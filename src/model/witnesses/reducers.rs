@@ -310,10 +310,12 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             if !window.admits(w) {
                 continue;
             }
-            // Skip scoped InferredType witnesses that don't contain the
-            // query point — narrowing facts for a different slice of the
-            // variable's lifetime.
-            if let (Some(point), WitnessPayload::InferredType(_)) = (narrow_point, &w.payload) {
+            // Skip region witnesses that don't contain the query point —
+            // a narrowing or a use's observation for a different slice of
+            // the variable's lifetime (past the arm it was made in).
+            if let (Some(point), WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)) =
+                (narrow_point, &w.payload)
+            {
                 if !span_is_zero(&w.span) && !span_contains(&w.span, point) {
                     continue;
                 }
@@ -659,39 +661,20 @@ impl WitnessReducer for SymbolReturnArmFold {
     }
 }
 
-// ---- Typed-slot fold ----
-//
-// Claims `SlotType{class, key}` attachments carrying `InferredType`
-// payloads (per-write `Edge(Expr(rhs_span))` witnesses, materialized to
-// types by the registry). Each witness is one `$obj->{key} = <rhs>`
-// WRITE; the per-write arms join under the query's class order. Nothing
-// consumes this attachment yet — it's the typed half of the hash-key-write
-// seed, paired with the untyped `mutation` Fact.
-
-pub struct SlotTypeFold;
-
-impl WitnessReducer for SlotTypeFold {
-    fn name(&self) -> &str {
-        "slot_type_fold"
-    }
-
-    fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::SlotType { .. })
-            && matches!(w.payload, WitnessPayload::InferredType(_))
-    }
-
-    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        let arms: Vec<InferredType> = ws
-            .iter()
-            .filter_map(|w| match &w.payload {
-                WitnessPayload::InferredType(t) => Some(t.clone()),
-                _ => None,
-            })
-            .collect();
-        match crate::model::file_analysis::join_all(&arms, class_order(_q)) {
-            Some(t) => ReducedValue::Type(t),
-            None => ReducedValue::None,
-        }
+/// One stored slot's value over its writes: each `InferredType` is an arm,
+/// joined under the query's class order (two classes neither of which
+/// inherits from the other don't join: a slot can't be both `A` and `B`).
+fn agree_slot_arms(ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+    let arms: Vec<InferredType> = ws
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::InferredType(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    match crate::model::file_analysis::join_all(&arms, class_order(q)) {
+        Some(t) => ReducedValue::Type(t),
+        None => ReducedValue::None,
     }
 }
 
@@ -835,9 +818,12 @@ impl WitnessReducer for TypeNameReducer {
 // ---- Field value ----
 //
 // Claims `Field{owner, name}` carrying a materialized `InferredType` — the
-// storage slot's value edge (`Edge(Variable{decl})`, pushed per field
-// declaration) after `materialize` chased it. Latest wins: the declaring
-// file's `Variable` fold already ranked annotation over assignment.
+// storage slot's value edges after `materialize` chased them: one per field
+// declaration (`Edge(Variable{decl})`, whose own fold already ranked
+// annotation over assignment) and one per write to a slot nothing in the
+// writing file declares (`$obj->{k} = rhs`, `obj.k = rhs`). Each is an arm,
+// and the arms join (`agree_slot_arms`): `$self->{h} = A->new` in one
+// method and `= B->new` in another genuinely conflict.
 
 pub struct FieldValueReducer;
 
@@ -851,13 +837,8 @@ impl WitnessReducer for FieldValueReducer {
             && matches!(w.payload, WitnessPayload::InferredType(_))
     }
 
-    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        for w in ws.iter().rev() {
-            if let WitnessPayload::InferredType(t) = &w.payload {
-                return ReducedValue::Type(t.clone());
-            }
-        }
-        ReducedValue::None
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        agree_slot_arms(ws, q)
     }
 }
 

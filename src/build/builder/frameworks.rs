@@ -34,7 +34,7 @@ impl<'a> Builder<'a> {
                     lexical: false,
                 },
             );
-            self.contract_symbols.insert(sid);
+            self.symbols[sid.0 as usize].flags |= crate::model::file_analysis::SymbolFlags::CONTRACT;
         }
         self.role_requires
             .entry(pkg.to_string())
@@ -786,7 +786,7 @@ impl<'a> Builder<'a> {
         if args.is_empty() {
             // Fallback to standard extraction
             let (standard, _) = self.extract_use_import_list(node);
-            return standard;
+            return standard.into_iter().map(|(text, _)| text).collect();
         }
         args
     }

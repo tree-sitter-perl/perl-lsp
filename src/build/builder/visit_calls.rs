@@ -15,6 +15,23 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // A symbolic reference to a constant name (`${"abel"}`, or `${$n}`
+        // with `$n` folded) is the package variable it names — never a
+        // lexical — so its ref is spelled qualified. The block is still
+        // visited below for the refs inside it.
+        let access = self.determine_access(node);
+        let sigil = match node.kind() {
+            "scalar" => Some(crate::model::conventions::Sigil::Scalar),
+            "array" => Some(crate::model::conventions::Sigil::Array),
+            "hash" => Some(crate::model::conventions::Sigil::Hash),
+            _ => None,
+        };
+        for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
+            let idx = self.refs.len();
+            self.add_ref(RefKind::Variable, span, name, access);
+            self.refs[idx].folded_from = folded_from;
+        }
+
         // Check for block-based dereference: @{expr}, %{expr}, &{expr}
         // In tree-sitter-perl these parse as array/hash/function with a varname
         // child containing a block. The block holds the real expressions.
@@ -64,15 +81,20 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        // If this scalar is inside a block-deref, infer the type from the outer sigil.
-        // Parent chain: scalar → expression_statement → block → varname → outer_node
-        if node.kind() == "scalar" {
-            if let Some((deref_type, context)) = self.block_deref_context(node) {
-                self.push_var_type_constraint(node, context, deref_type);
-            }
-        }
-
-        if let Ok(text) = node.utf8_text(self.source) {
+        // `${name}` IS `$name`: key the ref on the canonical spelling and
+        // anchor it on the bare name token, so rename rewrites inside the
+        // braces and a string's `"${name}s"` keeps them.
+        let spelled = match crate::cst::braced_varname(node) {
+            Some(vn) => crate::cst::canonical_var_name(node, self.source)
+                .zip(vn.utf8_text(self.source).ok())
+                .map(|(name, bare)| (name, crate::cst::fq_tail_span(vn, bare))),
+            None => node
+                .utf8_text(self.source)
+                .ok()
+                .map(|text| (text.to_string(), fq_tail_span(node, text))),
+        };
+        if let Some((text, ref_span)) = spelled {
+            let text = text.as_str();
             let access = self.determine_access(node);
             // A scalar READ anywhere but an element-access base hands the
             // reference to code that may mutate the referent (call arg,
@@ -111,12 +133,11 @@ impl<'a> Builder<'a> {
                 self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
-            // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
-            // bare tail (rule #7) so rename rewrites only `x` and the
-            // qualifier survives, mirroring the FQ-call narrowing. The full
+            // Fully-qualified read (`$Foo::Bar::x`): the span is the bare
+            // tail (rule #7) so rename rewrites only `x` and the qualifier
+            // survives, mirroring the FQ-call narrowing. The full
             // `target_name` keeps the path; `qualified_var_target()` decodes
             // `(pkg, sigil+basename)` for cross-package resolution.
-            let ref_span = fq_tail_span(node, text);
             self.add_ref(
                 RefKind::Variable,
                 ref_span,
@@ -124,6 +145,53 @@ impl<'a> Builder<'a> {
                 access,
             );
         }
+    }
+
+    /// The variables a symbolic reference names when its name is a constant:
+    /// `(qualified name, ref span, rename source)` per value, the same shape
+    /// as a const-folded method call. A string literal is its own rewrite
+    /// site. A folded `$n` is not: its ref sits on the `$n` token, which
+    /// rename skips, and a single-literal fold carries the literal as
+    /// `folded_from` for rename to rewrite instead. Unqualified names belong
+    /// to the package in force, as Perl resolves them.
+    fn symbolic_variables(&self, node: Node<'a>, sigil: crate::model::conventions::Sigil) -> Vec<(String, Span, Option<Span>)> {
+        use crate::model::conventions::{
+            is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
+        };
+        let Some(expr) = crate::cst::deref_operand_expr(node) else {
+            return Vec::new();
+        };
+        let (names, span, folded_from) = match expr.kind() {
+            "scalar" => {
+                let Some(var) = crate::cst::canonical_var_name(expr, self.source) else { return Vec::new() };
+                let Some(values) = self.resolve_constant_strings(&var, expr) else { return Vec::new() };
+                let source = (values.len() == 1)
+                    .then(|| self.constant_string_source(&var, expr))
+                    .flatten();
+                (values, node_to_span(expr), source)
+            }
+            _ => match crate::cst::plain_string_literal_text(expr, self.source) {
+                Some(value) => (vec![value], crate::cst::string_content_span(expr), None),
+                None => return Vec::new(),
+            },
+        };
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let (pkg, base) = split_qualified(&name, &PERL_SPELLINGS);
+                if base.is_empty()
+                    || !base.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    || is_special_variable(&format!("{}{base}", sigil.char()))
+                {
+                    return None;
+                }
+                let pkg = match pkg {
+                    Some(pkg) => PERL_SPELLINGS.qualifier_package(pkg),
+                    None => self.current_package.as_deref().unwrap_or_else(|| PERL_SPELLINGS.qualifier_package("")),
+                };
+                Some((qualify_var(sigil.char(), pkg, base, &PERL_SPELLINGS), span, folded_from))
+            })
+            .collect()
     }
 
     /// Sigil-deref of a scalar (`%$x` / `@$x` / `$$x`): the outer sigil node
@@ -168,36 +236,10 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// Walk up from a scalar to detect block-deref context.
-    /// Returns the inferred type and a context node (for constraint span) if inside
-    /// @{$x}, %{$y}, or &{$z}.
-    ///
-    /// Parent chain: scalar → expression_statement → block → varname → outer_node
-    /// where outer_node.kind() is "array" (@{}), "hash" (%{}), or "function" (&{}).
-    pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(InferredType, Node<'a>)> {
-        let stmt = node.parent()?;
-        if stmt.kind() != "expression_statement" { return None; }
-        let block = stmt.parent()?;
-        if block.kind() != "block" { return None; }
-        let varname = block.parent()?;
-        if varname.kind() != "varname" { return None; }
-        let outer = varname.parent()?;
-        match outer.kind() {
-            "array" => Some((InferredType::ArrayRef, outer)),
-            "hash" => Some((InferredType::HashRef, outer)),
-            "function" => {
-                if let Ok(text) = outer.utf8_text(self.source) {
-                    if text.starts_with("&{") {
-                        return Some((InferredType::CodeRef { return_edge: None }, outer));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn visit_container_ref(&mut self, node: Node<'a>) {
+        if self.visit_deref_container(node) {
+            return;
+        }
         // Container variables: $hash{key}, @arr[0], etc.
         // The container itself is a ref to the underlying variable
         if let Ok(text) = node.utf8_text(self.source) {
@@ -213,11 +255,36 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// An element/slice/`$#` access through a deref (`${EXPR}[0]`,
+    /// `@$x{..}`, `$#{EXPR}`) names no variable of its own: the operand is
+    /// visited for its refs, and a constant name (`${"abel"}[0]`) is the
+    /// package aggregate it names. `false` = a named container, not a deref.
+    fn visit_deref_container(&mut self, node: Node<'a>) -> bool {
+        let Some(operand) = crate::cst::deref_operand(node) else { return false };
+        if let Some(sigil) = crate::cst::container_sigil(node) {
+            let access = self.determine_access(node);
+            for (name, span, folded_from) in self.symbolic_variables(node, sigil) {
+                let idx = self.refs.len();
+                self.add_ref(RefKind::ContainerAccess, span, name, access);
+                self.refs[idx].folded_from = folded_from;
+            }
+        }
+        if operand.kind() == "block" {
+            self.queue_children(operand);
+        } else {
+            self.queue_node(operand);
+        }
+        true
+    }
+
     /// `$#foo` — arraylen. TSP gives us a distinct `arraylen` node
     /// with a `varname` child; the access resolves to `@foo`. We emit
     /// a ContainerAccess ref so goto-def and rename treat it like
     /// any other indirect access into the array.
     pub(super) fn visit_arraylen_ref(&mut self, node: Node<'a>) {
+        if self.visit_deref_container(node) {
+            return;
+        }
         let bare = match find_varname_child(node).and_then(|v| v.utf8_text(self.source).ok()) {
             Some(b) => b,
             None => return,
@@ -305,9 +372,9 @@ impl<'a> Builder<'a> {
                     self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
                 // Push type constraints on arguments of known builtins
-                if let Some(arg_type) = crate::model::builtins::builtin_first_arg_type(name) {
+                if let Some(obs) = crate::model::builtins::builtin_first_arg_use(name) {
                     if let Some(first_arg) = self.first_call_arg(node) {
-                        self.push_var_type_constraint(first_arg, node, arg_type);
+                        self.observe(first_arg, node, obs);
                     }
                 }
                 // `bless $self, $class` promotes $self to ClassName($class)
@@ -950,145 +1017,6 @@ impl<'a> Builder<'a> {
 
     /// Does this `substitution_regexp` carry the `/e` modifier (replacement is
     /// evaluated as Perl code)?
-    pub(super) fn subst_replacement_is_eval(&self, node: Node<'a>) -> bool {
-        for i in 0..node.named_child_count() {
-            if let Some(c) = node.named_child(i) {
-                if c.kind() == "substitution_regexp_modifiers" {
-                    return c.utf8_text(self.source).map_or(false, |t| t.contains('e'));
-                }
-            }
-        }
-        false
-    }
-
-    /// Re-parse an `s///e` replacement as Perl and emit refs for the entities
-    /// inside it — function calls, method calls, and variables — so the code in
-    /// the replacement gets the same navigation (goto-def / references / rename /
-    /// highlight) as code anywhere else (rule #7: every meaningful token gets a
-    /// ref). The snippet is padded with the replacement's leading rows/cols so
-    /// the re-parsed nodes carry the *original* file coordinates — no per-node
-    /// offset math, spans drop straight in. (`s///ee` double-eval is the
-    /// documented edge; one level covers it.)
-    ///
-    /// This is a deliberate secondary-parse emitter, not the main walker (its
-    /// `Node<'a>` is bound to the primary tree's lifetime, so the snippet nodes
-    /// can't flow through `visit_*`). It emits the ref shapes directly; the
-    /// downstream resolution passes (`resolve_variable_refs`, MCB) wire them up
-    /// from `(scope, name)` exactly as for natively-walked refs.
-    pub(super) fn emit_refs_in_eval_replacement(&mut self, repl: Node<'a>) {
-        let Ok(text) = repl.utf8_text(self.source) else { return };
-        if text.trim().is_empty() {
-            return;
-        }
-        let start = repl.start_position();
-        let mut snippet = String::with_capacity(start.row + start.column + text.len());
-        for _ in 0..start.row { snippet.push('\n'); }
-        for _ in 0..start.column { snippet.push(' '); }
-        snippet.push_str(text);
-        let bytes = snippet.into_bytes();
-        let mut parser = create_parser();
-        let Some(tree) = parser.parse(&bytes, None) else { return };
-        let scope = self.current_scope();
-
-        // A `scalar`/`array`/`hash` node is a plain variable only when its text
-        // is sigil + identifier path: `$x`, `@a`, `%h`, `$Foo::bar`. Deref
-        // wrappers (`${...}`, `@{...}`, `$$x`) don't match here — their inner
-        // `scalar` child is a named child and gets matched on its own.
-        let plain_var = |t: &str| {
-            let mut cs = t.chars();
-            matches!(cs.next(), Some('$' | '@' | '%'))
-                && t.len() > 1
-                && cs.all(|c| c.is_alphanumeric() || c == '_' || c == ':')
-        };
-
-        let mut stack = vec![tree.root_node()];
-        while let Some(n) = stack.pop() {
-            match n.kind() {
-                "function_call_expression" | "ambiguous_function_call_expression" => {
-                    if let Some(func) = n.child_by_field_name("function") {
-                        if let Ok(name) = func.utf8_text(&bytes) {
-                            let name = name.to_string();
-                            let resolved_package = self.resolve_call_package(&name);
-                            self.refs.push(Ref {
-                                kind: RefKind::FunctionCall,
-                                span: node_to_span(func),
-                                scope,
-                                target_name: name,
-                                access: AccessKind::Read,
-                                binding: resolved_package
-                                    .map(|package| RefBinding::Function { package }),
-                                folded_from: None,
-                                arg_count: None,
-                            });
-                        }
-                    }
-                }
-                "method_call_expression" => {
-                    let method = n.child_by_field_name("method");
-                    let invocant = n.child_by_field_name("invocant");
-                    // Bareword method only — `$obj->$dynamic(...)` has a sigil'd
-                    // method node and isn't a nameable target.
-                    if let Some(method) = method {
-                        if let Ok(name) = method.utf8_text(&bytes) {
-                            if name.chars().next().map_or(false, |c| c == '_' || c.is_alphabetic()) {
-                                self.refs.push(Ref {
-                                    kind: RefKind::MethodCall {
-                                        invocant: crate::model::conventions::Invocant::assume_canonical(
-                                            invocant
-                                                .and_then(|i| {
-                                                    crate::cst::canonical_var_name(i, &bytes)
-                                                        .or_else(|| i.utf8_text(&bytes).ok().map(String::from))
-                                                })
-                                                .unwrap_or_default(),
-                                        ),
-                                        invocant_span: invocant.map(node_to_span),
-                                        // A fully-qualified call (`$o->Foo::Bar::m`)
-                                        // keeps the full path in `target_name` but
-                                        // narrows the renamable span to the `m` tail
-                                        // (rule #7), mirroring FunctionCall.
-                                        method_name_span: crate::cst::fq_tail_span(method, name),
-                                        member_op: None,
-                                        named_by_string: false,
-                                    },
-                                    span: node_to_span(n),
-                                    scope,
-                                    target_name: name.to_string(),
-                                    access: AccessKind::Read,
-                                    binding: None,
-                                    folded_from: None,
-                                    arg_count: None,
-                                });
-                            }
-                        }
-                    }
-                }
-                "scalar" | "array" | "hash" => {
-                    if let Ok(t) = n.utf8_text(&bytes) {
-                        if plain_var(t) {
-                            let ref_span = fq_tail_span(n, t);
-                            self.refs.push(Ref {
-                                kind: RefKind::Variable,
-                                span: ref_span,
-                                scope,
-                                target_name: t.to_string(),
-                                access: AccessKind::Read,
-                                binding: None,
-                                folded_from: None,
-                                arg_count: None,
-                            });
-                        }
-                    }
-                }
-                _ => {}
-            }
-            for i in 0..n.named_child_count() {
-                if let Some(c) = n.named_child(i) {
-                    stack.push(c);
-                }
-            }
-        }
-    }
-
     /// Keep only entries that name a sub: a plain bareword. Sigil'd vars
     /// (`$x`/`@y`/`%z` — exported package globals, not subs) and tags
     /// (`-tag`/`:group` — Exporter::Extensible export groups) are dropped.

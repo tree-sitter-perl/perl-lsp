@@ -228,6 +228,23 @@ pub enum InferredType {
     /// scope walk stops on it instead of falling through to a shadowed
     /// namesake. Consumers read it as "no information".
     Unknown,
+    /// The string `ref`/`reftype`/`blessed` returns: it names what
+    /// `subject` held at `site`, so comparing it to a literal is a guard on
+    /// `subject` (`docs/adr/flow-narrowing.md`). A `String` to every
+    /// consumer but that guard; it means nothing outside the sub that
+    /// computed it, so the Surface sees `String`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    RefTagOf { subject: String, site: Span, via: RefTagFn },
+}
+
+/// Which builtin minted a [`InferredType::RefTagOf`] — what its string can
+/// say: `ref` a reftype token or a class, `reftype` only a token, `blessed`
+/// only a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefTagFn {
+    Ref,
+    RefType,
+    Blessed,
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -929,8 +946,15 @@ impl InferredType {
             | InferredType::TypeConstraintOf(None)
             | InferredType::Undef
             | InferredType::Bool
+            | InferredType::RefTagOf { .. }
             | InferredType::Unknown => {}
         }
+    }
+
+    /// A string value: `String`, or a [`InferredType::RefTagOf`] — which is
+    /// one to everything but the guard that reads its subject.
+    pub fn is_string(&self) -> bool {
+        matches!(self, InferredType::String | InferredType::RefTagOf { .. })
     }
 
     /// Witness-bag attachment whose type IS this callable's return
@@ -1180,6 +1204,9 @@ pub fn join(a: &InferredType, b: &InferredType, order: &dyn ClassOrder) -> Optio
         _ if a.is_hash_shaped() && b.is_hash_shaped() => Some(T::HashRef),
         _ if a.is_array_shaped() && b.is_array_shaped() => Some(T::ArrayRef),
         (T::Bool | T::Numeric, T::Bool | T::Numeric) => Some(T::Numeric),
+        // Tags naming different subjects (or a tag and a literal) are all
+        // strings; what one arm's tag says about its subject the join can't keep.
+        _ if a.is_string() && b.is_string() => Some(T::String),
         // TODO(union-join): the one place a union enters the lattice
         // (docs/open-forks.md, "Union types in the lattice").
         _ => None,

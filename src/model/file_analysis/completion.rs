@@ -161,6 +161,9 @@ impl FileAnalysis {
         let mut vars: Vec<(&Symbol, usize)> = visible
             .into_iter()
             .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
+            // The token being typed is never its own completion — an
+            // undeclared one is already an implicit global anchored there.
+            .filter(|s| !(s.selection_span.start <= point && point <= s.selection_span.end))
             .filter_map(|s| {
                 if let SymbolDetail::Variable { .. } = &s.detail {
                     let scope = &self.scopes[s.scope.0 as usize];
@@ -208,16 +211,7 @@ impl FileAnalysis {
                 _ => PRIORITY_LOCAL,
             };
             let detail = match &sym.detail {
-                SymbolDetail::Variable { decl_kind, .. } => {
-                    Some(match decl_kind {
-                        DeclKind::My => "my".to_string(),
-                        DeclKind::Our => "our".to_string(),
-                        DeclKind::State => "state".to_string(),
-                        DeclKind::Field => "field".to_string(),
-                        DeclKind::Param => "param".to_string(),
-                        DeclKind::ForVar => "for".to_string(),
-                    })
-                }
+                SymbolDetail::Variable { decl_kind, .. } => Some(decl_kind.label().to_string()),
                 SymbolDetail::Field { .. } => Some("field".to_string()),
                 _ => None,
             };
@@ -1359,7 +1353,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::CodeRef { .. } => "CodeRef".to_string(),
         InferredType::Regexp => "Regexp".to_string(),
         InferredType::Numeric => "Numeric".to_string(),
-        InferredType::String => "String".to_string(),
+        InferredType::String | InferredType::RefTagOf { .. } => "String".to_string(),
         // Method dispatch on a Parametric uses its `class_name()`
         // (= the flavor's dispatch class), so the tag follows.
         // Type-arg detail lives in the richer
@@ -1434,7 +1428,7 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
         InferredType::CodeRef { .. } => tag("CodeRef"),
         InferredType::Regexp => tag("Regexp"),
         InferredType::Numeric => tag("Numeric"),
-        InferredType::String => tag("String"),
+        InferredType::String | InferredType::RefTagOf { .. } => tag("String"),
         InferredType::Parametric(p) => format_parametric_with(p, vocab),
         InferredType::Sequence(elems) => {
             // Angle brackets, not `[...]` — markdown renderers treat

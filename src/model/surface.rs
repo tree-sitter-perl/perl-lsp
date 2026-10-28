@@ -269,11 +269,11 @@ impl Surface {
                         }
                     }
                 }
-                SymKind::Variable | SymKind::Field | SymKind::Enumerator => {
+                SymKind::Variable | SymKind::Field | SymKind::Enumerator | SymKind::HashKeyDef => {
                     // Cross-file-visible values: the C-linkage file-scope
-                    // gate OR class content (fields / named-enum constants
-                    // reachable via member access).
-                    if !(feed.analysis.is_linkage_visible(sym)
+                    // gate OR class content (fields / named-enum constants /
+                    // instance slots reachable via member access).
+                    if !((sym.kind != SymKind::HashKeyDef && feed.analysis.is_linkage_visible(sym))
                         || feed.analysis.symbol_is_class_content(sym))
                     {
                         continue;
@@ -440,6 +440,7 @@ fn despan(t: &InferredType) -> InferredType {
                 args: args.iter().map(despan).collect(),
             },
         }),
+        InferredType::RefTagOf { .. } => InferredType::String,
         other => other.clone(),
     }
 }
