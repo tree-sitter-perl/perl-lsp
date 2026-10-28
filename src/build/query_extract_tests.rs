@@ -560,6 +560,22 @@ fn operator_evidence_types_through_usage() {
     assert_eq!(fa.inferred_type_via_bag("$s", end), Some(InferredType::String));
 }
 
+/// A use inside a conditionally-run arm observes its operand within the
+/// arm only, as the walker's does.
+#[test]
+fn operator_evidence_holds_within_its_arm() {
+    let src = "my $x = f();\nmy $c = g();\nmy $y = $c ? $x + 1 : 0;\nmy $z = 1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &perl_pack())
+        .unwrap()
+        .into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |row, column| fa.inferred_type_via_bag("$x", tree_sitter::Point { row, column });
+    assert_eq!(at(2, 19), Some(InferredType::Numeric), "inside the arm");
+    assert_eq!(at(4, 0), None, "past the arm");
+}
+
 #[test]
 fn python_workspace_rename_for_free() {
     // The exact LSP rename path — resolve_symbol at the cursor, then

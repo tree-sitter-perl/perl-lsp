@@ -361,6 +361,9 @@ pub enum Capture {
     Flow(FlowCap),
     Expr(ExprCap),
     Obs(ObsKind),
+    /// A conditionally-run arm (`@arm`): an observation made inside holds
+    /// only within it.
+    Arm,
     Narrow(NarrowCap),
     Move(MoveCap),
     /// A control-flow construct's span (`@guard.region`).
@@ -448,6 +451,7 @@ impl Capture {
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
+            ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
             ["guard", "region"] => C::GuardRegion,
@@ -512,6 +516,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
             C::Obs(k) => write!(f, "obs.{k}"),
+            C::Arm => f.write_str("arm"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Move(k) => write!(f, "move.{k}"),
             C::GuardRegion => f.write_str("guard.region"),
