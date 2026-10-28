@@ -2184,7 +2184,15 @@ impl ReducerRegistry {
         owner: &str,
         site: &'static str,
     ) -> ReducedValue {
+        // `main` is declared by hundreds of files in a script-heavy tree;
+        // decoding each bag to find the one that defines the sub was the
+        // whole of FHEM's --check.
+        let mention = attachment.provider_mention();
         for cached in idx.visible_def_candidates(owner).read() {
+            if mention.is_some_and(|m| !idx.candidate_bag_may_answer(&cached, m, owner, false)) {
+                crate::util::ghost_stats::count("moc.provider_skipped");
+                continue;
+            }
             crate::util::ghost_stats::count("moc.provider_fetched");
             crate::util::ghost_stats::count(if site == "field" { "mocsite.field" } else { "mocsite.param" });
             let full = idx.bag_present(&cached);

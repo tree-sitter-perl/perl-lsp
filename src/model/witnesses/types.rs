@@ -220,6 +220,20 @@ impl WitnessAttachment {
         }
     }
 
+    /// The name every file that can answer this owner-keyed attachment
+    /// mentions: the slot's key, or the sub that holds the parameter. An
+    /// owner scan skips a declaring file whose rows rule the name out.
+    pub fn provider_mention(&self) -> Option<&str> {
+        match self {
+            WitnessAttachment::Field { name, .. }
+            | WitnessAttachment::Param { name, .. }
+            | WitnessAttachment::CallbackIn { name, .. }
+            | WitnessAttachment::ParamWrites { name, .. } => Some(name),
+            WitnessAttachment::SlotElements { key, .. } => Some(key),
+            _ => None,
+        }
+    }
+
     /// The value arrives from call sites: whatever the joined callers pass,
     /// a caller the index doesn't hold (or a later edit) may pass more. A
     /// hash shape answered here is never closed.
