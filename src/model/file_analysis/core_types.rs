@@ -1828,9 +1828,9 @@ pub enum RefKind {
     /// edge witnesses; the helper reads those at query time.
     MethodCall {
         invocant: crate::model::conventions::Invocant,
-        /// Span of the invocant node. Used by
-        /// `method_call_invocant_class` to find an inner-receiver
-        /// ref via `RefTable::call_at_start` (chain dispatch).
+        /// Span of the invocant node. `method_call_invocant_class` reads
+        /// the receiver's value at it, and the call spanning it exactly
+        /// (`RefTable::call_spanning`, chain dispatch).
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).
         method_name_span: Span,

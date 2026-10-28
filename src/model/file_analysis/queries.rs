@@ -623,8 +623,7 @@ impl FileAnalysis {
         // exact-span match is what distinguishes "the value of
         // `$f->get_bar()->get_name()`" (the outer call's return) from
         // "the inner receiver `$f->get_bar()`" (which has its own,
-        // narrower span), which is why this asks `call_spanning` and not
-        // `call_at_start` (the innermost receiver).
+        // narrower span).
         if let Some((recv_idx, kind)) =
             self.refs.call_spanning(span).map(|i| (i, &self.refs[i].kind))
         {
