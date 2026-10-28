@@ -83,7 +83,12 @@ pub struct SkelRef {
 #[derive(Debug, Clone)]
 pub struct CallSite {
     pub span: Span,
+    /// The callee as its token spells it: a member's name, a free call's
+    /// name token.
     pub callee: String,
+    /// Where the callee's token starts, the key a free call's reference
+    /// shares.
+    pub callee_at: tree_sitter::Point,
     /// A member call's receiver expression; `None` for a free call.
     pub receiver: Option<Span>,
     /// The scope the call is written in, which says whether a bare callee
@@ -735,6 +740,19 @@ impl SkeletonAnalysis {
             .filter(|s| matches!(s.kind, SymKind::Sub))
             .map(|s| ((s.package.as_deref().unwrap_or(""), s.name.as_str()), s.id))
             .collect();
+        // Each free call under a use-map, by where its name token starts: the
+        // function it names and the identity a class of that spelling has
+        // there. Its `Invoke` and its reference both read this one answer.
+        let free_calls: std::collections::HashMap<tree_sitter::Point, (crate::model::file_analysis::QualifiedName, String)> =
+            self.refs
+                .iter()
+                .filter(|r| r.kind == super::vocab::RefCap::Call)
+                .filter_map(|r| {
+                    let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols)?;
+                    let function = function_identity(&map, names.functions, &r.name, &free_functions);
+                    Some((r.start, (function, map.resolve(&r.name).identity(map.sep))))
+                })
+                .collect();
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -985,22 +1003,20 @@ impl SkeletonAnalysis {
                         },
                         Some(WA::Expr(recv)),
                     ),
-                    None => match use_map_at(span.start) {
-                        Some(map) => {
-                            let fq = function_identity(&map, self.names.functions, name, &free_functions);
+                    None => match free_calls.get(&site.callee_at) {
+                        Some((fq, identity)) => {
                             // under a use-map a class is filed under the
                             // identity its spelling names at the call
-                            let identity = map.resolve(name).identity(map.sep);
                             let local = free_functions
                                 .get(&(fq.namespace.as_str(), fq.leaf.as_str()))
                                 .or_else(|| callee_sid.get(identity.as_str()))
                                 .copied();
                             (
                                 crate::model::witnesses::Callee::Function {
-                                    name: fq.leaf,
+                                    name: fq.leaf.clone(),
                                     local,
                                     member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
-                                    constructs: calls_construct.then_some(identity),
+                                    constructs: calls_construct.then(|| identity.clone()),
                                 },
                                 None,
                             )
@@ -1127,9 +1143,8 @@ impl SkeletonAnalysis {
                     // Under a use-map a call is pinned to its function's
                     // namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call => {
-                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols);
-                        if let Some(map) = map {
-                            let namespace = function_identity(&map, names.functions, &r.name, &free_functions).namespace;
+                        if let Some((function, _)) = free_calls.get(&r.start) {
+                            let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
                         RefKind::FunctionCall

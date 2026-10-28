@@ -195,22 +195,22 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // f(..)` flow edge targets it. A member call (`recv.m(..)`)
             // carries its receiver, the `@member.recv` of the same match.
             let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
-            // A qualified free callee (`\Lib\f()`) is named by its whole
-            // spelling, which resolves through the use-map at the site.
             let callee = in_match(Capture::Ref(RefCap::Call))
-                .map(|x| (in_match(Capture::RefSpelled).unwrap_or(x).text.clone(), None))
+                .map(|x| (x, None))
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;
                     let recv = in_match(Capture::Member(MemberCap::Recv))?;
-                    Some(((pack.shape_name)(&name.text), Some(recv.span())))
+                    Some((name, Some(recv.span())))
                 });
-            if let Some((callee, receiver)) = callee {
+            if let Some((token, receiver)) = callee {
+                let (callee, callee_at) = ((pack.shape_name)(&token.text), token.start);
                 let span = e.span();
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
                 let args = st.members.call_args(e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
                     callee,
+                    callee_at,
                     receiver,
                     scope: cur_scope,
                     args,

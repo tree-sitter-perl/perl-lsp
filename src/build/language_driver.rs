@@ -1142,6 +1142,7 @@ fn remap_spans(
     // (the same call span) they land beside.
     for site in call_sites.iter_mut() {
         site.span = rspan(site.span);
+        site.callee_at = rspan(crate::model::file_analysis::Span { start: site.callee_at, end: site.callee_at }).start;
         if let Some(recv) = site.receiver.as_mut() {
             *recv = rspan(*recv);
         }
