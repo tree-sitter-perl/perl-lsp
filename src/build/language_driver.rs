@@ -1057,7 +1057,6 @@ fn remap_spans(
         parents: _,
         var_reads,
         var_writes,
-        // scope-keyed — no spans to fix.
         write_sites,
         label_refs,
         flow_edges,
