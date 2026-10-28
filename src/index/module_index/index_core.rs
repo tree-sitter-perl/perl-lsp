@@ -362,10 +362,7 @@ impl IndexCore {
     pub(crate) fn adopt_inc_providers(&self, module_name: &str, providers: &[Arc<CachedModule>]) {
         let mut v = self.all_defs.entry(module_name.to_string()).or_default();
         for cand in providers {
-            match v.iter().position(|c| c.path == cand.path) {
-                Some(i) => v[i] = cand.clone(),
-                None => v.push(cand.clone()),
-            }
+            crate::model::file_analysis::upsert_candidate(&mut v, cand.clone());
         }
     }
 
