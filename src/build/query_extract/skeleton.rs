@@ -1650,12 +1650,13 @@ type FreeFunctions<'a> = std::collections::HashMap<(&'a str, &'a str), crate::mo
 /// owner is a late binding (`fold.rs` `resolve_hash_key_owners` /
 /// `fixup_call_bound_hash_key_owners`, `cursor_queries.rs`
 /// `deferred_hash_key_owner`), and "declared" becomes the first write
-/// whose decided owner is the class. It lands with the php variables stack
-/// (php-5's `unify_assigned`, `TODO(assigned-unify)`), possibly on the
-/// query-delayed-facts deferred carrier.
+/// whose decided owner is the class, possibly on the query-delayed-facts
+/// deferred carrier.
 ///
-/// TODO(assigned-unify): php's `unify_assigned` (held php-5) is this rule
-/// for variables over the lookup chain; the two passes become one there.
+/// TODO(assigned-unify): `unify_assigned` (extraction) is this rule for
+/// variables over the write lookup chain. The two become one pass once a
+/// slot's owner is a late binding too (`TODO(slot-owner-deferred)`): until
+/// then a slot's owner needs the assembled analysis, a variable's does not.
 fn declare_slots(
     fa: &mut crate::model::file_analysis::FileAnalysis,
     mut writes: Vec<SlotWrite>,
