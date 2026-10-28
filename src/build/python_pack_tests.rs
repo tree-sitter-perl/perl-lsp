@@ -1311,3 +1311,58 @@ def use(h: Holder):
     let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
     assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
 }
+
+/// A call is typed by what its callee returns: the `-> T` it declares,
+/// spelled through the def's own imports, else every `return` agreeing,
+/// in the defining file and from another one.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_is_typed_by_its_callees_return() {
+    let lib = "\
+from pkg.widgets import Widget
+
+class Gadget:
+    def spin(self):
+        return 2
+
+def make():
+    return Gadget()
+
+def declared() -> Widget:
+    return build()
+
+def nothing() -> None:
+    pass
+
+g = make()
+g.spin()
+";
+    let widgets = "\
+class Widget:
+    def spin(self):
+        return 1
+";
+    let main = "\
+from pkg.lib import make, declared
+
+def f():
+    make().spin()
+    declared().spin()
+";
+    let (t, idx) = indexed("pyreturns", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/widgets.py", widgets),
+        ("pkg/lib.py", lib),
+        ("pkg/main.py", main),
+    ]);
+    for (file, at, home) in [
+        ("pkg/lib.py", Point::new(16, 2), ("lib.py", 3)),
+        ("pkg/main.py", Point::new(3, 11), ("lib.py", 3)),
+        ("pkg/main.py", Point::new(4, 15), ("widgets.py", 1)),
+    ] {
+        let (defs, _, _) = landing(&idx, &t.0.join(file), at);
+        assert_eq!(defs, [(home.0.to_string(), home.1)], "goto-def on spin in {file} at {at:?}");
+    }
+    let fa = idx.workspace_file_for_test(&t.0.join("pkg/lib.py")).unwrap();
+    assert_eq!(fa.sub_return_type_at_arity("nothing", Some(0)), None, "`-> None` names no class");
+}
