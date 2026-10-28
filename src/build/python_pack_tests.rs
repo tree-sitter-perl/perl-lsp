@@ -966,6 +966,31 @@ def reset(other: Counter, o):
     assert_eq!(later.target_name, "z");
 }
 
+/// A local typed only by its value is typed by the time slots are
+/// settled: `o = Counter()` makes `o.z = 1` a write of `Counter.z`, and a
+/// read through it lands there.
+#[test]
+fn a_write_through_a_constructed_local_declares_on_its_class() {
+    let src = "\
+class Counter:
+    pass
+
+o = Counter()
+o.z = 1
+x = o.z
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    assert_eq!(fields_of(&fa), [("z", 4, true)]);
+    let read = fa.refs().iter().find(|r| r.span.start == Point::new(5, 6)).expect("the read is a reference");
+    assert_eq!(read.target_name, "z");
+    #[cfg(feature = "python")]
+    {
+        let (t, idx) = indexed("pyvaluetyped", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+        let (defs, _, _) = landing(&idx, &t.0.join("pkg/mod.py"), Point::new(5, 6));
+        assert_eq!(defs, [("mod.py".to_string(), 4)]);
+    }
+}
+
 /// Member completion on an instance offers the class-body fields, the
 /// instance fields and the methods.
 #[test]
@@ -1100,6 +1125,54 @@ fn a_class_body_binding_is_a_member_and_a_bare_name_renamed_together() {
     }
 }
 
+/// A subclass reaches its base's class-body binding as the same group,
+/// across files: a rename from the subclass's read moves the member and
+/// the bare name the base's body reads.
+#[cfg(feature = "python")]
+#[test]
+fn an_inherited_class_body_binding_renames_as_one_group_across_files() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let base = "\
+class Base:
+    count = 0
+    double = count * 2
+";
+    let sub = "\
+from pkg.base import Base
+
+class Sub(Base):
+    def go(self):
+        n = self.count
+        return n
+";
+    let (t, idx) = indexed("pyinherit", &[("pkg/__init__.py", ""), ("pkg/base.py", base), ("pkg/sub.py", sub)]);
+    let edits = |file: &str, at: Point| {
+        let path = t.0.join(file);
+        let fa = idx.workspace_file_for_test(&path).unwrap();
+        let store = OpenDocs::new();
+        let cs = resolve(&store, &fa, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+        let mut e: Vec<(String, usize, usize)> = cs
+            .rename_edits("total")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(l, _)| {
+                let name = match &l.key {
+                    FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
+                    FileKey::Url(u) => u.to_string(),
+                };
+                (name, l.span.start.row, l.span.start.column)
+            })
+            .collect();
+        e.sort();
+        e.dedup();
+        e
+    };
+    let all = [("base.py".to_string(), 1, 4), ("base.py".to_string(), 2, 13), ("sub.py".to_string(), 4, 17)];
+    assert_eq!(edits("pkg/sub.py", Point::new(4, 17)), all, "from the subclass's read");
+    assert_eq!(edits("pkg/base.py", Point::new(2, 13)), all, "from the base's body read");
+}
+
 /// A subclass's write of a name its base declares — by a class-body
 /// binding or a slot of its own — is a use of the base's member.
 #[test]
@@ -1156,4 +1229,221 @@ def f(c: Counter):
         assert!(labels.contains(&name), "{name} in {labels:?}");
     }
     assert_eq!(labels.iter().filter(|&&l| l == "count").count(), 1, "one entry per member: {labels:?}");
+}
+
+/// A member read that is the last token of a body is still a member
+/// read: a def's node ends there, its name does not.
+#[test]
+fn a_member_read_ending_a_body_is_a_member_read() {
+    use crate::model::file_analysis::RefKind;
+    let src = "\
+class A:
+    def go(self):
+        return self.count
+    def put(self):
+        y = self.count
+    n = A.count
+
+def f(o):
+    return o.count
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let mut reads: Vec<(usize, bool)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "count")
+        .map(|r| (r.span.start.row, matches!(r.kind, RefKind::FieldAccess { .. })))
+        .collect();
+    reads.sort();
+    assert_eq!(reads, [(2, true), (4, true), (5, true), (8, true)]);
+}
+
+/// A write through `self` states the slot's value: a read of the slot,
+/// in a method above the write, through a subclass in another file, or
+/// on an annotated instance in a third, has the written value's type.
+#[cfg(feature = "python")]
+#[test]
+fn a_slot_write_states_the_slots_value() {
+    let holder = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Holder:
+    def early(self):
+        return self.made.spin()
+    def __init__(self):
+        self.made = Widget()
+";
+    let child = "\
+from pkg.holder import Holder
+
+class Child(Holder):
+    def go(self):
+        return self.made.spin()
+";
+    let main = "\
+from pkg.holder import Holder
+
+def f(h: Holder):
+    return h.made.spin()
+";
+    let (t, idx) = indexed("pyslotvalue", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/holder.py", holder),
+        ("pkg/child.py", child),
+        ("pkg/main.py", main),
+    ]);
+    for (file, at) in [("pkg/holder.py", Point::new(6, 25)), ("pkg/child.py", Point::new(4, 25)), ("pkg/main.py", Point::new(3, 18))] {
+        let (defs, _, _) = landing(&idx, &t.0.join(file), at);
+        assert_eq!(defs, [("holder.py".to_string(), 1)], "goto-def on spin in {file}");
+    }
+}
+
+/// A write to a member is an assignment to it, through any receiver: a
+/// declared attribute keeps its annotation over what is written to it,
+/// and an undeclared one whose writes disagree on the class has no value.
+#[cfg(feature = "python")]
+#[test]
+fn a_member_write_is_an_assignment_to_the_member() {
+    let src = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Gadget:
+    def spin(self):
+        return 2
+
+class Holder:
+    made: Widget
+    def __init__(self):
+        self.made = Gadget()
+        self.either = Widget()
+    def swap(self):
+        self.either = Gadget()
+    def go(self):
+        return self.made.spin()
+    def maybe(self):
+        return self.either.spin()
+
+def fill(h: Holder):
+    h.kept = Gadget()
+
+def use(h: Holder):
+    return h.kept.spin()
+
+class Outer:
+    def __init__(self):
+        self.inner = Holder()
+    def fill(self):
+        self.inner.deep = Gadget()
+    def go(self):
+        return self.inner.deep.spin()
+";
+    let (t, idx) = indexed("pymemberwrite", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+    let path = t.0.join("pkg/mod.py");
+    let (defs, _, _) = landing(&idx, &path, Point::new(16, 25));
+    assert_eq!(defs, [("mod.py".to_string(), 1)], "the annotation governs `made`");
+    let (defs, _, _) = landing(&idx, &path, Point::new(18, 27));
+    assert_eq!(defs, [], "`either` is written a Widget and a Gadget");
+    let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
+    assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
+    let (defs, _, _) = landing(&idx, &path, Point::new(32, 32));
+    assert_eq!(defs, [("mod.py".to_string(), 5)], "a nested write states the value");
+}
+
+/// A call is typed by what its callee returns: the `-> T` it declares,
+/// spelled through the def's own imports, else every `return` agreeing,
+/// in the defining file and from another one.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_is_typed_by_its_callees_return() {
+    let lib = "\
+from pkg.widgets import Widget
+
+class Gadget:
+    def spin(self):
+        return 2
+
+def make():
+    return Gadget()
+
+def declared() -> Widget:
+    return build()
+
+def nothing() -> None:
+    pass
+
+g = make()
+g.spin()
+";
+    let widgets = "\
+class Widget:
+    def spin(self):
+        return 1
+";
+    let main = "\
+from pkg.lib import make, declared
+
+def f():
+    make().spin()
+    declared().spin()
+";
+    let (t, idx) = indexed("pyreturns", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/widgets.py", widgets),
+        ("pkg/lib.py", lib),
+        ("pkg/main.py", main),
+    ]);
+    for (file, at, home) in [
+        ("pkg/lib.py", Point::new(16, 2), ("lib.py", 3)),
+        ("pkg/main.py", Point::new(3, 11), ("lib.py", 3)),
+        ("pkg/main.py", Point::new(4, 15), ("widgets.py", 1)),
+    ] {
+        let (defs, _, _) = landing(&idx, &t.0.join(file), at);
+        assert_eq!(defs, [(home.0.to_string(), home.1)], "goto-def on spin in {file} at {at:?}");
+    }
+    let fa = idx.workspace_file_for_test(&t.0.join("pkg/lib.py")).unwrap();
+    assert_eq!(fa.sub_return_type_at_arity("nothing", Some(0)), None, "`-> None` names no class");
+}
+
+/// Calling a class another file declares constructs it: the call is an
+/// instance of the class its spelling names through the file's imports,
+/// whether the call is assigned, chained, or returned by a def.
+#[cfg(feature = "python")]
+#[test]
+fn calling_a_class_from_another_file_constructs_it() {
+    let widgets = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Holder:
+    def __init__(self):
+        self.made = Widget()
+";
+    let main = "\
+from pkg.widgets import Widget, Holder
+
+w = Widget()
+w.spin()
+Widget().spin()
+Holder().made.spin()
+
+def make():
+    return Widget()
+
+make().spin()
+";
+    let (t, idx) = indexed("pyclasscall", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/widgets.py", widgets),
+        ("pkg/main.py", main),
+    ]);
+    let path = t.0.join("pkg/main.py");
+    for at in [Point::new(3, 2), Point::new(4, 9), Point::new(5, 14), Point::new(10, 7)] {
+        let (defs, _, _) = landing(&idx, &path, at);
+        assert_eq!(defs, [("widgets.py".to_string(), 1)], "goto-def on spin at {at:?}");
+    }
 }

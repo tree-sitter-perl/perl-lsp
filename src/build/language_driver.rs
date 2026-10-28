@@ -894,6 +894,7 @@ fn inject_member_blocks(
             owner: None,
             implicit_receiver: false,
             direct: false,
+            declaration_rules: Vec::new(),
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {
@@ -1080,9 +1081,13 @@ fn remap_spans(
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         names: _,
+        slot_writes,
+        member_writes,
+        // scope-keyed — no spans to fix.
+        class_scopes: _,
     } = skel;
 
-    for s in symbols.iter_mut() {
+    for s in symbols.iter_mut().chain(slot_writes.iter_mut().map(|w| &mut w.symbol)) {
         let crate::build::query_extract::SkelSymbol {
             kind: _,
             name: _,
@@ -1155,6 +1160,13 @@ fn remap_spans(
     for (_, span) in return_sites.iter_mut() {
         *span = rspan(*span);
     }
+    // Member writes settle through `expr_type_at_span` on the receiver and an
+    // edge to the value's `Expr`, both of which speak original coords.
+    for w in member_writes.iter_mut() {
+        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        *receiver = rspan(*receiver);
+        *value = rspan(*value);
+    }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
         sc.span.end = r(sc.span.end);
@@ -1188,7 +1200,6 @@ fn remap_spans(
         | WitnessAttachment::HashKey { .. }
         | WitnessAttachment::PackageSymbol { .. }
         | WitnessAttachment::SymbolReturnArm(_)
-        | WitnessAttachment::SlotType { .. }
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
         | WitnessAttachment::Param { .. } => {}

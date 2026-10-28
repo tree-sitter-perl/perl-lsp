@@ -4,11 +4,14 @@ use super::*;
 use crate::build::packs::php_pack;
 use crate::model::file_analysis::{FileAnalysis, SymKind};
 
+// TODO(language-stamped-at-assembly): the driver stamps `language`, so an
+// analysis assembled without it (other packs' test helpers) routes as the
+// host; the stamp belongs where the skeleton is assembled.
 fn php(src: &str) -> FileAnalysis {
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
-    let tree = parser.parse(src, None).unwrap();
-    extract(&tree, src.as_bytes(), &php_pack()).unwrap().into_file_analysis()
+    crate::build::language_driver::LanguageRegistry::compiled()
+        .for_path(std::path::Path::new("t.php"))
+        .unwrap()
+        .analyze(src)
 }
 
 /// (name, package) of every symbol of `kind`, in source order.
@@ -1052,13 +1055,12 @@ class Child extends Base {
 #[test]
 fn an_inherited_member_resolves_and_renames_across_files() {
     let ws = Workspace::new(&[("/fake/php/Lib/Base.php", BASE), ("/fake/php/App/Child.php", CHILD)]);
-    // a definition in another file is reported at its line
-    let greet = vec![site("Base.php", 5, 0)];
+    let greet = vec![site("Base.php", 5, 20)];
     assert_eq!(ws.defs("Child.php", "greet();\n        $this", 0), greet, "a parameter typed by the child");
     assert_eq!(ws.defs("Child.php", "greet();\n        $b", 0), greet, "`$this`");
     assert_eq!(ws.defs("Child.php", "greet();\n        $c->label", 0), greet, "a nullsafe call");
     assert_eq!(ws.defs("Child.php", "label", 0), vec![site("Base.php", 4, 19)], "an inherited property");
-    let make = vec![site("Base.php", 6, 0)];
+    let make = vec![site("Base.php", 6, 27)];
     assert_eq!(ws.defs("Child.php", "make();\n        Base", 0), make, "`self::` up the chain");
     assert_eq!(ws.defs("Child.php", "make();\n    }", 0), make, "a class named through the use-map");
 
@@ -1120,7 +1122,7 @@ strlen('x');
     );
 
     let ws = Workspace::new(&[("/fake/php/Lib/helpers.php", HELPERS), ("/fake/php/App/main.php", src)]);
-    assert_eq!(ws.defs("main.php", "helper(2)", 0), vec![site("helpers.php", 3, 0)]);
+    assert_eq!(ws.defs("main.php", "helper(2)", 0), vec![site("helpers.php", 3, 9)]);
     assert_eq!(ws.defs("main.php", "local(1", 0), vec![site("main.php", 3, 9)]);
 }
 
@@ -1247,7 +1249,7 @@ fn a_call_chain_types_through_declared_returns() {
 #[test]
 fn a_chained_member_resolves_across_files_and_hovers_its_return() {
     let ws = Workspace::new(&[("/fake/php/Lib/Clock.php", CLOCK), ("/fake/php/App/Builder.php", RETURNS)]);
-    let tick = vec![site("Clock.php", 4, 0)];
+    let tick = vec![site("Clock.php", 4, 20)];
     assert_eq!(ws.defs("Builder.php", "tick();\n    }", 0), tick, "a method chain");
     assert_eq!(ws.defs("Builder.php", "full()->tick", 8), tick, "a chain from a free call");
     assert_eq!(ws.defs("Builder.php", "clock()->tick", 0), vec![site("Builder.php", 10, 20)]);
@@ -1297,10 +1299,10 @@ class Users extends Query {
 fn an_inherited_declared_return_types_the_chain_across_files() {
     use crate::model::file_analysis::RefKind;
     let ws = Workspace::new(&[("/fake/php/Lib/Query.php", FLUENT_BASE), ("/fake/php/App/Users.php", FLUENT_CHILD)]);
-    assert_eq!(ws.defs("Users.php", "where()->first()->id", 0), vec![site("Query.php", 4, 0)]);
-    assert_eq!(ws.defs("Users.php", "first()->id", 0), vec![site("Query.php", 5, 0)]);
-    assert_eq!(ws.defs("Users.php", "id()", 0), vec![site("Query.php", 9, 0)]);
-    assert_eq!(ws.defs("Users.php", "first();", 0), vec![site("Query.php", 5, 0)]);
+    assert_eq!(ws.defs("Users.php", "where()->first()->id", 0), vec![site("Query.php", 4, 20)]);
+    assert_eq!(ws.defs("Users.php", "first()->id", 0), vec![site("Query.php", 5, 20)]);
+    assert_eq!(ws.defs("Users.php", "id()", 0), vec![site("Query.php", 9, 20)]);
+    assert_eq!(ws.defs("Users.php", "first();", 0), vec![site("Query.php", 5, 20)]);
 
     let child = ws.idx.workspace_file_for_test(std::path::Path::new("/fake/php/App/Users.php")).unwrap();
     let receivers: Vec<(&str, Option<String>)> = child
