@@ -1753,6 +1753,17 @@ impl IntoIterator for ReceiverClasses {
     }
 }
 
+/// How far a receiver's classes reach past what its value states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverPolicy {
+    /// Navigation: a conventional invocant (`$self`) whose value names no
+    /// class still dispatches on the enclosing class.
+    Navigate,
+    /// Only what the value states: a diagnostic must not warn about a
+    /// class the code never named.
+    Stated,
+}
+
 /// Build-time-resolved dispatch target for a `MethodCall` ref.
 /// `invocant_class` is the class the invocant resolved to at build time
 /// (frozen); it drives the inheritance rename-chain match in `refs_to`,

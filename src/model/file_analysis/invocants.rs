@@ -413,6 +413,16 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> ReceiverClasses {
+        self.invocant_classes_under(r, module_index, ReceiverPolicy::Navigate)
+    }
+
+    /// `method_call_invocant_classes` under an explicit `ReceiverPolicy`.
+    pub fn invocant_classes_under(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+        policy: ReceiverPolicy,
+    ) -> ReceiverClasses {
         let Some(site) = r.member_site() else { return ReceiverClasses::default() };
         // A qualified method token names its dispatch class explicitly —
         // Perl ignores the invocant's class for the lookup, so the token
@@ -445,7 +455,7 @@ impl FileAnalysis {
                 }
             }
         }
-        let Some(t) = self.method_call_invocant_type(r, module_index) else {
+        let Some(t) = self.invocant_type_under(r, module_index, policy) else {
             return ReceiverClasses::default();
         };
         // A DBIC resultset row projects to `ClassName(<source moniker>)` —
@@ -732,6 +742,17 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
+        self.invocant_type_under(r, module_index, ReceiverPolicy::Navigate)
+    }
+
+    /// `method_call_invocant_type` under an explicit `ReceiverPolicy`.
+    fn invocant_type_under(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+        policy: ReceiverPolicy,
+    ) -> Option<InferredType> {
+        let navigate = policy == ReceiverPolicy::Navigate;
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
         let invocant = match invocant {
@@ -875,7 +896,8 @@ impl FileAnalysis {
                 // enclosing class — identity outranks a classless value
                 // type (`$self->{count}++` observations must not demote
                 // `$self` to a plain hashref).
-                if self.dispatch_classes_of(&t, module_index).is_empty()
+                if navigate
+                    && self.dispatch_classes_of(&t, module_index).is_empty()
                     && crate::model::conventions::is_conventional_invocant_name(invocant)
                 {
                     return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
@@ -885,7 +907,7 @@ impl FileAnalysis {
             // Enclosing-class fallback for an untyped conventional
             // invocant. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if crate::model::conventions::is_conventional_invocant_name(invocant) {
+            if navigate && crate::model::conventions::is_conventional_invocant_name(invocant) {
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;

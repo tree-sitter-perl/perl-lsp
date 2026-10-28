@@ -484,37 +484,24 @@ pub fn collect_diagnostics(
             continue;
         }
 
-        // Resolve invocant to its classes — one, or each object arm of a
-        // union. Diagnostics stays bag-only for scalars — no enclosing-class
-        // fallback, which would manufacture warnings on untyped invocants —
-        // and skips everything else.
-        let (classes, is_union): (Vec<String>, bool) = match invocant.classify() {
-            InvocantText::Bareword(b) => (vec![b.to_string()], false),
-            InvocantText::Scalar(_) => match analysis.inferred_type_via_bag(invocant, r.span.start) {
-                Some(ty) => {
-                    let mut cs: Vec<String> = Vec::new();
-                    for cn in ty.receiver_arms().iter().filter_map(|t| t.class_name()) {
-                        if !cs.iter().any(|c| c == cn) {
-                            cs.push(cn.to_string());
-                        }
-                    }
-                    (cs, matches!(ty, InferredType::Union(_)))
-                }
-                None => continue,
-            },
-            _ => continue,
-        };
+        // A bareword or scalar receiver is one the code names, so its
+        // classes are checked; and only the classes its value states
+        // (`ReceiverPolicy::Stated`) — an enclosing-class guess would
+        // manufacture warnings on untyped invocants.
+        if !matches!(invocant.classify(), InvocantText::Bareword(_) | InvocantText::Scalar(_)) {
+            continue;
+        }
+        let classes = analysis.invocant_classes_under(r, Some(module_index), ReceiverPolicy::Stated);
 
         // Each arm is checked on its own, so a union receiver warns for the
         // arms that lack the method even when another arm answers it — the
         // call dies at runtime for exactly those values.
-        let missing: Vec<&String> =
-            classes.iter().filter(|cn| class_lacks_method(cn, method_name)).collect();
+        let missing: Vec<&str> = classes.iter().filter(|cn| class_lacks_method(cn, method_name)).collect();
         if missing.is_empty() {
             continue;
         }
-        let in_classes = missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" or ");
-        let message = if is_union {
+        let in_classes = missing.join(" or ");
+        let message = if classes.single().is_none() {
             format!("'{}' is not defined in {}, which {} may be", method_name, in_classes, invocant)
         } else {
             format!("'{}' is not defined in {}", method_name, in_classes)
@@ -695,22 +682,20 @@ pub fn collect_diagnostics(
             if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
                 continue;
             }
-            let class_name = match invocant.classify() {
-                InvocantText::Bareword(b) => Some(b.to_string()),
-                InvocantText::Scalar(_) => analysis
-                    .inferred_type_via_bag(invocant, r.span.start)
-                    .and_then(|ty| ty.class_name().map(|s| s.to_string())),
-                _ => None,
-            };
-            let Some(class_name) = class_name else { continue };
-            if !seen.insert((class_name.clone(), method_name.clone())) {
-                // one hint per (class, helper) per file — the fix is
-                // one `plugin` line, not one per call site
+            // The same receivers the unresolved-method lint checks.
+            if !matches!(invocant.classify(), InvocantText::Bareword(_) | InvocantText::Scalar(_)) {
                 continue;
             }
-            let Some(provider) =
-                analysis.bridged_helper_provider(&class_name, method_name, Some(module_index))
-            else {
+            let classes = analysis.invocant_classes_under(r, Some(module_index), ReceiverPolicy::Stated);
+            // The helper's provider on whichever class the receiver may be
+            // bridges it.
+            // One hint per (class, helper) per file — the fix is one
+            // `plugin` line, not one per call site.
+            let fresh: Vec<&str> =
+                classes.iter().filter(|c| seen.insert((c.to_string(), method_name.clone()))).collect();
+            let Some(provider) = fresh.iter().find_map(|class_name| {
+                analysis.bridged_helper_provider(class_name, method_name, Some(module_index))
+            }) else {
                 continue;
             };
             if !module_index.is_workspace_module(&provider) {
