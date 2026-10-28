@@ -1109,7 +1109,7 @@ impl<'a> Builder<'a> {
     /// span-extent witness, excluded past the arm the way a narrowing is. The
     /// arm is one side of a join: what follows it is that join's to answer.
     pub(super) fn push_deref_observation(&mut self, var_node: Node<'a>, context_node: Node<'a>, inferred_type: InferredType) {
-        let Some(arm) = crate::cst::conditional_arm_in_block(context_node) else {
+        let Some(arm) = crate::cst::conditional_arm(context_node, crate::cst::ArmBound::Block) else {
             self.push_var_type_constraint(var_node, context_node, inferred_type);
             return;
         };

@@ -1393,7 +1393,7 @@ fn language_spellings_have_one_home() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
+        ("model/conventions.rs", 9, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
         ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
