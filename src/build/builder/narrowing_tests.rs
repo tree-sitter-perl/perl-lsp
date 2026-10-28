@@ -913,3 +913,24 @@ fn a_guard_narrows_every_arm_it_decides() {
     assert_eq!(at(7, 24), foo, "the right of `and`");
     assert_eq!(at(8, 4), None, "nothing after");
 }
+
+#[test]
+fn a_loop_guard_narrows_its_body() {
+    // A loop tests its condition before every run of its body, so the body
+    // is an arm of the guard; `do BLOCK while G` runs once untested.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    while ($x->isa('Foo')) { $x->go; }\n    until (defined $y) { my $u = $y; }\n    $x->go while $x->isa('Foo');\n    do { $x->go } while $x->isa('Foo');\n    for (my $i = 0; $x->isa('Foo'); $i++) { $x->go; }\n    $x->go;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_eq!(at(3, 29), foo, "a while body");
+    assert_eq!(
+        fa.inferred_type_via_bag("$y", Point::new(4, 34)),
+        Some(InferredType::Undef),
+        "an until body runs where the guard fails",
+    );
+    assert_eq!(at(5, 4), foo, "a statement a while modifier repeats");
+    assert_eq!(at(6, 9), None, "a do block runs before its first test");
+    assert_eq!(at(7, 46), foo, "a C-style for body");
+    assert_eq!(at(8, 4), None, "nothing after: `last` leaves with the guard unchanged");
+}

@@ -454,19 +454,51 @@ impl<'a> Builder<'a> {
     /// `STMT if/unless G;` — STMT runs only where G says, so it is a one-arm
     /// region the guard narrows; when STMT is a control-flow exit, the rest
     /// of the enclosing block is the fall-through, which holds the opposite.
+    /// `STMT while/until G;` tests G before every run of STMT, so it narrows
+    /// STMT the same way — except `do BLOCK while G`, whose first run comes
+    /// before any test. A loop's fall-through is not narrowed: `last` leaves
+    /// with G unchanged.
     pub(super) fn narrow_postfix(&mut self, postfix: Node<'a>) {
         let Some(condition) = postfix.child_by_field_name("condition") else { return };
         let Some(modified) = postfix.named_child(0) else { return };
         let Some(kw) = connector_keyword_between(modified, condition, self.source) else { return };
-        let runs_when_true = match kw.as_str() {
-            "if" => true,
-            "unless" => false,
+        let (runs_when_true, is_loop) = match kw.as_str() {
+            "if" => (true, false),
+            "unless" => (false, false),
+            "while" => (true, true),
+            "until" => (false, true),
             _ => return,
         };
+        // TODO(do-loop-node): the grammar gives `do BLOCK while G` the same
+        // node as `STMT while G`; a node of its own would make this a kind.
+        if is_loop && modified.kind() == "do_expression" {
+            return;
+        }
         self.narrow_arm(condition, modified, runs_when_true);
-        if is_exit_expression(modified, self.source) {
+        if !is_loop && is_exit_expression(modified, self.source) {
             self.narrow_block_remainder(postfix, condition, !runs_when_true);
         }
+    }
+
+    /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
+    /// run of the body, so the body narrows by G (`until` by its negation),
+    /// and the rebind cutoff ends it at a write. Nothing narrows after the
+    /// loop: `last` leaves with G unchanged.
+    pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
+        let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
+        else {
+            return;
+        };
+        // The C-style condition is an `expression_statement` around the test.
+        let condition = match condition.kind() {
+            "expression_statement" => match crate::cst::nth_element(condition, 0) {
+                Some(test) => test,
+                None => return,
+            },
+            _ => condition,
+        };
+        let enter = stmt.child(0).is_none_or(|k| k.kind() != "until");
+        self.narrow_arm(condition, body, enter);
     }
 
     /// `G ? A : B` — A runs where G holds, B where it fails.

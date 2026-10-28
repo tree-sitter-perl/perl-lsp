@@ -190,7 +190,12 @@ A statement modifier is a one-arm region: `STMT if G` narrows STMT by G
 TRUE, `STMT unless G` by G FALSE, exit or not. A ternary's branches and a
 logical operator's right side are arms the same way: `G ? A : B` narrows A
 by G TRUE and B by G FALSE, `G && R` / `G and R` narrow R by G TRUE, and
-`G || R` / `G or R` by G FALSE (`narrow_arm`, the one spelling). When STMT is an exit, the
+`G || R` / `G or R` by G FALSE (`narrow_arm`, the one spelling).
+A loop tests its condition before every run of its body, so the body is
+an arm too: `while (G)`, `STMT while G` and a C-style `for (…; G; …)`
+narrow by G TRUE, `until` by G FALSE. `do BLOCK while G` is the one
+exception — perlsyn runs the block once before the first test. Nothing
+narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once, as before.

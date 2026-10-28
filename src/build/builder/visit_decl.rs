@@ -73,8 +73,12 @@ impl<'a> Builder<'a> {
                 self.narrow_block_guard(node);
                 self.queue_children(node);
             }
-            "postfix_conditional_expression" => {
+            "postfix_conditional_expression" | "postfix_loop_expression" => {
                 self.narrow_postfix(node);
+                self.queue_children(node);
+            }
+            "loop_statement" | "cstyle_for_statement" => {
+                self.narrow_loop(node);
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {
