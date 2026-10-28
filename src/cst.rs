@@ -22,6 +22,7 @@
 
 use tree_sitter::Node;
 
+use crate::model::conventions::Sigil;
 use crate::model::file_analysis::Span;
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
@@ -593,28 +594,46 @@ pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Opt
         return None;
     }
     let bare = varname_child(node)?.text(src)?;
-    Some(format!("{}{}", container_sigil(node)?, bare))
+    Some(format!("{}{}", container_sigil(node)?.char(), bare))
 }
 
 /// The sigil of the aggregate a container access reads — `@` for `$a[0]`,
 /// `@a[..]`, `%a[..]`, `$#a`; `%` for `$h{k}`, `@h{..}`, `%h{..}`. The
 /// access node's own sigil never says it: a slice is always `@`.
-pub(crate) fn container_sigil(node: Node) -> Option<char> {
+pub(crate) fn container_sigil(node: Node) -> Option<Sigil> {
     if node.kind() == "arraylen" {
-        return Some('@');
+        return Some(Sigil::Array);
     }
     let parent = node.parent()?;
     match parent.kind() {
-        "array_element_expression" => Some('@'),
-        "hash_element_expression" => Some('%'),
+        "array_element_expression" => Some(Sigil::Array),
+        "hash_element_expression" => Some(Sigil::Hash),
         "slice_expression" | "keyval_expression" => {
             if parent.child_by_field_name("array").is_some_and(|c| c == node) {
-                Some('@')
+                Some(Sigil::Array)
             } else if parent.child_by_field_name("hash").is_some_and(|c| c == node) {
-                Some('%')
+                Some(Sigil::Hash)
             } else {
                 None
             }
+        }
+        _ => None,
+    }
+}
+
+/// What a deref node dereferences its operand as: `${..}` / `$$x` a
+/// scalar, `@{..}` / `@$x` an array, `%{..}` / `%$x` a hash, an element,
+/// slice or `$#` access the aggregate it reads, `&{..}` / `&$x` code,
+/// `*{..}` a glob.
+pub(crate) fn deref_sigil(node: Node) -> Option<Sigil> {
+    match node.kind() {
+        "scalar" => Some(Sigil::Scalar),
+        "array" => Some(Sigil::Array),
+        "hash" => Some(Sigil::Hash),
+        "function" | "code_deref_expression" => Some(Sigil::Code),
+        "glob" | "glob_deref_expression" => Some(Sigil::Glob),
+        "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
+            container_sigil(node)
         }
         _ => None,
     }
@@ -1035,25 +1054,13 @@ pub(crate) fn string_list_with_residue(
     (results, residue)
 }
 
-/// True when `node` sits in a conditionally-executed position within
-/// its enclosing sub: under an if/unless block, a postfix modifier, a
-/// ternary arm, a loop, or a short-circuit chain (`and`/`or`; the
-/// `binary_expression` arm over-claims `&&`-and-friends' left operands
-/// too — over-marking is the safe direction, it only widens a shape to
-/// open). Climbs to the nearest sub/file boundary; scope-crossing
-/// conditionality (a write inside a block or closure relative to an
-/// outer variable's scope) is the caller's check — this answers only
-/// what the syntax between here and the boundary says.
-pub(crate) fn is_conditionally_executed(node: Node) -> bool {
-    conditional_before_boundary(node, false)
-}
-
-/// The same question relative to the enclosing BLOCK: a postfix modifier,
-/// ternary arm or short-circuit chain between `node` and its block counts;
-/// the block's own `if`/loop does not. For a fact that lands on the block's
-/// own scope — inside the block the block has, by construction, run.
-pub(crate) fn is_conditionally_executed_in_block(node: Node) -> bool {
-    conditional_before_boundary(node, true)
+/// How far [`conditional_arm`] climbs: to the enclosing sub (or file), or
+/// only to the enclosing block. A fact that lands on the block's own scope
+/// asks `Block` — inside the block, the block has, by construction, run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArmBound {
+    Sub,
+    Block,
 }
 
 /// A call on a variable or place whose callee `tag_of` names as reporting
@@ -1079,14 +1086,16 @@ pub(crate) fn ref_tag_call<'a>(
         .then_some((via, operand))
 }
 
-/// The arm of a conditionally-run construct, between `node` and its block,
-/// that holds `node`: the statement a postfix `if`/`unless`/`for`/`while`
-/// modifies, a ternary branch, the right operand of a short-circuit. A
-/// condition, a loop list and a non-short-circuit operand run whenever
-/// their construct does, so the climb passes through them. `None` = `node`
-/// runs whenever its block does. Exact where `is_conditionally_executed_in_block`
-/// over-claims: an observation made there is lost, not kept safe.
-pub(crate) fn conditional_arm_in_block<'a>(node: Node<'a>) -> Option<Node<'a>> {
+/// The arm of a conditionally-run construct, between `node` and `bound`,
+/// that holds `node`: an `if`/`elsif`/`else` body or a later branch, a loop
+/// body, a C-style `for`'s iterator, the statement a postfix
+/// `if`/`unless`/`for`/`while` modifies, a ternary branch, the right
+/// operand of a short-circuit. A condition, a loop list, a `for`
+/// initialiser and a non-short-circuit operand run whenever their
+/// construct does, so the climb passes through them. `None` = `node` runs
+/// whenever its bound does. Scope-crossing conditionality (a write inside
+/// a closure relative to an outer variable's scope) is the caller's check.
+pub(crate) fn conditional_arm<'a>(node: Node<'a>, bound: ArmBound) -> Option<Node<'a>> {
     let mut child = node;
     let mut cur = node.parent();
     while let Some(p) = cur {
@@ -1095,11 +1104,15 @@ pub(crate) fn conditional_arm_in_block<'a>(node: Node<'a>) -> Option<Node<'a>> {
             "subroutine_declaration_statement"
             | "method_declaration_statement"
             | "anonymous_subroutine_expression"
-            | "source_file"
-            | "block" => return None,
-            "postfix_conditional_expression" | "postfix_loop_expression" => !is_field("condition"),
-            "postfix_for_expression" => !is_field("list"),
-            "conditional_expression" => !is_field("condition"),
+            | "source_file" => return None,
+            "block" if bound == ArmBound::Block => return None,
+            "conditional_statement"
+            | "loop_statement"
+            | "postfix_conditional_expression"
+            | "postfix_loop_expression"
+            | "conditional_expression" => !is_field("condition"),
+            "cstyle_for_statement" => !is_field("initialiser") && !is_field("condition"),
+            "for_statement" | "postfix_for_expression" => !is_field("list") && !is_field("variable"),
             "lowprec_logical_expression" => is_field("right"),
             "binary_expression" => {
                 is_field("right")
@@ -1116,31 +1129,6 @@ pub(crate) fn conditional_arm_in_block<'a>(node: Node<'a>) -> Option<Node<'a>> {
         cur = p.parent();
     }
     None
-}
-
-fn conditional_before_boundary(node: Node, stop_at_block: bool) -> bool {
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        match p.kind() {
-            "subroutine_declaration_statement"
-            | "method_declaration_statement"
-            | "anonymous_subroutine_expression"
-            | "source_file" => return false,
-            "block" if stop_at_block => return false,
-            "conditional_statement"
-            | "postfix_conditional_expression"
-            | "conditional_expression"
-            | "lowprec_logical_expression"
-            | "binary_expression"
-            | "loop_statement"
-            | "for_statement"
-            | "postfix_for_expression"
-            | "postfix_loop_expression" => return true,
-            _ => {}
-        }
-        cur = p.parent();
-    }
-    false
 }
 
 /// The scalar wrapped by a container node's deref varname (`@$h{…}` —

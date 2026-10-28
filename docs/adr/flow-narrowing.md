@@ -98,10 +98,13 @@ never answers with the outer's), and consumers ask the value
 
 A rebind that may not run is old-or-new no matter what its RHS is, and
 lands as `Unknown` outright. "May not run" is asked at two granularities,
-both spelled once in `cst.rs` (one climb, two boundaries):
+both spelled once in `cst.rs` (`cst::conditional_arm`, one climb, two
+`ArmBound`s). The climb is exact: a condition, a loop list, a `for`
+initialiser and a short-circuit's left operand run whenever their construct
+does, so only the arm that may be skipped counts.
 
 - **Relative to the block the witness lands on**
-  (`is_conditionally_executed_in_block`): a statement modifier, a
+  (`ArmBound::Block`): a statement modifier, a
   ternary arm, a short-circuit. `$x = undef if COND` anchors at the
   statement start, so the guard's own condition reads no value the write
   has not produced, and the successor reads no value it may never
@@ -123,15 +126,12 @@ An **observation** — a deref typing its operand (`@$x` → ArrayRef) — is
 the other half of the same question. It is no write, so it mints no marker
 and resets nothing; it says what the variable holds on the paths that
 reach it. Run unconditionally, that is the belief from there on (a
-zero-width witness). In a conditionally-run arm (`cst::conditional_arm_in_block`:
+zero-width witness). In a conditionally-run arm (`cst::conditional_arm`:
 the statement a postfix modifier guards, a ternary branch, a short-circuit
 RHS) it holds over the arm only — a span-extent witness the arm's end
 excludes, the way a narrowing un-narrows. Past the arm the value is a join
 of this arm and the bypass, which `JoinFold` will answer; until then the
-arm says nothing outside itself. The arm climb is exact rather than
-`is_conditionally_executed_in_block`'s over-claim: for a write
-over-marking is the safe direction, for an observation it throws evidence
-away.
+arm says nothing outside itself.
 
 Declarations do not mint a marker, and that is placement rather than
 principle: a declaration's companions may legitimately sit before it (a
