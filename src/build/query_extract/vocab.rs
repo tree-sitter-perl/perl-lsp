@@ -228,7 +228,14 @@ spelled! {
 }
 
 spelled! {
-    pub enum MemberCap { Recv = "recv", Op = "op" }
+    pub enum MemberCap {
+        /// A receiver written as an expression (`self.x`, `f()`, `(*p)`).
+        Recv = "recv",
+        /// A receiver written as a bare name (`w`, `Widget`): it may spell
+        /// a class, and its operator can be checked by its name.
+        RecvName = "recv.name",
+        Op = "op",
+    }
 }
 
 spelled! {
@@ -461,7 +468,7 @@ impl Capture {
             ["receiver"] => C::Receiver,
             ["mark", k] => C::Mark(MarkCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
-            ["member", k] => C::Member(MemberCap::parse(k)?),
+            ["member", rest @ ..] => C::Member(MemberCap::parse(&rest.join("."))?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
             ["domain", k] => C::Domain(DomainCap::parse(k)?),
             ["shape", k] => C::Shape(ShapeCap::parse(k)?),

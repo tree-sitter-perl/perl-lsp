@@ -701,18 +701,33 @@
 ; call_expression's only children are its callee and its argument_list, so a
 ; field_expression whose parent is a call is the callee. The read's value is
 ; the receiver's slot (@expr.member); the call's is an Invoke of the member
-; on the receiver (@expr.call).
+; on the receiver (@expr.call). A receiver written as a bare name is
+; @member.recv.name (it may spell a class, and op-DX checks its operator by
+; the name); any other is an expression, @member.recv.
+((field_expression
+  argument: (identifier) @member.recv.name
+  operator: _ @member.op
+  field: (field_identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call_expression))
 ((field_expression
   argument: (_) @member.recv
   operator: _ @member.op
   field: (field_identifier) @ref.member.value) @expr.member
- (#not-has-parent? @expr.member call_expression))
+ (#not-has-parent? @expr.member call_expression)
+ (#not-is-kind? @member.recv identifier))
 (call_expression
+  function: (field_expression
+    argument: (identifier) @member.recv.name
+    operator: _ @member.op
+    field: (field_identifier) @ref.member.call)
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
+((call_expression
   function: (field_expression
     argument: (_) @member.recv
     operator: _ @member.op
     field: (field_identifier) @ref.member.call)
   arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
+ (#not-is-kind? @member.recv identifier))
 
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.

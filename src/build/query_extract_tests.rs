@@ -3135,11 +3135,14 @@ fn cpp_call_arg_count_skips_comments() {
 }
 
 // A comment ahead of a parenthesized C++ receiver is peeled with the parens.
+// The receiver stays an expression: the parens are how it was written.
 #[test]
 fn cpp_receiver_peel_skips_comments() {
     let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
     let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
-    assert_eq!(call.invocant.as_ref().unwrap().1, crate::model::conventions::Invocant::assume_canonical("w"));
+    let (span, invocant) = call.invocant.as_ref().unwrap();
+    assert_eq!(*invocant, crate::model::conventions::Invocant::expr("w"));
+    assert_eq!(span.start, Point::new(1, 25));
 }
 
 // `this` is the object of the class whose body it is in, not a class named
