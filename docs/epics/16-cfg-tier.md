@@ -124,6 +124,18 @@ This converges `GuardSite.subject`, `moved_from`'s tuple, and
 call sites read `Place`; a subobject-move test that the flat spelling
 could not express; an aliasing test that the spelling key got wrong.
 
+**One attachment per binding.** The bag files a variable's facts under
+`(name, scope the fact was seen in)`: a guard's proof on the guard's scope,
+a write's reset on the write's, so the fold never sees them together, and
+the narrowing cut is precomputed by name instead (`PendingNarrow`). A
+`Place` attachment keyed by its binding puts every fact about one variable
+on one attachment, so the fold reads where a fact ends from the writes
+themselves. Two things ride with it: a declaration must stop a read's scope
+walk (an untyped shadow — `for $x (…)`, `my $x;` in a block — today falls
+through to the outer variable's facts), and a place's disturbances become
+writes on the place. A spike of the fold-reads-the-end half, on scope-keyed
+attachments, is on branch `claude/project-thread-kiq5f3-regions`.
+
 ### Phase C — assembler + `JoinFold` + cycle-cut markers + atoms
 
 The core. Buys cpp D1/D2/D6 along real control flow and must/may UAM.
