@@ -8,6 +8,7 @@ impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
     pub(super) fn visit_node(&mut self, node: Node<'a>) {
+        self.observe_deref(node);
         match node.kind() {
             "package_statement" => self.visit_package(node),
             "class_statement" => self.visit_class(node),
@@ -136,9 +137,6 @@ impl<'a> Builder<'a> {
             // (the EXPR inside the block) is a coderef. Narrow it, then visit
             // children so the inner scalar still gets its read ref.
             "code_deref_expression" => {
-                if let Some(operand) = code_deref_operand(node) {
-                    self.push_rep_observation(operand, node, TypeObservation::CodeRefInvocation);
-                }
                 self.queue_children(node);
             }
             "array_deref_expression" => {
@@ -164,7 +162,7 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => {
                 // $x++ / $x-- / ++$x / --$x → Numeric
                 if let Some(operand) = node.named_child(0) {
-                    self.push_var_type_constraint(operand, node, InferredType::Numeric);
+                    self.observe(operand, node, TypeObservation::NumericUse);
                 }
                 self.queue_children(node);
             }

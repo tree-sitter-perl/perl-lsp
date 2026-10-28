@@ -1147,26 +1147,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A deref observes what its operand holds on the paths that reach it,
-    /// and no others. Run unconditionally, that is the variable's belief from
-    /// here on; inside a conditionally-run arm it holds over the arm only — a
-    /// span-extent witness, excluded past the arm the way a narrowing is. The
-    /// arm is one side of a join: what follows it is that join's to answer.
-    pub(super) fn push_deref_observation(&mut self, var_node: Node<'a>, context_node: Node<'a>, inferred_type: InferredType) {
-        let Some(arm) = crate::cst::conditional_arm(context_node, crate::cst::ArmBound::Block) else {
-            self.push_var_type_constraint(var_node, context_node, inferred_type);
-            return;
-        };
-        let Ok(text) = var_node.utf8_text(self.source) else { return };
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
-            source: WitnessSource::Builder("type_constraint".into()),
-            payload: WitnessPayload::InferredType(inferred_type),
-            span: Span { start: context_node.start_position(), end: arm.end_position() },
-        });
-    }
-
     /// Infer the result type of an expression (not its operands — those are handled elsewhere).
     /// e.g. `$a + $b` produces Numeric, `$a . $b` produces String.
     pub(super) fn infer_expression_result_type(&self, node: Node<'a>) -> Option<InferredType> {
@@ -1214,28 +1194,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Infer a type on the first named child (the operand) of a dereference expression.
+    /// An arrow deref (`$x->{k}`, `$x->[0]`, `$x->()`, `$x->@*`) observes
+    /// its operand's representation.
     pub(super) fn infer_deref_type(&mut self, node: Node<'a>, rep: TypeObservation) {
         if let Some(operand) = node.named_child(0) {
-            self.push_rep_observation(operand, node, rep);
+            self.observe(operand, node, rep);
         }
-    }
-
-    /// A deref reveals the operand's REPRESENTATION, not its value: an
-    /// observation the reducer's rep axis projects only when no value
-    /// answers, so `my $r = maybe(); $r->[0]` keeps the `Optional` its
-    /// writer's edge carries.
-    pub(super) fn push_rep_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, rep: TypeObservation) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        if operand.kind() != "scalar" {
-            return;
-        }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
-            source: WitnessSource::Builder("deref_access".into()),
-            payload: WitnessPayload::Observation(rep),
-            span: node_to_span(context_node),
-        });
     }
 
     /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
@@ -1266,7 +1230,7 @@ impl<'a> Builder<'a> {
             Some("+" | "-" | "*" | "/" | "%" | "**") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::Numeric);
+                        self.observe(child, node, TypeObservation::NumericUse);
                     }
                 }
             }
@@ -1274,17 +1238,17 @@ impl<'a> Builder<'a> {
             Some("." | "x") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_string_context(child, node);
+                        self.observe(child, node, TypeObservation::StringUse);
                     }
                 }
             }
             // Regex match: LHS is String, RHS is Regexp
             Some("=~" | "!~") => {
                 if let Some(lhs) = crate::cst::nth_element(node, 0) {
-                    self.push_string_context(lhs, node);
+                    self.observe(lhs, node, TypeObservation::StringUse);
                 }
                 if let Some(rhs) = crate::cst::nth_element(node, 1) {
-                    self.push_var_type_constraint(rhs, node, InferredType::Regexp);
+                    self.observe(rhs, node, TypeObservation::RegexpUse);
                 }
             }
             _ => {}
@@ -1294,39 +1258,18 @@ impl<'a> Builder<'a> {
     /// Infer types from comparison operators (equality_expression, relational_expression).
     pub(super) fn infer_comparison_type(&mut self, node: Node<'a>) {
         let op = self.get_operator_text(node);
-        let inferred = match op.as_deref() {
-            // Numeric comparisons
-            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(InferredType::Numeric),
-            // String comparisons
-            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(InferredType::String),
+        let observed = match op.as_deref() {
+            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(TypeObservation::NumericUse),
+            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(TypeObservation::StringUse),
             _ => None,
         };
-        if let Some(it) = inferred {
+        if let Some(obs) = observed {
             for i in 0..node.named_child_count() {
                 if let Some(child) = node.named_child(i) {
-                    if it.is_string() {
-                        self.push_string_context(child, node);
-                    } else {
-                        self.push_var_type_constraint(child, node, it.clone());
-                    }
+                    self.observe(child, node, obs.clone());
                 }
             }
         }
-    }
-
-    /// A string-context use says the operand is a string — news only when
-    /// its value is not one already. Restating it over a value that is
-    /// (a `RefTagOf`) would retire that value under latest-wins.
-    fn push_string_context(&mut self, operand: Node<'a>, context: Node<'a>) {
-        if operand.kind() == "scalar" {
-            let known = operand.utf8_text(self.source).ok().and_then(|name| {
-                self.bag_query_variable(name, self.current_scope(), operand.start_position())
-            });
-            if known.is_some_and(|t| t.is_string()) {
-                return;
-            }
-        }
-        self.push_var_type_constraint(operand, context, InferredType::String);
     }
 
     /// Get the operator text from a binary/comparison/equality expression.

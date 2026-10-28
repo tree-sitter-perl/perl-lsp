@@ -159,12 +159,18 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         Capture::Obs(obs) => {
             // Usage-site evidence: a mono-typed operator observes
             // its operand. Same Observation payloads the Perl
-            // walker emits; the fold is the production one.
+            // walker emits; the fold is the production one. It holds from
+            // the site to the end of its scope.
+            // TODO(pack-observation-arms): bound it by the conditional arm
+            // around the site, as the Perl walker does, once the query
+            // document captures arms.
+            let site = e.span();
+            let end = out.scopes[cur_scope.0 as usize].span.end;
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Variable { name: (pack.shape_name)(&e.text), scope: cur_scope },
                 "skeleton-obs",
                 WitnessPayload::Observation(obs.observation()),
-                e.span(),
+                Span { start: site.start, end },
             ));
         }
         Capture::Expr(ExprCap::Call) => {

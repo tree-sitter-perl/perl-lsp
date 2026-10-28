@@ -884,32 +884,9 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {
         use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
         self.seed_arg_windows();
-
-        // Rep observations from `$v->{k}` access. Method-call return
-        // edges on `Expression(refidx)` are emitted later — by the
-        // chain-typing PostFold pass once `invocant_class` is filled —
-        // as `Edge(PackageSymbol{package, method})`. Without a known
-        // class there's no class-keyed answer to chase to, so the
-        // emission is gated by chain-typing's own progress.
-        let mut hash_obs: Vec<(String, ScopeId, Span)> = Vec::new();
-        for r in self.refs.iter() {
-            if let RefKind::HashKeyAccess { var_text, .. } = &r.kind {
-                if var_text.starts_with('$') {
-                    hash_obs.push((var_text.clone(), r.scope, r.span));
-                }
-            }
-        }
-        for (var, scope, span) in hash_obs {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Variable { name: var, scope },
-                source: WitnessSource::Builder("hash_ref_access".into()),
-                payload: WitnessPayload::Observation(TypeObservation::HashRefAccess),
-                span,
-            });
-        }
 
         // Invocant mutations on hash keys.
         //

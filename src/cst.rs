@@ -640,10 +640,30 @@ pub(crate) fn deref_sigil(node: Node) -> Option<Sigil> {
 }
 
 /// What a deref spelling dereferences: the `block` of `@{EXPR}` /
-/// `${EXPR}[0]` / `$#{EXPR}`, or the inner `scalar` of `@$x` / `$$x[0]` /
-/// `$#$x`. `None` for a named variable — its `varname` is a bare leaf.
+/// `${EXPR}[0]` / `$#{EXPR}` / `&{EXPR}`, or the inner `scalar` of `@$x` /
+/// `$$x[0]` / `$#$x` / `&$x`. `None` for a named variable — its `varname`
+/// is a bare leaf.
 pub(crate) fn deref_operand<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    varname_child(node)?.named().find(|c| matches!(c.kind(), "block" | "scalar"))
+    let holder = match node.kind() {
+        "code_deref_expression" | "glob_deref_expression" => node,
+        _ => varname_child(node)?,
+    };
+    holder.named().find(|c| matches!(c.kind(), "block" | "scalar"))
+}
+
+/// The expression a deref dereferences: the inner scalar of `@$x`, or the
+/// lone expression of `@{EXPR}`. `None` for a named variable or a block
+/// that is more than one expression.
+pub(crate) fn deref_operand_expr<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let operand = deref_operand(node)?;
+    if operand.kind() != "block" {
+        return Some(operand);
+    }
+    let mut stmts = operand.elements();
+    let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
+    let mut exprs = stmt.elements();
+    let expr = exprs.next()?;
+    (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
 }
 
 /// Canonical access-path key for a place subject — a chain of constant
@@ -1052,6 +1072,19 @@ pub(crate) fn string_list_with_residue(
         }
     }
     (results, residue)
+}
+
+/// The block (or file) `node` runs in: the extent a fact observed at
+/// `node` can hold over when no conditional arm bounds it.
+pub(crate) fn enclosing_block(node: Node) -> Option<Node> {
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        if matches!(p.kind(), "block" | "source_file") {
+            return Some(p);
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 /// How far [`conditional_arm`] climbs: to the enclosing sub (or file), or

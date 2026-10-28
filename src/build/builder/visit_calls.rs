@@ -81,14 +81,6 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        // If this scalar is inside a block-deref, infer the type from the outer sigil.
-        // Parent chain: scalar → expression_statement → block → varname → outer_node
-        if node.kind() == "scalar" {
-            if let Some((deref_type, context)) = self.block_deref_context(node) {
-                self.push_deref_observation(node, context, deref_type);
-            }
-        }
-
         // `${name}` IS `$name`: key the ref on the canonical spelling and
         // anchor it on the bare name token, so rename rewrites inside the
         // braces and a string's `"${name}s"` keeps them.
@@ -163,20 +155,10 @@ impl<'a> Builder<'a> {
     /// `folded_from` for rename to rewrite instead. Unqualified names belong
     /// to the package in force, as Perl resolves them.
     fn symbolic_variables(&self, node: Node<'a>, sigil: crate::model::conventions::Sigil) -> Vec<(String, Span, Option<Span>)> {
-        use crate::cst::NodeExt;
         use crate::model::conventions::{
             is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
         };
-        let Some(expr) = crate::cst::varname_child(node)
-            .and_then(|vn| vn.named().find(|c| c.kind() == "block"))
-            .and_then(|block| {
-                let mut stmts = block.elements();
-                let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
-                let mut exprs = stmt.elements();
-                let expr = exprs.next()?;
-                (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
-            })
-        else {
+        let Some(expr) = crate::cst::deref_operand_expr(node) else {
             return Vec::new();
         };
         let (names, span, folded_from) = match expr.kind() {
@@ -252,36 +234,6 @@ impl<'a> Builder<'a> {
             }
         }
         false
-    }
-
-    /// The reference type a scalar must hold when it is the whole operand of
-    /// a deref — `@{$x}` / `@$x` / `${$x}[0]` / `$$x[0]` / `$#{$x}` hold an
-    /// ArrayRef, `%{$x}` / `$$x{k}` / `@{$x}{..}` a HashRef, `&{$x}` / `&$x`
-    /// a CodeRef — with the deref node as the constraint's context.
-    ///
-    /// Parent chain: scalar → varname → outer (sigil form), or scalar →
-    /// expression_statement → block → varname-or-deref → outer (block form).
-    pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(InferredType, Node<'a>)> {
-        use crate::model::conventions::Sigil;
-        let mut up = node.parent()?;
-        if up.kind() == "expression_statement" {
-            let block = up.parent()?;
-            if block.kind() != "block" { return None; }
-            up = block.parent()?;
-        }
-        let outer = match up.kind() {
-            "varname" => up.parent()?,
-            "code_deref_expression" | "glob_deref_expression" => up,
-            _ => return None,
-        };
-        let ty = match crate::cst::deref_sigil(outer)? {
-            Sigil::Array => InferredType::ArrayRef,
-            Sigil::Hash => InferredType::HashRef,
-            Sigil::Code => InferredType::CodeRef { return_edge: None },
-            // The lattice has no scalar or glob reference type to hold.
-            Sigil::Scalar | Sigil::Glob => return None,
-        };
-        Some((ty, outer))
     }
 
     pub(super) fn visit_container_ref(&mut self, node: Node<'a>) {
@@ -420,9 +372,9 @@ impl<'a> Builder<'a> {
                     self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
                 // Push type constraints on arguments of known builtins
-                if let Some(arg_type) = crate::model::builtins::builtin_first_arg_type(name) {
+                if let Some(obs) = crate::model::builtins::builtin_first_arg_use(name) {
                     if let Some(first_arg) = self.first_call_arg(node) {
-                        self.push_var_type_constraint(first_arg, node, arg_type);
+                        self.observe(first_arg, node, obs);
                     }
                 }
                 // `bless $self, $class` promotes $self to ClassName($class)

@@ -489,6 +489,22 @@ fn conditional_deref_types_its_arm_only() {
     assert_eq!(at("$d", 6, 0), Some(InferredType::ArrayRef));
 }
 
+/// Every use observes its operand on the same rule as a deref: a numeric,
+/// string or builtin-argument use in an arm says nothing past the arm; a
+/// use of a place observes the place; a use never overrides a value.
+#[test]
+fn every_use_observes_on_one_rule() {
+    let fa = build_fa(
+        "sub f {\nmy ($n, $s, $e, $self) = @_;\nmy $y = $e ? $n + 1 : 0;\nprint 1 if $e && $s eq 'x';\nmy @l = @{$self->{items}};\nmy $v = Foo->new; $v . '';\nreturn;\n}\n",
+    );
+    let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
+    assert_eq!(at("$n", 2, 18), Some(InferredType::Numeric), "inside the arm");
+    assert_eq!(at("$n", 6, 0), None, "past the arm");
+    assert_eq!(at("$s", 6, 0), None, "past the short-circuit");
+    assert_eq!(at("$self->{items}", 6, 0), Some(InferredType::ArrayRef));
+    assert_eq!(at("$v", 6, 0).as_ref().and_then(|t| t.class_name()), Some("Foo"));
+}
+
 /// A write in a postfix modifier's condition runs whenever the statement
 /// does; only the modified statement is the arm that may be skipped.
 #[test]

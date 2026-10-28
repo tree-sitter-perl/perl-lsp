@@ -122,16 +122,21 @@ does, so only the arm that may be skipped counts.
   `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
   is in that epic's table.
 
-An **observation** — a deref typing its operand (`@$x` → ArrayRef) — is
-the other half of the same question. It is no write, so it mints no marker
-and resets nothing; it says what the variable holds on the paths that
-reach it. Run unconditionally, that is the belief from there on (a
-zero-width witness). In a conditionally-run arm (`cst::conditional_arm`:
-the statement a postfix modifier guards, a ternary branch, a short-circuit
-RHS) it holds over the arm only — a span-extent witness the arm's end
-excludes, the way a narrowing un-narrows. Past the arm the value is a join
-of this arm and the bypass, which `JoinFold` will answer; until then the
-arm says nothing outside itself.
+An **observation** is the other half of the same question: a use of a
+variable or place that reveals what it holds — any deref (`@$x`, `$$x{k}`,
+`$x->[0]`, `&$x`), a numeric, string or regex operator, a builtin's
+argument. It is no write, so it mints no marker and resets nothing; it says
+what the subject holds on the paths that reach it. Every use reaches the
+bag through one producer, `Builder::observe`, as a `TypeObservation` —
+evidence, which a value and a class identity outrank, never a proof. Its
+region is the narrowing rule's: from the use to the end of the
+conditionally-run arm around it (`cst::conditional_arm`: the statement a
+postfix modifier guards, a ternary branch, a short-circuit RHS), else to
+the end of its block, cut at the subject's next rebind
+(`RegionFact::Observe`, sharing `PendingNarrow`'s cutoffs, place subjects
+included). Past an arm the value is a join of the arm and its bypass,
+which `JoinFold` will answer; until then the arm says nothing outside
+itself.
 
 Declarations do not mint a marker, and that is placement rather than
 principle: a declaration's companions may legitimately sit before it (a
@@ -216,9 +221,9 @@ answer. A tag guards its subject only while it is still true:
   as every narrowing does.
 
 `via` says what the literal can prove: `ref` a reftype token or a class,
-`reftype` only a token, `blessed` only a class. A string-context use of a
-value already a string adds nothing, so it is not restated over the tag
-(it would retire it under latest-wins). Two tags that disagree join to
+`reftype` only a token, `blessed` only a class. A string-context use of
+the tag (`$ref eq 'HASH'`) is an observation, which the tag — a value —
+outranks. Two tags that disagree join to
 plain `String`. Under unions the same rule holds arm-wise: a guard reads
 a subject only when every arm of `$ref`'s value names the same one.
 

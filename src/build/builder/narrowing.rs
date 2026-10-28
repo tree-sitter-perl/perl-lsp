@@ -115,6 +115,15 @@ pub(super) struct TagNarrowing {
     lit: String,
 }
 
+/// What holds over a region of a subject's lifetime: a guard's proof, or
+/// a use's evidence. Both share the region and its cutoffs; only the
+/// payload's strength differs — a proof outranks every other belief, a
+/// use ranks below a value and a class.
+pub(super) enum RegionFact {
+    Guard(NarrowOp),
+    Observe(crate::model::witnesses::TypeObservation),
+}
+
 /// A recognized narrowing whose region cutoff is computed AFTER the walk —
 /// once `mint_flow_edges_via_query` has run, so the scalar-rebind truncation
 /// reads FlowEdges (`apply_narrowing_cutoffs`) instead of a CST scan. The
@@ -124,7 +133,7 @@ pub(super) struct TagNarrowing {
 /// walk's `current_scope`), invisible post-walk.
 pub(super) struct PendingNarrow {
     subject: NarrowSubject,
-    op: NarrowOp,
+    fact: RegionFact,
     region: Span,
     scope: ScopeId,
     place_cut: Option<Point>,
@@ -507,6 +516,51 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A deref observes its operand as the reference its sigil names:
+    /// `@$x` / `@{$x}` / `$$x[0]` an array, `%$x` / `$$x{k}` a hash,
+    /// `&$x` / `&{$x}` code. Every deref spelling reaches here, keyed on
+    /// the deref node, whichever visitor then walks it.
+    pub(super) fn observe_deref(&mut self, node: Node<'a>) {
+        use crate::model::conventions::Sigil;
+        use crate::model::witnesses::TypeObservation;
+        let Some(sigil) = crate::cst::deref_sigil(node) else { return };
+        let Some(operand) = crate::cst::deref_operand_expr(node) else { return };
+        let obs = match sigil {
+            Sigil::Array => TypeObservation::ArrayRefAccess,
+            Sigil::Hash => TypeObservation::HashRefAccess,
+            Sigil::Code => TypeObservation::CodeRefInvocation,
+            // No reference type in the lattice to observe.
+            Sigil::Scalar | Sigil::Glob => return,
+        };
+        self.observe(operand, node, obs);
+    }
+
+    /// Record what `operand`'s use at `context` reveals about it. A use
+    /// says what the operand holds on the paths that reach it and no others:
+    /// it holds from `context` to the end of the conditionally-run arm
+    /// around it (`cst::conditional_arm`), or else to the end of the block
+    /// it sits in, and like any narrowing it ends at the subject's next
+    /// rebind. Past an arm the value is a join of the arm and its bypass,
+    /// which `JoinFold` will answer; until then the arm says nothing
+    /// outside itself.
+    pub(super) fn observe(
+        &mut self,
+        operand: Node<'a>,
+        context: Node<'a>,
+        obs: crate::model::witnesses::TypeObservation,
+    ) {
+        let operand = crate::cst::peel_groups(operand);
+        if !is_subject_node_kind(operand.kind()) {
+            return;
+        }
+        let Some(subject) = narrow_subject_of(operand, self.source) else { return };
+        let extent = crate::cst::conditional_arm(context, crate::cst::ArmBound::Block)
+            .or_else(|| crate::cst::enclosing_block(context));
+        let Some(extent) = extent else { return };
+        let region = Span { start: context.start_position(), end: extent.end_position() };
+        self.emit_region_fact(&subject, RegionFact::Observe(obs), region, extent);
+    }
+
     /// Push the span-extent narrowing witness on the subject's home scope,
     /// truncating the region at the first reassignment of the subject.
     /// Emit a guard's narrowing into `region`. `op` is the polarity-
@@ -517,6 +571,16 @@ impl<'a> Builder<'a> {
         &mut self,
         subject: &NarrowSubject,
         op: NarrowOp,
+        region: Span,
+        container: Node<'a>,
+    ) {
+        self.emit_region_fact(subject, RegionFact::Guard(op), region, container);
+    }
+
+    fn emit_region_fact(
+        &mut self,
+        subject: &NarrowSubject,
+        fact: RegionFact,
         region: Span,
         container: Node<'a>,
     ) {
@@ -535,7 +599,7 @@ impl<'a> Builder<'a> {
         };
         self.pending_narrowings.push(PendingNarrow {
             subject: subject.clone(),
-            op,
+            fact,
             region,
             scope: self.current_scope(),
             place_cut,
@@ -730,7 +794,7 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
         for pn in pending {
-            if let (NarrowSubject::TagOf(var), NarrowOp::TagEq(lit)) = (&pn.subject, &pn.op) {
+            if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
                 // truncates is a write to the subject it names, known only
                 // once the tag resolves.
@@ -759,8 +823,8 @@ impl<'a> Builder<'a> {
                 continue; // truncated to nothing
             }
             let region = Span { start: pn.region.start, end };
-            match pn.op {
-                NarrowOp::To(ty) => {
+            match pn.fact {
+                RegionFact::Guard(NarrowOp::To(ty)) => {
                     self.bag.push(Witness {
                         attachment: WitnessAttachment::Variable { name, scope: pn.scope },
                         source: WitnessSource::Builder("narrowing".into()),
@@ -768,7 +832,7 @@ impl<'a> Builder<'a> {
                         span: region,
                     });
                 }
-                NarrowOp::StripOptional { query_point } => {
+                RegionFact::Guard(NarrowOp::StripOptional { query_point }) => {
                     self.defined_narrowings.push(DefinedNarrowing {
                         name,
                         scope: pn.scope,
@@ -776,7 +840,15 @@ impl<'a> Builder<'a> {
                         query_point,
                     });
                 }
-                NarrowOp::TagEq(_) => {}
+                RegionFact::Guard(NarrowOp::TagEq(_)) => {}
+                RegionFact::Observe(obs) => {
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Variable { name, scope: pn.scope },
+                        source: WitnessSource::Builder("usage_observation".into()),
+                        payload: WitnessPayload::Observation(obs),
+                        span: region,
+                    });
+                }
             }
         }
     }
