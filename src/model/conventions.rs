@@ -240,6 +240,28 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
     })
 }
 
+/// A Perl sigil: what kind of thing a name, or a deref, denotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sigil {
+    Scalar,
+    Array,
+    Hash,
+    Code,
+    Glob,
+}
+
+impl Sigil {
+    pub fn char(self) -> char {
+        match self {
+            Sigil::Scalar => '$',
+            Sigil::Array => '@',
+            Sigil::Hash => '%',
+            Sigil::Code => '&',
+            Sigil::Glob => '*',
+        }
+    }
+}
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
 /// own word: a pack mints the class its receiver names, never this token
 /// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).
