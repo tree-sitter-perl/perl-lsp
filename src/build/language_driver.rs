@@ -138,7 +138,7 @@ pub trait LanguageDriver: Send + Sync {
     /// Where this project keeps the dependencies the workspace walk does
     /// not own (php: Composer's `vendor/`), and which of their files
     /// declares a name. `None` = the walk is the whole story.
-    fn dependency_locator(&self, _root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+    fn dependency_locator(&'static self, _root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
         None
     }
     /// File names whose change can move `dependency_locator`'s answer —
@@ -339,7 +339,9 @@ pub struct PackDriver {
 #[cfg(feature = "pack-langs")]
 #[derive(Clone, Copy)]
 struct PackDependencies {
-    locator: fn(&Path) -> std::sync::Arc<dyn DependencyLocator>,
+    /// Builds the map for a root; given the driver it serves, so the map
+    /// parses and spells names in that driver's language.
+    locator: fn(&Path, &'static dyn LanguageDriver) -> std::sync::Arc<dyn DependencyLocator>,
     manifests: &'static [&'static str],
 }
 
@@ -440,8 +442,8 @@ impl LanguageDriver for PackDriver {
     fn analysis_input_fingerprint(&self) -> u64 {
         self.input_fingerprint.map(|f| f()).unwrap_or(0)
     }
-    fn dependency_locator(&self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
-        self.dependencies.map(|d| (d.locator)(root))
+    fn dependency_locator(&'static self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        self.dependencies.map(|d| (d.locator)(root, self))
     }
     fn dependency_manifests(&self) -> &[&'static str] {
         self.dependencies.map(|d| d.manifests).unwrap_or(&[])

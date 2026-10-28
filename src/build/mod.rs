@@ -33,6 +33,8 @@ pub mod query_extract;
 // pre-extraction reparse seam (whose production form is cpp_reparse).
 #[allow(dead_code)]
 pub mod reparse;
+// the one source-file walk and guarded analyze the indexers share
+pub mod source_files;
 // package-marker directories a workspace walk saw (python's `__init__.py`);
 // only a path-named language reads them
 #[cfg_attr(not(feature = "python"), allow(dead_code))]

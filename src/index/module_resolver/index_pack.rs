@@ -27,8 +27,7 @@ pub fn index_pack_language(
     // disables retention (rehydrate-and-drop). See `docs/adr/memory-slice-2-lru.md`.
     bag_cache_bytes: usize,
 ) -> usize {
-    use ignore::types::TypesBuilder;
-    use ignore::WalkBuilder;
+    use crate::build::source_files::{self, PACK_FILE_CAP};
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -52,25 +51,12 @@ pub fn index_pack_language(
             .filter_map(|r| r.strip_prefix(&canon_root).ok().map(|rel| root.join(rel)))
             .collect()
     };
-    let paths: Vec<PathBuf> = {
-        let mut tb = TypesBuilder::new();
-        for ext in driver.extensions() {
-            let _ = tb.add(lang, &format!("*.{ext}"));
-        }
-        let _ = tb.select(lang);
-        match tb.build() {
-            Ok(types) if !driver.extensions().is_empty() => WalkBuilder::new(root)
-                .types(types)
-                .filter_entry(move |e| !skip_roots.iter().any(|r| e.path().starts_with(r)))
-                .build()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
-                .map(|e| e.into_path())
-                .collect(),
-            _ => Vec::new(),
-        }
-    };
+    let walked = source_files::walk(
+        root,
+        &source_files::Walk { extensions: driver.extensions(), cap: PACK_FILE_CAP, skip: &skip_roots, ignores: true },
+    );
+    source_files::report_oversize(&walked.oversize, PACK_FILE_CAP);
+    let paths = walked.files;
     let grand_total = paths.len();
     // The walk already yielded every marker file (they are source files of
     // the language): record where, so naming a module asks this snapshot
@@ -411,22 +397,9 @@ pub fn index_pack_language(
                 }
                 crate::util::timings::trace_file(&canon);
                 crate::util::timings::set_current_file(Some(&canon));
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    analyze_stamped(path, || {
-                        let source = std::fs::read_to_string(path).ok()?;
-                        Some(driver.analyze_with_path(&source, Some(path)))
-                    })
-                }));
+                let res = analyze_stamped(path, || source_files::analyze_file(driver, path, PACK_FILE_CAP));
                 crate::util::timings::set_current_file(None);
-                if res.is_err() {
-                    // eprintln, not log::warn — the CLI runs without a logger,
-                    // and a panic that doesn't name its file costs a bisection.
-                    eprintln!(
-                        "perl-lsp: panic while indexing {}; file skipped",
-                        canon.display()
-                    );
-                }
-                if let Ok(Some((analysis, stamp))) = res {
+                if let Some((analysis, stamp)) = res {
                     // Encode the FULL analysis for the disk write, then strip
                     // the resident copy — one struct, no clone
                     // (`docs/adr/memory-slice-2-lru.md`). Strip only when the

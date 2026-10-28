@@ -126,17 +126,8 @@ fn land_path(
     st: &mut DependencyState,
     canon: &std::path::Path,
 ) -> Option<Arc<crate::model::file_analysis::FileAnalysis>> {
-    let meta = std::fs::metadata(canon).ok()?;
-    if meta.len() > 2_000_000 {
-        return None;
-    }
-    let source = std::fs::read_to_string(canon).ok()?;
-    let driver = st.driver;
-    let fa = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        driver.analyze_with_path(&source, Some(canon))
-    }))
-    .ok()?;
-    let fa = Arc::new(fa);
+    use crate::build::source_files::{analyze_file, PACK_FILE_CAP};
+    let fa = Arc::new(analyze_file(st.driver, canon, PACK_FILE_CAP)?);
     crate::util::ghost_stats::count("dependency.landed");
     let names = index.land_dependency(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::clone(&fa))));
     st.landed.insert(canon.to_path_buf(), names);

@@ -9,7 +9,7 @@
 //! `ResolvedConfig::load` can replace ours without touching the locator or
 //! the tier plumbing.
 
-use crate::build::language_driver::DependencyLocator;
+use crate::build::language_driver::{DependencyLocator, LanguageDriver};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -165,20 +165,23 @@ fn normalize(base: &Path, rel: &str) -> PathBuf {
     out
 }
 
-/// The project's Composer locator. Always a locator, even with no
-/// `composer.json`: it then locates nothing, and its inputs are still the
-/// files whose appearance would change that.
-pub fn locator(root: &Path) -> Arc<dyn DependencyLocator> {
+/// The project's Composer locator for `driver`'s language. Always a
+/// locator, even with no `composer.json`: it then locates nothing, and its
+/// inputs are still the files whose appearance would change that.
+pub fn locator(root: &Path, driver: &'static dyn LanguageDriver) -> Arc<dyn DependencyLocator> {
     let config = ResolvedConfig::load(root, true);
     if let Err(e) = &config {
         log::debug!("composer: no autoload map ({e})");
     }
-    Arc::new(ComposerLocator::new(root, config.ok()))
+    Arc::new(ComposerLocator::new(root, driver, config.ok()))
 }
 
 /// Class identity → candidate files, by Composer's rules: PSR-4 (longest
 /// prefix first), then PSR-0, then the classmap.
 pub struct ComposerLocator {
+    /// The language the map serves: its namespace separator spells the
+    /// identities, and a classmap file is parsed in it.
+    driver: &'static dyn LanguageDriver,
     sep: String,
     psr_4: Vec<(String, Vec<PathBuf>)>,
     psr_0: Vec<(String, Vec<PathBuf>)>,
@@ -193,10 +196,11 @@ pub struct ComposerLocator {
 }
 
 impl ComposerLocator {
-    fn new(root: &Path, config: Option<ResolvedConfig>) -> Self {
-        let sep = crate::build::packs::php_pack().names.use_map_sep().unwrap_or_default().to_string();
+    fn new(root: &Path, driver: &'static dyn LanguageDriver, config: Option<ResolvedConfig>) -> Self {
+        let sep = driver.lang_pack().and_then(|p| p.names.use_map_sep().map(str::to_string)).unwrap_or_default();
         let vendor_dir = config.as_ref().map(|c| c.vendor_dir.clone()).unwrap_or_else(|| root.join("vendor"));
         let mut loc = ComposerLocator {
+            driver,
             sep,
             psr_4: Vec::new(),
             psr_0: Vec::new(),
@@ -244,42 +248,18 @@ impl ComposerLocator {
     fn classmap(&self) -> &HashMap<String, PathBuf> {
         self.classmap.get_or_init(|| {
             let mut map = HashMap::new();
-            let Some(driver) = crate::build::language_driver::LanguageRegistry::compiled().for_id("php") else {
-                return map;
-            };
-            let mut files = Vec::new();
-            for root in &self.classmap_roots {
-                collect_php_files(root, driver.extensions(), &mut files, 0);
-            }
-            for path in files {
-                let Ok(src) = std::fs::read_to_string(&path) else { continue };
-                let fa = driver.analyze_with_path(&src, Some(&path));
+            use crate::build::source_files::{analyze_file, walk, Walk, PACK_FILE_CAP};
+            let driver = self.driver;
+            // Inside `vendor/`, which projects ignore: the walk must not.
+            let w = Walk { extensions: driver.extensions(), cap: PACK_FILE_CAP, skip: &[], ignores: false };
+            for path in self.classmap_roots.iter().flat_map(|root| walk(root, &w).files) {
+                let Some(fa) = analyze_file(driver, &path, PACK_FILE_CAP) else { continue };
                 for s in fa.symbols().iter().filter(|s| s.kind == crate::model::file_analysis::SymKind::Class) {
                     map.entry(s.name.clone()).or_insert_with(|| path.clone());
                 }
             }
             map
         })
-    }
-}
-
-fn collect_php_files(path: &Path, exts: &[&str], out: &mut Vec<PathBuf>, depth: u32) {
-    if path.is_file() {
-        out.push(path.to_path_buf());
-        return;
-    }
-    if depth > 32 {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(path) else { return };
-    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            collect_php_files(&p, exts, out, depth + 1);
-        } else if p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.contains(&e)) {
-            out.push(p);
-        }
     }
 }
 

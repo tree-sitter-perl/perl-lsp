@@ -14,6 +14,11 @@ pub(crate) fn project(tag: &str, files: &[(&str, &str)]) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
+/// The driver a Composer map serves.
+fn php() -> &'static dyn LanguageDriver {
+    crate::build::language_driver::LanguageRegistry::compiled().for_id("php").expect("php driver")
+}
+
 const ROOT_JSON: &str = r#"{"name": "app/app",
   "autoload": {"psr-4": {"App\\": "src/"}},
   "autoload-dev": {"psr-4": {"App\\Tests\\": ["tests/", "tests2/"]}}}"#;
@@ -80,7 +85,7 @@ fn a_configured_vendor_dir_moves_the_tier_and_its_manifest() {
     let cfg = ResolvedConfig::load(&root, true).unwrap();
     assert_eq!(cfg.vendor_dir, root.join("lib/deps"));
     assert_eq!(cfg.packages[1].root, root.join("lib/deps/a/b"));
-    let loc = locator(&root);
+    let loc = locator(&root, php());
     assert_eq!(loc.inputs(), [root.join("composer.json"), root.join("lib/deps/composer/installed.json")]);
     assert_eq!(loc.roots(), [root.join("lib/deps")]);
 }
@@ -89,13 +94,13 @@ fn a_configured_vendor_dir_moves_the_tier_and_its_manifest() {
 fn a_missing_or_malformed_manifest_locates_nothing_but_still_names_its_inputs() {
     let root = project("bad", &[("composer.json", "{not json"), ("vendor/acme/model/src/Base.php", "<?php")]);
     assert!(ResolvedConfig::load(&root, true).is_err());
-    let loc = locator(&root);
+    let loc = locator(&root, php());
     assert!(loc.locate("Acme\\Model\\Base").is_empty());
     assert_eq!(loc.inputs(), [root.join("composer.json"), root.join("vendor/composer/installed.json")]);
 
     let root = project("none", &[("vendor/composer/installed.json", V2)]);
     assert!(ResolvedConfig::load(&root, true).is_err());
-    assert!(locator(&root).always_loaded().is_empty());
+    assert!(locator(&root, php()).always_loaded().is_empty());
 
     // a malformed installed.json is a project with nothing installed
     let root = project("badinst", &[("composer.json", ROOT_JSON), ("vendor/composer/installed.json", "[{")]);
@@ -116,7 +121,7 @@ fn psr_4_answers_by_the_longest_prefix_and_psr_0_keeps_the_whole_identity() {
             ("vendor/old/lib/legacy/anything.php", "<?php\nclass Legacy_Widget {}\n"),
         ],
     );
-    let loc = locator(&root);
+    let loc = locator(&root, php());
     let v = |rel: &str| root.join("vendor").join(rel);
     assert_eq!(loc.locate("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
     assert_eq!(loc.locate("\\Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);

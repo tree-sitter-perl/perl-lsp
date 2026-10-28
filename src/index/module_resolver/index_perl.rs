@@ -76,51 +76,19 @@ pub fn index_workspace_with_index(
     // drain completes.
     walk_done: Option<&(dyn Fn() + Sync)>,
 ) -> usize {
-    use ignore::types::TypesBuilder;
-    use ignore::WalkBuilder;
+    use crate::build::source_files;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Extensioned Perl (`*.pm/*.pl/*.t`) — type-pruned at the walk
-    // level (cheap; never descends into a JS tree's files).
-    let mut types_builder = TypesBuilder::new();
-    types_builder.add("perl", "*.pm").unwrap();
-    types_builder.add("perl", "*.pl").unwrap();
-    types_builder.add("perl", "*.t").unwrap();
-    types_builder.select("perl");
-    let types = types_builder.build().unwrap();
-
-    let mut oversize: Vec<(PathBuf, u64)> = Vec::new();
-    let mut paths: Vec<PathBuf> = WalkBuilder::new(root)
-        .types(types)
-        .build()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter(|e| {
-            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-            if len >= 1_000_000 {
-                oversize.push((e.path().to_path_buf(), len));
-                return false;
-            }
-            true
-        })
-        .map(|e| e.into_path())
-        .collect();
-    // Say what the size cap dropped, once per walk: a skipped file gets no
-    // diagnostics from `--check` or the workspace index, and silence there
-    // reads as "no problems found" (FHEM ships four such files). The open-doc
-    // path has no cap — the editor still analyzes these on didOpen.
-    if !oversize.is_empty() {
-        oversize.sort();
-        eprintln!(
-            "perl-lsp: {} file(s) over the 1 MB workspace-index cap were skipped \
-             (no --check/workspace diagnostics for them; opening in an editor still works):",
-            oversize.len()
-        );
-        for (p, len) in &oversize {
-            eprintln!("perl-lsp:   {:.1} MB  {}", *len as f64 / 1e6, p.display());
-        }
-    }
+    // Extensioned Perl, type-pruned at the walk level (cheap; never
+    // descends into a JS tree's files). FHEM ships four files over the cap.
+    const PERL_FILE_CAP: u64 = 1_000_000;
+    let walked = source_files::walk(
+        root,
+        &source_files::Walk { extensions: &["pm", "pl", "t"], cap: PERL_FILE_CAP, skip: &[], ignores: true },
+    );
+    source_files::report_oversize(&walked.oversize, PERL_FILE_CAP);
+    let mut paths = walked.files;
 
     // Extensionless entrypoint SCRIPTS (`#!/usr/bin/env perl` — crm's
     // `jobs`/`login`/… Mojo::Lite apps) carry no glob, so a SHALLOW
