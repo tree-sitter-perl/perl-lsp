@@ -281,11 +281,7 @@ impl FileAnalysis {
         ty: &InferredType,
         members_of: impl Fn(&str) -> Vec<CompletionCandidate>,
     ) -> Vec<CompletionCandidate> {
-        let mut t = ty;
-        while let Some(inner) = t.optional_inner() {
-            t = inner;
-        }
-        let mut per_arm = t.arms().iter().filter_map(|a| a.class_name()).map(members_of);
+        let mut per_arm = ty.receiver_arms().iter().filter_map(|a| a.class_name()).map(members_of);
         let Some(mut out) = per_arm.next() else { return Vec::new() };
         for other in per_arm {
             let labels: HashSet<String> = other.into_iter().map(|c| c.label).collect();

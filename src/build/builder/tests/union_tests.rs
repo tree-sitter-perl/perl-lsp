@@ -67,3 +67,20 @@ fn a_drill_into_a_union_reads_every_arm_it_can() {
     assert_eq!(fa.sub_return_type_at_arity("k", None), Some(InferredType::String));
     assert_eq!(fa.sub_return_type_at_arity("i", None), Some(InferredType::Numeric));
 }
+
+#[test]
+fn a_maybe_union_receiver_distributes_like_the_union() {
+    // `A|B|undef` is `Optional(Union[A, B])`: every member read sees through
+    // the undef half to the same arms the bare union has.
+    let src = format!(
+        "{PRELUDE}sub pick {{ my $n = shift; return Cat->new if $n == 1; return Bird->new if $n == 2; return undef }}\n\
+         sub probe {{ my $pet = pick(1); return $pet->legs }}\n\
+         sub one {{ my $c = rand() ? Cat->new : undef; return $c->purr }}\n1;\n"
+    );
+    let fa = build_fa(&src);
+    let pet = fa.sub_return_type_at_arity("pick", None).expect("typed");
+    assert!(matches!(&pet, InferredType::Optional(inner) if matches!(**inner, InferredType::Union(_))), "got {pet:?}");
+    let t = fa.sub_return_type_at_arity("probe", None).expect("typed");
+    assert!(matches!(&t, InferredType::Union(a) if a.len() == 2), "got {t:?}");
+    assert_eq!(fa.sub_return_type_at_arity("one", None), Some(InferredType::String));
+}
