@@ -190,18 +190,18 @@
 ; what the variable held.
 (assignment_expression
   left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
-  right: (_) @flow.source) @flow.write
+  right: (_) @flow.source) @flow.assign
 (reference_assignment_expression
   left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
-  right: (_) @flow.source) @flow.write
+  right: (_) @flow.source) @flow.assign
 ; A compound write keeps the kind of value the variable holds; a
 ; destructuring and a loop write values they do not name.
 (augmented_assignment_expression
   left: (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
 (assignment_expression
-  left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)) @flow.write
+  left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)) @flow.assign
 (assignment_expression
-  left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned .))) @flow.write
+  left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned .))) @flow.assign
 (foreach_statement . (_) . [
   (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned
   (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
@@ -219,12 +219,12 @@
 (static_variable_declaration
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
   value: (_)? @flow.source)
-; `$x->p = v` writes the property.
-[
-  (assignment_expression left: (member_access_expression name: (name) @access.write))
-  (reference_assignment_expression left: (member_access_expression name: (name) @access.write))
-  (augmented_assignment_expression left: (member_access_expression name: (name) @access.write))
-]
+; An assignment writes the place its left side denotes, whatever that is
+; (`$x->p = v` writes the property); a compound one writes it too, with a
+; value it does not name.
+(assignment_expression left: (_) @flow.place right: (_) @flow.source) @flow.assign
+(reference_assignment_expression left: (_) @flow.place right: (_) @flow.source) @flow.assign
+(augmented_assignment_expression left: (_) @flow.place)
 
 ; ---- closures ----
 ; `use ($x)` reads the variable of the code around the closure, and the

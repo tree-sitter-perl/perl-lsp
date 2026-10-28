@@ -160,8 +160,8 @@ pub struct SkeletonAnalysis {
     /// (closure body, name) for each `@closure.capture`: the name the body
     /// sees through its closed boundary.
     pub captures: std::collections::HashSet<(crate::model::file_analysis::ScopeId, String)>,
-    /// Tokens the document says are written (`@access.write`): the
-    /// reference at each is a write.
+    /// The member tokens assignments write (a `@flow.place` whose read
+    /// projects a member): the reference at each is a write.
     pub write_sites: Vec<crate::model::file_analysis::Span>,
     /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
     /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —

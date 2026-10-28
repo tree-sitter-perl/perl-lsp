@@ -185,12 +185,11 @@ spelled! {
 
 spelled! {
     pub enum FlowCap {
-        /// The assignment node (pattern anchor).
-        Assign = "assign",
         /// The assignment node of a write that replaces its target's value:
-        /// every target of the match is written at the node's end, where
-        /// everything believed about it before dies.
-        Write = "write",
+        /// every target of the match is written at the node's end, once the
+        /// value has been read, and everything believed about it before
+        /// dies there.
+        Assign = "assign",
         /// A name the value binds. A def's own name token binds where the
         /// def does (a property's at its class body).
         Target = "target",
@@ -385,8 +384,6 @@ pub enum Capture {
     /// closure).
     DefHoist,
     Ref(RefCap),
-    /// The token is written, not read: the reference it carries is a write.
-    AccessWrite,
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
     /// resolves by the spelling and rewrites only the leaf.
@@ -487,7 +484,6 @@ impl Capture {
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", "sub", "closed"] => C::Scope(ScopeCap::SubClosed),
             ["closure", "capture"] => C::ClosureCapture,
-            ["access", "write"] => C::AccessWrite,
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
@@ -555,7 +551,6 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::DefPair => f.write_str("def.pair"),
             C::DefHoist => f.write_str("def.hoist"),
-            C::AccessWrite => f.write_str("access.write"),
             C::ClosureCapture => f.write_str("closure.capture"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),

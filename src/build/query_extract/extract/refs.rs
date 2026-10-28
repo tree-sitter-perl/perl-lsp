@@ -14,7 +14,6 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::RefSpelled => {
             st.refs.spelled_by_match.insert(e.match_id, e.text.clone());
         }
-        Capture::AccessWrite => st.out.write_sites.push(e.span()),
         _ => {}
     }
 }

@@ -866,6 +866,9 @@
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
+; TODO(declared-type-across-writes): no `@flow.assign`, so the write binds at
+; `x`, before the rhs reads it. The anchor would land it after, but its
+; reset retires `x`'s declared type, which in C++ holds for life.
 (assignment_expression
   left: (identifier) @flow.target
   right: (_) @flow.source)

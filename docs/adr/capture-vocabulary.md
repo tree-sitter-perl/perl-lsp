@@ -123,9 +123,9 @@ plain `@scope.sub` and sees the enclosing function's).
 written in, so `use (&$x)` declares `$x` in the enclosing function when it
 does not exist yet.
 
-`@access.write` sits on a token an assignment writes through a
-reference that is not a variable's (php's `$o->p = v`): the ref at that
-token is a write.
+`@flow.place` is the left side of an assignment. When its own read
+projects a member (`$o->p`, `self.p`), that member takes the value and its
+token is written, not read.
 
 ## Decision: a kind's meaning lives on the kind
 

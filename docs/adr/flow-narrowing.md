@@ -61,12 +61,15 @@ token instead, since its RHS cannot name the variable it declares. One
 speller, `Builder::assignment_write_point`, serves the walk, the flow lane
 and chain typing.
 A pack's document says which of its assignments are writes of this kind
-by anchoring the pattern on `@flow.write` (php's `$x = …`): every target
-of the match is written at the assignment node's end, with its marker
-there, so `$node = $node->parent` reads the old `$node` on the right. A
-plain `@flow.assign` anchor binds at the target token and mints no marker,
-which is what a statically typed declaration wants (cpp's `T x = …` keeps
-`T` across later writes).
+by anchoring the pattern on `@flow.assign` (php's `$x = …`, python's and
+R's assignments): every target of the match is written at the assignment
+node's end, with its marker there, so `$node = $node->parent` reads the old
+`$node` on the right. An annotated write (`x: int = 5`) is anchored too, so
+its declared type lands at the write it is declared with. A target with no
+anchor binds at its token and mints no marker, which is what a statically
+typed declaration wants (cpp's `T x = …` keeps `T` across later writes;
+TODO(declared-type-across-writes): cpp's plain reassignment stays
+unanchored for that reason, so its rhs still sees the write).
 `FrameworkAwareTypeFold` reads it three ways:
 
 - **It is a cutoff.** At the query point, every witness strictly before

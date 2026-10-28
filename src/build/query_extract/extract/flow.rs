@@ -7,6 +7,14 @@ use super::*;
 use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 use std::collections::HashMap;
 
+/// A member read (`@expr.member`): the receiver it reads through, the
+/// member's name, and the token that names it.
+struct MemberRead {
+    receiver: Span,
+    member: String,
+    token: Span,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     /// flow.assign joins: match_id → (target name, the scopes it binds
@@ -18,14 +26,14 @@ pub(super) struct State {
     source_inner: HashMap<usize, Span>,
     /// Writes to a place: match_id → the place's span and byte range.
     flow_places: HashMap<usize, (Span, (usize, usize))>,
-    /// Member reads by byte range → (receiver span, member): what a
-    /// place's own read projects, so a write lands where the read looks.
-    member_reads: HashMap<(usize, usize), (Span, String)>,
+    /// Member reads by byte range: what a place's own read projects, so a
+    /// write lands where the read looks.
+    member_reads: HashMap<(usize, usize), MemberRead>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
     pub(super) flow_rebinds: Vec<(String, ScopeId, Point, Point)>,
-    /// `@flow.write`: where each match's write lands, the end of its
+    /// `@flow.assign`: where each match's write lands, the end of its
     /// assignment node.
     write_at: HashMap<usize, Point>,
     /// `@type.annot` — a declaration's type text and span, joined per match.
@@ -74,7 +82,7 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Expr(ExprCap::ReadVarName) => {
             st.flow.read_names.insert(e.match_id, (e.text.clone(), e.span()));
         }
-        Capture::Flow(FlowCap::Write) => {
+        Capture::Flow(FlowCap::Assign) => {
             st.flow.write_at.insert(e.match_id, e.end);
         }
         Capture::Domain(DomainCap::Value) => {
@@ -85,7 +93,7 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     }
 }
 
-/// Where a target event's write lands. A `@flow.write` match writes at its
+/// Where a target event's write lands. A `@flow.assign` match writes at its
 /// assignment's end, after every read the assignment makes, and resets the
 /// variable there (`docs/adr/flow-narrowing.md`); any other target is
 /// bound at its own token.
@@ -279,7 +287,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
-                f.member_reads.insert((e.start_byte, e.end_byte), (recv.span(), member.clone()));
+                f.member_reads.insert(
+                    (e.start_byte, e.end_byte),
+                    MemberRead { receiver: recv.span(), member: member.clone(), token: name.span() },
+                );
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -303,7 +314,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         }
         // The assignment node anchors its pattern; its target and source
         // carry the meaning.
-        Capture::Flow(FlowCap::Assign | FlowCap::Write) => {}
+        Capture::Flow(FlowCap::Assign) => {}
         _ => {}
     }
 }
@@ -428,12 +439,15 @@ pub(super) fn finish(st: &mut ExtractState) {
     // projects (a call, a literal) takes nothing.
     let mut place_mids: Vec<&usize> = f.flow_places.keys().collect();
     place_mids.sort_unstable();
+    // The member token of a projected place is written, not read, whether
+    // or not a value flows in (`$o->n += 1`).
     for mid in place_mids {
-        let read = f.member_reads.get(&f.flow_places[mid].1);
-        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(f, *mid)) {
+        let Some(read) = f.member_reads.get(&f.flow_places[mid].1) else { continue };
+        out.write_sites.push(read.token);
+        if let Some(value) = source_value_span(f, *mid) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
-                receiver: *receiver,
-                member: member.clone(),
+                receiver: read.receiver,
+                member: read.member.clone(),
                 value,
             });
         }

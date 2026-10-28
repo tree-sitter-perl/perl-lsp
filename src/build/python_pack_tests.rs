@@ -510,8 +510,9 @@ class Other(Outer.Inner):
     assert_eq!(fa.inferred_type_via_bag("child", Point::new(5, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
     // Sub's body and build's body see past Outer to the module's class
-    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
-    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    // (each declared type holds from the end of its write)
+    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 28)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 25)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
     // a dotted spelling hangs its leaf off the class its head names
     assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
@@ -1457,4 +1458,48 @@ make().spin()
         let (defs, _, _) = landing(&idx, &path, at);
         assert_eq!(defs, [("widgets.py".to_string(), 1)], "goto-def on spin at {at:?}");
     }
+}
+
+/// An assignment's left side is written: `self.n = 0` and `self.n += 1`
+/// write the member, and a read of it stays a read.
+#[test]
+fn a_member_an_assignment_writes_is_a_write() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let fa = py_in(
+        "class C:
+    def __init__(self):
+        self.n = 0
+    def bump(self):
+        self.n += 1
+        return self.n
+",
+        None,
+    );
+    let n: Vec<(usize, AccessKind)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "n")
+        .map(|r| (r.span.start.row, r.access))
+        .collect();
+    assert_eq!(n, [(2, AccessKind::Write), (4, AccessKind::Write), (5, AccessKind::Read)]);
+}
+
+/// A write lands once the assignment has read what it reads, and replaces
+/// what the variable held: `n = n.nxt` reads the old `n`, and after
+/// `x = {}` the variable is no longer the `Foo` it was.
+#[test]
+fn a_write_replaces_the_value_after_its_right_side_is_read() {
+    let src = "class Foo:
+    nxt: Foo
+def f():
+    x = Foo()
+    x = {}
+    n = Foo()
+    n = n.nxt
+    return x
+";
+    let fa = py_in(src, None);
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_ne!(fa.inferred_type_via_bag("x", Point::new(7, 11)), foo, "the later write replaces it");
+    assert_eq!(fa.inferred_type_via_bag("n", Point::new(7, 4)), foo, "the right side read the old `n`");
 }

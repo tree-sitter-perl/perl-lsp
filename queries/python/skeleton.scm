@@ -70,10 +70,12 @@
     object: (identifier) @def.slot.receiver
     attribute: (identifier) @def.slot.name) @def.slot)
 
-; An assignment writes the place its left side denotes, whatever that is.
+; An assignment writes the place its left side denotes, whatever that is; a
+; compound one writes it too, with a value it does not name.
 (assignment
   left: (_) @flow.place
   right: (_) @flow.source) @flow.assign
+(augmented_assignment left: (_) @flow.place)
 
 (parameters
   (identifier) @def.var.name @def.var)
@@ -142,7 +144,7 @@
 ; annot_type predicate.
 (assignment
   left: (identifier) @flow.target
-  type: (type) @type.annot)
+  type: (type) @type.annot) @flow.assign
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
 ; type yet) so the narrowing cutoff ends a region at the loop.

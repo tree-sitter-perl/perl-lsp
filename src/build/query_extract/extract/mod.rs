@@ -86,7 +86,7 @@ fn family(cap: Capture) -> Family {
         | C::Tmpl(_)
         | C::ParamReceiver
         | C::Mark(_) => Family::Defs,
-        C::Ref(_) | C::RefSpelled | C::AccessWrite => Family::Refs,
+        C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)

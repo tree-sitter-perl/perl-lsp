@@ -1536,6 +1536,41 @@ fn a_write_highlights_as_a_write() {
     assert_eq!(clock, [(17, AccessKind::Write)]);
 }
 
+/// An assignment writes the place its left side denotes: `$this->p = v`
+/// gives the property `v`'s value and writes its token, and a compound
+/// write writes it too.
+#[test]
+fn an_assignment_writes_the_member_its_left_side_reads() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let fa = php("<?php
+namespace App;
+
+class Clock { public function tick() {} }
+function clock(): Clock {}
+
+class Box {
+    public $c;
+    public $n;
+    public function fill() {
+        $this->c = clock();
+        $this->n += 1;
+        $this->c->tick();
+    }
+}
+");
+    let access = |name: &str| -> Vec<(usize, AccessKind)> {
+        fa.refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == name)
+            .map(|r| (r.span.start.row, r.access))
+            .collect()
+    };
+    assert_eq!(access("c"), [(10, AccessKind::Write), (12, AccessKind::Read)]);
+    assert_eq!(access("n"), [(11, AccessKind::Write)]);
+    let tick = fa.refs().iter().find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "tick").unwrap();
+    assert_eq!(fa.method_call_invocant_class(tick, None).as_deref(), Some("App\\Clock"));
+}
+
 /// A function sees no variable of the file around it: the script's
 /// `$config` and the function's are two variables.
 #[test]
