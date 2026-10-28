@@ -2615,6 +2615,24 @@ fn param_type_cycle_settles_on_the_common_class() {
     }
 }
 
+/// A cycle whose head moves between rounds joins its rounds' classes
+/// through the cross-file ancestry, read while the head's frame is open.
+#[test]
+fn param_type_cycle_joins_rounds_through_ancestry() {
+    let user = parse_source_to_cached("package User;\nsub name { 1 }\n1;\n", "User");
+    let admin = parse_source_to_cached(
+        "package Admin;\nuse parent -norequire, 'User';\nsub up { return bless({}, 'User') }\n1;\n",
+        "Admin",
+    );
+    let ring = parse_source_to_cached(
+        "package Ring;\nsub a { my ($x) = @_; a($x->up); return $x }\n1;\n",
+        "Ring",
+    );
+    let app = parse_source_to_cached("package App;\nsub run { Ring::a(bless({}, 'Admin')) }\n1;\n", "App");
+    let idx = index_of(&[&user, &admin, &ring, &app]);
+    assert_eq!(class_at(&ring, &idx, "$x", 1, 40).as_deref(), Some("User"));
+}
+
 /// Named arguments join from the callers' key/value pairs, and a field the
 /// constructor spreads them into reads its key off that join.
 #[test]

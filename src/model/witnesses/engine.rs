@@ -1307,23 +1307,25 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
     let mut rounds = 0;
     let (value, moved) = loop {
         let mut v = crate::util::ghost_stats::timed("engine.compute_time", || super::registry::compute_engine_key(idx, key));
+        // A head's assumption only climbs: each round's value is joined
+        // onto the last, so a computation that answers nothing under one
+        // assumption and a type under the other settles at their join
+        // instead of alternating until the round cap, where the value
+        // left would depend on which key the cycle was entered through.
+        // The join reads class ancestry through tracked state, so it runs
+        // with no engine-local borrow held; its reads land on this frame.
+        let is_head = FRAMES.with(|f| f.borrow()[depth].is_head);
+        let own_moved = is_head && {
+            if let Some(prev) = ASSUMED.with(|a| a.borrow().get(key).cloned()) {
+                v = super::registry::widen(idx, &prev, &v);
+            }
+            ASSUMED
+                .with(|a| a.borrow_mut().insert(key.clone(), v.clone()))
+                .map_or(v != EngineValue::NOTHING, |prev| prev != v)
+        };
         let (inner, moved) = FRAMES.with(|f| {
             let mut frames = f.borrow_mut();
             let fr = &mut frames[depth];
-            // A head's assumption only climbs: each round's value is joined
-            // onto the last, so a computation that answers nothing under one
-            // assumption and a type under the other settles at their join
-            // instead of alternating until the round cap, where the value
-            // left would depend on which key the cycle was entered through.
-            let own_moved = fr.is_head
-                && ASSUMED.with(|a| {
-                    let mut a = a.borrow_mut();
-                    if let Some(prev) = a.get(key) {
-                        v = super::registry::widen(idx, prev, &v);
-                    }
-                    a.insert(key.clone(), v.clone())
-                })
-                .map_or(v != EngineValue::NOTHING, |prev| prev != v);
             let moved = own_moved || fr.changed;
             fr.is_head = false;
             fr.changed = false;
