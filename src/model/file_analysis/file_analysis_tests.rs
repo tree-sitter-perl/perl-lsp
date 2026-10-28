@@ -17,6 +17,8 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             package: None,
             owner: None,
             implicit_receiver: false,
+            direct: false,
+            declaration_rules: Vec::new(),
         }],
         ..Default::default()
     });
@@ -132,6 +134,8 @@ fn test_resolve_sub_return_type() {
             package: None,
             owner: None,
             implicit_receiver: false,
+            direct: false,
+            declaration_rules: Vec::new(),
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),
@@ -2329,7 +2333,7 @@ fn name_in_no_export_or_tag_is_not_exported() {
 fn cross_file_slot_write_types_the_read() {
     // A4 v2: the typed slot write lives in the PARENT class's file;
     // the read in the child file narrows through the registry's
-    // SlotType cross-file + ancestor arm at query time.
+    // Field cross-file + ancestor arm at query time.
     use std::sync::Arc;
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let parent_src = "package Parent;\nsub init {\n    my ($self) = @_;\n    $self->{conn} = My::Conn->new;\n}\n1;\n";
@@ -3206,7 +3210,7 @@ fn unknown_return_is_not_displayed() {
     // no return rather than `→ unknown`.
     let fa = build_fa_from_source(
         "package Foo;\n\
-         sub fix { my ($s) = @_; $s = '' if $s eq 'x'; return $s; }\n\
+         sub fix { my ($s) = @_; $s = '' if defined $s; return $s; }\n\
          sub a { my $t = shift; fix($t->{k}) }\n\
          1;\n",
     );

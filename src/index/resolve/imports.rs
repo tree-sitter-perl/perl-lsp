@@ -37,6 +37,10 @@ pub(super) fn import_candidates(
             if !origin.symbols_named(local).is_empty() {
                 continue;
             }
+            // An imported variable is no sub to call.
+            if crate::model::conventions::is_variable_or_glob_spelling(local) {
+                continue;
+            }
             if !mask.contains(RoleMask::OPEN) {
                 continue;
             }
@@ -80,7 +84,9 @@ pub(super) fn import_candidates(
                 if !seen.insert(name.clone()) {
                     continue;
                 }
-                if !origin.symbols_named(name).is_empty() {
+                if !origin.symbols_named(name).is_empty()
+                    || crate::model::conventions::is_variable_or_glob_spelling(name)
+                {
                     continue;
                 }
 

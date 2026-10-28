@@ -115,21 +115,19 @@ fn error_text_recovery_does_not_duplicate_a_recovered_sub() {
     assert_eq!(kept.len(), 1, "no duplicate `kept`: {kept:?}");
 }
 
-// ---- Typed-slot witness (SlotType) ----
+// ---- Typed-slot witness (Field) ----
 //
 // These exercise the typed half of the hash-key-write seed in isolation:
-// build a fixture, then query the `SlotType{class, key}` attachment
-// through the registry. Nothing in the server consumes this attachment
-// yet (typed `$obj->{k}->m()` resolution is a later step), so the
-// registry query IS the whole validation surface.
+// build a fixture, then query the `Field{owner, name}` attachment
+// through the registry.
 
 fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> {
     use crate::model::witnesses::{
         BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
     };
-    let att = WitnessAttachment::SlotType {
-        class: class.to_string(),
-        key: key.to_string(),
+    let att = WitnessAttachment::Field {
+        owner: class.to_string(),
+        name: key.to_string(),
     };
     let ctx = BagContext {
         scopes: &fa.scopes,
@@ -157,7 +155,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
 fn slot_type_single_typed_write() {
     let src = "package Foo;\nsub init {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\n";
     let fa = build_fa(src);
-    let t = slot_type(&fa, "Foo", "h").expect("SlotType{Foo,h} should fold");
+    let t = slot_type(&fa, "Foo", "h").expect("Field{Foo,h} should fold");
     assert_eq!(t.class_name(), Some("Helper"), "got {t:?}");
 }
 
@@ -181,7 +179,7 @@ fn slot_type_two_disagreeing_writes_union() {
 
 #[test]
 fn slot_type_unknown_rhs_no_slot() {
-    // `= shift` / `= $param` carry no resolvable type — no SlotType seed,
+    // `= shift` / `= $param` carry no resolvable type — no slot seed,
     // never a guess.
     let src = "package Foo;\nsub init {\n  my $self = shift;\n  my $param = shift;\n  $self->{h} = $param;\n}\n";
     let fa = build_fa(src);
@@ -194,10 +192,10 @@ fn slot_type_keyed_by_owner_class() {
     // OWNER's class, distinct from `$self->{h}` of the enclosing package.
     let src = "package Bar;\nsub mk {\n  my $self = shift;\n  my $o = Foo->new;\n  $o->{h} = Helper->new;\n  $self->{h} = Sidecar->new;\n}\n";
     let fa = build_fa(src);
-    let foo_h = slot_type(&fa, "Foo", "h").expect("SlotType keyed by owner class Foo");
+    let foo_h = slot_type(&fa, "Foo", "h").expect("Field keyed by owner class Foo");
     assert_eq!(foo_h.class_name(), Some("Helper"), "got {foo_h:?}");
     // The enclosing-package write lands on Bar, not Foo — no cross-contamination.
-    let bar_h = slot_type(&fa, "Bar", "h").expect("SlotType{Bar,h} from $self write");
+    let bar_h = slot_type(&fa, "Bar", "h").expect("Field{Bar,h} from $self write");
     assert_eq!(bar_h.class_name(), Some("Sidecar"), "got {bar_h:?}");
 }
 

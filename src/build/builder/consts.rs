@@ -85,8 +85,7 @@ impl<'a> Builder<'a> {
     /// The innermost declaration of `name` visible at `at`: the scope
     /// chain innermost-out, the latest declaration at or before `at`.
     fn visible_variable_decl(&self, name: &str, at: Point, use_pkg: Option<&str>) -> Option<SymbolId> {
-        let mut scope = Some(self.scope_at_point(at));
-        while let Some(sid) = scope {
+        for sid in crate::model::file_analysis::lookup_chain(&self.scopes, self.scope_at_point(at)).scopes() {
             if let Some(decls) = self.var_decls.get(&(sid, name.to_string())) {
                 let hit = decls.iter().rev().find(|&&id| {
                     let sym = &self.symbols[id.0 as usize];
@@ -97,7 +96,6 @@ impl<'a> Builder<'a> {
                     return Some(id);
                 }
             }
-            scope = self.scopes[sid.0 as usize].parent;
         }
         None
     }

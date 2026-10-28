@@ -666,9 +666,9 @@ pub fn sym_name_row_exists(
 /// skip license, `None` (never shredded) must stay distinguishable.
 ///
 /// For the registry consult pre-filter's un-attributed flavor
-/// (`SlotType{.., key}`): a slot-type witness is minted from a hash-key
-/// WRITE ref, so a file with no ref row for the key provably carries no
-/// such witness. The syms half rides along for over-approximation — a
+/// (`Field{.., name}`): a slot's value witness is minted from a member
+/// declaration or WRITE, so a file with no row for the name provably
+/// carries no such witness. The syms half rides along for over-approximation — a
 /// wasted decode is the cheap error.
 pub fn name_row_exists(
     conn: &Connection,

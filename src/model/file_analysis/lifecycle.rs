@@ -74,7 +74,7 @@ impl FileAnalysis {
             reexport_modules,
             lib_roots,
             type_provenance,
-            package_ranges,
+            namespace_ranges,
             mut witnesses,
             provisional_dispatches,
             guard_sites,
@@ -83,7 +83,6 @@ impl FileAnalysis {
             attr_projections,
             reassigned_scalars,
             key_writes,
-            contract_symbols,
             dbic_source_name,
             column_keyed_verbs,
             dynamic_dispatch_sites,
@@ -102,7 +101,7 @@ impl FileAnalysis {
             imports,
             call_bindings,
             method_call_bindings,
-            package_ranges,
+            namespace_ranges,
             packages,
             framework_imports,
             export,
@@ -121,7 +120,6 @@ impl FileAnalysis {
             attr_projections,
             reassigned_scalars,
             key_writes,
-            contract_symbols,
             dbic_source_name,
             column_keyed_verbs,
             dynamic_dispatch_sites,
@@ -274,6 +272,17 @@ impl FileAnalysis {
         self.refs.seal_baseline();
     }
 
+    /// Adopt build-time witnesses minted after assembly (a pack's slot
+    /// values, whose owner is a type only the assembled analysis answers),
+    /// sealed into the enrichment baseline as `adopt_path_symbols` seals
+    /// its symbols.
+    pub fn adopt_witnesses(&mut self, witnesses: Vec<crate::model::witnesses::Witness>) {
+        for w in witnesses {
+            self.witnesses.push(w);
+        }
+        self.base_witness_count = self.witnesses.len();
+    }
+
     /// Derive `unrowed_attachment_names` from the FINAL bag: every
     /// class-keyed attachment name the relational rows would deny.
     ///
@@ -332,7 +341,7 @@ impl FileAnalysis {
                         out.push(name.clone());
                     }
                 }
-                WitnessAttachment::SlotType { key, .. } => {
+                WitnessAttachment::Field { name: key, .. } => {
                     if !ref_keys.contains(key)
                         && !ref_keys.contains(&super::name_match_key(key, self.names()))
                     {
@@ -1289,7 +1298,7 @@ impl FileAnalysis {
             + vcap(&self.key_writes)
             + vcap(&self.flow_edges)
             + vcap(&self.loader_config_params)
-            + vcap(&self.package_ranges);
+            + vcap(&self.namespace_ranges);
 
         // per-package small maps/sets + export lists.
         h.misc += pkg_facts(&self.packages)
