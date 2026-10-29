@@ -203,3 +203,29 @@ fn prepare_rename_on_one_arm_answers_the_union_refusal() {
     let err = at(&f, &fa, &f.cat, 2, col).renameable().expect_err("refuses");
     assert!(err.contains("Bird") && err.contains("un_zoo.pm:4"), "{err}");
 }
+
+/// An unrelated class's same-named method comes first, so a hover that
+/// fell back to the name would show it.
+const HOVER_PETS: &str = "package Other;\nsub sound { 'other' }\n\
+package Cat;\nsub new { bless {}, shift }\nsub sound { my ($self, $loud) = @_; 'meow' }\n\
+package Bird;\nsub new { bless {}, shift }\nsub sound { my ($self, $pitch) = @_; 'tweet' }\n\
+package main;\nmy $pet = rand() ? Cat->new : Bird->new;\nprint $pet->sound(1);\n1;\n";
+
+#[test]
+fn hover_on_a_union_receiver_shows_every_arm() {
+    let fa = parse(HOVER_PETS);
+    let col = HOVER_PETS.lines().nth(10).unwrap().find("sound").unwrap();
+    let hover = fa.hover_info(tree_sitter::Point { row: 10, column: col }, HOVER_PETS, None).expect("hovers");
+    assert!(hover.contains("*class Cat*") && hover.contains("*class Bird*"), "{hover}");
+    assert!(!hover.contains("Other"), "not a class `$pet` can be: {hover}");
+}
+
+#[test]
+fn signature_help_on_a_union_receiver_offers_every_arm() {
+    let fa = parse(HOVER_PETS);
+    let col = HOVER_PETS.lines().nth(10).unwrap().find('(').unwrap() + 1;
+    let sigs = fa.signatures_for_call("sound", true, Some("$pet"), tree_sitter::Point { row: 10, column: col }, None);
+    let mut params: Vec<Vec<String>> = sigs.iter().map(|s| s.params.iter().map(|p| p.name.clone()).collect()).collect();
+    params.sort();
+    assert_eq!(params, vec![vec!["$loud".to_string()], vec!["$pitch".to_string()]]);
+}
