@@ -1148,6 +1148,7 @@ impl FileAnalysis {
                 verdict,
                 subject: g.subject.clone(),
                 predicate: g.predicate.clone(),
+                satisfied,
             });
         }
         out

@@ -416,30 +416,22 @@ pub fn load_one_diag(
     // A dual-homed project-lib file has TWO rows for one path (name-keyed
     // import + path-keyed workspace). Prefer a row whose stamp matches the
     // disk (one tier's persist may have failed or lagged, leaving a stale
-    // generation); workspace-first is only the tiebreak. Single-row paths
-    // deliberately skip stamp validation — the registered generation may
-    // legitimately predate an unsaved edit, and the caller invalidates the
-    // LRU on file change.
+    // generation); workspace-first is only the tiebreak, applied in Rust
+    // because an ORDER BY would run a sorter on every rehydrate. Single-row
+    // paths deliberately skip stamp validation — the registered generation
+    // may legitimately predate an unsaved edit, and the caller invalidates
+    // the LRU on file change.
     //
     // The `extract_version` filter is what lets `decode_analysis_parts` skip
     // format inference: a pre-split row carries its bag inside `analysis` and
     // would decode as a post-split row whose bag column vanished. Filtering
     // makes such a row invisible here rather than plausible.
-    let mut stmt = conn
-        .prepare(if want_bag {
-            "SELECT analysis, mtime_secs, file_size, bag FROM modules \
-             WHERE path = ?1 AND extract_version = ?2 \
-             ORDER BY CASE source WHEN 'workspace' THEN 0 ELSE 1 END"
-        } else {
-            "SELECT analysis, mtime_secs, file_size, NULL FROM modules \
-             WHERE path = ?1 AND extract_version = ?2 \
-             ORDER BY CASE source WHEN 'workspace' THEN 0 ELSE 1 END"
-        })
-        .map_err(|_| RehydrateMiss::NoRow)?;
+    let load = if want_bag { sql::MODULE_LOAD_WITH_BAG } else { sql::MODULE_LOAD_NO_BAG };
+    let mut stmt = conn.prepare(load.registered()).map_err(|_| RehydrateMiss::NoRow)?;
     // Stage 1 of the rehydrate: the SQL roundtrip that fetches the bytes.
     // Timed separately from the decode because batching the fetch is only
     // worth doing if THIS is the dominant term.
-    let rows: Vec<(Option<Vec<u8>>, i64, i64, Option<Vec<u8>>)> =
+    let mut rows: Vec<(Option<Vec<u8>>, i64, i64, Option<Vec<u8>>, bool)> =
         crate::util::ghost_stats::timed("decode.1_sql_fetch", || {
             stmt.query_map(params![path, EXTRACT_VERSION], |row| {
                 Ok((
@@ -447,18 +439,21 @@ pub fn load_one_diag(
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, bool>(4)?,
                 ))
             })
             .map(|rows| rows.flatten().collect::<Vec<_>>())
         })
         .map_err(|_| RehydrateMiss::NoRow)?;
+    // Stable: rows of one tier keep the order SQLite returned them in.
+    rows.sort_by_key(|row| !row.4);
     if rows.is_empty() {
         return Err(RehydrateMiss::NoRow);
     }
     // The bag rides with the blob it was split from: picking them separately
     // could pair a workspace row's analysis with an import row's bag.
     let pick = |require_stamp: bool| -> Option<(&Vec<u8>, Option<&Vec<u8>>)> {
-        rows.iter().find_map(|(blob, m, sz, bag)| {
+        rows.iter().find_map(|(blob, m, sz, bag, _)| {
             let blob = blob.as_ref().filter(|b| !b.is_empty())?;
             if require_stamp && file_stamp(std::path::Path::new(path)) != Some((*m, *sz)) {
                 return None;
@@ -634,7 +629,7 @@ pub(super) fn rehydrate_from_opens(
         if let Some(rw) = rw_open() {
             for p in paths {
                 if let Ok(fa) = load_one_diag(&rw, p, want_bag) {
-                    let _ = rw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+                    let _ = rw.execute_batch(sql::WAL_CHECKPOINT_TRUNCATE.registered());
                     return Ok(fa);
                 }
             }
@@ -665,8 +660,7 @@ pub fn save_blob_to_db_stamped(
     let (mtime, size) = stamp;
     let deps = closure_stamp(include_closure, &mut std::collections::HashMap::new());
     let r = conn.execute(
-        "INSERT OR REPLACE INTO modules (module_name, path, mtime_secs, file_size, source, analysis, bag, extract_version, deps_stamp)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        sql::MODULE_SAVE.registered(),
         params![
             module_name,
             path.to_string_lossy(),
@@ -720,12 +714,12 @@ pub fn persist_surface(conn: &Connection, path: &str, enc: &EncodedAnalysis) {
     // reader cannot detect (`load_surface` keys on (path, version), and
     // `paths_needing_repair` only sees NOT EXISTS), so it would pair a
     // pre-edit fingerprint with a post-edit blob and read Unchanged forever.
-    let _ = conn.execute("DELETE FROM surfaces WHERE path = ?1", params![path]);
+    let _ = conn.execute(sql::SURFACE_DELETE.registered(), params![path]);
     if enc.surface.is_empty() {
         return;
     }
     let r = conn.execute(
-        "INSERT OR REPLACE INTO surfaces (path, version, surface) VALUES (?1, ?2, ?3)",
+        sql::SURFACE_SAVE.registered(),
         params![path, super::surface_version(), enc.surface],
     );
     if let Err(e) = r {
@@ -735,7 +729,7 @@ pub fn persist_surface(conn: &Connection, path: &str, enc: &EncodedAnalysis) {
 
 /// Drop a path's persisted surface — the blob it was projected from is gone.
 pub fn forget_surface(conn: &Connection, path: &str) {
-    let _ = conn.execute("DELETE FROM surfaces WHERE path = ?1", params![path]);
+    let _ = conn.execute(sql::SURFACE_DELETE.registered(), params![path]);
 }
 
 /// One file's persisted surface, or `None` when there is none AT THE CURRENT
@@ -747,7 +741,7 @@ pub fn forget_surface(conn: &Connection, path: &str) {
 pub fn load_surface(conn: &Connection, path: &str) -> Option<crate::model::surface::Surface> {
     let blob: Vec<u8> = conn
         .query_row(
-            "SELECT surface FROM surfaces WHERE path = ?1 AND version = ?2",
+            sql::SURFACE_LOAD.registered(),
             params![path, super::surface_version()],
             |row| row.get(0),
         )
@@ -765,9 +759,7 @@ fn persist_conclusions(conn: &Connection, path: &str, enc: &EncodedAnalysis) {
     }
     let at = current_generation(conn);
     let r = conn.execute(
-        "INSERT OR REPLACE INTO conclusions \
-         (path, generation, map, source_fingerprint, flush_generation) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        sql::CONCLUSIONS_SAVE.registered(),
         params![path, at.0, enc.conclusions, enc.source_fingerprint as i64, at.0],
     );
     if let Err(e) = r {
@@ -788,10 +780,7 @@ pub fn refresh_deps_stamp(
     stat_memo: &mut std::collections::HashMap<String, (i64, i64)>,
 ) {
     let deps = closure_stamp(include_closure, stat_memo);
-    let _ = conn.execute(
-        "UPDATE modules SET deps_stamp = ?1 WHERE path = ?2",
-        params![deps, path],
-    );
+    let _ = conn.execute(sql::MODULE_DEPS_STAMP_UPDATE.registered(), params![deps, path]);
 }
 
 /// Returns whether the modules row landed — stripping a resident copy is
@@ -832,8 +821,7 @@ pub fn save_to_db(
     };
 
     let r = conn.execute(
-        "INSERT OR REPLACE INTO modules (module_name, path, mtime_secs, file_size, source, analysis, bag, extract_version, deps_stamp)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        sql::MODULE_SAVE.registered(),
         params![
             module_name,
             path_str,
