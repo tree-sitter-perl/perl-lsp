@@ -2211,10 +2211,31 @@ impl ReducerRegistry {
             }
             crate::util::ghost_stats::count("moc.provider_fetched");
             crate::util::ghost_stats::count(if site == "field" { "mocsite.field" } else { "mocsite.param" });
-            let full = idx.bag_present(&cached);
-            if skip.is_some_and(|b| std::ptr::eq(b, &full.witnesses)) {
+            if let Some(b) = skip {
+                if std::ptr::eq(b, &idx.bag_present(&cached).witnesses) {
+                    continue;
+                }
+            }
+            // A candidate answers in its own scope, whoever asks: one stored
+            // answer per file, so the scan stays cheap under a scoped asker
+            // whose own key (its candidate ranking) can't be shared.
+            if idx.unscoped().unwrap_or(idx).answer_store().is_some() {
+                let key = EngineKey::Consult(super::engine::ConsultKey {
+                    file: cached.path.clone(),
+                    rule: idx.visibility_rule(),
+                    attachment: attachment.clone(),
+                    framework,
+                    arity: None,
+                    receiver: receiver.clone(),
+                    args: args.clone(),
+                });
+                let v = super::engine::answer(idx, &key).reduced();
+                if v != ReducedValue::None {
+                    return v;
+                }
                 continue;
             }
+            let full = idx.bag_present(&cached);
             let cached_ctx = BagContext {
                 scopes: &full.scopes,
                 package_framework: &full.packages,

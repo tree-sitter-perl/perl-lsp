@@ -2703,6 +2703,43 @@ fn pushed_slot_elements_type_the_loop_over_the_slot() {
     assert_eq!(t.and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
 }
 
+/// An owner scan asked through a scoped view ranks candidates by the
+/// asker, but each candidate answers in its own scope: the second ask
+/// re-ranks and reads every candidate's stored answer.
+#[test]
+fn an_owner_scan_through_a_scoped_view_reads_stored_candidate_answers() {
+    use crate::model::file_analysis::{ScopedLookup, VisibilityAxis};
+    use crate::model::witnesses::engine::{take_computed, EngineKey};
+    use crate::model::witnesses::WitnessAttachment;
+    let roster = parse_source_to_cached(
+        "package Roster;\nsub new { bless { users => [] }, shift }\nsub add { my ($self, $u) = @_; push @{ $self->{users} }, $u; return $self }\n1;\n",
+        "Roster",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { my $r = Roster->new->add(bless({}, 'User')); for my $m (@{ $r->{users} }) {\n $m;\n } }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&roster, &app]);
+    let empty = Default::default();
+    let scoped = ScopedLookup::new(&idx, &empty, None, VisibilityAxis::SearchPath(Arc::new(Vec::new())));
+    let ask = || {
+        app.analysis()
+            .inferred_type_via_bag_ctx("$m", tree_sitter::Point { row: 2, column: 2 }, Some(&scoped))
+            .and_then(|t| t.class_name().map(str::to_string))
+    };
+    let count = |keys: &[EngineKey], f: fn(&EngineKey) -> bool| keys.iter().filter(|k| f(k)).count();
+    let _ = take_computed();
+    assert_eq!(ask().as_deref(), Some("User"));
+    let first = take_computed();
+    assert!(count(&first, |k| matches!(k, EngineKey::Providers(_))) > 0, "the ask scans the owner: {first:?}");
+    let slot_consult: fn(&EngineKey) -> bool =
+        |k| matches!(k, EngineKey::Consult(c) if matches!(c.attachment, WitnessAttachment::SlotElements { .. }));
+    assert!(count(&first, slot_consult) > 0, "each candidate is a consult: {first:?}");
+    assert_eq!(ask().as_deref(), Some("User"));
+    let second = take_computed();
+    assert_eq!(count(&second, slot_consult), 0, "candidates are served from the store: {second:?}");
+}
+
 /// The class of `var` in `fa`'s file at `(row, column)`, read through `idx`.
 fn class_at(fa: &CachedModule, idx: &ModuleIndex, var: &str, row: usize, column: usize) -> Option<String> {
     fa.analysis()
