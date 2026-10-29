@@ -17,7 +17,8 @@ impl FileAnalysis {
 
     /// Find the symbol whose selection_span contains the point.
     pub fn symbol_at(&self, point: Point) -> Option<&Symbol> {
-        self.symbols.iter().find(|s| contains_point(&s.selection_span, point))
+        // A mention is anchored on a use, which declares nothing.
+        self.symbols.iter().find(|s| contains_point(&s.selection_span, point) && !s.is_mention())
     }
 
     /// The innermost callable (Sub/Method) whose body span contains the
@@ -67,8 +68,10 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable => {
-                    if let Some(sym_id) = r.resolved_symbol() {
-                        return Some(self.symbol(sym_id).selection_span);
+                    // A `Mention` is no definition: the global is declared
+                    // elsewhere, if anywhere (the adapter's cross-file arm).
+                    if let Some(sym) = r.resolved_symbol().map(|id| self.symbol(id)).filter(|s| !s.is_mention()) {
+                        return Some(sym.selection_span);
                     }
                 }
                 RefKind::FunctionCall => {

@@ -1433,3 +1433,31 @@ sub b2 { my $q = { url => 1 }; print $q->{typo}; }
         fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
     assert_eq!(typos, vec![("typo".to_string(), 4)]);
 }
+
+/// A qualified global and a special variable are variables too: their
+/// writes bind, so a reassignment opens their shape whatever package the
+/// use is written in (Foswiki's `local %Foswiki::cfg = (…)` then
+/// `%Foswiki::cfg = %$upper`).
+#[test]
+fn qualified_and_special_globals_are_reassigned_by_binding() {
+    let src = "\
+package Foswiki::Configure::Query;
+sub load { local %Foswiki::cfg = ( Engine => 1 ); %Foswiki::cfg = %$upper; print $Foswiki::cfg{BOOTSTRAPDIRS}; }
+sub env { %ENV = ( PATH => 1 ); %ENV = %$saved; print $ENV{HOME}; }
+package main;
+sub q { my $q = { url => 1 }; print $q->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 4)], "only the never-reassigned lexical reports");
+    // One identity per global, wherever it is spelled, and none of them is
+    // this file's own outline entry.
+    let cfg: Vec<_> = fa.symbols().iter().filter(|s| s.name == "%cfg").collect();
+    assert_eq!(cfg.len(), 1);
+    assert_eq!(cfg[0].package.as_deref(), Some("Foswiki"));
+    let env = fa.symbols().iter().find(|s| s.name == "%ENV").expect("%ENV binds");
+    assert_eq!(env.package.as_deref(), Some("main"), "a special variable lives in main");
+    assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
+}

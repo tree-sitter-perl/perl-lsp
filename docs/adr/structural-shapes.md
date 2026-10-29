@@ -170,7 +170,11 @@ only `\%h` ref-taking escapes.
 `FileAnalysis::closed_shape_is_whole_story(var)` = not reassigned.
 **Reassignment** (`reassigned_vars`, by declaring symbol): a Write
 targeting the variable itself (`$v = …`, `%h = …`); element writes are mutations,
-modeled above. The clause is the trust-gate stand-in for the
+modeled above. The symbol is the ref's binding, and every variable ref has
+one: a qualified (`%Foswiki::cfg`) or special (`%ENV`) global binds to its
+`(package, name)` global like any undeclared use. The gate asks by name
+through `variable_binding`, which applies the binder's own rule
+(`variable_use`), so the asked identity is the one the writes bound. The clause is the trust-gate stand-in for the
 unmodeled conditional-reassignment disagreement (`$spec = {…} unless
 ref $spec`) plus the unknown-RHS reassignment (`$h = fetch()` — the
 bag has no retraction, so a stale closed shape would survive
