@@ -20,8 +20,12 @@ memo does not.
 `ResolutionSession::enter(index)` is an RAII guard, thread-local, opened
 once around a WALK — `CandidateSet::references()` (target minting resolves
 invocants too, so it belongs inside), `refs_to` for its other callers, and
-`OpenDocs::enrich_open`, because the open-doc heal runs the same cascade on
-a background thread. Nested enters ride the open one. While it is open the
+`enrich_imported_types_with_keys_for` itself, because enrichment runs the
+same cascade and has callers of every kind: the open-doc heal on a
+background thread, the enriched overlay, and every CLI verb. Opening it in
+the enrichment body rather than at each call site means no caller can
+enrich without the memo and the budget — a CLI `--completion` that did,
+on FHEM, ran for hours with no deadline to stop it. Nested enters ride the open one. While it is open the
 `PackageSymbol` /
 `Field` cross-file hops answer from a memo of **candidate
 contributions**: "what does the file at `path` contribute to this query".
@@ -96,8 +100,8 @@ enough — the attribution matters more than the total:
   analysis per level. Measured at 138k files: one consult descended 220+
   frames of enrich → query → enrich and never came back. A memo cannot help
   a walk that never comes back up to the hop where the memo is consulted;
-- **a session around `enrich_open`** — the open-doc heal runs the identical
-  cascade on a background thread with no walk to bound it.
+- **a session inside enrichment** — the open-doc heal, the overlay and
+  the CLI verbs run the identical cascade with no walk to bound it.
 
 The depth cap is a containment measure, not a tuned value. It exists to
 bound a recursion whose real defect is that the cycle guard is
