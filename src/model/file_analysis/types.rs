@@ -765,6 +765,30 @@ impl InferredType {
         }
     }
 
+    /// This value joined with an arm the join can't see. The seen arm keeps
+    /// what it says about the value's kind (the author wrote it as the
+    /// value they expect), but a literal shape's key set is complete only
+    /// for the literal: the unseen arm may hold any keys, so every shape in
+    /// the value opens.
+    pub fn joined_with_unseen(self) -> Self {
+        use InferredType::*;
+        match self {
+            HashWithKeys { mut keys, .. } => {
+                for (_, v) in keys.to_mut().iter_mut() {
+                    if let Some(b) = v.take() {
+                        *v = Some(Box::new(b.joined_with_unseen()));
+                    }
+                }
+                HashWithKeys { keys, open: true }
+            }
+            Sequence(v) => Sequence(v.into_iter().map(InferredType::joined_with_unseen).collect()),
+            Branded { base, marks } => Branded { base: Box::new(base.joined_with_unseen()), marks },
+            Optional(b) => Optional(Box::new(b.joined_with_unseen())),
+            Union(arms) => arms.map(|a| a.clone().joined_with_unseen()),
+            other => other,
+        }
+    }
+
     /// Extract the class name if this is an object type
     /// (ClassName, FirstParam, or Parametric — the latter
     /// delegates to the flavor's `class_name()`). For the row-

@@ -1464,3 +1464,21 @@ sub q { my $q = { url => 1 }; print $q->{typo}; }
     assert_eq!(env.package.as_deref(), Some("main"), "a special variable lives in main");
     assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
 }
+
+/// A fallback floor written against a value nothing types says what kind
+/// of value the author expects, not that it is the empty literal: `$o->{y}
+/// // {}` may hold any keys (98_Modbus.pm, TablePlugin Core.pm).
+#[test]
+fn a_floor_against_an_unseen_value_is_an_open_shape() {
+    let src = "\
+package Foo;
+sub a { my ($o) = @_; my $x = $o->{y} // {}; print $x->{k}; }
+sub b { my ($o) = @_; my $x = $o->{y} || {}; print $x->{k}; }
+sub c { my $x = {}; print $x->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 3)]);
+}

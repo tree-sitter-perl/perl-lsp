@@ -557,9 +557,10 @@ impl WitnessReducer for BranchArmFold {
             // Writing a fallback says the author expects it to run, so the
             // operator is a hint and both arms count, whatever the LHS's
             // truthiness: the value is `left ⊔ right`, the left minus its
-            // undef half. With no typed left the RHS floor stands alone:
-            // that is what lets `$ENV{X} || 10` type to `Numeric`. An
-            // untyped RHS is an arm the join can't see, so it answers nothing.
+            // undef half. With no typed left the RHS floor stands in for an
+            // arm the join can't see: that is what lets `$ENV{X} || 10` type
+            // to `Numeric`, and why `$opts // {}` is an open hash, not an
+            // empty one. An untyped RHS answers nothing.
             // TODO(dead-fallback-lint): an LHS that can't be false (a
             // reference, an object without `bool` overloading) makes the
             // fallback dead; that belongs in a diagnostic, not in the type.
@@ -567,8 +568,10 @@ impl WitnessReducer for BranchArmFold {
             if fallback.is_empty() {
                 return ReducedValue::None;
             }
+            let unseen_left = typed.is_empty() && undef_arms == 0;
             let all: Vec<InferredType> = defined.chain(fallback).collect();
             return match crate::model::file_analysis::join_all(&all, class_order(_q)) {
+                Some(t) if unseen_left => ReducedValue::Type(t.joined_with_unseen()),
                 Some(t) => ReducedValue::Type(t),
                 None => ReducedValue::None,
             };
