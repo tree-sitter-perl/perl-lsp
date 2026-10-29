@@ -475,6 +475,10 @@ impl FileAnalysis {
         path: Option<&std::path::Path>,
     ) {
         crate::util::ghost_stats::count("enrich_imported_types_with_keys");
+        // Enrichment is a walk (`docs/adr/resolution-session.md`): every
+        // caller gets the candidate memo and the budget, nested callers ride
+        // the outer session.
+        let _session = crate::model::witnesses::ResolutionSession::enter(module_index);
         // Truncate back to baseline so repeated enrichment doesn't
         // accumulate duplicates. Enrichment pushes Variable witnesses
         // via `push_type_constraint` and synthetic symbols + witnesses
@@ -1194,6 +1198,7 @@ impl FileAnalysis {
                 verdict,
                 subject: g.subject.clone(),
                 predicate: g.predicate.clone(),
+                satisfied,
             });
         }
         out

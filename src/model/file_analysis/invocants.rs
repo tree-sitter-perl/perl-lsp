@@ -19,7 +19,7 @@ impl FileAnalysis {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => {
                     if let Some(sym_id) = r.resolved_symbol() {
-                        return Some((sym_id, true));
+                        return Some((sym_id, !self.symbol(sym_id).is_mention()));
                     }
                     // Try resolving manually
                     if let Some(sym) = self.resolve_variable(&r.target_name, point) {

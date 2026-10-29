@@ -863,18 +863,7 @@ impl ModuleIndex {
             whole.heap_estimate().total() as u64,
         );
         let mut copy: FileAnalysis = (*whole).clone();
-        // A session around the build, same as `enrich_open`'s: the overlay's
-        // enrichment is where the cross-file consult cascade lives (FHEM
-        // measured 12.3M slot-value attempts inside these builds, every one
-        // `session.absent`), and without a session the candidate-answer memo
-        // is inert on exactly the path that repeats. A caller already holding
-        // a session (server verbs) nests — this owns only when outermost.
-        {
-            let _session = crate::model::witnesses::ResolutionSession::enter(Some(
-                self as &dyn crate::model::file_analysis::CrossFileLookup,
-            ));
-            copy.enrich_imported_types_with_keys_for(Some(self), Some(&cached.path));
-        }
+        copy.enrich_imported_types_with_keys_for(Some(self), Some(&cached.path));
         let arc = Arc::new(copy);
         // Cycle-tainted: some dep declined mid-enrich (mutual imports), so
         // this copy baked a RAW view of that dep. Caching it would serve
