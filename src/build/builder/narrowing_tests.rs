@@ -934,3 +934,45 @@ fn a_loop_guard_narrows_its_body() {
     assert_eq!(at(7, 46), foo, "a C-style for body");
     assert_eq!(at(8, 4), None, "nothing after: `last` leaves with the guard unchanged");
 }
+
+#[test]
+fn a_failed_conjunction_proves_nothing_about_either_side() {
+    // `!(A && B)` is `!A || !B`: neither side alone is known false, so no
+    // region where a conjunction fails narrows its conjuncts.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    if (defined($x) && $y) { 1 } else { my $e = $x; }\n    my $t = (defined($x) && $y) ? 1 : $x;\n    (defined($x) && $y) || print $x;\n    unless (defined($x) and $y) { my $u = $x; }\n    if (!(defined($x) && $y)) { my $n = $x; }\n    return if (defined($x) && $y eq 'f');\n    my $after = $x;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    assert_eq!(at(3, 50), None, "the else of a conjunction");
+    assert_eq!(at(4, 38), None, "the false arm of a ternary on a conjunction");
+    assert_eq!(at(5, 33), None, "the right of `||` after a conjunction");
+    assert_eq!(at(6, 43), None, "the body of `unless` on an `and`");
+    assert_eq!(at(7, 41), None, "a negated conjunction");
+    assert_eq!(at(9, 16), None, "after `return if (defined($x) && ...)`");
+}
+
+#[test]
+fn a_failed_disjunction_proves_both_sides_false() {
+    // `!(A || B)` is `!A && !B`, so where a disjunction fails each side
+    // narrows at its own false polarity; where it holds, neither does.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    if (defined($x) || defined($y)) { my $o = $x; } else { my $e = $x; my $f = $y; }\n    return if !defined($x) or !defined $y;\n    my $after = $x;\n}",
+    );
+    let at = |var, row, column| fa.inferred_type_via_bag(var, Point::new(row, column));
+    assert_eq!(at("$x", 3, 47), None, "a disjunction that holds proves no side");
+    assert_eq!(at("$x", 3, 67), Some(InferredType::Undef), "the else of `||`: $x undef");
+    assert_eq!(at("$y", 3, 78), Some(InferredType::Undef), "the else of `||`: $y undef");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None, "untyped param: strip leaves it wide");
+}
+
+#[test]
+fn a_low_precedence_not_and_and_narrow_like_their_symbols() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    if (not defined $x) { my $u = $x; }\n    if ($x->isa('Foo') and $y) { $x->go; }\n    return if not $x->isa('Foo');\n    $x->go;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_eq!(at(3, 34), Some(InferredType::Undef), "`not defined`");
+    assert_eq!(at(4, 33), foo, "an `and` condition");
+    assert_eq!(at(6, 4), foo, "`return if not` narrows the remainder");
+}

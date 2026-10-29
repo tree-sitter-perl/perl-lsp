@@ -1508,3 +1508,19 @@ fn args_untouched_statements_do_not_end_the_unpack() {
     assert!(param_names(&fa, "handed").is_empty(), "`&other;` hands `@_` on");
     assert!(param_names(&fa, "guarded").is_empty(), "`$_[0]` read");
 }
+
+/// A special variable binds like any global, but Perl owns its name: its
+/// uses are one identity, and rename declines it.
+#[test]
+fn special_variables_bind_but_never_rename() {
+    let fa = build_fa("sub f { my $x = shift; print @_, $_[0]; for (@_) { print $_ } }\n");
+    let at = |needle: &str, nth: usize| {
+        let src = "sub f { my $x = shift; print @_, $_[0]; for (@_) { print $_ } }\n";
+        let col = src.match_indices(needle).nth(nth).unwrap().0 + 1;
+        tree_sitter::Point::new(0, col)
+    };
+    assert!(fa.rename_at(at("@_", 0), "args").is_none());
+    assert!(fa.rename_at(at("$_ ", 0), "it").is_none());
+    assert_eq!(fa.find_references(at("@_", 0), None).len(), 3, "both `@_` and `$_[0]` name `@_`");
+    assert!(implicit_globals(&fa).is_empty(), "a special variable is a mention, not this file's global");
+}
