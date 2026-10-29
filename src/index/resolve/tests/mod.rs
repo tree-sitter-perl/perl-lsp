@@ -8,3 +8,5 @@ mod groups_tests;
 mod candidate_set_tests;
 
 mod projection_consistency_tests;
+#[cfg(all(feature = "php", feature = "python"))]
+mod construction_tests;

@@ -195,6 +195,33 @@ fn heatmap_symbol_row(
     (row, is_callable, dead, dead_export)
 }
 
+/// One declaration's heatmap row as the default sweep computes it
+/// (workspace scope, the default override scope, no pre-prune).
+#[cfg(test)]
+pub(crate) fn heatmap_row_for_test(
+    ws: &open_docs::OpenDocs,
+    idx: &dyn file_analysis::CrossFileLookup,
+    path: &std::path::Path,
+    analysis: &file_analysis::FileAnalysis,
+    sym: &file_analysis::Symbol,
+) -> serde_json::Value {
+    let mut sources = SourceCache::new(CoordFmt::EditorOneBasedChar);
+    heatmap_symbol_row(
+        ws,
+        idx,
+        path,
+        analysis,
+        sym,
+        resolve::RoleMask::EDITABLE,
+        resolve::OverrideScope::default(),
+        false,
+        None,
+        None,
+        &mut sources,
+    )
+    .0
+}
+
 /// --refs-parity <root> — the relational-ref-index migration net
 /// (`docs/adr/relational-ref-index.md`). Mints the CandidateSet at every
 /// heatmap-eligible symbol declaration (Perl workspace + pack files) and

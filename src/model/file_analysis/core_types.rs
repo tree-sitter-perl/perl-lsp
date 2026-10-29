@@ -429,9 +429,11 @@ pub enum ConstructionKey {
     /// `Foo->new`), like any other call.
     #[default]
     Constructor,
-    /// The class the site spells (php's `new Foo`): the site never names
-    /// its constructor, so a constructor's references are retrieved under
-    /// the classes that construct through it (`RefKind::MethodCall::constructs`).
+    /// The class the site spells (php's `new Foo`, python's `Foo()`): the
+    /// site never names its constructor, so a constructor's references are
+    /// retrieved under the classes that construct through it — a
+    /// `RefKind::MethodCall::constructs` ref, or a call whose name is a
+    /// class where calling a class constructs it.
     Class,
 }
 

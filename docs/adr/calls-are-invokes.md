@@ -121,7 +121,14 @@ match rather than one capture, so the extractor drops a captured comment.
   no producer knows keys by its spelling, so only an in-file walk finds it
   (`TODO(dynamic-construction-retrieval)`). Python's `Foo()` and C++'s
   `Foo(x)` are a `Function` whose `constructs` names the class: a class
-  that answers the call answers with an instance of itself.
+  that answers the call answers with an instance of itself. Python also
+  keys its constructions by class, but mints no companion: whether a call
+  names a class is known only at query time (the class may live in another
+  file), so the matcher admits, for a constructor target, a written call
+  (one with an argument count) whose name resolves to a class
+  (`class_named_by_call`) whose constructor walk reaches it. Such a site
+  is never rewritable either. C++ keys by constructor until a constructor
+  walk stops at the declaring class (`TODO(construction-navigation)`).
 - A class literal (`@expr.class`, php's `Foo::class`) is an edge to its
   `@receiver.*` token's value, the class.
 - A pack callable's declared return (`@rettype`) is its `Symbol`'s value,
