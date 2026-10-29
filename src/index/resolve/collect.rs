@@ -305,13 +305,7 @@ pub(super) fn pack_symbol_def_location(
             key_for_sort(origin_key),
             sym.selection_span.start.row,
             sym.selection_span.start.column,
-            RefLocation {
-                key: origin_key.clone(),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-            },
+            RefLocation::at(origin_key.clone(), sym.selection_span, AccessKind::Declaration),
         ));
     }
     // The FULL candidate table for `name` — a definition legitimately lives
@@ -331,13 +325,7 @@ pub(super) fn pack_symbol_def_location(
                 cached.path.clone(),
                 sym.selection_span.start.row,
                 sym.selection_span.start.column,
-                RefLocation {
-                    key: FileKey::Path(cached.path.clone()),
-                    span: sym.selection_span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                },
+                RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration),
             ));
         }
     }
@@ -772,13 +760,7 @@ pub(super) fn collect_package_var(
             && sym.package.as_deref() == Some(package)
             && sym.name == name
         {
-            out.push(RefLocation {
-                key: key.clone(),
-                span: tail(sym.selection_span),
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None
-            });
+            out.push(RefLocation::at(key.clone(), tail(sym.selection_span), AccessKind::Declaration));
         }
     }
     for r in analysis.refs() {
@@ -794,32 +776,14 @@ pub(super) fn collect_package_var(
                 // single-literal fold's rewrite lands on that literal
                 // (rule #9), as for a const-folded method call.
                 let folded = span_is_folded_name(analysis, r.span, false, &r.target_name);
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: if folded { r.span } else { tail(r.span) },
-                    access: r.access,
-                    rewritable: !folded,
-                    label: None
-                });
+                out.push(RefLocation::at(key.clone(), if folded { r.span } else { tail(r.span) }, r.access).with_rewrite(SiteRewrite::literal_if(!folded)));
                 if let Some(src) = r.folded_from {
-                    out.push(RefLocation {
-                        key: key.clone(),
-                        span: src,
-                        access: r.access,
-                        rewritable: true,
-                        label: None
-                    });
+                    out.push(RefLocation::at(key.clone(), src, r.access));
                 }
             }
         } else if r.target_name == name && r.resolved_symbol().is_some_and(is_our_decl) {
             // Unqualified — only this package's `our` var (resolved in-file).
-            out.push(RefLocation {
-                key: key.clone(),
-                span: tail(r.span),
-                access: r.access,
-                rewritable: true,
-                label: None
-            });
+            out.push(RefLocation::at(key.clone(), tail(r.span), r.access));
         }
     }
 }
@@ -1001,13 +965,7 @@ pub(super) fn collect_from_analysis(
     for &sid in analysis.symbols_named(&target.name) {
         let sym = analysis.symbol(sid);
         if symbol_defines_target(sym, target, analysis) {
-            out.push(RefLocation {
-                key: key.clone(),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: rewritable_at(sym.selection_span),
-                label: None
-            });
+            out.push(RefLocation::at(key.clone(), sym.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::literal_if(rewritable_at(sym.selection_span))));
         }
     }
 
@@ -1076,6 +1034,7 @@ pub(super) fn collect_from_analysis(
         // Sub + Method both match any call into that scope — function
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
+        let mut also_on: Vec<String> = Vec::new();
         let matches_kind = alias_matched || match (&target.kind, &r.kind) {
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall) => {
@@ -1169,61 +1128,62 @@ pub(super) fn collect_from_analysis(
                 }
                 let method = r.unqualified_target_name(analysis.names());
                 {
-                    let resolved_class = match r.method_target() {
-                        // The frozen edge can carry an UNRESOLVED DBIC source
-                        // moniker (`Artist`) when it was stamped at build with
-                        // no index (a closed call-site file — enrichment
-                        // re-stamps OPEN docs only). Map it to the FQ result
-                        // class here, index in hand, so `$row->cds` sites match
-                        // the same target goto-def reaches. No-op for a class
-                        // that already resolves.
-                        Some(edge) => Some(analysis.resolve_dbic_source_moniker(
-                            edge.invocant_class().to_string(),
-                            None,
-                            module_index,
-                        )),
-                        None => analysis.method_call_invocant_class(r, module_index),
-                    };
-                    match (resolved_class, scope) {
-                        (Some(cn), Some(pkg)) => {
-                            if target.scope == OverrideScope::Hierarchy {
-                                // The override family is precomputed; a call
-                                // matches iff its invocant is in it — so
-                                // `$child->m` and `$base->m` rename together.
-                                // (Every family member is a descendant of the
-                                // root, so inheriting-without-override calls are
-                                // covered by membership.) The family walk runs
-                                // INVERSE edges from the origin file, which can
-                                // miss aliases declared elsewhere (perl5's
-                                // `typedef struct op OP` lives in perl.h, so
-                                // `OP` isn't in `op`'s computed family) — the
-                                // UPWARD chain from the invocant's class needs
-                                // no inverse index, so admit a class whose
-                                // chain reaches the family.
-                                target.method_classes.iter().any(|c| c == &cn)
-                                    || rename_chain_cache
+                    // A union receiver dispatches on every arm, so the
+                    // site references each arm's member.
+                    let resolved_classes = analysis.receiver_classes(r, module_index);
+                    let mut unmatched: Vec<String> = Vec::new();
+                    let matched = match scope {
+                        Some(pkg) => resolved_classes.into_iter().fold(false, |any, cn| {
+                            let hit = {
+                                if target.scope == OverrideScope::Hierarchy {
+                                    // The override family is precomputed; a call
+                                    // matches iff its invocant is in it — so
+                                    // `$child->m` and `$base->m` rename together.
+                                    // (Every family member is a descendant of the
+                                    // root, so inheriting-without-override calls are
+                                    // covered by membership.) The family walk runs
+                                    // INVERSE edges from the origin file, which can
+                                    // miss aliases declared elsewhere (perl5's
+                                    // `typedef struct op OP` lives in perl.h, so
+                                    // `OP` isn't in `op`'s computed family) — the
+                                    // UPWARD chain from the invocant's class needs
+                                    // no inverse index, so admit a class whose
+                                    // chain reaches the family.
+                                    target.method_classes.iter().any(|c| c == &cn)
+                                        || rename_chain_cache
+                                            .entry(cn.clone())
+                                            .or_insert_with(|| {
+                                                analysis.member_rename_chain(&cn, method, chain_want, module_index)
+                                            })
+                                            .iter()
+                                            .any(|c| target.method_classes.iter().any(|f| f == c))
+                                } else {
+                                    // Dispatch: the call matches only if it
+                                    // dispatches to THIS def — `$child->m` reaches an
+                                    // ancestor target via the per-invocant chain,
+                                    // unrelated same-named methods stay out.
+                                    cn == *pkg || rename_chain_cache
                                         .entry(cn.clone())
                                         .or_insert_with(|| {
                                             analysis.member_rename_chain(&cn, method, chain_want, module_index)
                                         })
                                         .iter()
-                                        .any(|c| target.method_classes.iter().any(|f| f == c))
-                            } else {
-                                // Dispatch: the call matches only if it
-                                // dispatches to THIS def — `$child->m` reaches an
-                                // ancestor target via the per-invocant chain,
-                                // unrelated same-named methods stay out.
-                                cn == *pkg || rename_chain_cache
-                                    .entry(cn.clone())
-                                    .or_insert_with(|| {
-                                        analysis.member_rename_chain(&cn, method, chain_want, module_index)
-                                    })
-                                    .iter()
-                                    .any(|c| c == pkg)
+                                        .any(|c| c == pkg)
+                                }
+                            };
+                            // A class the site may be and the target is not:
+                            // only a matched site (some other class hit) keeps it.
+                            if !hit {
+                                unmatched.push(cn);
                             }
-                        }
-                        _ => false,
+                            any || hit
+                        }),
+                        None => false,
+                    };
+                    if matched {
+                        also_on = unmatched;
                     }
+                    matched
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
@@ -1355,24 +1315,19 @@ pub(super) fn collect_from_analysis(
             // (rename, highlight) want just the member-name token so they
             // can replace or underline exactly the right characters.
             let span = r.member_site().map_or(r.span, |m| m.name_span);
-            out.push(RefLocation {
-                key: key.clone(),
-                span,
-                access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
-                label: None
-            });
+            let rewrite = if alias_matched {
+                SiteRewrite::ThroughMacro
+            } else if !also_on.is_empty() {
+                SiteRewrite::Shared { also_on: std::mem::take(&mut also_on) }
+            } else {
+                SiteRewrite::literal_if(rewritable_at(span))
+            };
+            out.push(RefLocation::at(key.clone(), span, r.access).with_rewrite(rewrite));
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)
             // has a non-rewritable name token above; the rewrite belongs on the
             // source string literal the fold came from (rule #9).
             if let Some(src) = r.folded_from {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: src,
-                    access: r.access,
-                    rewritable: rewritable_at(src),
-                    label: None
-                });
+                out.push(RefLocation::at(key.clone(), src, r.access).with_rewrite(SiteRewrite::literal_if(rewritable_at(src))));
             }
         }
     }
@@ -1387,13 +1342,7 @@ pub(super) fn collect_from_analysis(
     if let TargetKind::Handler { owner, name: hname } = &target.kind {
         for applied in analysis.applicable_dispatches(module_index) {
             if &applied.name == hname && &applied.owner == owner {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: applied.span,
-                    access: AccessKind::Read,
-                    rewritable: rewritable_at(applied.span),
-                    label: None
-                });
+                out.push(RefLocation::at(key.clone(), applied.span, AccessKind::Read).with_rewrite(SiteRewrite::literal_if(rewritable_at(applied.span))));
             }
         }
     }

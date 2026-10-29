@@ -54,7 +54,7 @@ isa-check runs at **query time**:
   (`FileAnalysis::dispatch_at`) both route through it, so a call site in a
   NON-open workspace/dependency file surfaces exactly like an open one.
 - The receiver class comes from the existing invocant resolution
-  (build-time `ClassName` hint, else `method_call_invocant_class`, bag-
+  (build-time `ClassName` hint, else `method_call_invocant_classes`, bag-
   routed and cross-file aware) — gate *input*, distinct from gated
   *content*. Only the handler-link payload (name, owner) is protected.
 

@@ -469,9 +469,8 @@ impl<'a> Builder<'a> {
             // as a short-circuit. `=` / `&&=` produce the RHS, unless
             // the target is an aggregate: a list assignment in scalar context
             // is a count, and the list type is `@flow`'s business.
-            // TODO(union-join): `&&=` is the false old value ⊔ the RHS; it
-            // types as the RHS until the lattice can join them
-            // (docs/open-forks.md "Union types in the lattice").
+            // TODO(falsy-part): `&&=` is the false old value ⊔ the RHS; it
+            // types as the RHS until a value's false part has a type.
             "assignment_expression" => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
                     let left = node.child_by_field_name("left")?;
@@ -753,11 +752,13 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
-        // A written element and the levels on its path are the write, not
-        // drills: their keys extend the shape (`emit_mutation_extension_witnesses`)
-        // instead of being read out of it.
+        // A written element and the levels on a write's path are the write,
+        // not drills: their keys extend the shape
+        // (`emit_mutation_extension_witnesses`) instead of being read out of
+        // it — unless the write reads the element first (`ElementWrite`).
         if matches!(node.kind(), "hash_element_expression" | "array_element_expression")
-            && (self.is_written_element(node) || self.on_write_path(node))
+            && (self.on_write_path(node)
+                || self.element_write_kind(node).is_some_and(|w| !w.reads_element()))
         {
             return;
         }
@@ -903,8 +904,8 @@ impl<'a> Builder<'a> {
     /// whenever the env var is unset), so it rides a distinct `fallback_arm`
     /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
     /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
-    /// for "this expression's value is one of these arms." The arms' union
-    /// would be built in `BranchArmFold` (its `TODO(union-join)`).
+    /// for "this expression's value is one of these arms"; `BranchArmFold`
+    /// joins them.
     fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
         use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let arm_att = WitnessAttachment::BranchArm(span);
@@ -1036,8 +1037,7 @@ impl<'a> Builder<'a> {
     ///   recursively with per-arm `branch_arm` Edges for ternary.
     /// - `SymbolReturnArm(sub_id)` gets one `Edge(Expr(body_span))`
     ///   witness per arm. `SymbolReturnArmFold` claims this
-    ///   attachment and folds arms via `resolve_return_type`
-    ///   (agreement / disagreement / single-arm).
+    ///   attachment and joins the arms (`join_return_arms`).
     /// - `Symbol(sub_id)` carries one `Edge(SymbolReturnArm(sub_id))`
     ///   per sub (`link_return_arms`) so consumers querying the
     ///   symbol's return walk through to the arm-fold.

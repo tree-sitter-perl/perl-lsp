@@ -1680,6 +1680,41 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
             }
         }
 
+        // Widening the return-arm join took, re-derived from the arms (the
+        // join is a pure function of them), never read from storage.
+        let widening: Vec<serde_json::Value> = {
+            use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+            let arms: Vec<file_analysis::InferredType> = analysis
+                .witnesses
+                .for_attachment(&WitnessAttachment::SymbolReturnArm(sym.id))
+                .iter()
+                .filter_map(|w| match &w.payload {
+                    WitnessPayload::InferredType(t) => Some(t.clone()),
+                    WitnessPayload::Edge(WitnessAttachment::Expr(span)) => {
+                        analysis.expr_type_at_span(*span, Some(&module_index))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let order = analysis.type_order(Some(&module_index));
+            let fmt = |ms: &[file_analysis::InferredType]| {
+                ms.iter().map(file_analysis::format_inferred_type).collect::<Vec<_>>()
+            };
+            file_analysis::join_all_traced(&arms, &order)
+                .map(|(_, steps)| steps)
+                .unwrap_or_default()
+                .iter()
+                .map(|w| match w {
+                    file_analysis::Widening::CommonClass { members, to } => {
+                        serde_json::json!({ "kind": "CommonClass", "members": fmt(members), "to": to })
+                    }
+                    file_analysis::Widening::Top { members } => {
+                        serde_json::json!({ "kind": "Top", "members": fmt(members) })
+                    }
+                })
+                .collect()
+        };
+
         let mut entry = serde_json::json!({
             "name": sym.name,
             "kind": format!("{:?}", sym.kind),
@@ -1694,6 +1729,9 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
         });
         if let Some(prov) = provenance {
             entry["return_type_provenance"] = prov;
+        }
+        if !widening.is_empty() {
+            entry["return_type_widening"] = serde_json::json!(widening);
         }
         if let Some(d) = sym.presentation.display {
             entry["display"] = serde_json::json!(format!("{:?}", d));
