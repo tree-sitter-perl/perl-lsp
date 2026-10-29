@@ -3,8 +3,6 @@
 //! sanctioned extraction seam (plugins, pod, query packs, reparse).
 
 pub mod builder;
-// carton's install base: the perl dependency tier's directory
-pub mod carton;
 pub mod cpanfile;
 // Composer's autoload data: the php dependency tier's map
 #[cfg(feature = "php")]
@@ -22,6 +20,8 @@ pub mod cpp_reparse;
 pub mod cpp_toolchain;
 // sentinel re-parse for member-access cursor context
 pub mod cursor_sentinel;
+// @INC: the perl dependency tier's map
+pub mod inc;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
 pub mod plugin;

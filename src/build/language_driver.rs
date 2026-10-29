@@ -9,7 +9,7 @@
 //! (the layering test is the seam) until a second driver makes a cargo
 //! *workspace* earn its keep — see `docs/gold-roadmap.md`.
 
-use crate::model::file_analysis::FileAnalysis;
+use crate::model::file_analysis::{FileAnalysis, NameSpellings};
 use std::path::Path;
 
 /// Per-language behavioral capabilities — the properties core layers ask
@@ -135,6 +135,11 @@ pub trait LanguageDriver: Send + Sync {
     fn analysis_input_fingerprint(&self) -> u64 {
         0
     }
+    /// How this language spells a module as a file under a search root.
+    /// `None` = it names no module by path.
+    fn module_spelling(&self) -> Option<ModuleSpelling> {
+        self.lang_pack().map(|p| ModuleSpelling { names: p.names, module_paths: p.module_paths })
+    }
     /// Where this project keeps the dependencies the workspace walk does
     /// not own (php: Composer's `vendor/`), and which of their files
     /// declares a name. `None` = the walk is the whole story.
@@ -160,6 +165,15 @@ pub trait LanguageDriver: Send + Sync {
     fn path_inputs_current(&self, _path: &Path, _analysis: &FileAnalysis) -> bool {
         true
     }
+}
+
+/// A language's module spelling: its names (whose use-map separator, if
+/// any, splits an imported name from its module) and the files under a
+/// search root a module name may be, most-preferred first.
+#[derive(Clone)]
+pub struct ModuleSpelling {
+    pub names: NameSpellings,
+    pub module_paths: fn(&str) -> Vec<String>,
 }
 
 /// The dependency tier's map for one project: a name nothing in the
@@ -268,8 +282,14 @@ impl LanguageDriver for PerlDriver {
         // method/pkg/hash-key slots; `(`/`,` are signature-help adjacent.
         &["$", "@", "%", ">", ":", "{", "(", ","]
     }
+    fn module_spelling(&self) -> Option<ModuleSpelling> {
+        Some(ModuleSpelling {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            module_paths: crate::model::conventions::perl_module_paths,
+        })
+    }
     fn dependency_locator(&'static self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
-        Some(crate::build::carton::locator(root, self))
+        Some(crate::build::inc::dependency_locator(root, self))
     }
     fn dependency_manifests(&self) -> &[&'static str] {
         &["cpanfile.snapshot"]

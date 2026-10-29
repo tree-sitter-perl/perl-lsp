@@ -41,9 +41,10 @@ static SEARCH_ROOTS: RwLock<Vec<(&'static str, Vec<PathBuf>)>> = RwLock::new(Vec
 /// Name files under `roots` from them, for `marker`'s language. Replaces
 /// the roots set before.
 pub fn set_search_roots(marker: &'static str, roots: &[PathBuf]) {
+    let canon = roots.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     let mut all = SEARCH_ROOTS.write().unwrap_or_else(|e| e.into_inner());
     all.retain(|(m, _)| *m != marker);
-    all.push((marker, roots.to_vec()));
+    all.push((marker, canon));
 }
 
 impl MarkerSnapshot {

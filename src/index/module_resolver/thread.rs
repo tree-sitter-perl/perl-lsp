@@ -8,15 +8,20 @@ use super::*;
 /// protocol (memoization, persistence, strip, `insert_resolved`) has a
 /// single spelling and cannot drift between the two spawn fronts.
 pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>) {
-    let mut inc_paths = discover_inc_paths();
+    // Read the process @INC (a `perl` shell-out, memoized) while initialize
+    // is still in flight.
+    let _ = crate::build::inc::discover_inc_paths();
 
     // Wait for workspace root from initialize() for per-project cache path.
     let ws_root = wait_for_workspace_root(&core.workspace_root);
 
-    // Auto-discover project-local lib paths (lib/, local/lib/perl5/).
-    if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
-        add_project_lib_paths(&mut inc_paths, &root_path);
-    }
+    // Perl's dependency map: the project's lib paths ahead of @INC.
+    let root_path = ws_root.as_ref().and_then(|u| uri_to_path(u));
+    let inc = crate::build::inc::locator(root_path.as_deref(), &crate::build::language_driver::PerlDriver);
+    let inc_paths = {
+        use crate::build::language_driver::DependencyLocator;
+        inc.search_roots().to_vec()
+    };
 
     // Publish the resolved search path before anything can query: an
     // origin's visibility rank prefix-matches candidates against it, and
@@ -208,7 +213,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
 
             crate::util::ghost_stats::count("resolver.module_resolved");
-            let result = parse_module(&inc_paths, &module_name, &mut parser, &mut parse_memo);
+            let result = parse_module(&*inc, &module_name, &mut parser, &mut parse_memo);
             match &result {
                 Some(providers) => log::info!(
                     "Resolved '{}': {} provider(s), {} export, {} export_ok",

@@ -338,8 +338,13 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         return (ws, module_index);
     }
 
-    let mut inc_paths = timings::phase("cli::discover_inc", module_resolver::discover_inc_paths);
-    module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
+    let inc = timings::phase("cli::discover_inc", || {
+        crate::build::inc::locator(Some(&root_path), &language_driver::PerlDriver)
+    });
+    let inc_paths = {
+        use crate::build::language_driver::DependencyLocator;
+        inc.search_roots().to_vec()
+    };
 
     let db = module_cache::open_cache_db(Some(&root_uri), "perl");
     let mut stale_set: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -415,7 +420,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
             if stale_set.contains(&name) {
                 parse_memo.remove(&name);
             }
-            module_resolver::resolve_and_parse_with_memo(&inc_paths, &name, &mut parser, &mut parse_memo)
+            module_resolver::resolve_and_parse_with_memo(&*inc, &name, &mut parser, &mut parse_memo)
                 .map(|providers| {
                     if let Some(ref conn) = db {
                         // One row per provider — the name maps to a set.

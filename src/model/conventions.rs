@@ -62,6 +62,12 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     }
 }
 
+/// The file a Perl module is under an `@INC` root: `Foo::Bar` →
+/// `Foo/Bar.pm`.
+pub fn perl_module_paths(module: &str) -> Vec<String> {
+    vec![format!("{}.pm", module.replace("::", "/"))]
+}
+
 /// `split_qualified`'s inverse: a namespace and a leaf as one qualified
 /// name. The global namespace (an empty `namespace`) yields the bare leaf,
 /// never a dangling separator, so a caller need not ask first whether the

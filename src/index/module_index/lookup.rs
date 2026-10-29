@@ -280,9 +280,9 @@ impl ModuleIndex {
         if let Some(entry) = self.core.cache.get(module_name) {
             return entry.clone();
         }
-        let inc_paths = module_resolver::discover_inc_paths();
+        let inc = crate::build::inc::locator(None, &crate::build::language_driver::PerlDriver);
         let mut parser = module_resolver::create_parser();
-        let result = module_resolver::resolve_and_parse(&inc_paths, module_name, &mut parser);
+        let result = module_resolver::resolve_and_parse(&*inc, module_name, &mut parser);
         self.core.note_shape_change();
         self.core.cache.insert(module_name.to_string(), result.clone());
         result
@@ -290,13 +290,16 @@ impl ModuleIndex {
 
     #[cfg(test)]
     pub(super) fn inc_paths(&self) -> Vec<PathBuf> {
-        module_resolver::discover_inc_paths()
+        crate::build::inc::discover_inc_paths()
     }
 
     #[cfg(test)]
     pub fn resolve_module(&self, module_name: &str) -> Option<PathBuf> {
-        let inc_paths = module_resolver::discover_inc_paths();
-        module_resolver::resolve_module_path(&inc_paths, module_name)
+        use crate::build::language_driver::DependencyLocator;
+        crate::build::inc::locator(None, &crate::build::language_driver::PerlDriver)
+            .locate(module_name)
+            .into_iter()
+            .next()
     }
 }
 
