@@ -2869,12 +2869,10 @@ fn follow_one(
         std::collections::HashSet::new();
 
     for _ in 0..super::MAX_FOLLOW_HOPS {
-        let super::ConclusionKey::MethodOnClass { class, .. } = &key else {
-            // Only class-keyed hops can be resolved to a candidate FILE; the
-            // other key shapes have no such relation to walk.
-            return None;
-        };
-        let candidates = resolve(class);
+        // A hop resolves to candidate FILES only through a class ladder —
+        // the ladder that baked the `Link` names whose files they are.
+        let att = key.to_attachment()?;
+        let candidates = resolve(ClassLadder::of(&att)?.owner);
         let mut next: Option<(super::ConclusionKey, Option<InferredType>, Option<u32>)> = None;
         for (path, map) in candidates.into_iter() {
             let ident = (path, key.clone(), format!("{recv:?}"), ar);

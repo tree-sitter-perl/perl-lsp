@@ -96,7 +96,7 @@ slot write in `70_Jabber.pm` sat at the 512-frame depth cap, with every
 frame holding a rehydrated analysis (2.7 GB). The open never finished.
 
 With an index, hop (1) of the ladder is a node of its own in
-`QueryState`, keyed by attachment, receiver and arity (`LadderKey`).
+`QueryState` (`fan_out_node`), keyed by attachment, receiver and arity.
 When it is on the path, the inner frame skips it and counts a cut, and
 the frame that owns it walks the remaining candidates. Off the path, the
 first walk's answer serves the rest of the query. The key drops the
@@ -118,6 +118,19 @@ bag's view of the class's ancestry, and wherever those edges lead, with
 the class's fan-out cut.
 
 An index-less chase (a bake, a hand-built FA) has no fan-out to key.
+
+A free function's cross-file half (`free_function_cross_file`: its
+exporters, then a pack's linkage-visible definitions, and for a
+constructing call the class's definitions) is the same shape — a
+fan-out over files, each chased on its own bag — so it is the same node,
+keyed by name and constructed class, and spends the consult budget per
+file it decodes as the ladder's candidates do. Two fan-outs, one node:
+whatever bounds one bounds the other.
+
+The no-decode `Link` walk (`follow_link`) resolves a hop to candidate
+files through `ClassLadder::of` on the key's attachment, so every key a
+ladder bakes (methods, slots, type names) walks, and the walk can never
+name a class's files differently from the ladder that baked the `Link`.
 
 ## What actually made the verb return
 
