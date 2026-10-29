@@ -81,7 +81,7 @@ impl FileAnalysis {
             arrow_deref_sites,
             gated_param_types,
             attr_projections,
-            reassigned_scalars,
+            reassigned_vars,
             key_writes,
             dbic_source_name,
             column_keyed_verbs,
@@ -118,7 +118,7 @@ impl FileAnalysis {
             arrow_deref_sites,
             gated_param_types,
             attr_projections,
-            reassigned_scalars,
+            reassigned_vars,
             key_writes,
             dbic_source_name,
             column_keyed_verbs,
@@ -1305,7 +1305,7 @@ impl FileAnalysis {
             + map_str_vec(&self.export_tags)
             + mcap(&self.type_provenance)
             + scap(&self.framework_imports)
-            + scap(&self.reassigned_scalars)
+            + scap(&self.reassigned_vars)
             + scap(&self.column_keyed_verbs)
             + vcap(&self.export)
             + vcap(&self.export_ok)
