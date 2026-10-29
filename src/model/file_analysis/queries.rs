@@ -816,8 +816,9 @@ impl FileAnalysis {
         out
     }
 
-    /// True when a closed literal shape on `var_text` is the variable's
-    /// whole story in this file: the scalar is never reassigned. Key
+    /// True when a closed literal shape on the variable `var_text` names at
+    /// `at` is its whole story in this file: that variable (not every one
+    /// spelled the same) is never reassigned. Key
     /// writes AND escapes are not gate clauses — both are modeled on
     /// the shape itself by the mutation-extension pass (writes extend
     /// or open; an escape is an open-switching write at the escape
@@ -826,8 +827,8 @@ impl FileAnalysis {
     /// conditional-reassignment disagreement
     /// (docs/adr/structural-shapes.md); the unknown-hash-key
     /// diagnostic only fires behind it.
-    pub fn closed_shape_is_whole_story(&self, var_text: &str) -> bool {
-        !self.reassigned_scalars.contains(var_text)
+    pub fn closed_shape_is_whole_story(&self, var_text: &str, at: Point) -> bool {
+        self.resolve_variable(var_text, at).is_none_or(|v| !self.reassigned_vars.contains(&v.id))
     }
 
     /// Closed-shape hash-key typo sites: a READ of `$config->{typo}` where
@@ -866,7 +867,7 @@ impl FileAnalysis {
                 continue;
             };
             let Some(known_keys) = t.closed_keys_lacking(&r.target_name) else { continue };
-            if !self.closed_shape_is_whole_story(var_text) {
+            if !self.closed_shape_is_whole_story(var_text, r.span.start) {
                 continue;
             }
             out.push(KeyTypoSite {
