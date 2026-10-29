@@ -16,7 +16,7 @@ pub const EXTRACT_VERSION: i64 = 289;
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
 /// the derived `refs`/`files`/`strings` tables — the blobs stay valid and the
 /// next warm re-shreds rows from the already-decoded analyses for free.
-pub(super) const REF_ROWS_VERSION: &str = "8";
+pub(super) const REF_ROWS_VERSION: &str = "9";
 
 /// Row format of the `conclusions` lane. Bump on any change to the row's
 /// SHAPE or to what its stamp means.
@@ -152,6 +152,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         .map(|_| ())
         .and_then(|_| conn.prepare(sql::SHAPE_REFS.registered()).map(|_| ()))
         .and_then(|_| conn.prepare(sql::SHAPE_SYMS.registered()).map(|_| ()))
+        .and_then(|_| conn.prepare(sql::SHAPE_HELD.registered()).map(|_| ()))
         .is_ok()
         // The columns the current format DROPPED must be gone. Probing only
         // for what the new shape HAS would pass on the old twelve-column
@@ -233,7 +234,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
 }
 
-/// Wipe the derived tables (`refs`/`syms`/`files`/`strings`/`stubs`/
+/// Wipe the derived tables (`refs`/`syms`/`held`/`files`/`strings`/`stubs`/
 /// `surfaces`). Runs
 /// alongside every `DELETE FROM modules` hard-clear: the rows are shredded
 /// from the blobs, so a generation that invalidates the blobs invalidates
@@ -296,6 +297,7 @@ pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite:
         conn.execute(sql::MODULES_CLEAR_IMPORT.registered(), [])?;
         conn.execute(sql::REFS_CLEAR_IMPORT.registered(), [])?;
         conn.execute(sql::SYMS_CLEAR_IMPORT.registered(), [])?;
+        conn.execute(sql::HELD_CLEAR_IMPORT.registered(), [])?;
         conn.execute(sql::FILES_CLEAR_IMPORT.registered(), [])?;
         conn.execute(sql::META_SET.registered(), params!["inc_hash", current_hash])?;
     }

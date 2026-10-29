@@ -306,6 +306,11 @@ fn whole_copy_registration_sites_are_allowlisted() {
         // register_workspace_module: TEST-ONLY today (fixtures build whole
         // copies directly). Its first production caller lands here.
         ("register_workspace_module", vec![]),
+        // `insert_cache` stores a WHOLE copy by construction (`persisted:
+        // false` — nothing was written, so the strip has no licence): CLI and
+        // test fixtures only. A production caller pins whole copies without
+        // tripping any other gate, so it lands here first.
+        ("insert_cache", vec![]),
         (
             "register_workspace_resident",
             vec![
@@ -320,29 +325,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ("module_index", 1, "register_workspace_stripping's residency half"),
                 ("module_resolver", 2, "deferred writer halves — stripped arcs only"),
             ],
-        ),
-        // `insert_cache` stores a WHOLE copy by construction (`persisted:
-        // false` — nothing was written, so the strip has no licence). Its one
-        // production reach is through `register_materialized_whole`, already
-        // bounded by that site's entry; a NEW caller would pin whole copies
-        // without tripping any other gate.
-        (
-            "insert_cache",
-            vec![(
-                "module_index",
-                1,
-                "register_materialized_whole’s cache-slot half",
-            )],
-        ),
-        (
-            "register_materialized_whole",
-            vec![(
-                "module_index",
-                1,
-                "gated-emission CLI/batch materialization — plugin-triggered \
-                 files only (sparse by construction), one-shot startup, whole \
-                 copy deliberate so whole_present sees the emissions",
-            )],
         ),
     ];
     let mut violations: Vec<String> = Vec::new();

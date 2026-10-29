@@ -1637,6 +1637,15 @@ impl Ref {
     }
 }
 
+/// One file's whole relational shred: its refs and symbols, and the names
+/// its gated emissions could add (`held`, their own candidate rows).
+#[derive(Debug, Clone, Default)]
+pub struct RowSeeds {
+    pub refs: Vec<RefRowSeed>,
+    pub syms: Vec<SymRowSeed>,
+    pub held: Vec<String>,
+}
+
 /// One symbol's projection into the relational store — the enumeration
 /// surface: workspace/symbol answers from these rows, declaration-only
 /// files become backward-walk candidates through them, and a future

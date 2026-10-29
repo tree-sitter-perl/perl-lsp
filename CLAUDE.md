@@ -41,7 +41,7 @@ repo — recipe, incl. the restricted-sandbox mirror workaround, in the
 gold asserts answers, these measure behaviour at scale — wall, RSS, and the
 pathologies no fixture reproduces. Every scaling limit in
 `docs/scaling-limits.md` came from them, and none reproduced on synthetic
-input. `corpus/bootstrap.sh` reconstructs all eight on a fresh box (idempotent;
+input. `corpus/bootstrap.sh` reconstructs all nine on a fresh box (idempotent;
 `corpus/bootstrap.sh "" FHEM` for one). `./kick.sh` opens one in an editor
 without typing paths — `--nodeps`, `--dry`, `--debug`.
 

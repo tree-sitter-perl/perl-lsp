@@ -70,14 +70,13 @@ pub fn shred_derived_rows(
     conn: &Connection,
     path: &str,
     source: &str,
-    seeds: &[crate::model::file_analysis::RefRowSeed],
-    sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+    seeds: &crate::model::file_analysis::RowSeeds,
 ) -> rusqlite::Result<()> {
     // Accumulated, never printed per file: the row-store write cost is what
     // an index change on these tables moves, and the persist writer runs
     // this once per file.
     crate::util::ghost_stats::timed("persist.shred", || {
-        shred_derived_rows_inner(conn, path, source, seeds, sym_seeds)
+        shred_derived_rows_inner(conn, path, source, &seeds.refs, &seeds.syms, &seeds.held)
     })
 }
 
@@ -87,6 +86,7 @@ fn shred_derived_rows_inner(
     source: &str,
     seeds: &[crate::model::file_analysis::RefRowSeed],
     sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+    held: &[String],
 ) -> rusqlite::Result<()> {
     // Sticky workspace tier: project lib/ files are inside the walk AND on
     // @INC (add_project_lib_paths), so the resolver re-shreds them as
@@ -98,6 +98,7 @@ fn shred_derived_rows_inner(
         conn.query_row(sql::FILE_ID_BY_PATH.registered(), params![path], |row| row.get(0))?;
     conn.execute(sql::REFS_DELETE_FILE_ID.registered(), params![file_id])?;
     conn.execute(sql::SYMS_DELETE_FILE_ID.registered(), params![file_id])?;
+    conn.execute(sql::HELD_DELETE_FILE_ID.registered(), params![file_id])?;
 
     let generation = crate::index::module_cache::strings_generation(conn);
     INTERN_MEMO.with(|cell| -> rusqlite::Result<()> {
@@ -177,6 +178,17 @@ fn shred_derived_rows_inner(
                 container_id,
                 seed.flags,
             ])?;
+        }
+        drop(insert_sym);
+
+        // A gated emission's names are candidates only: present in the
+        // views whose gate fires. They never join `refs`/`syms`, whose rows
+        // every view shows; a retrieval that must find those views asks
+        // `held`.
+        let mut insert_held = conn.prepare_cached(sql::HELD_INSERT.registered())?;
+        for name in held {
+            let name_id = intern_str(name, &mut memo)?;
+            insert_held.execute(params![name_id, file_id])?;
         }
         Ok(())
     })?;
@@ -303,6 +315,7 @@ pub fn delete_ref_rows(conn: &Connection, path: &str) {
 fn delete_rows_of(conn: &Connection, file_id: i64) {
     let _ = conn.execute(sql::REFS_DELETE_FILE_ID.registered(), params![file_id]);
     let _ = conn.execute(sql::SYMS_DELETE_FILE_ID.registered(), params![file_id]);
+    let _ = conn.execute(sql::HELD_DELETE_FILE_ID.registered(), params![file_id]);
 }
 
 /// Has `path` been shredded into the relational index? (`files` presence is
@@ -322,16 +335,18 @@ pub fn ref_candidate_files(conn: &Connection, keys: &[String]) -> Vec<String> {
     // rows — a file that declares `helper` but never mentions it again has
     // no matching ref row, and without the syms half the backward walk's
     // matcher (whose declaration half reads symbols) never rehydrates it.
-    // Both halves feed one `seen` set, which is the whole dedup.
-    let (Ok(mut refs_half), Ok(mut syms_half)) = (
+    // HELD candidacy from `held` rows: a name only the views whose gate
+    // fires show. Every half feeds one `seen` set, which is the whole dedup.
+    let (Ok(mut refs_half), Ok(mut syms_half), Ok(mut held_half)) = (
         conn.prepare_cached(sql::REF_CANDIDATES_REFS.registered()),
         conn.prepare_cached(sql::REF_CANDIDATES_SYMS.registered()),
+        conn.prepare_cached(sql::REF_CANDIDATES_HELD.registered()),
     ) else {
         return out;
     };
     let mut seen = std::collections::HashSet::new();
     for key in keys {
-        for stmt in [&mut refs_half, &mut syms_half] {
+        for stmt in [&mut refs_half, &mut syms_half, &mut held_half] {
             let rows = stmt.query_map(params![key], |row| row.get::<_, String>(0));
             if let Ok(rows) = rows {
                 for r in rows {
@@ -633,13 +648,16 @@ pub fn paths_with_ref_rows(conn: &Connection) -> std::collections::HashSet<Strin
 /// only when the store actually covers the files the walk would scan).
 pub fn names_with_ref_rows(conn: &Connection) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let Ok(mut stmt) = conn.prepare(sql::REF_NAMES_ALL.registered()) else {
-        return out;
-    };
-    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-        for n in rows.flatten() {
-            out.insert(n);
-        }
+    // `held` too: a gated emission's refs reference their names in the views
+    // whose gate fires, so absence must mean absent from every view.
+    for names in [sql::REF_NAMES_ALL, sql::REF_NAMES_HELD] {
+        let Ok(mut stmt) = conn.prepare(names.registered()) else {
+            return std::collections::HashSet::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+            continue;
+        };
+        out.extend(rows.flatten());
     }
     out
 }

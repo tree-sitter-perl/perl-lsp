@@ -17,7 +17,6 @@ designs live in `docs/prompt-storage-residuals.md`.
 | --- | --- | --- |
 | [Answer honesty under index/enrichment windows](#answer-honesty-under-indexenrichment-windows--2026-07-14--open-claude) | 07-14 | which verbs block for honest answers vs stay fast-best-effort — now that honest cold references costs ~27 s on abseil? |
 | [Decl→def ranking on QUALIFIED / member goto-def](#decldef-ranking-on-qualified--member-goto-def--2026-07-15--open-claude) | 07-15 | should qualified goto-def rank def-over-decl, via the shared seam (B) or a local patch (A)? |
-| [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
 | [Stacked refs at one span](#stacked-refs-at-one-span--2026-09-15--open-claude) | 09-15 | when two identities share a token (a class token that is also a rail use), is a companion ref with a cursor tiebreak enough, or should one ref carry several bindings? |
 
@@ -118,76 +117,6 @@ Format per entry:
 - **Discussion needed:** should member/qualified goto-def rank def-over-decl
   at all, and if so via the shared `preferred_definitions` seam (B) or a
   local `member_def_location` patch (A)? B is the rule-#10-consistent pick.
-
----
-
-## Cross-file gated-emission visibility — 2026-07-17 — OPEN (Claude)
-- **Context:** H7-5. A `ClassIsa` plugin trigger
-  (DBIC `has_many`/`add_columns` synthesis) can't fire at build for a result
-  class whose `isa DBIx::Class` route runs through a cross-file intermediate
-  base (rule #1: index-free builder). The build records the emission as a
-  `GatedEmission` and enrichment re-fires it (`class_isa_prefix` +
-  `apply_gated_emissions`). That makes the OPEN focus file + `--dump-package`
-  (enriched overlay) correct. The residual: cross-file goto-def / references
-  read the TARGET class's *cached* copy via `whole_present`, which doesn't
-  carry enrichment-only symbols.
-- **Options:**
-  - **A — index-time materialize (picked).** After indexing completes,
-    `ModuleIndex::materialize_gated_emissions` applies each cached copy's
-    deferred emissions in place (gate resolved cross-file), so `whole_present`
-    carries them. Deterministic, no per-query cost.
-  - **B — per-query enriched overlay.** A fallback-on-miss in
-    `method_resolution_on_class` consults `enriched_snapshot` for a gated
-    class. Tried and REVERTED: it re-enters full enrichment per inheritance
-    hop (enrichment's own `stamp_method_call_targets` resolves methods →
-    overlay → nested enrich), overflowing the stack on the DBIx::Class
-    substrate; the enriched-overlay memoization key also churned, returning
-    Some then None for the same file within one query.
-- **Picked:** A. Loosely coupled: `materialize_gated_emissions` is one
-  post-index pass keyed only on `gated_emissions` being non-empty (a normal
-  class pays nothing); it mutates the cache in place and is idempotent
-  (`apply_gated_emissions` dedups). It is called only from `cli_full_startup`
-  (CLI + `--batch`), so the warm-server residency budget is untouched.
-- **Undo cost:** delete the one call in `cli_full_startup` + the
-  `ModuleIndex`/`FileAnalysis` methods; the build-time recording +
-  enrichment application (open-doc + overlay) stand alone.
-- **Discussion needed:** three residuals to ratify or close.
-  (1) **Real LSP server (not CLI):** `materialize` runs only in the CLI/batch
-  startup, so a live-editor goto-def into a CLOSED dependency's gated accessor
-  misses (open files enrich; the warm server evicts symbols, so materializing
-  in-place there would re-pin them — a residency call). Is the CLI-only scope
-  acceptable, or should the server get a residency-bounded variant?
-  (2) **The `$schema->resultset('X')->...->first` chain** (separate defect,
-  H7-8-adjacent) types the row as the SHORT source name `"Artist"`, not the FQ
-  result class `DBICTest::Schema::Artist`, so on the real DBIx-Class corpus the
-  `->cds` call-site invocants never match the FQ anchor: `--references`/
-  `--definition` at those coordinates return 0 despite correct synthesis + a
-  working cross-file goto-def path (proven on a directly-typed invocant). The
-  source-name→result-class mapping is the missing piece and is out of H7-5's
-  ClassIsa scope.
-  (3) **Gated content is invisible to the Surface freshness firewall**
-  (surfaced by the round-7 sweep). `Surface::project` reads `fa.symbols` +
-  `fa.packages`, never `fa.gated_emissions`, and
-  `materialize_gated_emissions` swaps the cached `Arc` WITHOUT re-recording
-  the Surface / `FreshnessIndex`. So a change confined to a result class's
-  gated content (its `add_columns`/`has_many` list, whose synthesized
-  accessors live ONLY in `gated_emissions` until the cross-file gate
-  resolves) projects an IDENTICAL Surface → `SurfaceVerdict::Unchanged` →
-  consumers are not dirtied. Latent today, not a live bug: CLI is one-shot
-  (no incremental dirty-tracking), and the warm server never materializes
-  into the Surface — it answers gated classes through the per-query
-  enriched overlay. But it is a PRECONDITION of resolving residual (1) the
-  in-place way: if the server ever gets a residency-bounded in-place
-  materialize, `Surface::project` must also learn to reflect gated methods
-  (or `FreshnessIndex` must fingerprint `gated_emissions`) so incremental
-  edits to gated content dirty consumers — otherwise a server-side
-  materialize goes stale on the next edit. The question: should gated
-  emissions participate in the Surface / freshness firewall, and if so does
-  that ride with the residual-(1) server-materialize decision or land first
-  as its own equality-net arm? (No R1 violation exists today —
-  `gated_emissions` is deliberately NOT a projected Surface field, so nothing
-  smuggled a span past the equality net; this is a design question about
-  whether it SHOULD be one.)
 
 ---
 

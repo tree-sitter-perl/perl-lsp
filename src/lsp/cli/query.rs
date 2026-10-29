@@ -876,7 +876,7 @@ fn run_one(
                 if !analysis.symbols_are_evicted() {
                     covered.insert(path.to_path_buf());
                 }
-                for sym in analysis.symbols() {
+                for sym in analysis.symbols().iter().chain(&idx.shown_gated_symbols(cached, &q)) {
                     if sym.hidden_in_outline() {
                         continue;
                     }

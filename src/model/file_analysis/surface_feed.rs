@@ -14,7 +14,7 @@ use super::*;
 /// Field reads go through the named borrows. The `analysis` handle exists
 /// ONLY for the derived queries whose conclusions land in projected values
 /// (`symbol_return_type_via_bag`, `is_linkage_visible`,
-/// `symbol_is_class_content`) — never for direct field access, which would
+/// `symbol_is_class_content`, `gated_candidates`, `bridge_classes`) — never for direct field access, which would
 /// bypass the classification gate.
 pub struct SurfaceFeed<'a> {
     pub symbols: &'a [Symbol],
@@ -93,7 +93,7 @@ impl FileAnalysis {
                     loads: plugin_loads,
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
-                    gated_emissions: _gated_emissions, // re-fired by this file's OWN enrichment
+                    gated_emissions: _gated_emissions, // projected as candidates through the derived-query handle (`gated_candidates`), the mint the rows read
                     meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 

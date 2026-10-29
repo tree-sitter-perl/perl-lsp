@@ -24,7 +24,7 @@ pub(super) fn class_has_dispatch_handlers(
     let mut found = false;
     analysis.for_each_dispatch_handler_on_class(
         class,
-        dispatcher,
+        &[dispatcher],
         Some(module_index),
         |_sym, _prov| { found = true; },
     );
@@ -177,7 +177,7 @@ pub(super) fn dispatch_target_completions(
     let mut acc: std::collections::BTreeMap<String, (Vec<String>, String)> =
         std::collections::BTreeMap::new();
     analysis.for_each_dispatch_handler_on_class(
-        class, method_name, Some(module_index),
+        class, &[method_name], Some(module_index),
         |sym, provenance| {
             let SymbolDetail::Handler { params, .. } = &sym.detail else { return };
             let display: Vec<String> = params
@@ -298,10 +298,9 @@ pub(super) fn mid_string_methodref_completions(
     items
 }
 
-/// Materialize `PluginCompletion` items for every Handler symbol
-/// whose owner matches `owner_class` and whose `dispatchers` list
-/// contains any of `dispatcher_names`. Walks the local analysis AND
-/// every cross-file cached module. Used by plugin-delegated
+/// Materialize `PluginCompletion` items for every Handler visible from
+/// `owner_class` that dispatches through any of `dispatcher_names`
+/// (`for_each_dispatch_handler_on_class`). Used by plugin-delegated
 /// dispatch-name completion (Minion enqueue arg-0, Mojo emit arg-0,
 /// etc.).
 pub(super) fn dispatch_target_items_for(
@@ -328,15 +327,8 @@ pub(super) fn dispatch_target_items_for(
             ..Default::default()
         });
     };
-    for sym in analysis.handlers_for_owner(owner_class, dispatcher_names) {
-        emit(sym);
-    }
-    module_index.for_each_cached(|_, cached| {
-        let whole = module_index.whole_present(cached);
-        for sym in whole.handlers_for_owner(owner_class, dispatcher_names) {
-            emit(sym);
-        }
-    });
+    let dispatchers: Vec<&str> = dispatcher_names.iter().map(String::as_str).collect();
+    analysis.for_each_dispatch_handler_on_class(owner_class, &dispatchers, Some(module_index), |sym, _| emit(sym));
     out
 }
 
@@ -503,23 +495,11 @@ fn string_dispatch_signature_for(
         });
     };
 
-    for sym in analysis.symbols() {
-        if sym.name != handler_name { continue; }
-        push_sig(&mut signatures, sym, None);
-    }
-    if let Some(idx) = module_index {
-        for module_name in idx.modules_with_symbol(handler_name) {
-            // Every file registered under the name — stacked registrations
-            // may live in a losing candidate.
-            for cached in idx.visible_def_candidates(&module_name) {
-                let whole = idx.whole_present(&cached);
-                for sym in whole.symbols() {
-                    if sym.name != handler_name { continue; }
-                    push_sig(&mut signatures, sym, Some(module_name.as_str()));
-                }
-            }
-        }
-    }
+    // Stacked registrations (several `->on('ready', …)`) each add one.
+    analysis.for_each_dispatch_handler_on_class(class, &[], module_index, |sym, provenance| {
+        if sym.name != handler_name { return; }
+        push_sig(&mut signatures, sym, (provenance != "this file").then_some(provenance));
+    });
 
     if signatures.is_empty() { return None; }
     Some(SignatureHelp {

@@ -1409,7 +1409,7 @@ pub enum PluginSigHelpAnswer {
     /// Delegate to the core: "render the sig for this Handler". The
     /// plugin has already resolved which Handler the cursor points at
     /// and which param slot is active; the core does the param lookup
-    /// (including cross-file via `handlers_for_owner`) and invocant
+    /// (including cross-file via `for_each_dispatch_handler_on_class`) and invocant
     /// stripping. Same delegation pattern as completion's
     /// `dispatch_targets_for`.
     ShowHandler {

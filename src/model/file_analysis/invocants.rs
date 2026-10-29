@@ -1105,16 +1105,7 @@ impl FileAnalysis {
             .candidate_defining_sub_in_package(&module, &on_class, &name)
             .or_else(|| idx.get_cached(&module))?;
         let whole = idx.whole_present(&cached);
-        let is_bridge = whole.plugin.namespaces.iter().any(|ns| {
-            ns.bridges
-                .iter()
-                .any(|b| matches!(b, Bridge::Class(c) if c == &on_class))
-                && ns.entities.iter().any(|sid| {
-                    whole.symbols.get(sid.0 as usize).is_some_and(|s| {
-                        matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
-                    })
-                })
-        });
+        let is_bridge = whole.bridges_callable(&on_class, &name);
         is_bridge.then_some(module)
     }
 
@@ -1321,14 +1312,7 @@ impl FileAnalysis {
                 return true;
             }
         }
-        self.plugin.namespaces.iter().any(|ns| {
-            ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls))
-                && ns.entities.iter().any(|sid| {
-                    self.symbols.get(sid.0 as usize).is_some_and(|s| {
-                        matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
-                    })
-                })
-        })
+        self.bridges_callable(cls, name)
     }
 
     /// Any non-contract Sub/Method named `name` in this file,
@@ -1358,16 +1342,18 @@ impl FileAnalysis {
     }
 
     /// Collect every Handler visible from `class_name` whose `dispatchers`
-    /// list contains `dispatcher`. Walks the inheritance chain and at
-    /// each level pulls Handlers from (1) this file's symbols with
-    /// matching owner, (2) this file's `plugin_namespaces` bridged to
-    /// the current class, and (3) cross-file via
-    /// `module_index.for_each_entity_bridged_to` — rule #8.
+    /// list names any of `dispatchers` (an empty `dispatchers` takes every
+    /// Handler on the class). Walks the inheritance chain and at
+    /// each level pulls the Handlers bridged to the current class, from
+    /// this file and cross-file — rule #8. A class owns its Handlers by
+    /// bridging them (`FileAnalysis::for_each_entity_bridged_to`).
     ///
     /// Shares `for_each_ancestor_class` with `resolve_method_in_ancestors`
-    /// so the two dispatch paths can't drift on MRO rules. Both
-    /// `dispatch_target_completions` and `class_has_dispatch_handlers`
-    /// in `symbols.rs` funnel through here.
+    /// so the two dispatch paths can't drift on MRO rules. Every
+    /// handler-by-class reader in `lsp/symbols/signature.rs` (dispatch
+    /// completion, plugin-delegated `dispatch_targets_for`, handler
+    /// signature help, `class_has_dispatch_handlers`) funnels through here.
+    /// A symbol is visited once per class it is reached from.
     ///
     /// `visit(symbol, provenance)` — provenance is `"this file"` for
     /// local hits and the cached module's filename for cross-file
@@ -1375,36 +1361,23 @@ impl FileAnalysis {
     pub fn for_each_dispatch_handler_on_class(
         &self,
         class_name: &str,
-        dispatcher: &str,
+        dispatchers: &[&str],
         module_index: Option<&dyn CrossFileLookup>,
         mut visit: impl FnMut(&Symbol, &str),
     ) {
-        let disp_matches = |dd: &[String]| dd.iter().any(|d| d == dispatcher);
+        let disp_matches = |dd: &[String]| {
+            dispatchers.is_empty() || dd.iter().any(|d| dispatchers.contains(&d.as_str()))
+        };
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            // (1) Local Handler symbols owned by this class.
-            for sym in &self.symbols {
-                if let SymbolDetail::Handler {
-                    owner: HandlerOwner::Class(n), dispatchers, ..
-                } = &sym.detail
-                {
-                    if n == cls && disp_matches(dispatchers) {
+            let _ = self.for_each_entity_bridged_to(cls, |sym| {
+                if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
+                    if disp_matches(dispatchers) {
                         visit(sym, "this file");
                     }
                 }
-            }
-            // (2) Local plugin-namespace bridge to `cls`.
-            for ns in &self.plugin.namespaces {
-                if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
-                for sym_id in &ns.entities {
-                    let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                    if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
-                        if disp_matches(dispatchers) {
-                            visit(sym, "this file");
-                        }
-                    }
-                }
-            }
-            // (3) Cross-file plugin-namespace bridge.
+                std::ops::ControlFlow::Continue(())
+            });
+            // Cross-file.
             if let Some(idx) = module_index {
                 idx.for_each_entity_bridged_to(cls, &mut |_mod, cached, sym| {
                     if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {

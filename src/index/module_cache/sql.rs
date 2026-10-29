@@ -93,6 +93,14 @@ macro_rules! syms_half {
         )
     };
 }
+/// A gated emission's name: present in the views whose gate fires, so any
+/// probe that licenses skipping a file fails open on it. Kind- and
+/// container-blind, since `held` stores presence only.
+macro_rules! held_half {
+    ($n:literal) => {
+        concat!("EXISTS(SELECT 1 FROM held h WHERE h.name_id = ", sid!($n), " AND h.file_id = f.file_id)")
+    };
+}
 macro_rules! refs_half {
     ($n:literal) => {
         concat!("EXISTS(SELECT 1 FROM refs r WHERE r.name_id = ", sid!($n), " AND r.file_id = f.file_id)")
@@ -148,6 +156,12 @@ registry! {
             PRIMARY KEY (name_id, file_id)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file_id);
+        CREATE TABLE IF NOT EXISTS held (
+            name_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            PRIMARY KEY (name_id, file_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_held_file ON held(file_id);
         CREATE TABLE IF NOT EXISTS syms (
             file_id      INTEGER NOT NULL,
             name_id      INTEGER NOT NULL,
@@ -190,12 +204,14 @@ registry! {
     SHAPE_FILES => NoScratch, "SELECT source FROM files LIMIT 1";
     SHAPE_REFS => NoScratch, "SELECT name_id, file_id FROM refs LIMIT 1";
     SHAPE_SYMS => NoScratch, "SELECT flags, key_id FROM syms LIMIT 1";
+    SHAPE_HELD => NoScratch, "SELECT name_id, file_id FROM held LIMIT 1";
     SHAPE_REFS_DROPPED_COLUMN => Unplanned("shape probe that must FAIL to prepare on the current schema"),
         "SELECT qual_kind FROM refs LIMIT 1";
     SHAPE_CONCLUSIONS => NoScratch,
         "SELECT source_fingerprint, flush_generation FROM conclusions LIMIT 1";
     ROWS_REBUILD => Unplanned("DDL batch, once per row-format change"),
         "DROP TABLE IF EXISTS refs;
+         DROP TABLE IF EXISTS held;
          DROP TABLE IF EXISTS syms;
          DROP TABLE IF EXISTS files;
          DROP TABLE IF EXISTS strings;
@@ -214,6 +230,12 @@ registry! {
             PRIMARY KEY (name_id, file_id)
          ) WITHOUT ROWID;
          CREATE INDEX idx_refs_file ON refs(file_id);
+         CREATE TABLE held (
+            name_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            PRIMARY KEY (name_id, file_id)
+         ) WITHOUT ROWID;
+         CREATE INDEX idx_held_file ON held(file_id);
          CREATE TABLE syms (
             file_id      INTEGER NOT NULL,
             name_id      INTEGER NOT NULL,
@@ -269,7 +291,7 @@ registry! {
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);";
     DERIVED_ROWS_CLEAR => Unplanned("multi-statement hard clear, once per generation wipe"),
-        "DELETE FROM refs; DELETE FROM syms; DELETE FROM files; DELETE FROM strings; \
+        "DELETE FROM refs; DELETE FROM syms; DELETE FROM held; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces;";
     MODULES_CLEAR => NoScratch, "DELETE FROM modules";
     MODULES_CLEAR_IMPORT => NoScratch, "DELETE FROM modules WHERE source = 'import'";
@@ -277,6 +299,8 @@ registry! {
         "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
     SYMS_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives the `file_id` index prefix per import file instead of probing `files` once per syms row"),
         "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
+    HELD_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives idx_held_file per import file instead of probing `files` once per held row"),
+        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
     FILES_CLEAR_IMPORT => NoScratch, "DELETE FROM files WHERE source = 'import'";
     CONCLUSIONS_CLEAR => NoScratch, "DELETE FROM conclusions";
     BUILTINS_CLEAR => NoScratch, "DELETE FROM builtins";
@@ -380,6 +404,7 @@ registry! {
     /// ephemeral b-tree on every invalidation.
     REFS_DELETE_FILE_ID => NoScratch, "DELETE FROM refs WHERE file_id = ?1";
     SYMS_DELETE_FILE_ID => NoScratch, "DELETE FROM syms WHERE file_id = ?1";
+    HELD_DELETE_FILE_ID => NoScratch, "DELETE FROM held WHERE file_id = ?1";
     FILES_DELETE_PATH => NoScratch, "DELETE FROM files WHERE path = ?1";
     FILES_DELETE_PATH_TIER => NoScratch,
         "DELETE FROM files WHERE path = ?1 AND source = ?2";
@@ -388,6 +413,7 @@ registry! {
     /// OR IGNORE: a duplicate pair would otherwise abort the whole chunk
     /// transaction and take other files' rows with it.
     REFS_INSERT => NoScratch, "INSERT OR IGNORE INTO refs (name_id, file_id) VALUES (?1, ?2)";
+    HELD_INSERT => NoScratch, "INSERT OR IGNORE INTO held (name_id, file_id) VALUES (?1, ?2)";
     SYMS_INSERT => NoScratch,
         "INSERT INTO syms (file_id, name_id, key_id, kind, start_row, start_col, end_row,
                            end_col, container_id, flags)
@@ -400,11 +426,12 @@ registry! {
              UNION SELECT name_id FROM syms
              UNION SELECT key_id FROM syms
              UNION SELECT container_id FROM syms WHERE container_id IS NOT NULL
+             UNION SELECT name_id FROM held
          )";
-    // The candidate halves are two statements rather than one UNION, which
-    // would dedup through a temp b-tree on every `refs_to` key; the caller
-    // dedups. The refs half yields each file once by construction (the
-    // primary key is the (name, file) pair).
+    // The candidate halves are separate statements rather than one UNION,
+    // which would dedup through a temp b-tree on every `refs_to` key; the
+    // caller dedups. The refs and held halves yield each file once by
+    // construction (the primary key is the (name, file) pair).
     REF_CANDIDATES_REFS => NoScratch,
         "SELECT f.path FROM refs r
            JOIN files f ON f.file_id = r.file_id
@@ -413,6 +440,11 @@ registry! {
         "SELECT f.path FROM syms y
            JOIN files f ON f.file_id = y.file_id
           WHERE y.key_id = (SELECT str_id FROM strings WHERE s = ?1)";
+    /// A gated emission's names: present only in the views whose gate fires.
+    REF_CANDIDATES_HELD => NoScratch,
+        "SELECT f.path FROM held h
+           JOIN files f ON f.file_id = h.file_id
+          WHERE h.name_id = (SELECT str_id FROM strings WHERE s = ?1)";
     #[cfg(test)]
     REF_CANDIDATE_FILE_COUNT => NoScratch,
         "SELECT COUNT(*) FROM refs
@@ -422,7 +454,9 @@ registry! {
         syms_half!("name_id", "?2", container), " OR ",
         syms_half!("key_id", "?2", container), " OR ",
         syms_half!("name_id", "?3", container), " OR ",
-        syms_half!("key_id", "?3", container),
+        syms_half!("key_id", "?3", container), " OR ",
+        held_half!("?2"), " OR ",
+        held_half!("?3"),
         " FROM files f WHERE f.path = ?1"
     );
     SYM_NAME_PROBE => NoScratch, concat!(
@@ -430,7 +464,9 @@ registry! {
         syms_half!("name_id", "?2"), " OR ",
         syms_half!("key_id", "?2"), " OR ",
         syms_half!("name_id", "?3"), " OR ",
-        syms_half!("key_id", "?3"),
+        syms_half!("key_id", "?3"), " OR ",
+        held_half!("?2"), " OR ",
+        held_half!("?3"),
         " FROM files f WHERE f.path = ?1"
     );
     NAME_PROBE => NoScratch, concat!(
@@ -440,7 +476,9 @@ registry! {
         syms_half!("name_id", "?2"), " OR ",
         syms_half!("key_id", "?2"), " OR ",
         syms_half!("name_id", "?3"), " OR ",
-        syms_half!("key_id", "?3"),
+        syms_half!("key_id", "?3"), " OR ",
+        held_half!("?2"), " OR ",
+        held_half!("?3"),
         " FROM files f WHERE f.path = ?1"
     );
     /// Every workspace-tier symbol row; the non-ASCII workspace/symbol query
@@ -464,6 +502,10 @@ registry! {
             AND n.s LIKE '%' || ?1 || '%' ESCAPE '\\'";
     REF_NAMES_ALL => NoScratch,
         "SELECT DISTINCT s.s FROM refs r JOIN strings s ON s.str_id = r.name_id";
+    /// The heatmap prune's held half: a gated emission's refs reference their
+    /// names in the views whose gate fires. The caller unions it in.
+    REF_NAMES_HELD => NoScratch,
+        "SELECT DISTINCT s.s FROM held h JOIN strings s ON s.str_id = h.name_id";
     /// Against the KEY: refs are keyed by `Ref::match_key`, so comparing them
     /// to a symbol's display name is what let the two families drift apart.
     /// A no-op for the rows this view gates on (an `@EXPORT` name is bare).
@@ -478,17 +520,24 @@ registry! {
                   SELECT 1 FROM refs r
                    WHERE r.name_id = y.key_id
                      AND r.file_id != y.file_id
+                )
+            AND NOT EXISTS (
+                  SELECT 1 FROM held h
+                   WHERE h.name_id = y.key_id
+                     AND h.file_id != y.file_id
                 )";
 
     // ---- `--gc-cache` report ----
     GC_COUNT_FILES => NoScratch, "SELECT COUNT(*) FROM files";
     GC_COUNT_REFS => NoScratch, "SELECT COUNT(*) FROM refs";
     GC_COUNT_SYMS => NoScratch, "SELECT COUNT(*) FROM syms";
+    GC_COUNT_HELD => NoScratch, "SELECT COUNT(*) FROM held";
     GC_COUNT_STRINGS => NoScratch, "SELECT COUNT(*) FROM strings";
     GC_COUNT_ORPHANED_STRINGS => NoScratch,
         "SELECT COUNT(*) FROM strings s WHERE NOT EXISTS(SELECT 1 FROM refs r WHERE r.name_id=s.str_id) \
              AND NOT EXISTS(SELECT 1 FROM syms y WHERE y.name_id=s.str_id OR y.key_id=s.str_id \
-                            OR y.container_id=s.str_id)";
+                            OR y.container_id=s.str_id) \
+             AND NOT EXISTS(SELECT 1 FROM held h WHERE h.name_id=s.str_id)";
     GC_COUNT_WORKSPACE_FILES => NoScratch,
         "SELECT COUNT(*) FROM files f WHERE f.source='workspace'";
 }
