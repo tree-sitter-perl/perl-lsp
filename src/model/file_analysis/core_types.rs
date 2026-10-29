@@ -35,7 +35,7 @@ pub(crate) mod point_opt_serde {
 
 // ---- Shared types ----
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     #[serde(with = "PointDef")]
     pub start: Point,
@@ -87,7 +87,7 @@ pub enum FoldKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ScopeId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct SymbolId(pub u32);
 
 // ---- Scope ----
@@ -1524,7 +1524,7 @@ impl Ref {
     /// Whether matching this ref against a target consults only the frozen
     /// build-time verdict on the ref itself. `false` means the matcher's
     /// fallback arm re-derives the verdict at query time through this FILE's
-    /// witness bag (`method_call_invocant_class` on an unstamped method
+    /// witness bag (`method_call_invocant_classes` on an unstamped method
     /// call / `deferred_hash_key_owner` on an unowned or variable-owned
     /// key), so a bag-stripped `refs_present` view could silently drop the
     /// site — the caller upgrades that file to `whole_present` instead.
@@ -1710,10 +1710,75 @@ pub fn sym_kind_code(k: &SymKind) -> u8 {
     }
 }
 
+/// The classes a member access may dispatch on — one per value its
+/// receiver may be, deduplicated in arm order. A union receiver has
+/// several; nothing pins an empty one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiverClasses(Vec<String>);
+
+impl ReceiverClasses {
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, class: &str) -> bool {
+        self.0.iter().any(|c| c == class)
+    }
+
+    /// The class, when the receiver can only be one. For a consumer whose
+    /// answer IS one class (a frozen edge, an owner key); each caller says
+    /// why at its call. A union has none.
+    pub fn single(&self) -> Option<&str> {
+        match self.0.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    pub fn push(&mut self, class: String) {
+        if !self.contains(&class) {
+            self.0.push(class);
+        }
+    }
+}
+
+impl FromIterator<String> for ReceiverClasses {
+    fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Self {
+        let mut out = ReceiverClasses::default();
+        for c in it {
+            out.push(c);
+        }
+        out
+    }
+}
+
+impl IntoIterator for ReceiverClasses {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// How far a receiver's classes reach past what its value states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverPolicy {
+    /// Navigation: a conventional invocant (`$self`) whose value names no
+    /// class still dispatches on the enclosing class.
+    Navigate,
+    /// Only what the value states: a diagnostic must not warn about a
+    /// class the code never named.
+    Stated,
+}
+
 /// Build-time-resolved dispatch target for a `MethodCall` ref.
 /// `invocant_class` is the class the invocant resolved to at build time
 /// (frozen); it drives the inheritance rename-chain match in `refs_to`,
-/// replacing the query-time `method_call_invocant_class` re-derivation.
+/// replacing the query-time `method_call_invocant_classes` re-derivation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MethodTarget {
     /// Method found on a local symbol in this file (via the ancestor walk).
@@ -1804,7 +1869,7 @@ pub enum RefKind {
     /// Method call site `$obj->m(...)` / `Class->m(...)` /
     /// `chain()->m(...)`. **Invocant class is NOT cached on the
     /// variant** — it's resolved on demand via
-    /// `FileAnalysis::method_call_invocant_class(ref, module_index)`,
+    /// `FileAnalysis::method_call_invocant_classes(ref, module_index)`,
     /// which dispatches by invocant shape (variable / chain receiver /
     /// function-call receiver / bareword / `__PACKAGE__` / `shift` /
     /// `$_[0]`) and queries the witness bag. This is intentional:
@@ -1819,7 +1884,7 @@ pub enum RefKind {
     MethodCall {
         invocant: crate::model::conventions::Invocant,
         /// Span of the invocant node. Used by
-        /// `method_call_invocant_class` to find an inner-receiver
+        /// `method_call_invocant_classes` to find an inner-receiver
         /// ref via `RefTable::call_at_start` (chain dispatch).
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).

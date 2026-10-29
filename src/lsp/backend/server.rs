@@ -1054,20 +1054,19 @@ impl LanguageServer for Backend {
             // edits. Accepting on any `symbol_at`/`ref_at` hit is a UX trap:
             // positions like `@_` or an ownerless constructor key resolve to
             // nothing renameable, so the user gets a box that silently no-ops.
-            // `renameable()` mirrors `rename_edits`' arms on the same set
-            // (incl. the pack probe: a rename the set would refuse or no-op on
-            // offers no box), so this gate tracks new renameable kinds
-            // automatically, with no change here.
+            // `renameable()` IS the rename probed on the same set, so this
+            // gate tracks new renameable kinds automatically, and a rename
+            // that would refuse says why here, before a name is typed.
             let cs = cx.set(cx.lookup(), &analysis, &uri, point, scope);
-            if !cs.renameable() {
-                return None;
+            if !cs.renameable().map_err(tower_lsp::jsonrpc::Error::invalid_params)? {
+                return Ok(None);
             }
-            box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
+            Ok(box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
                 range: symbols::span_to_range(span),
                 placeholder,
-            })
+            }))
         })
-        .await
+        .await?
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {

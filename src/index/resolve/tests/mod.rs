@@ -8,3 +8,4 @@ mod groups_tests;
 mod candidate_set_tests;
 
 mod projection_consistency_tests;
+mod union_nav_tests;

@@ -9,7 +9,7 @@ fn calls(fa: &FileAnalysis, name: &str) -> Vec<(usize, Option<String>)> {
     fa.refs()
         .iter()
         .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == name)
-        .map(|r| (r.span.start.row, fa.method_call_invocant_class(r, None)))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_classes(r, None).single().map(str::to_string)))
         .collect()
 }
 

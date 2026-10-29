@@ -55,6 +55,59 @@ impl FileAnalysis {
             .map(|(_, v)| v.clone())
     }
 
+    /// Hover for `mname` dispatched on `cn`; `via` names the dynamic method
+    /// variable it was reached through (`$self->$via()`).
+    fn method_hover_on(
+        &self,
+        cn: &str,
+        mname: &str,
+        via: Option<&str>,
+        source: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
+        let class_label = |defining: &str| {
+            let class = if defining != cn { format!("{} (from {})", cn, defining) } else { cn.to_string() };
+            match via {
+                Some(v) => format!("{} — resolved from `{}`", class, v),
+                None => class,
+            }
+        };
+        match self.resolve_method_in_ancestors(cn, mname, module_index) {
+            Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
+                let sym = self.symbol(sym_id);
+                let line = source_line_at(source, sym.selection_span.start.row);
+                let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label(defining_class));
+                if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None).filter(InferredType::is_known) {
+                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
+                }
+                if let SymbolDetail::Sub { doc: Some(ref d), .. } = sym.detail {
+                    text.push_str(&format!("\n\n{}", d));
+                }
+                Some(text)
+            }
+            Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
+                let idx = module_index?;
+                // Bridged helper lives in `def_module`; real inherited method
+                // in `class`'s own module. Either name maps to a SET of files —
+                // the definer may be a losing candidate.
+                let module = def_module.as_deref().unwrap_or(class.as_str());
+                let cached = idx.candidate_defining_sub_in_package(module, class, mname)?;
+                let whole = idx.bag_present(&cached);
+                let sub_info = whole.sub_info_view(mname)?;
+                let sig = format_cross_file_signature(mname, &sub_info);
+                let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label(class));
+                if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
+                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
+                }
+                if let Some(doc) = sub_info.doc() {
+                    text.push_str(&format!("\n\n{}", doc));
+                }
+                Some(text)
+            }
+            None => None,
+        }
+    }
+
     /// Hover info: return display text for the symbol at cursor.
     pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Option<String> {
         // Check refs first
@@ -76,56 +129,15 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let class_name = self.method_call_invocant_class(mr, module_index);
                             let mname = mr.unqualified_target_name(self.names());
-                            if let Some(ref cn) = class_name {
-                                match self.resolve_method_in_ancestors(cn, mname, module_index) {
-                                    Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
-                                        let sym = self.symbol(sym_id);
-                                        let line = source_line_at(source, sym.selection_span.start.row);
-                                        let class_label = if defining_class != cn {
-                                            format!("{} (from {})", cn, defining_class)
-                                        } else {
-                                            cn.to_string()
-                                        };
-                                        let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
-                                        if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None).filter(InferredType::is_known) {
-                                            text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                                        }
-                                        if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
-                                            if let Some(ref d) = doc {
-                                                text.push_str(&format!("\n\n{}", d));
-                                            }
-                                        }
-                                        return Some(text);
-                                    }
-                                    Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
-                                        if let Some(idx) = module_index {
-                                            // Bridged helper lives in `def_module`; real
-                                            // inherited method in `class`'s own module.
-                                            // Either name maps to a SET of files — the
-                                            // definer may be a losing candidate.
-                                            let module = def_module.as_deref().unwrap_or(class.as_str());
-                                            if let Some(cached) =
-                                                idx.candidate_defining_sub_in_package(module, class, mname)
-                                            {
-                                                let whole = idx.bag_present(&cached);
-                                                if let Some(sub_info) = whole.sub_info_view(mname) {
-                                                    let sig = format_cross_file_signature(mname, &sub_info);
-                                                    let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
-                                                    if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
-                                                        text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                                                    }
-                                                    if let Some(doc) = sub_info.doc() {
-                                                        text.push_str(&format!("\n\n{}", doc));
-                                                    }
-                                                    return Some(text);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => {}
-                                }
+                            // One section per class the receiver may be.
+                            let sections: Vec<String> = self
+                                .receiver_classes(mr, module_index)
+                                .iter()
+                                .filter_map(|cn| self.method_hover_on(cn, mname, Some(&r.target_name), source, module_index))
+                                .collect();
+                            if !sections.is_empty() {
+                                return Some(sections.join("\n\n---\n\n"));
                             }
                         }
                     }
@@ -195,60 +207,16 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    // Single-source the invocant class off the frozen
-                    // dispatch edge (NAV unification) — same edge find_def /
-                    // refs_to read, so hover never diverges.
-                    let class_name = r.method_target().map(|t| t.invocant_class().to_string());
-                    // The bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
+                    // One section per class the receiver may be, from the
+                    // same receiver projection find_def / refs_to read.
                     let method = r.unqualified_target_name(self.names());
-                    if let Some(ref cn) = class_name {
-                        match self.resolve_method_in_ancestors(cn, method, module_index) {
-                            Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
-                                let sym = self.symbol(sym_id);
-                                let line = source_line_at(source, sym.selection_span.start.row);
-                                let class_label = if defining_class != cn {
-                                    format!("{} (from {})", cn, defining_class)
-                                } else {
-                                    cn.to_string()
-                                };
-                                let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label);
-                                if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None).filter(InferredType::is_known) {
-                                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                                }
-                                return Some(text);
-                            }
-                            Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
-                                if let Some(idx) = module_index {
-                                    // Bridged helper lives in `def_module`; real
-                                    // inherited method in `class`'s own module.
-                                    // Either name maps to a SET of files — the
-                                    // definer may be a losing candidate.
-                                    let module = def_module.as_deref().unwrap_or(class.as_str());
-                                    if let Some(cached) =
-                                        idx.candidate_defining_sub_in_package(module, class, method)
-                                    {
-                                        let whole = idx.bag_present(&cached);
-                                        if let Some(sub_info) = whole.sub_info_view(method) {
-                                            let class_label = if class != cn {
-                                                format!("{} (from {})", cn, class)
-                                            } else {
-                                                cn.to_string()
-                                            };
-                                            let sig = format_cross_file_signature(method, &sub_info);
-                                            let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
-                                            if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
-                                                text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                                            }
-                                            if let Some(doc) = sub_info.doc() {
-                                                text.push_str(&format!("\n\n{}", doc));
-                                            }
-                                            return Some(text);
-                                        }
-                                    }
-                                }
-                            }
-                            None => {}
-                        }
+                    let sections: Vec<String> = self
+                        .receiver_classes(r, module_index)
+                        .iter()
+                        .filter_map(|cn| self.method_hover_on(cn, method, None, source, module_index))
+                        .collect();
+                    if !sections.is_empty() {
+                        return Some(sections.join("\n\n---\n\n"));
                     }
                     // Fallback
                     for &sid in self.symbols_named(method) {
@@ -259,33 +227,28 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::FieldAccess { .. } => {
-                    let cn = r.method_target().map(|t| t.invocant_class().to_string());
                     let member = r.unqualified_target_name(self.names());
-                    if let Some(ref cn) = cn {
-                        match self.resolve_field_in_ancestors(cn, member, module_index) {
-                            Some(MethodResolution::Local { sym_id, .. }) => {
-                                let sym = self.symbol(sym_id);
-                                return Some(self.format_symbol_hover(sym, source, module_index));
-                            }
-                            Some(MethodResolution::CrossFile { ref class, .. }) => {
-                                let idx = module_index?;
-                                for cached in idx.visible_def_candidates(class) {
-                                    let whole = idx.whole_present(&cached);
-                                    let Some(sym) = whole.symbols().iter().find(|s| {
-                                        !matches!(s.kind, SymKind::Sub | SymKind::Method)
-                                            && s.name == member
-                                            && s.package.as_deref() == Some(class.as_str())
-                                            && whole.symbol_is_class_content(s)
-                                    }) else {
-                                        continue;
-                                    };
-                                    return Some(whole.format_symbol_hover(sym, "", Some(idx)));
-                                }
-                            }
-                            None => {}
+                    let on = |cn: &str| match self.resolve_field_in_ancestors(cn, member, module_index)? {
+                        MethodResolution::Local { sym_id, .. } => {
+                            Some(self.format_symbol_hover(self.symbol(sym_id), source, module_index))
                         }
-                    }
-                    return None;
+                        MethodResolution::CrossFile { ref class, .. } => {
+                            let idx = module_index?;
+                            idx.visible_def_candidates(class).into_iter().find_map(|cached| {
+                                let whole = idx.whole_present(&cached);
+                                let sym = whole.symbols().iter().find(|s| {
+                                    !matches!(s.kind, SymKind::Sub | SymKind::Method)
+                                        && s.name == member
+                                        && s.package.as_deref() == Some(class.as_str())
+                                        && whole.symbol_is_class_content(s)
+                                })?;
+                                Some(whole.format_symbol_hover(sym, "", Some(idx)))
+                            })
+                        }
+                    };
+                    let sections: Vec<String> =
+                        self.receiver_classes(r, module_index).iter().filter_map(on).collect();
+                    return (!sections.is_empty()).then(|| sections.join("\n\n---\n\n"));
                 }
                 RefKind::PackageRef => {
                     let identity = self.spelled_identity(r);
