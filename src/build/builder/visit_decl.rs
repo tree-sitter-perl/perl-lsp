@@ -152,7 +152,7 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Binary operators → type constraints on variable operands
+            // Binary operators → use observations on variable operands
             "binary_expression" => {
                 self.infer_binary_op_type(node);
                 self.queue_children(node);

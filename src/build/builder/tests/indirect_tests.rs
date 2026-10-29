@@ -276,3 +276,17 @@ fn a_view_links_the_dispatch_calls_it_installs_to_their_handlers() {
         .expect("the installed dispatch call");
     assert_eq!(call.resolved_symbol(), Some(handler));
 }
+#[test]
+fn a_local_new_on_an_unnamed_indexed_class_is_a_method_call() {
+    // Foswiki PageCache.pm: the enclosing package has its own `sub new` and
+    // never names `Foswiki::Meta`, so only the index knows the stash exists.
+    let meta = "package Foswiki::Meta;\nsub new { bless {}, shift }\n1;\n";
+    let site = "package Foswiki::PageCache;\nsub new { bless {}, shift }\nsub go {\n    my $t = new Foswiki::Meta(1);\n    return;\n}\n";
+    assert_eq!(decide(site, &[("/tmp/qa_ind/Foswiki/Meta.pm", meta)]), (Verdict::Yes, "method"));
+    let fa = build_fa(site);
+    let idx = ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(std::path::PathBuf::from("/tmp/qa_ind/Foswiki/Meta.pm"), build_fa(meta));
+    let call = Span { start: Point::new(3, 12), end: Point::new(3, 32) };
+    let view = fa.decided_with(&idx).expect("the index moves the site off its fallback");
+    assert_eq!(view.expr_type_at_span(call, Some(&idx)), Some(InferredType::ClassName("Foswiki::Meta".into())));
+}

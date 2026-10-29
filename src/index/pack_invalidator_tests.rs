@@ -389,7 +389,7 @@ fn class_names(pack: &ModuleIndex, path: &Path) -> Vec<String> {
     pack.for_each_registered_file(&mut |cm| {
         if cm.path == path {
             names = cm
-                .analysis
+                .analysis()
                 .symbols()
                 .iter()
                 .filter(|s| s.kind == crate::model::file_analysis::SymKind::Class)

@@ -424,3 +424,16 @@ fn fold_converges_on_self_recursive_call_binding() {
         "settled answer changed under an extra fold pass"
     );
 }
+
+/// An operand use is not a value: `int($c)` and `$c + 0` reveal how `$c`
+/// is used, and must not outrank the string `$c` was assigned.
+#[test]
+fn operand_uses_do_not_outrank_the_assigned_value() {
+    let src = "sub f {\n    my ($s) = @_;\n    my $c = $s . \"\";\n    my $n = int($c);\n    my $m = $c + 0;\n    return $c;\n}\n";
+    let tree = parse(src);
+    let fa = crate::build::builder::build(&tree, src.as_bytes());
+    let at = tree_sitter::Point { row: 5, column: 12 };
+    assert_eq!(fa.inferred_type_via_bag("$c", at), Some(InferredType::String));
+    // With no value in hand, the use still answers.
+    assert_eq!(fa.inferred_type_via_bag("$s", at), Some(InferredType::String));
+}

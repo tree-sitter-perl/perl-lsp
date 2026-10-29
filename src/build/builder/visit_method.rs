@@ -31,10 +31,10 @@ impl<'a> Builder<'a> {
                 );
             }
         }
-        // Push type constraint on the argument
-        if let Some(arg_type) = crate::model::builtins::builtin_first_arg_type(name) {
+        // A known builtin observes how its argument is used
+        if let Some(arg_use) = crate::model::builtins::builtin_first_arg_use(name) {
             if let Some(arg) = node.named_child(0) {
-                self.push_var_type_constraint(arg, node, arg_type);
+                self.push_use_observation(arg, node, arg_use);
             }
         }
         self.queue_children(node);

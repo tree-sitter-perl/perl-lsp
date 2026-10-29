@@ -434,7 +434,7 @@ fn a_same_leaf_class_never_competes_with_the_identity() {
         ("pkg/views.py", "from pkg.models import User\n\nclass Admin(User):\n    pass\n"),
     ]);
     assert_eq!(idx.leaf_def_candidates("User").len(), 2, "the leaf is registered");
-    assert!(idx.def_candidates("User").is_empty(), "and answers no name lookup");
+    assert!(idx.def_candidates("User").read().is_empty(), "and answers no name lookup");
     let views = t.0.join("pkg/views.py");
     for at in [Point::new(0, 23), Point::new(2, 12)] {
         let (defs, hover, labels) = landing(&idx, &views, at);

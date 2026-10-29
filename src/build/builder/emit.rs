@@ -1319,6 +1319,18 @@ impl<'a> Builder<'a> {
     /// answers, so `my $r = maybe(); $r->[0]` keeps the `Optional` its
     /// writer's edge carries.
     pub(super) fn push_rep_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, rep: TypeObservation) {
+        self.push_observation(operand, context_node, rep, "deref_access");
+    }
+
+    /// An operator or builtin argument reveals how the operand is USED, not
+    /// what it holds: `my $s = f(); int($s)` must not let the later use
+    /// outrank `$s`'s value, so the use is an observation the fold projects
+    /// only when no value answers.
+    pub(super) fn push_use_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, obs: TypeObservation) {
+        self.push_observation(operand, context_node, obs, "operand_use");
+    }
+
+    fn push_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, obs: TypeObservation, tag: &str) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         if operand.kind() != "scalar" {
             return;
@@ -1326,8 +1338,8 @@ impl<'a> Builder<'a> {
         let Ok(text) = operand.utf8_text(self.source) else { return };
         self.bag.push(Witness {
             attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
-            source: WitnessSource::Builder("deref_access".into()),
-            payload: WitnessPayload::Observation(rep),
+            source: WitnessSource::Builder(tag.into()),
+            payload: WitnessPayload::Observation(obs),
             span: node_to_span(context_node),
         });
     }
@@ -1352,54 +1364,40 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// Infer types from binary operator expressions.
+    /// Operand uses of binary operator expressions.
     pub(super) fn infer_binary_op_type(&mut self, node: Node<'a>) {
         let op = self.get_operator_text(node);
-        match op.as_deref() {
-            // Numeric operators: both operands are Numeric
-            Some("+" | "-" | "*" | "/" | "%" | "**") => {
-                for i in 0..node.named_child_count() {
-                    if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::Numeric);
-                    }
-                }
-            }
-            // String operators: both operands are String
-            Some("." | "x") => {
-                for i in 0..node.named_child_count() {
-                    if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::String);
-                    }
-                }
-            }
-            // Regex match: LHS is String, RHS is Regexp
+        let both = match op.as_deref() {
+            Some("+" | "-" | "*" | "/" | "%" | "**") => TypeObservation::NumericUse,
+            Some("." | "x") => TypeObservation::StringUse,
             Some("=~" | "!~") => {
                 if let Some(lhs) = crate::cst::nth_element(node, 0) {
-                    self.push_var_type_constraint(lhs, node, InferredType::String);
+                    self.push_use_observation(lhs, node, TypeObservation::StringUse);
                 }
                 if let Some(rhs) = crate::cst::nth_element(node, 1) {
-                    self.push_var_type_constraint(rhs, node, InferredType::Regexp);
+                    self.push_use_observation(rhs, node, TypeObservation::RegexpUse);
                 }
+                return;
             }
-            _ => {}
+            _ => return,
+        };
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                self.push_use_observation(child, node, both.clone());
+            }
         }
     }
 
-    /// Infer types from comparison operators (equality_expression, relational_expression).
+    /// Operand uses of comparison operators (equality_expression, relational_expression).
     pub(super) fn infer_comparison_type(&mut self, node: Node<'a>) {
-        let op = self.get_operator_text(node);
-        let inferred = match op.as_deref() {
-            // Numeric comparisons
-            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(InferredType::Numeric),
-            // String comparisons
-            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(InferredType::String),
-            _ => None,
+        let obs = match self.get_operator_text(node).as_deref() {
+            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => TypeObservation::NumericUse,
+            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => TypeObservation::StringUse,
+            _ => return,
         };
-        if let Some(it) = inferred {
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    self.push_var_type_constraint(child, node, it.clone());
-                }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                self.push_use_observation(child, node, obs.clone());
             }
         }
     }

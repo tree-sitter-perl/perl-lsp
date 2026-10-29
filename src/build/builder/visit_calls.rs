@@ -428,10 +428,10 @@ impl<'a> Builder<'a> {
                     };
                     self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
-                // Push type constraints on arguments of known builtins
-                if let Some(arg_type) = crate::model::builtins::builtin_first_arg_type(name) {
+                // A known builtin observes how its first argument is used
+                if let Some(arg_use) = crate::model::builtins::builtin_first_arg_use(name) {
                     if let Some(first_arg) = self.first_call_arg(node) {
-                        self.push_var_type_constraint(first_arg, node, arg_type);
+                        self.push_use_observation(first_arg, node, arg_use);
                     }
                 }
                 // `bless $self, $class` promotes $self to ClassName($class)

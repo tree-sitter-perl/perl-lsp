@@ -2955,7 +2955,7 @@ fn unknown_return_is_not_displayed() {
     // no return rather than `→ unknown`.
     let fa = build_fa_from_source(
         "package Foo;\n\
-         sub fix { my ($s) = @_; $s = '' if $s eq 'x'; return $s; }\n\
+         sub fix { my ($s) = @_; $s = '' unless $s; return $s; }\n\
          sub a { my $t = shift; fix($t->{k}) }\n\
          1;\n",
     );

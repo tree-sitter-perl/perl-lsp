@@ -610,7 +610,7 @@ fn a_same_leaf_class_never_competes_with_the_identity() {
     let user = ("/fake/php/App/User.php", "<?php\nnamespace App;\nuse Lib\\Model;\nclass User extends Model {}\n");
     let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, user]);
     assert_eq!(idx.leaf_def_candidates("Model").len(), 2, "the leaf is registered");
-    assert!(idx.def_candidates("Model").is_empty(), "and answers no name lookup");
+    assert!(idx.def_candidates("Model").read().is_empty(), "and answers no name lookup");
     for at in [Point::new(2, 8), Point::new(3, 19)] {
         let (defs, hover) = php_landing(&idx, user.0, at);
         assert_eq!(defs, [("Lib/Model.php".to_string(), 2, None)], "goto-def from {at:?}");
