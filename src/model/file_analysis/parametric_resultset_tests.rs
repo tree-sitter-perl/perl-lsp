@@ -269,7 +269,7 @@ $rs->SUPER::search({{ name => 'X' }});
         .iter()
         .find(|r| r.target_name == "SUPER::search")
         .expect("SUPER::search MethodCall ref");
-    assert_eq!(fa.method_call_invocant_class(super_ref, None), None);
+    assert_eq!(fa.method_call_invocant_classes(super_ref, None).single().map(str::to_string), None);
 }
 
 /// (e) **Receiver dispatch unchanged**. `$rs->all()` and
@@ -441,7 +441,7 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
 /// resolve through a REAL stamped `resolved_method_target` edge — not
 /// the deleted same-name fallback. The receiver of `->name` is the
 /// `find` method call (a chained method return, not a variable);
-/// `method_call_invocant_class` resolves it via `expr_type_at_span`
+/// `method_call_invocant_classes` resolves it via `expr_type_at_span`
 /// (RowOf projection over the parametric `find` receiver) and freezes a
 /// `Local` edge to the Row accessor. Pins that the edge is present so
 /// the fallback's removal is provably safe; goto-def + references both
@@ -1112,7 +1112,7 @@ my $x = $schema->resultset('Artist')->first->cds;
         .iter()
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "cds")
         .expect("->cds ref");
-    let cn = consumer.method_call_invocant_class(cds_ref, Some(&idx));
+    let cn = consumer.method_call_invocant_classes(cds_ref, Some(&idx)).single().map(str::to_string);
     assert_eq!(
         cn.as_deref(),
         Some("MyApp::Schema::Result::Artist"),
@@ -1153,7 +1153,7 @@ my $x = $schema->resultset('SourceNameArtists')->first->cds;
         .iter()
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "cds")
         .expect("->cds ref");
-    let cn = consumer.method_call_invocant_class(cds_ref, Some(&idx));
+    let cn = consumer.method_call_invocant_classes(cds_ref, Some(&idx)).single().map(str::to_string);
     assert_eq!(
         cn.as_deref(),
         Some("MyApp::Schema::Result::ArtistSourceName"),

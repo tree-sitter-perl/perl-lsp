@@ -135,6 +135,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
         module_index: None,
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
+        lattice: crate::model::conventions::lattice_for(&fa.language),
     };
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,
@@ -168,11 +169,13 @@ fn slot_type_two_agreeing_writes() {
 }
 
 #[test]
-fn slot_type_two_disagreeing_writes_none() {
+fn slot_type_two_disagreeing_writes_union() {
     let src = "package Foo;\nsub a {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub b {\n  my $self = shift;\n  $self->{h} = Other->new;\n}\n";
     let fa = build_fa(src);
-    // Disagreeing writes → honest None (no guess).
-    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+    // Disagreeing writes → the union of the written classes.
+    let t = slot_type(&fa, "Foo", "h").expect("disagreeing writes fold to their union");
+    let InferredType::Union(arms) = &t else { panic!("expected a union, got {t:?}") };
+    assert_eq!(arms.iter().filter_map(|a| a.class_name()).collect::<Vec<_>>(), ["Helper", "Other"]);
 }
 
 #[test]
@@ -324,7 +327,7 @@ ${$ref}->other;
     };
     assert_eq!(invocant.text(), "$sner");
     assert_eq!(
-        fa.method_call_invocant_class(thing, None).as_deref(),
+        fa.method_call_invocant_classes(thing, None).single().map(str::to_string).as_deref(),
         Some("Foo"),
         "braced spelling resolves through the variable's type",
     );
@@ -360,7 +363,7 @@ $c->bump;
         .find(|r| r.target_name == "bump" && matches!(r.kind, RefKind::MethodCall { .. }))
         .expect("MethodCall ref for bump");
     assert_eq!(
-        fa.method_call_invocant_class(bump, None).as_deref(),
+        fa.method_call_invocant_classes(bump, None).single().map(str::to_string).as_deref(),
         Some("Counter"),
         "const-folded invocant should dispatch on Counter",
     );
@@ -1486,4 +1489,22 @@ sub s10 { my $d = {}; run(sub { $d->{Name} = 1; }); print $d->{Name}; }
     let typos: Vec<(String, u32)> =
         fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
     assert_eq!(typos, vec![("Name".to_string(), 8), ("typo".to_string(), 9)]);
+}
+
+/// A fallback floor written against a value nothing types says what kind
+/// of value the author expects, not that it is the empty literal: `$o->{y}
+/// // {}` may hold any keys (98_Modbus.pm, TablePlugin Core.pm).
+#[test]
+fn a_floor_against_an_unseen_value_is_an_open_shape() {
+    let src = "\
+package Foo;
+sub a { my ($o) = @_; my $x = $o->{y} // {}; print $x->{k}; }
+sub b { my ($o) = @_; my $x = $o->{y} || {}; print $x->{k}; }
+sub c { my $x = {}; print $x->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 3)]);
 }
