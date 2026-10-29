@@ -127,6 +127,10 @@ asks `.single()` and says why at the call. Every other consumer iterates:
   pack visibility identity); one class answers itself, several answer
   one `Group`, so references and rename reach every arm;
 - goto-def offers each arm's definition; hover shows a section per arm;
+- signature help offers each arm's signature, and an argument slot
+  expects the join of the arms' parameter types;
+- a plugin query hook's call frame carries the receiver as the join of
+  its classes;
 - the reference matcher counts a union site as a use of each arm's
   member, so `Cat::sound`'s references include `$pet->sound` on
   `Cat|Bird`;

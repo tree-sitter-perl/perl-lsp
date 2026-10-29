@@ -279,13 +279,7 @@ impl FileAnalysis {
         classes: &ReceiverClasses,
         members_of: impl Fn(&str) -> Vec<CompletionCandidate>,
     ) -> Vec<CompletionCandidate> {
-        let mut per_class = classes.iter().map(members_of);
-        let Some(mut out) = per_class.next() else { return Vec::new() };
-        for other in per_class {
-            let labels: HashSet<String> = other.into_iter().map(|c| c.label).collect();
-            out.retain(|c| labels.contains(&c.label));
-        }
-        out
+        shared_candidates(classes.iter().map(members_of))
     }
 
     /// Complete methods for a known class name, walking the inheritance chain.
@@ -1326,4 +1320,16 @@ impl ScopeClasses for FileAnalysis {
             matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity
         })
     }
+}
+
+/// The candidates every list offers, by label (the first list's candidate
+/// kept): what holds whichever arm a value takes.
+pub fn shared_candidates(lists: impl IntoIterator<Item = Vec<CompletionCandidate>>) -> Vec<CompletionCandidate> {
+    let mut lists = lists.into_iter();
+    let Some(mut out) = lists.next() else { return Vec::new() };
+    for other in lists {
+        let labels: HashSet<String> = other.into_iter().map(|c| c.label).collect();
+        out.retain(|c| labels.contains(&c.label));
+    }
+    out
 }

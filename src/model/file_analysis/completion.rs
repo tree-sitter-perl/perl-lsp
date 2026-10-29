@@ -703,11 +703,12 @@ impl FileAnalysis {
         }
 
         // Find the sub definition (local or cross-file)
-        let resolved = match self.find_sub_for_call(call_name, is_method, invocant, point, module_index) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
+        // The keys every sub the call may dispatch to accepts.
+        let subs = self.find_subs_for_call(call_name, is_method, invocant, point, module_index);
+        super::class_queries::shared_candidates(subs.into_iter().map(|resolved| self.call_key_candidates(call_name, resolved, used_keys)))
+    }
 
+    fn call_key_candidates(&self, call_name: &str, resolved: ResolvedSub<'_>, used_keys: &HashSet<String>) -> Vec<CompletionCandidate> {
         match resolved {
             ResolvedSub::Local(sub_sym) => {
                 let params = match &sub_sym.detail {
@@ -790,17 +791,23 @@ impl FileAnalysis {
         }
     }
 
-    /// Resolve signature info for a call (sub/method name).
-    pub fn signature_for_call(
+    /// Signature info for a call (sub/method name): one per sub the call may
+    /// dispatch to.
+    pub fn signatures_for_call(
         &self,
         name: &str,
         is_method: bool,
         invocant: Option<&str>,
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<SignatureInfo> {
-        let resolved = self.find_sub_for_call(name, is_method, invocant, point, module_index)?;
+    ) -> Vec<SignatureInfo> {
+        self.find_subs_for_call(name, is_method, invocant, point, module_index)
+            .into_iter()
+            .filter_map(|resolved| self.signature_of(name, is_method, resolved))
+            .collect()
+    }
 
+    fn signature_of(&self, name: &str, is_method: bool, resolved: ResolvedSub<'_>) -> Option<SignatureInfo> {
         match resolved {
             ResolvedSub::Local(sub_sym) => {
                 let (params, sym_is_method) = match &sub_sym.detail {
@@ -870,17 +877,18 @@ impl FileAnalysis {
 
     // ---- Internal completion helpers ----
 
-    /// Find a sub/method by name, optionally scoped to a class.
-    /// Returns `ResolvedSub::Local` for same-file symbols, or `ResolvedSub::CrossFile`
+    /// Find a sub/method by name, optionally scoped to the classes its receiver
+    /// may be: one per class that defines it, else the name fallbacks.
+    /// `ResolvedSub::Local` for same-file symbols, `ResolvedSub::CrossFile`
     /// for inherited methods and imported functions found via `ModuleIndex`.
-    fn find_sub_for_call<'s>(
+    fn find_subs_for_call<'s>(
         &'s self,
         name: &str,
         is_method: bool,
         invocant: Option<&str>,
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<ResolvedSub<'s>> {
+    ) -> Vec<ResolvedSub<'s>> {
         let scope = self.scope_at(point).unwrap_or(ScopeId(0));
         // A fully-qualified / SUPER call token (`$o->Foo::Bar::m`, `SUPER::m`)
         // names its dispatch class explicitly — split it so lookups use the
@@ -903,33 +911,30 @@ impl FileAnalysis {
             _ => ReceiverClasses::default(),
         };
 
-        // Try inheritance-aware class-scoped lookup first, on each class the
-        // receiver may be; the first that defines the sub answers.
-        for cn in classes.iter() {
-            match self.resolve_method_in_ancestors(cn, name, module_index) {
-                Some(MethodResolution::Local { sym_id, .. }) => {
-                    return Some(ResolvedSub::Local(self.symbol(sym_id)));
+        // Inheritance-aware class-scoped lookup first: the sub each class the
+        // receiver may be dispatches to, one per arm that defines it.
+        let per_class: Vec<ResolvedSub<'s>> = classes
+            .iter()
+            .filter_map(|cn| match self.resolve_method_in_ancestors(cn, name, module_index)? {
+                MethodResolution::Local { sym_id, .. } => Some(ResolvedSub::Local(self.symbol(sym_id))),
+                MethodResolution::CrossFile { ref class, .. } => {
+                    // Symbol-disambiguated: the candidate defining `name`.
+                    let idx = module_index?;
+                    let cached = idx.candidate_defining_sub(class, name)?;
+                    let whole = idx.bag_present(&cached);
+                    whole.sub_info_view(name).map(|sub_info| cross_file_resolved(&sub_info))
                 }
-                Some(MethodResolution::CrossFile { ref class, .. }) => {
-                    if let Some(idx) = module_index {
-                        // Symbol-disambiguated: the candidate defining `name`.
-                        if let Some(cached) = idx.candidate_defining_sub(class, name) {
-                            let whole = idx.bag_present(&cached);
-                            if let Some(sub_info) = whole.sub_info_view(name) {
-                                return Some(cross_file_resolved(&sub_info));
-                            }
-                        }
-                    }
-                }
-                None => {}
-            }
+            })
+            .collect();
+        if !per_class.is_empty() {
+            return per_class;
         }
 
         // Fallback: any local sub/method with that name
         for &sid in self.symbols_named(name) {
             let sym = self.symbol(sid);
             if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                return Some(ResolvedSub::Local(sym));
+                return vec![ResolvedSub::Local(sym)];
             }
         }
 
@@ -964,14 +969,14 @@ impl FileAnalysis {
                     {
                         let whole = idx.bag_present(&cached);
                         if let Some(sub_info) = whole.sub_info_view(&remote) {
-                            return Some(cross_file_resolved(&sub_info));
+                            return vec![cross_file_resolved(&sub_info)];
                         }
                     }
                 }
             }
         }
 
-        None
+        Vec::new()
     }
 
     /// Resolve a variable text to a HashKeyOwner for hash key completion.
