@@ -14,7 +14,7 @@ use super::*;
 /// Field reads go through the named borrows. The `analysis` handle exists
 /// ONLY for the derived queries whose conclusions land in projected values
 /// (`symbol_return_type_via_bag`, `is_linkage_visible`,
-/// `symbol_is_class_content`) — never for direct field access, which would
+/// `symbol_is_class_content`, `gated_candidates`, `bridge_classes`) — never for direct field access, which would
 /// bypass the classification gate.
 pub struct SurfaceFeed<'a> {
     pub symbols: &'a [Symbol],
@@ -26,7 +26,6 @@ pub struct SurfaceFeed<'a> {
     pub export_tags: &'a HashMap<String, Vec<String>>,
     pub reexport_modules: &'a [String],
     pub plugin_namespaces: &'a [PluginNamespace],
-    pub gated_emissions: &'a [GatedEmission],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
     pub include_directives: &'a [(Span, String)],
@@ -94,7 +93,7 @@ impl FileAnalysis {
                     loads: plugin_loads,
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
-                    gated_emissions,
+                    gated_emissions: _gated_emissions, // projected as candidates through the derived-query handle (`gated_candidates`), the mint the rows read
                     meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 
@@ -157,7 +156,6 @@ impl FileAnalysis {
             export_tags,
             reexport_modules,
             plugin_namespaces,
-            gated_emissions,
             app_surface_consumers,
             macro_defs,
             include_directives,

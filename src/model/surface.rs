@@ -81,13 +81,13 @@ pub struct ValueSurface {
     pub kind: u8,
 }
 
-/// One [`GatedEmission`](crate::model::file_analysis::GatedEmission), span-free:
-/// its gate and the members it adds (`on_class` when not the package).
+/// One member a [`GatedEmission`](crate::model::file_analysis::GatedEmission)
+/// would add (`FileAnalysis::gated_candidates`), span-free, under the package
+/// it lands in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatedSurface {
-    pub package: String,
-    pub gates: Vec<String>,
-    pub members: Vec<(Option<String>, MethodSurface)>,
+    pub package: Option<String>,
+    pub member: MethodSurface,
 }
 
 /// One `#define`'s cross-file-visible contract. Under textual inclusion
@@ -147,9 +147,9 @@ pub struct Surface {
     pub reexports: Vec<String>,
     /// Classes plugin namespaces in THIS file bridge content onto.
     pub plugin_bridges: Vec<String>,
-    /// Plugin emissions deferred on a cross-file `ClassIsa` gate, as
-    /// declared. Whether a gate fires is the reader's question; what the
-    /// emission WOULD add is this file's to state.
+    /// What plugin emissions deferred on a cross-file `ClassIsa` gate would
+    /// add. Whether a gate fires is the reader's question; what the emission
+    /// adds is this file's to state.
     pub gated: Vec<GatedSurface>,
     /// Manifest-declared app-surface consumer classes.
     pub app_surface_consumers: Vec<String>,
@@ -362,34 +362,32 @@ impl Surface {
             v
         };
         let plugin_bridges = fa.bridge_classes();
-        let mut gated: Vec<GatedSurface> = feed
-            .gated_emissions
+        // The same mint the rows and the index feeds read: candidates, each
+        // keyed to the package it would land in.
+        let mint = fa.gated_candidates();
+        let mut gated: Vec<GatedSurface> = mint
+            .symbols
             .iter()
-            .map(|em| {
-                let mut gates = em.gate_prefixes.clone();
-                gates.sort_unstable();
-                let mut members: Vec<(Option<String>, MethodSurface)> = em
-                    .symbols
-                    .iter()
-                    .map(|gs| {
+            .map(|sym| GatedSurface {
+                package: sym.package.clone(),
+                member: MethodSurface {
+                    name: sym.name.clone(),
+                    kind: crate::model::file_analysis::sym_kind_code(&sym.kind),
+                    arity: None,
+                    ret: mint.witnesses.iter().find_map(|w| match (&w.attachment, &w.payload) {
                         (
-                            gs.on_class.clone(),
-                            MethodSurface {
-                                name: gs.name.clone(),
-                                kind: crate::model::file_analysis::sym_kind_code(&gs.kind),
-                                arity: None,
-                                ret: gs.return_type.as_ref().map(despan),
-                                hash_keys: Vec::new(),
-                            },
-                        )
-                    })
-                    .collect();
-                members.sort_by(|a, b| (&a.0, &a.1.name, a.1.kind).cmp(&(&b.0, &b.1.name, b.1.kind)));
-                members.dedup();
-                GatedSurface { package: em.package.clone(), gates, members }
+                            crate::model::witnesses::WitnessAttachment::Symbol(id),
+                            crate::model::witnesses::WitnessPayload::InferredType(t),
+                        ) if *id == sym.id => Some(despan(t)),
+                        _ => None,
+                    }),
+                    hash_keys: Vec::new(),
+                },
             })
             .collect();
-        gated.sort_by(|a, b| (&a.package, &a.gates).cmp(&(&b.package, &b.gates)));
+        gated.sort_by(|a, b| {
+            (&a.package, &a.member.name, a.member.kind).cmp(&(&b.package, &b.member.name, b.member.kind))
+        });
         gated.dedup();
         let mut macros: Vec<MacroSurface> = feed
             .macro_defs
