@@ -214,12 +214,13 @@ fn extend_shape(
                 return Some(InferredType::ArrayRef);
             }
             if !rest.is_empty() {
+                // A write THROUGH the slot at `len` lands in a value nobody
+                // typed: a tuple may be a known prefix (`@_`'s argument
+                // window), whose next slot is the caller's, not empty.
                 if i == elems.len() {
-                    elems.push(vivify(rest, vtype).unwrap_or(InferredType::Unknown));
-                } else {
-                    let inner = extend_shape(&elems[i], rest, vtype, widen)?;
-                    elems[i] = inner;
+                    return None;
                 }
+                elems[i] = extend_shape(&elems[i], rest, vtype, widen)?;
             } else {
                 match (i.cmp(&elems.len()), vtype) {
                     (std::cmp::Ordering::Less, None) => return None,

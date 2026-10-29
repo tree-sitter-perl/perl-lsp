@@ -1212,7 +1212,8 @@ cfg()->{hsot2};
 /// A write through an array element extends the element shapes the
 /// array's pushes declared. A named slot (`$rv[0]->{k}`) extends that
 /// element and keeps it closed; a dynamic index (`$rv[$#rv]->{k}`) may
-/// land in any element, so each opens.
+/// land in any element, so each opens. A slot past a tuple's known
+/// elements holds a value nobody typed.
 #[test]
 fn test_writes_through_an_array_element_extend_its_shape() {
     let unknown_keys = |src: &str| -> Vec<String> {
@@ -1247,6 +1248,16 @@ sub f {
 }
 ");
     assert!(dynamic.is_empty(), "{:?}", dynamic);
+    // `@_`'s window knows no argument here, so a write through `$_[0]`
+    // lands in the caller's hash, whose other keys are not known.
+    let window = unknown_keys("\
+sub create {
+    $_[0]->{'file'} ||= 'x';
+    $_[0]->{'line'} = 3;
+    print $_[0]->{'cmt'};
+}
+");
+    assert!(window.is_empty(), "{:?}", window);
 }
 
 /// Role `requires NAMES` declares method contracts: `$self->name`
