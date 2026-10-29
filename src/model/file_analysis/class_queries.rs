@@ -302,9 +302,7 @@ impl FileAnalysis {
         // Collect methods from this class and all ancestors. Perl has no
         // access-specifier concept, so no symbol here ever carries
         // "non_public" — `requesting_class: None` is a no-op gate.
-        self.collect_ancestor_methods(
-            class_name, class_name, module_index, &mut candidates, &mut seen_names, 0, None,
-        );
+        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, None);
 
         candidates
     }
@@ -448,9 +446,7 @@ impl FileAnalysis {
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        self.collect_ancestor_methods(
-            class_name, class_name, module_index, &mut candidates, &mut seen, 0, requesting_class,
-        );
+        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, requesting_class);
         // Data members from this class AND its ancestors. A field lives in
         // its class body scope (or a nested container body — inline unions);
         // a Variable inside a Sub-kind scope is a local/param. Anchored on

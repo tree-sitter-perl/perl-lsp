@@ -950,20 +950,35 @@ impl FileAnalysis {
         incomplete
     }
 
-    /// Recursively collect methods from a class and its ancestors, deduping by name.
+    /// Collect methods from a class and its ancestors, deduping by name
+    /// (child shadows parent). The MRO is `for_each_ancestor_class`, so a
+    /// class reached by several paths (a diamond, components over one base)
+    /// is collected once.
     pub(super) fn collect_ancestor_methods(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        candidates: &mut Vec<CompletionCandidate>,
+        seen_names: &mut HashSet<String>,
+        requesting_class: Option<&str>,
+    ) {
+        self.for_each_ancestor_class(class_name, module_index, |c| {
+            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, requesting_class);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+
+    /// One class's own methods for `collect_ancestor_methods`: local,
+    /// bridged plugin entities, and every cross-file file declaring it.
+    fn collect_class_methods(
         &self,
         original_class: &str,
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
-        depth: usize,
         requesting_class: Option<&str>,
     ) {
-        if depth > 20 {
-            return;
-        }
         // Access-specifier gate: visible from outside
         // `class_name`'s own body only when NOT tagged non-public.
         // Callability gate on the same closure so every enumeration loop in
@@ -1040,9 +1055,7 @@ impl FileAnalysis {
             }
         }
 
-        // Cross-file entity + own-class method collection. Parent
-        // recursion (local ∪ cross-file ∪ synthetic app-surface edge)
-        // is the single `parents_of` walk at the end of the fn.
+        // Cross-file entity + own-class method collection.
         if let Some(idx) = module_index {
             // Two sources of candidates:
             //   (1) Plugin entities reached through bridges (helpers,
@@ -1098,8 +1111,8 @@ impl FileAnalysis {
             // file declaring the class (a reopened package's methods live
             // across the set; `seen_names` keeps child-shadows-parent).
             for cached in idx.visible_def_candidates(class_name) {
-                let whole = idx.whole_present(&cached);
-                for sym in &whole.symbols {
+                let present = idx.symbols_present(&cached);
+                for sym in present.symbols() {
                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                     if sym.package.as_deref() != Some(class_name) { continue; }
                     if seen_names.contains(&sym.name) { continue; }
@@ -1125,21 +1138,6 @@ impl FileAnalysis {
                 }
             }
 
-        }
-
-        // Walk parents: local ∪ cross-file ∪ synthetic app-surface edge,
-        // unioned + deduped by `parents_of` (the single edge-injection
-        // site). Name dedup across the recursion is the `seen_names` set.
-        for parent in parents_of(
-            class_name,
-            &self.packages,
-            module_index,
-            &self.plugin.app_surface_consumers,
-        ) {
-            self.collect_ancestor_methods(
-                original_class, &parent, module_index, candidates, seen_names, depth + 1,
-                requesting_class,
-            );
         }
     }
 
