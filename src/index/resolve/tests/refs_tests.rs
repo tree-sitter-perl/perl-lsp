@@ -698,7 +698,7 @@ Bler->new->hi;
 
 /// ALL FOUR LSP paths (hover, gd, gr, rename) must class-scope
 /// for two packages sharing a method name. Single resolver post
-/// option-2 — `FileAnalysis::method_call_invocant_class(ref, idx)`
+/// option-2 — `FileAnalysis::method_call_invocant_classes(ref, idx)`
 /// — but the four user-visible surfaces still each need their own
 /// integration coverage:
 ///
@@ -1928,7 +1928,7 @@ sub touch  { 1 }
 /// invocants whose type comes from enrichment, but does NOT handle
 /// CHAIN invocants (`$x->makeFoo()->ping()`) when the inner
 /// `$x->makeFoo()` ref's invocant_class cache stayed None at build
-/// time — the hybrid's bag fallback hits `resolve_invocant_class`
+/// time — the hybrid's bag fallback hits `invocant_classes_in_scope`
 /// which doesn't know how to walk a chain at read time. Option 2's
 /// helper recurses on the inner receiver via `call_ref_by_start`,
 /// re-resolving fresh, so cross-file enrichment composes through

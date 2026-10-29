@@ -271,6 +271,17 @@ impl FileAnalysis {
         found
     }
 
+    /// The members a receiver offers, `members_of` completing one class:
+    /// those every class it may be offers (the first class's candidate
+    /// kept), so an accepted name dispatches whichever the value is.
+    pub fn shared_members(
+        &self,
+        classes: &ReceiverClasses,
+        members_of: impl Fn(&str) -> Vec<CompletionCandidate>,
+    ) -> Vec<CompletionCandidate> {
+        shared_candidates(classes.iter().map(members_of))
+    }
+
     /// Complete methods for a known class name, walking the inheritance chain.
     pub fn complete_methods_for_class(
         &self,
@@ -673,7 +684,8 @@ impl FileAnalysis {
     ) -> Option<crate::model::witnesses::WitnessAttachment> {
         let (class, name) = match &r.kind {
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
-                let class = self.method_call_invocant_class(r, module_index)?;
+                // A subject is one owner's slot; a union receiver reads several.
+                let class = self.method_call_invocant_classes(r, module_index).single()?.to_string();
                 (class, r.unqualified_target_name(self.names()).to_string())
             }
             RefKind::HashKeyAccess { .. } => {
@@ -813,9 +825,11 @@ impl FileAnalysis {
             .refs
             .iter()
             .find(|r| r.span == site.slot_span && r.member_site().is_some())?;
-        let class = self.method_call_invocant_class(r, module_index)?;
+        // A site votes for one subject; a union receiver names several.
+        let classes = self.method_call_invocant_classes(r, module_index);
+        let class = classes.single()?;
         let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
-            self.field_subject(&class, &site.slot, module_index)
+            self.field_subject(class, &site.slot, module_index)
         else {
             return None;
         };
@@ -1008,7 +1022,7 @@ impl FileAnalysis {
         (uses, parents)
     }
 
-    /// Resolve the class name for an invocant expression text (the token
+    /// Resolve the classes for an invocant expression text (the token
     /// left of `->`). A receiver (the variable its producer flagged
     /// `RECEIVER`) and `__PACKAGE__` fall back to the enclosing package; typed
     /// scalars go through `inferred_type`; barewords are treated as
@@ -1017,29 +1031,27 @@ impl FileAnalysis {
     /// This is Perl-semantic resolution, so it belongs on the data
     /// layer (rule #3). Callers in `symbols.rs` / `cursor_context.rs`
     /// compose this; they don't repeat the rules.
-    pub fn invocant_text_to_class(&self, invocant: Option<&str>, point: Point) -> Option<String> {
+    pub fn invocant_text_classes(&self, invocant: Option<&str>, point: Point) -> ReceiverClasses {
         use crate::model::conventions::InvocantText;
-        let text = invocant?;
+        let Some(text) = invocant else { return ReceiverClasses::default() };
+        let here = || self.package_at(point).map(str::to_string).into_iter().collect();
         if self.is_receiver_at(text, point) {
-            return self.package_at(point).map(|s| s.to_string());
+            return here();
         }
         match InvocantText::parse(text) {
-            InvocantText::CurrentPackage | InvocantText::PositionalReceiver => {
-                self.package_at(point).map(|s| s.to_string())
-            }
-            // Use `InferredType::class_name()` so BOTH `ClassName` and
-            // `FirstParam` resolve to their class — without this, a
-            // `my ($c) = @_` invocant in a controller method (typed
-            // `FirstParam { package: Users }`) falls back to None and
-            // dispatch-target completion never fires for `$c->url_for(|)`.
-            // Method completion on the same `$c` already uses this
-            // accessor; routing through it here keeps the two paths in
-            // sync. Rule #3.
+            InvocantText::CurrentPackage | InvocantText::PositionalReceiver => here(),
+            // A class per value the scalar may be: both `ClassName` and
+            // `FirstParam` dispatch — without that, a `my ($c) = @_`
+            // invocant in a controller method (typed `FirstParam { package:
+            // Users }`) answers nothing and dispatch-target completion never
+            // fires for `$c->url_for(|)`. Method completion on the same `$c`
+            // reads the same projection. Rule #3.
             InvocantText::Scalar(_) => self
                 .inferred_type_via_bag(text, point)
-                .and_then(|t| t.class_name().map(str::to_string)),
-            InvocantText::NonScalar(_) => None,
-            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b, point)),
+                .map(|t| self.dispatch_classes_of(&t, None))
+                .unwrap_or_default(),
+            InvocantText::NonScalar(_) => ReceiverClasses::default(),
+            InvocantText::Bareword(b) => [self.class_spelling_identity(b, point)].into_iter().collect(),
         }
     }
 
@@ -1308,4 +1320,16 @@ impl ScopeClasses for FileAnalysis {
             matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity
         })
     }
+}
+
+/// The candidates every list offers, by label (the first list's candidate
+/// kept): what holds whichever arm a value takes.
+pub fn shared_candidates(lists: impl IntoIterator<Item = Vec<CompletionCandidate>>) -> Vec<CompletionCandidate> {
+    let mut lists = lists.into_iter();
+    let Some(mut out) = lists.next() else { return Vec::new() };
+    for other in lists {
+        let labels: HashSet<String> = other.into_iter().map(|c| c.label).collect();
+        out.retain(|c| labels.contains(&c.label));
+    }
+    out
 }

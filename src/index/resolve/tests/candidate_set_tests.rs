@@ -40,7 +40,7 @@ fn candidate_set_rename_is_subset_of_references() {
         Some(&idx),
         OverrideScope::default(),
     );
-    assert!(cs.renameable(), "a package sub is a cross-file renameable");
+    assert_eq!(cs.renameable(), Ok(true), "a package sub is a cross-file renameable");
 
     let refs = cs.references();
     assert!(
@@ -179,7 +179,7 @@ fn candidate_set_local_projections() {
     // Cursor on `$count` decl (row 0, col 3).
     let cs = resolve(&store, &fa, key, tree_sitter::Point { row: 0, column: 3 }, None, OverrideScope::default());
     assert!(matches!(cs.resolution(), Some(ResolvedTarget::Local)));
-    assert!(cs.renameable());
+    assert_eq!(cs.renameable(), Ok(true));
     let refs = cs.references();
     assert_eq!(refs.len(), 3, "decl + two uses: {refs:?}");
     let edits = cs.rename_edits("$total").expect("perl rename never refuses");
