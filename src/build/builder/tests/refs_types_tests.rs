@@ -860,10 +860,11 @@ fn test_return_type_implicit_last_expr() {
 }
 
 #[test]
-fn test_return_type_conflicting_returns_unknown() {
-    // Two returns with different types → None (unknown)
+fn test_return_type_conflicting_returns_union() {
+    // Two returns with different shapes → their union
     let fa = build_fa("sub ambiguous {\n    if (1) { return {} }\n    return [];\n}");
-    assert_eq!(fa.sub_return_type_at_arity("ambiguous", None), None);
+    let t = fa.sub_return_type_at_arity("ambiguous", None).unwrap();
+    assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
@@ -1081,6 +1082,20 @@ fn test_return_type_undef_arm_before_explicit_return_still_undef() {
         fa.sub_return_type_at_arity("always", None),
         Some(InferredType::Undef)
     );
+}
+
+#[test]
+fn test_return_type_undef_valued_arm_beside_an_untyped_arm_not_undef() {
+    // `return $self->_log(..)` is a value arm whose value is undef; the
+    // last arm calls something nothing types. Joining only the typed arms
+    // said `Undef`, and `return if !$m; $m->Foo` then warned that a live
+    // object's method call dies (Znuny's `_GetTransportModule`).
+    let fa = build_fa(
+        "package T;\nsub _log { return; }\nsub get {\n    my ($self, $y) = @_;\n    return if !$y;\n    \
+         if ($y > 1) { return $self->_log('bad'); }\n    return $Kernel::OM->Get($y);\n}\n",
+    );
+    assert_eq!(fa.sub_return_type_at_arity("_log", None), Some(InferredType::Undef));
+    assert_ne!(fa.sub_return_type_at_arity("get", None), Some(InferredType::Undef));
 }
 
 /// `package A` with a constructor, then `sub f` whose body is `body`.
@@ -1394,7 +1409,7 @@ $h{it}->kid();
         {
             continue;
         }
-        let via_ref = fa.method_call_invocant_class(r, None);
+        let via_ref = fa.method_call_invocant_classes(r, None).single().map(str::to_string);
         let via_node =
             crate::lsp::cursor_context::resolve_expression_type(&fa, invocant_node, src.as_bytes(), None)
                 .and_then(|t| t.class_name().map(|s| s.to_string()));
@@ -1423,7 +1438,7 @@ $h{it}->kid();
             && r.target_name == "kid"
     });
     assert_eq!(
-        kid_on_scalar.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        kid_on_scalar.and_then(|r| fa.method_call_invocant_classes(r, None).single().map(str::to_string)).as_deref(),
         Some("Foo"),
         "scalar invocant `$f->kid` should type as Foo, tree-free",
     );
@@ -1432,7 +1447,7 @@ $h{it}->kid();
             && r.target_name == "kid"
     });
     assert_eq!(
-        kid_on_array.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        kid_on_array.and_then(|r| fa.method_call_invocant_classes(r, None).single().map(str::to_string)).as_deref(),
         Some("Foo"),
         "array-element invocant `$arr[0]->kid` should type as Foo, tree-free",
     );

@@ -152,10 +152,7 @@ pub(super) fn dispatch_target_completions(
     point: Point,
     tree: &Tree,
 ) -> Vec<CompletionCandidate> {
-    let class = match analysis.invocant_text_to_class(invocant, point) {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
+    let classes = analysis.invocant_text_classes(invocant, point);
 
     // Quote-aware insert_text. Three cases:
     //   * cursor inside a string_literal (`->emit('|')`) — the quotes
@@ -175,10 +172,12 @@ pub(super) fn dispatch_target_completions(
     // `for_each_entity_bridged_to` (rule #8) and walks ancestors so
     // `$c->url_for('|')` on a `Users` controller surfaces routes whose
     // Handlers live on `Mojolicious::Controller` (the shared base).
+    // A union receiver offers the handlers every class it may be offers.
+    analysis.shared_members(&classes, |class| {
     let mut acc: std::collections::BTreeMap<String, (Vec<String>, String)> =
         std::collections::BTreeMap::new();
     analysis.for_each_dispatch_handler_on_class(
-        &class, method_name, Some(module_index),
+        class, method_name, Some(module_index),
         |sym, provenance| {
             let SymbolDetail::Handler { params, .. } = &sym.detail else { return };
             let display: Vec<String> = params
@@ -219,6 +218,7 @@ pub(super) fn dispatch_target_completions(
                 display_override: None,
         }
     }).collect()
+    })
 }
 
 /// Collect refs whose span contains `point` and match a predicate.
@@ -546,8 +546,9 @@ fn string_dispatch_signature(
     active_param: usize,
     point: Point,
 ) -> Option<SignatureHelp> {
-    let class = analysis.invocant_text_to_class(invocant, point)?;
-    string_dispatch_signature_for(analysis, module_index, &class, dispatcher, handler_name, active_param)
+    analysis.invocant_text_classes(invocant, point).iter().find_map(|class| {
+        string_dispatch_signature_for(analysis, module_index, class, dispatcher, handler_name, active_param)
+    })
 }
 
 pub fn signature_help(
@@ -675,68 +676,74 @@ pub fn signature_help(
         }
     }
 
-    // Step 2: file_analysis resolves the sub signature (local + cross-file)
-    if let Some(sig_info) = analysis.signature_for_call(
-        &call_ctx.name,
-        call_ctx.is_method,
-        call_ctx.invocant.as_deref(),
-        point,
-        Some(module_index),
-    ) {
-        // Build param labels with inferred types
-        let param_labels: Vec<String> = sig_info
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let base = if let Some(ref default) = p.default {
-                    format!("{} = {}", p.name, default)
-                } else {
-                    p.name.clone()
-                };
-                // Skip the invocant — its type is obvious (covers
-                // plugin-marked invocants like a helper's `$c`).
-                if p.is_invocant {
-                    return base;
-                }
-                // Cross-file: use pre-resolved param types
-                if let Some(ref types) = sig_info.param_types {
-                    if let Some(Some(ref type_tag)) = types.get(i) {
-                        return format!("{}: {}", base, type_tag);
+    // Step 2: file_analysis resolves the sub signatures (local + cross-file),
+    // one per sub the call may dispatch to.
+    let signatures: Vec<SignatureInformation> = analysis
+        .signatures_for_call(
+            &call_ctx.name,
+            call_ctx.is_method,
+            call_ctx.invocant.as_deref(),
+            point,
+            Some(module_index),
+        )
+        .into_iter()
+        .map(|sig_info| {
+            // Build param labels with inferred types
+            let param_labels: Vec<String> = sig_info
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let base = if let Some(ref default) = p.default {
+                        format!("{} = {}", p.name, default)
+                    } else {
+                        p.name.clone()
+                    };
+                    // Skip the invocant — its type is obvious (covers
+                    // plugin-marked invocants like a helper's `$c`).
+                    if p.is_invocant {
+                        return base;
                     }
-                    return base;
-                }
-                // Local: look up inferred type at end of sub body —
-                // route through the witness bag so framework + branch
-                // + arity rules refine the answer.
-                if let Some(ty) = analysis
-                    .inferred_type_via_bag(&p.name, sig_info.body_end)
-                    .filter(InferredType::is_known)
-                {
-                    format!("{}: {}", base, format_inferred_type(&ty))
-                } else {
-                    base
-                }
-            })
-            .collect();
+                    // Cross-file: use pre-resolved param types
+                    if let Some(ref types) = sig_info.param_types {
+                        if let Some(Some(ref type_tag)) = types.get(i) {
+                            return format!("{}: {}", base, type_tag);
+                        }
+                        return base;
+                    }
+                    // Local: look up inferred type at end of sub body —
+                    // route through the witness bag so framework + branch
+                    // + arity rules refine the answer.
+                    if let Some(ty) = analysis
+                        .inferred_type_via_bag(&p.name, sig_info.body_end)
+                        .filter(InferredType::is_known)
+                    {
+                        format!("{}: {}", base, format_inferred_type(&ty))
+                    } else {
+                        base
+                    }
+                })
+                .collect();
 
-        let params: Vec<ParameterInformation> = param_labels
-            .iter()
-            .map(|label| ParameterInformation {
-                label: ParameterLabel::Simple(label.clone()),
-                documentation: None,
-            })
-            .collect();
+            let params: Vec<ParameterInformation> = param_labels
+                .iter()
+                .map(|label| ParameterInformation {
+                    label: ParameterLabel::Simple(label.clone()),
+                    documentation: None,
+                })
+                .collect();
 
-        let label = format!("{}({})", sig_info.name, param_labels.join(", "));
-
-        return Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label,
+            SignatureInformation {
+                label: format!("{}({})", sig_info.name, param_labels.join(", ")),
                 documentation: None,
                 parameters: Some(params),
                 active_parameter: Some(call_ctx.active_param as u32),
-            }],
+            }
+        })
+        .collect();
+    if !signatures.is_empty() {
+        return Some(SignatureHelp {
+            signatures,
             active_signature: Some(0),
             active_parameter: Some(call_ctx.active_param as u32),
         });

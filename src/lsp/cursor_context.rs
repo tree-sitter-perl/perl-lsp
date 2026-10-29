@@ -249,7 +249,7 @@ module_index: Option<&dyn CrossFileLookup>,
     // Tree-free first: the builder recorded the type of every
     // meaningful expression at its span (`Expr(span)` + the
     // `Expression(refidx)` call axis). Read it back by span — the
-    // same chase `method_call_invocant_class` uses. The node-kind
+    // same chase `method_call_invocant_classes` uses. The node-kind
     // walk below is the degradation path for the raw-cursor /
     // incomplete-ERROR case completion hits where no witness was
     // recorded (a node that never existed at build time).
@@ -1150,9 +1150,16 @@ pub fn build_plugin_query_context(
             is_method: c.is_method,
             name: c.name.clone(),
             receiver_text: c.invocant.clone(),
-            receiver_type: c.invocant.as_deref()
-                .and_then(|inv| analysis.invocant_text_to_class(Some(inv), point))
-                .map(InferredType::ClassName),
+            // Every class the receiver may be, joined: a union receiver
+            // reaches the hook as the union it is.
+            receiver_type: {
+                let classes: Vec<InferredType> = analysis
+                    .invocant_text_classes(c.invocant.as_deref(), point)
+                    .into_iter()
+                    .map(InferredType::ClassName)
+                    .collect();
+                crate::model::file_analysis::join_all(&classes, &analysis.type_order(None))
+            },
             args,
             cursor_arg_index: c.active_param,
         }
