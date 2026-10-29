@@ -3787,6 +3787,16 @@ impl ReducerRegistry {
                 ReducedValue::Type(t) => {
                     let t = t.clone();
                     if t.class_name().is_some() || scope_binds_variable(bag, var, sid, point) {
+                        // The fold's own rule, lifted across the walk: an
+                        // `Unknown` the walker produced yields to use
+                        // evidence after it, and an inner scope's
+                        // observations are after every outer binding the
+                        // point can see.
+                        if t == InferredType::Unknown && !claims_unknown(bag, var, sid, point) {
+                            if let Some(w) = weak.filter(InferredType::is_known) {
+                                return Some(w);
+                            }
+                        }
                         return Some(t);
                     }
                     if weak.is_none() {
@@ -3798,6 +3808,18 @@ impl ReducerRegistry {
         }
         weak
     }
+}
+
+/// Whether the scope's `Unknown` is a claim (a source above the walker's
+/// priority, e.g. a plugin annotation) rather than an untyped value.
+fn claims_unknown(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
+    let att = WitnessAttachment::Variable { name: var.to_string(), scope };
+    let walker = WitnessSource::Builder(String::new()).priority();
+    bag.for_attachment(&att).iter().any(|w| {
+        w.span.start <= point
+            && w.source.priority() > walker
+            && matches!(&w.payload, WitnessPayload::InferredType(InferredType::Unknown))
+    })
 }
 
 /// Does this scope *bind* the variable — establish its value/identity via

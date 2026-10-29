@@ -449,3 +449,13 @@ fn block_derefs_are_observations() {
     assert_eq!(fa.inferred_type_via_bag("$c", at), Some(InferredType::String));
     assert_eq!(fa.inferred_type_via_bag("$t", at), Some(InferredType::HashRef));
 }
+
+/// An untyped value yields to use evidence after it in an inner block, as
+/// it does within one scope.
+#[test]
+fn an_inner_block_use_types_an_untyped_outer_value() {
+    let src = "sub f {\n    my ($params) = @_;\n    my $text = $params->{_DEFAULT};\n    $text = '' unless defined $text;\n    for my $o (1) {\n        $text =~ s/$o/x/ge;\n    }\n    return $text;\n}\n";
+    let tree = parse(src);
+    let fa = crate::build::builder::build(&tree, src.as_bytes());
+    assert_eq!(fa.inferred_type_via_bag("$text", tree_sitter::Point { row: 5, column: 9 }), Some(InferredType::String));
+}
