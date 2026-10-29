@@ -47,7 +47,9 @@ when, why), not the contract.
   its class and the classes inheriting it (`TargetRef::retrieval_keys`,
   from the in-memory class graph), so the class identity is the key and
   no ref needs a second binding. The class ref on the same token keeps
-  the cursor through the companion tiebreak.
+  the cursor through the companion tiebreak. Python's `Foo()` takes the
+  same keys with no companion at all: the matcher asks the call's name
+  for its class at query time, so the one ref there stays single-bound.
 - **What B would cost (sizes from `size_of` on the layer-8 head, 2026-10-28):** `Ref`
   is 352 bytes and `Option<RefBinding>` 56. A `Vec<RefBinding>` is one
   heap allocation per bound ref, on every ref of every language. A

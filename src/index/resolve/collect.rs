@@ -2,6 +2,7 @@
 //! target matching (`symbol_defines_target`), `references_mask_for`, and the
 //! raw-word / pack def-path helpers.
 use super::*;
+use crate::model::file_analysis::MemberKey;
 
 /// The identifier under `point` in `source`, or `None` if the cursor is not
 /// on a `[A-Za-z0-9_]` word. Byte-scan (macros vanish from the analysis under
@@ -954,6 +955,32 @@ pub(super) fn collect_from_analysis(
     // which uses that family reaches.
     let chain_want = target.member_kind.unwrap_or(MemberKind::Callable);
     let namespace = analysis.names().member_namespace;
+    // Whether a call on `cn` asking for `member` reaches the target owned by
+    // `pkg`. Under Hierarchy the override family is precomputed and a call
+    // matches iff its class is in it — so `$child->m` and `$base->m` rename
+    // together (every family member descends from the root, so inheriting
+    // without overriding is covered by membership). The family walk runs
+    // INVERSE edges from the origin file, which can miss aliases declared
+    // elsewhere (perl5's `typedef struct op OP` lives in perl.h, so `OP`
+    // isn't in `op`'s computed family) — the UPWARD chain from the call's
+    // class needs no inverse index, so a class whose chain reaches the
+    // family is admitted too. Under Dispatch the call matches only if it
+    // dispatches to THIS def: `$child->m` reaches an ancestor target via the
+    // per-class chain, unrelated same-named methods stay out.
+    let mut reaches_target = |cn: &str, member: MemberKey<'_>, pkg: &str| -> bool {
+        let mut chain = || {
+            rename_chain_cache
+                .entry((cn.to_string(), matches!(member, MemberKey::Constructor)))
+                .or_insert_with(|| analysis.member_rename_chain(cn, member, chain_want, module_index))
+                .clone()
+        };
+        if target.scope == OverrideScope::Hierarchy {
+            target.method_classes.iter().any(|c| c == cn)
+                || chain().iter().any(|c| target.method_classes.iter().any(|f| f == c))
+        } else {
+            cn == pkg || chain().iter().any(|c| c == pkg)
+        }
+    };
 
     // Pack (closure-carrying) files speak C++'s relative name lookup and may
     // carry only partial namespace attribution — `pkg_agrees` reads this.
@@ -1031,6 +1058,18 @@ pub(super) fn collect_from_analysis(
     let all_refs = analysis.refs();
     for &ri in &keyed {
         let r = &all_refs[ri];
+        // Where calling a class constructs it (python's `Foo()`), a call
+        // whose name is a class runs that class's constructor, as php's
+        // `new Foo` does: the class it constructs, asked only for a
+        // constructor target. Only a written call constructs: the pack mints
+        // an argument count at every call site, and a call-shaped ref with
+        // none (python's `from m import Foo`) names the class, never runs it.
+        let call_constructs = (!target.constructed_classes.is_empty()
+            && matches!(r.kind, RefKind::FunctionCall)
+            && r.arg_count.is_some())
+        .then(|| analysis.class_named_by_call(r, module_index))
+        .flatten();
+        let construction = r.constructs() || call_constructs.is_some();
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
@@ -1046,7 +1085,7 @@ pub(super) fn collect_from_analysis(
             // A class token names the class its file's use-map says it
             // does; the target is that identity.
             analysis.spelled_identity(r) == target.name
-        } else if r.constructs() {
+        } else if construction {
             // A construction is keyed by its class; whether it runs this
             // constructor is the dispatch check below.
             !target.constructed_classes.is_empty()
@@ -1078,6 +1117,9 @@ pub(super) fn collect_from_analysis(
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
         let matches_kind = alias_matched || match (&target.kind, &r.kind) {
+            (TargetKind::Method { class }, RefKind::FunctionCall) if call_constructs.is_some() => {
+                call_constructs.as_deref().is_some_and(|cn| reaches_target(cn, MemberKey::Constructor, class))
+            }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall) => {
                 // callable_scope_for_refs is derived from the same target.kind
@@ -1186,43 +1228,7 @@ pub(super) fn collect_from_analysis(
                         None => analysis.method_call_invocant_class(r, module_index),
                     };
                     match (resolved_class, scope) {
-                        (Some(cn), Some(pkg)) => {
-                            if target.scope == OverrideScope::Hierarchy {
-                                // The override family is precomputed; a call
-                                // matches iff its invocant is in it — so
-                                // `$child->m` and `$base->m` rename together.
-                                // (Every family member is a descendant of the
-                                // root, so inheriting-without-override calls are
-                                // covered by membership.) The family walk runs
-                                // INVERSE edges from the origin file, which can
-                                // miss aliases declared elsewhere (perl5's
-                                // `typedef struct op OP` lives in perl.h, so
-                                // `OP` isn't in `op`'s computed family) — the
-                                // UPWARD chain from the invocant's class needs
-                                // no inverse index, so admit a class whose
-                                // chain reaches the family.
-                                target.method_classes.iter().any(|c| c == &cn)
-                                    || rename_chain_cache
-                                        .entry((cn.clone(), r.constructs()))
-                                        .or_insert_with(|| {
-                                            analysis.member_rename_chain(&cn, member, chain_want, module_index)
-                                        })
-                                        .iter()
-                                        .any(|c| target.method_classes.iter().any(|f| f == c))
-                            } else {
-                                // Dispatch: the call matches only if it
-                                // dispatches to THIS def — `$child->m` reaches an
-                                // ancestor target via the per-invocant chain,
-                                // unrelated same-named methods stay out.
-                                cn == *pkg || rename_chain_cache
-                                    .entry((cn.clone(), r.constructs()))
-                                    .or_insert_with(|| {
-                                        analysis.member_rename_chain(&cn, member, chain_want, module_index)
-                                    })
-                                    .iter()
-                                    .any(|c| c == pkg)
-                            }
-                        }
+                        (Some(cn), Some(pkg)) => reaches_target(&cn, member, pkg),
                         _ => false,
                     }
                 }
@@ -1361,7 +1367,7 @@ pub(super) fn collect_from_analysis(
                 span,
                 access: r.access,
                 // A construction's token spells the class, not the member.
-                rewritable: !alias_matched && !r.constructs() && rewritable_at(span),
+                rewritable: !alias_matched && !construction && rewritable_at(span),
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)
