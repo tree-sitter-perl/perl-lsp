@@ -353,6 +353,7 @@ impl<'a> Builder<'a> {
                         sym: None,
                     }),
                     folded_from: None,
+                    import_name: false,
                     arg_count: None,
                 });
             }
@@ -445,6 +446,7 @@ impl<'a> Builder<'a> {
                     access: AccessKind::Read,
                     binding: None,
                     folded_from: None,
+                    import_name: false,
                     arg_count: None,
                 });
                 if let Some(c) = invocant_class {
@@ -475,6 +477,7 @@ impl<'a> Builder<'a> {
                             sym: None,
                         }),
                         folded_from: None,
+                        import_name: false,
                         arg_count: None,
                     });
                 }

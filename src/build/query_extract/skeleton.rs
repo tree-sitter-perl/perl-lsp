@@ -801,11 +801,12 @@ impl SkeletonAnalysis {
             .collect();
         // Each free call under a use-map, by where its name token starts: the
         // function it names and the identity a class of that spelling has
-        // there. Its `Invoke` and its reference both read this one answer.
+        // there. Its `Invoke` and its reference both read this one answer, and
+        // an imported name pins to the function it names the same way.
         let free_calls: std::collections::HashMap<tree_sitter::Point, (crate::model::file_analysis::QualifiedName, String)> =
             self.refs
                 .iter()
-                .filter(|r| r.kind == super::vocab::RefCap::Call)
+                .filter(|r| matches!(r.kind, super::vocab::RefCap::Call | super::vocab::RefCap::Import))
                 .filter_map(|r| {
                     let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols)?;
                     let function = function_identity(&map, names.functions, &r.name, &free_functions);
@@ -1163,6 +1164,7 @@ impl SkeletonAnalysis {
                 )
                 .map(crate::model::file_analysis::RefBinding::Symbol),
                 folded_from: None,
+                import_name: false,
                 arg_count: None,
             });
         }
@@ -1183,6 +1185,7 @@ impl SkeletonAnalysis {
                     access: crate::model::file_analysis::AccessKind::Read,
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
+                    import_name: false,
                     arg_count: None,
                 }),
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
@@ -1205,6 +1208,7 @@ impl SkeletonAnalysis {
                     access: crate::model::file_analysis::AccessKind::Read,
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
+                    import_name: false,
                     arg_count: None,
                 });
             }
@@ -1235,9 +1239,9 @@ impl SkeletonAnalysis {
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
                 let kind = match r.kind {
-                    // Under a use-map a call is pinned to its function's
-                    // namespace (`\Lib\f()` → `Lib`).
-                    RefCap::Call => {
+                    // Under a use-map a call, and an imported name, is pinned
+                    // to its function's namespace (`\Lib\f()` → `Lib`).
+                    RefCap::Call | RefCap::Import => {
                         if let Some((function, _)) = free_calls.get(&r.start) {
                             let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
@@ -1338,6 +1342,7 @@ impl SkeletonAnalysis {
                     access,
                     binding,
                     folded_from: None,
+                    import_name: r.kind == RefCap::Import,
                     arg_count: r.arg_count,
                 })
             })
@@ -1383,6 +1388,7 @@ impl SkeletonAnalysis {
                 access: crate::model::file_analysis::AccessKind::Read,
                 binding: None,
                 folded_from: None,
+                import_name: false,
                 arg_count: None,
             });
         }
@@ -1453,6 +1459,7 @@ impl SkeletonAnalysis {
                             },
                         )),
                         folded_from: None,
+                        import_name: false,
                         arg_count: None,
                     });
                 }

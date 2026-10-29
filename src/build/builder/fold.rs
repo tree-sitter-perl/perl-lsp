@@ -928,6 +928,7 @@ impl<'a> Builder<'a> {
                     sym: None,
                 }),
                 folded_from: None,
+                import_name: false,
                 arg_count: None,
             });
         }
