@@ -49,7 +49,7 @@ use crate::index::open_docs::OpenDocs;
 use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
-use crate::build::source_files::{analyze_file, PACK_FILE_CAP};
+use crate::build::source_files::analyze_file;
 
 /// One change, as the consumer rule reads it.
 struct Change<'a> {
@@ -375,13 +375,11 @@ impl PackInvalidator {
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
         // The dependency tier's own events: a manifest moves the map (a new
-        // generation re-lands what the project names), and a file under a
-        // tier root is never a workspace file — the next generation, not a
-        // registration, is what refreshes it.
+        // generation asks again for what the old one landed), and a file
+        // under a tier root is never a workspace file — the next
+        // generation, not a registration, is what refreshes it.
         if index.is_dependency_input(&canon) {
-            if crate::index::module_resolver::refresh_dependency_map_again(index) {
-                crate::index::module_resolver::acquire_dependencies(index, index.dependency_demand());
-            }
+            index.refresh_dependency_map_again();
             return Swept { skip_consumers: true, ..Default::default() };
         }
         if index.under_dependency_root(&canon) {
@@ -456,7 +454,7 @@ impl PackInvalidator {
             // TODO(oversize-unregister): a file that grows past the cap keeps
             // its last registration, as an unreadable one does, though the
             // walk would not index it.
-            if let Some(fa) = analyze_file(driver, &canon, PACK_FILE_CAP) {
+            if let Some(fa) = analyze_file(driver, &canon, driver.caps().file_cap) {
                 changed_verdict = pack.record_surface(&canon, &fa);
                 changed_fa = Some(Arc::new(fa));
             }
@@ -490,10 +488,10 @@ impl PackInvalidator {
         targets.retain(|p| changed_fa.is_none() || *p != canon);
         let mut results: Vec<(PathBuf, Arc<FileAnalysis>)> = targets
             .par_iter()
-            .filter_map(|p| Some((p.clone(), Arc::new(analyze_file(driver, p, PACK_FILE_CAP)?))))
+            .filter_map(|p| Some((p.clone(), Arc::new(analyze_file(driver, p, driver.caps().file_cap)?))))
             .collect();
         // What the changed file now names that nothing declares is the
-        // dependency tier's to place, before its registration is queried.
+        // dependency tier's to place: asked of the resolver once the file registers.
         let demand: Vec<String> = changed_fa
             .as_deref()
             .map(crate::index::module_index::dependency_demand_of)
@@ -586,7 +584,9 @@ impl PackInvalidator {
                 }
             }
         }
-        crate::index::module_resolver::acquire_dependencies(pack, demand);
+        for name in &demand {
+            pack.request_resolve(name);
+        }
         Swept { skip_consumers, refiled }
     }
 

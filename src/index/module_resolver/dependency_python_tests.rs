@@ -70,6 +70,7 @@ fn a_venv_places_what_the_workspace_imports() {
     let root = venv_project("venv");
     let idx = ModuleIndex::new_for_test();
     super::index_pack_language(python(), &root, None, &idx, None, 0);
+    idx.wait_idle();
     let mut files = Vec::new();
     idx.for_each_workspace_file(&mut |cm| files.push(cm.path.strip_prefix(&root).unwrap().display().to_string()));
     files.sort();

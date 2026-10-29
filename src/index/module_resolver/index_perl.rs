@@ -85,16 +85,16 @@ pub fn index_workspace_with_index(
     // `local/`) names the directories the walk leaves out, whether or not
     // the project ignores them.
     static PERL: crate::build::language_driver::PerlDriver = crate::build::language_driver::PerlDriver;
-    super::refresh_dependency_map(idx, &PERL, root);
+    idx.refresh_dependency_map(&PERL, Some(root));
     let skip_roots = idx.dependency_roots_under(root);
     // Extensioned Perl, type-pruned at the walk level (cheap; never
     // descends into a JS tree's files). FHEM ships four files over the cap.
-    const PERL_FILE_CAP: u64 = 1_000_000;
+    let cap = PERL.caps().file_cap;
     let walked = source_files::walk(
         root,
-        &source_files::Walk { extensions: PERL.extensions(), cap: PERL_FILE_CAP, skip: &skip_roots, ignores: true },
+        &source_files::Walk { extensions: PERL.extensions(), cap, skip: &skip_roots, ignores: true },
     );
-    source_files::report_oversize(&walked.oversize, PERL_FILE_CAP);
+    source_files::report_oversize(&walked.oversize, cap);
     let mut paths = walked.files;
 
     // Extensionless entrypoint SCRIPTS (`#!/usr/bin/env perl` — crm's

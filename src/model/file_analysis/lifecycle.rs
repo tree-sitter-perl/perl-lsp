@@ -940,24 +940,50 @@ impl FileAnalysis {
         }
     }
 
-    /// Like `export_surface`, but resolves `reexport_modules` transitively
-    /// through `module_index`: the materialized surface includes every
-    /// re-exported module's surface (default ∪ optional ∪ tags), walked
-    /// cross-file via `ModuleIndex::for_each_reexport_module` (seen-set for
-    /// cycles, fan-out cap). When this module has no re-export edges the
-    /// result is identical to `export_surface` (own-only, zero extra storage).
-    /// This is the one transitive-closure site — the consumer evaluator
-    /// (`imported_names`) is untouched; it binds whatever the surface reports.
+    /// Like `export_surface`, but resolved through `module_index`: a module
+    /// exporting nothing answers with its first exporting parent's surface,
+    /// and every re-exported module's surface (default ∪ optional ∪ tags)
+    /// is merged in, walked cross-file via
+    /// `ModuleIndex::for_each_reexport_module` (seen-set for cycles, fan-out
+    /// cap). With neither, the result is `export_surface` (own-only, zero
+    /// extra storage). `module` is the name the consumer `use`d — the
+    /// package whose `@ISA` the inherited `import` comes through. This is
+    /// the one closure site — the consumer evaluator (`imported_names`) is
+    /// untouched; it binds whatever the surface reports.
     pub fn export_surface_with_index(
         &self,
+        module: &str,
         module_index: &dyn CrossFileLookup,
     ) -> ExportSurface<'_> {
-        if self.reexport_modules.is_empty() {
+        self.export_surface_at_depth(module, module_index, 0)
+    }
+
+    fn export_surface_at_depth(
+        &self,
+        module: &str,
+        module_index: &dyn CrossFileLookup,
+        depth: usize,
+    ) -> ExportSurface<'_> {
+        // Perl's default MRO depth; also what bounds an `@ISA` cycle.
+        const MAX_INHERITED_DEPTH: usize = 20;
+        let inherited = if self.export.is_empty() && self.export_ok.is_empty() && depth < MAX_INHERITED_DEPTH {
+            // `use DDP` binds Data::Printer's `p`: DDP declares no exports
+            // but inherits Data::Printer's `import`, which exports its own.
+            self.declared_parents(module).iter().find_map(|parent| {
+                let pc = module_index.get_cached(parent)?;
+                let s = pc.analysis.export_surface_at_depth(parent, module_index, depth + 1);
+                (!s.default_set().is_empty() || !s.optional_set().is_empty())
+                    .then(|| (s.default_set().to_vec(), s.optional_set().to_vec()))
+            })
+        } else {
+            None
+        };
+        if self.reexport_modules.is_empty() && inherited.is_none() {
             return self.export_surface();
         }
 
-        let mut default_set: Vec<String> = self.export.clone();
-        let mut optional_set: Vec<String> = self.export_ok.clone();
+        let (mut default_set, mut optional_set) =
+            inherited.unwrap_or_else(|| (self.export.clone(), self.export_ok.clone()));
         let mut tags: HashMap<String, Vec<String>> = self.export_tags.clone();
 
         // Merge every re-exported module's surface, walking the edges through the

@@ -406,7 +406,7 @@ impl ModuleIndex {
         // The path's `all_defs` candidates must track the same generation —
         // a stale candidate would serve the pre-materialization analysis to
         // every by-name candidate reader.
-        if let Some(rec) = self.registered_names.get(&path) {
+        if let Some(rec) = self.core.registered_names.get(&path) {
             for (n, _) in rec.iter() {
                 if let Some(mut v) = self.core.all_defs.get_mut(n) {
                     if let Some(i) = v.iter().position(|c| c.path == path) {
@@ -480,7 +480,7 @@ impl ModuleIndex {
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
         self.all_files.insert(cached.path.clone(), cached.clone());
-        let names = package_names(&analysis);
+        let names = analysis.package_names();
         if !names.is_empty() {
             // Whole copy: the feed inside the rebuild records the name list.
             self.core.edges.record_names(&cached.path, &analysis);
@@ -503,6 +503,7 @@ impl ModuleIndex {
         names: Vec<(String, bool)>,
     ) {
         let prev = self
+            .core
             .registered_names
             .insert(cached.path.clone(), names.clone());
         let mut affected: Vec<String> = names.iter().map(|(n, _)| n.clone()).collect();
@@ -562,19 +563,18 @@ impl ModuleIndex {
         // The relation is shared with the @INC tier, but the winner is not:
         // project code shadows an installed copy of the same name, and
         // `best_candidate`'s path tie-break has no opinion about which tier
-        // a file came from. `registered_names` holds exactly the paths a
-        // workspace/pack front door registered, so it IS the tier test —
-        // no second marker to keep in sync.
+        // a file came from. `is_front_door` is the tier test, the same one
+        // a dependency landing asks (`IndexCore::publish_resolved`).
         let refs: Vec<&Arc<CachedModule>> = cands
             .iter()
-            .filter(|c| self.registered_names.contains_key(&c.path))
+            .filter(|c| self.core.is_front_door(&c.path))
             .collect();
         if refs.is_empty() {
             // Only @INC providers left: leave their slot alone.
             return;
         }
         if let Some(best) =
-            best_candidate(&refs, name, &|m, n| self.module_defines_class(m, n))
+            best_candidate(&refs, name, &|m, n| self.core.module_defines_class(m, n))
         {
             self.core.cache.insert(name.to_string(), Some(best));
         }
@@ -720,13 +720,6 @@ impl ModuleIndex {
     /// where a surface fingerprint deliberately stands still).
     pub(crate) fn bump_registration_gen(&self, path: &std::path::Path) {
         self.core.mint_registration_gen(path);
-    }
-
-    /// Stamp a generation for every name-keyed cache entry that lacks one —
-    /// the warm scan loads @INC blobs straight into the cache without a
-    /// registration front door. See `IndexCore::stamp_missing_import_gens`.
-    pub(crate) fn stamp_import_generations(&self) {
-        self.core.stamp_missing_import_gens();
     }
 
     fn registration_gen_of(&self, path: &std::path::Path) -> u64 {
@@ -1087,9 +1080,9 @@ impl ModuleIndex {
         // bare `package Foo;` mints no PackageFacts entry, so the facts
         // table under-enumerates), falling back to the Package/Class
         // symbols for unregistered copies.
-        let mut own: Vec<String> = match self.registered_names.get(&cached.path) {
+        let mut own: Vec<String> = match self.core.registered_names.get(&cached.path) {
             Some(names) => names.iter().map(|(n, _)| n.clone()).collect(),
-            None => crate::index::module_index::package_names(&cached.analysis)
+            None => cached.analysis.package_names()
                 .into_iter()
                 .map(|(n, _)| n)
                 .collect(),
@@ -1197,7 +1190,7 @@ impl ModuleIndex {
         path: &std::path::Path,
         fa: &FileAnalysis,
     ) -> Vec<(String, bool)> {
-        let names = package_names(fa);
+        let names = fa.package_names();
         if !names.is_empty() {
             let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
             self.core.edges.record_names(&canon, fa);
@@ -1289,7 +1282,7 @@ impl ModuleIndex {
         // one module, so dropping on one file's deletion would wrongly
         // un-suppress the entrypoint lint. Its reader is biased honest-quiet,
         // so never-remove is the safe direction there.
-        if let Some((_, names)) = self.registered_names.remove(&canon) {
+        if let Some((_, names)) = self.core.registered_names.remove(&canon) {
             for (name, _) in &names {
                 if let Some(mut v) = self.core.all_defs.get_mut(name) {
                     v.retain(|c| c.path != canon);
@@ -1650,21 +1643,6 @@ impl ModuleIndex {
         cached.analysis.clone()
     }
 
-    /// Does `m` declare a `Class`/type named `name`? Rank source for the
-    /// cache-slot tie-break and the scoped/survivor re-picks. Reads the
-    /// registration record first — the resident copy's `symbols` may be
-    /// evicted — and falls back to the symbol scan for copies registered
-    /// whole (recovery paths, tests).
-    pub(super) fn module_defines_class(&self, m: &CachedModule, name: &str) -> bool {
-        if let Some(rec) = self.registered_names.get(&m.path) {
-            return rec.iter().any(|(n, is_class)| n == name && *is_class);
-        }
-        m.analysis
-            .symbols()
-            .iter()
-            .any(|s| matches!(s.kind, SymKind::Class) && s.name == name)
-    }
-
     /// Run `f` against this index's retained read connection to the
     /// relational row store, opening (or re-opening, if the DB file was
     /// unlinked/recreated) through the installed opener. `None` when no
@@ -1737,7 +1715,7 @@ impl ModuleIndex {
     pub(crate) fn prepare_pack_feed(
         fa: &FileAnalysis,
     ) -> (Vec<(String, bool)>, Vec<(String, String)>) {
-        let feed = collect_linkage_feed(fa);
+        let feed = fa.linkage_feed();
         let specs: Vec<(String, String)> =
             fa.pack.specializes.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         (feed, specs)
@@ -1810,7 +1788,7 @@ impl ModuleIndex {
         // registration's tie-break consults the record via
         // `module_defines_class`, and the fallback symbol scan on a
         // stripped copy misjudges every Class as a value.
-        self.registered_names.insert(cached.path.clone(), feed.to_vec());
+        self.core.registered_names.insert(cached.path.clone(), feed.to_vec());
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
         self.all_files.insert(cached.path.clone(), cached.clone());
@@ -1853,7 +1831,7 @@ impl ModuleIndex {
                         None => true,
                         Some(existing) => {
                             let existing_is_class =
-                                self.module_defines_class(existing, sym_name);
+                                self.core.module_defines_class(existing, sym_name);
                             match (incoming_is_class, existing_is_class) {
                                 (true, false) => true,  // Class beats Sub/value
                                 (false, true) => false, // Sub/value never beats a Class
@@ -1926,6 +1904,7 @@ impl ModuleIndex {
         // inverse runs on the name list registration recorded, not on
         // `old.analysis.symbols`.
         let names = self
+            .core
             .registered_names
             .remove(&canon)
             .map(|(_, v)| v)
@@ -1946,7 +1925,7 @@ impl ModuleIndex {
                 .all_defs
                 .get(name)
                 .and_then(|v| best_candidate(&v.iter().collect::<Vec<_>>(), name, &|m, n| {
-                    self.module_defines_class(m, n)
+                    self.core.module_defines_class(m, n)
                 }));
             // Only touch the cache slot if the departing file held it.
             let held = self

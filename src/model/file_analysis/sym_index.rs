@@ -36,6 +36,59 @@ impl FileAnalysis {
         method_fallback
     }
 
+    /// The linkage-visible feed a registration extracts from a WHOLE
+    /// analysis: (name, declares-a-Class) per visible symbol. Collected
+    /// before any strip so the feeds and tie-breaks never read an emptied
+    /// `symbols`.
+    pub fn linkage_feed(&self) -> Vec<(String, bool)> {
+        let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut feed: Vec<(String, bool)> = Vec::new();
+        for sym in self.symbols() {
+            // The same predicate completion gathering uses, so every name
+            // registered here is also offerable and vice versa.
+            if !self.is_linkage_visible(sym) {
+                continue;
+            }
+            let is_class = matches!(sym.kind, SymKind::Class);
+            match index.get(sym.name.as_str()) {
+                // A file declaring both a value AND a Class under one name
+                // ranks as a Class.
+                Some(&i) => feed[i].1 |= is_class,
+                None => {
+                    index.insert(sym.name.as_str(), feed.len());
+                    feed.push((sym.name.clone(), is_class));
+                }
+            }
+        }
+        // Class rank is visibility-INDEPENDENT: a non-linkage-visible Class
+        // sharing a visible value's name still ranks the file as declaring
+        // that Class.
+        for sym in self.symbols() {
+            if matches!(sym.kind, SymKind::Class) {
+                if let Some(&i) = index.get(sym.name.as_str()) {
+                    feed[i].1 = true;
+                }
+            }
+        }
+        feed
+    }
+
+    /// Every `package X;` / `class X` this file declares, in declaration
+    /// order, deduped — `(name, is-class)`, the `linkage_feed` shape. A
+    /// multi-package `.pm` is ordinary Perl, and keying on the first name
+    /// alone leaves every later package unreachable by name. Empty for
+    /// scripts with no explicit package declaration.
+    pub fn package_names(&self) -> Vec<(String, bool)> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for sym in self.symbols() {
+            if matches!(sym.kind, SymKind::Package | SymKind::Class) && seen.insert(sym.name.as_str()) {
+                out.push((sym.name.clone(), matches!(sym.kind, SymKind::Class)));
+            }
+        }
+        out
+    }
+
     /// The C-linkage "everything exported" test: is `sym` part of this
     /// file's cross-file surface? Types (class/struct/typedef), functions,
     /// and FILE-SCOPE values (globals, object-like macros, enum constants).

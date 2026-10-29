@@ -33,9 +33,9 @@ pub enum FileRole { Open, Workspace, Dependency, BuiltIn }
 `DashMap<Url, Document>`, each with its tree because cursor-time queries need
 it and because diagnostics publish to them. Every other file lives in the
 `ModuleIndex`: the project's own in `all_files` (the per-path front-door
-registry, WORKSPACE), `@INC` modules and a pack's dependency-map landings
-(Composer's `vendor/`, `module_resolver::acquire_dependencies`) in the
-name-keyed cache (DEPENDENCY).
+registry, WORKSPACE), every language's dependency-map landings (`@INC`,
+Composer's `vendor/`; the resolver thread's `module_resolver::acquire`) in
+the name-keyed cache (DEPENDENCY).
 Role is implicit in which home holds the path. An open document SHADOWS its
 index copy: walks claim open paths first and skip the index entry, and
 closing a document leaves the index copy (the on-disk text) answering.

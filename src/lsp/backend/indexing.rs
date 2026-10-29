@@ -97,7 +97,7 @@ impl Backend {
                 // (the next walk's skip), and a file under a tier root is
                 // never a workspace file.
                 if module_index.is_dependency_input(&canon) {
-                    crate::index::module_resolver::refresh_dependency_map_again(&module_index);
+                    module_index.refresh_dependency_map_again();
                     continue;
                 }
                 if module_index.under_dependency_root(&canon) {

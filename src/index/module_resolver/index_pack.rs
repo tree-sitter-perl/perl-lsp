@@ -27,7 +27,7 @@ pub fn index_pack_language(
     // disables retention (rehydrate-and-drop). See `docs/adr/memory-slice-2-lru.md`.
     bag_cache_bytes: usize,
 ) -> usize {
-    use crate::build::source_files::{self, PACK_FILE_CAP};
+    use crate::build::source_files;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -40,13 +40,14 @@ pub fn index_pack_language(
     let lang = driver.id();
     // The dependency map first: its roots are the tier's, so the walk
     // leaves them out whether or not the project ignores them.
-    refresh_dependency_map(index, driver, root);
+    index.refresh_dependency_map(driver, Some(root));
     let skip_roots = index.dependency_roots_under(root);
+    let cap = driver.caps().file_cap;
     let walked = source_files::walk(
         root,
-        &source_files::Walk { extensions: driver.extensions(), cap: PACK_FILE_CAP, skip: &skip_roots, ignores: true },
+        &source_files::Walk { extensions: driver.extensions(), cap, skip: &skip_roots, ignores: true },
     );
-    source_files::report_oversize(&walked.oversize, PACK_FILE_CAP);
+    source_files::report_oversize(&walked.oversize, cap);
     let paths = walked.files;
     let grand_total = paths.len();
     // The walk already yielded every marker file (they are source files of
@@ -388,7 +389,7 @@ pub fn index_pack_language(
                 }
                 crate::util::timings::trace_file(&canon);
                 crate::util::timings::set_current_file(Some(&canon));
-                let res = analyze_stamped(path, || source_files::analyze_file(driver, path, PACK_FILE_CAP));
+                let res = analyze_stamped(path, || source_files::analyze_file(driver, path, cap));
                 crate::util::timings::set_current_file(None);
                 if let Some((analysis, stamp)) = res {
                     // Encode the FULL analysis for the disk write, then strip
@@ -486,13 +487,12 @@ pub fn index_pack_language(
         }
     }
     // The project's own files are registered: what they name that none of
-    // them declares is the dependency tier's to place. The map is re-read
-    // first if a manifest moved during the walk — an event then was
-    // deferred to this index, and this is where the index reads it.
-    crate::util::timings::phase("index.dependencies", || {
-        refresh_dependency_map(index, driver, root);
-        acquire_dependencies(index, index.dependency_demand())
-    });
+    // them declares is the dependency tier's to place, on the resolver
+    // thread. The map is re-read first if a manifest moved during the walk
+    // — an event then was deferred to this index, and this is where the
+    // index reads it.
+    index.refresh_dependency_map(driver, Some(root));
+    index.request_dependency_demand();
     if std::env::var_os("PERL_LSP_MEM_REPORT").is_some() {
         eprintln!("[mem-report] {}", crate::build::cpp_reparse::cache_size_report());
     }

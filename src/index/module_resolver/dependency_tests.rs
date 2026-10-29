@@ -32,6 +32,8 @@ fn write(root: &Path, rel: &str, body: &str) {
 fn indexed(root: &Path) -> ModuleIndex {
     let idx = ModuleIndex::new_for_test();
     super::index_pack_language(php(), root, None, &idx, None, 0);
+    // The landings are the resolver thread's.
+    idx.wait_idle();
     idx
 }
 
@@ -188,6 +190,7 @@ fn a_manifest_change_moves_the_map_and_a_save_asks_for_its_imports() {
     write(&root, "vendor/composer/installed.json", INSTALLED);
     assert!(idx.is_dependency_input(&installed));
     inv.file_changed(None, &idx, &docs, &installed, false);
+    idx.wait_idle();
     assert_eq!(idx.dependency_generation(), 2);
     assert!(widening(&idx, &root, "src/User.php").is_empty());
     assert_eq!(landing(&idx, &root, "src/User.php", at(USER, "name()")).0[0].0, "vendor/acme/model/src/Base.php");
@@ -196,6 +199,7 @@ fn a_manifest_change_moves_the_map_and_a_save_asks_for_its_imports() {
 
     write(&root, "vendor/composer/installed.json", r#"{"packages": [ ]}"#);
     inv.file_changed(None, &idx, &docs, &installed, false);
+    idx.wait_idle();
     assert_eq!(idx.dependency_generation(), 3);
     assert!(idx.def_candidates("Acme\\Model\\Base").is_empty(), "the old generation's landing retired");
     assert!(idx.def_candidates("Acme\\Model\\Root").is_empty());
@@ -203,7 +207,9 @@ fn a_manifest_change_moves_the_map_and_a_save_asks_for_its_imports() {
     // a save under the tier's root never registers as the project's
     write(&root, "vendor/composer/installed.json", INSTALLED);
     inv.file_changed(None, &idx, &docs, &installed, false);
+    idx.wait_idle();
     inv.file_changed(None, &idx, &docs, &root.join("vendor/acme/model/src/Unused.php"), false);
+    idx.wait_idle();
     assert_eq!(workspace_files(&idx, &root), ["src/Old.php", "src/Other/Base.php", "src/User.php"]);
     assert!(idx.def_candidates("Acme\\Model\\Unused").is_empty());
 
@@ -211,5 +217,6 @@ fn a_manifest_change_moves_the_map_and_a_save_asks_for_its_imports() {
     let uses = "<?php\nnamespace App;\nuse Acme\\Model\\Unused;\nclass Fresh extends Unused {}\n";
     write(&root, "src/Fresh.php", uses);
     inv.file_changed(None, &idx, &docs, &root.join("src/Fresh.php"), false);
+    idx.wait_idle();
     assert_eq!(idx.def_candidates("Acme\\Model\\Unused").len(), 1);
 }

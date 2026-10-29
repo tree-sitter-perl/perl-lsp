@@ -540,7 +540,8 @@ fn completion_items_native(
                     cands
                         .iter()
                         .flat_map(|cached| {
-                            module_index.whole_present(cached).import_list_candidates()
+                            let whole = module_index.whole_present(cached);
+                            whole.import_list_candidates(&whole.export_surface_with_index(name, module_index))
                         })
                         .filter(|c| seen.insert(c.label.clone()))
                         .map(candidate_to_completion_item)

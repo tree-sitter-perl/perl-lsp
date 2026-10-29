@@ -26,7 +26,7 @@ use std::path::Path;
 /// `..`), so adding one is a compile error until every declared answer is
 /// reviewed — a capability added-and-silently-defaulted is how a caps
 /// struct decays back into the branching it replaced.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct DriverCaps {
     /// Analyses integrate with the Perl module hub's cross-file lane:
     /// import/export enrichment (`enrich_imported_types_with_keys`),
@@ -68,6 +68,27 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
+    /// Files at or over this many bytes are never analyzed — the walk
+    /// lists them and the dependency tier refuses them.
+    pub file_cap: u64,
+}
+
+impl Default for DriverCaps {
+    fn default() -> Self {
+        DriverCaps {
+            hub_enrichment: false,
+            cursor_context: false,
+            hover_info: false,
+            signature_help: false,
+            selection_range: false,
+            synchronous_rebuild: false,
+            context_gather: false,
+            pack_invalidation: false,
+            cross_file_words: false,
+            entrypoint_symbols: &[],
+            file_cap: crate::build::source_files::PACK_FILE_CAP,
+        }
+    }
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -142,9 +163,16 @@ pub trait LanguageDriver: Send + Sync {
     }
     /// Where this project keeps the dependencies the workspace walk does
     /// not own (php: Composer's `vendor/`), and which of their files
-    /// declares a name. `None` = the walk is the whole story.
-    fn dependency_locator(&'static self, _root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+    /// declares a name; `root` is `None` with no project open. `None` =
+    /// the walk is the whole story.
+    fn dependency_locator(&'static self, _root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
         None
+    }
+    /// The names a file registers under, each with whether it declares a
+    /// class there — what the workspace front door files it by and what a
+    /// dependency file lands under. Default: every linkage-visible name.
+    fn registration_names(&self, analysis: &FileAnalysis) -> Vec<(String, bool)> {
+        analysis.linkage_feed()
     }
     /// File names whose change can move `dependency_locator`'s answer —
     /// the watcher subscribes to them; the locator's own `inputs` decide
@@ -274,6 +302,7 @@ impl LanguageDriver for PerlDriver {
             signature_help: true,
             selection_range: true,
             synchronous_rebuild: true,
+            file_cap: 1_000_000,
             ..Default::default()
         }
     }
@@ -288,8 +317,13 @@ impl LanguageDriver for PerlDriver {
             module_paths: crate::model::conventions::perl_module_paths,
         })
     }
-    fn dependency_locator(&'static self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
-        Some(crate::build::inc::dependency_locator(root, self))
+    fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        Some(crate::build::inc::locator(root, self) as std::sync::Arc<dyn DependencyLocator>)
+    }
+    /// Perl subs link through their package, never by bare name: a file
+    /// registers under the packages it declares.
+    fn registration_names(&self, analysis: &FileAnalysis) -> Vec<(String, bool)> {
+        analysis.package_names()
     }
     fn dependency_manifests(&self) -> &[&'static str] {
         &["cpanfile.snapshot"]
@@ -474,7 +508,8 @@ impl LanguageDriver for PackDriver {
     fn analysis_input_fingerprint(&self) -> u64 {
         self.input_fingerprint.map(|f| f()).unwrap_or(0)
     }
-    fn dependency_locator(&'static self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+    fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        let root = root?;
         self.dependencies.map(|d| (d.locator)(root, self))
     }
     fn dependency_manifests(&self) -> &[&'static str] {

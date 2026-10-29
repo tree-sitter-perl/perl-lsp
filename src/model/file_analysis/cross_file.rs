@@ -114,15 +114,16 @@ impl FileAnalysis {
         out
     }
 
-    /// Completion candidates for `use Module qw(|)` — this module's export
-    /// surface, `@EXPORT` first (sort tier 10) then `@EXPORT_OK` (tier 20),
-    /// deduped. Detail carries the resolved return type when known. The
-    /// adapter projects these; the "still indexing" affordance for a
-    /// not-yet-cached module is the adapter's (there's no entity to gather).
-    pub fn import_list_candidates(&self) -> Vec<CompletionCandidate> {
+    /// Completion candidates for `use Module qw(|)` — `surface` (this
+    /// module's, from `export_surface_with_index`), `@EXPORT` first (sort
+    /// tier 10) then `@EXPORT_OK` (tier 20), deduped. Detail carries the
+    /// resolved return type when known. The adapter projects these; the
+    /// "still indexing" affordance for a not-yet-cached module is the
+    /// adapter's (there's no entity to gather).
+    pub fn import_list_candidates(&self, surface: &ExportSurface<'_>) -> Vec<CompletionCandidate> {
         let mut items = Vec::new();
         let mut seen = HashSet::new();
-        for name in &self.export {
+        for name in surface.default_set() {
             if seen.insert(name.clone()) {
                 let detail = self
                     .sub_info_view(name)
@@ -142,7 +143,7 @@ impl FileAnalysis {
                 });
             }
         }
-        for name in &self.export_ok {
+        for name in surface.optional_set() {
             if seen.insert(name.clone()) {
                 let detail = self
                     .sub_info_view(name)

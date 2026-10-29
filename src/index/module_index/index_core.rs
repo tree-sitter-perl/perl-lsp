@@ -137,10 +137,18 @@ pub(crate) struct IndexCore {
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
         Arc<std::sync::RwLock<Option<Arc<crate::index::conclusion_cache::ConclusionCache>>>>,
-    /// The pack dependency tier's map and what it landed
-    /// (`dependency_tier`). `None` until a pack index reads a map; Perl's
-    /// dependency tier is `@INC`, resolved by the thread above.
+    /// The dependency tier's map and what it landed (`dependency_tier`).
+    /// `None` until an indexer or the resolver thread reads one.
     pub(crate) dependencies: Mutex<Option<super::dependency_tier::DependencyState>>,
+    /// Path → the names a FRONT DOOR (workspace or pack registration)
+    /// registered it under, `(name, is-class)` — the exact inverse list
+    /// `unregister_file` walks AND the class-rank source for the cache-slot
+    /// tie-break. Recorded at registration (pre-strip) because the resident
+    /// copy's `symbols` may be evicted, and rehydration after an edit
+    /// persists would fetch the NEW generation's names. Membership is the
+    /// tier test: a dependency landing never takes a name one of these
+    /// paths declares.
+    pub(crate) registered_names: DashMap<std::path::PathBuf, Vec<(String, bool)>>,
 }
 
 impl IndexCore {
@@ -157,11 +165,7 @@ impl IndexCore {
             all_defs: DashMap::new(),
             leaf_defs: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
-            queue: ResolveQueue {
-                priority: Mutex::new(Vec::new()),
-                pending: Mutex::new(Vec::new()),
-                condvar: Condvar::new(),
-            },
+            queue: ResolveQueue::new(),
             resolved: ResolveNotify { mu: Mutex::new(()), cv: Condvar::new() },
             workspace_root: WorkspaceRootChannel {
                 root: Mutex::new(None),
@@ -180,7 +184,36 @@ impl IndexCore {
             bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
             dependencies: Mutex::new(None),
+            registered_names: DashMap::new(),
         }
+    }
+
+    /// Did a front door register `path`?
+    pub(crate) fn is_front_door(&self, path: &std::path::Path) -> bool {
+        self.registered_names.contains_key(path)
+    }
+
+    /// Does a front-door registration declare `name`? A dependency never
+    /// takes the slot of a name the project owns.
+    pub(crate) fn front_door_declares(&self, name: &str) -> bool {
+        self.all_defs
+            .get(name)
+            .is_some_and(|v| v.iter().any(|c| self.is_front_door(&c.path)))
+    }
+
+    /// Does `m` declare a `Class`/type named `name`? Rank source for the
+    /// cache-slot tie-break and the scoped/survivor re-picks. Reads the
+    /// registration record first — the resident copy's `symbols` may be
+    /// evicted — and falls back to the symbol scan for copies registered
+    /// whole (recovery paths, tests).
+    pub(crate) fn module_defines_class(&self, m: &CachedModule, name: &str) -> bool {
+        if let Some(rec) = self.registered_names.get(&m.path) {
+            return rec.iter().any(|(n, is_class)| n == name && *is_class);
+        }
+        m.analysis
+            .symbols()
+            .iter()
+            .any(|s| matches!(s.kind, SymKind::Class) && s.name == name)
     }
 
     /// Record the process `@INC`, canonicalized so the per-asker rank can
@@ -257,9 +290,30 @@ impl IndexCore {
         persisted: bool,
         strip: bool,
     ) -> Option<Providers> {
+        let stored: Option<Providers> = result.as_ref().map(|providers| {
+            providers
+                .iter()
+                .map(|m| strip_import_copy_one(m, persisted, strip))
+                .collect()
+        });
+        self.publish_resolved(module_name, result.as_deref(), stored, true)
+    }
+
+    /// `insert_resolved` for copies already prepared: `whole` feeds the
+    /// projections, `stored` (the same files, possibly stripped) is what
+    /// the relation and the slot hold. Lets one file land under several
+    /// names as ONE stored copy. `claim: false` joins the relation without
+    /// replacing a slot that already answers.
+    pub(crate) fn publish_resolved(
+        &self,
+        module_name: &str,
+        whole: Option<&[Arc<CachedModule>]>,
+        stored: Option<Providers>,
+        claim: bool,
+    ) -> Option<Providers> {
         crate::util::ghost_stats::count("epoch.shape.insert_resolved");
         self.note_shape_change();
-        if let Some(ref providers) = result {
+        if let Some(providers) = whole {
             // One purge, then one push per provider: `record_loader_shapes`
             // clears the contributor's entries before pushing, so calling it
             // per provider would leave only the last one's shapes.
@@ -275,12 +329,6 @@ impl IndexCore {
         } else if matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
             return None;
         }
-        let stored: Option<Providers> = result.as_ref().map(|providers| {
-            providers
-                .iter()
-                .map(|m| strip_import_copy_one(m, persisted, strip))
-                .collect()
-        });
         // The relation holds every provider; the name-keyed slot holds the
         // @INC-order winner (what `require` would load) — derived from the
         // set, never the only thing kept.
@@ -288,7 +336,14 @@ impl IndexCore {
             self.adopt_inc_providers(module_name, providers);
         }
         let primary = stored.as_ref().and_then(|p| p.first().cloned());
-        self.cache.insert(module_name.to_string(), primary);
+        // A front door's name keeps its front-door winner: project code
+        // shadows an installed copy of the same name.
+        let shadowed = primary.as_ref().is_some_and(|p| !self.is_front_door(&p.path))
+            && self.front_door_declares(module_name);
+        let answered = matches!(self.cache.get(module_name).as_deref(), Some(Some(_)));
+        if !shadowed && (claim || !answered) {
+            self.cache.insert(module_name.to_string(), primary);
+        }
         stored
     }
 

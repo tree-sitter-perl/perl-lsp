@@ -152,11 +152,11 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    not own (`LanguageDriver::dependency_locator`; php: `build::composer`,
    Composer's `composer.json` + `installed.json`, never PHP itself). The
    walk skips the map's roots (`vendor/`) whatever `.gitignore` says, and
-   after it the indexer asks the map for every identity the project's
-   files import or extend that nothing declares
-   (`module_resolver::acquire_dependencies`, then each landed file's
-   parents, transitively). A landed file enters the @INC tier's relation
-   (`IndexCore::insert_resolved`: `all_defs` + the name slot, never
+   after it the indexer asks for every identity the project's files import
+   or extend (`request_resolve`; the resolver thread lands what the map
+   places and nothing declares, then each landed file's parents,
+   transitively). A landed file enters the @INC tier's relation
+   (`IndexCore::land_dependency`: `all_defs` + the name slot, never
    `all_files`), so the exact lane of `use_map_candidates` answers and the
    leaf lane never runs for it; it is dependency by construction
    (`is_dependency_path`), so rename never rewrites it and no workspace

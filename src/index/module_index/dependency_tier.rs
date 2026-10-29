@@ -1,13 +1,14 @@
-//! The pack dependency tier's index half: what a `DependencyLocator`
-//! landed, under which names, and its retirement when the map moves.
+//! The dependency tier's index half: the map a `DependencyLocator` reads,
+//! what the resolver thread landed under it, and their retirement when the
+//! map moves.
 //!
-//! A landed file enters the SAME candidate relation the @INC tier feeds
-//! (`IndexCore::insert_resolved`): `all_defs` + the name slot, never
+//! A landed file enters the SAME candidate relation the front doors feed
+//! (`IndexCore::publish_resolved`): `all_defs` + the name slot, never
 //! `all_files`. So it is DEPENDENCY by construction (`is_dependency_path`
 //! is "not a front-door registration"), and every workspace-tier sweep —
 //! diagnostics' and the heatmap's registered set, workspace-symbol's
-//! workspace rows — never sees it. Acquisition (locate + parse) is the
-//! resolver's (`module_resolver::acquire_dependencies`).
+//! workspace rows — never sees it. Acquisition (locate + parse + land) is
+//! the resolver thread's (`module_resolver::acquire`).
 
 use super::*;
 use crate::build::language_driver::{DependencyLocator, LanguageDriver};
@@ -16,28 +17,267 @@ use crate::build::language_driver::{DependencyLocator, LanguageDriver};
 /// generation. Replaced whole when an input manifest moves.
 pub(crate) struct DependencyState {
     pub(crate) driver: &'static dyn LanguageDriver,
-    pub(crate) root: std::path::PathBuf,
+    /// Canonical; `None` with no project open.
+    pub(crate) root: Option<std::path::PathBuf>,
     pub(crate) locator: Arc<dyn DependencyLocator>,
     /// `file_stamp` of each `locator.inputs()` when the map was read.
     pub(crate) stamps: Vec<Option<(i64, i64)>>,
     pub(crate) generation: u64,
-    /// Identities asked this generation → the file that landed them
-    /// (`None`: the map places nothing that declares it). A miss stays a
-    /// miss until the map moves.
-    pub(crate) asked: std::collections::HashMap<String, Option<std::path::PathBuf>>,
     /// Canonical path → the names it landed under.
     pub(crate) landed: std::collections::HashMap<std::path::PathBuf, Vec<String>>,
 }
 
-impl ModuleIndex {
+/// The map as one acquisition reads it, so locating and parsing run with
+/// no lock held. `generation` is what the landing re-checks.
+pub(crate) struct MapSnapshot {
+    pub(crate) driver: &'static dyn LanguageDriver,
+    pub(crate) root: Option<std::path::PathBuf>,
+    pub(crate) locator: Arc<dyn DependencyLocator>,
+    pub(crate) generation: u64,
+}
+
+impl MapSnapshot {
+    /// A located file is the tier's when it is under one of the map's
+    /// roots, or outside the project altogether. Anything else under the
+    /// root is the workspace walk's to index, or to leave alone.
+    pub(crate) fn in_tier(&self, canon: &std::path::Path) -> bool {
+        self.locator.roots().iter().any(|r| canon.starts_with(r))
+            || self.root.as_ref().is_none_or(|root| !canon.starts_with(root))
+    }
+}
+
+/// The map moved between an acquisition's snapshot and its landing; the
+/// name is asked again under the new one.
+pub(crate) struct MapMoved;
+
+fn stamps(inputs: &[std::path::PathBuf]) -> Vec<Option<(i64, i64)>> {
+    inputs.iter().map(|p| crate::index::module_cache::file_stamp(p)).collect()
+}
+
+impl IndexCore {
     pub(crate) fn dependency_state(&self) -> std::sync::MutexGuard<'_, Option<DependencyState>> {
-        self.core.dependencies.lock().unwrap_or_else(|e| e.into_inner())
+        self.dependencies.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Bring the map up to `root`'s manifests for `driver`. A moved input,
+    /// a new root or another language is a new GENERATION: what the old
+    /// map landed retires, the names it answered — and every miss — are
+    /// asked again under the new one, and the resolver thread is woken to
+    /// adopt it. Returns whether the generation moved. Cheap when nothing
+    /// did: one stat per input.
+    pub(crate) fn refresh_dependency_map(
+        &self,
+        driver: &'static dyn LanguageDriver,
+        root: Option<&std::path::Path>,
+    ) -> bool {
+        let root = root.map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.to_path_buf()));
+        let mut guard = self.dependency_state();
+        if let Some(st) = guard.as_ref() {
+            if st.driver.id() == driver.id() && st.root == root && stamps(st.locator.inputs()) == st.stamps {
+                return false;
+            }
+        }
+        let old = guard.take();
+        let generation = old.as_ref().map_or(0, |s| s.generation) + 1;
+        let mut reask: Vec<String> = Vec::new();
+        if let Some(old) = old {
+            for (path, names) in &old.landed {
+                self.retire_dependency(path, names);
+                reask.extend(names.iter().cloned());
+            }
+        }
+        // A miss under the old map may be a hit under this one.
+        self.cache.retain(|name, slot| {
+            if slot.is_some() {
+                return true;
+            }
+            reask.push(name.clone());
+            false
+        });
+        let locator: Arc<dyn DependencyLocator> = driver.dependency_locator(root.as_deref()).unwrap_or_else(|| {
+            Arc::new(crate::build::search_path::SearchPathLocator::new(driver, Vec::new(), Vec::new(), Vec::new()))
+        });
+        if let Some(marker) = driver.module_marker() {
+            crate::build::walk_markers::set_search_roots(marker, locator.search_roots());
+        }
+        // Visibility ranks candidates against the search path, so it is
+        // published before anything can land under it.
+        self.set_inc_roots(locator.search_roots());
+        *guard = Some(DependencyState {
+            driver,
+            root,
+            stamps: stamps(locator.inputs()),
+            locator,
+            generation,
+            landed: Default::default(),
+        });
+        drop(guard);
+        self.queue.map_moved.store(true, std::sync::atomic::Ordering::Release);
+        self.queue.ask(reask);
+        // A resolver still waiting for initialize's root can start: the
+        // map says where the project is.
+        let _root = self.workspace_root.root.lock().unwrap_or_else(|e| e.into_inner());
+        self.workspace_root.condvar.notify_all();
+        true
+    }
+
+    /// `refresh_dependency_map` for a caller with no driver of its own:
+    /// the driver and root the current map was read with, or `served` and
+    /// `root` when there is none yet.
+    pub(crate) fn ensure_dependency_map(&self, served: &'static dyn LanguageDriver, root: Option<&std::path::Path>) {
+        let current = self.dependency_state().as_ref().map(|st| (st.driver, st.root.clone()));
+        match current {
+            Some((driver, root)) => self.refresh_dependency_map(driver, root.as_deref()),
+            None => self.refresh_dependency_map(served, root),
+        };
+    }
+
+    pub(crate) fn map_snapshot(&self) -> Option<MapSnapshot> {
+        self.dependency_state().as_ref().map(|st| MapSnapshot {
+            driver: st.driver,
+            root: st.root.clone(),
+            locator: Arc::clone(&st.locator),
+            generation: st.generation,
+        })
+    }
+
+    pub(crate) fn dependency_generation(&self) -> u64 {
+        self.dependency_state().as_ref().map_or(0, |s| s.generation)
+    }
+
+    /// Land `whole` — the files the map placed for `asked` (none: its
+    /// always-loaded files), parsed under `generation`, in the map's
+    /// precedence order — under every name each file declares. A file
+    /// answers only for names it declares: the map places files that MAY
+    /// declare a name (a python class's module and its package), and every
+    /// file declaring it is a provider (Perl's twins across `@INC`). One
+    /// stored copy per file serves all its names; a name `asked` did not
+    /// ask for only fills a slot nothing answers yet, since an ask's own
+    /// answer outranks a file that happens to declare the name too.
+    /// Returns `asked`'s stored providers; `None` is a miss.
+    pub(crate) fn land_dependency(
+        &self,
+        asked: Option<&str>,
+        generation: u64,
+        whole: Providers,
+        persisted: bool,
+        strip: bool,
+    ) -> Result<Option<Providers>, MapMoved> {
+        debug_assert!(
+            std::thread::current().name().is_some_and(|n| n.starts_with("module-resolver")),
+            "only the resolver thread lands a dependency",
+        );
+        let mut guard = self.dependency_state();
+        let Some(st) = guard.as_mut().filter(|st| st.generation == generation) else {
+            return Err(MapMoved);
+        };
+        // Name → the files declaring it, in precedence order; the asked
+        // name first, so its answer lands before any by-product.
+        let mut declared: Vec<(String, Vec<usize>)> = asked.map(|a| (a.to_string(), Vec::new())).into_iter().collect();
+        for (i, m) in whole.iter().enumerate() {
+            for (name, _) in st.driver.registration_names(&m.analysis) {
+                match declared.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, at)) => at.push(i),
+                    None => declared.push((name, vec![i])),
+                }
+            }
+        }
+        // `persisted` covers the asked name's providers — the rows the
+        // caller wrote; any other file stays whole, its bag unrecoverable.
+        let answers: &[usize] = match asked {
+            Some(_) => &declared[0].1,
+            None => &[],
+        };
+        let stored: Providers = whole
+            .iter()
+            .enumerate()
+            .map(|(i, m)| super::index_core::strip_import_copy_one(m, persisted && answers.contains(&i), strip))
+            .collect();
+        let mut out = None;
+        for (name, at) in declared {
+            let claim = Some(name.as_str()) == asked;
+            if at.is_empty() {
+                self.insert_resolved(&name, None, persisted, strip);
+                continue;
+            }
+            let w: Providers = at.iter().map(|&i| Arc::clone(&whole[i])).collect();
+            let s: Providers = at.iter().map(|&i| Arc::clone(&stored[i])).collect();
+            for &i in &at {
+                st.landed.entry(whole[i].path.clone()).or_default().push(name.clone());
+            }
+            let landed = self.publish_resolved(&name, Some(&w), Some(s), claim);
+            if claim {
+                out = landed;
+            }
+        }
+        crate::util::ghost_stats::count_by("dependency.landed", whole.len() as u64);
+        Ok(out)
+    }
+
+    /// Undo a landing of `path`: its candidates, any name slot it holds
+    /// (re-picked from the survivors), and its edge feed.
+    pub(crate) fn retire_dependency(&self, path: &std::path::Path, names: &[String]) {
+        self.note_shape_change();
+        for name in names {
+            if let Some(mut v) = self.all_defs.get_mut(name) {
+                v.retain(|c| c.path != path);
+            }
+            self.all_defs.remove_if(name, |_, v| v.is_empty());
+            let held = self
+                .cache
+                .get(name)
+                .is_some_and(|e| matches!(e.value(), Some(c) if c.path == path));
+            if held {
+                let survivor = self.all_defs.get(name).and_then(|v| {
+                    best_candidate(&v.iter().collect::<Vec<_>>(), name, &|m, n| self.module_defines_class(m, n))
+                });
+                match survivor {
+                    Some(c) => {
+                        self.cache.insert(name.clone(), Some(c));
+                    }
+                    None => {
+                        self.cache.remove(name);
+                    }
+                }
+            }
+            // A front door that declares the name publishes under it too;
+            // its edges outlive the dependency's.
+            if !self.front_door_declares(name) {
+                self.edges.purge_module(name);
+            }
+        }
+        self.edges.remove_path_record(path);
+        if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
+            bc.invalidate(path);
+        }
+    }
+}
+
+impl ModuleIndex {
+    /// See `IndexCore::refresh_dependency_map`.
+    pub fn refresh_dependency_map(
+        &self,
+        driver: &'static dyn LanguageDriver,
+        root: Option<&std::path::Path>,
+    ) -> bool {
+        self.core.refresh_dependency_map(driver, root)
+    }
+
+    /// The map's generation check, for a caller that holds no root: the
+    /// driver and root the current map was read with.
+    pub fn refresh_dependency_map_again(&self) -> bool {
+        let current = self.core.dependency_state().as_ref().map(|st| (st.driver, st.root.clone()));
+        match current {
+            Some((driver, root)) => self.core.refresh_dependency_map(driver, root.as_deref()),
+            None => false,
+        }
     }
 
     /// The current map's tier roots — directories the workspace walk skips
     /// and the watcher never registers from. Empty before the first map.
     pub fn dependency_roots(&self) -> Vec<std::path::PathBuf> {
-        self.dependency_state()
+        self.core
+            .dependency_state()
             .as_ref()
             .map(|s| s.locator.roots().to_vec())
             .unwrap_or_default()
@@ -63,7 +303,7 @@ impl ModuleIndex {
     /// Is `path` a manifest the current map was read from?
     pub fn is_dependency_input(&self, path: &std::path::Path) -> bool {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        self.dependency_state().as_ref().is_some_and(|s| {
+        self.core.dependency_state().as_ref().is_some_and(|s| {
             s.locator
                 .inputs()
                 .iter()
@@ -74,71 +314,7 @@ impl ModuleIndex {
     /// The map's generation: moves each time an input manifest does.
     #[cfg(test)]
     pub fn dependency_generation(&self) -> u64 {
-        self.dependency_state().as_ref().map(|s| s.generation).unwrap_or(0)
-    }
-
-    /// Does a front-door (workspace) registration declare `name`? A
-    /// dependency never takes a name the project owns.
-    fn front_door_declares(&self, name: &str) -> bool {
-        self.core
-            .all_defs
-            .get(name)
-            .is_some_and(|v| v.iter().any(|c| self.all_files.contains_key(&c.path)))
-    }
-
-    /// Land one dependency file under every linkage-visible name it
-    /// declares that the workspace does not. Whole copy: nothing persisted
-    /// it, so nothing could rehydrate a strip — bounded by the demand
-    /// closure (`acquire_dependencies`), never by the vendor tree.
-    pub(crate) fn land_dependency(&self, cached: Arc<CachedModule>) -> Vec<String> {
-        let mut names = Vec::new();
-        for (name, _) in collect_linkage_feed(&cached.analysis) {
-            if self.front_door_declares(&name) {
-                continue;
-            }
-            self.core.insert_resolved(&name, Some(vec![Arc::clone(&cached)]), false, false);
-            names.push(name);
-        }
-        names
-    }
-
-    /// Undo `land_dependency` for `path`: its candidates, any name slot it
-    /// holds (re-picked from the survivors), and its edge feed.
-    pub(crate) fn retire_dependency(&self, path: &std::path::Path, names: &[String]) {
-        self.core.note_shape_change();
-        for name in names {
-            if let Some(mut v) = self.core.all_defs.get_mut(name) {
-                v.retain(|c| c.path != path);
-            }
-            self.core.all_defs.remove_if(name, |_, v| v.is_empty());
-            let held = self
-                .core
-                .cache
-                .get(name)
-                .is_some_and(|e| matches!(e.value(), Some(c) if c.path == path));
-            if held {
-                let survivor = self.core.all_defs.get(name).and_then(|v| {
-                    best_candidate(&v.iter().collect::<Vec<_>>(), name, &|m, n| self.module_defines_class(m, n))
-                });
-                match survivor {
-                    Some(c) => {
-                        self.core.cache.insert(name.clone(), Some(c));
-                    }
-                    None => {
-                        self.core.cache.remove(name);
-                    }
-                }
-            }
-            // A front door that declares the name publishes under it too;
-            // its edges outlive the dependency's.
-            if !self.front_door_declares(name) {
-                self.core.edges.purge_module(name);
-            }
-        }
-        self.core.edges.remove_path_record(path);
-        if let Some(bc) = self.core.bag_cache.read().ok().and_then(|g| g.clone()) {
-            bc.invalidate(path);
-        }
+        self.core.dependency_generation()
     }
 
     /// The identities the project's own files name across files: each
