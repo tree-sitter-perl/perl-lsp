@@ -1916,16 +1916,23 @@ impl ReducerRegistry {
                 (*this.query_rec(&full.witnesses, &q, state)).clone()
             };
             if let Some(recv) = &receiver {
-                let recv_class = match query_in(self, recv, state) {
-                    ReducedValue::Type(t) => t.class_name().map(str::to_string),
-                    ReducedValue::FactMap(_) | ReducedValue::None => None,
-                };
-                // A receiver the caller can't name a class for (untyped, or
-                // a class-name string it computes) may dispatch anywhere:
-                // counting it lets another family's arguments type this one.
-                let Some(c) = recv_class else { continue };
-                if c != package && !crate::model::file_analysis::class_isa(&c, package, &frame.packages, Some(idx)) {
-                    continue;
+                // A receiver the caller can't type, or only knows the shape
+                // of (a hash or array, which a blessed object is), may be
+                // this family's object: it counts. One known to be another
+                // class, or a value no object is (a class-name string it
+                // computes), dispatches elsewhere and would let that
+                // method's arguments type this one.
+                match query_in(self, recv, state) {
+                    ReducedValue::Type(t) => match t.class_name() {
+                        Some(c) => {
+                            if c != package && !crate::model::file_analysis::class_isa(c, package, &frame.packages, Some(idx)) {
+                                continue;
+                            }
+                        }
+                        None if t.is_known() && !t.is_hash_shaped() && !t.is_array_shaped() => continue,
+                        None => {}
+                    },
+                    ReducedValue::FactMap(_) | ReducedValue::None => {}
                 }
             }
             let skip = |i: u32| if method { i.checked_sub(1) } else { Some(i) };

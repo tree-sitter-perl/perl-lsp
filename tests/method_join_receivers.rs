@@ -1,7 +1,8 @@
-//! A method's parameter joins over its callers. A caller whose receiver
-//! names no class (a computed class-name string here, Foswiki's
-//! `$handler->INCLUDE(..)`) may be calling another family's method of the
-//! same name, so it stays out of the join; a typed caller still counts.
+//! A method's parameter joins over its callers. A caller whose receiver is
+//! known to be no object (a computed class-name string here, Foswiki's
+//! `$handler->INCLUDE(..)`) is calling some other class's method of the
+//! same name, so it stays out of the join. A typed caller counts, and so
+//! does one whose receiver is untyped (Foswiki's `$section->addChild(..)`).
 
 use std::process::Command;
 
@@ -57,5 +58,12 @@ fn a_computed_receiver_is_not_a_caller() {
 fn a_typed_receiver_is_a_caller() {
     let app = "package App;\nsub run { Foswiki->new->INCLUDE(bless({}, 'Params')) }\n1;\n";
     let out = hover_params("typed", &[("App.pm", app)]);
+    assert!(out.contains("*type: Params*"), "{out}");
+}
+
+#[test]
+fn an_untyped_receiver_is_a_caller() {
+    let app = "package App;\nuse Foswiki;\nsub run { my ($self, $section) = @_; $section->INCLUDE(bless({}, 'Params')) }\n1;\n";
+    let out = hover_params("untyped", &[("App.pm", app)]);
     assert!(out.contains("*type: Params*"), "{out}");
 }
