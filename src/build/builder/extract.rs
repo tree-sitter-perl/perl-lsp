@@ -659,6 +659,7 @@ impl<'a> Builder<'a> {
                 access: AccessKind::Write,
                 binding: None,
                 folded_from: None,
+                import_name: false,
                 arg_count: None,
             });
         }
@@ -786,6 +787,7 @@ impl<'a> Builder<'a> {
                 binding: owner_to_emit
                     .map(|owner| crate::model::file_analysis::RefBinding::HashKey { owner, sym: None }),
                 folded_from: None,
+                import_name: false,
                 arg_count: None,
             });
         }

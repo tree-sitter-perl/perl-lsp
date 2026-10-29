@@ -138,6 +138,7 @@ fn equal_span_first_write_wins() {
         access: AccessKind::Read,
         binding: None,
         folded_from: None,
+        import_name: false,
         arg_count: None,
     };
     let fa = FileAnalysis::new(crate::model::file_analysis::FileAnalysisParts {

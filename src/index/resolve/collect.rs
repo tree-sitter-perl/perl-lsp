@@ -1061,12 +1061,11 @@ pub(super) fn collect_from_analysis(
         // Where calling a class constructs it (python's `Foo()`), a call
         // whose name is a class runs that class's constructor, as php's
         // `new Foo` does: the class it constructs, asked only for a
-        // constructor target. Only a written call constructs: the pack mints
-        // an argument count at every call site, and a call-shaped ref with
-        // none (python's `from m import Foo`) names the class, never runs it.
+        // constructor target. An imported name (python's `from m import
+        // Foo`) names the class and runs nothing.
         let call_constructs = (!target.constructed_classes.is_empty()
             && matches!(r.kind, RefKind::FunctionCall)
-            && r.arg_count.is_some())
+            && !r.import_name)
         .then(|| analysis.class_named_by_call(r, module_index))
         .flatten();
         let construction = r.constructs() || call_constructs.is_some();
