@@ -245,7 +245,7 @@ fn test_helper_not_loaded_exempts_installed_plugins() {
     idx.insert_cache(
         "My::Plugin::WasLoaded",
         Some(std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-            std::path::PathBuf::from("/inc/My/Plugin/WasLoaded.pm"),
+            crate::util::canonical_path::CanonicalPath::resolve(std::path::PathBuf::from("/inc/My/Plugin/WasLoaded.pm")),
             std::sync::Arc::new(fa),
         ))),
     );

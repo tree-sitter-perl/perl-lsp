@@ -697,7 +697,7 @@ impl CrossFileLookup for ModuleIndex {
     // `parents_cached`: the trait default unions over `def_candidates`
     // (every file declaring the package), which is the honest Perl relation.
 
-    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         self.module_path_cached(module_name)
     }
 
@@ -774,13 +774,13 @@ impl CrossFileLookup for ModuleIndex {
         let mut seen: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
         for entry in self.all_files.iter() {
-            if seen.insert(entry.key().clone()) {
+            if seen.insert(entry.key().to_path_buf()) {
                 f(entry.value());
             }
         }
         for entry in self.core.cache.iter() {
             if let Some(ref cached) = *entry.value() {
-                if seen.insert(cached.path.clone()) {
+                if seen.insert(cached.path.to_path_buf()) {
                     f(cached);
                 }
             }

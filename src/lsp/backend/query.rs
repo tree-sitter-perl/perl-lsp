@@ -111,7 +111,7 @@ impl QueryCx {
             return Some((Arc::clone(&doc.analysis), FileKey::Url(uri.clone())));
         }
         let path = uri.to_file_path().ok()?;
-        let key = FileKey::Path(path);
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path));
         let analysis =
             crate::index::resolve::analysis_for_key(&self.open_docs, Some(&*self.module_index), &key)?;
         Some((analysis, key))

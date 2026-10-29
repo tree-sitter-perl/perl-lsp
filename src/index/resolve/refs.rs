@@ -10,7 +10,7 @@ use super::*;
 pub(super) fn group_from_projections(
     p: crate::model::file_analysis::FieldProjections,
     class_analysis: &FileAnalysis,
-    pinned_path: Option<PathBuf>,
+    pinned_path: Option<CanonicalPath>,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> ResolvedTarget {
     let mut members = Vec::new();
@@ -138,7 +138,7 @@ pub fn group_refs(
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
-    pinned_spans: &[(PathBuf, Span)],
+    pinned_spans: &[(CanonicalPath, Span)],
     members: &[GroupMember],
     mask_override: Option<RoleMask>,
 ) -> Vec<RefLocation> {
@@ -233,7 +233,7 @@ pub fn group_rename_edits(
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
-    pinned_spans: &[(PathBuf, Span)],
+    pinned_spans: &[(CanonicalPath, Span)],
     members: &[GroupMember],
     bare_new: &str,
     mask: RoleMask,
@@ -435,11 +435,11 @@ fn retrieve_dep_files(
     }
     let mut df = DepFiles { unindexed: Vec::new(), by_path: Default::default() };
     idx.for_each_cached_file(&mut |cached| {
-        if !rows_indexed.contains(&cached.path) {
+        if !rows_indexed.contains(cached.path.as_path()) {
             df.unindexed.push(std::sync::Arc::clone(cached));
         }
         df.by_path
-            .entry(cached.path.clone())
+            .entry(cached.path.to_path_buf())
             .or_insert_with(|| std::sync::Arc::clone(cached));
     });
     let df = std::sync::Arc::new(df);
@@ -571,8 +571,11 @@ fn walk_refs(
     });
 
     if let WalkScope::Origin { key, analysis } = scope {
-        let file_str = canonical_file_str(key);
-        collect_from_analysis(key, analysis, target, &aliases, module_index, &file_str, &memo, &mut out);
+        let file = match key {
+            FileKey::Path(p) => p.clone(),
+            FileKey::Url(u) => files.get_open(u).map(|d| d.canonical_path.clone()).unwrap_or_default(),
+        };
+        collect_from_analysis(key, analysis, target, &aliases, module_index, &file, &memo, &mut out);
         return sorted_deduped(out);
     }
 
@@ -595,9 +598,10 @@ fn walk_refs(
             });
         }
     }
-    let gate = |analysis: &FileAnalysis, file_str: &str| {
-        file_sees_target_ids(target, &target_def_ids, analysis, file_str)
-            || seen_by_inclusion.contains(file_str)
+    let gate = |analysis: &FileAnalysis, file: &CanonicalPath| {
+        let file_str = file.to_string_lossy();
+        file_sees_target_ids(target, &target_def_ids, analysis, &file_str)
+            || seen_by_inclusion.contains(file_str.as_ref())
     };
 
     // Row-narrowing gate: when the relational store is live for a masked
@@ -633,39 +637,31 @@ fn walk_refs(
 
     // Open docs (canonical — their index entries are skipped).
     let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    // Claim the canonical spelling too: candidate rows are keyed canonical,
+    // and an open doc reached through a symlinked root must shadow its own
+    // persisted generation.
+    let mut cover = |url: &Url, doc: &crate::index::document::Document| {
+        if let Ok(p) = url.to_file_path() {
+            covered_paths.insert(doc.canonical_path.to_path_buf());
+            covered_paths.insert(p);
+        }
+    };
     if mask.contains(RoleMask::OPEN) {
         files.for_each_open(|url, doc| {
-            let url = url.clone();
-            if let Ok(p) = url.to_file_path() {
-                // Claim the canonical spelling too: candidate rows are keyed
-                // canonical, and an open doc reached through a symlinked
-                // root must shadow its own persisted generation.
-                if let Ok(canon) = std::fs::canonicalize(&p) {
-                    covered_paths.insert(canon);
-                }
-                covered_paths.insert(p);
-            }
+            cover(url, doc);
             // The walk applies visibility: role mask picked the tier, the
             // closure gate decides per file (`file_sees_target_ids`); the
             // matcher below only matches.
-            let key = FileKey::Url(url);
-            let file_str = canonical_file_str(&key);
-            if !gate(&doc.analysis, &file_str) {
+            if !gate(&doc.analysis, &doc.canonical_path) {
                 return;
             }
-            collect_from_analysis(&key, &doc.analysis, target, &aliases, module_index, &file_str, &memo, &mut out);
+            let key = FileKey::Url(url.clone());
+            collect_from_analysis(&key, &doc.analysis, target, &aliases, module_index, &doc.canonical_path, &memo, &mut out);
         });
     } else {
         // Even if open isn't in the mask, track the paths so a WORKSPACE walk
         // doesn't duplicate them (an open file's pre-close state isn't meaningful).
-        files.for_each_open(|url, _doc| {
-            if let Ok(p) = url.to_file_path() {
-                if let Ok(canon) = std::fs::canonicalize(&p) {
-                    covered_paths.insert(canon);
-                }
-                covered_paths.insert(p);
-            }
-        });
+        files.for_each_open(|url, doc| cover(url, doc));
     }
 
     // Relational retrieval (`docs/adr/relational-ref-index.md`): the files
@@ -707,17 +703,16 @@ fn walk_refs(
                 }
                 let Some(cached) = idx.cached_by_path(path) else { continue };
                 covered_paths.insert(path.clone());
-                let key = FileKey::Path(cached.path.clone());
-                let file_str = canonical_file_str(&key);
-                if !gate(&cached.analysis, &file_str) {
+                if !gate(&cached.analysis, &cached.path) {
                     continue;
                 }
+                let key = FileKey::Path(cached.path.clone());
                 // The matcher reads refs (usage sites) AND symbols
                 // (declaration sites) — the rows-axes view, upgraded to
                 // whole only when a matching ref needs the bag.
                 let full = crate::util::ghost_stats::timed("refs.cand.view", || matcher_view(idx, &cached, target));
                 crate::util::ghost_stats::timed("refs.cand.collect", || collect_from_analysis(
-                    &key, &full, target, &aliases, module_index, &file_str, &memo, &mut out,
+                    &key, &full, target, &aliases, module_index, &cached.path, &memo, &mut out,
                 ));
             }
         }
@@ -738,22 +733,21 @@ fn walk_refs(
                 // Shredded but not a candidate ⇒ provably matchless; skip the
                 // rehydration. Candidates always fall through (the relational
                 // block may have failed to resolve them).
-                if rows_indexed.contains(&cached.path) && !candidate_set.contains(&cached.path) {
+                if rows_indexed.contains(cached.path.as_path()) && !candidate_set.contains(cached.path.as_path()) {
                     return;
                 }
-                if !covered_paths.insert(cached.path.clone()) {
+                if !covered_paths.insert(cached.path.to_path_buf()) {
+                    return;
+                }
+                if !gate(&cached.analysis, &cached.path) {
                     return;
                 }
                 let key = FileKey::Path(cached.path.clone());
-                let file_str = canonical_file_str(&key);
-                if !gate(&cached.analysis, &file_str) {
-                    return;
-                }
                 // Rows-off fallback sweep: copies here may still be
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
                 let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
+                collect_from_analysis(&key, &full, target, &aliases, module_index, &cached.path, &memo, &mut out);
             };
             // Narrowed, a sweep visits exactly the unshredded files plus the
             // candidates — so a sweep memo enumerates those instead of
@@ -1146,15 +1140,10 @@ fn scan_alias_pairs(
     // projections (the set's borrow discipline), so a write lock here
     // deadlocks the moment a diagnostics refresh queues behind it.
     files.for_each_open(|url, doc| {
-        let path = url
-            .to_file_path()
-            .map(|p| {
-                std::fs::canonicalize(&p)
-                    .unwrap_or(p)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_else(|_| url.to_string());
+        let path = match url.to_file_path() {
+            Ok(_) => doc.canonical_path.to_string_lossy().into_owned(),
+            Err(_) => url.to_string(),
+        };
         add(&doc.analysis, &path);
     });
     if let Some(idx) = module_index {

@@ -57,7 +57,7 @@ pub fn analysis_for_key(
             }
             u.to_file_path().ok()?
         }
-        FileKey::Path(p) => p.clone(),
+        FileKey::Path(p) => p.to_path_buf(),
     };
     // Index copies are symbols-evicted after persist; the enclosing-caller
     // lookup reads symbols, so rehydrate (`whole_present`) rather than answer

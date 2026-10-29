@@ -2,6 +2,7 @@
 //! `--refs-parity` A/B net over the same eligible-symbol walk.
 
 use super::*;
+use crate::util::canonical_path::CanonicalPath;
 
 /// Which symbols a usage heatmap lists: nameable callables and packages.
 /// A listing policy, not an identity decision — identity is minted by the
@@ -45,7 +46,7 @@ fn heatmap_symbol_eligible(sym: &file_analysis::Symbol) -> bool {
 fn heatmap_symbol_row(
     ws: &open_docs::OpenDocs,
     routing_idx: &dyn file_analysis::CrossFileLookup,
-    path: &std::path::Path,
+    path: &CanonicalPath,
     analysis: &file_analysis::FileAnalysis,
     sym: &file_analysis::Symbol,
     visibility: resolve::RoleMask,
@@ -80,7 +81,7 @@ fn heatmap_symbol_row(
             let mut cs = crate::util::ghost_stats::timed("heatmap.mint", || resolve::resolve(
                 ws,
                 analysis,
-                open_docs::FileKey::Path(path.to_path_buf()),
+                open_docs::FileKey::Path(path.clone()),
                 sym.selection_span.start,
                 Some(routing_idx),
                 scope,
@@ -246,7 +247,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     let mut mismatched = 0usize;
     let mut check = |ws: &open_docs::OpenDocs,
                      routing: &dyn file_analysis::CrossFileLookup,
-                     path: &std::path::Path,
+                     path: &CanonicalPath,
                      analysis: &file_analysis::FileAnalysis,
                      visibility: resolve::RoleMask,
                      checked: &mut usize,
@@ -265,7 +266,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
             let mut cs = resolve::resolve(
                 ws,
                 analysis,
-                open_docs::FileKey::Path(path.to_path_buf()),
+                open_docs::FileKey::Path(path.clone()),
                 sym.selection_span.start,
                 Some(routing),
                 scope,
@@ -315,7 +316,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
 /// deterministic report. Batch-CLI-sized cost, not a query path.
 fn registered_whole(
     idx: &crate::index::module_index::ModuleIndex,
-) -> Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> {
+) -> Vec<(CanonicalPath, std::sync::Arc<file_analysis::FileAnalysis>)> {
     let mut entries = Vec::new();
     idx.for_each_registered_file(&mut |cached| {
         entries.push((
@@ -341,7 +342,7 @@ type PruneIndex = (
 /// here, never as a family flag in the row builder.
 struct HeatmapItem<'a> {
     routing: &'a (dyn file_analysis::CrossFileLookup + Sync),
-    path: &'a std::path::Path,
+    path: &'a CanonicalPath,
     analysis: &'a file_analysis::FileAnalysis,
     sym: &'a file_analysis::Symbol,
     prune: Option<&'a PruneIndex>,

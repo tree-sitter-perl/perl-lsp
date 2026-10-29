@@ -177,7 +177,7 @@ impl Backend {
                     module_index
                         .visible_def_candidates(class)
                         .iter()
-                        .map(|c| c.path.clone())
+                        .map(|c| c.path.to_path_buf())
                         .collect()
                 };
                 let consumers_of = |p: &std::path::Path| -> Vec<PathBuf> {

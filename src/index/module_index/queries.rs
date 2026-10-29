@@ -310,7 +310,7 @@ impl ModuleIndex {
     }
 
     /// Return cached module path only — never does I/O.
-    pub fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    pub fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         self.core.cache
             .get(module_name)
             .and_then(|entry| entry.as_ref().map(|m| m.path.clone()))
@@ -575,7 +575,7 @@ impl ModuleIndex {
     /// `method_resolution_on_class`. Idempotent (`materialize_gated_emissions`
     /// dedups against already-present symbols).
     pub fn materialize_gated_emissions(&self) {
-        let mut updates: Vec<(String, std::path::PathBuf, Arc<FileAnalysis>)> = Vec::new();
+        let mut updates: Vec<(String, crate::util::canonical_path::CanonicalPath, Arc<FileAnalysis>)> = Vec::new();
         for entry in self.core.cache.iter() {
             let Some(cached) = entry.value() else { continue };
             if cached.analysis.plugin.gated_emissions.is_empty() {
@@ -590,7 +590,7 @@ impl ModuleIndex {
         }
         for (name, path, analysis) in updates {
             let cm = Arc::new(CachedModule::new(path.clone(), analysis));
-            self.register_materialized_whole(name, path, cm);
+            self.register_materialized_whole(name, path.into_path_buf(), cm);
         }
     }
 }

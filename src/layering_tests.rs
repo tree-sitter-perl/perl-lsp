@@ -1525,6 +1525,41 @@ fn packs_do_not_borrow_perls_current_package_token() {
     );
 }
 
+/// A query never asks the filesystem how a path is spelled. `realpath`
+/// costs one `readlink` per path component, and re-canonicalizing an
+/// already-registered path per candidate file per `references()` call was
+/// half of a heatmap sweep's kernel time. The canonical spelling is minted
+/// where a path enters (`CanonicalPath`, `util/canonical_path.rs`) and the
+/// query tiers read it; `from_stored` re-adopts a persisted spelling and
+/// stays with the cache that wrote it.
+#[test]
+fn query_paths_never_canonicalize() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Model, Layer::Index])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("model/") || rel.starts_with("index/resolve/"))
+        .collect();
+    let seen = count_lines(&files, &|l| {
+        l.contains("canonicalize(") || l.contains("CanonicalPath::resolve(")
+    });
+    let allow: &[(&str, usize, &str)] = &[(
+        "model/file_analysis/cross_file.rs",
+        1,
+        "`VisibilityAxis::for_origin` resolves the `use lib` directories a file's SOURCE names — \
+         not a registered path re-spelled; only an origin that declares `use lib` reaches it",
+    )];
+    let mut drift = allowlist_drift("query-time canonicalize", &seen, allow);
+
+    let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));
+    let allow: &[(&str, usize, &str)] = &[(
+        "index/module_cache/warm.rs",
+        1,
+        "the warm scan re-adopts the spelling its own writer persisted",
+    )];
+    drift.extend(allowlist_drift("CanonicalPath::from_stored", &seen, allow));
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,

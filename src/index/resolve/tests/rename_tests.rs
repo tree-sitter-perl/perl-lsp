@@ -140,7 +140,7 @@ sub ping { "pong" }
     idx.insert_cache(
         "Base",
         Some(Arc::new(crate::model::file_analysis::CachedModule::new(
-            dep_path.clone(),
+            crate::util::canonical_path::CanonicalPath::resolve(dep_path.clone()),
             Arc::new(parse(dep_src)),
         ))),
     );

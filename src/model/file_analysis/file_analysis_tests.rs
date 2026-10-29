@@ -2240,7 +2240,7 @@ fn cross_file_slot_write_types_the_read() {
         idx.insert_cache(
             "Parent",
             Some(Arc::new(crate::model::file_analysis::CachedModule::new(
-                std::path::PathBuf::from("/fake/Parent.pm"),
+                crate::util::canonical_path::CanonicalPath::resolve(std::path::PathBuf::from("/fake/Parent.pm")),
                 Arc::new(fa),
             ))),
         );
@@ -2313,7 +2313,7 @@ fn loader_config_types_register_conf_cross_file() {
         idx.insert_cache(
             "MyApp::Boot",
             Some(Arc::new(crate::model::file_analysis::CachedModule::new(
-                std::path::PathBuf::from("/fake/conf/Boot.pm"),
+                crate::util::canonical_path::CanonicalPath::resolve(std::path::PathBuf::from("/fake/conf/Boot.pm")),
                 Arc::new(fa),
             ))),
         );

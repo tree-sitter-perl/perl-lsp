@@ -303,7 +303,7 @@ fn calling_a_class_names_it() {
     idx.insert_workspace_for_test(path.clone(), fa);
     let fa = idx.workspace_file_for_test(&path).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(path), Point::new(2, 11), Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path)), Point::new(2, 11), Some(&idx), OverrideScope::default());
     let mut rows: Vec<usize> = cs.rename_edits("Baz").unwrap().into_iter().map(|(l, _)| l.span.start.row).collect();
     rows.sort();
     assert_eq!(rows, [0, 2, 4]);

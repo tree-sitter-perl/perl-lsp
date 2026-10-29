@@ -320,7 +320,7 @@ pub(super) fn pack_symbol_def_location(
     // the scoped lookup).
     let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for cached in module_index.def_candidates(name) {
-        if !seen_paths.insert(cached.path.clone()) {
+        if !seen_paths.insert(cached.path.to_path_buf()) {
             continue;
         }
         let whole = module_index.whole_present(&cached);
@@ -328,7 +328,7 @@ pub(super) fn pack_symbol_def_location(
             candidates.push((
                 has_body(&whole, sym),
                 false,
-                cached.path.clone(),
+                cached.path.to_path_buf(),
                 sym.selection_span.start.row,
                 sym.selection_span.start.column,
                 RefLocation {
@@ -352,7 +352,7 @@ pub(super) fn pack_symbol_def_location(
 
 pub(crate) fn key_for_sort(k: &FileKey) -> PathBuf {
     match k {
-        FileKey::Path(p) => p.clone(),
+        FileKey::Path(p) => p.to_path_buf(),
         FileKey::Url(u) => u.to_file_path().unwrap_or_else(|_| PathBuf::from(u.as_str())),
     }
 }
@@ -847,16 +847,6 @@ pub(super) fn file_sees_target_ids(
         })
 }
 
-/// A `FileKey`'s canonical path string — the spelling the visibility facts
-/// (`def_paths`, alias def sites, include closures) are keyed in.
-pub(super) fn canonical_file_str(key: &FileKey) -> String {
-    let file_path = key_for_sort(key);
-    std::fs::canonicalize(&file_path)
-        .unwrap_or(file_path)
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// The refs of `analysis` that can match `name` under any matcher arm — the
 /// in-file half of the relational narrowing (`RefTable::by_key`), in ref
 /// order. Callers iterate this instead of the whole ref vec.
@@ -892,11 +882,12 @@ pub(super) fn collect_from_analysis(
     target: &TargetRef,
     aliases: &[DelegationAlias],
     module_index: Option<&dyn CrossFileLookup>,
-    file_str: &str,
+    file: &CanonicalPath,
     memo: &WalkMemo,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::model::file_analysis::HashKeyOwner;
+    let file_str = file.to_string_lossy();
 
     // An alias applies in THIS file only if its `#define` is visible here
     // (macro expansion requires inclusion). Files of another language have
@@ -905,7 +896,7 @@ pub(super) fn collect_from_analysis(
     let visible_aliases: Vec<&DelegationAlias> = aliases
         .iter()
         .filter(|a| {
-            a.def_path == file_str
+            a.def_path == *file_str
                 || analysis.pack.include_closure.contains(&a.def_path)
         })
         .collect();
@@ -919,12 +910,11 @@ pub(super) fn collect_from_analysis(
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
         Some(idx) if !analysis.pack.include_closure.is_empty() => {
-            let path = key_for_sort(key);
             // Guarded by a non-empty include closure — a pack-only shape.
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
-                Some(path.as_path()),
+                Some(file),
                 crate::model::file_analysis::VisibilityAxis::IncludeClosure,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,

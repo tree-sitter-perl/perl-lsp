@@ -35,7 +35,7 @@ fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> 
     let tree = parser.parse(source, None).unwrap();
     let analysis = crate::build::builder::build(&tree, source.as_bytes());
     Arc::new(CachedModule::new(
-        PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/"))),
+        crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/")))),
         Arc::new(analysis),
     ))
 }
@@ -969,7 +969,7 @@ fn cache_bridged(
     idx.insert_cache(
         module_name,
         Some(Arc::new(CachedModule::new(
-            PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/"))),
+            crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/")))),
             Arc::new(fa),
         ))),
     );
@@ -1151,7 +1151,7 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     let mut fa = crate::build::builder::build(&tree, src.as_bytes());
     fa.evict_to(crate::model::file_analysis::Residency::Skeleton);
     let cm = Arc::new(CachedModule::new(
-        PathBuf::from("/fake/Ghost.pm"),
+        crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/Ghost.pm")),
         Arc::new(fa),
     ));
 
@@ -1917,7 +1917,7 @@ fn an_enriched_copy_keeps_the_degraded_marker() {
     let mut fa = (*consumer.analysis).clone();
     fa.degraded = true;
     let degraded_consumer = Arc::new(CachedModule::new(
-        consumer.path.to_path_buf(),
+        crate::util::canonical_path::CanonicalPath::resolve(consumer.path.to_path_buf()),
         Arc::new(fa),
     ));
     idx.register_workspace_module(

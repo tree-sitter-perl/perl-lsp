@@ -1123,7 +1123,7 @@ sub create { }
         resolve(
             &store,
             &fa,
-            FileKey::Path(PathBuf::from("/tmp/dh_scope_test.pl")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/tmp/dh_scope_test.pl"))),
             pt,
             Some(&idx),
             OverrideScope::default(),
@@ -1739,7 +1739,7 @@ $b->touch();
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(consumer_path),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(consumer_path)),
         tree_sitter::Point { row: 3, column: 4 },
         Some(&idx),
         OverrideScope::default(),
@@ -2058,7 +2058,7 @@ $x->makeFoo()->ping();
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(consumer_path),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(consumer_path)),
         tree_sitter::Point { row: 3, column: 18 },
         Some(&idx),
         OverrideScope::default(),
