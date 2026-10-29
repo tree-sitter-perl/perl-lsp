@@ -2,9 +2,10 @@
 //! identity the workspace does not.
 //!
 //! The ONE seam the index's dependency tier asks: [`locator`] builds a
-//! [`DependencyLocator`] from `composer.json` and
-//! `<vendor-dir>/composer/installed.json`, and the index never sees
-//! Composer. Nothing here runs PHP or Composer. [`ResolvedConfig`] mirrors
+//! [`DependencyLocator`] from `composer.json`,
+//! `<vendor-dir>/composer/installed.json` and the classmap Composer
+//! generated beside it, and the index never sees Composer. Nothing here
+//! runs PHP or Composer. [`ResolvedConfig`] mirrors
 //! `composr`'s `config::ResolvedConfig` field for field, so that crate's
 //! `ResolvedConfig::load` can replace ours without touching the locator or
 //! the tier plumbing.
@@ -82,6 +83,13 @@ impl ResolvedConfig {
 
 fn installed_json(vendor_dir: &Path) -> PathBuf {
     vendor_dir.join("composer").join("installed.json")
+}
+
+/// The class → file map `composer dump-autoload` writes. It already applies
+/// every package's `classmap` and `exclude-from-classmap` (and, optimized,
+/// every PSR class too), so reading it is exact where scanning was not.
+fn autoload_classmap(vendor_dir: &Path) -> PathBuf {
+    vendor_dir.join("composer").join("autoload_classmap.php")
 }
 
 fn read_json(path: &Path) -> Result<serde_json::Value, String> {
@@ -176,19 +184,21 @@ pub fn locator(root: &Path, driver: &'static dyn LanguageDriver) -> Arc<dyn Depe
     Arc::new(ComposerLocator::new(root, driver, config.ok()))
 }
 
-/// Class identity → candidate files, by Composer's rules: PSR-4 (longest
-/// prefix first), then PSR-0, then the classmap.
+/// Class identity → candidate files, in Composer's own order: the generated
+/// classmap, then PSR-4 (longest prefix first), then PSR-0.
 pub struct ComposerLocator {
     /// The language the map serves: its namespace separator spells the
-    /// identities, and a classmap file is parsed in it.
+    /// identities, and the generated classmap is parsed in it.
     driver: &'static dyn LanguageDriver,
     sep: String,
     psr_4: Vec<(String, Vec<PathBuf>)>,
     psr_0: Vec<(String, Vec<PathBuf>)>,
-    classmap_roots: Vec<PathBuf>,
-    /// Filled on the first identity PSR-4/PSR-0 cannot place: a classmap
-    /// names directories, and only parsing their files says which classes
-    /// they declare.
+    /// `$vendorDir` and `$baseDir` as the generated classmap spells them.
+    vendor_dir: PathBuf,
+    base_dir: PathBuf,
+    /// Read on the first ask. No generated classmap (`dump-autoload` never
+    /// ran) is an empty map, not a scan of the packages' classmap
+    /// directories: Composer itself would load none of those classes.
     classmap: OnceLock<HashMap<String, PathBuf>>,
     files: Vec<PathBuf>,
     roots: Vec<PathBuf>,
@@ -204,16 +214,16 @@ impl ComposerLocator {
             sep,
             psr_4: Vec::new(),
             psr_0: Vec::new(),
-            classmap_roots: Vec::new(),
+            vendor_dir: vendor_dir.clone(),
+            base_dir: root.to_path_buf(),
             classmap: OnceLock::new(),
             files: Vec::new(),
             roots: vec![std::fs::canonicalize(&vendor_dir).unwrap_or_else(|_| vendor_dir.clone())],
-            inputs: vec![root.join("composer.json"), installed_json(&vendor_dir)],
+            inputs: vec![root.join("composer.json"), installed_json(&vendor_dir), autoload_classmap(&vendor_dir)],
         };
         for p in config.into_iter().flat_map(|c| c.packages) {
             loc.psr_4.extend(p.psr_4);
             loc.psr_0.extend(p.psr_0);
-            loc.classmap_roots.extend(p.classmap);
             loc.files.extend(p.files);
         }
         // Longest prefix first; the empty fallback prefix sorts last.
@@ -247,31 +257,82 @@ impl ComposerLocator {
 
     fn classmap(&self) -> &HashMap<String, PathBuf> {
         self.classmap.get_or_init(|| {
-            let mut map = HashMap::new();
-            use crate::build::source_files::{analyze_file, walk, Walk, PACK_FILE_CAP};
-            let driver = self.driver;
-            // Inside `vendor/`, which projects ignore: the walk must not.
-            let w = Walk { extensions: driver.extensions(), cap: PACK_FILE_CAP, skip: &[], ignores: false };
-            for path in self.classmap_roots.iter().flat_map(|root| walk(root, &w).files) {
-                let Some(fa) = analyze_file(driver, &path, PACK_FILE_CAP) else { continue };
-                for s in fa.symbols().iter().filter(|s| s.kind == crate::model::file_analysis::SymKind::Class) {
-                    map.entry(s.name.clone()).or_insert_with(|| path.clone());
-                }
-            }
-            map
+            let path = autoload_classmap(&self.vendor_dir);
+            let Ok(source) = std::fs::read_to_string(&path) else { return HashMap::new() };
+            read_classmap(self.driver, &source, &self.vendor_dir, &self.base_dir)
         })
     }
+}
+
+/// The generated classmap's entries, through `composer-classmap.scm`. An
+/// entry whose path is spelled any other way than the query admits is
+/// skipped, never guessed at.
+fn read_classmap(driver: &dyn LanguageDriver, source: &str, vendor_dir: &Path, base_dir: &Path) -> HashMap<String, PathBuf> {
+    use tree_sitter::{Query, QueryCursor, StreamingIterator};
+    static SCM: &str = include_str!("../../queries/php/composer-classmap.scm");
+    let mut map = HashMap::new();
+    let mut parser = driver.make_parser();
+    let Some(lang) = parser.language().map(|l| (*l).clone()) else { return map };
+    let Some(tree) = parser.parse(source, None) else { return map };
+    let query = match Query::new(&lang, SCM) {
+        Ok(q) => q,
+        Err(e) => {
+            log::warn!("composer: classmap query does not compile: {e}");
+            return map;
+        }
+    };
+    let names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
+        let (mut class, mut path) = (None, None);
+        for c in m.captures {
+            let Some(text) = c.node.utf8_text(source.as_bytes()).ok().and_then(single_quoted) else { continue };
+            match names[c.index as usize] {
+                "classmap.class" => class = Some(text),
+                "classmap.path.vendor" => path = Some(normalize(vendor_dir, text.trim_start_matches('/'))),
+                "classmap.path.base" => path = Some(normalize(base_dir, text.trim_start_matches('/'))),
+                "classmap.path.absolute" => path = Some(normalize(Path::new("/"), &text)),
+                _ => {}
+            }
+        }
+        if let (Some(class), Some(path)) = (class, path) {
+            map.entry(class).or_insert(path);
+        }
+    }
+    map
+}
+
+/// A single-quoted PHP string's value: `\\` and `\'` are its only escapes.
+/// `None` for any other spelling, which the generated file never writes.
+fn single_quoted(text: &str) -> Option<String> {
+    let inner = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(e @ ('\\' | '\'')) => out.push(e),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            c => out.push(c),
+        }
+    }
+    Some(out)
 }
 
 impl DependencyLocator for ComposerLocator {
     fn locate(&self, identity: &str) -> Vec<PathBuf> {
         let identity = identity.trim_start_matches(self.sep.as_str());
-        let mut out = Vec::new();
+        let mut out: Vec<PathBuf> = self.classmap().get(identity).filter(|p| p.is_file()).cloned().into_iter().collect();
         self.psr_4(identity, &mut out);
         self.psr_0(identity, &mut out);
-        if out.is_empty() && !self.classmap_roots.is_empty() {
-            out.extend(self.classmap().get(identity).cloned());
-        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|p| seen.insert(p.clone()));
         out
     }
     fn always_loaded(&self) -> &[PathBuf] {

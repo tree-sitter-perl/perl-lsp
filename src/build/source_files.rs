@@ -32,7 +32,7 @@ pub struct Walked {
 }
 
 /// Every file of the language under `root`, in walk order. A `root` that is
-/// itself a file is the one file (a Composer classmap entry may name one).
+/// itself a file is the one file.
 pub fn walk(root: &Path, w: &Walk) -> Walked {
     use ignore::types::TypesBuilder;
     use ignore::WalkBuilder;

@@ -45,6 +45,8 @@ const BASE: &str = "<?php\nnamespace Acme\\Model;\nclass Base extends Root {\n  
 const ROOT: &str = "<?php\nnamespace Acme\\Model;\nclass Root {\n    function root() {}\n}\n";
 const UNUSED: &str = "<?php\nnamespace Acme\\Model;\nclass Unused {}\n";
 const LEGACY: &str = "<?php\nclass Legacy_Thing {\n    function hi() {}\n}\n";
+/// The classmap `composer dump-autoload` writes for INSTALLED.
+const CLASSMAP: &str = "<?php\n$vendorDir = dirname(__DIR__);\n$baseDir = dirname($vendorDir);\n\nreturn array(\n    'Legacy_Thing' => $vendorDir . '/old/lib/legacy/thing.php',\n);\n";
 const USER: &str = "<?php\nnamespace App;\nuse Acme\\Model\\Base;\nclass User extends Base {\n    function go() { $this->name(); $this->root(); }\n}\n";
 const OLD: &str = "<?php\nnamespace App;\nclass Old extends \\Legacy_Thing {\n    function go() { $this->hi(); }\n}\n";
 /// A same-leaf class the workspace declares: what `Acme\Model\Base`
@@ -61,6 +63,7 @@ fn composer_project(tag: &str, composer: &str) -> PathBuf {
             ("vendor/acme/model/src/Root.php", ROOT),
             ("vendor/acme/model/src/Unused.php", UNUSED),
             ("vendor/old/lib/legacy/thing.php", LEGACY),
+            ("vendor/composer/autoload_classmap.php", CLASSMAP),
             ("src/User.php", USER),
             ("src/Old.php", OLD),
             ("src/Other/Base.php", STRANGER),
@@ -140,8 +143,7 @@ fn a_psr_4_dependency_parent_resolves_as_the_dependency_tier() {
     assert_eq!(idx.dependency_generation(), 1);
 }
 
-/// A classmap names a directory; the class it holds is found by parsing,
-/// and lands like a PSR-4 one.
+/// A class only the generated classmap places lands like a PSR-4 one.
 #[test]
 fn a_classmap_entry_resolves() {
     let root = composer_project("classmap", COMPOSER);

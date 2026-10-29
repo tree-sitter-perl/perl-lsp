@@ -787,7 +787,7 @@ fn php_driver() -> PackDriver {
         file_module: None,
         dependencies: Some(PackDependencies {
             locator: crate::build::composer::locator,
-            manifests: &["composer.json", "installed.json"],
+            manifests: &["composer.json", "installed.json", "autoload_classmap.php"],
         }),
     }
 }
