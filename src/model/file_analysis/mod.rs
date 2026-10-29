@@ -230,7 +230,8 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub attr_projections: Vec<AttrProjection>,
 
-    /// Scalars reassigned after declaration (`$v = …` with the
+    /// Variables (by declaring symbol) reassigned after declaration
+    /// (`$v = …` with the
     /// variable itself as assignment target — element writes are NOT
     /// reassignment, they're modeled as shape mutations). A closed
     /// shape on a reassigned scalar isn't trustworthy: the other
@@ -238,7 +239,7 @@ pub struct FileAnalysis {
     /// conditional-reassignment lattice disagreement is the modeled
     /// fix; this set is its trust-gate stand-in.
     #[serde(default)]
-    pub reassigned_scalars: HashSet<String>,
+    pub reassigned_vars: HashSet<SymbolId>,
 
     /// Hash-key writes, in walk order. Input to the mutation-extension
     /// pass — see [`KeyWrite`].
@@ -606,7 +607,7 @@ pub struct FileAnalysisParts {
     pub arrow_deref_sites: Vec<ArrowDerefSite>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
     pub attr_projections: Vec<AttrProjection>,
-    pub reassigned_scalars: HashSet<String>,
+    pub reassigned_vars: HashSet<SymbolId>,
     pub key_writes: Vec<KeyWrite>,
     pub dbic_source_name: Option<String>,
     pub column_keyed_verbs: HashSet<String>,

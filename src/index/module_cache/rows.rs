@@ -93,28 +93,20 @@ fn shred_derived_rows_inner(
     // 'import'. The walk's verdict wins — downgrading would let the @INC
     // hard-clear take an editable file's generation out from under its
     // stripped resident copy.
-    conn.execute(
-        "INSERT INTO files (path, source) VALUES (?1, ?2)
-         ON CONFLICT(path) DO UPDATE SET source =
-           CASE WHEN files.source = 'workspace' THEN 'workspace' ELSE excluded.source END",
-        params![path, source],
-    )?;
-    let file_id: i64 = conn.query_row(
-        "SELECT file_id FROM files WHERE path = ?1",
-        params![path],
-        |row| row.get(0),
-    )?;
-    conn.execute("DELETE FROM refs WHERE file_id = ?1", params![file_id])?;
-    conn.execute("DELETE FROM syms WHERE file_id = ?1", params![file_id])?;
-    conn.execute("DELETE FROM held WHERE file_id = ?1", params![file_id])?;
+    conn.execute(sql::FILES_UPSERT.registered(), params![path, source])?;
+    let file_id: i64 =
+        conn.query_row(sql::FILE_ID_BY_PATH.registered(), params![path], |row| row.get(0))?;
+    conn.execute(sql::REFS_DELETE_FILE_ID.registered(), params![file_id])?;
+    conn.execute(sql::SYMS_DELETE_FILE_ID.registered(), params![file_id])?;
+    conn.execute(sql::HELD_DELETE_FILE_ID.registered(), params![file_id])?;
 
     let generation = crate::index::module_cache::strings_generation(conn);
     INTERN_MEMO.with(|cell| -> rusqlite::Result<()> {
         let mut memo = cell.borrow_mut();
         memo.reset_if_stale(generation);
 
-        let mut intern = conn.prepare_cached("INSERT OR IGNORE INTO strings (s) VALUES (?1)")?;
-        let mut lookup = conn.prepare_cached("SELECT str_id FROM strings WHERE s = ?1")?;
+        let mut intern = conn.prepare_cached(sql::STRINGS_INTERN.registered())?;
+        let mut lookup = conn.prepare_cached(sql::STRINGS_LOOKUP.registered())?;
         // SELECT first. `INSERT OR IGNORE` for a name already interned is a
         // write statement that does nothing, and at corpus scale almost every
         // name is already there — `$self` was re-interned once per FILE.
@@ -138,12 +130,9 @@ fn shred_derived_rows_inner(
         // primary key's conflict handling is the point: it collapses the
         // statement count along with the row count, and the statements were
         // the write pressure.
-        let mut insert = conn.prepare_cached(
-            // OR IGNORE, not a bare INSERT: the per-file DELETE above should
-            // leave every pair fresh, but a duplicate would otherwise abort
-            // the whole chunk transaction and take other files' rows with it.
-            "INSERT OR IGNORE INTO refs (name_id, file_id) VALUES (?1, ?2)",
-        )?;
+        // OR IGNORE, not a bare INSERT: the per-file DELETE above should
+        // leave every pair fresh.
+        let mut insert = conn.prepare_cached(sql::REFS_INSERT.registered())?;
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for seed in seeds {
             if !seen.insert(seed.key.as_str()) {
@@ -156,11 +145,7 @@ fn shred_derived_rows_inner(
 
         // Symbols keep their full row shape — every column has a reader
         // (`sym_rows_matching`, the dead-export view, workspace/symbol).
-        let mut insert_sym = conn.prepare_cached(
-            "INSERT INTO syms (file_id, name_id, key_id, kind, start_row, start_col, end_row,
-                               end_col, container_id, flags)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        )?;
+        let mut insert_sym = conn.prepare_cached(sql::SYMS_INSERT.registered())?;
         for seed in sym_seeds {
             let name_id = intern_str(&seed.name, &mut memo)?;
             // A symbol row carries BOTH names: `name_id` is what it is called
@@ -200,7 +185,7 @@ fn shred_derived_rows_inner(
         // views whose gate fires. They never join `refs`/`syms`, whose rows
         // every view shows; a retrieval that must find those views asks
         // `held`.
-        let mut insert_held = conn.prepare_cached("INSERT OR IGNORE INTO held (name_id, file_id) VALUES (?1, ?2)")?;
+        let mut insert_held = conn.prepare_cached(sql::HELD_INSERT.registered())?;
         for name in held {
             let name_id = intern_str(name, &mut memo)?;
             insert_held.execute(params![name_id, file_id])?;
@@ -220,9 +205,8 @@ fn shred_derived_rows_inner(
 /// never shrinks, so a long-lived workspace accumulates every name it has
 /// ever seen.
 ///
-/// Shaped as a set-difference, not a per-string existence test: `container_id`
-/// carries no index, so a `NOT EXISTS` per string would scan `syms` once per
-/// string. This builds the live set in one pass over each table instead.
+/// Shaped as a set-difference (`sql::STRINGS_GC`) that builds the live set in
+/// one pass over each table.
 ///
 /// Returns the number of strings reclaimed. Bumps `strings_generation` when
 /// it reclaims any, because the shredder memoizes `str_id`s for the writer's
@@ -235,16 +219,7 @@ fn shred_derived_rows_inner(
 /// the delete below; what the generation bump protects is the memo a writer
 /// built in an EARLIER transaction.
 pub fn gc_strings(conn: &Connection) -> usize {
-    let deleted = conn.execute(
-        "DELETE FROM strings WHERE str_id NOT IN (
-             SELECT name_id FROM refs
-             UNION SELECT name_id FROM syms
-             UNION SELECT key_id FROM syms
-             UNION SELECT container_id FROM syms WHERE container_id IS NOT NULL
-             UNION SELECT name_id FROM held
-         )",
-        [],
-    );
+    let deleted = conn.execute(sql::STRINGS_GC.registered(), []);
     match deleted {
         Ok(n) if n > 0 => {
             let _ = crate::index::module_cache::bump_strings_generation(conn);
@@ -259,7 +234,7 @@ pub fn gc_strings(conn: &Connection) -> usize {
 /// describe one generation"). Every invalidation seam calls this; nobody
 /// else spells modules-table SQL.
 pub fn invalidate_generation(conn: &Connection, path: &str) {
-    let _ = conn.execute("DELETE FROM modules WHERE path = ?1", params![path]);
+    let _ = conn.execute(sql::MODULES_DELETE_PATH.registered(), params![path]);
     delete_stub(conn, path);
     delete_ref_rows(conn, path);
     forget_orphaned_derivations(conn, path);
@@ -297,11 +272,7 @@ pub fn invalidate_generation(conn: &Connection, path: &str) {
 /// needed and neither is sufficient.
 fn forget_orphaned_derivations(conn: &Connection, path: &str) {
     let still_persisted: bool = conn
-        .query_row(
-            "SELECT 1 FROM modules WHERE path = ?1 LIMIT 1",
-            params![path],
-            |_| Ok(()),
-        )
+        .query_row(sql::MODULES_PATH_EXISTS.registered(), params![path], |_| Ok(()))
         .is_ok();
     if !still_persisted {
         super::forget_conclusions(conn, path);
@@ -314,64 +285,45 @@ fn forget_orphaned_derivations(conn: &Connection, path: &str) {
 /// import-tier generation (project-lib files leave the walk when
 /// gitignored but stay valid @INC modules).
 pub fn invalidate_generation_tier(conn: &Connection, path: &str, source: &str) {
-    let _ = conn.execute(
-        "DELETE FROM modules WHERE path = ?1 AND source = ?2",
-        params![path, source],
-    );
+    let _ = conn.execute(sql::MODULES_DELETE_PATH_TIER.registered(), params![path, source]);
     // Stubs are workspace-tier only — an import-tier invalidation must not
     // orphan a dual-homed file's still-valid workspace stub.
     if source == "workspace" {
         delete_stub(conn, path);
     }
-    let _ = conn.execute(
-        "DELETE FROM refs WHERE file_id IN
-           (SELECT file_id FROM files WHERE path = ?1 AND source = ?2)",
+    if let Ok(file_id) = conn.query_row(
+        sql::FILE_ID_BY_PATH_TIER.registered(),
         params![path, source],
-    );
-    let _ = conn.execute(
-        "DELETE FROM syms WHERE file_id IN
-           (SELECT file_id FROM files WHERE path = ?1 AND source = ?2)",
-        params![path, source],
-    );
-    let _ = conn.execute(
-        "DELETE FROM held WHERE file_id IN
-           (SELECT file_id FROM files WHERE path = ?1 AND source = ?2)",
-        params![path, source],
-    );
-    let _ = conn.execute(
-        "DELETE FROM files WHERE path = ?1 AND source = ?2",
-        params![path, source],
-    );
+        |row| row.get::<_, i64>(0),
+    ) {
+        delete_rows_of(conn, file_id);
+    }
+    let _ = conn.execute(sql::FILES_DELETE_PATH_TIER.registered(), params![path, source]);
     forget_orphaned_derivations(conn, path);
 }
 
 /// Remove a deleted file's rows (the removal half of `shred_derived_rows`).
 pub fn delete_ref_rows(conn: &Connection, path: &str) {
-    let _ = conn.execute(
-        "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
-        params![path],
-    );
-    let _ = conn.execute(
-        "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
-        params![path],
-    );
-    let _ = conn.execute(
-        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
-        params![path],
-    );
-    let _ = conn.execute("DELETE FROM files WHERE path = ?1", params![path]);
+    if let Ok(file_id) =
+        conn.query_row(sql::FILE_ID_BY_PATH.registered(), params![path], |row| row.get::<_, i64>(0))
+    {
+        delete_rows_of(conn, file_id);
+    }
+    let _ = conn.execute(sql::FILES_DELETE_PATH.registered(), params![path]);
+}
+
+fn delete_rows_of(conn: &Connection, file_id: i64) {
+    let _ = conn.execute(sql::REFS_DELETE_FILE_ID.registered(), params![file_id]);
+    let _ = conn.execute(sql::SYMS_DELETE_FILE_ID.registered(), params![file_id]);
+    let _ = conn.execute(sql::HELD_DELETE_FILE_ID.registered(), params![file_id]);
 }
 
 /// Has `path` been shredded into the relational index? (`files` presence is
 /// the marker — `shred_derived_rows` upserts it even for empty files.)
 #[cfg(test)]
 pub fn has_ref_rows(conn: &Connection, path: &str) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM files WHERE path = ?1",
-        params![path],
-        |_| Ok(()),
-    )
-    .is_ok()
+    conn.query_row(sql::FILE_ID_BY_PATH.registered(), params![path], |_| Ok(()))
+        .is_ok()
 }
 
 /// The retrieval half: every indexed file containing at least one ref row
@@ -381,42 +333,36 @@ pub fn ref_candidate_files(conn: &Connection, keys: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     // Usage candidacy comes from ref rows; DECLARATION candidacy from sym
     // rows — a file that declares `helper` but never mentions it again has
-    // no matching ref row, and without the union the backward walk's
+    // no matching ref row, and without the syms half the backward walk's
     // matcher (whose declaration half reads symbols) never rehydrates it.
     // HELD candidacy from `held` rows: a name only the views whose gate
-    // fires show.
-    let Ok(mut stmt) = conn.prepare_cached(
-        "SELECT DISTINCT f.path FROM refs r
-           JOIN files f ON f.file_id = r.file_id
-          WHERE r.name_id = (SELECT str_id FROM strings WHERE s = ?1)
-         UNION
-         SELECT DISTINCT f.path FROM syms y
-           JOIN files f ON f.file_id = y.file_id
-          WHERE y.key_id = (SELECT str_id FROM strings WHERE s = ?1)
-         UNION
-         SELECT DISTINCT f.path FROM held h
-           JOIN files f ON f.file_id = h.file_id
-          WHERE h.name_id = (SELECT str_id FROM strings WHERE s = ?1)",
+    // fires show. Every half feeds one `seen` set, which is the whole dedup.
+    let (Ok(mut refs_half), Ok(mut syms_half), Ok(mut held_half)) = (
+        conn.prepare_cached(sql::REF_CANDIDATES_REFS.registered()),
+        conn.prepare_cached(sql::REF_CANDIDATES_SYMS.registered()),
+        conn.prepare_cached(sql::REF_CANDIDATES_HELD.registered()),
     ) else {
         return out;
     };
     let mut seen = std::collections::HashSet::new();
     for key in keys {
-        let rows = stmt.query_map(params![key], |row| row.get::<_, String>(0));
-        if let Ok(rows) = rows {
-            for r in rows {
-                match r {
-                    Ok(p) => {
-                        if seen.insert(p.clone()) {
-                            out.push(p);
+        for stmt in [&mut refs_half, &mut syms_half, &mut held_half] {
+            let rows = stmt.query_map(params![key], |row| row.get::<_, String>(0));
+            if let Ok(rows) = rows {
+                for r in rows {
+                    match r {
+                        Ok(p) => {
+                            if seen.insert(p.clone()) {
+                                out.push(p);
+                            }
                         }
-                    }
-                    // A step-level error (corrupt page, IO) ends the scan —
-                    // the candidate list is TRUNCATED, which reads as
-                    // "fewer references" with no other witness. Say so.
-                    Err(e) => {
-                        log::warn!("ref candidate scan aborted mid-iteration: {}", e);
-                        break;
+                        // A step-level error (corrupt page, IO) ends the scan —
+                        // the candidate list is TRUNCATED, which reads as
+                        // "fewer references" with no other witness. Say so.
+                        Err(e) => {
+                            log::warn!("ref candidate scan aborted mid-iteration: {}", e);
+                            break;
+                        }
                     }
                 }
             }
@@ -453,15 +399,7 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
     // with the SAME Rust containment test so an evicted file's `sub Übung`
     // matches exactly like a resident one.
     if !query.is_ascii() {
-        let Ok(mut stmt) = conn.prepare_cached(
-            "SELECT f.path, n.s, y.kind, y.start_row, y.start_col, y.end_row, y.end_col,
-                    c.s, y.flags
-               FROM syms y
-               JOIN files f ON f.file_id = y.file_id
-               JOIN strings n ON n.str_id = y.name_id
-               LEFT JOIN strings c ON c.str_id = y.container_id
-              WHERE f.source = 'workspace'",
-        ) else {
+        let Ok(mut stmt) = conn.prepare_cached(sql::SYM_ROWS_WORKSPACE.registered()) else {
             return out;
         };
         let q = query.to_lowercase();
@@ -495,16 +433,7 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
         }
         return out;
     }
-    let Ok(mut stmt) = conn.prepare_cached(
-        "SELECT f.path, n.s, y.kind, y.start_row, y.start_col, y.end_row, y.end_col,
-                c.s, y.flags
-           FROM syms y
-           JOIN files f ON f.file_id = y.file_id
-           JOIN strings n ON n.str_id = y.name_id
-           LEFT JOIN strings c ON c.str_id = y.container_id
-          WHERE f.source = 'workspace'
-            AND n.s LIKE '%' || ?1 || '%' ESCAPE '\\'",
-    ) else {
+    let Ok(mut stmt) = conn.prepare_cached(sql::SYM_ROWS_WORKSPACE_LIKE.registered()) else {
         return out;
     };
     // LIKE wildcards in the user's query are literals, not patterns.
@@ -536,99 +465,17 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
     out
 }
 
-/// The per-file probes' SQL, shared with the plan test
-/// (`row_probes_plan_as_index_point_lookups`) that pins how SQLite runs
-/// them. Binds: `?1` path, `?2` raw name, `?3` its match key (NULL when the
-/// same spelling), `?4` container. Each probe is ONE statement because each
-/// statement is its own read transaction, and every read transaction takes
-/// the database file's WAL shared-memory mutex (shared by every connection
-/// in the process) and `fstat`s the file: the earlier five statements per
-/// probe were 3.1M fstats on one networkx heatmap.
-///
-/// Shapes the planner needs: spellings resolve through scalar subqueries
-/// with `=`, never `IN` (an IN list, even of bound literals, materializes an
-/// ephemeral btree per execution, and its create/destroy takes SQLite's
-/// process-global page-cache mutex). Every (spelling, column) half is its
-/// own `EXISTS`, never one `OR` inside a WHERE: an OR plans as a scan of the
-/// `file_id` prefix, while each half alone is a covering point probe on
-/// `(file_id, name_id|key_id, container_id)`. An unshredded file returns NO
-/// row (`None`, fail open); a never-interned string compares NULL, so its
-/// halves are false. The plan is the SQLite planner's choice, so the test
-/// asserts it rather than this comment.
-macro_rules! sid {
-    ($n:literal) => {
-        concat!("(SELECT str_id FROM strings WHERE s = ", $n, ")")
-    };
-}
-macro_rules! syms_half {
-    ($col:literal, $n:literal) => {
-        concat!(
-            "EXISTS(SELECT 1 FROM syms y WHERE y.file_id = f.file_id AND y.",
-            $col, " = ", sid!($n), ")"
-        )
-    };
-    ($col:literal, $n:literal, container) => {
-        concat!(
-            "EXISTS(SELECT 1 FROM syms y WHERE y.file_id = f.file_id AND y.",
-            $col, " = ", sid!($n), " AND y.container_id = ", sid!("?4"), ")"
-        )
-    };
-}
-macro_rules! refs_half {
-    ($n:literal) => {
-        concat!("EXISTS(SELECT 1 FROM refs r WHERE r.name_id = ", sid!($n), " AND r.file_id = f.file_id)")
-    };
-}
-
-/// A gated emission's name: present in the views whose gate fires, so any
-/// probe that licenses skipping a file must fail open on it. Kind- and
-/// container-blind — `held` stores presence only.
-macro_rules! held_half {
-    ($n:literal) => {
-        concat!("EXISTS(SELECT 1 FROM held h WHERE h.name_id = ", sid!($n), " AND h.file_id = f.file_id)")
-    };
-}
-
-pub(super) const SYM_MEMBER_PROBE_SQL: &str = concat!(
-    "SELECT ",
-    syms_half!("name_id", "?2", container), " OR ",
-    syms_half!("key_id", "?2", container), " OR ",
-    syms_half!("name_id", "?3", container), " OR ",
-    syms_half!("key_id", "?3", container), " OR ",
-    held_half!("?2"), " OR ",
-    held_half!("?3"),
-    " FROM files f WHERE f.path = ?1"
-);
-
-pub(super) const SYM_NAME_PROBE_SQL: &str = concat!(
-    "SELECT ",
-    syms_half!("name_id", "?2"), " OR ",
-    syms_half!("key_id", "?2"), " OR ",
-    syms_half!("name_id", "?3"), " OR ",
-    syms_half!("key_id", "?3"), " OR ",
-    held_half!("?2"), " OR ",
-    held_half!("?3"),
-    " FROM files f WHERE f.path = ?1"
-);
-
-pub(super) const NAME_PROBE_SQL: &str = concat!(
-    "SELECT ",
-    refs_half!("?2"), " OR ",
-    refs_half!("?3"), " OR ",
-    syms_half!("name_id", "?2"), " OR ",
-    syms_half!("key_id", "?2"), " OR ",
-    syms_half!("name_id", "?3"), " OR ",
-    syms_half!("key_id", "?3"), " OR ",
-    held_half!("?2"), " OR ",
-    held_half!("?3"),
-    " FROM files f WHERE f.path = ?1"
-);
-
 /// Run one probe: `None` when the file was never shredded or the read
 /// failed, else whether any half hit.
+///
+/// Each probe is ONE statement (`sql::SYM_MEMBER_PROBE` and siblings) because
+/// each statement is its own read transaction, and every read transaction takes
+/// the database file's WAL shared-memory mutex (shared by every connection in
+/// the process) and `fstat`s the file: at five statements per probe, one
+/// networkx heatmap paid 3.1M fstats.
 fn run_probe(
     conn: &Connection,
-    sql: &str,
+    probe: sql::Sql,
     path: &str,
     names: &NameSpellings,
     name: &str,
@@ -636,7 +483,7 @@ fn run_probe(
 ) -> Option<bool> {
     let norm = probe_spelling(name, names);
     let norm = (norm != name).then_some(norm);
-    let mut stmt = conn.prepare_cached(sql).ok()?;
+    let mut stmt = conn.prepare_cached(probe.registered()).ok()?;
     let row = match container {
         Some(c) => stmt.query_row(params![path, name, norm, c], |row| row.get::<_, bool>(0)),
         None => stmt.query_row(params![path, name, norm], |row| row.get::<_, bool>(0)),
@@ -669,7 +516,7 @@ pub fn sym_member_row_exists(
 ) -> Option<bool> {
     // The container stays EXACT-match: it is a package name, and its match
     // key strips the qualifier, which would let `Base` claim `My::Base`'s rows.
-    run_probe(conn, SYM_MEMBER_PROBE_SQL, path, names, name, Some(container))
+    run_probe(conn, sql::SYM_MEMBER_PROBE, path, names, name, Some(container))
 }
 
 /// The store's spelling policy, in ONE place: callers pass the RAW name and
@@ -700,7 +547,7 @@ pub fn sym_name_row_exists(
     names: &NameSpellings,
     name: &str,
 ) -> Option<bool> {
-    run_probe(conn, SYM_NAME_PROBE_SQL, path, names, name, None)
+    run_probe(conn, sql::SYM_NAME_PROBE, path, names, name, None)
 }
 
 /// The widest per-file mention probe: can the store rule out ANY row —
@@ -719,7 +566,7 @@ pub fn name_row_exists(
     names: &NameSpellings,
     name: &str,
 ) -> Option<bool> {
-    run_probe(conn, NAME_PROBE_SQL, path, names, name, None)
+    run_probe(conn, sql::NAME_PROBE, path, names, name, None)
 }
 
 /// How many FILES carry a ref row for one match key.
@@ -732,12 +579,9 @@ pub fn name_row_exists(
 /// "maybe"), so nothing may present this as "how many times X is used".
 #[cfg(test)]
 pub fn ref_candidate_file_count(conn: &Connection, key: &str) -> u64 {
-    conn.query_row(
-        "SELECT COUNT(*) FROM refs
-          WHERE name_id = (SELECT str_id FROM strings WHERE s = ?1)",
-        params![key],
-        |row| row.get::<_, i64>(0),
-    )
+    conn.query_row(sql::REF_CANDIDATE_FILE_COUNT.registered(), params![key], |row| {
+        row.get::<_, i64>(0)
+    })
     .map(|n| n as u64)
     .unwrap_or(0)
 }
@@ -756,16 +600,16 @@ pub fn write_in_chunks<T>(
     per_item: impl Fn(&Connection, &T),
 ) {
     for chunk in items.chunks(chunk_size) {
-        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+        if conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered()).is_err() {
             log::error!("{label}: txn open failed; remaining items defer to next warm");
             break;
         }
         for item in chunk {
             per_item(conn, item);
         }
-        if let Err(e) = conn.execute_batch("COMMIT") {
+        if let Err(e) = conn.execute_batch(sql::TXN_COMMIT.registered()) {
             log::error!("{label}: commit failed: {}", e);
-            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
         }
     }
 }
@@ -775,20 +619,16 @@ pub fn write_in_chunks<T>(
 /// `cache_policy` sizes a batch sweep's rehydration cache from: persisted
 /// at index time, so a warm start reads it for free.
 pub fn persisted_source_bytes(conn: &Connection) -> u64 {
-    conn.query_row(
-        "SELECT COALESCE(SUM(file_size), 0) FROM modules",
-        [],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|n| n.max(0) as u64)
-    .unwrap_or(0)
+    conn.query_row(sql::MODULES_SOURCE_BYTES.registered(), [], |r| r.get::<_, i64>(0))
+        .map(|n| n.max(0) as u64)
+        .unwrap_or(0)
 }
 
 /// Every path that currently has shredded derived rows — the bulk twin of
 /// `has_ref_rows` for warm scans (one query instead of one per file).
 pub fn paths_with_ref_rows(conn: &Connection) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let Ok(mut stmt) = conn.prepare("SELECT path FROM files") else {
+    let Ok(mut stmt) = conn.prepare(sql::FILES_ALL_PATHS.registered()) else {
         return out;
     };
     if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
@@ -808,20 +648,16 @@ pub fn paths_with_ref_rows(conn: &Connection) -> std::collections::HashSet<Strin
 /// only when the store actually covers the files the walk would scan).
 pub fn names_with_ref_rows(conn: &Connection) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    let Ok(mut stmt) =
-        // `held` too: a gated emission's refs reference their names in the
-        // views whose gate fires, so absence must mean absent from every view.
-        conn.prepare(
-            "SELECT s.s FROM refs r JOIN strings s ON s.str_id = r.name_id
-             UNION SELECT s.s FROM held h JOIN strings s ON s.str_id = h.name_id",
-        )
-    else {
-        return out;
-    };
-    if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-        for n in rows.flatten() {
-            out.insert(n);
-        }
+    // `held` too: a gated emission's refs reference their names in the views
+    // whose gate fires, so absence must mean absent from every view.
+    for names in [sql::REF_NAMES_ALL, sql::REF_NAMES_HELD] {
+        let Ok(mut stmt) = conn.prepare(names.registered()) else {
+            return std::collections::HashSet::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+            continue;
+        };
+        out.extend(rows.flatten());
     }
     out
 }
@@ -854,32 +690,7 @@ pub struct DeadExportRow {
 /// would not have survived the matcher.
 pub fn unused_exported_syms(conn: &Connection) -> Vec<DeadExportRow> {
     let mut out = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT f.path, n.s, y.start_row, y.start_col
-           FROM syms y
-           JOIN files f ON f.file_id = y.file_id
-           JOIN strings n ON n.str_id = y.name_id
-          WHERE f.source = 'workspace'
-            AND (y.flags & ?1) != 0
-            AND NOT EXISTS (
-                  -- Against the KEY: refs are keyed by `Ref::match_key`, so
-                  -- comparing them to a symbol's display name is what let the
-                  -- two families drift apart in the first place. A no-op for
-                  -- the rows this view gates on (an `@EXPORT` name is bare, so
-                  -- key and name are the same string) — it is here so the next
-                  -- reader cannot reintroduce the mismatch.
-                  SELECT 1 FROM refs r
-                   WHERE r.name_id = y.key_id
-                     AND r.file_id != y.file_id
-                )
-            -- A gated emission's name is a candidate use in the views whose
-            -- gate fires: absence must mean absent from every view.
-            AND NOT EXISTS (
-                  SELECT 1 FROM held h
-                   WHERE h.name_id = y.key_id
-                     AND h.file_id != y.file_id
-                )",
-    ) else {
+    let Ok(mut stmt) = conn.prepare(sql::UNUSED_EXPORTS.registered()) else {
         return out;
     };
     let flag = crate::model::file_analysis::SymRowSeed::FLAG_EXPORTED as i64;
