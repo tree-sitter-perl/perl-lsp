@@ -307,10 +307,9 @@ impl FileAnalysis {
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
         receiver.join_over_arms(&self.type_order(module_index), |arm| {
-            // The whole ladder, most-specific first: a member the winning
-            // spec doesn't define falls through to the next rung
-            // (ultimately the primary) — same never-pruned order goto-def
-            // presents.
+            // The whole `dispatch_ladder_of`, most-specific first: a member
+            // the winning spec doesn't define falls through to the next
+            // rung (ultimately the primary).
             for (class, recv) in self.dispatch_ladder_of(arm, module_index) {
                 if let Some(t) =
                     self.method_return_type_on(&class, &recv, member, module_index, arg_count)
