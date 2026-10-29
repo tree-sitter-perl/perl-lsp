@@ -1461,3 +1461,29 @@ sub q { my $q = { url => 1 }; print $q->{typo}; }
     assert_eq!(env.package.as_deref(), Some("main"), "a special variable lives in main");
     assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
 }
+
+/// A write inside a nested block lands on the variable, wherever the block
+/// is: the read after the block sees the shape the write opened (Foswiki
+/// Register.pm's `try { … $data->{$k} = … }`). The write's own access in the
+/// block is no home for the variable's shape.
+#[test]
+fn key_writes_in_nested_blocks_reach_the_variable() {
+    let src = "\
+package Foo;
+sub s1 { my ($k) = @_; my $d = {}; { $d->{$k} = 1; } print $d->{Name}; }
+sub s2 { my $d = {}; for my $x (@_) { $d->{$x} = 1; } print $d->{Name}; }
+sub s3 { my $d = {}; if ($_[0]) { $d->{Name} = 1; } print $d->{Name}; }
+sub s4 { my $d = {}; while (shift) { $d->{Name} = 1; } print $d->{Name}; }
+sub s5 { my $d = {}; eval { $d->{Name} = 1; }; print $d->{Name}; }
+sub s6 { my $d = {}; { $d->{Name} = 1; } print $d->{Name}; }
+sub s7 { my $d; { $d = {}; $d->{Name} = 1; print $d->{Name}; } }
+sub s8 { my $d = {}; { my $d = {}; $d->{Name} = 1; } print $d->{Name}; }
+sub s9 { my $d = { Name => 1 }; print $d->{typo}; }
+sub s10 { my $d = {}; run(sub { $d->{Name} = 1; }); print $d->{Name}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("Name".to_string(), 8), ("typo".to_string(), 9)]);
+}
