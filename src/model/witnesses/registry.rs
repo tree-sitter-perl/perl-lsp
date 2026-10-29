@@ -1920,10 +1920,12 @@ impl ReducerRegistry {
                     ReducedValue::Type(t) => t.class_name().map(str::to_string),
                     ReducedValue::FactMap(_) | ReducedValue::None => None,
                 };
-                if let Some(c) = recv_class {
-                    if c != package && !crate::model::file_analysis::class_isa(&c, package, &frame.packages, Some(idx)) {
-                        continue;
-                    }
+                // A receiver the caller can't name a class for (untyped, or
+                // a class-name string it computes) may dispatch anywhere:
+                // counting it lets another family's arguments type this one.
+                let Some(c) = recv_class else { continue };
+                if c != package && !crate::model::file_analysis::class_isa(&c, package, &frame.packages, Some(idx)) {
+                    continue;
                 }
             }
             let skip = |i: u32| if method { i.checked_sub(1) } else { Some(i) };
