@@ -271,3 +271,22 @@ fn a_written_element_is_a_drill_only_when_the_write_reads_it() {
     let got: Vec<bool> = (1..=6).map(drilled).collect();
     assert_eq!(got, vec![false, true, false, false, false, false]);
 }
+
+/// An arm that materializes to `Undef` (a call to a sub returning undef) is
+/// an undef arm like a literal `return undef`: `Undef` is the join's bottom,
+/// so it makes the value arms `Optional`, answers alone only when every way
+/// out is undef, and never answers for an untyped value arm.
+#[test]
+fn a_call_returning_undef_is_an_undef_arm() {
+    let pre = "package Foo;\nsub new { bless {}, shift }\nsub err { return undef }\n";
+    let probe = |body: &str| {
+        build_fa(&format!("{pre}sub probe {{ {body} }}\n1;\n")).sub_return_type_at_arity("probe", None)
+    };
+    let maybe_foo = Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into()))));
+    assert_eq!(probe("my ($c) = @_; return err() unless $c; return Foo->new;"), maybe_foo);
+    assert_eq!(probe("my ($c) = @_; return $c ? err() : Foo->new;"), maybe_foo);
+    assert_eq!(probe("my ($c) = @_; return err() unless $c; return err();"), Some(InferredType::Undef));
+    // Webmin Convert/TNEF.pm `_build_data`: the untyped `$fd` arm may return
+    // a value, so the undef call arm doesn't answer for the sub.
+    assert_eq!(probe("my ($s, $fd) = @_; return err() unless $fd; return $fd;"), None);
+}
