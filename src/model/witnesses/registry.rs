@@ -30,9 +30,17 @@ use super::*;
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
-/// A class's candidate fan-out identity: `VisitedKey` without the bag and
-/// the point (the fan-out is point-free).
-type LadderKey = (WitnessAttachment, Option<String>, Option<u32>);
+/// What a cross-file fan-out asks the files of: a class-keyed attachment's
+/// candidate files (`class_candidates_node`), or a free function's exporters
+/// and linkage-visible definitions (`free_function_cross_file`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FanOut {
+    Class(WitnessAttachment),
+    Free { name: String, class: Option<String> },
+}
+/// A fan-out's identity: `VisitedKey` without the bag and the point (a
+/// fan-out is point-free).
+type FanOutKey = (FanOut, Option<String>, Option<u32>);
 
 /// What the class-keyed fallback ladder (`ReducerRegistry::class_fallback`)
 /// needs to know about an attachment, read off the attachment once so the
@@ -341,11 +349,11 @@ fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Ar
 /// queries whose context (scopes / module_index / framework) differs.
 pub(super) struct QueryState {
     visited: VisitedSet,
-    /// The class-keyed candidate fan-outs on the current path, and the
-    /// answers of those already walked this query (`class_candidates_node`).
-    /// The bag-free twins of `visited` and `memo`.
-    ladders: std::collections::HashSet<LadderKey>,
-    ladder_memo: std::collections::HashMap<LadderKey, std::sync::Arc<ReducedValue>>,
+    /// The cross-file fan-outs on the current path, and the answers of those
+    /// already walked this query (`fan_out_node`). The bag-free twins of
+    /// `visited` and `memo`.
+    fan_outs: std::collections::HashSet<FanOutKey>,
+    fan_out_memo: std::collections::HashMap<FanOutKey, std::sync::Arc<ReducedValue>>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -399,11 +407,37 @@ pub(super) struct QueryState {
 }
 
 impl QueryState {
+    /// A cross-file fan-out as a node of its own, keyed WITHOUT the bag. Each
+    /// file the fan-out reaches is consulted by a chase of its own bag, and
+    /// that chase reaches this same fan-out when the file cannot answer
+    /// locally; keyed by the bag, every file re-walked every other one
+    /// (FHEM's 534 `main` files nested 512 deep per query). On the path the
+    /// frame below skips it — the frame that owns it walks the remaining
+    /// files — and off the path the first walk's answer serves the query.
+    fn fan_out_node(
+        &mut self,
+        key: FanOutKey,
+        walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
+    ) -> Option<ReducedValue> {
+        if let Some(v) = self.fan_out_memo.get(&key) {
+            return (**v != ReducedValue::None).then(|| (**v).clone());
+        }
+        if !self.fan_outs.insert(key.clone()) {
+            self.cuts += 1;
+            return None;
+        }
+        let v = walk(self);
+        self.fan_outs.remove(&key);
+        self.fan_out_memo
+            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
+        v
+    }
+
     pub(super) fn new() -> Self {
         QueryState {
             visited: std::collections::HashSet::new(),
-            ladders: std::collections::HashSet::new(),
-            ladder_memo: std::collections::HashMap::new(),
+            fan_outs: std::collections::HashSet::new(),
+            fan_out_memo: std::collections::HashMap::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
             cuts: 0,
@@ -1114,14 +1148,8 @@ impl ReducerRegistry {
         Self::class_bridges(ctx, ladder)
     }
 
-    /// Hop (1) of `class_fallback` as a node of its own, keyed WITHOUT the
-    /// bag. Each candidate is consulted by a chase of its own bag, and that
-    /// chase reaches this same fan-out when the candidate cannot answer
-    /// locally; keyed by the bag, every candidate re-walked every other one
-    /// (FHEM's 534 `main` files nested 512 deep per query). On the path the
-    /// frame below skips it — the frame that owns it walks the remaining
-    /// candidates — and off the path the first walk's answer serves the
-    /// query. Only the fan-out is bag-free: the ancestry hop reduces the
+    /// Hop (1) of `class_fallback` as a fan-out node (`fan_out_node`). Only
+    /// the fan-out is bag-free: the ancestry hop reduces the
     /// re-keyed attachment on the bag that asked, and a candidate's own bag
     /// can know its parent's member (`my $self = Parent->new; $self->{k} =
     /// {}`) where the asker's cannot, so the skipped frame still walks it.
@@ -1134,20 +1162,8 @@ impl ReducerRegistry {
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
         ladder: &ClassLadder,
     ) -> Option<ReducedValue> {
-        let key: LadderKey = (q.attachment.clone(), receiver_key(&q.receiver), ladder.arity(q));
-        if let Some(v) = state.ladder_memo.get(&key) {
-            return (**v != ReducedValue::None).then(|| (**v).clone());
-        }
-        if !state.ladders.insert(key.clone()) {
-            state.cuts += 1;
-            return None;
-        }
-        let v = self.class_candidates(bag, q, state, ctx, idx, ladder);
-        state.ladders.remove(&key);
-        state
-            .ladder_memo
-            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
-        v
+        let key = (FanOut::Class(q.attachment.clone()), receiver_key(&q.receiver), ladder.arity(q));
+        state.fan_out_node(key, |state| self.class_candidates(bag, q, state, ctx, idx, ladder))
     }
 
     /// Hop (2) of `class_fallback`: the attachment re-keyed per parent, MRO
@@ -2503,12 +2519,41 @@ impl ReducerRegistry {
         args: &[InferredType],
         state: &mut QueryState,
     ) -> Option<InferredType> {
-        use crate::model::file_analysis::{FileAnalysis, SymKind};
-        use std::sync::Arc;
         let idx = ctx.module_index?;
         if !super::session::budget_available(idx) {
             return None;
         }
+        let key = (
+            FanOut::Free { name: name.to_string(), class: class.map(str::to_string) },
+            receiver_key(&receiver),
+            arity_hint,
+        );
+        let v = state.fan_out_node(key, |state| {
+            self.free_function_fan_out(idx, name, class, arity_hint, receiver, args, state)
+                .map(ReducedValue::Type)
+        });
+        match v {
+            Some(ReducedValue::Type(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The walk behind `free_function_cross_file`'s fan-out node. Each file
+    /// it decodes spends the session's consult budget, as the class ladder's
+    /// candidates do.
+    #[allow(clippy::too_many_arguments)]
+    fn free_function_fan_out(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        name: &str,
+        class: Option<&str>,
+        arity_hint: Option<u32>,
+        receiver: Option<InferredType>,
+        args: &[InferredType],
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        use crate::model::file_analysis::{FileAnalysis, SymKind};
+        use std::sync::Arc;
         let is_callable = |s: &crate::model::file_analysis::Symbol| {
             (s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method))
                 || (class == Some(s.name.as_str()) && s.kind == SymKind::Class)
@@ -2550,6 +2595,9 @@ impl ReducerRegistry {
             // Every candidate file registered under the exporter's name — a
             // split exporter's sub lives in whichever file defines it.
             for cached in idx.visible_def_candidates(&module_name) {
+                if !super::session::spend_consult(idx) {
+                    return None;
+                }
                 let full = idx.bag_present(&cached);
                 let Some(sym) = full.symbols().iter().find(|s| is_callable(s)).map(|s| s.id) else {
                     continue;
@@ -2564,6 +2612,9 @@ impl ReducerRegistry {
             crate::util::ghost_stats::count("consult.imported_sub_return");
             if !idx.serves_enriched() {
                 break;
+            }
+            if !super::session::spend_consult(idx) {
+                return None;
             }
             let full = idx.bag_present(&cached);
             let enriched = idx.enriched_present(&cached);
@@ -2612,6 +2663,9 @@ impl ReducerRegistry {
             };
             if !reachable {
                 continue;
+            }
+            if !super::session::spend_consult(idx) {
+                return None;
             }
             let full = idx.bag_present(&cached);
             let Some(sym) = full
