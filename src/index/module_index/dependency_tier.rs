@@ -145,19 +145,17 @@ impl IndexCore {
         self.dependency_state().as_ref().map_or(0, |s| s.generation)
     }
 
-    /// Land `whole` — the files the map placed for `asked` (none: its
-    /// always-loaded files), parsed under `generation`, in the map's
-    /// precedence order — under every name each file declares. A file
-    /// answers only for names it declares: the map places files that MAY
-    /// declare a name (a python class's module and its package), and every
-    /// file declaring it is a provider (Perl's twins across `@INC`). One
-    /// stored copy per file serves all its names; a name `asked` did not
-    /// ask for only fills a slot nothing answers yet, since an ask's own
-    /// answer outranks a file that happens to declare the name too.
-    /// Returns `asked`'s stored providers; `None` is a miss.
+    /// Land `whole` — the files the map placed for an asked name (none:
+    /// its always-loaded files), parsed under `generation`, in the map's
+    /// precedence order — under the asked name for the files `asked`
+    /// says answer it, and under every name each file declares. One
+    /// stored copy per file serves all its names; a name nobody asked for
+    /// only fills a slot nothing answers yet, since an ask's own answer
+    /// outranks a file that happens to declare the name too. Returns the
+    /// asked name's stored providers; `None` is a miss.
     pub(crate) fn land_dependency(
         &self,
-        asked: Option<&str>,
+        asked: Option<(&str, &[usize])>,
         generation: u64,
         whole: Providers,
         persisted: bool,
@@ -171,23 +169,22 @@ impl IndexCore {
         let Some(st) = guard.as_mut().filter(|st| st.generation == generation) else {
             return Err(MapMoved);
         };
-        // Name → the files declaring it, in precedence order; the asked
-        // name first, so its answer lands before any by-product.
-        let mut declared: Vec<(String, Vec<usize>)> = asked.map(|a| (a.to_string(), Vec::new())).into_iter().collect();
+        // Name → the files answering it, in precedence order: the asked
+        // name first, so its answer lands before any by-product, then
+        // every name a file declares.
+        let mut declared: Vec<(String, Vec<usize>)> = asked.map(|(a, at)| (a.to_string(), at.to_vec())).into_iter().collect();
         for (i, m) in whole.iter().enumerate() {
             for (name, _) in st.driver.registration_names(&m.analysis) {
                 match declared.iter_mut().find(|(n, _)| *n == name) {
-                    Some((_, at)) => at.push(i),
+                    Some((_, at)) if !at.contains(&i) => at.push(i),
+                    Some(_) => {}
                     None => declared.push((name, vec![i])),
                 }
             }
         }
         // `persisted` covers the asked name's providers — the rows the
         // caller wrote; any other file stays whole, its bag unrecoverable.
-        let answers: &[usize] = match asked {
-            Some(_) => &declared[0].1,
-            None => &[],
-        };
+        let answers: &[usize] = asked.map_or(&[], |(_, at)| at);
         let stored: Providers = whole
             .iter()
             .enumerate()
@@ -195,7 +192,7 @@ impl IndexCore {
             .collect();
         let mut out = None;
         for (name, at) in declared {
-            let claim = Some(name.as_str()) == asked;
+            let claim = asked.is_some_and(|(a, _)| a == name);
             if at.is_empty() {
                 self.insert_resolved(&name, None, persisted, strip);
                 continue;

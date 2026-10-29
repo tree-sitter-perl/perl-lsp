@@ -10,7 +10,7 @@
 //! `ResolvedConfig::load` can replace ours without touching the locator or
 //! the tier plumbing.
 
-use crate::build::language_driver::{DependencyLocator, LanguageDriver};
+use crate::build::language_driver::{DependencyLocator, LanguageDriver, Located, LocatedBy};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -326,14 +326,16 @@ fn single_quoted(text: &str) -> Option<String> {
 }
 
 impl DependencyLocator for ComposerLocator {
-    fn locate(&self, identity: &str) -> Vec<PathBuf> {
+    /// Every hit is exact: the classmap, PSR-4 and PSR-0 each spell the
+    /// class's own file.
+    fn locate(&self, identity: &str) -> Vec<Located> {
         let identity = identity.trim_start_matches(self.sep.as_str());
         let mut out: Vec<PathBuf> = self.classmap().get(identity).filter(|p| p.is_file()).cloned().into_iter().collect();
         self.psr_4(identity, &mut out);
         self.psr_0(identity, &mut out);
         let mut seen = std::collections::HashSet::new();
         out.retain(|p| seen.insert(p.clone()));
-        out
+        out.into_iter().map(|path| Located { path, by: LocatedBy::Exact }).collect()
     }
     fn always_loaded(&self) -> &[PathBuf] {
         &self.files

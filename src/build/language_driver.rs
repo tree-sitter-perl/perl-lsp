@@ -210,7 +210,7 @@ pub struct ModuleSpelling {
 /// filesystem. Implemented per language (php: `build::composer`).
 pub trait DependencyLocator: Send + Sync {
     /// Files that may declare `identity`, most-preferred first.
-    fn locate(&self, identity: &str) -> Vec<std::path::PathBuf>;
+    fn locate(&self, identity: &str) -> Vec<Located>;
     /// Files the project loads whatever it names (Composer's `files`).
     fn always_loaded(&self) -> &[std::path::PathBuf];
     /// Directories whose files belong to this tier, never to the walk.
@@ -223,6 +223,23 @@ pub trait DependencyLocator: Send + Sync {
     fn search_roots(&self) -> &[std::path::PathBuf] {
         &[]
     }
+}
+
+/// A file a dependency map places for a name, and how it got there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Located {
+    pub path: std::path::PathBuf,
+    pub by: LocatedBy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocatedBy {
+    /// The path spells the name: it is that module's file, the one a
+    /// `require` of the name loads, whatever it declares inside.
+    Exact,
+    /// The file of an enclosing module (`acme/__init__.py` for
+    /// `acme.models.Base`), which may or may not declare the name.
+    Enclosing,
 }
 
 /// How a language that names modules by path names one: the marker file

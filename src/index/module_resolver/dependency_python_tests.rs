@@ -82,7 +82,9 @@ fn a_venv_places_what_the_workspace_imports() {
     // a module outside any package is named from the search root
     assert_eq!(defs(&idx, &root, "app/user.py", at(USER, "six()")), [(format!("{SITE}/six.py"), 1)]);
     assert!(idx.is_dependency_path(&root.join(&models)));
-    // each landed under the identity the import spells, so nothing widens
+    // each landed under the identity the import spells, so nothing widens;
+    // `acme/__init__.py` encloses the name without declaring it, so it is
+    // not a candidate
     assert_eq!(idx.def_candidates("acme.models.Base").len(), 1);
     assert_eq!(idx.def_candidates("six.Six").len(), 1);
     let fa = idx.workspace_file_for_test(&root.join("app/user.py")).unwrap();

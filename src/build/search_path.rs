@@ -2,7 +2,7 @@
 //! search root (python's `sys.path`, perl's `@INC`): a name is a file under
 //! one of the roots, spelled by the driver's `ModuleSpelling`.
 
-use crate::build::language_driver::{DependencyLocator, LanguageDriver};
+use crate::build::language_driver::{DependencyLocator, LanguageDriver, Located, LocatedBy};
 use std::path::{Path, PathBuf};
 
 pub struct SearchPathLocator {
@@ -35,14 +35,16 @@ impl SearchPathLocator {
 
 impl DependencyLocator for SearchPathLocator {
     /// The module a name spells, or the module declaring it: `a.b.C` is
-    /// `a/b/C`, else `a/b` (which declares `C`), else `a`, longest first.
+    /// `a/b/C` (exact), else `a/b` (which declares `C`), else `a` — both
+    /// enclosing — longest first.
     /// Canonical, so distinct roots naming one file (a symlinked root, a
     /// duplicated entry) give one candidate.
-    fn locate(&self, identity: &str) -> Vec<PathBuf> {
+    fn locate(&self, identity: &str) -> Vec<Located> {
         let segs: Vec<&str> = if self.sep.is_empty() { vec![identity] } else { identity.split(self.sep.as_str()).collect() };
-        let mut out = Vec::new();
+        let mut out: Vec<Located> = Vec::new();
         for k in (1..=segs.len()).rev() {
             let module = segs[..k].join(self.sep.as_str());
+            let by = if k == segs.len() { LocatedBy::Exact } else { LocatedBy::Enclosing };
             for dir in &self.search {
                 for rel in (self.module_paths)(&module) {
                     let p = dir.join(rel);
@@ -50,8 +52,8 @@ impl DependencyLocator for SearchPathLocator {
                         continue;
                     }
                     let canon = std::fs::canonicalize(&p).unwrap_or(p);
-                    if !out.contains(&canon) {
-                        out.push(canon);
+                    if !out.iter().any(|l| l.path == canon) {
+                        out.push(Located { path: canon, by });
                     }
                 }
             }

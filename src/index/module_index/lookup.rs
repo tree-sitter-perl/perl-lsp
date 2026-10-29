@@ -298,6 +298,7 @@ impl ModuleIndex {
             .locate(module_name)
             .into_iter()
             .next()
+            .map(|l| l.path)
     }
 }
 

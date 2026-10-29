@@ -192,19 +192,22 @@ fn psr_4_answers_by_the_longest_prefix_and_psr_0_keeps_the_whole_identity() {
     );
     let loc = locator(&root, php());
     let v = |rel: &str| root.join("vendor").join(rel);
-    assert_eq!(loc.locate("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
-    assert_eq!(loc.locate("\\Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
+    // Every hit spells the class's own file.
+    assert!(loc.locate("Acme\\Model\\Deep\\Thing").iter().all(|l| l.by == LocatedBy::Exact));
+    let at = |id: &str| loc.locate(id).into_iter().map(|l| l.path).collect::<Vec<_>>();
+    assert_eq!(at("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
+    assert_eq!(at("\\Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
     // both prefixes place a file; the longer one answers first
     assert_eq!(
-        loc.locate("Acme\\Model\\Deep\\Thing"),
+        at("Acme\\Model\\Deep\\Thing"),
         [v("acme/model/deep/Thing.php"), v("acme/model/src/Deep/Thing.php")]
     );
-    assert_eq!(loc.locate("Old_Tool_Hammer"), [v("old/lib/lib/Old/Tool/Hammer.php")]);
-    assert!(loc.locate("Acme\\Model\\Missing").is_empty());
+    assert_eq!(at("Old_Tool_Hammer"), [v("old/lib/lib/Old/Tool/Hammer.php")]);
+    assert!(at("Acme\\Model\\Missing").is_empty());
     // the generated classmap answers what the prefixes cannot
-    assert_eq!(loc.locate("Legacy_Widget"), [v("old/lib/legacy/anything.php")]);
+    assert_eq!(at("Legacy_Widget"), [v("old/lib/legacy/anything.php")]);
     // and answers first, as Composer's loader asks it first
-    assert_eq!(loc.locate("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
+    assert_eq!(at("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
     assert_eq!(loc.always_loaded(), [v("acme/model/helpers.php")]);
     assert_eq!(loc.roots(), [root.join("vendor")]);
 }

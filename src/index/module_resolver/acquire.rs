@@ -5,7 +5,15 @@
 //! descent from a landed file — reaches it through `request_resolve`.
 
 use super::*;
+use crate::build::language_driver::{LanguageDriver, Located, LocatedBy};
 use crate::index::module_index::{MapMoved, MapSnapshot};
+
+/// A file the map placed for an asked name, parsed, and how the map
+/// found it.
+pub(crate) struct Placed {
+    pub file: Arc<CachedModule>,
+    pub by: LocatedBy,
+}
 
 /// The files `snap`'s map places for `name` that are the tier's, parsed in
 /// the map's precedence order (every provider, not just the winner: a
@@ -13,20 +21,34 @@ use crate::index::module_index::{MapMoved, MapSnapshot};
 /// by `local/` — and a shadowed twin carries its own subs and `@ISA`). A
 /// file that is unreadable, at or over the driver's cap, or whose
 /// analysis panics is left out.
-pub(crate) fn locate_and_parse(snap: &MapSnapshot, name: &str) -> Providers {
+pub(crate) fn locate_and_parse(snap: &MapSnapshot, name: &str) -> Vec<Placed> {
     let cap = snap.driver.caps().file_cap;
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut out: Providers = Vec::new();
-    for path in snap.locator.locate(name) {
+    let mut out: Vec<Placed> = Vec::new();
+    for Located { path, by } in snap.locator.locate(name) {
         let canon = std::fs::canonicalize(&path).unwrap_or(path);
         if !seen.insert(canon.clone()) || !snap.in_tier(&canon) {
             continue;
         }
-        if let Some(cm) = parse_one(snap, &canon, cap, name) {
-            out.push(cm);
+        if let Some(file) = parse_one(snap, &canon, cap, name) {
+            out.push(Placed { file, by });
         }
     }
     out
+}
+
+/// Which placed files answer `name`, in precedence order. The file whose
+/// path spells the name is its file — `require JSON::backportPP` loads
+/// `JSON/backportPP.pm` though it declares `JSON::PP` — so it answers
+/// whatever it declares; an enclosing module's file answers only when it
+/// declares the name.
+fn answering(driver: &dyn LanguageDriver, name: &str, placed: &[Placed]) -> Vec<usize> {
+    (0..placed.len())
+        .filter(|&i| {
+            placed[i].by == LocatedBy::Exact
+                || driver.registration_names(&placed[i].file.analysis).iter().any(|(n, _)| n == name)
+        })
+        .collect()
 }
 
 fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: &str) -> Option<Arc<CachedModule>> {
@@ -49,16 +71,14 @@ pub(super) fn acquire(
     let Some(snap) = core.map_snapshot() else {
         return Ok(None);
     };
-    let whole = locate_and_parse(&snap, name);
-    let answers: Providers = whole
-        .iter()
-        .filter(|m| snap.driver.registration_names(&m.analysis).iter().any(|(n, _)| n == name))
-        .cloned()
-        .collect();
+    let placed = locate_and_parse(&snap, name);
+    let answers = answering(snap.driver, name, &placed);
+    let whole: Providers = placed.into_iter().map(|p| p.file).collect();
+    let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
     // Per FILE: each provider gets its own row, so a shadowed twin
     // survives the warm start too.
-    let persisted = db.is_some_and(|conn| save_module_generation(conn, name, &(!answers.is_empty()).then_some(answers)));
-    core.land_dependency(Some(name), snap.generation, whole.clone(), persisted, eviction_enabled())?;
+    let persisted = db.is_some_and(|conn| save_module_generation(conn, name, &(!rows.is_empty()).then_some(rows)));
+    core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), persisted, eviction_enabled())?;
     Ok((!whole.is_empty()).then_some(whole))
 }
 
@@ -129,9 +149,11 @@ pub(crate) fn perl_snapshot(locator: Arc<dyn crate::build::language_driver::Depe
 }
 
 /// The process `@INC`'s providers for `name`, parsed: what the resolver
-/// lands with no project open.
+/// lands under `name` with no project open.
 #[cfg(test)]
 pub(crate) fn parse_from_inc(name: &str) -> Providers {
     let inc = crate::build::inc::locator(None, &crate::build::language_driver::PerlDriver);
-    locate_and_parse(&perl_snapshot(inc), name)
+    let placed = locate_and_parse(&perl_snapshot(inc), name);
+    let driver = &crate::build::language_driver::PerlDriver;
+    answering(driver, name, &placed).into_iter().map(|i| Arc::clone(&placed[i].file)).collect()
 }

@@ -9,12 +9,16 @@ fn inc_over(roots: &[PathBuf]) -> SearchPathLocator {
     SearchPathLocator::new(&PerlDriver, roots.to_vec(), Vec::new(), Vec::new())
 }
 
+fn files(placed: Vec<Placed>) -> Providers {
+    placed.into_iter().map(|p| p.file).collect()
+}
+
 #[test]
 fn test_resolve_module_list_util() {
     if discover_inc_paths().is_empty() {
         return;
     }
-    let path = crate::build::inc::locator(None, &PerlDriver).locate("List::Util").into_iter().next();
+    let path = crate::build::inc::locator(None, &PerlDriver).locate("List::Util").into_iter().next().map(|l| l.path);
     assert!(path.is_some(), "List::Util should be resolvable");
     let p = path.unwrap();
     assert!(p.to_str().unwrap().contains("List/Util.pm"));
@@ -314,16 +318,17 @@ fn twin_roots(tag: &str) -> (PathBuf, PathBuf) {
 #[test]
 fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let (a, b) = twin_roots("paths");
-    let found = inc_over(&[a.clone(), b.clone()]).locate("Twin");
+    let at = |inc: &[PathBuf]| inc_over(inc).locate("Twin").into_iter().map(|l| l.path).collect::<Vec<_>>();
+    let found = at(&[a.clone(), b.clone()]);
     assert_eq!(
         found,
         vec![a.join("Twin.pm"), b.join("Twin.pm")],
         "both roots provide Twin; the relation must hold both, @INC order first",
     );
     // The winner is still exactly what `require` would load.
-    assert_eq!(inc_over(&[a.clone(), b.clone()]).locate("Twin").first(), Some(&a.join("Twin.pm")));
+    assert_eq!(at(&[a.clone(), b.clone()]).first(), Some(&a.join("Twin.pm")));
     // Reversing @INC reverses the winner, not the membership.
-    assert_eq!(inc_over(&[b.clone(), a.clone()]).locate("Twin").first(), Some(&b.join("Twin.pm")));
+    assert_eq!(at(&[b.clone(), a.clone()]).first(), Some(&b.join("Twin.pm")));
 }
 
 #[test]
@@ -334,7 +339,7 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     // unreachable. Both providers must survive as candidates.
     use crate::model::file_analysis::CrossFileLookup;
     let (a, b) = twin_roots("relation");
-    let providers = locate_and_parse(&perl_snapshot(Arc::new(inc_over(&[a.clone(), b.clone()]))), "Twin");
+    let providers = files(locate_and_parse(&perl_snapshot(Arc::new(inc_over(&[a.clone(), b.clone()]))), "Twin"));
     assert_eq!(providers.len(), 2, "both providers parse");
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -452,7 +457,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     // The process @INC has only the app lib: `t/lib` is a root ONLY the
     // test file declares, which is exactly the discriminator.
     idx.set_inc_roots_for_test(&[applib.clone()]);
-    let providers = locate_and_parse(&perl_snapshot(Arc::new(inc_over(&[applib.clone(), testlib.clone()]))), "Twin");
+    let providers = files(locate_and_parse(&perl_snapshot(Arc::new(inc_over(&[applib.clone(), testlib.clone()]))), "Twin"));
     assert_eq!(providers.len(), 2);
     idx.insert_cache_providers("Twin", Some(providers));
 
@@ -711,8 +716,9 @@ fn perls_map_is_inc_with_the_project_libs_first() {
 
     let local = dir.join("local/lib/perl5/Twin.pm");
     let lib = dir.join("lib/Twin.pm");
-    assert_eq!(inc.locate("Twin"), vec![local.clone(), lib.clone()]);
-    assert!(inc.locate("Outer::Inner").is_empty(), "no Outer/Inner.pm: Outer.pm is not searched for it");
+    let at = |name: &str| inc.locate(name).into_iter().map(|l| l.path).collect::<Vec<_>>();
+    assert_eq!(at("Twin"), vec![local.clone(), lib.clone()]);
+    assert!(at("Outer::Inner").is_empty(), "no Outer/Inner.pm: Outer.pm is not searched for it");
 
     // Project `lib/` is searched but is the workspace walk's to index: the
     // tier lands only what is under its roots or outside the project.
@@ -722,7 +728,7 @@ fn perls_map_is_inc_with_the_project_libs_first() {
         locator: inc.clone(),
         generation: 0,
     };
-    let providers = locate_and_parse(&snap, "Twin");
+    let providers = files(locate_and_parse(&snap, "Twin"));
     let paths: Vec<PathBuf> = providers.iter().map(|p| p.path.clone()).collect();
     assert_eq!(paths, vec![local.clone()]);
     assert!(!snap.in_tier(&lib));
@@ -780,5 +786,39 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
         "the project's own `Mine` keeps the slot",
     );
     assert_eq!(idx.def_candidates("Mine").len(), 2, "the dependency's `Mine` is still a candidate");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The file a name's path spells is that name's file, whatever package it
+/// declares: `require JSON::backportPP` loads `JSON/backportPP.pm`, which
+/// declares `JSON::PP`. (Spelled afresh: the process `@INC` may hold the
+/// real one.)
+#[test]
+fn a_file_at_the_asked_path_answers_the_asked_name_whatever_it_declares() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let dir = std::env::temp_dir().join(format!("perl-exact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Acme::ShimPP;\n1;\n"),
+        ("local/lib/perl5/Acme/ShimPP.pm", "package Acme::PP;\nsub encode_json { 1 }\n1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    index_workspace_with_index(&dir, &idx, None, None);
+    idx.request_dependency_demand();
+    idx.wait_idle();
+    let file = dir.join("local/lib/perl5/Acme/ShimPP.pm");
+    assert_eq!(idx.get_cached("Acme::ShimPP").map(|c| c.path.clone()), Some(file.clone()));
+    assert_eq!(idx.def_candidates("Acme::ShimPP").len(), 1);
+    assert_eq!(
+        idx.get_cached("Acme::PP").map(|c| c.path.clone()),
+        Some(file),
+        "and it answers the package it declares",
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
