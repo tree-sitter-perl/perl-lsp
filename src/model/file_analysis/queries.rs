@@ -817,8 +817,9 @@ impl FileAnalysis {
         out
     }
 
-    /// True when a closed literal shape on `var_text` is the variable's
-    /// whole story in this file: the scalar is never reassigned. Key
+    /// True when a closed literal shape on the variable `var_text` names at
+    /// `at` is its whole story in this file: that variable (not every one
+    /// spelled the same) is never reassigned. Key
     /// writes AND escapes are not gate clauses — both are modeled on
     /// the shape itself by the mutation-extension pass (writes extend
     /// or open; an escape is an open-switching write at the escape
@@ -827,8 +828,50 @@ impl FileAnalysis {
     /// conditional-reassignment disagreement
     /// (docs/adr/structural-shapes.md); the unknown-hash-key
     /// diagnostic only fires behind it.
-    pub fn closed_shape_is_whole_story(&self, var_text: &str) -> bool {
-        !self.reassigned_scalars.contains(var_text)
+    pub fn closed_shape_is_whole_story(&self, var_text: &str, at: Point) -> bool {
+        self.variable_binding(var_text, at).is_none_or(|id| !self.reassigned_vars.contains(&id))
+    }
+
+    /// The variable a use of `name` written at `at` binds to — the
+    /// builder's binding rule (`variable_use`) asked by name, so it agrees
+    /// with the binding on every ref of that spelling there.
+    pub fn variable_binding(&self, name: &str, at: Point) -> Option<SymbolId> {
+        let scope = self.scope_at(at)?;
+        let outcome = variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
+            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(|s| {
+                // An implicit global is minted from uses, not declared: the
+                // `Global` arm reaches it by its package.
+                let declared = match &s.detail {
+                    SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => false,
+                    _ => matches!(s.kind, SymKind::Variable | SymKind::Field),
+                };
+                let gate = match &s.detail {
+                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
+                    _ => None,
+                };
+                (declared && s.name == name).then_some((s.id, s.span.start, gate))
+            })
+        });
+        match outcome {
+            VariableUse::Declared(id) => Some(id),
+            VariableUse::GatedOur => None,
+            VariableUse::Global { package, name } => {
+                // A declared global wins over the one minted from uses, as
+                // it does in the binder.
+                let global = |minted: bool| {
+                    self.symbols.iter().find(|s| {
+                        s.name == name
+                            && s.package.as_deref().unwrap_or("main") == package
+                            && match s.detail {
+                                SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } => !minted,
+                                SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => minted,
+                                _ => false,
+                            }
+                    })
+                };
+                global(false).or_else(|| global(true)).map(|s| s.id)
+            }
+        }
     }
 
     /// Closed-shape hash-key typo sites: a READ of `$config->{typo}` where
@@ -867,7 +910,7 @@ impl FileAnalysis {
                 continue;
             };
             let Some(known_keys) = t.closed_keys_lacking(&r.target_name) else { continue };
-            if !self.closed_shape_is_whole_story(var_text) {
+            if !self.closed_shape_is_whole_story(var_text, r.span.start) {
                 continue;
             }
             out.push(KeyTypoSite {
