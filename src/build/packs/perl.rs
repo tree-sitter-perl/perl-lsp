@@ -6,6 +6,7 @@ pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         names: crate::model::conventions::PERL_SPELLINGS,
+        lattice: crate::model::conventions::PERL_LATTICE.clone(),
         // The builder stores variable symbols WITH sigil. Nothing to
         // re-attach: def.var captures the whole `(scalar)` node, so the
         // raw text already carries it.

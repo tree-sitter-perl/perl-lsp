@@ -18,6 +18,8 @@ pub fn php_pack() -> LangPack {
             class_call: ClassCall::FunctionCall,
             ..NameSpellings::NONE
         },
+        // `bool` is not an `int`: `bool|int` is a union a signature spells.
+        lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,

@@ -359,7 +359,7 @@ impl FileAnalysis {
     /// Stamp the `Method` binding on every `MethodCall` ref — the NAV
     /// unification edge (build pipeline phase 6 `PostFold`, then re-stamped
     /// at enrichment). The invocant class is resolved ONCE here (via the
-    /// bag-routed `method_call_invocant_class`) and frozen on the ref;
+    /// bag-routed `method_call_invocant_classes`) and frozen on the ref;
     /// `refs_to` / `find_definition` / hover read the frozen edge instead of
     /// re-deriving the class at query time, so they can never diverge.
     ///
@@ -424,7 +424,7 @@ impl FileAnalysis {
     }
 
     pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
-        // Collect resolutions first; `method_call_invocant_class` /
+        // Collect resolutions first; `method_call_invocant_classes` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
         // `&mut self.refs[i]` while calling them.
         // MEASUREMENT: this pass is the dominant driver of cross-file bag
@@ -470,9 +470,13 @@ impl FileAnalysis {
             // than stopping at a hit), so apportioning the pass's cost by ref
             // COUNT would misattribute it in an unknown direction.
             let _t0 = std::time::Instant::now();
+            // The edge holds ONE class: a union receiver stays unfrozen, and
+            // `receiver_classes` resolves its arms fresh for every consumer.
             let target = (|| self
-                .method_call_invocant_class(r, module_index)
+                .method_call_invocant_classes(r, module_index)
+                .single()
                 .map(|cn| {
+                    let cn = cn.to_string();
                     let member = r.unqualified_target_name(self.names());
                     let resolved = match &r.kind {
                         RefKind::FieldAccess { .. } => {
@@ -559,7 +563,7 @@ impl FileAnalysis {
             // action that offers to write `requires`.
             if crate::util::ghost_stats::probe("demands") {
                 if let Some(idx) = module_index {
-                    if let Some(cn) = self.method_call_invocant_class(r, module_index) {
+                    for cn in self.method_call_invocant_classes(r, module_index) {
                         let name = r.unqualified_target_name(self.names());
                         // Demanded here and provided by NOBODY up-chain — the
                         // degenerate-singleton case pass 2 would fire on.
@@ -627,7 +631,7 @@ impl FileAnalysis {
                 }
             }
             if module_index.is_some() && crate::util::ghost_stats::probe("owner") {
-                if let Some(cn) = self.method_call_invocant_class(r, module_index) {
+                for cn in self.method_call_invocant_classes(r, module_index) {
                     let name = r.unqualified_target_name(self.names());
                     let arity = r.arg_count.map(|c| c as usize);
                     let owner = match self.resolve_method_in_ancestors(&cn, name, module_index) {

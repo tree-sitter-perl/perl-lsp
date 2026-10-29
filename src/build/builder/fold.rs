@@ -271,6 +271,7 @@ impl<'a> Builder<'a> {
                     module_index: None,
                     package_parents: &self.package_parents,
                     app_surface_consumers: &self.app_surface_consumers,
+                    lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
                 };
                 crate::model::witnesses::emit_mutation_extension_witnesses(
                     &mut self.bag,
@@ -1093,6 +1094,7 @@ impl<'a> Builder<'a> {
             module_index: None,
             package_parents: &self.package_parents,
             app_surface_consumers: &self.app_surface_consumers,
+            lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
         }
     }
 
@@ -1332,7 +1334,7 @@ impl<'a> Builder<'a> {
             // Object-subsumes-HashRef dominance — that's a merge, not agreement.
             // An arm that doesn't type yet can't be shown to agree, so it
             // keeps the union authoritative too.
-            if known_arm_types.len() < arms.len() || arms_genuinely_agree(&known_arm_types).is_none() {
+            if known_arm_types.len() < arms.len() || arms_genuinely_agree(&known_arm_types, &self.bag_context()).is_none() {
                 authoritative_syms.push(sym_id);
             }
             let return_expr = ReturnExpr::UnionOnArgs { branches: sorted };

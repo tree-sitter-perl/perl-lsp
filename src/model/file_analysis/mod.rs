@@ -334,7 +334,7 @@ pub struct FileAnalysis {
 /// serde default for `FileAnalysis::language` — the native builder's id,
 /// also what pre-field cache blobs deserialize as.
 fn default_language() -> String {
-    "perl".to_string()
+    crate::model::conventions::PERL_LANGUAGE.to_string()
 }
 
 /// What one package in this file declares about itself. Keyed by package
