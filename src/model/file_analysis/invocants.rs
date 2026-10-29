@@ -1320,16 +1320,19 @@ impl FileAnalysis {
     }
 
     /// Collect every Handler visible from `class_name` whose `dispatchers`
-    /// list contains `dispatcher`. Walks the inheritance chain and at
+    /// list names any of `dispatchers` (an empty `dispatchers` takes every
+    /// Handler on the class). Walks the inheritance chain and at
     /// each level pulls Handlers from (1) this file's symbols with
     /// matching owner, (2) this file's `plugin_namespaces` bridged to
     /// the current class, and (3) cross-file via
     /// `module_index.for_each_entity_bridged_to` — rule #8.
     ///
     /// Shares `for_each_ancestor_class` with `resolve_method_in_ancestors`
-    /// so the two dispatch paths can't drift on MRO rules. Both
-    /// `dispatch_target_completions` and `class_has_dispatch_handlers`
-    /// in `symbols.rs` funnel through here.
+    /// so the two dispatch paths can't drift on MRO rules. Every
+    /// handler-by-class reader in `lsp/symbols/signature.rs` (dispatch
+    /// completion, plugin-delegated `dispatch_targets_for`, handler
+    /// signature help, `class_has_dispatch_handlers`) funnels through here.
+    /// A symbol is visited once per class it is reached from.
     ///
     /// `visit(symbol, provenance)` — provenance is `"this file"` for
     /// local hits and the cached module's filename for cross-file
@@ -1337,11 +1340,13 @@ impl FileAnalysis {
     pub fn for_each_dispatch_handler_on_class(
         &self,
         class_name: &str,
-        dispatcher: &str,
+        dispatchers: &[&str],
         module_index: Option<&dyn CrossFileLookup>,
         mut visit: impl FnMut(&Symbol, &str),
     ) {
-        let disp_matches = |dd: &[String]| dd.iter().any(|d| d == dispatcher);
+        let disp_matches = |dd: &[String]| {
+            dispatchers.is_empty() || dd.iter().any(|d| dispatchers.contains(&d.as_str()))
+        };
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             // (1) Local Handler symbols owned by this class.
             for sym in &self.symbols {
@@ -1359,7 +1364,9 @@ impl FileAnalysis {
                 if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
                 for sym_id in &ns.entities {
                     let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                    if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
+                    if let SymbolDetail::Handler { owner, dispatchers, .. } = &sym.detail {
+                        // Owned by `cls` too: arm (1) already visited it.
+                        if matches!(owner, HandlerOwner::Class(n) if n == cls) { continue; }
                         if disp_matches(dispatchers) {
                             visit(sym, "this file");
                         }

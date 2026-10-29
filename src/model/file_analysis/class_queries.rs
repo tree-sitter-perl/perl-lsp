@@ -948,32 +948,6 @@ impl FileAnalysis {
         namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
-    /// Iterate Handler symbols whose owner class is `owner_class` and
-    /// that dispatch through any of `dispatchers`. When `dispatchers`
-    /// is empty, all handlers for that class match. Powers plugin
-    /// `dispatch_targets_for` (rule #5: this extraction lives on the
-    /// data model, not duplicated in symbols.rs).
-    pub fn handlers_for_owner<'a>(
-        &'a self,
-        owner_class: &'a str,
-        dispatchers: &'a [String],
-    ) -> impl Iterator<Item = &'a Symbol> + 'a {
-        self.symbols.iter().filter(move |sym| {
-            let SymbolDetail::Handler { owner, dispatchers: dd, .. } = &sym.detail else {
-                return false;
-            };
-            // Global handlers have no owner class — receiver-typed lookups skip them.
-            let HandlerOwner::Class(c) = owner else { return false };
-            if c != owner_class { return false; }
-            if !dispatchers.is_empty()
-                && !dd.iter().any(|d| dispatchers.iter().any(|n| n == d))
-            {
-                return false;
-            }
-            true
-        })
-    }
-
     /// Trigger-matching view for plugin query hooks at `point`: the
     /// modules `use`d inside the enclosing package plus the transitive
     /// parent chain. Mirrors what the builder assembles at emit time so
