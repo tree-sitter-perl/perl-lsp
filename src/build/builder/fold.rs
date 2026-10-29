@@ -27,6 +27,19 @@ pub(super) fn our_gate_admits(gate: Option<&str>, use_pkg: Option<&str>) -> bool
 impl<'a> Builder<'a> {
     // ---- Post-passes ----
 
+    /// Fold key writes into the shapes they land in (clear-and-emit).
+    pub(super) fn emit_mutation_extension(&mut self) {
+        let ctx = crate::model::witnesses::BagContext {
+            scopes: &self.scopes,
+            package_framework: &self.package_framework,
+            module_index: None,
+            package_parents: &self.package_parents,
+            app_surface_consumers: &self.app_surface_consumers,
+            origin: None,
+        };
+        crate::model::witnesses::emit_mutation_extension_witnesses(&mut self.bag, &ctx, &self.key_writes, true);
+    }
+
     pub(super) fn resolve_variable_refs(&mut self) {
         // Build a temporary scope-to-symbols map for efficient lookup.
         //
@@ -289,20 +302,7 @@ impl<'a> Builder<'a> {
             // passes so call-binding-propagated shapes are visible.
             {
                 let _t = crate::util::ghost_stats::ScopedNs::start("fold::mutation_ext");
-                let ctx = crate::model::witnesses::BagContext {
-                    scopes: &self.scopes,
-                    package_framework: &self.package_framework,
-                    module_index: None,
-                    package_parents: &self.package_parents,
-                    app_surface_consumers: &self.app_surface_consumers,
-                    origin: None,
-                };
-                crate::model::witnesses::emit_mutation_extension_witnesses(
-                    &mut self.bag,
-                    &ctx,
-                    &self.key_writes,
-                    true,
-                );
+                self.emit_mutation_extension();
             }
             let cur = crate::util::ghost_stats::timed("fold::snapshot", || {
                 self.fold_state_snapshot(&reg)

@@ -219,9 +219,16 @@ impl<'a> Builder<'a> {
         // Container form `$h{k}` writes `%h` (canonical name); deref form
         // `$v->{k}` / `$v->[N]` writes through scalar `$v`, arrow required
         // (`$foo{k}` without one would be `%foo` mis-keyed to `$foo`).
-        // `$arr[N]` stays unmodeled: there is no tuple on `@arr` to extend.
+        // `$arr[N] = …` itself stays unmodeled; a write THROUGH an element
+        // (`$arr[$i]->{k} = …`) lands in `@arr`'s element shapes.
         let var_text: String = match (innermost.kind(), container.kind()) {
             ("hash_element_expression", "container_variable") => {
+                match crate::cst::canonical_container_name(container, self.source) {
+                    Some(n) => n,
+                    None => return,
+                }
+            }
+            ("array_element_expression", "container_variable") if !outer_hops.is_empty() => {
                 match crate::cst::canonical_container_name(container, self.source) {
                     Some(n) => n,
                     None => return,

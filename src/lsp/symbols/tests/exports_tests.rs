@@ -1209,6 +1209,46 @@ cfg()->{hsot2};
     );
 }
 
+/// A write through an array element extends the element shapes the
+/// array's pushes declared. A named slot (`$rv[0]->{k}`) extends that
+/// element and keeps it closed; a dynamic index (`$rv[$#rv]->{k}`) may
+/// land in any element, so each opens.
+#[test]
+fn test_writes_through_an_array_element_extend_its_shape() {
+    let unknown_keys = |src: &str| -> Vec<String> {
+        let analysis = parse_analysis(src);
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        collect_diagnostics(&analysis, &idx, DiagnosticOptions::default())
+            .into_iter()
+            .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unknown-hash-key"))
+            .map(|d| d.message)
+            .collect()
+    };
+    let named = unknown_keys("\
+sub f {
+    my @rv;
+    push(@rv, { 'up' => 1 });
+    $rv[0]->{'netmask'} = 2;
+    my @x = grep { $_->{'netmask'} || $_->{'bogus'} } @rv;
+    return @x;
+}
+");
+    assert_eq!(named.len(), 1, "only the unwritten key: {:?}", named);
+    assert!(named[0].contains("'bogus'"), "{:?}", named);
+    let dynamic = unknown_keys("\
+sub f {
+    my ($c) = @_;
+    my @rv;
+    push(@rv, { 'up' => 1 });
+    $rv[$#rv]->{'netmask'} = 2;
+    $rv[$#rv]->{'dhcp'} = 1 if ($c);
+    my @x = grep { $_->{'netmask'} || $_->{'dhcp'} } @rv;
+    return @x;
+}
+");
+    assert!(dynamic.is_empty(), "{:?}", dynamic);
+}
+
 /// Role `requires NAMES` declares method contracts: `$self->name`
 /// inside the role resolves to the synthesized marker (no
 /// unresolved-method hint, goto-def lands on the contract atom); a

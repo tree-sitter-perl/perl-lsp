@@ -179,13 +179,36 @@ fn extend_shape(
         // A tuple slot: only the sound moves, retyping an in-bounds slot or
         // appending at exactly `len`. A write past `len` leaves holes, so the
         // tuple degrades to `ArrayRef`. A tuple has no open flag to widen
-        // into, so a conditional or dynamic write changes nothing.
+        // into, so a write that may not have run changes a slot only by
+        // opening the shape below it.
         InferredType::Sequence(elems) => {
-            let WriteKey::Index(i) = first else { return None };
-            if widen || *i < 0 {
+            let at = match first {
+                WriteKey::Index(i) if *i >= 0 => Some(*i as usize),
+                _ => None,
+            };
+            let Some(i) = at else {
+                // A write into an element nobody can name (a dynamic index)
+                // may land in any of them: each element's shape opens
+                // below it.
+                if rest.is_empty() {
+                    return None;
+                }
+                let mut changed = false;
+                let elems: Vec<InferredType> = elems
+                    .iter()
+                    .map(|e| match extend_shape(e, rest, vtype, true) {
+                        Some(o) => {
+                            changed = true;
+                            o
+                        }
+                        None => e.clone(),
+                    })
+                    .collect();
+                return changed.then_some(InferredType::Sequence(elems));
+            };
+            if widen && (rest.is_empty() || i >= elems.len()) {
                 return None;
             }
-            let i = *i as usize;
             let mut elems = elems.clone();
             if i > elems.len() {
                 return Some(InferredType::ArrayRef);

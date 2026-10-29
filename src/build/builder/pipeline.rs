@@ -675,6 +675,9 @@ fn build_once(
     // freshly-published edges.
     bphase!("emit_mc_return_edges", b.emit_method_call_return_edges());
     bphase!("emit_array_push_witns", b.emit_array_push_witnesses());
+    // Writes through an element (`$a[$i]->{k} = …`) land in the element
+    // shapes the pushes just published.
+    bphase!("mutation_ext_after_push", b.emit_mutation_extension());
     // Fold-phase pattern dispatch: patterns declared `phase: "fold"`
     // run HERE — after PostFold, so their projections read settled
     // chain typing (route brands, resolved invocants). Matches
