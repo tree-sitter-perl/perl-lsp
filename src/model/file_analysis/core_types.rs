@@ -1477,6 +1477,12 @@ pub struct Ref {
     /// kinds).
     #[serde(default)]
     pub arg_count: Option<usize>,
+    /// A `FunctionCall` on a name an import binds from another module
+    /// (python's `from m import Foo`): it references the def the name
+    /// resolves to, so a rename rewrites the import line, but it calls
+    /// nothing, so it never runs a class's constructor.
+    #[serde(default)]
+    pub import_name: bool,
 }
 
 pub use crate::model::conventions::{name_match_key, split_qualified};

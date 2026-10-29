@@ -139,7 +139,7 @@
 ; Imported names are references to the remote def — this single
 ; pattern is what makes cross-file RENAME rewrite the import line too.
 (import_from_statement
-  name: (dotted_name (identifier) @ref.call))
+  name: (dotted_name (identifier) @ref.import))
 
 ; A variable belongs to the function it is assigned in: the first write
 ; declares it, and every later write and every read in the body is that

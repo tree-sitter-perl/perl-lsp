@@ -124,10 +124,13 @@ match rather than one capture, so the extractor drops a captured comment.
   that answers the call answers with an instance of itself. Python also
   keys its constructions by class, but mints no companion: whether a call
   names a class is known only at query time (the class may live in another
-  file), so the matcher admits, for a constructor target, a written call
-  (one with an argument count) whose name resolves to a class
+  file), so the matcher admits, for a constructor target, a call whose
+  name resolves to a class
   (`class_named_by_call`) whose constructor walk reaches it. Such a site
-  is never rewritable either. C++ keys by constructor until a constructor
+  is never rewritable either. An imported name (`@ref.import`, python's
+  `from m import Foo`) is a `FunctionCall` reference to the def it names,
+  pinned like a call, that the extractor marks `Ref::import_name`: it
+  calls nothing, so it constructs nothing. C++ keys by constructor until a constructor
   walk stops at the declaring class (`TODO(construction-navigation)`).
 - A class literal (`@expr.class`, php's `Foo::class`) is an edge to its
   `@receiver.*` token's value, the class.

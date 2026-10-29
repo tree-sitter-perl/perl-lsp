@@ -89,6 +89,9 @@ spelled! {
     /// What a `@ref.<kind>` refers through.
     pub enum RefCap {
         Call = "call",
+        /// A name an import binds (python's `from m import Foo`): a
+        /// reference to the def it names, as a call's is, that calls nothing.
+        Import = "import",
         /// A `::`-qualified call (`fmt::format_to(...)`).
         QCall = "qcall",
         Method = "method",
