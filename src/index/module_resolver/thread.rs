@@ -63,11 +63,10 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is the Perl hub's prefetch: a
-    // pack's wider descent waits on a measurement. A one-shot run takes it
-    // too: what it lands persists, so the next run warms it instead of
-    // parsing.
-    let prefetch = hub;
+    // Every language descends through what a landed file uses, not only its
+    // parents. A one-shot run takes it too: what it lands persists, so the
+    // next run warms it instead of parsing.
+    let prefetch = true;
     let mut adopted = 0u64;
     let mut progress = Progress::default();
     // Adopted before the first wait as well as after each, so what the map
