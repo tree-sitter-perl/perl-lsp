@@ -1150,11 +1150,16 @@ pub fn build_plugin_query_context(
             is_method: c.is_method,
             name: c.name.clone(),
             receiver_text: c.invocant.clone(),
-            // A frame names one receiver class; a union receiver has none.
-            receiver_type: analysis
-                .invocant_text_classes(c.invocant.as_deref(), point)
-                .single()
-                .map(|c| InferredType::ClassName(c.to_string())),
+            // Every class the receiver may be, joined: a union receiver
+            // reaches the hook as the union it is.
+            receiver_type: {
+                let classes: Vec<InferredType> = analysis
+                    .invocant_text_classes(c.invocant.as_deref(), point)
+                    .into_iter()
+                    .map(InferredType::ClassName)
+                    .collect();
+                crate::model::file_analysis::join_all(&classes, &analysis.type_order(None))
+            },
             args,
             cursor_arg_index: c.active_param,
         }

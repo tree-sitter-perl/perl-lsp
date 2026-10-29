@@ -127,6 +127,10 @@ asks `.single()` and says why at the call. Every other consumer iterates:
   pack visibility identity); one class answers itself, several answer
   one `Group`, so references and rename reach every arm;
 - goto-def offers each arm's definition; hover shows a section per arm;
+- signature help offers each arm's signature, and an argument slot
+  expects the join of the arms' parameter types;
+- a plugin query hook's call frame carries the receiver as the join of
+  its classes;
 - the reference matcher counts a union site as a use of each arm's
   member, so `Cat::sound`'s references include `$pet->sound` on
   `Cat|Bird`;
@@ -139,12 +143,12 @@ asks `.single()` and says why at the call. Every other consumer iterates:
 
 Rename refuses a union site whose classes it would not all rename. The
 matcher records, on each union site it matches, the classes the site
-names outside the target (`RefLocation::also_on`). Renaming `Cat::sound`
+names outside the target (`SiteRewrite::Shared { also_on }`). Renaming `Cat::sound`
 from its declaration finds `$pet->sound` naming Bird too, so it refuses
 and names the site to rename from. Renaming from that site renames every
 arm; a group rename refuses only a site that no member's image covers
 (a second site on `Cat|Fish` while renaming `Cat|Bird`). prepareRename
-still offers the box, so the refusal's message reaches the user.
+answers the refusal as its error, before a name is typed.
 
 Python annotations mint unions: `A | B`, `Union[A, B]`, `Optional[A]`
 (`A | None`). PHP `A|B` docblocks land with the PHP pack.
