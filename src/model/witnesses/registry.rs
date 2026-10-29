@@ -2798,6 +2798,23 @@ fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Poin
     binds_variable_where(bag, var, scope, |w| w.span.start <= point)
 }
 
+/// The scope a read of `var` from `scope` at `point` takes its value from:
+/// the first scope out the chain that binds it, with its index on the
+/// chain (0 = `scope` itself). A write through the variable lands its
+/// shape there, so every read that binds the same value sees it.
+pub(crate) fn variable_binding_scope(
+    bag: &WitnessBag,
+    scopes: &[Scope],
+    var: &str,
+    scope: ScopeId,
+    point: Point,
+) -> Option<(usize, ScopeId)> {
+    crate::model::file_analysis::lookup_chain(scopes, scope)
+        .scopes()
+        .enumerate()
+        .find(|&(_, sid)| scope_binds_variable(bag, var, sid, point))
+}
+
 fn binds_variable_where(
     bag: &WitnessBag,
     var: &str,
