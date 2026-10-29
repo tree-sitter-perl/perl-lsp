@@ -79,10 +79,42 @@ Receiver is the whole structural identity, not a variant tag —
 Hop (1) skips a candidate whose bag IS the querying bag: the reducers
 above already ran on it, and re-entering would recurse. A memo HIT can't
 make that check — it has no bag in hand. It doesn't need to: the stored
-value for candidate `X` is `query_rec(X.bag, q, ctx_X)`, which is exactly
-what a query already running on `X.bag` with the same key computes. Serving
+value for candidate `X` is `query_rec(X.bag, q, ctx_X)` — X's own answer,
+with the class ladder cut (next section) — which is exactly what a query
+already running on `X.bag` with the same key computes. Serving
 it early is the fixpoint, not a different answer. Self-skipped candidates
 are never STORED, so an entry always describes a full evaluation.
+
+## The ladder is keyed without the bag
+
+A candidate is consulted through a chase of its own bag, and when that
+candidate cannot answer locally, its chase reaches the same class ladder.
+Keyed by the bag (`VisitedKey`), that inner ladder is a new node and walks
+every other candidate again, so a class with n files nests n deep per
+query. FHEM has 534 files declaring `main`. One slot write in
+`70_Jabber.pm` sat at the 512-frame depth cap, with every frame holding a
+rehydrated analysis (2.7 GB). The open never finished.
+
+With an index, the ladder is a node of its own in `QueryState`, keyed by
+attachment, receiver and arity (`LadderKey`). When it is on the path, the
+inner frame skips it and counts a cut, and the frame that owns it walks
+the remaining candidates and then the ancestry, in ladder order. Off the
+path, the first walk's answer serves the rest of the query. The key drops
+the asking bag because the bag cannot move the answer: the ladder runs
+only when that bag answered nothing locally, and that is all its
+self-skipped candidate would have said. The ancestry reads the asker's
+local parents ∪ the index's `parents_cached`, so a second asker's local
+parents are already in the set. Only their order within the local-first
+union can differ.
+
+So a candidate's stored contribution is its own answer: its bag and
+wherever that bag's edges lead, with the class's ladder cut. That is
+what the ladder asks of it, because the ladder walks the class's
+ancestry itself.
+
+An index-less chase (a bake, a hand-built FA) keeps the bag-keyed guard.
+There the ancestry reads only the asking bag's own parents, so the bag
+is part of the question.
 
 ## What actually made the verb return
 
