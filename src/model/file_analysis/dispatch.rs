@@ -244,12 +244,12 @@ impl LookupChain {
     /// Every symbol a scope on the chain binds, innermost scope first and
     /// in declaration order within one. A key — of a hash, or an
     /// instance's slot (`self.x = …`) — is reached through its container
-    /// and binds no name.
+    /// and binds no name, and a mention declares nothing.
     pub fn bindings(self, symbols: &SymbolTable) -> impl Iterator<Item = &Symbol> {
         self.0
             .into_iter()
             .flat_map(move |scope| symbols.declared_directly_in(scope).iter().map(move |sid| &symbols[sid.0 as usize]))
-            .filter(|s| s.kind != SymKind::HashKeyDef)
+            .filter(|s| s.kind != SymKind::HashKeyDef && !s.is_mention())
     }
 }
 
@@ -284,6 +284,69 @@ pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
     let mut chain = scope_chain_of(scopes, from);
     chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
     LookupChain(chain)
+}
+
+/// What a Perl variable use names. THE binding rule: the builder's binder
+/// mints from it and `FileAnalysis::variable_binding` answers from it, so a
+/// by-name ask and a bound ref agree on identity by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableUse {
+    /// A declaration the lookup chain reaches.
+    Declared(SymbolId),
+    /// The package global the name reaches: a qualified spelling names its
+    /// package, a special variable lives in `main`, any other undeclared
+    /// name in the package the use is written in.
+    Global { package: String, name: String },
+    /// An `our` of another package is in lexical view: the name is
+    /// declared, so it is no implicit global, but the use can't reach it.
+    GatedOur,
+}
+
+/// Resolve the variable use `name` written at `at`. `decls_in(scope)`
+/// lists the variables `scope` declares under `name` as `(id, start,
+/// gate)`, the gate being the package an `our` is visible from.
+pub fn variable_use<'a, I>(
+    name: &str,
+    at: Point,
+    chain: LookupChain,
+    use_package: Option<&str>,
+    names: &NameSpellings,
+    decls_in: impl Fn(ScopeId) -> I,
+) -> VariableUse
+where
+    I: IntoIterator<Item = (SymbolId, Point, Option<&'a str>)>,
+{
+    // The qualifier names the package directly, so the lexical chain is
+    // irrelevant and a `my` of the same name is never the answer.
+    if let Some((package, name)) = crate::model::conventions::split_qualified_var(name, names) {
+        return VariableUse::Global { package: package.to_string(), name };
+    }
+    let mut gated_our = false;
+    for scope in chain.scopes() {
+        let mut found = None;
+        for (id, start, gate) in decls_in(scope) {
+            if start > at {
+                continue;
+            }
+            match gate {
+                Some(pkg) if pkg != use_package.unwrap_or("main") => gated_our = true,
+                _ => found = Some(id),
+            }
+        }
+        if let Some(id) = found {
+            return VariableUse::Declared(id);
+        }
+    }
+    if gated_our {
+        return VariableUse::GatedOur;
+    }
+    // Perl forces the special variables into `main` from every package.
+    let package = if crate::model::conventions::is_special_variable(name) {
+        "main"
+    } else {
+        use_package.unwrap_or("main")
+    };
+    VariableUse::Global { package: package.to_string(), name: name.to_string() }
 }
 
 /// Three-way outcome of resolving a [`ReceiverGated`] value against a
