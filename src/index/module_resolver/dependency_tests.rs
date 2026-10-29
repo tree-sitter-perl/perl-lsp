@@ -349,3 +349,75 @@ fn the_listing_moves_with_the_map() {
     let got = completes(&idx, &root, "src/User.php", typed);
     assert!(got.iter().any(|(l, _)| l == "Fresh\\Thing"), "{got:?}");
 }
+
+/// A class named with no `use` — a construction and a parameter type
+/// spelled absolute — is demand like an import: it lands as dependency.
+#[test]
+fn a_class_named_with_no_use_lands() {
+    const MAKE: &str = "<?php\nnamespace App;\nclass Make {\n    function go(\\Acme\\Model\\Root $r) { return new \\Acme\\Model\\Unused(); }\n}\n";
+    let root = project(
+        "unused",
+        &[
+            ("composer.json", COMPOSER),
+            ("vendor/composer/installed.json", INSTALLED),
+            ("vendor/acme/model/src/Root.php", ROOT),
+            ("vendor/acme/model/src/Unused.php", UNUSED),
+            ("src/Make.php", MAKE),
+        ],
+    );
+    let idx = indexed(&root);
+    let fa = idx.workspace_file_for_test(&root.join("src/Make.php")).unwrap();
+    let used = fa.used_identities();
+    assert!(used.iter().any(|u| u == "Acme\\Model\\Unused"), "{used:?}");
+    assert!(used.iter().any(|u| u == "Acme\\Model\\Root"), "{used:?}");
+    for (class, rel) in [("Acme\\Model\\Unused", "Unused.php"), ("Acme\\Model\\Root", "Root.php")] {
+        assert!(!idx.def_candidates(class).is_empty(), "{class} did not land");
+        assert!(idx.is_dependency_path(&root.join("vendor/acme/model/src").join(rel)));
+    }
+}
+
+/// Composer's `files` are declared demand, asked by their own path: they
+/// land in every session, persist under that path, and a warm start loads
+/// them instead of parsing them again.
+#[test]
+fn an_always_loaded_file_lands_once_and_warms() {
+    const WITH_FILES: &str = r#"{"packages": [
+  {"name": "acme/model", "install-path": "../acme/model",
+   "autoload": {"psr-4": {"Acme\\Model\\": "src/"}, "files": ["helpers.php"]}}
+]}"#;
+    const HELPERS: &str = "<?php\nfunction acme_help() {}\n";
+    let root = project(
+        "files",
+        &[
+            ("composer.json", COMPOSER),
+            ("vendor/composer/installed.json", WITH_FILES),
+            ("vendor/acme/model/helpers.php", HELPERS),
+            ("src/User.php", USER),
+            ("vendor/acme/model/src/Base.php", BASE),
+            ("vendor/acme/model/src/Root.php", ROOT),
+        ],
+    );
+    let helpers = root.join("vendor/acme/model/helpers.php");
+    let store = std::env::temp_dir().join(format!("php-deps-files-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    std::fs::create_dir_all(&store).unwrap();
+    let busy = std::time::Duration::from_secs(5);
+    let declares = |idx: &ModuleIndex, name: &str| {
+        idx.def_candidates(&helpers.display().to_string())
+            .iter()
+            .any(|c| idx.symbols_present(c).symbols().iter().any(|s| s.name == name))
+    };
+
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(idx.is_dependency_path(&helpers));
+        assert!(declares(&idx, "acme_help"));
+    });
+    assert_eq!(import_rows(&store, "%/helpers.php"), 1, "filed under its own path");
+
+    rewrite_unseen(&root, "vendor/acme/model/helpers.php", "acme_help", "acme_hlep");
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(declares(&idx, "acme_help"), "helpers.php was parsed again");
+    });
+}

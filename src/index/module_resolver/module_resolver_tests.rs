@@ -700,6 +700,7 @@ fn perls_map_is_inc_with_the_project_libs_first() {
         ("lib/Twin.pm", "package Twin;\nsub which { 'lib' }\n1;\n"),
         ("local/lib/perl5/Twin.pm", "package Twin;\nsub which { 'local' }\n1;\n"),
         ("local/lib/perl5/Outer.pm", "package Outer;\n1;\npackage Outer::Inner;\nsub hi { 1 }\n1;\n"),
+        ("cpanfile", "requires 'Twin';\nrequires 'Outer', '1.0';\n"),
     ] {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -713,6 +714,9 @@ fn perls_map_is_inc_with_the_project_libs_first() {
     assert_eq!(inc.search_roots(), expected.as_slice());
     assert_eq!(inc.roots(), [dir.join("local")]);
     assert_eq!(inc.inputs(), [dir.join("local/lib/perl5"), dir.join("cpanfile.snapshot")]);
+    // The cpanfile's requires are declared, for a prefetching session.
+    use crate::build::language_driver::Declared;
+    assert_eq!(inc.declared_demand(), [Declared::Listed("Outer".into()), Declared::Listed("Twin".into())]);
 
     let local = dir.join("local/lib/perl5/Twin.pm");
     let lib = dir.join("lib/Twin.pm");

@@ -82,33 +82,10 @@ pub(super) fn acquire(
     Ok((!whole.is_empty()).then_some(whole))
 }
 
-/// Land the map's always-loaded files (Composer's `files`) under the names
-/// they declare. Returns them whole, for descent.
-pub(super) fn land_always_loaded(core: &IndexCore) -> Result<Providers, MapMoved> {
-    let Some(snap) = core.map_snapshot() else {
-        return Ok(Vec::new());
-    };
-    let cap = snap.driver.caps().file_cap;
-    let whole: Providers = snap
-        .locator
-        .always_loaded()
-        .iter()
-        .filter_map(|p| {
-            let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
-            parse_one(&snap, &canon, cap, &canon.display().to_string())
-        })
-        .collect();
-    if whole.is_empty() {
-        return Ok(whole);
-    }
-    core.land_dependency(None, snap.generation, whole.clone(), false, false)?;
-    Ok(whole)
-}
-
 /// What a landed file asks for next. Parents and re-exports always: the
 /// MRO and a module's export surface read them at query time. With
-/// `prefetch`, also its imports and the classes its subs return — the
-/// chain a long-lived session walks before anyone asks for it.
+/// `prefetch`, everything it uses (`used_identities`) and the classes its
+/// subs return — the chain a session walks before anyone asks for it.
 pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();
@@ -126,7 +103,7 @@ pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<St
         if !prefetch {
             continue;
         }
-        asks.extend(fa.imports.iter().map(|i| i.module_name.clone()));
+        asks.extend(fa.used_identities());
         // `has foo => sub { Bar->new }`, plugin-emitted typed subs, return
         // annotations: classes a chain walks through at query time.
         for sym in fa.symbols() {

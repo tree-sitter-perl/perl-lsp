@@ -10,7 +10,7 @@
 //! `ResolvedConfig::load` can replace ours without touching the locator or
 //! the tier plumbing.
 
-use crate::build::language_driver::{DependencyLocator, LanguageDriver, Located, LocatedBy};
+use crate::build::language_driver::{Declared, DependencyLocator, LanguageDriver, Located, LocatedBy};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -200,7 +200,9 @@ pub struct ComposerLocator {
     /// ran) is an empty map, not a scan of the packages' classmap
     /// directories: Composer itself would load none of those classes.
     classmap: OnceLock<HashMap<String, PathBuf>>,
-    files: Vec<PathBuf>,
+    /// Composer's `files`, each asked by its path: Composer itself names
+    /// them by file, not by anything they declare.
+    files: Vec<Declared>,
     roots: Vec<PathBuf>,
     inputs: Vec<PathBuf>,
 }
@@ -224,7 +226,7 @@ impl ComposerLocator {
         for p in config.into_iter().flat_map(|c| c.packages) {
             loc.psr_4.extend(p.psr_4);
             loc.psr_0.extend(p.psr_0);
-            loc.files.extend(p.files);
+            loc.files.extend(p.files.iter().map(|f| Declared::Loaded(f.display().to_string())));
         }
         // Longest prefix first; the empty fallback prefix sorts last.
         loc.psr_4.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
@@ -326,9 +328,13 @@ fn single_quoted(text: &str) -> Option<String> {
 }
 
 impl DependencyLocator for ComposerLocator {
-    /// Every hit is exact: the classmap, PSR-4 and PSR-0 each spell the
-    /// class's own file.
+    /// Every hit is exact: a `files` entry is its own path, and the
+    /// classmap, PSR-4 and PSR-0 each spell the class's own file.
     fn locate(&self, identity: &str) -> Vec<Located> {
+        if self.files.iter().any(|d| matches!(d, Declared::Loaded(p) if p == identity)) {
+            let path = PathBuf::from(identity);
+            return if path.is_file() { vec![Located { path, by: LocatedBy::Exact }] } else { Vec::new() };
+        }
         let identity = identity.trim_start_matches(self.sep.as_str());
         let mut out: Vec<PathBuf> = self.classmap().get(identity).filter(|p| p.is_file()).cloned().into_iter().collect();
         self.psr_4(identity, &mut out);
@@ -337,7 +343,7 @@ impl DependencyLocator for ComposerLocator {
         out.retain(|p| seen.insert(p.clone()));
         out.into_iter().map(|path| Located { path, by: LocatedBy::Exact }).collect()
     }
-    fn always_loaded(&self) -> &[PathBuf] {
+    fn declared_demand(&self) -> &[Declared] {
         &self.files
     }
     fn roots(&self) -> &[PathBuf] {

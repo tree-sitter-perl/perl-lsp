@@ -177,7 +177,6 @@ pub(crate) use index_core::strip_import_copy_one;
 
 mod dependency_tier;
 pub(crate) use dependency_tier::{MapMoved, MapSnapshot};
-pub use dependency_tier::dependency_demand_of;
 mod lookup;
 mod queries;
 mod registration;

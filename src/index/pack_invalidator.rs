@@ -490,12 +490,9 @@ impl PackInvalidator {
             .par_iter()
             .filter_map(|p| Some((p.clone(), Arc::new(analyze_file(driver, p, driver.caps().file_cap)?))))
             .collect();
-        // What the changed file now names that nothing declares is the
+        // What the changed file now uses that nothing declares is the
         // dependency tier's to place: asked of the resolver once the file registers.
-        let demand: Vec<String> = changed_fa
-            .as_deref()
-            .map(crate::index::module_index::dependency_demand_of)
-            .unwrap_or_default();
+        let demand: Vec<String> = changed_fa.as_deref().map(FileAnalysis::used_identities).unwrap_or_default();
         if let Some(fa) = changed_fa {
             results.push((canon.clone(), fa));
         }
