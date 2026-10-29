@@ -30,8 +30,8 @@ use super::*;
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
-/// A class-keyed ladder's identity: `VisitedKey` without the bag and the
-/// point (a ladder is point-free).
+/// A class's candidate fan-out identity: `VisitedKey` without the bag and
+/// the point (the fan-out is point-free).
 type LadderKey = (WitnessAttachment, Option<String>, Option<u32>);
 
 /// What the class-keyed fallback ladder (`ReducerRegistry::class_fallback`)
@@ -341,9 +341,9 @@ fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Ar
 /// queries whose context (scopes / module_index / framework) differs.
 pub(super) struct QueryState {
     visited: VisitedSet,
-    /// The class-keyed ladders on the current path, and the answers of those
-    /// already walked this query (`class_fallback`). The bag-free twins of
-    /// `visited` and `memo`.
+    /// The class-keyed candidate fan-outs on the current path, and the
+    /// answers of those already walked this query (`class_candidates_node`).
+    /// The bag-free twins of `visited` and `memo`.
     ladders: std::collections::HashSet<LadderKey>,
     ladder_memo: std::collections::HashMap<LadderKey, std::sync::Arc<ReducedValue>>,
     /// Enriched copies consulted during this query — pinned so memo
@@ -1088,49 +1088,9 @@ impl ReducerRegistry {
         ladder: &ClassLadder,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
-        if ctx.module_index.is_none() {
-            return self.class_ladder_walk(bag, q, state, ctx, ladder);
-        }
-        // With an index the ladder is a node of its own, keyed WITHOUT the
-        // bag: the candidates, the ancestry (local ∪ cross-file parents) and
-        // the bridges are the class's, whichever bag asked. Each candidate is
-        // consulted by a chase of its own bag, and that chase reaches this
-        // same ladder when the candidate cannot answer locally. Keyed by the
-        // bag, every candidate re-walked every other one: FHEM's 534 `main`
-        // files nested 512 deep per query. On the path, the frame below
-        // skips it — the frame that owns it walks the remaining candidates
-        // and then the ancestry, in ladder order. Off the path, the first
-        // walk's answer serves the query. The asker's bag is the one input
-        // the key drops, and it cannot move the answer: the ladder runs only
-        // when that bag answered nothing locally, which is all its
-        // self-skipped candidate would have said.
-        let key: LadderKey = (q.attachment.clone(), receiver_key(&q.receiver), ladder.arity(q));
-        if let Some(v) = state.ladder_memo.get(&key) {
-            return (**v != ReducedValue::None).then(|| (**v).clone());
-        }
-        if !state.ladders.insert(key.clone()) {
-            state.cuts += 1;
-            return None;
-        }
-        let v = self.class_ladder_walk(bag, q, state, ctx, ladder);
-        state.ladders.remove(&key);
-        state
-            .ladder_memo
-            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
-        v
-    }
-
-    fn class_ladder_walk(
-        &self,
-        bag: &WitnessBag,
-        q: &ReducerQuery,
-        state: &mut QueryState,
-        ctx: &BagContext,
-        ladder: &ClassLadder,
-    ) -> Option<ReducedValue> {
         match ctx.module_index {
             Some(idx) => {
-                if let Some(v) = self.class_candidates(bag, q, state, ctx, idx, ladder) {
+                if let Some(v) = self.class_candidates_node(bag, q, state, ctx, idx, ladder) {
                     return Some(v);
                 }
             }
@@ -1152,6 +1112,42 @@ impl ReducerRegistry {
             }
         }
         Self::class_bridges(ctx, ladder)
+    }
+
+    /// Hop (1) of `class_fallback` as a node of its own, keyed WITHOUT the
+    /// bag. Each candidate is consulted by a chase of its own bag, and that
+    /// chase reaches this same fan-out when the candidate cannot answer
+    /// locally; keyed by the bag, every candidate re-walked every other one
+    /// (FHEM's 534 `main` files nested 512 deep per query). On the path the
+    /// frame below skips it — the frame that owns it walks the remaining
+    /// candidates — and off the path the first walk's answer serves the
+    /// query. Only the fan-out is bag-free: the ancestry hop reduces the
+    /// re-keyed attachment on the bag that asked, and a candidate's own bag
+    /// can know its parent's member (`my $self = Parent->new; $self->{k} =
+    /// {}`) where the asker's cannot, so the skipped frame still walks it.
+    fn class_candidates_node(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        ctx: &BagContext,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        ladder: &ClassLadder,
+    ) -> Option<ReducedValue> {
+        let key: LadderKey = (q.attachment.clone(), receiver_key(&q.receiver), ladder.arity(q));
+        if let Some(v) = state.ladder_memo.get(&key) {
+            return (**v != ReducedValue::None).then(|| (**v).clone());
+        }
+        if !state.ladders.insert(key.clone()) {
+            state.cuts += 1;
+            return None;
+        }
+        let v = self.class_candidates(bag, q, state, ctx, idx, ladder);
+        state.ladders.remove(&key);
+        state
+            .ladder_memo
+            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
+        v
     }
 
     /// Hop (2) of `class_fallback`: the attachment re-keyed per parent, MRO
