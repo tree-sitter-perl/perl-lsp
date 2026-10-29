@@ -822,7 +822,7 @@ impl ReducerRegistry {
         // arm-agreement folds for legibility.
         r.register(Box::new(SlotTypeFold));
         r.register(Box::new(InstanceShapeFold));
-        r.register(Box::new(SlotElementsFold));
+        r.register(Box::new(FedValuesJoin));
         r.register(Box::new(ParamWritesFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
         // overlap with the Variable/Expr folds below, so order here is

@@ -323,14 +323,17 @@ pub struct PersistedNode {
     pub kids: Vec<(Vec<u8>, u64)>,
 }
 
-/// Byte caps. Past its cap a shard drops everything and starts over: a full
-/// reset is the one eviction that can never serve a stale entry, and a
-/// parent whose child was dropped verifies as stale. The pending buffer
+/// Byte caps. Past its cap a shard drops its least recently used entries
+/// down to `EVICT_TO` of the cap, in one batch so the sort is paid once
+/// per many inserts. Dropping any entry is sound: a parent whose child was
+/// dropped verifies as stale and recomputes. The pending buffer
 /// instead stops taking rows until it is flushed; a row it refuses is an
 /// answer the next process recomputes.
 const ENTRIES_BYTE_CAP: usize = 32 << 20;
 const MENTIONS_BYTE_CAP: usize = 16 << 20;
 const PENDING_BYTE_CAP: usize = 16 << 20;
+/// What a full shard is cut back to, as a fraction of its cap.
+const EVICT_TO: (usize, usize) = (3, 4);
 
 /// Entry shards: lookups run on every worker thread, and one lock over the
 /// whole map serialized them.
@@ -356,8 +359,7 @@ fn entry_bytes(key: &EngineKey, e: &Entry) -> usize {
         + key_bytes(key)
         + match &*e.value {
             EngineValue::Value(ReducedValue::Type(t)) => bincode::serialized_size(t).unwrap_or(0) as usize,
-            // A fact map is the size of its debug rendering, near enough.
-            EngineValue::Value(ReducedValue::FactMap(m)) => format!("{m:?}").len(),
+            EngineValue::Value(ReducedValue::FactMap(m)) => super::types::fact_map_heap_bytes(m),
             EngineValue::Value(ReducedValue::None) | EngineValue::Disagree => 0,
             EngineValue::Tally(t) => bincode::serialized_size(t).unwrap_or(0) as usize,
         }
@@ -374,7 +376,33 @@ fn entry_bytes(key: &EngineKey, e: &Entry) -> usize {
         + e.children.iter().map(|(k, _)| key_bytes(k) + std::mem::size_of::<u64>()).sum::<usize>()
 }
 
-type Shard = Mutex<Budgeted<HashMap<EngineKey, Entry>>>;
+type Shard = Mutex<Budgeted<Recency>>;
+
+/// A shard's entries, each with the tick it was last read or written at.
+#[derive(Default)]
+struct Recency {
+    entries: HashMap<EngineKey, (Entry, u64)>,
+    clock: u64,
+}
+
+impl Recency {
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    fn get(&mut self, key: &EngineKey) -> Option<&mut Entry> {
+        let now = self.tick();
+        self.entries.get_mut(key).map(|(e, used)| {
+            *used = now;
+            e
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 /// The index-owned answer store. Lives as long as the index; validity is
 /// re-established per lookup, never by a caller remembering to invalidate.
@@ -428,7 +456,7 @@ impl AnswerStore {
     }
 
     fn get(&self, key: &EngineKey) -> Option<Entry> {
-        self.shard(key).lock().ok().and_then(|m| m.map.get(key).cloned())
+        self.shard(key).lock().ok().and_then(|mut m| m.map.get(key).cloned())
     }
 
     pub fn len(&self) -> usize {
@@ -562,7 +590,7 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Op
     }
     let frame = FRAMES.with(|f| f.borrow_mut().pop())?;
     ASSUMED.with(|a| a.borrow_mut().remove(key));
-    if !kids_hold || frame.tainted {
+    if !kids_hold {
         // Whatever the children computed against this frame's assumption
         // is retired with it.
         next_round(members_mark);
@@ -609,9 +637,6 @@ struct Frame {
     /// key was still being computed (a cycle back to an ancestor frame):
     /// the value holds only for that ancestor's assumption.
     reads_open: Option<usize>,
-    /// Read a provisional value that read no open frame's assumption: it
-    /// holds only for assumptions this computation never saw.
-    tainted: bool,
     /// This key was re-entered while open in the current round.
     is_head: bool,
     /// An assumption inside this computation's cycle moved this round, so
@@ -631,7 +656,6 @@ impl Frame {
             deps: std::collections::HashSet::new(),
             children: HashMap::new(),
             reads_open: None,
-            tainted: false,
             is_head: false,
             changed: false,
             members_mark,
@@ -705,9 +729,9 @@ pub(crate) fn untracked<R>(f: impl FnOnce() -> R) -> R {
 struct Member {
     key: EngineKey,
     entry: Entry,
-    /// Depth of the open frame whose assumption it read; `None` when it read
-    /// a value from outside the fixpoint.
-    reads_open: Option<usize>,
+    /// Depth of the open frame whose assumption it read. A value that read
+    /// no open assumption settles at once, so every member read one.
+    reads_open: usize,
     /// Computed here, so promoting it writes its row; an adopted member's
     /// row is already the one it was read from.
     persist: bool,
@@ -717,14 +741,6 @@ struct Member {
 /// members computed under it read an assumption that just moved.
 fn next_round(mark: usize) {
     MEMBERS.with(|m| m.borrow_mut().truncate(mark));
-}
-
-fn taint_open_frames() {
-    FRAMES.with(|f| {
-        for fr in f.borrow_mut().iter_mut() {
-            fr.tainted = true;
-        }
-    });
 }
 
 /// Record a read into the innermost open frame; the frames around it reach
@@ -1208,7 +1224,7 @@ fn verify_on_stack(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, ep
 
 fn restamp(store: &AnswerStore, key: &EngineKey, epoch: u64) {
     if let Ok(mut m) = store.shard(key).lock() {
-        if let Some(slot) = m.map.get_mut(key) {
+        if let Some(slot) = m.map.get(key) {
             slot.epoch = epoch;
         }
     }
@@ -1264,10 +1280,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         // computation did.
         crate::util::ghost_stats::count("engine.member_hit");
         note_child(key, changed);
-        match read {
-            Some(d) => mark_reads_open(d),
-            None => taint_open_frames(),
-        }
+        mark_reads_open(read);
         return (*value).clone();
     }
     let store = idx.answer_store();
@@ -1286,7 +1299,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
                     note_child(key, e.changed);
                     mark_reads_open(d);
                     let value = (*e.value).clone();
-                    MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry: e, reads_open: Some(d), persist: false }));
+                    MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry: e, reads_open: d, persist: false }));
                     return value;
                 }
                 None => {}
@@ -1386,7 +1399,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
             break (EngineValue::NOTHING, false);
         }
     };
-    let Some(Frame { deps, children, reads_open, tainted, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
+    let Some(Frame { deps, children, reads_open, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
         return value;
     };
     if let Some(d) = reads_open {
@@ -1398,13 +1411,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
             });
         }
     }
-    let path_dependent = tainted;
-    if path_dependent {
-        crate::util::ghost_stats::count("engine.tainted");
-        taint_open_frames();
-    }
-    let provisional = path_dependent || reads_open.is_some();
-    if provisional {
+    if reads_open.is_some() {
         crate::util::ghost_stats::count("engine.provisional");
     }
     let mut settled = None;
@@ -1429,23 +1436,20 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
             digest,
         };
         note_child(key, changed);
-        if provisional {
-            MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open, persist: true }));
-        } else {
-            settled = Some(entry);
+        match reads_open {
+            Some(d) => MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open: d, persist: true })),
+            None => settled = Some(entry),
         }
     }
     let unsettled = UNSETTLED.with(|u| u.get());
     if reads_open.is_none() {
         // No open frame's assumption reaches this value, so every cycle under
         // it is closed: its members read only assumptions that held, unless a
-        // cycle gave up or the chase read a value from outside the fixpoint.
+        // cycle gave up.
         let members = MEMBERS.with(|m| m.borrow_mut().split_off(members_mark));
         if unsettled {
             // Nothing the round computed is served again.
             crate::util::ghost_stats::count("engine.retired_unsettled");
-        } else if path_dependent {
-            crate::util::ghost_stats::count("engine.settled_tainted");
         } else if let Some(store) = store {
             promote(idx, store, &members);
         }
@@ -1503,14 +1507,32 @@ fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &EngineKey, 
 fn insert_entry(store: &AnswerStore, key: &EngineKey, entry: Entry) {
     let bytes = entry_bytes(key, &entry);
     if let Ok(mut m) = store.shard(key).lock() {
-        if m.bytes + bytes > ENTRIES_BYTE_CAP / SHARDS {
-            crate::util::ghost_stats::count("engine.reset");
-            *m = Budgeted::default();
+        let cap = ENTRIES_BYTE_CAP / SHARDS;
+        if m.bytes + bytes > cap {
+            evict_least_recent(&mut m, cap * EVICT_TO.0 / EVICT_TO.1);
         }
-        if let Some(old) = m.map.insert(key.clone(), entry) {
+        let now = m.map.tick();
+        if let Some((old, _)) = m.map.entries.insert(key.clone(), (entry, now)) {
             m.bytes = m.bytes.saturating_sub(entry_bytes(key, &old));
         }
         m.bytes += bytes;
+    }
+}
+
+/// Drop the least recently used entries until the shard holds `target`
+/// bytes or fewer.
+fn evict_least_recent(m: &mut Budgeted<Recency>, target: usize) {
+    crate::util::ghost_stats::count("engine.evict_round");
+    let mut by_age: Vec<(u64, EngineKey)> = m.map.entries.iter().map(|(k, (_, used))| (*used, k.clone())).collect();
+    by_age.sort_unstable_by_key(|(used, _)| *used);
+    for (_, k) in by_age {
+        if m.bytes <= target {
+            break;
+        }
+        if let Some((old, _)) = m.map.entries.remove(&k) {
+            crate::util::ghost_stats::count("engine.evicted");
+            m.bytes = m.bytes.saturating_sub(entry_bytes(&k, &old));
+        }
     }
 }
 
@@ -1638,5 +1660,34 @@ mod capture_tests {
         close();
         assert!(!captured.deps.contains(&file_dep("/deep.pm")));
         assert!(captured.children.contains(&(key("inner"), 3)));
+    }
+
+    /// A full shard drops the entries read least recently, not everything:
+    /// an entry read since it was written outlives one that was not.
+    #[test]
+    fn a_full_shard_drops_its_least_recent_entries() {
+        let entry = || Entry {
+            value: Arc::new(EngineValue::NOTHING),
+            hash: None,
+            epoch: 0,
+            world: 0,
+            deps: Vec::new().into(),
+            children: Vec::new().into(),
+            changed: 0,
+            digest: None,
+        };
+        let mut m: Budgeted<Recency> = Budgeted::default();
+        for name in ["a", "b", "c"] {
+            let now = m.map.tick();
+            m.bytes += entry_bytes(&key(name), &entry());
+            m.map.entries.insert(key(name), (entry(), now));
+        }
+        assert!(m.map.get(&key("a")).is_some());
+        let one = entry_bytes(&key("a"), &entry());
+        evict_least_recent(&mut m, 2 * one);
+        assert!(m.map.entries.contains_key(&key("a")), "read since written");
+        assert!(!m.map.entries.contains_key(&key("b")), "least recent");
+        assert!(m.map.entries.contains_key(&key("c")));
+        assert_eq!(m.bytes, 2 * one);
     }
 }

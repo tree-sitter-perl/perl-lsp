@@ -734,11 +734,11 @@ impl WitnessReducer for InstanceShapeFold {
 /// `SlotElements{class, key}` / `CallbackIn{..}`: every value fed in (each
 /// value pushed into the slot, each argument a callback is called with),
 /// joined.
-pub struct SlotElementsFold;
+pub struct FedValuesJoin;
 
-impl WitnessReducer for SlotElementsFold {
+impl WitnessReducer for FedValuesJoin {
     fn name(&self) -> &str {
-        "slot_elements"
+        "fed_values"
     }
 
     fn claims(&self, w: &Witness) -> bool {

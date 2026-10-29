@@ -808,6 +808,28 @@ pub enum FactValue {
     Map(Vec<(String, FactValue)>),
 }
 
+impl FactValue {
+    /// Heap bytes this value owns, beyond its own inline size.
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            FactValue::Str(s) => s.capacity(),
+            FactValue::List(vs) => {
+                vs.capacity() * std::mem::size_of::<FactValue>()
+                    + vs.iter().map(FactValue::heap_bytes).sum::<usize>()
+            }
+            FactValue::Bool(_) | FactValue::Num(_) => 0,
+            FactValue::Map(m) => fact_map_heap_bytes(m),
+        }
+    }
+}
+
+/// Heap bytes a fact map owns, beyond the `Vec` header itself.
+#[allow(clippy::ptr_arg)] // reads the Vec's capacity, which a slice hides
+pub fn fact_map_heap_bytes(m: &Vec<(String, FactValue)>) -> usize {
+    m.capacity() * std::mem::size_of::<(String, FactValue)>()
+        + m.iter().map(|(k, v)| k.capacity() + v.heap_bytes()).sum::<usize>()
+}
+
 // ---- Framework-mode mirror (builder's FrameworkMode is private to
 // builder.rs, so the resolver duplicates a small view) ----
 

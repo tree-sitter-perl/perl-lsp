@@ -1412,7 +1412,7 @@ impl<'a> Builder<'a> {
     /// A sub literal passed as an argument: each of its parameters is what the
     /// callee passes when it calls the code at that position (`CallbackIn`).
     fn emit_callback_params(&mut self, node: Node<'a>, params: &[ParamInfo]) {
-        use crate::model::witnesses::{ProjectionStep, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessSource};
         let Some(call) = crate::cst::enclosing_call_of_arg(node) else { return };
         let args = self.flat_call_args(self.extract_call_args(call));
         let Some(pos) = args.iter().position(|a| a.id() == node.id()) else { return };
@@ -1420,7 +1420,7 @@ impl<'a> Builder<'a> {
             return;
         }
         // The callee's view of the position: a method's invocant is its `@_[0]`.
-        let callee: Box<dyn Fn(u32) -> WitnessPayload> = match call.kind() {
+        let callee = match call.kind() {
             "method_call_expression" => {
                 let Some(inv) = call.child_by_field_name("invocant") else { return };
                 let Some(member) = call
@@ -1432,12 +1432,11 @@ impl<'a> Builder<'a> {
                     return;
                 };
                 self.emit_invocant_witness(inv);
-                let base = WitnessAttachment::Expr(node_to_span(inv));
-                let param = pos as u32 + 1;
-                Box::new(move |index| WitnessPayload::Projected {
-                    base: base.clone(),
-                    step: ProjectionStep::CallbackOf { member: member.clone(), param, index },
-                })
+                CallbackCallee::Method {
+                    base: WitnessAttachment::Expr(node_to_span(inv)),
+                    member,
+                    param: pos as u32 + 1,
+                }
             }
             _ => {
                 let Some(name) = call
@@ -1451,15 +1450,7 @@ impl<'a> Builder<'a> {
                 let Some(package) = qualifier.map(str::to_string).or_else(|| self.current_package.clone()) else {
                     return;
                 };
-                let (leaf, param) = (leaf.to_string(), pos as u32);
-                Box::new(move |index| {
-                    WitnessPayload::Edge(WitnessAttachment::CallbackIn {
-                        package: package.clone(),
-                        name: leaf.clone(),
-                        param,
-                        index,
-                    })
-                })
+                CallbackCallee::Sub { package, name: leaf.to_string(), param: pos as u32 }
             }
         };
         let scope = self.current_scope();
@@ -1471,7 +1462,7 @@ impl<'a> Builder<'a> {
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Variable { name: p.name.clone(), scope },
                 source: WitnessSource::Builder("callback_param".into()),
-                payload: callee(index),
+                payload: callee.payload(index),
                 span: Span { start: at, end: at },
             });
         }
@@ -1954,6 +1945,32 @@ impl<'a> Builder<'a> {
                 end_line: end,
                 kind: FoldKind::Region,
             });
+        }
+    }
+}
+
+/// Who calls a callback passed as an argument, seen from the callback's
+/// parameters: a method on the invocant's class, or a named sub.
+enum CallbackCallee {
+    Method { base: crate::model::witnesses::WitnessAttachment, member: String, param: u32 },
+    Sub { package: String, name: String, param: u32 },
+}
+
+impl CallbackCallee {
+    /// The value the callee feeds the callback's parameter `index`.
+    fn payload(&self, index: u32) -> crate::model::witnesses::WitnessPayload {
+        use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+        match self {
+            CallbackCallee::Method { base, member, param } => WitnessPayload::Projected {
+                base: base.clone(),
+                step: ProjectionStep::CallbackOf { member: member.clone(), param: *param, index },
+            },
+            CallbackCallee::Sub { package, name, param } => WitnessPayload::Edge(WitnessAttachment::CallbackIn {
+                package: package.clone(),
+                name: name.clone(),
+                param: *param,
+                index,
+            }),
         }
     }
 }
