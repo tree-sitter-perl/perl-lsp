@@ -2830,3 +2830,39 @@ fn sweep_probe_memo_is_stamp_keyed_and_keeps_only_proven_verdicts() {
     assert_eq!(probe(&idx, sym(), None), None);
     assert_eq!(runs.get(), 5);
 }
+
+/// A stripped copy replays its recorded feed, handler-owner bridges
+/// included: owning a handler bridges it, and the owner is read from the
+/// symbols the strip drops.
+#[test]
+fn a_stripped_copy_keeps_its_handler_owner_bridges() {
+    use crate::index::module_index::ModuleEdgeIndexes;
+    let mut fa = build_fa(
+        "package My::Emitter;\nuse parent 'Mojo::EventEmitter';\n\
+         sub register { my $self = shift; $self->on('ready', sub { 1 }); }\n",
+    );
+    // Only ownership may carry the bridge here.
+    fa.plugin.namespaces.clear();
+    assert!(
+        fa.symbols().iter().any(|s| s.kind == crate::model::file_analysis::SymKind::Handler),
+        "the fixture must emit a handler"
+    );
+    let bridges = |edges: &ModuleEdgeIndexes| -> Vec<String> {
+        edges
+            .snapshot()
+            .into_iter()
+            .filter(|(map, _, _)| *map == "bridges")
+            .map(|(_, key, _)| key)
+            .collect()
+    };
+    let path = PathBuf::from("/fake/emitter.pm");
+    let edges = ModuleEdgeIndexes::new();
+    edges.feed("My::Emitter", &path, &fa);
+    let whole = bridges(&edges);
+    assert!(!whole.is_empty(), "the owned handler bridges its owner");
+
+    fa.evict_symbols();
+    edges.purge_module("My::Emitter");
+    edges.feed("My::Emitter", &path, &fa);
+    assert_eq!(bridges(&edges), whole, "the stripped replay lost a bridge");
+}

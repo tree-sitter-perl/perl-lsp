@@ -163,14 +163,15 @@ struct FedKeys {
     providers: ModuleBucket,
 }
 
-/// The symbols-derived halves of one FILE's feed, recorded together so a
-/// replay over a symbol-evicted copy can never carry one and miss the
-/// other. Both are read from `analysis.symbols()`, the only evictable axis
-/// `feed` touches.
+/// The symbols-derived parts of one FILE's feed, recorded together so a
+/// replay over a symbol-evicted copy can never carry one and miss another.
+/// All are read from `analysis.symbols()`, the only evictable axis `feed`
+/// touches (bridges through the handlers a file owns).
 #[derive(Default, Clone)]
 struct FedNames {
     names: Vec<String>,
     providers: Vec<String>,
+    bridges: Vec<String>,
 }
 
 impl FedKeys {
@@ -212,7 +213,7 @@ impl ModuleEdgeIndexes {
     /// candidate-set rebuilds (purge + one feed per candidate) and the
     /// warm rebuild can overlap without accumulation.
     pub fn feed(&self, module_name: &str, path: &std::path::Path, analysis: &FileAnalysis) {
-        let FedNames { names, providers } = if analysis.symbols_are_evicted() {
+        let FedNames { names, providers, bridges } = if analysis.symbols_are_evicted() {
             match self.name_records.get(path) {
                 Some(rec) => rec.clone(),
                 // No record (a stripped copy fed without ever being fed
@@ -237,7 +238,7 @@ impl ModuleEdgeIndexes {
         for name in names {
             push_unique(&self.names, name, &mut fed.names);
         }
-        for class in Self::bridge_classes(analysis) {
+        for class in bridges {
             push_unique(&self.bridges, class, &mut fed.bridges);
         }
         for parent in Self::parent_classes(analysis) {
@@ -403,12 +404,13 @@ impl ModuleEdgeIndexes {
         self.fed_modules.clear();
     }
 
-    /// One walk of `symbols()` for both symbol-derived feed halves — the
+    /// The symbol-derived feed parts — the
     /// record they land in is what a stripped copy replays.
     fn symbol_derived_names(analysis: &FileAnalysis) -> FedNames {
         FedNames {
             names: Self::indexable_names(analysis),
             providers: analysis.provided_packages(),
+            bridges: Self::bridge_classes(analysis),
         }
     }
 
