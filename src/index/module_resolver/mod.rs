@@ -55,9 +55,18 @@ pub fn spawn_test_resolver(core: Arc<IndexCore>) {
 }
 
 fn spawn_loop(name: &str, core: Arc<IndexCore>, server: Option<ServerSession>) {
+    // A test's store reaches the resolver it spawns, so its landings persist.
+    #[cfg(test)]
+    let store = module_cache::test_cache_dir();
     std::thread::Builder::new()
         .name(name.into())
-        .spawn(move || resolver_loop(core, server))
+        .spawn(move || {
+            #[cfg(test)]
+            if let Some((dir, busy)) = store {
+                return module_cache::with_test_cache_dir(&dir, busy, || resolver_loop(core, server));
+            }
+            resolver_loop(core, server)
+        })
         .expect("failed to spawn module-resolver thread");
 }
 

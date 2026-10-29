@@ -297,16 +297,15 @@ fn test_find_exporters_uses_reverse_index() {
 
 #[test]
 fn test_rebuild_reverse_index_recovers_warm_path_exporters() {
-    // The warm path (`warm_cache`) writes straight into `cache_raw()` and
-    // never touches the reverse index, so `find_exporters` is blind until a
-    // rebuild. The export-only name (`weaken`-style XS export with no Perl
+    // A copy written straight into `cache_raw()` never touches the reverse
+    // index, so `find_exporters` is blind until a rebuild. The export-only name (`weaken`-style XS export with no Perl
     // body, hence no `symbols` entry) is the case `indexable_symbol_names`
     // alone misses — the B6 cold/warm attribution regression.
     let idx = ModuleIndex::new_for_test();
     let src = "package Scalar::Util;\nour @EXPORT_OK = qw(weaken blessed);\n1;";
     let cached = parse_source_to_cached(src, "Scalar::Util");
 
-    // Simulate warm_cache: direct insert, no reverse-index update.
+    // Direct insert, no reverse-index update.
     idx.cache_raw().insert("Scalar::Util".to_string(), Some(cached));
     assert!(
         idx.find_exporters("weaken").is_empty(),
@@ -462,7 +461,7 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
     let child = "package Kid;\nuse parent 'Base::Class';\n1;";
     let cached = parse_source_to_cached(child, "Kid");
 
-    // Simulate warm_cache: direct insert, indexes untouched.
+    // Direct insert, indexes untouched.
     idx.cache_raw().insert("Kid".to_string(), Some(cached));
     assert!(idx.modules_with_parent("Base::Class").is_empty());
 

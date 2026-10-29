@@ -27,6 +27,21 @@ pub(crate) struct DependencyState {
     pub(crate) landed: std::collections::HashMap<std::path::PathBuf, Vec<String>>,
 }
 
+impl DependencyState {
+    /// The map's identity across processes: where it searches, which roots
+    /// are the tier's, and the manifests it was read from with their stamps
+    /// — what moves a generation in a running process.
+    fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.locator.search_roots().hash(&mut h);
+        self.locator.roots().hash(&mut h);
+        self.locator.inputs().hash(&mut h);
+        self.stamps.hash(&mut h);
+        h.finish()
+    }
+}
+
 /// The map as one acquisition reads it, so locating and parsing run with
 /// no lock held. `generation` is what the landing re-checks.
 pub(crate) struct MapSnapshot {
@@ -34,6 +49,9 @@ pub(crate) struct MapSnapshot {
     pub(crate) root: Option<std::path::PathBuf>,
     pub(crate) locator: Arc<dyn DependencyLocator>,
     pub(crate) generation: u64,
+    /// What the persisted import tier was landed under
+    /// (`module_cache::validate_dependency_fingerprint`).
+    pub(crate) fingerprint: u64,
 }
 
 impl MapSnapshot {
@@ -138,6 +156,7 @@ impl IndexCore {
             root: st.root.clone(),
             locator: Arc::clone(&st.locator),
             generation: st.generation,
+            fingerprint: st.fingerprint(),
         })
     }
 

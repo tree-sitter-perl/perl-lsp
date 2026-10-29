@@ -240,24 +240,6 @@ impl IndexCore {
         self.registration_gen.insert(path.to_path_buf(), g);
     }
 
-    /// Stamp a generation for every name-keyed cache entry that lacks one.
-    /// The @INC warm scan (`warm_cache`) writes blobs straight into the
-    /// cache without a registration front door, so those providers would
-    /// otherwise read gen 0 in `enrichment_key`. `or_insert` so a warm entry
-    /// racing a workspace front-door registration keeps the front-door
-    /// generation.
-    pub(crate) fn stamp_missing_import_gens(&self) {
-        for entry in self.cache.iter() {
-            if let Some(ref cm) = *entry.value() {
-                self.registration_gen.entry(cm.path.clone()).or_insert_with(|| {
-                    crate::util::ghost_stats::count("epoch.gen_stamp_missing");
-                    self.gen_counter
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                });
-            }
-        }
-    }
-
     /// THE one spelling of "a module resolution landed in the name-keyed
     /// cache slot" — the resolver thread and the CLI both route here.
     /// `result` is the WHOLE parsed copy; `persisted` says its blob landed
@@ -420,10 +402,8 @@ impl IndexCore {
     }
 
     /// Rebuild the edge indexes (`func → modules`, bridges, children, specs)
-    /// from the current cache. The warm path writes blobs straight into the
-    /// cache without touching the indexes, so a warm start that skips this
-    /// leaves every reverse lookup blind (cold/warm attribution, the B6
-    /// class).
+    /// from the current cache, for a caller that cannot vouch every copy in
+    /// it was fed (cold/warm attribution, the B6 class).
     pub(crate) fn rebuild_reverse_index(&self) {
         self.edges.clear();
         for entry in self.cache.iter() {

@@ -433,37 +433,32 @@ pub fn strings_generation(conn: &Connection) -> i64 {
     .unwrap_or(0)
 }
 
-pub fn compute_inc_hash(inc_paths: &[PathBuf]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    for p in inc_paths {
-        p.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
-
-pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
-    let current_hash = compute_inc_hash(inc_paths);
+/// Drop the import tier when the dependency map it was landed under moved
+/// (`MapSnapshot::fingerprint`: search path, tier roots, and the manifests'
+/// stamps). The same move retires every landing in a running process, so
+/// one rule serves the warm start and the in-session move alike.
+///
+/// Import-tier only: workspace blobs bake plugin emissions and their own
+/// source, not the map — and the workspace indexer may have written its
+/// rows BEFORE this validation runs (two writers, one DB), so anything
+/// broader would delete rows mid-write and leave already-evicted resident
+/// copies with no retrieval source.
+pub fn validate_dependency_fingerprint(conn: &Connection, fingerprint: u64) -> rusqlite::Result<()> {
+    let current = format!("{:016x}", fingerprint);
     let stored: Option<String> = conn
         .query_row(
-            "SELECT value FROM meta WHERE key = 'inc_hash'",
+            "SELECT value FROM meta WHERE key = 'dependency_fingerprint'",
             [],
             |row| row.get(0),
         )
         .ok();
 
-    if stored.as_deref() != Some(&current_hash) {
+    if stored.as_deref() != Some(&current) {
         log::info!(
-            "@INC changed (was {:?}, now {}), clearing module cache",
+            "Dependency map changed (was {:?}, now {}), clearing the import tier",
             stored,
-            current_hash
+            current
         );
-        // Import-tier only: workspace blobs bake plugin emissions and their
-        // own source, not @INC paths — and the workspace indexer may have
-        // written its rows BEFORE this validation runs (two writers, one
-        // DB), so anything broader would delete rows mid-write and leave
-        // already-evicted resident copies with no retrieval source.
         conn.execute("DELETE FROM modules WHERE source = 'import'", [])?;
         conn.execute(
             "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')",
@@ -475,19 +470,30 @@ pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite:
         )?;
         conn.execute("DELETE FROM files WHERE source = 'import'", [])?;
         conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('inc_hash', ?1)",
-            params![current_hash],
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('dependency_fingerprint', ?1)",
+            params![current],
         )?;
     }
     Ok(())
+}
+
+/// The store gates every opener of a language's DB runs before reading it:
+/// the driver's analysis inputs (a hard clear) and the conclusion
+/// derivation (conclusions only). Idempotent, so the resolver and the bulk
+/// indexer each run it on the one DB they share.
+pub fn validate_store(
+    conn: &Connection,
+    driver: &dyn crate::build::language_driver::LanguageDriver,
+) -> rusqlite::Result<()> {
+    validate_input_fingerprint(conn, driver.analysis_input_fingerprint())?;
+    validate_conclusion_fingerprint(conn, crate::index::module_cache::conclusion_fingerprint())
 }
 
 /// Hydrate the in-memory `builtins` mirror from SQLite, parsing
 /// `perlfunc.pod` and writing rows on first use (or when the perl
 /// version tag changes since the last run). Returns the populated
 /// map. Keyed in `meta` under `builtins_perl_version`: mismatch wipes
-/// the table and re-parses, same pattern as `validate_inc_paths` /
-/// `validate_plugin_fingerprint`.
+/// the table and re-parses, same pattern as `validate_input_fingerprint`.
 pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, String>> {
     let map: DashMap<String, String> = DashMap::new();
 
@@ -548,7 +554,7 @@ pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, S
 /// is precisely the decode stage 1 made cheaper. Dropping blobs here would
 /// turn a re-bake into a re-parse of the whole corpus for no reason.
 ///
-/// Same meta-row shape as `validate_plugin_fingerprint`, including the
+/// Same meta-row shape as `validate_input_fingerprint`, including the
 /// IMMEDIATE transaction: two validators racing on a missing stamp would both
 /// clear, and the second would delete rows the first had just written.
 pub fn validate_conclusion_fingerprint(
@@ -593,64 +599,18 @@ fn validate_conclusion_fingerprint_inner(
     Ok(())
 }
 
-/// Drop the module cache when the plugin set has changed since the last
-/// run. `fingerprint` is the value returned by
-/// `plugin::rhai_host::plugin_fingerprint()` — a hash over bundled
-/// plugin sources plus every `.rhai` in `$PERL_LSP_PLUGIN_DIR`.
-///
-/// Without this check, a plugin author who edits a `.rhai`, restarts
-/// the LSP, and inspects a cross-file query will see the *old*
-/// plugin's emissions in the cached `FileAnalysis` blobs — making
-/// plugin QA impossible. Mirrors `validate_inc_paths`: same meta-row
-/// pattern, same hard-clear on mismatch.
-pub fn validate_plugin_fingerprint(conn: &Connection, fingerprint: &str) -> rusqlite::Result<()> {
-    // IMMEDIATE: check-and-stamp must be atomic against the other writer
-    // (resolver thread vs workspace indexer) — two validators both reading
-    // a missing stamp would both hard-clear, the second deleting rows the
-    // first writer committed in between.
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = validate_plugin_fingerprint_inner(conn, fingerprint);
-    match &result {
-        Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(_) => {
-            let _ = conn.execute_batch("ROLLBACK");
-        }
-    }
-    result
-}
-
-fn validate_plugin_fingerprint_inner(conn: &Connection, fingerprint: &str) -> rusqlite::Result<()> {
-    let stored: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'plugin_fingerprint'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if stored.as_deref() != Some(fingerprint) {
-        log::info!(
-            "Plugin set changed (was {:?}, now {}), clearing module cache",
-            stored,
-            fingerprint
-        );
-        conn.execute("DELETE FROM modules", [])?;
-        clear_derived_rows(conn)?;
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('plugin_fingerprint', ?1)",
-            params![fingerprint],
-        )?;
-    }
-    Ok(())
-}
-
 /// Drop the modules table when the driver's external analysis inputs (the
 /// C++ toolchain: system include roots, predefined macros — or its probe
-/// FAILURE) changed since the rows were written. Same meta-row pattern as
-/// `validate_inc_paths`: a generation built under degraded/different inputs
-/// must not be served under the current ones (H8).
+/// FAILURE; Perl's plugin set) changed since the rows were written: a
+/// generation built under degraded/different inputs must not be served
+/// under the current ones (H8). Without it a plugin author who edits a
+/// `.rhai` and restarts would read the old plugin's emissions from cached
+/// blobs.
 pub fn validate_input_fingerprint(conn: &Connection, fingerprint: u64) -> rusqlite::Result<()> {
-    // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.
+    // IMMEDIATE: check-and-stamp must be atomic against the other writer
+    // (resolver thread vs bulk indexer) — two validators both reading a
+    // missing stamp would both hard-clear, the second deleting rows the
+    // first writer committed in between.
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = validate_input_fingerprint_inner(conn, fingerprint);
     match &result {

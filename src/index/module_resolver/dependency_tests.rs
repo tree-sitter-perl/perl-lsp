@@ -220,3 +220,74 @@ fn a_manifest_change_moves_the_map_and_a_save_asks_for_its_imports() {
     idx.wait_idle();
     assert_eq!(idx.def_candidates("Acme\\Model\\Unused").len(), 1);
 }
+
+/// Rewrite `rel` in place — same size, same mtime — so only a parse can
+/// see the change; a warm row still reads as current.
+fn rewrite_unseen(root: &Path, rel: &str, from: &str, to: &str) {
+    assert_eq!(from.len(), to.len());
+    let p = root.join(rel);
+    let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+    let body = std::fs::read_to_string(&p).unwrap().replace(from, to);
+    std::fs::write(&p, body).unwrap();
+    std::fs::File::options().write(true).open(&p).unwrap().set_modified(mtime).unwrap();
+}
+
+/// The store's import-tier rows for files whose path is `like`.
+fn import_rows(store: &Path, like: &str) -> i64 {
+    crate::index::module_cache::with_test_cache_dir(store, std::time::Duration::from_secs(5), || {
+        crate::index::module_cache::open_cache_db(None, "php")
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM modules WHERE source = 'import' AND path LIKE ?1",
+                [like],
+                |r| r.get(0),
+            )
+            .unwrap()
+    })
+}
+
+/// Landings persist: a second run against the same store warms every
+/// landed vendor file instead of parsing it — each was rewritten unseen
+/// between the runs, so a parse would show the rewrite and the warm copy
+/// cannot. A map move then takes the retired landings' rows with it.
+#[test]
+fn a_warm_start_parses_no_dependency_file_and_a_map_move_drops_its_rows() {
+    let root = composer_project("warm", COMPOSER);
+    let store = std::env::temp_dir().join(format!("php-deps-warm-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    std::fs::create_dir_all(&store).unwrap();
+    let busy = std::time::Duration::from_secs(5);
+    let resolves = |idx: &ModuleIndex, rel: &str, class: &str, name: &str| {
+        matches!(
+            member(idx, &root, rel, class, name),
+            Some(MethodResolution::CrossFile { widened: false, .. })
+        )
+    };
+
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(resolves(&idx, "src/User.php", "App\\User", "name"));
+        assert!(resolves(&idx, "src/User.php", "App\\User", "root"));
+        assert!(resolves(&idx, "src/Old.php", "App\\Old", "hi"));
+    });
+    assert_eq!(import_rows(&store, "%/vendor/%"), 3, "Base, Root and Legacy_Thing persisted");
+
+    rewrite_unseen(&root, "vendor/acme/model/src/Base.php", "name()", "nmae()");
+    rewrite_unseen(&root, "vendor/acme/model/src/Root.php", "root()", "rote()");
+    rewrite_unseen(&root, "vendor/old/lib/legacy/thing.php", "hi()", "ih()");
+
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(resolves(&idx, "src/User.php", "App\\User", "name"), "Base.php was parsed again");
+        assert!(resolves(&idx, "src/User.php", "App\\User", "root"), "Root.php was parsed again");
+        assert!(resolves(&idx, "src/Old.php", "App\\Old", "hi"), "thing.php was parsed again");
+
+        let installed = root.join("vendor/composer/installed.json");
+        write(&root, "vendor/composer/installed.json", r#"{"packages": []}"#);
+        let inv = crate::index::pack_invalidator::PackInvalidator::serving(php());
+        inv.file_changed(None, &idx, &OpenDocs::new(), &installed, false);
+        idx.wait_idle();
+        assert_eq!(idx.dependency_generation(), 2);
+    });
+    assert_eq!(import_rows(&store, "%/acme/%"), 0, "the retired landings' rows went with their map");
+}

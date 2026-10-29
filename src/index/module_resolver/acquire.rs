@@ -145,7 +145,7 @@ pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<St
 /// Perl's map over `locator` with no project open, as a snapshot.
 #[cfg(test)]
 pub(crate) fn perl_snapshot(locator: Arc<dyn crate::build::language_driver::DependencyLocator>) -> MapSnapshot {
-    MapSnapshot { driver: &crate::build::language_driver::PerlDriver, root: None, locator, generation: 0 }
+    MapSnapshot { driver: &crate::build::language_driver::PerlDriver, root: None, locator, generation: 0, fingerprint: 0 }
 }
 
 /// The process `@INC`'s providers for `name`, parsed: what the resolver

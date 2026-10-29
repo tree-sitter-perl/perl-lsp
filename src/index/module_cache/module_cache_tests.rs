@@ -7,6 +7,23 @@ fn test_db() -> Connection {
     conn
 }
 
+/// The warm lane's landings, stored as the resolver's landing stores them:
+/// every provider in the relation, the first in the name's slot, a
+/// remembered miss as an empty slot.
+fn warm_into(
+    conn: &Connection,
+    cache: &DashMap<String, Option<Arc<CachedModule>>>,
+    all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
+) -> (usize, Vec<String>) {
+    warm_cache(conn, &mut |name, providers| {
+        cache.insert(name.to_string(), providers.first().cloned());
+        if !providers.is_empty() {
+            all_defs.insert(name.to_string(), providers);
+        }
+        true
+    })
+}
+
 fn parse_source_to_cached(source: &str, path: &std::path::Path) -> Arc<CachedModule> {
     use tree_sitter::Parser;
     let mut parser = Parser::new();
@@ -60,7 +77,7 @@ fn test_db_save_and_load_roundtrip() {
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, stale) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, stale) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 1);
     assert!(stale.is_empty());
 
@@ -101,7 +118,7 @@ fn warm_cache_shares_the_name_keyed_pool_and_excludes_path_keyed_rows() {
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _stale) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _stale) = warm_into(&conn, &cache, &all_defs);
 
     assert_eq!(n, 1, "exactly the name-keyed row warms");
     assert!(
@@ -152,7 +169,7 @@ fn test_db_plugin_namespaces_roundtrip() {
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, stale) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, stale) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 1);
     assert!(stale.is_empty(), "fresh insert should not be stale");
 
@@ -191,7 +208,7 @@ fn test_db_negative_result_roundtrip() {
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 1);
 
     let entry = cache.get("Nonexistent::Module").unwrap();
@@ -223,7 +240,7 @@ fn test_db_stale_entry_skipped() {
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 0, "stale entry should not be loaded");
     assert!(!cache.contains_key("StaleModule"));
 
@@ -231,53 +248,23 @@ fn test_db_stale_entry_skipped() {
 }
 
 #[test]
-fn test_db_plugin_fingerprint_invalidation() {
+fn dependency_fingerprint_change_clears_the_import_tier() {
     let conn = test_db();
 
-    // First run: claims plugin set fingerprint "hash-A".
-    validate_plugin_fingerprint(&conn, "hash-A").unwrap();
+    validate_dependency_fingerprint(&conn, 1).unwrap();
     save_to_db(&conn, "Foo", &None, "import");
 
-    // Same fingerprint → cache survives.
-    validate_plugin_fingerprint(&conn, "hash-A").unwrap();
+    validate_dependency_fingerprint(&conn, 1).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
-    assert_eq!(n, 1, "cache should survive identical fingerprint");
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
+    assert_eq!(n, 1, "the same map keeps its landings");
 
-    // Plugin set changed → cache cleared.
-    validate_plugin_fingerprint(&conn, "hash-B").unwrap();
+    validate_dependency_fingerprint(&conn, 2).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
-    assert_eq!(n, 0, "cache should be empty after plugin set change");
-
-    // Stamp persists — second run with hash-B doesn't re-clear.
-    save_to_db(&conn, "Bar", &None, "import");
-    validate_plugin_fingerprint(&conn, "hash-B").unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
-    assert_eq!(n, 1, "stamp should persist between same-fingerprint runs");
-}
-
-#[test]
-fn test_db_inc_hash_invalidation() {
-    let conn = test_db();
-    let paths1 = vec![PathBuf::from("/usr/lib/perl5")];
-    let paths2 = vec![
-        PathBuf::from("/usr/lib/perl5"),
-        PathBuf::from("/home/user/lib"),
-    ];
-
-    validate_inc_paths(&conn, &paths1).unwrap();
-    save_to_db(&conn, "Foo", &None, "import");
-
-    validate_inc_paths(&conn, &paths2).unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
-    assert_eq!(n, 0, "cache should be empty after @INC change");
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
+    assert_eq!(n, 0, "a moved map retires its landings' rows");
 }
 
 #[test]
@@ -294,7 +281,7 @@ fn test_db_schema_version_migration() {
     init_schema(&conn).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 0, "old data should be gone after migration");
 }
 
@@ -360,7 +347,7 @@ fn test_full_file_analysis_survives_roundtrip() {
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 1);
 
     let loaded = cache.get("Fidelity").unwrap();
@@ -406,7 +393,7 @@ fn same_second_same_size_rewrite_invalidates_row() {
         if secs(s1) == secs(s2) && s1 != s2 {
             let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-            let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+            let (n, _) = warm_into(&conn, &cache, &all_defs);
             assert_eq!(n, 0, "same-second same-size rewrite must invalidate the row");
             let _ = std::fs::remove_file(&pm);
             return;
@@ -445,14 +432,14 @@ fn header_change_invalidates_consumer_row_via_deps_stamp() {
     // Unchanged closure → row warms.
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 1, "row valid while the closure is unchanged");
 
     // Header changes; the consumer file itself does not.
     std::fs::write(&hdr, "#define LIMIT 5\n#define LIMIT2 7\n").unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 0, "header edit must invalidate the consumer's row");
 
     let _ = std::fs::remove_file(&pm);
@@ -497,13 +484,13 @@ fn input_fingerprint_change_clears_table() {
     validate_input_fingerprint(&conn, 0xA).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 1, "same inputs: cache survives");
 
     validate_input_fingerprint(&conn, 0xB).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, false);
+    let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 0, "changed inputs: table cleared");
 }
 
@@ -972,8 +959,8 @@ fn ref_row_seed_match_keys() {
     let _ = std::fs::remove_file(&pm);
 }
 
-/// Hard-clears (inc hash / plugin fingerprint / input fingerprint) must wipe
-/// the derived row tables together with the blobs they derive from.
+/// Hard-clears (dependency map / input fingerprint) must wipe the derived
+/// row tables together with the blobs they derive from.
 #[test]
 fn hard_clear_wipes_derived_rows() {
     let conn = test_db();
@@ -992,8 +979,8 @@ fn hard_clear_wipes_derived_rows() {
     }];
     shred_derived_rows(&conn, "/some/file.pm", "workspace", &seeds, &[]).unwrap();
     assert!(has_ref_rows(&conn, "/some/file.pm"));
-    validate_plugin_fingerprint(&conn, "fingerprint-a").unwrap();
-    validate_plugin_fingerprint(&conn, "fingerprint-b").unwrap();
+    validate_input_fingerprint(&conn, 0xA).unwrap();
+    validate_input_fingerprint(&conn, 0xB).unwrap();
     assert!(
         !has_ref_rows(&conn, "/some/file.pm"),
         "fingerprint change must clear derived rows"
@@ -1043,24 +1030,25 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
     assert!(has_ref_rows(&conn, "/migrated.pm"));
 }
 
-/// The @INC hard-clear is tier-scoped: a PERL5LIB change must take the
-/// import tier (blobs AND derived rows) while workspace rows — possibly
-/// committed by the concurrent indexer moments earlier — survive.
+/// The dependency-map clear is tier-scoped: a moved map (PERL5LIB, an
+/// install) must take the import tier (blobs AND derived rows) while
+/// workspace rows — possibly committed by the concurrent indexer moments
+/// earlier — survive.
 #[test]
-fn inc_clear_is_import_tier_scoped() {
+fn dependency_clear_is_import_tier_scoped() {
     let conn = test_db();
-    validate_inc_paths(&conn, &[PathBuf::from("/lib/a")]).unwrap();
+    validate_dependency_fingerprint(&conn, 1).unwrap();
     shred_derived_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
     shred_derived_rows(&conn, "/inc/Dep.pm", "import", &[], &[]).unwrap();
 
-    validate_inc_paths(&conn, &[PathBuf::from("/lib/CHANGED")]).unwrap();
+    validate_dependency_fingerprint(&conn, 2).unwrap();
     assert!(
         has_ref_rows(&conn, "/ws/File.pm"),
-        "workspace rows must survive an @INC change"
+        "workspace rows must survive a map move"
     );
     assert!(
         !has_ref_rows(&conn, "/inc/Dep.pm"),
-        "import rows must clear on an @INC change"
+        "import rows must clear on a map move"
     );
 }
 

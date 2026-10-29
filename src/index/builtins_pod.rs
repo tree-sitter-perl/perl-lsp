@@ -10,7 +10,7 @@
 //! Storage and lookup live in [`crate::index::module_cache`] /
 //! [`crate::index::module_index`]: at startup the resolver thread writes
 //! the parsed entries to SQLite (keyed by perl version, same
-//! invalidation pattern as `inc_hash` / `plugin_fingerprint`) and
+//! invalidation pattern as the store's other `meta` fingerprints) and
 //! hydrates an in-memory mirror. Re-parse only happens when the
 //! version tag changes.
 

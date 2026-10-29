@@ -131,22 +131,12 @@ pub fn index_workspace_with_index(
     // thread and the hub's readers hash, so all three address one DB.
     let cache_key = idx.workspace_root();
     let conn = module_cache::open_cache_db(cache_key.as_deref(), "perl");
-    // Validate-and-stamp the plugin fingerprint BEFORE writing: the resolver
-    // thread runs the same (atomic) check concurrently on this DB, and an
-    // unstamped fresh DB reads as a mismatch there — it would hard-clear the
-    // rows this indexer is about to write.
+    // Validate-and-stamp the store BEFORE writing: the resolver thread runs
+    // the same (atomic) checks concurrently on this DB, and an unstamped
+    // fresh DB reads as a mismatch there — it would hard-clear the rows this
+    // indexer is about to write.
     if let Some(ref conn) = conn {
-        let _ = module_cache::validate_plugin_fingerprint(
-            conn,
-            &crate::build::plugin::rhai_host::plugin_fingerprint(),
-        );
-        // Beside the plugin gate, and for the same reason: a cached artifact
-        // that describes a derivation we no longer run. This one clears
-        // conclusions only — the blobs stay, because the repair is a re-bake.
-        let _ = module_cache::validate_conclusion_fingerprint(
-            conn,
-            module_cache::conclusion_fingerprint(),
-        );
+        let _ = module_cache::validate_store(conn, &crate::build::language_driver::PerlDriver);
     }
     // Persistence and eviction are independent: blobs + rows are written
     // whenever a DB exists (the parity harness runs under PERL_LSP_NO_EVICT

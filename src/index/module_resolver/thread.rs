@@ -1,5 +1,5 @@
 //! The one resolver loop: workspace-root wait, the dependency map, the
-//! Perl hub's store warm, queue drain, and the per-name acquisition
+//! store and its warm, queue drain, and the per-name acquisition
 //! (`acquire`), server and headless, for every served language.
 
 use super::*;
@@ -20,10 +20,13 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         .map(|s| (s.driver.caps().hub_enrichment, s.locator.search_roots().to_vec()))
         .unwrap_or_default();
 
-    // The store and the unparsed name list are the Perl hub's until every
-    // language persists its landings (layer 11) and lists its names
-    // (layer 12).
-    let db = if hub { hub_warmup(&core, server.as_ref(), ws_root.as_deref(), &search_roots) } else { None };
+    // The unparsed name list is the Perl hub's until every language lists
+    // its names (layer 12).
+    if hub {
+        scan_inc_module_names(&search_roots, &core.available_modules);
+        log::info!("@INC scan: {} modules available", core.available_modules.len());
+    }
+    let db = open_store(&core, server.as_ref(), ws_root.as_deref(), hub);
 
     // Track which extract version each module was resolved at.
     let mut seen: HashMap<String, i64> = HashMap::new();
@@ -110,10 +113,10 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is a long-lived session's
-    // prefetch: a one-shot run would re-parse it every time until landings
-    // persist for every language (layer 11).
-    let prefetch = server.is_some() && hub;
+    // Descent beyond parents and re-exports is the Perl hub's prefetch until
+    // demand is what a file uses (layer 13). A one-shot run takes it too:
+    // what it lands persists, so the next run warms it instead of parsing.
+    let prefetch = hub;
     let mut adopted = 0u64;
     core.queue.started.store(true, std::sync::atomic::Ordering::Release);
     notify_resolved(&core);
@@ -128,6 +131,10 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         if generation != adopted {
             adopted = generation;
             seen.clear();
+            // What the old map landed retired with it; its rows go too.
+            if let (Some(conn), Some(snap)) = (db.as_ref(), core.map_snapshot()) {
+                let _ = module_cache::validate_dependency_fingerprint(conn, snap.fingerprint);
+            }
             if let Ok(whole) = land_always_loaded(&core) {
                 ask_unresolved(&core, &seen, descent(&whole, prefetch));
             }
@@ -234,29 +241,21 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     }
 }
 
-/// The Perl hub's startup: the unparsed name list, then the module store —
-/// its validity gates, builtin docs, and the warm load. Returns the store.
-fn hub_warmup(
+/// The served language's store — its validity gates, Perl's builtin docs,
+/// and the warm load of every persisted landing through the one landing
+/// (`IndexCore::land_dependency`), so a warm copy retires with its map
+/// like a fresh one. Returns the store.
+fn open_store(
     core: &IndexCore,
     server: Option<&ServerSession>,
     ws_root: Option<&str>,
-    search_roots: &[PathBuf],
+    hub: bool,
 ) -> Option<rusqlite::Connection> {
-    // Scan @INC for available module names (fast, no parsing — just readdir)
-    scan_inc_module_names(search_roots, &core.available_modules);
-    log::info!("@INC scan: {} modules available", core.available_modules.len());
-
-    let conn = module_cache::open_cache_db(ws_root, "perl")?;
-    let _ = module_cache::validate_inc_paths(&conn, search_roots);
-    let _ = module_cache::validate_plugin_fingerprint(
-        &conn,
-        &crate::build::plugin::rhai_host::plugin_fingerprint(),
-    );
-    // Beside the plugin gate, and for the same reason: a cached artifact
-    // that describes a derivation we no longer run. This one clears
-    // conclusions only — the blobs stay, because the repair is a re-bake.
-    let _ = module_cache::validate_conclusion_fingerprint(&conn, module_cache::conclusion_fingerprint());
-    if server.is_some() {
+    let snap = core.map_snapshot()?;
+    let conn = module_cache::open_cache_db(ws_root, snap.driver.id())?;
+    let _ = module_cache::validate_store(&conn, snap.driver);
+    let _ = module_cache::validate_dependency_fingerprint(&conn, snap.fingerprint);
+    if hub && server.is_some() {
         // Hydrate Perl builtin hover docs (cached in SQLite, re-parsed
         // from perlfunc.pod only when the perl version tag changes).
         // Server-only: a one-shot session would pay the cold parse for
@@ -276,11 +275,13 @@ fn hub_warmup(
     let strip_warm = core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
         && eviction_enabled()
         && (server.is_some() || std::env::var("PERL_LSP_LONG_LIVED").as_deref() == Ok("1"));
-    let (n, stale_names) = module_cache::warm_cache(&conn, &core.cache, &core.all_defs, strip_warm);
+    let (n, stale_names) = module_cache::warm_cache(&conn, &mut |name, providers| {
+        // Every persisted row answered the name it is filed under.
+        let answers: Vec<usize> = (0..providers.len()).collect();
+        core.land_dependency(Some((name, &answers)), snap.generation, providers, true, strip_warm)
+            .is_ok()
+    });
     log::info!("Warmed module cache: {} entries loaded from disk, {} stale", n, stale_names.len());
-    // Stamp generations for the warm-loaded @INC providers (they
-    // landed in the cache without a registration front door).
-    core.stamp_missing_import_gens();
     for name in &stale_names {
         core.stale_modules.insert(name.clone(), ());
     }
@@ -294,8 +295,6 @@ fn hub_warmup(
         }
         core.queue.notify_new_work();
     }
-    // Build reverse index from warmed cache.
-    core.rebuild_reverse_index();
     Some(conn)
 }
 

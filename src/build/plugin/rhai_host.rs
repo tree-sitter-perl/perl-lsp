@@ -742,7 +742,7 @@ pub fn plugin_search_dirs() -> Vec<std::path::PathBuf> {
 /// Read-only: no compile, no side effects, no log spam. Fails open
 /// (returns the bundled-only hash) if a dir can't be read, matching
 /// the rest of the loader's silently-tolerant behavior.
-pub fn plugin_fingerprint() -> String {
+pub fn plugin_fingerprint() -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -773,7 +773,7 @@ pub fn plugin_fingerprint() -> String {
         }
     }
 
-    format!("{:016x}", hasher.finish())
+    hasher.finish()
 }
 
 /// The on-disk `.rhai` files the next `default_plugin_registry()` build
@@ -973,7 +973,6 @@ mod tests {
         let _ = std::fs::remove_file(&plugin_path);
         let _ = std::fs::remove_dir(&dir);
 
-        assert!(!v1a.is_empty(), "fingerprint should never be empty");
         assert_eq!(v1a, v1b, "fingerprint must be deterministic");
         assert_ne!(v1a, v2, "fingerprint must change when a user plugin's source changes");
     }

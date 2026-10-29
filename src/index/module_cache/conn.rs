@@ -183,6 +183,13 @@ pub fn with_test_cache_dir<R>(dir: &std::path::Path, busy: std::time::Duration, 
     f()
 }
 
+/// The store this thread's `with_test_cache_dir` installed, for a thread it
+/// spawns to inherit.
+#[cfg(test)]
+pub fn test_cache_dir() -> Option<(PathBuf, std::time::Duration)> {
+    TEST_CACHE_DIR.with(|c| c.borrow().clone())
+}
+
 #[cfg(test)]
 pub fn open_cache_db(_workspace_root: Option<&str>, lang: &str) -> Option<Connection> {
     let installed = TEST_CACHE_DIR.with(|c| c.borrow().clone());
