@@ -25,9 +25,10 @@ same cascade and has callers of every kind: the open-doc heal on a
 background thread, the enriched overlay, and every CLI verb. Opening it in
 the enrichment body rather than at each call site means no caller can
 enrich without the memo and the budget — a CLI `--completion` that did,
-on FHEM, ran for hours with no deadline to stop it. Nested enters ride the open one. While it is open the
-`PackageSymbol` /
-`Field` cross-file hops answer from a memo of **candidate
+on FHEM, ran for hours with no deadline to stop it. Nested enters ride
+the open one. While it is open the candidate hops of the class-keyed
+ladder — one ladder, `class_fallback`, for `PackageSymbol`, `Field`,
+`Param` and `TypeName` — answer from a memo of **candidate
 contributions**: "what does the file at `path` contribute to this query".
 It also shares `visible_def_candidates` (a clone + sort of the whole
 candidate vec per call, asked millions of times per walk) and carries the
@@ -91,7 +92,7 @@ enough — the attribution matters more than the total:
 - **the memo** — breadth: the same candidate answered once per walk instead
   of once per call site;
 - **the budget at the cross-file BOUNDARY, not per hop** — gating hops
-  individually (the `PackageSymbol` candidate loop only) let the cheap hops
+  individually (the class ladder's candidate loop only) let the cheap hops
   through and the walk kept running. One gate at the entry to the whole
   cross-file fallback region is the honest placement;
 - **an enrichment depth cap** — depth: `ENRICHING` refuses only a path
