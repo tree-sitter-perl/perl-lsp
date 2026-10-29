@@ -62,6 +62,23 @@ impl ConclusionKey {
             _ => None,
         }
     }
+
+    /// The attachment this key projects — `from_attachment`'s inverse, or
+    /// `None` for a key no attachment names.
+    pub fn to_attachment(&self) -> Option<WitnessAttachment> {
+        match self {
+            Self::MethodOnClass { class, name } => Some(WitnessAttachment::PackageSymbol {
+                package: class.clone(),
+                name: name.clone(),
+            }),
+            Self::Field { owner, name } => Some(WitnessAttachment::Field {
+                owner: owner.clone(),
+                name: name.clone(),
+            }),
+            Self::TypeName(n) => Some(WitnessAttachment::TypeName(n.clone())),
+            Self::SubByName(_) => None,
+        }
+    }
 }
 
 /// How a `Link` treats the evaluating query's receiver as it hops.

@@ -191,46 +191,103 @@ fn func1op_subject_arg<'a>(node: Node<'a>) -> Option<Node<'a>> {
     crate::cst::first_named_child_where(node, is_subject_node_kind)
 }
 
-/// Recognize the narrowing facts a condition proves. One fact per
-/// recognized conjunct (`&&`/`and` intersect the region); a disjunctive
-/// (`||`/`or`) or unrecognized condition yields none. `builder` is
-/// threaded so recognizers can consult constant-fold state (a folded
-/// class name in `$x->isa($CLASS)`).
-fn recognize_guards<'a>(builder: &Builder<'a>, cond: Node<'a>, source: &[u8]) -> Vec<GuardFact> {
+/// A condition's logical connective. Each operator has two spellings, and
+/// the low-precedence ones (`not`, `and`, `or`) are nodes of their own.
+enum Logical<'a> {
+    Not(Node<'a>),
+    And(Node<'a>, Node<'a>),
+    Or(Node<'a>, Node<'a>),
+}
+
+fn logical_shape<'a>(cond: Node<'a>, source: &[u8]) -> Option<Logical<'a>> {
+    match cond.kind() {
+        "unary_expression" if raw_leading_op(cond, source) == "!" => {
+            cond.child_by_field_name("operand").map(Logical::Not)
+        }
+        "logical_not_expression" => cond.child_by_field_name("operand").map(Logical::Not),
+        "binary_expression" | "lowprec_logical_expression" => {
+            let (l, r) = (cond.child_by_field_name("left")?, cond.child_by_field_name("right")?);
+            match raw_mid_op(cond, source).as_str() {
+                "&&" | "and" => Some(Logical::And(l, r)),
+                "||" | "or" => Some(Logical::Or(l, r)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The narrowing facts `cond` proves over a region where it evaluates to
+/// `holds`. A connective proves its sides only where every side is known:
+/// `A && B` true proves A and B, `A || B` false proves not-A and not-B,
+/// and the other two outcomes say nothing about either side alone.
+/// `builder` is threaded so recognizers can consult constant-fold state (a
+/// folded class name in `$x->isa($CLASS)`).
+fn facts_for_region<'a>(builder: &Builder<'a>, cond: Node<'a>, holds: bool) -> Vec<(NarrowSubject, NarrowOp)> {
     // Peel transparent `(...)` / single-element list wrappers up front, so
     // `if (($x->isa('Foo')))` and nested grouping fall through to the real
     // condition — one shared primitive instead of a per-shape arm.
     let cond = crate::cst::peel_groups(cond);
+    let both = |l, r, holds| {
+        let mut out = facts_for_region(builder, l, holds);
+        out.extend(facts_for_region(builder, r, holds));
+        out
+    };
+    match logical_shape(cond, builder.source) {
+        Some(Logical::Not(x)) => facts_for_region(builder, x, !holds),
+        Some(Logical::And(l, r)) if holds => both(l, r, true),
+        Some(Logical::Or(l, r)) if !holds => both(l, r, false),
+        Some(Logical::And(..) | Logical::Or(..)) => Vec::new(),
+        None => recognize_atom(builder, cond)
+            .and_then(|f| f.op_for_region(holds).map(|op| (f.subject, op)))
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Every guard literal in `cond` — an atom plus the negations applied
+/// directly to it — with the literal's node. A negation over a connective
+/// does not reach the atoms inside it (`!(A && B)` says nothing about A
+/// alone), so each literal's polarity is its own.
+fn guard_literals<'a>(builder: &Builder<'a>, cond: Node<'a>, out: &mut Vec<(GuardFact, Node<'a>)>) {
+    let cond = crate::cst::peel_groups(cond);
+    if let Some(fact) = guard_literal(builder, cond) {
+        out.push((fact, cond));
+        return;
+    }
+    match logical_shape(cond, builder.source) {
+        Some(Logical::Not(x)) => guard_literals(builder, x, out),
+        Some(Logical::And(l, r) | Logical::Or(l, r)) => {
+            guard_literals(builder, l, out);
+            guard_literals(builder, r, out);
+        }
+        None => {}
+    }
+}
+
+fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact> {
+    let cond = crate::cst::peel_groups(cond);
+    match logical_shape(cond, builder.source) {
+        Some(Logical::Not(x)) => guard_literal(builder, x).map(|mut f| {
+            f.asserts_when_true = !f.asserts_when_true;
+            f
+        }),
+        Some(_) => None,
+        None => recognize_atom(builder, cond),
+    }
+}
+
+/// The guard fact a single (non-connective) condition states, if any.
+fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact> {
+    let source = builder.source;
     match cond.kind() {
-        "unary_expression" if raw_leading_op(cond, source) == "!" => cond
-            .child_by_field_name("operand")
-            .map(|op| {
-                recognize_guards(builder, op, source)
-                    .into_iter()
-                    .map(|mut f| {
-                        f.asserts_when_true = !f.asserts_when_true;
-                        f
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        "binary_expression" if matches!(raw_mid_op(cond, source).as_str(), "&&" | "and") => {
-            let mut out = Vec::new();
-            if let Some(l) = cond.child_by_field_name("left") {
-                out.extend(recognize_guards(builder, l, source));
-            }
-            if let Some(r) = cond.child_by_field_name("right") {
-                out.extend(recognize_guards(builder, r, source));
-            }
-            out
-        }
-        "method_call_expression" => recognize_isa_guard(builder, cond, source).into_iter().collect(),
-        "equality_expression" => recognize_ref_eq_guard(builder, cond, source).into_iter().collect(),
-        "func1op_call_expression" => recognize_defined_guard(cond, source).into_iter().collect(),
+        "method_call_expression" => recognize_isa_guard(builder, cond, source),
+        "equality_expression" => recognize_ref_eq_guard(builder, cond, source),
+        "func1op_call_expression" => recognize_defined_guard(cond, source),
         "ambiguous_function_call_expression" | "function_call_expression" => {
-            recognize_blessed_guard(builder, cond, source).into_iter().collect()
+            recognize_blessed_guard(builder, cond, source)
         }
-        _ => Vec::new(),
+        _ => None,
     }
 }
 
@@ -397,42 +454,40 @@ impl<'a> Builder<'a> {
                 // Record the arm's own guard once (not the priors re-walked
                 // for cumulative negation) — D3/D4 want each condition once.
                 self.record_guard_sites(c);
-                for fact in recognize_guards(self, c, self.source) {
-                    if let Some(op) = fact.op_for_region(enter) {
-                        covered.push(subject_key(&fact.subject));
-                        self.emit_narrowing_fact(&fact.subject, op, region, blk);
-                    }
+                for (subject, op) in facts_for_region(self, c, enter) {
+                    covered.push(subject_key(&subject));
+                    self.emit_narrowing_fact(&subject, op, region, blk);
                 }
             }
             for &(prior_cond, _, prior_enter) in &arms[..k] {
                 let Some(prior_cond) = prior_cond else { continue };
-                for fact in recognize_guards(self, prior_cond, self.source) {
-                    let key = subject_key(&fact.subject);
+                // A prior arm not taken means its condition held at the
+                // opposite of its enter polarity.
+                for (subject, op) in facts_for_region(self, prior_cond, !prior_enter) {
+                    let key = subject_key(&subject);
                     if covered.contains(&key) {
                         continue;
                     }
-                    // A prior arm not taken means its condition held at the
-                    // opposite of its enter polarity.
-                    if let Some(op) = fact.op_for_region(!prior_enter) {
-                        covered.push(key);
-                        self.emit_narrowing_fact(&fact.subject, op, region, blk);
-                    }
+                    covered.push(key);
+                    self.emit_narrowing_fact(&subject, op, region, blk);
                 }
             }
         }
     }
 
-    /// Record each guard recognized in `condition` as a `GuardSite` for the
-    /// D3/D4 redundancy diagnostics — subject, predicate, polarity, and the
-    /// point at which to read the subject's prior (un-narrowed) type (the
-    /// condition's own location, before any narrowed region). Recognition is
-    /// shared with emission; this is the query-time projection of it.
+    /// Record each guard literal in `condition` as a `GuardSite` for the
+    /// D3/D4 redundancy diagnostics — subject, predicate, the literal's own
+    /// span and polarity (a verdict on one conjunct is not a verdict on the
+    /// condition), and the point at which to read the subject's prior
+    /// (un-narrowed) type (the condition's own location, before any
+    /// narrowed region). Recognition is shared with emission.
     fn record_guard_sites(&mut self, condition: Node<'a>) {
         use crate::model::file_analysis::{GuardPredicate, GuardSite};
         let scope = self.current_scope();
         let before = condition.start_position();
-        let span = node_to_span(condition);
-        for fact in recognize_guards(self, condition, self.source) {
+        let mut literals = Vec::new();
+        guard_literals(self, condition, &mut literals);
+        for (fact, literal) in literals {
             let predicate = match &fact.op {
                 NarrowOp::To(ty) => GuardPredicate::IsType(ty.clone()),
                 NarrowOp::StripOptional { .. } => GuardPredicate::Defined,
@@ -445,7 +500,7 @@ impl<'a> Builder<'a> {
                 scope,
                 predicate,
                 asserts_when_true: fact.asserts_when_true,
-                span,
+                span: node_to_span(literal),
                 before_point: before,
             });
         }
@@ -515,14 +570,10 @@ impl<'a> Builder<'a> {
     /// `L && R` / `L and R` — R runs where L holds; `||` / `or` where it
     /// fails.
     pub(super) fn narrow_logical_rhs(&mut self, expr: Node<'a>) {
-        let holds = match raw_mid_op(expr, self.source).as_str() {
-            "&&" | "and" => true,
-            "||" | "or" => false,
+        let (left, right, holds) = match logical_shape(expr, self.source) {
+            Some(Logical::And(l, r)) => (l, r, true),
+            Some(Logical::Or(l, r)) => (l, r, false),
             _ => return,
-        };
-        let (Some(left), Some(right)) = (expr.child_by_field_name("left"), expr.child_by_field_name("right"))
-        else {
-            return;
         };
         self.narrow_arm(left, right, holds);
     }
@@ -530,26 +581,22 @@ impl<'a> Builder<'a> {
     /// Narrow `arm`, which runs only where `condition` is `holds`.
     fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) {
         let region = node_to_span(arm);
-        for fact in recognize_guards(self, condition, self.source) {
-            if let Some(op) = fact.op_for_region(holds) {
-                self.emit_narrowing_fact(&fact.subject, op, region, arm);
-            }
+        for (subject, op) in facts_for_region(self, condition, holds) {
+            self.emit_narrowing_fact(&subject, op, region, arm);
         }
     }
 
     /// `G or EXIT;` / `G and EXIT;` — the bare-logical early-exit idiom.
     pub(super) fn narrow_logical_exit(&mut self, expr: Node<'a>) {
-        let Some(left) = expr.child_by_field_name("left") else { return };
-        let Some(right) = expr.child_by_field_name("right") else { return };
+        // `G or EXIT` → fall-through holds when G TRUE; `G and EXIT` → FALSE.
+        let (left, right, holds_when_true) = match logical_shape(expr, self.source) {
+            Some(Logical::Or(l, r)) => (l, r, true),
+            Some(Logical::And(l, r)) => (l, r, false),
+            _ => return,
+        };
         if !is_exit_expression(right, self.source) {
             return;
         }
-        // `G or EXIT` → fall-through holds when G TRUE; `G and EXIT` → FALSE.
-        let holds_when_true = match raw_mid_op(expr, self.source).as_str() {
-            "or" | "||" => true,
-            "and" | "&&" => false,
-            _ => return,
-        };
         self.narrow_block_remainder(expr, left, holds_when_true);
     }
 
@@ -572,10 +619,8 @@ impl<'a> Builder<'a> {
         }
         let region = Span { start: stmt.end_position(), end: block.end_position() };
         self.record_guard_sites(condition);
-        for fact in recognize_guards(self, condition, self.source) {
-            if let Some(op) = fact.op_for_region(holds_when_true) {
-                self.emit_narrowing_fact(&fact.subject, op, region, block);
-            }
+        for (subject, op) in facts_for_region(self, condition, holds_when_true) {
+            self.emit_narrowing_fact(&subject, op, region, block);
         }
     }
 
