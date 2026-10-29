@@ -1510,7 +1510,9 @@ impl LanguageServer for Backend {
             // they don't shadow.
             let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
-            let mut visit = |uri: Url, analysis: &crate::model::file_analysis::FileAnalysis| {
+            let mut visit = |uri: Url,
+                             analysis: &crate::model::file_analysis::FileAnalysis,
+                             gated: &[crate::model::file_analysis::Symbol]| {
                 if !analysis.symbols_are_evicted() {
                     if let Ok(p) = uri.to_file_path() {
                         // Claim the canonical spelling too: rows are keyed
@@ -1522,7 +1524,7 @@ impl LanguageServer for Backend {
                         covered.insert(p);
                     }
                 }
-                for sym in analysis.symbols() {
+                for sym in analysis.symbols().iter().chain(gated) {
                     if sym.name.to_lowercase().contains(&query) {
                         if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
                             results.push(info);
@@ -1543,7 +1545,7 @@ impl LanguageServer for Backend {
                 if let Ok(p) = url.to_file_path() {
                     open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
                 }
-                visit(url.clone(), &doc.analysis);
+                visit(url.clone(), &doc.analysis, &[]);
             });
             cx.index().for_each_registered_file(&mut |cached| {
                 if open_paths.contains(&cached.path) {
@@ -1552,7 +1554,9 @@ impl LanguageServer for Backend {
                 let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
                     Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                visit(uri, &cached.analysis);
+                // The stored copy holds no gated content, and neither do
+                // its rows; the gates that fire now add theirs.
+                visit(uri, &cached.analysis, &cx.index().shown_gated_symbols(cached, &query));
             });
 
             // Rows pass: symbol-evicted copies (the served language's

@@ -107,25 +107,24 @@ impl FileAnalysis {
         }
     }
 
-    /// Which of this file's [`GatedEmission`]s fire under `module_index`'s
-    /// ancestry, one verdict per emission. A gate is a `ClassIsa` question
-    /// asked of the one MRO seam (`class_isa_prefix`), so a file read late
-    /// converges to one built with its ancestry known. Emissions sharing a
-    /// gate (one DBIC class's `add_columns` + relationships) are asked once.
+    /// Which of this file's [`GatedEmission`]s fire under `module_index`,
+    /// one verdict per emission: each asks its [`Question`], so a file read
+    /// late converges to one built with its ancestry known. Emissions
+    /// asking the same question (one DBIC class's `add_columns` +
+    /// relationships) ask it once.
     pub fn gate_verdicts(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<bool> {
-        let mut asked: Vec<((&str, &[String]), bool)> = Vec::new();
+        let facts = InFile { fa: self, index: module_index };
+        let mut asked: Vec<(Question, bool)> = Vec::new();
         self.plugin
             .gated_emissions
             .iter()
             .map(|em| {
-                let gate = (em.package.as_str(), em.gate_prefixes.as_slice());
-                if let Some((_, fires)) = asked.iter().find(|(g, _)| *g == gate) {
+                let question = em.question();
+                if let Some((_, fires)) = asked.iter().find(|(q, _)| *q == question) {
                     return *fires;
                 }
-                let fires = em.gate_prefixes.iter().any(|prefix| {
-                    class_isa_prefix(&em.package, prefix, &self.packages, module_index)
-                });
-                asked.push((gate, fires));
+                let fires = question.decide(&facts) == Verdict::Yes;
+                asked.push((question, fires));
                 fires
             })
             .collect()
@@ -138,6 +137,37 @@ impl FileAnalysis {
     /// a wrong answer.
     pub fn gated_candidates(&self) -> GatedMint {
         self.mint_gated(|_| true)
+    }
+
+    /// The symbols a listing adds to this file under `verdicts`, with no
+    /// view built. A symbol-evicted copy cannot dedup them against its own
+    /// symbols; a listing dedups its results.
+    pub fn shown_gated_symbols(&self, verdicts: &[bool]) -> Vec<Symbol> {
+        self.mint_gated(|i| verdicts.get(i).copied().unwrap_or(false)).symbols
+    }
+
+    /// Every name a gated emission could add to this file, as the rows key
+    /// them: its own presence rows (`held`), so a retrieval that must not
+    /// miss a view finds the file without the base rows claiming the names.
+    pub fn held_row_names(&self) -> Vec<String> {
+        if self.plugin.gated_emissions.is_empty() {
+            return Vec::new();
+        }
+        let names = &self.pack.names;
+        let mint = self.gated_candidates();
+        let mut out: Vec<String> = mint.refs.iter().map(|r| r.match_key(names)).collect();
+        for s in &mint.symbols {
+            out.push(s.name.clone());
+            out.push(crate::model::conventions::name_match_key(&s.name, names));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Everything the relational rows store of this file.
+    pub fn row_seeds(&self) -> RowSeeds {
+        RowSeeds { refs: self.ref_row_seeds(), syms: self.sym_row_seeds(), held: self.held_row_names() }
     }
 
     /// A copy with the emissions `verdicts` fires applied: the view of a

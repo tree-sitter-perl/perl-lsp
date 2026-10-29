@@ -86,9 +86,11 @@ when, why), not the contract.
   applied — gate only, no enrichment, so B's re-entry does not recur. Applied
   copies are memoized by (registered copy, verdicts) in a 64 MiB byte-capped
   store, so an ancestry change re-applies and nothing invalidates. The
-  producer feeds (ref/sym rows, the reverse index, bridges) index every
-  emission ungated, as candidates, and the Surface projects gated content as
-  declared — closing residuals (1) and (3). Residual (2), the moniker chain,
+  gate is a `Question` (`GatedEmission::question`, `Question::decide`). The
+  producer feeds index every emission ungated, as candidates: the reverse
+  index and bridges by name, the row store in its own `held` presence table
+  (never the base `refs`/`syms` rows), and the Surface projects gated content
+  as declared — closing residuals (1) and (3). Residual (2), the moniker chain,
   is its own fork below.
 
 ## Invocant class vs inner-scope rep narrowing — 2026-07-15 — RESOLVED (veesh, 2026-07-15)

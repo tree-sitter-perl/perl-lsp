@@ -316,6 +316,23 @@ impl ModuleIndex {
             }
         })
     }
+
+    /// The gated symbols a listing adds to `cached` now: those whose gate
+    /// fires, with no view built. `query` (lowercased) bounds the decide to
+    /// files where a gated name could match; the base symbols come from the
+    /// resident copy or the rows, which hold no gated content.
+    pub fn shown_gated_symbols(&self, cached: &Arc<CachedModule>, query: &str) -> Vec<crate::model::file_analysis::Symbol> {
+        let fa = &cached.analysis;
+        let could_match = fa
+            .plugin
+            .gated_emissions
+            .iter()
+            .any(|em| em.symbols.iter().any(|s| s.name.to_lowercase().contains(query)));
+        if !could_match {
+            return Vec::new();
+        }
+        fa.shown_gated_symbols(&fa.gate_verdicts(Some(self)))
+    }
 }
 
 impl CrossFileLookup for ModuleIndex {

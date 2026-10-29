@@ -70,14 +70,13 @@ pub fn shred_derived_rows(
     conn: &Connection,
     path: &str,
     source: &str,
-    seeds: &[crate::model::file_analysis::RefRowSeed],
-    sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+    seeds: &crate::model::file_analysis::RowSeeds,
 ) -> rusqlite::Result<()> {
     // Accumulated, never printed per file: the row-store write cost is what
     // an index change on these tables moves, and the persist writer runs
     // this once per file.
     crate::util::ghost_stats::timed("persist.shred", || {
-        shred_derived_rows_inner(conn, path, source, seeds, sym_seeds)
+        shred_derived_rows_inner(conn, path, source, &seeds.refs, &seeds.syms, &seeds.held)
     })
 }
 
@@ -87,6 +86,7 @@ fn shred_derived_rows_inner(
     source: &str,
     seeds: &[crate::model::file_analysis::RefRowSeed],
     sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+    held: &[String],
 ) -> rusqlite::Result<()> {
     // Sticky workspace tier: project lib/ files are inside the walk AND on
     // @INC (add_project_lib_paths), so the resolver re-shreds them as
@@ -106,6 +106,7 @@ fn shred_derived_rows_inner(
     )?;
     conn.execute("DELETE FROM refs WHERE file_id = ?1", params![file_id])?;
     conn.execute("DELETE FROM syms WHERE file_id = ?1", params![file_id])?;
+    conn.execute("DELETE FROM held WHERE file_id = ?1", params![file_id])?;
 
     let generation = crate::index::module_cache::strings_generation(conn);
     INTERN_MEMO.with(|cell| -> rusqlite::Result<()> {
@@ -193,6 +194,17 @@ fn shred_derived_rows_inner(
                 seed.flags,
             ])?;
         }
+        drop(insert_sym);
+
+        // A gated emission's names are candidates only: present in the
+        // views whose gate fires. They never join `refs`/`syms`, whose rows
+        // every view shows; a retrieval that must find those views asks
+        // `held`.
+        let mut insert_held = conn.prepare_cached("INSERT OR IGNORE INTO held (name_id, file_id) VALUES (?1, ?2)")?;
+        for name in held {
+            let name_id = intern_str(name, &mut memo)?;
+            insert_held.execute(params![name_id, file_id])?;
+        }
         Ok(())
     })?;
     Ok(())
@@ -229,6 +241,7 @@ pub fn gc_strings(conn: &Connection) -> usize {
              UNION SELECT name_id FROM syms
              UNION SELECT key_id FROM syms
              UNION SELECT container_id FROM syms WHERE container_id IS NOT NULL
+             UNION SELECT name_id FROM held
          )",
         [],
     );
@@ -321,6 +334,11 @@ pub fn invalidate_generation_tier(conn: &Connection, path: &str, source: &str) {
         params![path, source],
     );
     let _ = conn.execute(
+        "DELETE FROM held WHERE file_id IN
+           (SELECT file_id FROM files WHERE path = ?1 AND source = ?2)",
+        params![path, source],
+    );
+    let _ = conn.execute(
         "DELETE FROM files WHERE path = ?1 AND source = ?2",
         params![path, source],
     );
@@ -335,6 +353,10 @@ pub fn delete_ref_rows(conn: &Connection, path: &str) {
     );
     let _ = conn.execute(
         "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
+        params![path],
+    );
+    let _ = conn.execute(
+        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
         params![path],
     );
     let _ = conn.execute("DELETE FROM files WHERE path = ?1", params![path]);
@@ -361,6 +383,8 @@ pub fn ref_candidate_files(conn: &Connection, keys: &[String]) -> Vec<String> {
     // rows — a file that declares `helper` but never mentions it again has
     // no matching ref row, and without the union the backward walk's
     // matcher (whose declaration half reads symbols) never rehydrates it.
+    // HELD candidacy from `held` rows: a name only the views whose gate
+    // fires show.
     let Ok(mut stmt) = conn.prepare_cached(
         "SELECT DISTINCT f.path FROM refs r
            JOIN files f ON f.file_id = r.file_id
@@ -368,7 +392,11 @@ pub fn ref_candidate_files(conn: &Connection, keys: &[String]) -> Vec<String> {
          UNION
          SELECT DISTINCT f.path FROM syms y
            JOIN files f ON f.file_id = y.file_id
-          WHERE y.key_id = (SELECT str_id FROM strings WHERE s = ?1)",
+          WHERE y.key_id = (SELECT str_id FROM strings WHERE s = ?1)
+         UNION
+         SELECT DISTINCT f.path FROM held h
+           JOIN files f ON f.file_id = h.file_id
+          WHERE h.name_id = (SELECT str_id FROM strings WHERE s = ?1)",
     ) else {
         return out;
     };
@@ -552,12 +580,23 @@ macro_rules! refs_half {
     };
 }
 
+/// A gated emission's name: present in the views whose gate fires, so any
+/// probe that licenses skipping a file must fail open on it. Kind- and
+/// container-blind — `held` stores presence only.
+macro_rules! held_half {
+    ($n:literal) => {
+        concat!("EXISTS(SELECT 1 FROM held h WHERE h.name_id = ", sid!($n), " AND h.file_id = f.file_id)")
+    };
+}
+
 pub(super) const SYM_MEMBER_PROBE_SQL: &str = concat!(
     "SELECT ",
     syms_half!("name_id", "?2", container), " OR ",
     syms_half!("key_id", "?2", container), " OR ",
     syms_half!("name_id", "?3", container), " OR ",
-    syms_half!("key_id", "?3", container),
+    syms_half!("key_id", "?3", container), " OR ",
+    held_half!("?2"), " OR ",
+    held_half!("?3"),
     " FROM files f WHERE f.path = ?1"
 );
 
@@ -566,7 +605,9 @@ pub(super) const SYM_NAME_PROBE_SQL: &str = concat!(
     syms_half!("name_id", "?2"), " OR ",
     syms_half!("key_id", "?2"), " OR ",
     syms_half!("name_id", "?3"), " OR ",
-    syms_half!("key_id", "?3"),
+    syms_half!("key_id", "?3"), " OR ",
+    held_half!("?2"), " OR ",
+    held_half!("?3"),
     " FROM files f WHERE f.path = ?1"
 );
 
@@ -577,7 +618,9 @@ pub(super) const NAME_PROBE_SQL: &str = concat!(
     syms_half!("name_id", "?2"), " OR ",
     syms_half!("key_id", "?2"), " OR ",
     syms_half!("name_id", "?3"), " OR ",
-    syms_half!("key_id", "?3"),
+    syms_half!("key_id", "?3"), " OR ",
+    held_half!("?2"), " OR ",
+    held_half!("?3"),
     " FROM files f WHERE f.path = ?1"
 );
 
@@ -766,7 +809,12 @@ pub fn paths_with_ref_rows(conn: &Connection) -> std::collections::HashSet<Strin
 pub fn names_with_ref_rows(conn: &Connection) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let Ok(mut stmt) =
-        conn.prepare("SELECT DISTINCT s.s FROM refs r JOIN strings s ON s.str_id = r.name_id")
+        // `held` too: a gated emission's refs reference their names in the
+        // views whose gate fires, so absence must mean absent from every view.
+        conn.prepare(
+            "SELECT s.s FROM refs r JOIN strings s ON s.str_id = r.name_id
+             UNION SELECT s.s FROM held h JOIN strings s ON s.str_id = h.name_id",
+        )
     else {
         return out;
     };
@@ -823,6 +871,13 @@ pub fn unused_exported_syms(conn: &Connection) -> Vec<DeadExportRow> {
                   SELECT 1 FROM refs r
                    WHERE r.name_id = y.key_id
                      AND r.file_id != y.file_id
+                )
+            -- A gated emission's name is a candidate use in the views whose
+            -- gate fires: absence must mean absent from every view.
+            AND NOT EXISTS (
+                  SELECT 1 FROM held h
+                   WHERE h.name_id = y.key_id
+                     AND h.file_id != y.file_id
                 )",
     ) else {
         return out;

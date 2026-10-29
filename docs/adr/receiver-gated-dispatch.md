@@ -125,8 +125,9 @@ records the syntactically-matched-but-ungated `on_match` emission as a
 once `class_isa_prefix` resolves the ancestry: `enrich_imported_types_with_keys`
 (open docs + enriched overlay) and the index's view seam
 (`ModuleIndex::gated_view`, so every `*_present` view of a closed file carries
-it). Both ask `FileAnalysis::gate_verdicts`; the producer feeds (rows, reverse
-index, bridges, Surface) index the emission ungated, as a candidate.
+it). Both ask `FileAnalysis::gate_verdicts`, which decides each emission's
+`Question`; the producer feeds (the `held` presence rows, reverse index,
+bridges, Surface) index the emission ungated, as a candidate.
 Idempotent (truncate-to-baseline / dedup) and deterministic. See
 `docs/prompt-enrichment-inheritance-residual.md` and the cross-file visibility
 fork in `docs/forks-resolved.md`.

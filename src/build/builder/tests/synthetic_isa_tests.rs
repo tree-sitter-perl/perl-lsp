@@ -1486,21 +1486,29 @@ fn a_closed_gated_file_is_viewed_with_its_firing_emissions() {
         "a consumer resolves the closed file's gated accessor"
     );
 
+    let listed = |idx: &ModuleIndex| idx.shown_gated_symbols(&leaf, "nam").iter().any(|s| s.name == "name");
+    assert!(listed(&idx), "a listing shows the firing gate's symbols");
+    assert!(idx.shown_gated_symbols(&leaf, "zzz").is_empty(), "no match, no decide");
+
     // `Mid` loses its DBIC parent: the gate no longer fires.
     idx.insert_cache("Mid", Some(mid(&[])));
     assert!(!has_accessor(&idx.whole_present(&leaf)), "the gate re-decides");
+    assert!(!listed(&idx), "and the listing with it");
     idx.insert_cache("Mid", Some(mid(&["DBIx::Class::Core"])));
     assert!(has_accessor(&idx.whole_present(&leaf)), "and fires again");
 }
 
 /// The producer side states a gated emission as declared: its accessors
-/// shred as candidate rows, and editing only gated content moves the
-/// Surface, so consumers are dirtied.
+/// shred as held presence rows (never base rows, which every view shows),
+/// and editing only gated content moves the Surface, so consumers are
+/// dirtied.
 #[test]
 fn gated_content_is_declared_to_rows_and_surface() {
     let a = build_fa("package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n");
     let b = build_fa("package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id title/);\n1;\n");
-    assert!(a.sym_row_seeds().iter().any(|s| s.name == "name"), "a candidate row");
+    let seeds = a.row_seeds();
+    assert!(seeds.held.iter().any(|n| n == "name"), "a held row");
+    assert!(!seeds.syms.iter().any(|s| s.name == "name"), "no base row");
     assert_ne!(
         crate::model::surface::Surface::project(&a),
         crate::model::surface::Surface::project(&b),

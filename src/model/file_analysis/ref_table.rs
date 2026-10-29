@@ -310,11 +310,8 @@ impl FileAnalysis {
 
     /// Project every ref into its relational row seed
     /// (`docs/adr/relational-ref-index.md`) — the shredder's input, twin
-    /// of `sym_row_seeds`, gated emissions included as candidates.
+    /// of `sym_row_seeds`.
     pub fn ref_row_seeds(&self) -> Vec<RefRowSeed> {
-        let names = &self.pack.names;
-        let mut seeds = self.refs.row_seeds(names);
-        seeds.extend(self.gated_candidates().refs.iter().map(|r| r.row_seed(names)));
-        seeds
+        self.refs.row_seeds(&self.pack.names)
     }
 }

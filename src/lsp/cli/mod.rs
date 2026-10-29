@@ -506,14 +506,16 @@ pub(crate) fn cli_gc_cache(root: &str) {
     // holding their names looks identical to a store with no garbage in it,
     // and those are very different situations.
     eprintln!(
-        "before: files={} refs={} syms={} strings={} (of which {} orphaned)",
+        "before: files={} refs={} syms={} held={} strings={} (of which {} orphaned)",
         n("SELECT COUNT(*) FROM files"),
         n("SELECT COUNT(*) FROM refs"),
         n("SELECT COUNT(*) FROM syms"),
+        n("SELECT COUNT(*) FROM held"),
         before,
         n("SELECT COUNT(*) FROM strings s WHERE NOT EXISTS(SELECT 1 FROM refs r WHERE r.name_id=s.str_id) \
              AND NOT EXISTS(SELECT 1 FROM syms y WHERE y.name_id=s.str_id OR y.key_id=s.str_id \
-                            OR y.container_id=s.str_id)"),
+                            OR y.container_id=s.str_id) \
+             AND NOT EXISTS(SELECT 1 FROM held h WHERE h.name_id=s.str_id)"),
     );
     let missing = n(
         "SELECT COUNT(*) FROM files f WHERE f.source='workspace'",

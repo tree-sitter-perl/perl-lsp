@@ -595,14 +595,16 @@ impl ProvisionalDispatch {
 /// The build records the already-computed emission (tree-free,
 /// file-analysis-native — the `on_match` result translated in
 /// `pattern_dispatch`, which speaks `EmitAction`) plus the gate prefixes.
-/// A gate is applied in exactly two places, both through
-/// `FileAnalysis::gate_verdicts` (the `class_isa_prefix` MRO seam): an open
+/// The gate is a [`Question`] (`GatedEmission::question`), decided in
+/// exactly two places, both through `FileAnalysis::gate_verdicts`: an open
 /// document's enrichment, and the index's view seam
 /// (`ModuleIndex::gated_view`), which hands every reader of a closed file
 /// the copy with its firing emissions applied. The applied content sits
 /// above the symbol/ref baselines, so a file whose ancestry resolves late
 /// converges to one built with it known. The producer feeds index every
-/// emission ungated, as candidates (`FileAnalysis::gated_candidates`).
+/// emission ungated, as candidates (`FileAnalysis::gated_candidates`):
+/// the reverse index and Surface by name, the row store in its own `held`
+/// presence table, never in the base `refs`/`syms` rows every view shows.
 /// See `docs/adr/receiver-gated-dispatch.md` (Phase 2) and
 /// `docs/prompt-enrichment-inheritance-residual.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -625,6 +627,13 @@ pub struct GatedEmission {
     /// Refs the pattern produced (dispatch-call / method-call / hash-key
     /// access sites) so cross-file references reach the re-fired symbols.
     pub refs: Vec<GatedRef>,
+}
+
+impl GatedEmission {
+    /// What the emission waits on.
+    pub fn question(&self) -> Question {
+        Question::ClassIsaPrefix { package: self.package.clone(), prefixes: self.gate_prefixes.clone() }
+    }
 }
 
 /// One symbol inside a [`GatedEmission`] — the file-analysis-native

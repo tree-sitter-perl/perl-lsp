@@ -172,6 +172,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (name_id, file_id)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file_id);
+        CREATE TABLE IF NOT EXISTS held (
+            name_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            PRIMARY KEY (name_id, file_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_held_file ON held(file_id);
         CREATE TABLE IF NOT EXISTS syms (
             file_id      INTEGER NOT NULL,
             name_id      INTEGER NOT NULL,
@@ -225,6 +231,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         .map(|_| ())
         .and_then(|_| conn.prepare("SELECT name_id, file_id FROM refs LIMIT 1").map(|_| ()))
         .and_then(|_| conn.prepare("SELECT flags, key_id FROM syms LIMIT 1").map(|_| ()))
+        .and_then(|_| conn.prepare("SELECT name_id, file_id FROM held LIMIT 1").map(|_| ()))
         .is_ok()
         // The columns the current format DROPPED must be gone. Probing only
         // for what the new shape HAS would pass on the old twelve-column
@@ -240,6 +247,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         // retrieval dead). Recreate from scratch.
         conn.execute_batch(
             "DROP TABLE IF EXISTS refs;
+             DROP TABLE IF EXISTS held;
              DROP TABLE IF EXISTS syms;
              DROP TABLE IF EXISTS files;
              DROP TABLE IF EXISTS strings;
@@ -258,6 +266,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
                 PRIMARY KEY (name_id, file_id)
              ) WITHOUT ROWID;
              CREATE INDEX idx_refs_file ON refs(file_id);
+             CREATE TABLE held (
+                name_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                PRIMARY KEY (name_id, file_id)
+             ) WITHOUT ROWID;
+             CREATE INDEX idx_held_file ON held(file_id);
              CREATE TABLE syms (
                 file_id      INTEGER NOT NULL,
                 name_id      INTEGER NOT NULL,
@@ -393,7 +407,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
 }
 
-/// Wipe the derived tables (`refs`/`syms`/`files`/`strings`/`stubs`/
+/// Wipe the derived tables (`refs`/`syms`/`held`/`files`/`strings`/`stubs`/
 /// `surfaces`). Runs
 /// alongside every `DELETE FROM modules` hard-clear: the rows are shredded
 /// from the blobs, so a generation that invalidates the blobs invalidates
@@ -401,7 +415,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// decoded analyses it is loading anyway.
 pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "DELETE FROM refs; DELETE FROM syms; DELETE FROM files; DELETE FROM strings; \
+        "DELETE FROM refs; DELETE FROM syms; DELETE FROM held; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces;",
     )?;
     bump_strings_generation(conn)
@@ -471,6 +485,10 @@ pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite:
         )?;
         conn.execute(
             "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')",
             [],
         )?;
         conn.execute("DELETE FROM files WHERE source = 'import'", [])?;
