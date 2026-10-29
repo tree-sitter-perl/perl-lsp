@@ -766,7 +766,8 @@ pub struct GuardSite {
     /// Whether the predicate holds where the guard EXPRESSION is true (`!`
     /// flips it) — lets D3/D4 resolve always-true vs always-false.
     pub asserts_when_true: bool,
-    /// Diagnostic range (the guard condition).
+    /// Diagnostic range: the guard literal (the predicate plus the `!`s
+    /// applied directly to it), not the whole condition around it.
     pub span: Span,
     /// Where to read the subject's prior (un-narrowed) type.
     #[serde(with = "PointDef")]
@@ -797,6 +798,11 @@ pub struct GuardRedundancy {
     /// The predicate the guard tested — the renderer names the concrete type
     /// (`IsType`) or definedness (`Defined`) as the message needs.
     pub predicate: GuardPredicate,
+    /// Whether the subject's prior type satisfies `predicate`. Under a
+    /// negation (`!defined $x`) this is the opposite of the verdict, so the
+    /// message states the subject's fact from this and the guard's from
+    /// `verdict`.
+    pub satisfied: bool,
 }
 
 /// A read of a hash key that the base's CLOSED structural shape does not

@@ -186,6 +186,17 @@ too — non-representable negations (`isa`) contribute nothing, making the
 cross-condition intersection automatic. General negation stays parked
 (see `optional-types.md`).
 
+A condition is read through its connectives before any atom is
+(`facts_for_region(cond, holds)`, the one reader every arm, fall-through
+and chain calls). `!X` / `not X` read X at the flipped polarity. `A && B`
+(or `and`) proves both sides only where it holds, and `A || B` (or `or`)
+proves both sides false only where it fails; the other outcome of each
+proves nothing about either side alone, so `return if (defined($x) && $y)`
+leaves `$x` as it was rather than `Undef`. D3/D4 judge each guard literal
+(an atom with the negations applied directly to it) at its own span and
+polarity, since a verdict on one conjunct is not a verdict on the
+condition.
+
 A statement modifier is a one-arm region: `STMT if G` narrows STMT by G
 TRUE, `STMT unless G` by G FALSE, exit or not. A ternary's branches and a
 logical operator's right side are arms the same way: `G ? A : B` narrows A
