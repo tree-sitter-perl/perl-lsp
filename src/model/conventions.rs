@@ -68,6 +68,11 @@ pub fn perl_module_paths(module: &str) -> Vec<String> {
     vec![format!("{}.pm", module.replace("::", "/"))]
 }
 
+/// `perl_module_paths`' inverse: `Foo/Bar.pm` is `Foo::Bar`.
+pub fn perl_module_of(path: &str) -> Option<String> {
+    Some(path.strip_suffix(".pm")?.replace('/', "::"))
+}
+
 /// `split_qualified`'s inverse: a namespace and a leaf as one qualified
 /// name. The global namespace (an empty `namespace`) yields the bare leaf,
 /// never a dangling separator, so a caller need not ask first whether the

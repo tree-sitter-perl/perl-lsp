@@ -43,7 +43,7 @@ pub fn pack_completion(
     // LangPack / no dangling member access) — comes from the one
     // cursor-tier entry (`docs/adr/cursor-slots.md`); this adapter only
     // projects it onto LSP items.
-    let crate::lsp::cursor_slot::DetectedSlot { slot, .. } =
+    let crate::lsp::cursor_slot::DetectedSlot { slot, arm } =
         crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, Some(xidx));
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(class) =
@@ -79,7 +79,11 @@ pub fn pack_completion(
             Some(base_idx),
             crate::index::resolve::OverrideScope::default(),
         );
-        let candidates = cs.complete_qualified_path(xidx, prefix);
+        let candidates = if arm == crate::lsp::cursor_slot::DetectorArm::UseModule {
+            cs.complete_module_candidates(prefix)
+        } else {
+            cs.complete_qualified_path(xidx, prefix)
+        };
         if !candidates.is_empty() {
             return (
                 candidates.into_iter().map(symbols::candidate_to_completion_item).collect(),

@@ -21,6 +21,10 @@ pub struct Walk<'a> {
     /// does; a walk inside a dependency directory must not, since projects
     /// routinely ignore the directory their dependencies install into.
     pub ignores: bool,
+    /// Descend through symlinked directories. Search roots install through
+    /// them (a versioned `@INC` directory linked under its short name); the
+    /// workspace walk keeps a link from pulling a second tree into the project.
+    pub follow_links: bool,
 }
 
 /// A walk's answer.
@@ -49,6 +53,7 @@ pub fn walk(root: &Path, w: &Walk) -> Walked {
     let skip: Vec<PathBuf> = w.skip.to_vec();
     let entries = WalkBuilder::new(root)
         .standard_filters(w.ignores)
+        .follow_links(w.follow_links)
         .types(types)
         .sort_by_file_path(|a, b| a.cmp(b))
         .filter_entry(move |e| !skip.iter().any(|r| e.path().starts_with(r)))

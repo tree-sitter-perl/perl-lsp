@@ -83,6 +83,44 @@ pub fn document_captures(language: &Language, pack: &LangPack) -> Vec<Capture> {
         .unwrap_or_default()
 }
 
+/// The identity typed so far at byte `at`, where the document spells one a
+/// dependency map places: the widest `identity_spelling` capture around
+/// `at`, cut at `at`, its leading namespace separator dropped. A reference
+/// counts only when written absolute (led by the separator); a relative
+/// import (`from .m import`) names the file's own package, never a map's.
+pub fn identity_prefix_at(tree: &Tree, source: &str, pack: &LangPack, at: usize) -> Option<String> {
+    let language: Language = (*tree.language()).clone();
+    let compiled = cached_query(&language, pack.query_source).ok()?;
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(at..at + 1);
+    let mut best: Option<(tree_sitter::Node, IdentitySpelling)> = None;
+    let mut matches = cursor.matches(&compiled.query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
+        let cap = |i: u32| compiled.captures.get(i as usize).copied().flatten();
+        if m.captures.iter().any(|c| cap(c.index) == Some(Capture::Import(ImportCap::Relative))) {
+            continue;
+        }
+        for c in m.captures {
+            let Some(spelling) = cap(c.index).and_then(|k| k.identity_spelling()) else { continue };
+            let n = c.node;
+            if n.start_byte() > at || at > n.end_byte() {
+                continue;
+            }
+            if best.is_none_or(|(b, _)| n.end_byte() - n.start_byte() > b.end_byte() - b.start_byte()) {
+                best = Some((n, spelling));
+            }
+        }
+    }
+    let (node, spelling) = best?;
+    let typed = source.get(node.start_byte()..at)?;
+    let sep = pack.names.use_map_sep().unwrap_or_default();
+    let absolute = !sep.is_empty() && typed.starts_with(sep);
+    if spelling == IdentitySpelling::Reference && !absolute {
+        return None;
+    }
+    Some(if absolute { &typed[sep.len()..] } else { typed }.to_string())
+}
+
 mod extract;
 mod packs;
 mod skeleton;

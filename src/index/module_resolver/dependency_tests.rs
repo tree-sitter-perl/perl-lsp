@@ -291,3 +291,61 @@ fn a_warm_start_parses_no_dependency_file_and_a_map_move_drops_its_rows() {
     });
     assert_eq!(import_rows(&store, "%/acme/%"), 0, "the retired landings' rows went with their map");
 }
+
+/// What completion offers at the `|` in `typed`, typed into `rel`.
+fn completes(idx: &ModuleIndex, root: &Path, rel: &str, typed: &str) -> Vec<(String, Option<String>)> {
+    let path = root.join(rel);
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let cursor = typed.find('|').unwrap();
+    let typed = typed.replacen('|', "", 1);
+    let before = &typed[..cursor];
+    let point = Point { row: before.matches('\n').count(), column: cursor - before.rfind('\n').map_or(0, |n| n + 1) };
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    let tree = parser.parse(&typed, None).unwrap();
+    let (items, _) =
+        crate::lsp::backend::pack_completion(&OpenDocs::new(), &fa, &typed, &tree, point, "php", Some(&path), idx);
+    items.into_iter().map(|i| (i.label, i.detail)).collect()
+}
+
+/// A vendor class nothing uses completes from Composer's map, unparsed:
+/// in a `use`, and as an absolute reference; a used one ranks as indexed.
+/// Each statement is closed: an unterminated one the grammar recovers as
+/// an ERROR no pattern names.
+#[test]
+fn an_unused_vendor_class_completes_from_the_map() {
+    let root = composer_project("names", COMPOSER);
+    let idx = indexed(&root);
+    assert!(idx.def_candidates("Acme\\Model\\Unused").is_empty(), "nothing parsed it");
+    let unused = ("Acme\\Model\\Unused".to_string(), Some("available".to_string()));
+    let in_use = completes(&idx, &root, "src/User.php", "<?php\nnamespace App;\nuse Acme\\Model\\Un|;");
+    assert!(in_use.contains(&unused), "{in_use:?}");
+    let in_new = completes(&idx, &root, "src/User.php", "<?php\nnamespace App;\nfunction f() { return new \\Acme\\Model\\Un|; }");
+    assert!(in_new.contains(&unused), "{in_new:?}");
+    let base = completes(&idx, &root, "src/User.php", "<?php\nnamespace App;\nuse Acme\\Model\\Ba|;");
+    assert!(base.contains(&("Acme\\Model\\Base".to_string(), Some("indexed".to_string()))), "{base:?}");
+    // the map's classmap names complete too
+    let legacy = completes(&idx, &root, "src/User.php", "<?php\nnamespace App;\nuse Legacy_|;");
+    assert!(legacy.iter().any(|(l, _)| l == "Legacy_Thing"), "{legacy:?}");
+}
+
+/// The listing is the map's: a package Composer installs later is offered
+/// once the map moves, with no restart.
+#[test]
+fn the_listing_moves_with_the_map() {
+    let root = composer_project("names-move", COMPOSER);
+    let idx = indexed(&root);
+    let typed = "<?php\nnamespace App;\nuse Fresh\\|;";
+    assert!(completes(&idx, &root, "src/User.php", typed).iter().all(|(l, _)| !l.starts_with("Fresh\\")));
+    write(&root, "vendor/fresh/pkg/src/Thing.php", "<?php\nnamespace Fresh;\nclass Thing {}\n");
+    let installed = INSTALLED.replace(
+        "\n]}",
+        ",\n  {\"name\": \"fresh/pkg\", \"install-path\": \"../fresh/pkg\", \"autoload\": {\"psr-4\": {\"Fresh\\\\\": \"src/\"}}}\n]}",
+    );
+    write(&root, "vendor/composer/installed.json", &installed);
+    let manifest = root.join("vendor/composer/installed.json");
+    crate::index::pack_invalidator::PackInvalidator::serving(php()).file_changed(None, &idx, &OpenDocs::new(), &manifest, false);
+    idx.wait_idle();
+    let got = completes(&idx, &root, "src/User.php", typed);
+    assert!(got.iter().any(|(l, _)| l == "Fresh\\Thing"), "{got:?}");
+}

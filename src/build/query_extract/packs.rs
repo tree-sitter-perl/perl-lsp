@@ -34,6 +34,10 @@ pub struct LangPack {
     /// → pkg/mod.py | pkg/mod/__init__.py. The dependency tier's
     /// search-path maps (`build::search_path`) locate with it.
     pub module_paths: fn(module: &str) -> Vec<String>,
+    /// `module_paths`' inverse: the module a `/`-separated path under a
+    /// search root is, or `None` when the file is no module. What lists a
+    /// search root's names without parsing (`DependencyLocator::for_each_name`).
+    pub module_of: fn(path: &str) -> Option<String>,
     /// Guard narrowing: given the guard token (`@narrow.guard` — a
     /// function/operator like `isinstance`, `has_value`; `None` for the
     /// token-less `if (opt)` truthiness form) and the type text, the
@@ -117,6 +121,7 @@ impl LangPack {
             default_name: _,
             annot_type: _,
             module_paths: _,
+            module_of: _,
             narrow_guard: _,
             entrypoint_symbols,
             brace_scoped_members: _,

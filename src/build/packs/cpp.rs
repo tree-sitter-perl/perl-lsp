@@ -77,6 +77,8 @@ pub fn cpp_pack() -> LangPack {
             let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
             vec![p.to_string()]
         },
+        // A header's path under an include dir is its spelling.
+        module_of: |p| Some(p.to_string()),
         // Two narrowings, both keyed on what the value IS, not a name allowlist:
         //   `if (dynamic_cast<Derived*>(b))` — b is a Derived inside (ty is the
         //     template arg; pointer-ness dropped for navigation, like locals).

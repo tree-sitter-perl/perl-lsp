@@ -346,6 +346,43 @@ impl DependencyLocator for ComposerLocator {
     fn inputs(&self) -> &[PathBuf] {
         &self.inputs
     }
+    /// The names `locate` answers, in its order: the generated classmap's
+    /// classes, then every file under a PSR-4 or PSR-0 directory, named the
+    /// way `locate` spells it back.
+    fn for_each_name(&self, workspace: Option<&Path>, visit: &mut dyn FnMut(&str)) {
+        use crate::build::search_path::{listable, module_files, rel_path};
+        for class in self.classmap().keys() {
+            visit(class);
+        }
+        let stems = |dir: &PathBuf| -> Vec<String> {
+            if !listable(dir, workspace) {
+                return Vec::new();
+            }
+            module_files(dir, self.driver.extensions())
+                .iter()
+                .filter_map(|p| rel_path(dir, p)?.strip_suffix(".php").map(str::to_string))
+                .collect()
+        };
+        for (prefix, dirs) in &self.psr_4 {
+            for stem in dirs.iter().flat_map(stems) {
+                visit(&format!("{prefix}{}", stem.replace('/', &self.sep)));
+            }
+        }
+        // A PSR-0 path spells its namespace with directories and its leaf's
+        // `_` with them too, so a file answers both pure spellings; each is
+        // listed when it carries the prefix the directory serves.
+        for (prefix, dirs) in &self.psr_0 {
+            for stem in dirs.iter().flat_map(stems) {
+                let namespaced = stem.replace('/', &self.sep);
+                let underscored = stem.replace('/', "_");
+                for name in [namespaced, underscored] {
+                    if name.starts_with(prefix.as_str()) {
+                        visit(&name);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

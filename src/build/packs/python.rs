@@ -51,6 +51,21 @@ pub fn python_pack() -> LangPack {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
         },
+        // `pkg/mod.py` is `pkg.mod`, `pkg/__init__.py` is `pkg`; a segment
+        // that is no identifier (`six-1.16.dist-info`) names no module.
+        module_of: |p| {
+            let stem = p.strip_suffix(".py")?;
+            let module = match stem.rsplit_once('/') {
+                Some((dir, "__init__")) => dir,
+                None if stem == "__init__" => return None,
+                _ => stem,
+            };
+            let ident = |s: &str| {
+                s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+            };
+            module.split('/').all(ident).then(|| module.replace('/', "."))
+        },
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
         entrypoint_symbols: &[],

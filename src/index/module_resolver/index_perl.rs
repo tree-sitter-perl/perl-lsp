@@ -92,7 +92,7 @@ pub fn index_workspace_with_index(
     let cap = PERL.caps().file_cap;
     let walked = source_files::walk(
         root,
-        &source_files::Walk { extensions: PERL.extensions(), cap, skip: &skip_roots, ignores: true },
+        &source_files::Walk { extensions: PERL.extensions(), cap, skip: &skip_roots, ignores: true, follow_links: false },
     );
     source_files::report_oversize(&walked.oversize, cap);
     let mut paths = walked.files;

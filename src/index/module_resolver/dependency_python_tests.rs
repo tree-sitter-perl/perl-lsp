@@ -92,3 +92,24 @@ fn a_venv_places_what_the_workspace_imports() {
     // only what the project asks for is parsed
     assert!(idx.def_candidates("acme.unused.Unused").is_empty());
 }
+
+/// A venv module nothing imports completes by name, unparsed.
+#[test]
+fn an_unused_venv_module_completes_from_the_map() {
+    let root = venv_project("venv-names");
+    let idx = ModuleIndex::new_for_test();
+    super::index_pack_language(python(), &root, None, &idx, None, 0);
+    idx.wait_idle();
+    let path = root.join("app/user.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let typed = "import acme.un";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(typed, None).unwrap();
+    let (items, _) = crate::lsp::backend::pack_completion(
+        &OpenDocs::new(), &fa, typed, &tree, Point::new(0, typed.len()), "python", Some(&path), &idx,
+    );
+    let got: Vec<(String, Option<String>)> = items.into_iter().map(|i| (i.label, i.detail)).collect();
+    assert!(got.contains(&("acme.unused".to_string(), Some("available".to_string()))), "{got:?}");
+    assert!(idx.def_candidates("acme.unused.Unused").is_empty(), "listed, not parsed");
+}

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub struct SearchPathLocator {
     sep: String,
     module_paths: fn(&str) -> Vec<String>,
+    module_of: fn(&str) -> Option<String>,
+    extensions: Vec<&'static str>,
     /// Where a name is looked up, in search order, as given: a located file
     /// is canonical, so the roots need not be.
     search: Vec<PathBuf>,
@@ -25,7 +27,9 @@ impl SearchPathLocator {
         let spelling = driver.module_spelling();
         SearchPathLocator {
             sep: spelling.as_ref().and_then(|s| s.names.use_map_sep().map(str::to_string)).unwrap_or_default(),
-            module_paths: spelling.map_or(|_| Vec::new(), |s| s.module_paths),
+            module_paths: spelling.as_ref().map_or(|_| Vec::new(), |s| s.module_paths),
+            module_of: spelling.map_or(|_| None, |s| s.module_of),
+            extensions: driver.extensions().to_vec(),
             search,
             roots: roots.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or(p)).collect(),
             inputs,
@@ -72,6 +76,43 @@ impl DependencyLocator for SearchPathLocator {
     fn inputs(&self) -> &[PathBuf] {
         &self.inputs
     }
+    /// Each module file under a listable search root, named by the
+    /// language's `module_of`.
+    fn for_each_name(&self, workspace: Option<&Path>, visit: &mut dyn FnMut(&str)) {
+        for dir in self.search.iter().filter(|d| listable(d, workspace)) {
+            for path in module_files(dir, &self.extensions) {
+                if let Some(name) = rel_path(dir, &path).and_then(|rel| (self.module_of)(&rel)) {
+                    visit(&name);
+                }
+            }
+        }
+    }
+}
+
+/// Whether a name listing may walk `root`. Never a filesystem root, nor a
+/// directory the workspace sits in: either would enumerate the project and
+/// whatever surrounds it.
+pub fn listable(root: &Path, workspace: Option<&Path>) -> bool {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    root.parent().is_some() && workspace.is_none_or(|w| !w.starts_with(&root))
+}
+
+/// Every file of `extensions` under `dir`, through the one walk: no ignore
+/// files (an install directory is routinely ignored), no size cap (nothing
+/// is read), and through symlinked directories, which installs use.
+pub fn module_files(dir: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+    crate::build::source_files::walk(
+        dir,
+        &crate::build::source_files::Walk { extensions, cap: u64::MAX, skip: &[], ignores: false, follow_links: true },
+    )
+    .files
+}
+
+/// `path` under `dir`, `/`-separated whatever the platform.
+pub fn rel_path(dir: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(dir).ok()?;
+    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    Some(parts.join("/"))
 }
 
 /// The directories directly under `root` that hold `marker`.
