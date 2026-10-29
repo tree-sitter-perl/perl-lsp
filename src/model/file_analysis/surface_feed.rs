@@ -26,6 +26,7 @@ pub struct SurfaceFeed<'a> {
     pub export_tags: &'a HashMap<String, Vec<String>>,
     pub reexport_modules: &'a [String],
     pub plugin_namespaces: &'a [PluginNamespace],
+    pub gated_emissions: &'a [GatedEmission],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
     pub include_directives: &'a [(Span, String)],
@@ -93,7 +94,7 @@ impl FileAnalysis {
                     loads: plugin_loads,
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
-                    gated_emissions: _gated_emissions, // re-fired by this file's OWN enrichment
+                    gated_emissions,
                     meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 
@@ -156,6 +157,7 @@ impl FileAnalysis {
             export_tags,
             reexport_modules,
             plugin_namespaces,
+            gated_emissions,
             app_surface_consumers,
             macro_defs,
             include_directives,

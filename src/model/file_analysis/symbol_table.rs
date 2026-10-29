@@ -85,18 +85,21 @@ impl SymbolTable {
         self.by_scope.get(&scope).map_or(&[], |v| v.as_slice())
     }
 
-    /// Every symbol's relational row seed, in symbol order. The two
-    /// analysis-level predicates are injected because they read tables
-    /// this one doesn't own — linkage visibility needs the declaring
-    /// scope's kind, exportedness the `@EXPORT`/`@EXPORT_OK` surface.
+    /// Every symbol's relational row seed, in symbol order, then
+    /// `candidates`'. The two analysis-level predicates are injected
+    /// because they read tables this one doesn't own — linkage visibility
+    /// needs the declaring scope's kind, exportedness the
+    /// `@EXPORT`/`@EXPORT_OK` surface.
     pub fn row_seeds(
         &self,
+        candidates: &[Symbol],
         names: &NameSpellings,
         linkage_visible: impl Fn(&Symbol) -> bool,
         exported: impl Fn(&str) -> bool,
     ) -> Vec<SymRowSeed> {
         self.symbols
             .iter()
+            .chain(candidates)
             .map(|s| {
                 let mut flags = 0u8;
                 if linkage_visible(s) {
@@ -252,9 +255,15 @@ impl FileAnalysis {
     /// (`docs/adr/relational-ref-index.md`) — the shredder's input, twin
     /// of `ref_row_seeds`. Exportedness reads the SAME `export`/`export_ok`
     /// surface the Surface projection does (`exports_name` →
-    /// `export_lookup`), so "exported" never drifts between the two.
+    /// `export_lookup`), so "exported" never drifts between the two. Gated
+    /// emissions shred as candidates (`gated_candidates`).
     pub fn sym_row_seeds(&self) -> Vec<SymRowSeed> {
-        self.symbols
-            .row_seeds(&self.pack.names, |s| self.is_linkage_visible(s), |n| self.exports_name(n))
+        let gated = self.gated_candidates();
+        self.symbols.row_seeds(
+            &gated.symbols,
+            &self.pack.names,
+            |s| self.is_linkage_visible(s),
+            |n| self.exports_name(n),
+        )
     }
 }

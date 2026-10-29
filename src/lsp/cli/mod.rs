@@ -455,15 +455,6 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         module_index.rebuild_reverse_index_from_cache()
     });
 
-    // Ancestry is now fully populated: materialize deferred cross-file
-    // `ClassIsa` plugin emissions (DBIC column/relationship accessors reached
-    // through a cross-file base) into the whole resident cached copies, so
-    // cross-file goto-def / references see them via `whole_present`. See
-    // `ModuleIndex::materialize_gated_emissions` / `GatedEmission`.
-    timings::phase("cli::materialize_gated", || {
-        module_index.materialize_gated_emissions()
-    });
-
     (ws, module_index)
 }
 

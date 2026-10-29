@@ -595,15 +595,14 @@ impl ProvisionalDispatch {
 /// The build records the already-computed emission (tree-free,
 /// file-analysis-native — the `on_match` result translated in
 /// `pattern_dispatch`, which speaks `EmitAction`) plus the gate prefixes.
-/// `enrich_imported_types_with_keys` re-fires it when the package's ancestry
-/// resolves ANY gate prefix CROSS-FILE (`class_isa_prefix`, the same MRO
-/// seam as every other ancestry walk). Idempotent by construction: the
-/// re-fired symbols/refs land ABOVE the symbol/ref tables' baselines
-/// and are truncated + re-derived every enrichment cycle, so a file whose
-/// ancestry resolves late converges to the same analysis as one built with
-/// it known — the same discipline as `ReceiverGated` dispatch, but for
-/// symbol emission (which feeds every symbol-table consumer, so it can't be
-/// gated at one query seam — it must materialize into the analysis).
+/// A gate is applied in exactly two places, both through
+/// `FileAnalysis::gate_verdicts` (the `class_isa_prefix` MRO seam): an open
+/// document's enrichment, and the index's view seam
+/// (`ModuleIndex::gated_view`), which hands every reader of a closed file
+/// the copy with its firing emissions applied. The applied content sits
+/// above the symbol/ref baselines, so a file whose ancestry resolves late
+/// converges to one built with it known. The producer feeds index every
+/// emission ungated, as candidates (`FileAnalysis::gated_candidates`).
 /// See `docs/adr/receiver-gated-dispatch.md` (Phase 2) and
 /// `docs/prompt-enrichment-inheritance-residual.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,6 +664,16 @@ pub struct GatedRef {
     pub access: AccessKind,
     #[serde(default)]
     pub binding: Option<RefBinding>,
+}
+
+/// What a set of [`GatedEmission`]s adds to a file, minted file-native
+/// (`FileAnalysis::gated_candidates`). Not stored: a view applies it, a
+/// producer feed indexes it.
+#[derive(Debug, Default)]
+pub struct GatedMint {
+    pub symbols: Vec<Symbol>,
+    pub refs: Vec<Ref>,
+    pub witnesses: Vec<crate::model::witnesses::Witness>,
 }
 
 /// A confirmed dispatch — a gated candidate whose receiver isa-resolved at
@@ -860,10 +869,18 @@ pub struct KeyTypoSite {
 
 
 impl FileAnalysis {
-    /// Every class this file's entities are reachable from
-    /// (see [`bridge_classes`]).
-    pub fn bridge_classes(&self) -> impl Iterator<Item = &str> {
-        bridge_classes(self.symbols.as_slice(), &self.plugin.namespaces)
+    /// Every class this file's entities are reachable from, deduped
+    /// (see [`bridge_classes`]), the owners its gated emissions' handlers
+    /// would have included as candidates.
+    pub fn bridge_classes(&self) -> Vec<String> {
+        let gated = self.gated_candidates();
+        let mut out: Vec<String> = bridge_classes(self.symbols.as_slice(), &self.plugin.namespaces)
+            .chain(bridge_classes(&gated.symbols, &[]))
+            .map(str::to_string)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// The entities this file makes visible from `class`, each once

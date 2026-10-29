@@ -81,6 +81,15 @@ pub struct ValueSurface {
     pub kind: u8,
 }
 
+/// One [`GatedEmission`](crate::model::file_analysis::GatedEmission), span-free:
+/// its gate and the members it adds (`on_class` when not the package).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatedSurface {
+    pub package: String,
+    pub gates: Vec<String>,
+    pub members: Vec<(Option<String>, MethodSurface)>,
+}
+
 /// One `#define`'s cross-file-visible contract. Under textual inclusion
 /// the BODY is semantics for every consumer (an expansion change with an
 /// unchanged name would silently under-invalidate without it), and the
@@ -138,6 +147,10 @@ pub struct Surface {
     pub reexports: Vec<String>,
     /// Classes plugin namespaces in THIS file bridge content onto.
     pub plugin_bridges: Vec<String>,
+    /// Plugin emissions deferred on a cross-file `ClassIsa` gate, as
+    /// declared. Whether a gate fires is the reader's question; what the
+    /// emission WOULD add is this file's to state.
+    pub gated: Vec<GatedSurface>,
     /// Manifest-declared app-surface consumer classes.
     pub app_surface_consumers: Vec<String>,
     /// DBIC `source_name` override — the registered source moniker when it
@@ -348,12 +361,36 @@ impl Surface {
             v.dedup();
             v
         };
-        let mut plugin_bridges: Vec<String> =
-            crate::model::file_analysis::bridge_classes(feed.symbols, feed.plugin_namespaces)
-                .map(str::to_string)
-                .collect();
-        plugin_bridges.sort_unstable();
-        plugin_bridges.dedup();
+        let plugin_bridges = fa.bridge_classes();
+        let mut gated: Vec<GatedSurface> = feed
+            .gated_emissions
+            .iter()
+            .map(|em| {
+                let mut gates = em.gate_prefixes.clone();
+                gates.sort_unstable();
+                let mut members: Vec<(Option<String>, MethodSurface)> = em
+                    .symbols
+                    .iter()
+                    .map(|gs| {
+                        (
+                            gs.on_class.clone(),
+                            MethodSurface {
+                                name: gs.name.clone(),
+                                kind: crate::model::file_analysis::sym_kind_code(&gs.kind),
+                                arity: None,
+                                ret: gs.return_type.as_ref().map(despan),
+                                hash_keys: Vec::new(),
+                            },
+                        )
+                    })
+                    .collect();
+                members.sort_by(|a, b| (&a.0, &a.1.name, a.1.kind).cmp(&(&b.0, &b.1.name, b.1.kind)));
+                members.dedup();
+                GatedSurface { package: em.package.clone(), gates, members }
+            })
+            .collect();
+        gated.sort_by(|a, b| (&a.package, &a.gates).cmp(&(&b.package, &b.gates)));
+        gated.dedup();
         let mut macros: Vec<MacroSurface> = feed
             .macro_defs
             .iter()
@@ -389,6 +426,7 @@ impl Surface {
             export_tags,
             reexports: sorted(feed.reexport_modules),
             plugin_bridges,
+            gated,
             app_surface_consumers: sorted(feed.app_surface_consumers),
             dbic_source_name: feed.dbic_source_name.clone(),
         }

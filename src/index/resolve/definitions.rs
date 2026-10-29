@@ -959,9 +959,8 @@ impl<'a> CandidateSet<'a> {
                             .or_else(|| idx.get_cached(module));
                         if let Some(cached) = chosen {
                             // A cross-file DBIC accessor is a deferred emission
-                            // MATERIALIZED into the whole cached copy at index
-                            // completion (`materialize_gated_emissions`), so the
-                            // whole view carries it — no per-query enrichment.
+                            // (`GatedEmission`) the view applies, so the whole
+                            // view carries it — no per-query enrichment.
                             let whole = idx.whole_present(&cached);
                             // A stored member of the class: a data field or
                             // an enum constant, not a sub.

@@ -657,13 +657,11 @@ impl FileAnalysis {
                     return Some(MethodResolution::CrossFile { class: cand_cls, def_module: None, widened });
                 }
                 // A cross-file DBIC result class's column/relationship accessors
-                // are DEFERRED plugin emissions (`gated_emissions`) that the raw
-                // cached copy doesn't carry. They are MATERIALIZED into the whole
-                // cached copy at index completion
-                // (`ModuleIndex::materialize_gated_emissions`), so the
+                // are deferred plugin emissions (`GatedEmission`); the index's
+                // views hand out the copy with them applied, so the
                 // `has_member` check above already sees them — no per-query
                 // enrichment hop here (that nested a full enrichment per hop and
-                // overflowed the stack on deep dep graphs). See `GatedEmission`.
+                // overflowed the stack on deep dep graphs).
             }
             // Cross-package typeglob install: the method is attributed to `cls`
             // but lives in a differently-named module file (`*{'DateTime::'.

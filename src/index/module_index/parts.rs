@@ -410,7 +410,7 @@ impl ModuleEdgeIndexes {
         FedNames {
             names: Self::indexable_names(analysis),
             providers: analysis.provided_packages(),
-            bridges: Self::bridge_classes(analysis),
+            bridges: analysis.bridge_classes(),
         }
     }
 
@@ -420,7 +420,8 @@ impl ModuleEdgeIndexes {
     /// across files.
     fn indexable_names(analysis: &FileAnalysis) -> Vec<String> {
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for sym in analysis.symbols() {
+        let gated = analysis.gated_candidates();
+        for sym in analysis.symbols().iter().chain(&gated.symbols) {
             if matches!(
                 sym.kind,
                 SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class
@@ -432,12 +433,6 @@ impl ModuleEdgeIndexes {
         names.extend(analysis.export.iter().cloned());
         names.extend(analysis.export_ok.iter().cloned());
         names.into_iter().collect()
-    }
-
-    /// The classes an analysis bridges entities onto, deduped.
-    fn bridge_classes(analysis: &FileAnalysis) -> Vec<String> {
-        let seen: std::collections::HashSet<&str> = analysis.bridge_classes().collect();
-        seen.into_iter().map(str::to_string).collect()
     }
 
     /// Every primary a specialization in the analysis names — the values of

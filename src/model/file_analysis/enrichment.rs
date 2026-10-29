@@ -107,48 +107,85 @@ impl FileAnalysis {
         }
     }
 
-    /// Materialize deferred plugin pattern emissions ([`GatedEmission`])
-    /// whose `ClassIsa` gate is now satisfied CROSS-FILE. Called from
-    /// `enrich_imported_types_with_keys` after the symbol/ref/witness
-    /// truncation, so the re-fired content sits above the baselines and is
-    /// re-derived every enrichment cycle (idempotent). Deterministic: gate
-    /// resolution goes through `class_isa_prefix` (the single MRO seam), and
-    /// symbols are minted with positional `SymbolId`s exactly as the builder
-    /// would have — a file enriched late converges to one built with the
-    /// ancestry known. Rule #10: the "should this synthesis apply?" question
-    /// is answered by asking the ancestry graph, never by a shape branch.
-    fn apply_gated_emissions(&mut self, module_index: Option<&dyn CrossFileLookup>) {
-        if self.plugin.gated_emissions.is_empty() {
-            return;
+    /// Which of this file's [`GatedEmission`]s fire under `module_index`'s
+    /// ancestry, one verdict per emission. A gate is a `ClassIsa` question
+    /// asked of the one MRO seam (`class_isa_prefix`), so a file read late
+    /// converges to one built with its ancestry known. Emissions sharing a
+    /// gate (one DBIC class's `add_columns` + relationships) are asked once.
+    pub fn gate_verdicts(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<bool> {
+        let mut asked: Vec<((&str, &[String]), bool)> = Vec::new();
+        self.plugin
+            .gated_emissions
+            .iter()
+            .map(|em| {
+                let gate = (em.package.as_str(), em.gate_prefixes.as_slice());
+                if let Some((_, fires)) = asked.iter().find(|(g, _)| *g == gate) {
+                    return *fires;
+                }
+                let fires = em.gate_prefixes.iter().any(|prefix| {
+                    class_isa_prefix(&em.package, prefix, &self.packages, module_index)
+                });
+                asked.push((gate, fires));
+                fires
+            })
+            .collect()
+    }
+
+    /// Every gated emission's content as if each gate fired. The producer
+    /// feeds (ref/sym rows, the reverse index, bridges) index these as
+    /// CANDIDATES; whether a gate holds is asked where a copy is handed to a
+    /// reader, so a candidate the gate refuses costs a wasted decode, never
+    /// a wrong answer.
+    pub fn gated_candidates(&self) -> GatedMint {
+        self.mint_gated(|_| true)
+    }
+
+    /// A copy with the emissions `verdicts` fires applied: the view of a
+    /// gated file. The applied content sits above the enrichment baselines,
+    /// so a later enrichment of the copy truncates and re-applies it.
+    pub fn with_gated_emissions(&self, verdicts: &[bool]) -> FileAnalysis {
+        let mut copy = self.clone();
+        copy.apply_gated_emissions(verdicts);
+        copy.rebuild_enrichment_indices();
+        copy
+    }
+
+    fn apply_gated_emissions(&mut self, verdicts: &[bool]) {
+        let mint = self.mint_gated(|i| verdicts.get(i).copied().unwrap_or(false));
+        for sym in mint.symbols {
+            self.symbols.push(sym);
         }
+        for r in mint.refs {
+            self.refs.push(r);
+        }
+        for w in mint.witnesses {
+            self.witnesses.push(w);
+        }
+    }
+
+    /// The symbols, refs and witnesses the emissions `fires` selects add to
+    /// this file, minted as the builder would have: positional `SymbolId`s
+    /// after the current symbols, and never a second copy of a symbol
+    /// already present (the builder's `apply_emit_action` dedup).
+    fn mint_gated(&self, fires: impl Fn(usize) -> bool) -> GatedMint {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        // Snapshot: the borrow of `self.plugin.gated_emissions` can't overlap the
-        // `&mut self` symbol/ref/witness pushes below.
-        let emissions = std::mem::take(&mut self.plugin.gated_emissions);
-        for em in &emissions {
-            let fires = em.gate_prefixes.iter().any(|prefix| {
-                class_isa_prefix(&em.package, prefix, &self.packages, module_index)
-            });
-            if !fires {
+        let mut mint = GatedMint::default();
+        for (i, em) in self.plugin.gated_emissions.iter().enumerate() {
+            if !fires(i) {
                 continue;
             }
             let scope = self.scope_at(em.scope_point).unwrap_or(ScopeId(0));
             let ns = Namespace::framework(em.plugin_id.clone());
             for gs in &em.symbols {
                 let pkg = gs.on_class.clone().or_else(|| Some(em.package.clone()));
-                // Same dedup the builder's `apply_emit_action` runs: never
-                // stack a second identical synthesized symbol.
-                let dup = self.symbols.iter().any(|s| {
-                    s.name == gs.name
-                        && s.kind == gs.kind
-                        && s.package == pkg
-                        && s.namespace == ns
-                });
-                if dup {
+                let same = |s: &Symbol| {
+                    s.name == gs.name && s.kind == gs.kind && s.package == pkg && s.namespace == ns
+                };
+                if self.symbols.iter().any(same) || mint.symbols.iter().any(same) {
                     continue;
                 }
-                let id = SymbolId(self.symbols.len() as u32);
-                self.symbols.push(Symbol {
+                let id = SymbolId((self.symbols.len() + mint.symbols.len()) as u32);
+                mint.symbols.push(Symbol {
                     id,
                     name: gs.name.clone(),
                     kind: gs.kind,
@@ -167,11 +204,11 @@ impl FileAnalysis {
                 });
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
-                    // the builder's Method emit. Class-scoped methods also get
-                    // the `PackageSymbol{package,name} → Edge(Symbol(sid))`
-                    // mirror the fold writeback would have pushed, so cross-
-                    // file return-type queries resolve the relationship shape.
-                    self.witnesses.push(Witness {
+                    // the builder's Method emit, plus the
+                    // `PackageSymbol{package,name}` mirror the fold writeback
+                    // would have pushed so cross-file return-type queries
+                    // resolve the relationship shape.
+                    mint.witnesses.push(Witness {
                         attachment: WitnessAttachment::Symbol(id),
                         source: WitnessSource::Plugin(em.plugin_id.clone()),
                         payload: WitnessPayload::InferredType(rt.clone()),
@@ -179,7 +216,7 @@ impl FileAnalysis {
                     });
                     if matches!(gs.kind, SymKind::Method | SymKind::Sub) {
                         if let Some(class) = &pkg {
-                            self.witnesses.push(Witness {
+                            mint.witnesses.push(Witness {
                                 attachment: WitnessAttachment::PackageSymbol {
                                     package: class.clone(),
                                     name: gs.name.clone(),
@@ -193,7 +230,7 @@ impl FileAnalysis {
                 }
             }
             for gr in &em.refs {
-                self.refs.push(Ref {
+                mint.refs.push(Ref {
                     kind: gr.kind.clone(),
                     span: gr.span,
                     scope,
@@ -205,25 +242,7 @@ impl FileAnalysis {
                 });
             }
         }
-        self.plugin.gated_emissions = emissions;
-    }
-
-    /// Materialize deferred gated emissions into a WORKSPACE-resident cached
-    /// copy, standalone (not inside the full enrichment pass). Used by the
-    /// index-completion pass so `whole_present` — the view every cross-file
-    /// goto-def / references reader consults — sees a DBIC result class's
-    /// synthesized accessors WITHOUT paying the per-query enriched overlay.
-    /// Idempotent: `apply_gated_emissions` dedups against existing symbols, so
-    /// a second call is a no-op; the emissions sit above the symbol table's
-    /// enrichment baseline and a later full enrichment re-derives them the
-    /// same way. Rebuilds the name/scope indices so `symbols_named` /
-    /// `sub_info_view` find them.
-    pub fn materialize_gated_emissions(&mut self, module_index: &dyn CrossFileLookup) {
-        if self.plugin.gated_emissions.is_empty() {
-            return;
-        }
-        self.apply_gated_emissions(Some(module_index));
-        self.rebuild_enrichment_indices();
+        mint
     }
 
 }
@@ -444,7 +463,8 @@ impl FileAnalysis {
         // reaching `DBIx::Class` through a cross-file intermediate base).
         // Runs first so the synthesized symbols exist for the rest of the
         // pass and the final `rebuild_enrichment_indices`. See `GatedEmission`.
-        self.apply_gated_emissions(module_index);
+        let verdicts = self.gate_verdicts(module_index);
+        self.apply_gated_emissions(&verdicts);
 
         // Loader-config param typing: join my `loader_config_params`
         // markers with caller-side `PluginLoad` facts across the index.
