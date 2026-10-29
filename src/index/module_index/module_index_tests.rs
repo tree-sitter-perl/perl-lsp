@@ -2560,6 +2560,35 @@ fn a_join_recomputes_only_when_what_it_read_moves() {
     assert!(joins(take_computed()) > 0, "a new caller moves the mentions the join read");
 }
 
+/// A join asked through a scoped view (an editor asker's @INC) is stored
+/// on the index: each caller resolves in its own scope, so the answer is
+/// the same whoever asks and a second ask computes nothing.
+#[test]
+fn a_join_asked_through_a_scoped_view_is_stored_once() {
+    use crate::model::file_analysis::{ScopedLookup, VisibilityAxis};
+    use crate::model::witnesses::engine::{take_computed, EngineKey};
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &app]);
+    let empty = Default::default();
+    let scoped = ScopedLookup::new(&idx, &empty, None, VisibilityAxis::SearchPath(Arc::new(Vec::new())));
+    let ask = || {
+        greeter
+            .analysis()
+            .inferred_type_via_bag_ctx("$u", tree_sitter::Point { row: 1, column: 40 }, Some(&scoped))
+            .and_then(|t| t.class_name().map(str::to_string))
+    };
+    let joins = |keys: Vec<EngineKey>| keys.into_iter().filter(|k| matches!(k, EngineKey::Join(_))).count();
+    let _ = take_computed();
+    assert_eq!(ask().as_deref(), Some("User"));
+    assert!(joins(take_computed()) > 0, "the first ask computes the join");
+    assert_eq!(ask().as_deref(), Some("User"));
+    assert_eq!(joins(take_computed()), 0, "the second ask is served from the index's store");
+}
+
 /// Callers passing a class and its subclass agree on the class.
 #[test]
 fn param_type_joins_a_class_and_its_subclass() {

@@ -1646,7 +1646,7 @@ impl ReducerRegistry {
             super::note_bake_exit("param_in", true);
             return None;
         };
-        let join = JoinKey { package: package.to_string(), name: name.to_string(), method, want };
+        let join = JoinKey { package: package.to_string(), name: name.to_string(), method, want, rule: idx.visibility_rule() };
         if super::engine::deeper_position_of_open_join(&join) {
             crate::util::ghost_stats::count("param_in.forward_cut");
             return Some(ReducedValue::None);
@@ -1751,9 +1751,10 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         arity: Option<u32>,
     ) -> Option<ReducedValue> {
-        idx.answer_store()?;
+        idx.unscoped().unwrap_or(idx).answer_store()?;
         let key = EngineKey::Consult(super::engine::ConsultKey {
             file: cached.path.clone(),
+            rule: idx.visibility_rule(),
             attachment: q.attachment.clone(),
             framework: q.framework,
             arity,
@@ -3980,8 +3981,12 @@ pub(super) fn compute_engine_key(
     let reg = super::conclusions::shared_registry();
     match key {
         EngineKey::Join(join) => reg.param_in_join(idx, join),
-        EngineKey::Contribution { join, file } => reg.param_contribution(idx, join, file),
-        EngineKey::Consult(c) => EngineValue::Value(reg.consult(idx, c)),
+        EngineKey::Contribution { join, file } => {
+            super::engine::in_origin_scope(idx, file, join.rule, |scope| reg.param_contribution(scope, join, file))
+        }
+        EngineKey::Consult(c) => {
+            super::engine::in_origin_scope(idx, &c.file, c.rule, |scope| EngineValue::Value(reg.consult(scope, c)))
+        }
         EngineKey::DomainVote { owner, field, rule } => {
             // A site's receiver is typed as the owner, so its file names the
             // owner too: reading only files that mention both keeps a common
@@ -4007,15 +4012,9 @@ pub(super) fn compute_engine_key(
                 return EngineValue::Tally(Vec::new());
             };
             let fa = idx.whole_present(&cached);
-            let tally = match rule {
-                Some(rule) => {
-                    let axis = crate::model::file_analysis::VisibilityAxis::for_origin(&fa, Some(file), idx, *rule);
-                    let scope = crate::model::file_analysis::ScopedLookup::new(idx, &fa.pack.include_closure, Some(file), axis);
-                    fa.domain_tally(owner, field, Some(&scope))
-                }
-                None => fa.domain_tally(owner, field, Some(idx)),
-            };
-            EngineValue::Tally(tally)
+            EngineValue::Tally(super::engine::in_origin_scope(idx, file, *rule, |scope| {
+                fa.domain_tally(owner, field, Some(scope))
+            }))
         }
         EngineKey::Providers(att) => {
             let Some((owner, site)) = att.provider_owner() else {

@@ -741,7 +741,7 @@ impl FileAnalysis {
         let tally = module_index
             .map(|idx| {
                 let key = EngineKey::DomainVote { owner: owner.to_string(), field: field.to_string(), rule: idx.visibility_rule() };
-                answer(idx.unscoped().unwrap_or(idx), &key)
+                answer(idx, &key)
             })
             .and_then(|v| match v {
                 EngineValue::Tally(t) if !t.is_empty() => Some(t),

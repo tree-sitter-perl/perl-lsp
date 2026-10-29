@@ -98,6 +98,8 @@ pub struct JoinKey {
     pub name: String,
     pub method: bool,
     pub want: JoinWant,
+    /// How each caller file is scoped while its own call sites resolve.
+    pub rule: Option<crate::model::file_analysis::PackVisibility>,
 }
 
 /// What the engine answers. Closed: each key names its computation.
@@ -121,6 +123,39 @@ pub enum EngineKey {
     DomainSites { owner: String, field: String, rule: Option<crate::model::file_analysis::PackVisibility>, file: PathBuf },
 }
 
+impl EngineKey {
+    /// Whether the answer is the same whoever asks: every file it reads
+    /// resolves in its own scope under the key's rule, so it is computed
+    /// and stored on the root index. `Providers` ranks candidates by the
+    /// asker's own visibility, so a scoped asker computes it in its scope.
+    fn asker_independent(&self) -> bool {
+        match self {
+            EngineKey::Join(_)
+            | EngineKey::Contribution { .. }
+            | EngineKey::Consult(_)
+            | EngineKey::DomainVote { .. }
+            | EngineKey::DomainSites { .. } => true,
+            EngineKey::Providers(_) => false,
+        }
+    }
+}
+
+/// `f` asked in `file`'s own scope under `rule`: the visibility that
+/// file's own sites resolve in, whoever asked.
+pub(crate) fn in_origin_scope<R>(
+    idx: &dyn CrossFileLookup,
+    file: &std::path::Path,
+    rule: Option<crate::model::file_analysis::PackVisibility>,
+    f: impl FnOnce(&dyn CrossFileLookup) -> R,
+) -> R {
+    let Some(rule) = rule else { return f(idx) };
+    let Some(cached) = idx.cached_by_path(file).read() else { return f(idx) };
+    let fa = idx.facts_present(&cached);
+    let axis = crate::model::file_analysis::VisibilityAxis::for_origin(&fa, Some(file), idx, rule);
+    let scope = crate::model::file_analysis::ScopedLookup::new(idx, &fa.pack.include_closure, Some(file), axis);
+    f(&scope)
+}
+
 /// Site counts per enum (`None`: a site whose value is no enumerator),
 /// sorted by enum so equal tallies hash alike.
 pub type DomainTally = Vec<(Option<String>, u32)>;
@@ -142,6 +177,8 @@ pub fn add_tallies(a: &DomainTally, b: &DomainTally) -> DomainTally {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ConsultKey {
     pub file: PathBuf,
+    /// How `file` is scoped while it answers.
+    pub rule: Option<crate::model::file_analysis::PackVisibility>,
     pub attachment: WitnessAttachment,
     pub framework: FrameworkFact,
     pub arity: Option<u32>,
@@ -1193,6 +1230,7 @@ pub fn answer(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
     // An answer's computation asks other answers, through chases that are
     // themselves recursive: the engine's own recursion needs the headroom
     // the chases have (a Foswiki edit overflowed a 2 MiB worker without it).
+    let idx = if key.asker_independent() { idx.unscoped().unwrap_or(idx) } else { idx };
     super::registry::with_stack_headroom(|| answer_on_stack(idx, key, Check::Verify))
 }
 
@@ -1532,6 +1570,7 @@ mod capture_tests {
             name: name.into(),
             method: false,
             want: JoinWant::At(0),
+            rule: None,
         })
     }
 
