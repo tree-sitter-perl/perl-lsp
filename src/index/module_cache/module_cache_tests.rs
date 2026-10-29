@@ -723,9 +723,9 @@ fn row_probes_plan_as_index_point_lookups() {
             .collect()
     };
     let probes: [(&str, &str, Vec<Box<dyn rusqlite::ToSql>>); 3] = [
-        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render"), Box::new("My::Base")]),
-        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render")]),
-        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("cache"), Box::new(Option::<String>::None)]),
+        ("sym_member", super::sql::SYM_MEMBER_PROBE.registered(), vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render"), Box::new("My::Base")]),
+        ("sym_name", super::sql::SYM_NAME_PROBE.registered(), vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render")]),
+        ("name", super::sql::NAME_PROBE.registered(), vec![Box::new(path_str.clone()), Box::new("cache"), Box::new(Option::<String>::None)]),
     ];
     for (label, sql, args) in &probes {
         let args: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
@@ -763,17 +763,8 @@ fn row_probes_plan_as_index_point_lookups() {
                 "{label}: the refs half must probe both key columns — {l} — plan: {lines:?}"
             );
         }
-        // No ephemeral btree per execution: each create/destroy takes SQLite's
-        // process-global page-cache mutex, which 20 sweep workers contend on
-        // (an `IN` list builds one, even over bound literals).
-        let mut stmt = conn.prepare(&format!("EXPLAIN {sql}")).unwrap();
-        let ephemeral: Vec<String> = stmt
-            .query_map(args.as_slice(), |row| row.get::<_, String>(1))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .filter(|op| op == "OpenEphemeral" || op == "OpenAutoindex")
-            .collect();
-        assert!(ephemeral.is_empty(), "{label}: builds a temp btree per call — {ephemeral:?}");
+        // No scratch b-tree per execution is asserted for every registered
+        // statement by `registered_statements_plan_without_scratch`.
         // One statement per probe: string ids resolve inside it, through the
         // UNIQUE index on `s`, never as separate reads.
         assert!(
@@ -782,13 +773,80 @@ fn row_probes_plan_as_index_point_lookups() {
         );
     }
     // The id resolution the probes are fed from rides the UNIQUE index on `s`.
-    let lines = plan("SELECT str_id FROM strings WHERE s = ?1", &[&"render"]);
+    let lines = plan(super::sql::STRINGS_LOOKUP.registered(), &[&"render"]);
     assert!(
         lines.iter().any(|l| l.contains("INDEX") && l.contains("(s=?)")),
         "the strings lookup is off the UNIQUE index — plan: {lines:?}"
     );
 
     let _ = std::fs::remove_file(&pm);
+}
+
+/// Opcodes that build a per-execution scratch structure. `OpenEphemeral`
+/// (an `IN` list, `UNION`, most `DISTINCT`s) and `OpenAutoindex` create and
+/// destroy a temp b-tree, taking SQLite's process-global page-cache mutex each
+/// time; `SorterOpen` (an `ORDER BY` no index serves) is the same per-call
+/// allocation and spills to a temp b-tree past its memory budget.
+const SCRATCH_OPCODES: &[&str] = &["OpenEphemeral", "OpenAutoindex", "SorterOpen"];
+
+/// Every statement the module cache runs is registered in `sql.rs`, and every
+/// one on a per-request, per-file or per-key path must compile without a
+/// scratch structure: sweep workers run them in parallel and serialize on the
+/// mutex a scratch b-tree takes. Exempt entries carry their reason in the
+/// registry; a `Scratch` exemption must still build one, so a statement that
+/// no longer needs its exemption cannot keep it.
+#[test]
+fn registered_statements_plan_without_scratch() {
+    use super::sql::{Plan, REGISTRY};
+    let conn = test_db();
+    let opcodes = |sql: &str| -> Result<Vec<String>, String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN {sql}")).map_err(|e| e.to_string())?;
+        // Plans do not depend on bound values; bind NULL to every slot.
+        let nulls = std::iter::repeat(rusqlite::types::Null).take(stmt.parameter_count());
+        let ops = stmt
+            .query_map(rusqlite::params_from_iter(nulls), |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ops.into_iter().filter(|op| SCRATCH_OPCODES.contains(&op.as_str())).collect())
+    };
+
+    let mut failures = Vec::new();
+    let mut seen_sql = std::collections::HashMap::new();
+    for entry in REGISTRY {
+        let sql = entry.sql.registered();
+        if let Some(other) = seen_sql.insert(sql, entry.name) {
+            failures.push(format!("{} and {other} register the same SQL — keep one", entry.name));
+        }
+        match entry.plan {
+            Plan::NoScratch => match opcodes(sql) {
+                Ok(ops) if ops.is_empty() => {}
+                Ok(ops) => failures.push(format!(
+                    "{} builds a scratch structure per execution ({ops:?}) — reshape it, \
+                     or exempt it with the reason it never runs per request, file or key",
+                    entry.name
+                )),
+                Err(e) => failures.push(format!("{} does not compile: {e}", entry.name)),
+            },
+            Plan::Scratch("") => {
+                failures.push(format!("{} is exempted without a reason", entry.name))
+            }
+            Plan::Scratch(reason) => match opcodes(sql) {
+                Ok(ops) if !ops.is_empty() => {}
+                Ok(_) => failures.push(format!(
+                    "{} is exempted ({reason}) but plans without a scratch structure — \
+                     make it NoScratch",
+                    entry.name
+                )),
+                Err(e) => failures.push(format!("{} does not compile: {e}", entry.name)),
+            },
+            Plan::Unplanned(reason) if reason.is_empty() => {
+                failures.push(format!("{} is exempt from the plan check without a reason", entry.name))
+            }
+            Plan::Unplanned(_) => {}
+        }
+    }
+    assert!(failures.is_empty(), "registered SQL:\n{}", failures.join("\n"));
 }
 
 /// `FLAG_EXPORTED` is minted from the real `@EXPORT`/`@EXPORT_OK` surface

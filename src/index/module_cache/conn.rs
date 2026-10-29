@@ -71,10 +71,23 @@ pub(super) const WRITER_BUSY_TIMEOUT: std::time::Duration = std::time::Duration:
 /// One speller, because the recreate path below opens a second connection and
 /// a pragma set on only one of them is the kind of drift nobody notices.
 fn apply_pragmas(conn: &Connection, busy: std::time::Duration) {
-    let sync = std::env::var("PERL_LSP_SQLITE_SYNC").unwrap_or_else(|_| "NORMAL".to_string());
-    let _ = conn.execute_batch(&format!(
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous={sync};"
-    ));
+    // `PERL_LSP_SQLITE_SYNC` picks among the registered levels; an
+    // unrecognized value keeps the default rather than reaching SQL.
+    let sync = match std::env::var("PERL_LSP_SQLITE_SYNC")
+        .map(|v| v.to_ascii_uppercase())
+        .as_deref()
+    {
+        Ok("OFF" | "0") => sql::PRAGMA_SYNC_OFF,
+        Ok("FULL" | "2") => sql::PRAGMA_SYNC_FULL,
+        Ok("EXTRA" | "3") => sql::PRAGMA_SYNC_EXTRA,
+        Ok("NORMAL" | "1") | Err(_) => sql::PRAGMA_SYNC_NORMAL,
+        Ok(other) => {
+            log::warn!("PERL_LSP_SQLITE_SYNC={other} is not a synchronous level; using NORMAL");
+            sql::PRAGMA_SYNC_NORMAL
+        }
+    };
+    let _ = conn.execute_batch(sql::PRAGMA_JOURNAL_WAL.registered());
+    let _ = conn.execute_batch(sync.registered());
     // Two writers share the Perl DB (resolver thread + workspace indexer); a
     // busy writer must wait, not fail its txn — a failed commit after resident
     // copies were stripped is unrecoverable for the session.
