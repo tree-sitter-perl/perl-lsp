@@ -1237,3 +1237,30 @@ fn missing_declaration_reads_eval_replacement_as_code() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].1.contains("'$typo'"), "{found:?}");
 }
+
+#[test]
+fn d3_d4_judge_each_guard_literal_not_the_condition() {
+    // A verdict on one conjunct is not a verdict on the condition: it lands
+    // on the literal, with that literal's own polarity, and the message
+    // states the subject's fact apart from the guard's outcome.
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+package Main;
+sub g {
+    my $x = Foo->new;
+    if (!(defined($x) && $_[0])) { return 1; }
+    if (!defined $x) { return 2; }
+    return;
+}
+1;
+"#;
+    let diags = guard_diags(src);
+    assert_eq!(
+        diags,
+        vec![
+            ("redundant-guard".into(), "'$x' is always defined here; this guard is redundant".into()),
+            ("contradictory-guard".into(), "'$x' is always defined here; this guard can never pass".into()),
+        ],
+    );
+}

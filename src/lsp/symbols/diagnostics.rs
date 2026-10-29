@@ -792,18 +792,15 @@ pub fn collect_diagnostics(
 fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> String {
     use crate::model::file_analysis::GuardPredicate;
     let subject = &g.subject;
-    match (&g.verdict, &g.predicate) {
-        (GuardVerdict::AlwaysTrue, GuardPredicate::Defined) => {
-            format!("'{subject}' is always defined here; this guard is redundant")
-        }
-        (GuardVerdict::AlwaysFalse, GuardPredicate::Defined) => {
-            format!("'{subject}' is undef here; this guard can never pass")
-        }
-        (GuardVerdict::AlwaysTrue, GuardPredicate::IsType(t)) => {
-            format!("'{subject}' is already {}; this guard is redundant", format_inferred_type(t))
-        }
-        (GuardVerdict::AlwaysFalse, GuardPredicate::IsType(t)) => {
-            format!("'{subject}' is not {} here; this guard can never pass", format_inferred_type(t))
-        }
-    }
+    let fact = match (g.satisfied, &g.predicate) {
+        (true, GuardPredicate::Defined) => format!("'{subject}' is always defined here"),
+        (false, GuardPredicate::Defined) => format!("'{subject}' is undef here"),
+        (true, GuardPredicate::IsType(t)) => format!("'{subject}' is already {}", format_inferred_type(t)),
+        (false, GuardPredicate::IsType(t)) => format!("'{subject}' is not {} here", format_inferred_type(t)),
+    };
+    let consequence = match g.verdict {
+        GuardVerdict::AlwaysTrue => "this guard is redundant",
+        GuardVerdict::AlwaysFalse => "this guard can never pass",
+    };
+    format!("{fact}; {consequence}")
 }

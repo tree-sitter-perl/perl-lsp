@@ -1119,6 +1119,12 @@ impl Symbol {
     pub fn hidden_in_outline(&self) -> bool {
         self.presentation.hide_in_outline
     }
+
+    /// A global this file only mentions (`DeclKind::Mention`): its uses
+    /// bind to it, but it declares nothing here.
+    pub fn is_mention(&self) -> bool {
+        matches!(self.detail, SymbolDetail::Variable { decl_kind: DeclKind::Mention, .. })
+    }
 }
 
 /// Which family a member belongs to: a stored value or a callable. An ask
@@ -1296,6 +1302,11 @@ pub enum DeclKind {
     /// creates on first mention (`$x = 1` in `main` is `$main::x`). The
     /// builder mints the symbol at the first use in the file.
     Implicit,
+    /// A global the file only names through a qualified spelling
+    /// (`%Foswiki::cfg`) or that Perl forces into `main` (`%ENV`, `$_`):
+    /// the identity its uses bind to, but neither a declaration nor this
+    /// file's own global, so it is no definition and no outline entry.
+    Mention,
 }
 
 impl DeclKind {
@@ -1316,7 +1327,7 @@ impl DeclKind {
             DeclKind::Field => "field",
             DeclKind::Param => "param",
             DeclKind::ForVar => "for",
-            DeclKind::Implicit => "global",
+            DeclKind::Implicit | DeclKind::Mention => "global",
         }
     }
 }
