@@ -126,7 +126,7 @@ pub trait WitnessReducer: Send + Sync {
 /// 3. `BlessTarget(Rep)` pins the rep axis.
 /// 4. Rep observations with no class evidence project to flat
 ///    `HashRef` / `ArrayRef` / `CodeRef`.
-/// 5. `NumericUse` / `StringUse` / `RegexpUse` project to their types.
+/// 5. The latest `NumericUse` / `StringUse` / `RegexpUse` projects to its type.
 pub struct FrameworkAwareTypeFold;
 
 /// The class-identity axis of `FrameworkAwareTypeFold`: the standing
@@ -281,9 +281,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut branded: Option<InferredType> = None;
         let mut rep_obs: Option<Rep> = None;
         let mut bless_rep: Option<Rep> = None;
-        let mut num = false;
-        let mut str_ = false;
-        let mut re = false;
+        // The latest scalar-context use by source position: a value used
+        // as a number and then matched as a string reads as what the
+        // nearest use before the point took it for.
+        let mut scalar_use: Option<(tree_sitter::Point, InferredType)> = None;
         let mut plain_type: Option<InferredType> = None;
         let mut plain_type_priority: u8 = 0;
         let mut plain_type_at: Option<Point> = None;
@@ -382,9 +383,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
                         TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
                         TypeObservation::BlessTarget(r) => bless_rep = Some(*r),
-                        TypeObservation::NumericUse => num = true,
-                        TypeObservation::StringUse => str_ = true,
-                        TypeObservation::RegexpUse => re = true,
+                        TypeObservation::NumericUse => latest_use(&mut scalar_use, w.span.start, InferredType::Numeric),
+                        TypeObservation::StringUse => latest_use(&mut scalar_use, w.span.start, InferredType::String),
+                        TypeObservation::RegexpUse => latest_use(&mut scalar_use, w.span.start, InferredType::Regexp),
                     }
                     last_observation_at = last_observation_at.max(Some(w.span.start));
                 }
@@ -439,15 +440,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             });
         }
 
-        // Scalar-context observations.
-        if re {
-            return ReducedValue::Type(InferredType::Regexp);
-        }
-        if num {
-            return ReducedValue::Type(InferredType::Numeric);
-        }
-        if str_ {
-            return ReducedValue::Type(InferredType::String);
+        if let Some((_, t)) = scalar_use {
+            return ReducedValue::Type(t);
         }
 
         // A write that retired something and was never displaced is the
@@ -456,6 +450,12 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             return ReducedValue::Type(InferredType::Unknown);
         }
         ReducedValue::None
+    }
+}
+
+fn latest_use(slot: &mut Option<(tree_sitter::Point, InferredType)>, at: tree_sitter::Point, t: InferredType) {
+    if slot.as_ref().is_none_or(|(have, _)| at >= *have) {
+        *slot = Some((at, t));
     }
 }
 
