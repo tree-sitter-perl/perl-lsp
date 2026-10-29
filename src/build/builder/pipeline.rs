@@ -427,7 +427,7 @@ fn build_once(
         topic_group_spans: Vec::new(),
         plugin_diagnostics: Vec::new(),
         topic_dsls,
-        reassigned_scalars: std::collections::HashSet::new(),
+        reassigning_refs: Vec::new(),
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
         method_call_refs: std::collections::HashMap::new(),
@@ -564,6 +564,8 @@ fn build_once(
 
     // Post-pass 1: resolve variable refs -> Symbol bindings
     bphase!("resolve_variable_refs", b.resolve_variable_refs());
+    let reassigned_vars: std::collections::HashSet<SymbolId> =
+        b.reassigning_refs.iter().filter_map(|&i| b.refs[i].resolved_symbol()).collect();
 
     // Value-flow capture: run the declarative `@flow` query (the assignment
     // SHAPES) and mint FlowEdges with the builder's own scope. Provenance-only
@@ -748,7 +750,7 @@ fn build_once(
         arrow_deref_sites: b.arrow_deref_sites,
         attr_projections: b.attr_projections,
         gated_param_types: b.gated_param_types,
-        reassigned_scalars: b.reassigned_scalars,
+        reassigned_vars,
         key_writes: b.key_writes,
         dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         dbic_source_name: b.dbic_source_name,
