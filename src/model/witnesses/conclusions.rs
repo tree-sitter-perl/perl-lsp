@@ -1224,7 +1224,7 @@ fn walk_reachable(
 ///
 /// Exactly one, deliberately: several would need the fold's agreement rules to
 /// combine them, and re-deriving those here is a second spelling of
-/// `resolve_return_type`. More than one is `OpenNone`'s job.
+/// `join`. More than one is `OpenNone`'s job.
 /// The one `MethodOnClass` edge pointing at a class this file does not
 /// declare, if there is exactly one and nothing else competes with it.
 ///

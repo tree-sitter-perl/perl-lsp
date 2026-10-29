@@ -236,22 +236,20 @@ impl FileAnalysis {
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
-        let class_name = self.resolve_invocant_class(
+        let classes = self.invocant_classes_in_scope(
             invocant,
             self.scope_at(point).unwrap_or(ScopeId(0)),
             point,
         );
 
-        if let Some(ref cn) = class_name {
-            // Pass `module_index` so the ancestor walk reaches CROSS-FILE
-            // parents. Without it, an untyped `$self` (e.g. assigned via
-            // `$class->SUPER::new`, which the bag can't yet type) resolves to
-            // the enclosing class but offers only its OWN methods — inherited
-            // methods from a `use parent`/`-base` ancestor vanish.
-            let candidates = self.complete_methods_for_class(cn, module_index);
-            if !candidates.is_empty() {
-                return candidates;
-            }
+        // Pass `module_index` so the ancestor walk reaches CROSS-FILE
+        // parents. Without it, an untyped `$self` (e.g. assigned via
+        // `$class->SUPER::new`, which the bag can't yet type) resolves to
+        // the enclosing class but offers only its OWN methods — inherited
+        // methods from a `use parent`/`-base` ancestor vanish.
+        let candidates = self.shared_members(&classes, |cn| self.complete_methods_for_class(cn, module_index));
+        if !candidates.is_empty() {
+            return candidates;
         }
 
         // Fallback: native subs/methods in file, deduped by label.
@@ -692,26 +690,25 @@ impl FileAnalysis {
         // For constructor calls on a class, check for :param fields
         if crate::model::conventions::is_constructor_name(call_name) {
             if let Some(inv) = invocant {
-                let class_name = self.resolve_invocant_class(
+                let classes = self.invocant_classes_in_scope(
                     inv,
                     self.scope_at(point).unwrap_or(ScopeId(0)),
                     point,
                 );
-                if let Some(ref cn) = class_name {
-                    let param_candidates = self.class_param_completions(cn, used_keys);
-                    if !param_candidates.is_empty() {
-                        return param_candidates;
-                    }
+                let param_candidates = self.shared_members(&classes, |cn| self.class_param_completions(cn, used_keys));
+                if !param_candidates.is_empty() {
+                    return param_candidates;
                 }
             }
         }
 
         // Find the sub definition (local or cross-file)
-        let resolved = match self.find_sub_for_call(call_name, is_method, invocant, point, module_index) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
+        // The keys every sub the call may dispatch to accepts.
+        let subs = self.find_subs_for_call(call_name, is_method, invocant, point, module_index);
+        super::class_queries::shared_candidates(subs.into_iter().map(|resolved| self.call_key_candidates(call_name, resolved, used_keys)))
+    }
 
+    fn call_key_candidates(&self, call_name: &str, resolved: ResolvedSub<'_>, used_keys: &HashSet<String>) -> Vec<CompletionCandidate> {
         match resolved {
             ResolvedSub::Local(sub_sym) => {
                 let params = match &sub_sym.detail {
@@ -794,17 +791,23 @@ impl FileAnalysis {
         }
     }
 
-    /// Resolve signature info for a call (sub/method name).
-    pub fn signature_for_call(
+    /// Signature info for a call (sub/method name): one per sub the call may
+    /// dispatch to.
+    pub fn signatures_for_call(
         &self,
         name: &str,
         is_method: bool,
         invocant: Option<&str>,
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<SignatureInfo> {
-        let resolved = self.find_sub_for_call(name, is_method, invocant, point, module_index)?;
+    ) -> Vec<SignatureInfo> {
+        self.find_subs_for_call(name, is_method, invocant, point, module_index)
+            .into_iter()
+            .filter_map(|resolved| self.signature_of(name, is_method, resolved))
+            .collect()
+    }
 
+    fn signature_of(&self, name: &str, is_method: bool, resolved: ResolvedSub<'_>) -> Option<SignatureInfo> {
         match resolved {
             ResolvedSub::Local(sub_sym) => {
                 let (params, sym_is_method) = match &sub_sym.detail {
@@ -874,17 +877,18 @@ impl FileAnalysis {
 
     // ---- Internal completion helpers ----
 
-    /// Find a sub/method by name, optionally scoped to a class.
-    /// Returns `ResolvedSub::Local` for same-file symbols, or `ResolvedSub::CrossFile`
+    /// Find a sub/method by name, optionally scoped to the classes its receiver
+    /// may be: one per class that defines it, else the name fallbacks.
+    /// `ResolvedSub::Local` for same-file symbols, `ResolvedSub::CrossFile`
     /// for inherited methods and imported functions found via `ModuleIndex`.
-    fn find_sub_for_call<'s>(
+    fn find_subs_for_call<'s>(
         &'s self,
         name: &str,
         is_method: bool,
         invocant: Option<&str>,
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<ResolvedSub<'s>> {
+    ) -> Vec<ResolvedSub<'s>> {
         let scope = self.scope_at(point).unwrap_or(ScopeId(0));
         // A fully-qualified / SUPER call token (`$o->Foo::Bar::m`, `SUPER::m`)
         // names its dispatch class explicitly — split it so lookups use the
@@ -900,41 +904,37 @@ impl FileAnalysis {
                 .map(|r| r.class().to_string()),
             t => t.literal_package().map(str::to_string),
         };
-        // Resolve class name for scoped lookup
-        let class_name = if fq_class.is_some() {
-            fq_class
-        } else if is_method {
-            invocant.and_then(|inv| self.resolve_invocant_class(inv, scope, point))
-        } else {
-            None
+        // Resolve the classes for scoped lookup
+        let classes: ReceiverClasses = match (fq_class, invocant) {
+            (Some(fq), _) => [fq].into_iter().collect(),
+            (None, Some(inv)) if is_method => self.invocant_classes_in_scope(inv, scope, point),
+            _ => ReceiverClasses::default(),
         };
 
-        // Try inheritance-aware class-scoped lookup first
-        if let Some(ref cn) = class_name {
-            match self.resolve_method_in_ancestors(cn, name, module_index) {
-                Some(MethodResolution::Local { sym_id, .. }) => {
-                    return Some(ResolvedSub::Local(self.symbol(sym_id)));
+        // Inheritance-aware class-scoped lookup first: the sub each class the
+        // receiver may be dispatches to, one per arm that defines it.
+        let per_class: Vec<ResolvedSub<'s>> = classes
+            .iter()
+            .filter_map(|cn| match self.resolve_method_in_ancestors(cn, name, module_index)? {
+                MethodResolution::Local { sym_id, .. } => Some(ResolvedSub::Local(self.symbol(sym_id))),
+                MethodResolution::CrossFile { ref class, .. } => {
+                    // Symbol-disambiguated: the candidate defining `name`.
+                    let idx = module_index?;
+                    let cached = idx.candidate_defining_sub(class, name)?;
+                    let whole = idx.bag_present(&cached);
+                    whole.sub_info_view(name).map(|sub_info| cross_file_resolved(&sub_info))
                 }
-                Some(MethodResolution::CrossFile { ref class, .. }) => {
-                    if let Some(idx) = module_index {
-                        // Symbol-disambiguated: the candidate defining `name`.
-                        if let Some(cached) = idx.candidate_defining_sub(class, name) {
-                            let whole = idx.bag_present(&cached);
-                            if let Some(sub_info) = whole.sub_info_view(name) {
-                                return Some(cross_file_resolved(&sub_info));
-                            }
-                        }
-                    }
-                }
-                None => {}
-            }
+            })
+            .collect();
+        if !per_class.is_empty() {
+            return per_class;
         }
 
         // Fallback: any local sub/method with that name
         for &sid in self.symbols_named(name) {
             let sym = self.symbol(sid);
             if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                return Some(ResolvedSub::Local(sym));
+                return vec![ResolvedSub::Local(sym)];
             }
         }
 
@@ -969,14 +969,14 @@ impl FileAnalysis {
                     {
                         let whole = idx.bag_present(&cached);
                         if let Some(sub_info) = whole.sub_info_view(&remote) {
-                            return Some(cross_file_resolved(&sub_info));
+                            return vec![cross_file_resolved(&sub_info)];
                         }
                     }
                 }
             }
         }
 
-        None
+        Vec::new()
     }
 
     /// Resolve a variable text to a HashKeyOwner for hash key completion.
@@ -1022,10 +1022,13 @@ impl FileAnalysis {
             {
                 let call = &self.refs()[mcb.call.0 as usize];
                 let method_name = &call.target_name;
+                // An owner is ONE producer: a union receiver's call has a
+                // return per arm, so it keeps the name-only fallback.
                 let package = self
-                    .method_call_invocant_class(call, None)
+                    .method_call_invocant_classes(call, None)
+                    .single()
                     .and_then(|cn| {
-                        match self.resolve_method_in_ancestors(&cn, method_name, None) {
+                        match self.resolve_method_in_ancestors(cn, method_name, None) {
                             Some(MethodResolution::Local { sym_id, .. }) => {
                                 self.symbol(sym_id).package.clone()
                             }
@@ -1370,6 +1373,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::Undef => "Undef".to_string(),
         InferredType::Bool => "Bool".to_string(),
         InferredType::Unknown => "Unknown".to_string(),
+        InferredType::Union(arms) => arms.iter().map(inferred_type_to_tag).collect::<Vec<_>>().join("|"),
     }
 }
 
@@ -1452,6 +1456,7 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
         InferredType::Undef => tag("Undef"),
         InferredType::Bool => tag("Bool"),
         InferredType::Unknown => tag("unknown"),
+        InferredType::Union(arms) => arms.iter().map(|a| format_type_with(a, vocab)).collect::<Vec<_>>().join("|"),
     }
 }
 

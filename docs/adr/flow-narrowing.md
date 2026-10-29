@@ -157,7 +157,7 @@ keyed by the subject's **source spelling** on the same `Variable`
 attachment, so the reducer, scope-walk, and narrow-filter are untouched —
 a place witness is just a span-scoped slot witness. The place-vs-variable
 distinction lives in exactly two spots: the truncation rule and the one
-`method_call_invocant_class` query seam (which fires for any invocant
+`method_call_invocant_classes` query seam (which fires for any invocant
 carrying a subscript — `->` / `{` / `[`). Truncation generalizes to
 multi-hop as "an opaque use of any **proper prefix** of the place (root,
 intermediate element, or — for a dynamic-key place — a key scalar)
@@ -282,7 +282,7 @@ where a guard narrows the variable (SSA's π), and a read edges to its
 reaching writes' value attachments instead of to `Variable@point`. Each
 write's value is then computed once per fold iteration, and the chase
 needs no temporal rule at all. A loop makes the reaching set plural, which
-is the same join as `TODO(union-join)`. Until then, `TODO(def-use)` marks
+is the one join (`docs/adr/union-types.md`). Until then, `TODO(def-use)` marks
 the query-time window.
 
 ## Forward work

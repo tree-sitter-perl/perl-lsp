@@ -76,7 +76,7 @@ fn narrow_observed_through_method_dispatch() {
         .find(|r| r.target_name == "paint" && matches!(r.kind, RefKind::MethodCall { .. }))
         .expect("paint method-call ref");
     assert_eq!(
-        fa.method_call_invocant_class(r, None).as_deref(),
+        fa.method_call_invocant_classes(r, None).single().map(str::to_string).as_deref(),
         Some("Foo"),
         "narrowed invocant dispatches on Foo",
     );
@@ -253,7 +253,7 @@ fn optional_dispatches_leniently_without_guard() {
 fn optional_receiver_goto_def_resolves() {
     // The motivating case: goto-def on a method called on an unguarded
     // Optional<Foo> lands on Foo's method, via the stamped nav edge that
-    // `method_call_invocant_class` now resolves leniently.
+    // `method_call_invocant_classes` now resolves leniently.
     let fa = build_fa(
         "package Foo;\nsub go { my ($self) = @_; }\npackage P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    $r->go;\n}",
     );
@@ -314,15 +314,19 @@ fn optional_ternary_then_defined_narrows() {
 }
 
 #[test]
-fn optional_ternary_conflict_stays_none() {
-    // Two distinct concrete arms (no undef) still disagree → None.
+fn optional_ternary_conflict_is_a_union() {
+    // Two distinct concrete arms (no undef) are a union, not Optional.
     let fa = build_fa(
         "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : Bar->new;\n    $x;\n}",
     );
     assert_eq!(
         fa.inferred_type_via_bag("$x", Point::new(4, 4)),
-        None,
-        "Foo vs Bar is genuine disagreement, not Optional",
+        Some(crate::model::file_analysis::join(
+            &InferredType::ClassName("Foo".into()),
+            &InferredType::ClassName("Bar".into()),
+            &crate::model::file_analysis::Unordered,
+        )),
+        "Foo vs Bar is a union, not Optional",
     );
 }
 
@@ -431,7 +435,7 @@ fn invocant_class_of(fa: &FileAnalysis, method: &str) -> Option<String> {
         .iter()
         .find(|r| r.target_name == method && matches!(r.kind, RefKind::MethodCall { .. }))
         .unwrap_or_else(|| panic!("no method-call ref for {method}"));
-    fa.method_call_invocant_class(r, None)
+    fa.method_call_invocant_classes(r, None).single().map(str::to_string)
 }
 
 #[test]

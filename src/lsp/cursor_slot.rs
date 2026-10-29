@@ -174,17 +174,23 @@ impl Slot {
             return Some(t.clone());
         }
         let c = callee.as_ref()?;
-        let sig = analysis.signature_for_call(
-            &c.name, c.is_method, c.invocant.as_deref(), point, module_index,
-        )?;
-        if sig.param_types.is_some() {
-            return None; // cross-file: pre-resolved as display tags, not InferredType
-        }
-        let param = sig.params.get(*index)?;
-        if param.is_invocant {
-            return None;
-        }
-        analysis.inferred_type_via_bag(&param.name, sig.body_end)
+        // What the slot takes whichever sub the call dispatches to: the join of
+        // each one's param type.
+        let types: Vec<InferredType> = analysis
+            .signatures_for_call(&c.name, c.is_method, c.invocant.as_deref(), point, module_index)
+            .into_iter()
+            .filter_map(|sig| {
+                if sig.param_types.is_some() {
+                    return None; // cross-file: pre-resolved as display tags, not InferredType
+                }
+                let param = sig.params.get(*index)?;
+                if param.is_invocant {
+                    return None;
+                }
+                analysis.inferred_type_via_bag(&param.name, sig.body_end)
+            })
+            .collect();
+        crate::model::file_analysis::join_all(&types, &analysis.type_order(module_index))
     }
 }
 
