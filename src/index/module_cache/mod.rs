@@ -36,6 +36,7 @@ mod conclusions_store;
 pub use conclusions_store::*;
 mod warm;
 pub use warm::*;
+pub(crate) mod sql;
 
 #[cfg(test)]
 #[path = "module_cache_tests.rs"]

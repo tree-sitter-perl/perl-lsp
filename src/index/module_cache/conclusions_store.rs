@@ -40,9 +40,11 @@ impl Generation {
 pub fn current_generation(conn: &Connection) -> Generation {
     // `prepare_cached` for the same reason as `load_conclusions_stamped`:
     // read per consult-path load on a retained connection.
-    conn.prepare_cached("SELECT value FROM meta WHERE key = 'conclusion_generation'")
+    conn.prepare_cached(sql::META_GET.registered())
         .ok()
-        .and_then(|mut s| s.query_row([], |row| row.get::<_, String>(0)).ok())
+        .and_then(|mut s| {
+            s.query_row(params!["conclusion_generation"], |row| row.get::<_, String>(0)).ok()
+        })
         .and_then(|v| v.parse::<i64>().ok())
         .map(Generation)
         .unwrap_or(Generation::INITIAL)
@@ -84,11 +86,7 @@ pub fn load_conclusions_stamped(
     // RETAINED connection, so the parsed statement amortizes; a plain
     // `query_row` re-parses the SQL on every load.
     let (blob, fp, gen): (Vec<u8>, i64, i64) = conn
-        .prepare_cached(
-            "SELECT map, source_fingerprint, flush_generation FROM conclusions \
-             WHERE path = ?1 AND generation <= ?2 \
-             ORDER BY generation DESC LIMIT 1",
-        )
+        .prepare_cached(sql::CONCLUSIONS_LOAD.registered())
         .ok()?
         .query_row(params![path, at.0], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -143,9 +141,7 @@ pub fn save_conclusions(
         return false;
     };
     conn.execute(
-        "INSERT OR REPLACE INTO conclusions \
-         (path, generation, map, source_fingerprint, flush_generation) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        sql::CONCLUSIONS_SAVE.registered(),
         params![path, at.0, blob, stamp.source_fingerprint as i64, stamp.flush_generation.0],
     )
     .is_ok()
@@ -166,8 +162,7 @@ pub fn publish_generation(
     at: Generation,
     entries: &[(String, ConclusionMap, u64)],
 ) -> rusqlite::Result<()> {
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| -> rusqlite::Result<()> {
+    super::in_immediate_txn(conn, || {
         for (path, map, fingerprint) in entries {
             let stamp = RowStamp {
                 source_fingerprint: *fingerprint,
@@ -183,23 +178,16 @@ pub fn publish_generation(
             }
         }
         conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('conclusion_generation', ?1)",
-            params![at.0.to_string()],
+            sql::META_SET.registered(),
+            params!["conclusion_generation", at.0.to_string()],
         )?;
         Ok(())
-    })();
-    match &result {
-        Ok(()) => conn.execute_batch("COMMIT")?,
-        Err(_) => {
-            let _ = conn.execute_batch("ROLLBACK");
-        }
-    }
-    result
+    })
 }
 
 /// Drop one path's conclusions — the file changed, so its bake is void.
 pub fn forget_conclusions(conn: &Connection, path: &str) {
-    let _ = conn.execute("DELETE FROM conclusions WHERE path = ?1", params![path]);
+    let _ = conn.execute(sql::CONCLUSIONS_DELETE_PATH.registered(), params![path]);
 }
 
 /// Discard superseded rows once no reader can still be pinned below `keep`.
@@ -214,14 +202,7 @@ pub fn prune_generations_below(conn: &Connection, keep: Generation) -> usize {
     // Keep the newest row at or below `keep` for each path — that is the one a
     // reader pinned at `keep` still resolves to. Only rows OLDER than that are
     // genuinely unreachable.
-    conn.execute(
-        "DELETE FROM conclusions WHERE generation < ?1 AND generation < (
-             SELECT MAX(c2.generation) FROM conclusions c2
-             WHERE c2.path = conclusions.path AND c2.generation <= ?1
-         )",
-        params![keep.0],
-    )
-    .unwrap_or(0)
+    conn.execute(sql::CONCLUSIONS_PRUNE.registered(), params![keep.0]).unwrap_or(0)
 }
 
 /// Paths holding a valid blob but no conclusion row a reader could use, OR no
@@ -262,28 +243,12 @@ pub fn paths_needing_repair(
     at: Generation,
     include_missing_maps: bool,
 ) -> Vec<String> {
-    let sql = if include_missing_maps {
-        "SELECT DISTINCT m.path FROM modules m \
-         WHERE m.analysis IS NOT NULL AND m.extract_version = ?1 \
-           AND (NOT EXISTS ( \
-                 SELECT 1 FROM conclusions c \
-                 WHERE c.path = m.path AND c.generation <= ?2 \
-               ) \
-             OR NOT EXISTS ( \
-                 SELECT 1 FROM surfaces s \
-                 WHERE s.path = m.path AND s.version = ?3 \
-               ))"
+    let frontier = if include_missing_maps {
+        sql::REPAIR_FRONTIER
     } else {
-        // Same bind list as the other shape; `?2` (the generation) does not
-        // participate in a surface-only selection.
-        "SELECT DISTINCT m.path FROM modules m \
-         WHERE m.analysis IS NOT NULL AND m.extract_version = ?1 AND ?2 = ?2 \
-           AND NOT EXISTS ( \
-                 SELECT 1 FROM surfaces s \
-                 WHERE s.path = m.path AND s.version = ?3 \
-               )"
+        sql::REPAIR_FRONTIER_SURFACES
     };
-    let mut stmt = match conn.prepare(sql) {
+    let mut stmt = match conn.prepare(frontier.registered()) {
         Ok(s) => s,
         Err(e) => {
             log::warn!("conclusion repair: could not enumerate frontier: {e}");
@@ -368,14 +333,14 @@ pub fn repair_conclusions_slice(
         return 0;
     }
     let mut landed = 0usize;
-    if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+    if conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered()).is_err() {
         log::warn!("conclusion repair: txn open failed; the slice defers to the next pass");
         return 0;
     }
     for (path, blob, fingerprint, surface) in &baked {
         if !surface.is_empty() {
             let r = conn.execute(
-                "INSERT OR REPLACE INTO surfaces (path, version, surface) VALUES (?1, ?2, ?3)",
+                sql::SURFACE_SAVE.registered(),
                 params![path, super::surface_version(), surface],
             );
             if let Err(e) = r {
@@ -389,9 +354,7 @@ pub fn repair_conclusions_slice(
             continue;
         }
         let r = conn.execute(
-            "INSERT OR REPLACE INTO conclusions \
-             (path, generation, map, source_fingerprint, flush_generation) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            sql::CONCLUSIONS_SAVE.registered(),
             params![path, at.0, blob, *fingerprint as i64, at.0],
         );
         match r {
@@ -399,9 +362,9 @@ pub fn repair_conclusions_slice(
             Err(e) => log::warn!("conclusion repair: store failed for '{path}': {e}"),
         }
     }
-    if let Err(e) = conn.execute_batch("COMMIT") {
+    if let Err(e) = conn.execute_batch(sql::TXN_COMMIT.registered()) {
         log::warn!("conclusion repair: commit failed: {e}");
-        let _ = conn.execute_batch("ROLLBACK");
+        let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
         return 0;
     }
     crate::util::ghost_stats::count_by("repair.baked", landed as u64);
