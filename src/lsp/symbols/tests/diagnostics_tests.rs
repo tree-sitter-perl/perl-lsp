@@ -970,6 +970,40 @@ fn diagnostic_options_deserialize_from_lsp_shape() {
     assert!(!opts.unresolved_dispatch, "absent key defaults to false");
 }
 
+// A union receiver: each arm is checked on its own.
+const UNION_PETS: &str = r#"
+package Cat;
+sub new { my $class = shift; return bless {}, $class }
+sub sound { 'meow' }
+sub purr { 'purr' }
+package Bird;
+sub new { my $class = shift; return bless {}, $class }
+sub sound { 'tweet' }
+package main;
+"#;
+
+fn union_pet_diags(call: &str) -> Vec<String> {
+    let src = format!("{UNION_PETS}sub g {{ my $pet = rand() ? Cat->new : Bird->new; $pet->{call}; }}\n1;\n");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    unresolved_method_diags(&src, &idx, DiagnosticOptions::default())
+}
+
+#[test]
+fn a_union_arm_without_the_method_warns_for_that_arm() {
+    let diags = union_pet_diags("purr");
+    assert_eq!(diags, ["'purr' is not defined in Bird, which $pet may be"]);
+}
+
+#[test]
+fn a_method_every_arm_answers_is_silent() {
+    assert!(union_pet_diags("sound").is_empty());
+}
+
+#[test]
+fn a_method_no_arm_answers_names_every_arm() {
+    assert_eq!(union_pet_diags("bark"), ["'bark' is not defined in Bird or Cat, which $pet may be"]);
+}
+
 /// `use strict;` and `use Moo;` are bare imports: until their producers are
 /// cached the valve keeps the file silent, so the lint's tests seed them the
 /// way @INC resolution does in the server.

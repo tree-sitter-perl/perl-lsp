@@ -49,6 +49,21 @@ impl std::ops::Deref for SharedKeys {
     }
 }
 
+impl PartialOrd for SharedKeys {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SharedKeys {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if std::sync::Arc::ptr_eq(&self.0, &other.0) {
+            return std::cmp::Ordering::Equal;
+        }
+        self.0.cmp(&other.0)
+    }
+}
+
 impl PartialEq for SharedKeys {
     fn eq(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0
@@ -83,7 +98,7 @@ pub struct Mark {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum InferredType {
     /// `$p = Point->new(...)` — variable is an instance of ClassName.
     ClassName(String),
@@ -215,7 +230,7 @@ pub enum InferredType {
     /// Perl has no distinct boolean value — truth is `1` / `''`, so Bool
     /// is a *sub-lattice of Numeric*: it prints and dispatches like a
     /// number, and a return-arm fold that sees `{Bool, Numeric}` joins to
-    /// `Numeric` (see `resolve_return_type`) rather than degrading to
+    /// `Numeric` (`Subsumption::BoolIntoNumeric`) rather than degrading to
     /// Unknown. The variant lets the analyzer *say* "this is a truth
     /// value" where it knows one — hover, inlay hints, future
     /// boolean-context diagnostics — without lying that it's a general
@@ -235,16 +250,54 @@ pub enum InferredType {
     /// computed it, so the Surface sees `String`. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     RefTagOf { subject: String, site: Span, via: RefTagFn },
+    /// `A|B`: a value that is one of several types the join could not
+    /// put a single type above. Built only by [`join`], so the arms are
+    /// canonical: two or more, sorted, deduped, none a union, an
+    /// `Optional`, `Undef` or `Unknown` (a maybe-undef union is
+    /// `Optional(Union)`), no class beside one of its ancestors, and at
+    /// most [`UNION_WIDTH_CAP`]. NOT a class (`class_name()` → `None`):
+    /// a union is not definitely any one class. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Union(UnionArms),
 }
 
 /// Which builtin minted a [`InferredType::RefTagOf`] — what its string can
 /// say: `ref` a reftype token or a class, `reftype` only a token, `blessed`
 /// only a class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RefTagFn {
     Ref,
     RefType,
     Blessed,
+}
+
+/// The arms of an [`InferredType::Union`]. The field is private so the
+/// canonical form is the constructor's job, not every caller's: the one
+/// way in is [`join`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UnionArms(Vec<InferredType>);
+
+impl std::ops::Deref for UnionArms {
+    type Target = [InferredType];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl UnionArms {
+    /// Rewrite every arm and re-join, so a rewrite that makes two arms
+    /// equal still yields a canonical type.
+    pub fn map(&self, f: impl FnMut(&InferredType) -> InferredType) -> InferredType {
+        let arms: Vec<InferredType> = self.0.iter().map(f).collect();
+        join_all(&arms, &Unordered).unwrap_or(InferredType::Unknown)
+    }
+
+    /// Every arm, mutably, for rewrites that keep each arm's identity
+    /// (span remaps, attachment rewrites).
+    pub fn arms_mut(&mut self) -> impl Iterator<Item = &mut InferredType> {
+        self.0.iter_mut()
+    }
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -257,7 +310,7 @@ pub enum RefTagFn {
 /// **Match invariant: never `_ => …` arms.** Every consumer
 /// explicitly handles every variant. The compiler enforces this
 /// when the (deferred) `Plugin` escape hatch lands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ParametricType {
     /// DBIC `$schema->resultset('Foo')` shape. `base` is the
     /// resolved resultset class (default
@@ -707,6 +760,31 @@ impl InferredType {
                 HashWithKeys { keys, open }
             }
             Optional(b) => Optional(Box::new(b.map_class_names(f))),
+            Union(arms) => arms.map(|a| a.clone().map_class_names(f)),
+            other => other,
+        }
+    }
+
+    /// This value joined with an arm the join can't see. The seen arm keeps
+    /// what it says about the value's kind (the author wrote it as the
+    /// value they expect), but a literal shape's key set is complete only
+    /// for the literal: the unseen arm may hold any keys, so every shape in
+    /// the value opens.
+    pub fn joined_with_unseen(self) -> Self {
+        use InferredType::*;
+        match self {
+            HashWithKeys { mut keys, .. } => {
+                for (_, v) in keys.to_mut().iter_mut() {
+                    if let Some(b) = v.take() {
+                        *v = Some(Box::new(b.joined_with_unseen()));
+                    }
+                }
+                HashWithKeys { keys, open: true }
+            }
+            Sequence(v) => Sequence(v.into_iter().map(InferredType::joined_with_unseen).collect()),
+            Branded { base, marks } => Branded { base: Box::new(base.joined_with_unseen()), marks },
+            Optional(b) => Optional(Box::new(b.joined_with_unseen())),
+            Union(arms) => arms.map(|a| a.clone().joined_with_unseen()),
             other => other,
         }
     }
@@ -724,6 +802,45 @@ impl InferredType {
             InferredType::Branded { base, .. } => base.class_name(),
             _ => None,
         }
+    }
+
+    /// The values a RECEIVER may be: the arms of its defined part (a
+    /// union's arms, else the defined part alone); none for `Undef`. Every
+    /// consumer that asks a receiver for a member reads this, so a union
+    /// and an `Optional` of one distribute the same way everywhere.
+    pub fn receiver_arms(&self) -> &[InferredType] {
+        match self.defined_part() {
+            Some(InferredType::Union(arms)) => arms,
+            Some(t) => std::slice::from_ref(t),
+            None => &[],
+        }
+    }
+
+    /// The value once it is defined: an `Optional<T>`'s `T` (however
+    /// nested), nothing for `Undef`, else the value itself. A receiver is
+    /// read through this — the author may not have written the `defined`
+    /// guard yet, and the "might be undef" warning belongs to a deref
+    /// diagnostic, not to the silence of a dead receiver.
+    pub fn defined_part(&self) -> Option<&InferredType> {
+        let mut t = self;
+        while let InferredType::Optional(inner) = t {
+            t = inner;
+        }
+        (!t.is_undef()).then_some(t)
+    }
+
+    /// `f` over each value a receiver may be (`receiver_arms`), joined
+    /// under `order`. An arm `f` answers nothing for adds no evidence —
+    /// whether its member is untyped or absent there: the value is what
+    /// the access yields where it does not die, and an arm lacking the
+    /// member is the missing-member diagnostic's to report.
+    pub fn join_over_arms(
+        &self,
+        order: &dyn TypeOrder,
+        f: impl FnMut(&InferredType) -> Option<InferredType>,
+    ) -> Option<InferredType> {
+        let answers: Vec<InferredType> = self.receiver_arms().iter().filter_map(f).collect();
+        join_all(&answers, order)
     }
 
     /// The wrapped type of an `Optional<T>`, else `None`. The `defined` /
@@ -746,11 +863,7 @@ impl InferredType {
     /// silence of a dead receiver. `Undef` peels to nothing — it is
     /// definitely not an object.
     pub fn class_name_lenient(&self) -> Option<&str> {
-        let mut t = self;
-        while let Some(inner) = t.optional_inner() {
-            t = inner;
-        }
-        t.class_name()
+        self.defined_part()?.class_name()
     }
 
     /// `->{key}` narrowing on a structurally-typed hash (rule #10: ask
@@ -928,6 +1041,11 @@ impl InferredType {
             }
             InferredType::TypeConstraintOf(Some(t)) | InferredType::Optional(t) => t.for_each_attachment_mut(f),
             InferredType::Branded { base, .. } => base.for_each_attachment_mut(f),
+            InferredType::Union(arms) => {
+                for t in arms.arms_mut() {
+                    t.for_each_attachment_mut(f);
+                }
+            }
             InferredType::HashWithKeys { keys, .. } => {
                 if keys.iter().any(|(_, v)| v.is_some()) {
                     for t in keys.to_mut().iter_mut().filter_map(|(_, v)| v.as_mut()) {
@@ -1121,92 +1239,317 @@ pub enum TypeProvenance {
     FrameworkSynthesis { framework: String, reason: String },
 }
 
-/// Resolve a return type from a list of inferred types (one per return statement).
+/// Past this many arms a union widens: its class arms collapse to their
+/// common class, and if that leaves it still too wide, to `Unknown`. Bounds
+/// the lattice's height, which a fixpoint over cycles needs.
+pub const UNION_WIDTH_CAP: usize = 4;
+
+/// A language's claim that one family of types sits above another in a
+/// join. The lattice's core (equality, unions, undef, the cap, structural
+/// shape merges) is the same in every language; these are what differ.
+/// Closed so a new rule makes every language decide whether it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Subsumption {
+    /// An object absorbs a hash shape: the object IS the hash (Perl's
+    /// blessed hashref, read by `$obj->{k}`).
+    ObjectAbsorbsHash,
+    /// `Bool` folds into `Numeric`: truth is a number (Perl's `1`/`''`,
+    /// Python's `bool <: int`, C++ integral promotion).
+    BoolIntoNumeric,
+}
+
+/// The subsumption rules one language declares (`LangPack::lattice`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatticeRules(std::borrow::Cow<'static, [Subsumption]>);
+
+impl LatticeRules {
+    pub const fn new(rules: &'static [Subsumption]) -> Self {
+        LatticeRules(std::borrow::Cow::Borrowed(rules))
+    }
+
+    pub fn holds(&self, rule: Subsumption) -> bool {
+        self.0.contains(&rule)
+    }
+}
+
+/// What a join reads beyond the types themselves: the class order and the
+/// language's subsumption rules. The lattice knows neither inheritance nor
+/// languages; it asks.
+pub trait TypeOrder {
+    /// `child` is `ancestor` or inherits from it.
+    fn isa(&self, child: &str, ancestor: &str) -> bool;
+    /// The one least class every class in `classes` is an instance of;
+    /// `None` when there is none or it is not unique.
+    fn common_class(&self, classes: &[&str]) -> Option<String>;
+    /// The language whose values are joined declares `rule`.
+    fn holds(&self, rule: Subsumption) -> bool;
+}
+
+/// A language's rules with no class graph in hand: a class is an instance
+/// only of itself, and a family absorbs another as the language declares.
+impl TypeOrder for LatticeRules {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        child == ancestor
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        Unordered.common_class(classes)
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        LatticeRules::holds(self, rule)
+    }
+}
+
+/// No inheritance and no language rules in hand: a class is an instance
+/// only of itself, and no family absorbs another.
+pub struct Unordered;
+
+impl TypeOrder for Unordered {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        child == ancestor
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        let (first, rest) = classes.split_first()?;
+        rest.iter().all(|c| c == first).then(|| first.to_string())
+    }
+
+    fn holds(&self, _: Subsumption) -> bool {
+        false
+    }
+}
+
+/// The least upper bound of two types: the one value-flow join every fold
+/// reads (return arms, ternary and `||` arms, slot writes, hash-key values).
+/// Total: where no single type sits above both, the answer is their union.
 ///
-/// Rules (from spec):
-/// - All agree → that type
-/// - Object subsumes HashRef (overloaded objects are common)
-/// - Disagreement → None (Unknown)
-///
-/// The input should already have bare returns / undef filtered out.
-pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType> {
-    if return_types.is_empty() {
-        return None;
+/// - equal → that type; `Unknown` absorbs (an arm nothing can name makes the
+///   join something nothing can name)
+/// - an `Optional` or `Undef` arm makes the join `Optional<the rest>`
+/// - otherwise each arm folds into an arm it joins precisely with
+///   ([`join_precise`]) and the rest stay side by side as a union, widened
+///   past [`UNION_WIDTH_CAP`]
+pub fn join(a: &InferredType, b: &InferredType, order: &dyn TypeOrder) -> InferredType {
+    join_traced(a, b, order, &mut |_| {})
+}
+
+/// How a join lost precision: the closed set of widening steps, reported to
+/// the `trace` of [`join_traced`] / [`join_all_traced`]. Never stored —
+/// widening is a pure function of the arms and the class order, so
+/// `--dump-package` re-derives it on demand instead of the blob carrying it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Widening {
+    /// Too many arms; their class arms collapsed to the one class all of
+    /// them are instances of.
+    CommonClass { members: Vec<InferredType>, to: String },
+    /// Too many arms and no single common class: the join is `Unknown`.
+    Top { members: Vec<InferredType> },
+}
+
+/// [`join`], reporting every widening step (nested key-value joins
+/// included) to `trace`. A step is handed over as a thunk, so a trace that
+/// ignores it (plain [`join`]) never builds the report.
+pub fn join_traced(
+    a: &InferredType,
+    b: &InferredType,
+    order: &dyn TypeOrder,
+    trace: &mut dyn FnMut(&dyn Fn() -> Widening),
+) -> InferredType {
+    if a == b {
+        return a.clone();
     }
-    let first = &return_types[0];
-    if return_types.iter().all(|t| t == first) {
-        return Some(first.clone());
-    }
-    // `Unknown` absorbs: an arm nothing can name makes the join something
-    // nothing can name. Not `None` — that reads as "no arms agree" and lets
-    // a lone typed arm answer for the sub — and not a candidate for the
-    // coarse joins below, which would dress it up as `HashRef` or `Numeric`.
-    if return_types.iter().any(|t| !t.is_known()) {
-        return Some(InferredType::Unknown);
-    }
-    // All arms hash-shaped but structurally different (`{a=>1}` vs
-    // `{b=>2}`) → degrade to the coarse HashRef rather than Unknown.
-    if return_types.iter().all(|t| t.is_hash_shaped()) {
-        return Some(InferredType::HashRef);
-    }
-    // Same rule for arrays: structurally different tuples agree on the
-    // coarse ArrayRef.
-    if return_types.iter().all(|t| t.is_array_shaped()) {
-        return Some(InferredType::ArrayRef);
-    }
-    // Bool is a sub-lattice of Numeric in Perl (truth is `1`/`''`), so a
-    // sub whose arms mix a comparison (`Bool`) with a plain number
-    // (`Numeric`) is coherently number-ish — join to the coarser Numeric
-    // rather than degrading to Unknown. All-Bool already returned via the
-    // exact-equal check above, so this only fires on a genuine mix.
-    if return_types
-        .iter()
-        .all(|t| matches!(t, InferredType::Bool | InferredType::Numeric))
-    {
-        return Some(InferredType::Numeric);
-    }
-    // Tags naming different subjects (or a tag and a literal) are all
-    // strings; what one arm's tag says about its subject the join can't keep.
-    if return_types.iter().all(InferredType::is_string) {
-        return Some(InferredType::String);
-    }
-    // Object subsumes HashRef: if some returns are Object(X) and others are
-    // hash-shaped, the Object wins (overloaded hash access is common in Perl).
-    let mut object: Option<InferredType> = None;
-    for t in return_types {
-        if t.is_object() {
-            // Two different classes are a disagreement, not a choice of the
-            // arm that came last (`WP_Term` vs `WP_Error`).
-            if object.as_ref().is_some_and(|o| o != t) {
-                return None;
-            }
-            object = Some(t.clone());
-        } else if !t.is_hash_shaped() {
-            // Non-hash, non-Object disagreement → Unknown
-            return None;
+    let mut arms = Vec::new();
+    let mut maybe_undef = false;
+    for t in [a, b] {
+        if !t.collect_arms(&mut arms, &mut maybe_undef) {
+            return InferredType::Unknown;
         }
     }
-    object
+    from_arms(arms, maybe_undef, order, trace)
+}
+
+impl InferredType {
+    /// Split `self` into union arms and its undef half. `false`: `self` is
+    /// `Unknown`, which absorbs the whole join.
+    fn collect_arms(&self, arms: &mut Vec<InferredType>, maybe_undef: &mut bool) -> bool {
+        match self {
+            InferredType::Unknown => false,
+            InferredType::Undef => {
+                *maybe_undef = true;
+                true
+            }
+            InferredType::Optional(inner) => {
+                *maybe_undef = true;
+                inner.collect_arms(arms, maybe_undef)
+            }
+            InferredType::Union(us) => {
+                arms.extend(us.iter().cloned());
+                true
+            }
+            t => {
+                arms.push(t.clone());
+                true
+            }
+        }
+    }
+}
+
+/// The canonical type over `arms` (none a union, `Optional`, `Undef` or
+/// `Unknown`), `Optional` when `maybe_undef`. Each arm folds into one it
+/// joins precisely with, until no two do; the result depends only on the
+/// set of arms, not their order, so a join folded in any order (callers in
+/// path order, arms in source order) answers the same everywhere.
+fn from_arms(
+    arms: Vec<InferredType>,
+    maybe_undef: bool,
+    order: &dyn TypeOrder,
+    trace: &mut dyn FnMut(&dyn Fn() -> Widening),
+) -> InferredType {
+    fn insert(
+        out: &mut Vec<InferredType>,
+        mut t: InferredType,
+        order: &dyn TypeOrder,
+        trace: &mut dyn FnMut(&dyn Fn() -> Widening),
+    ) {
+        while let Some((i, joined)) =
+            out.iter().enumerate().find_map(|(i, u)| join_precise(u, &t, order, trace).map(|j| (i, j)))
+        {
+            out.swap_remove(i);
+            t = joined;
+        }
+        out.push(t);
+    }
+    let mut out: Vec<InferredType> = Vec::new();
+    for t in arms {
+        insert(&mut out, t, order, trace);
+    }
+    if out.len() > UNION_WIDTH_CAP {
+        let classes: Vec<&str> = out.iter().filter_map(|t| t.class_name()).collect();
+        if let Some(common) = (classes.len() > 1).then(|| order.common_class(&classes)).flatten() {
+            trace(&|| {
+                let mut members = out.clone();
+                members.sort();
+                Widening::CommonClass { members, to: common.clone() }
+            });
+            out.retain(|t| t.class_name().is_none());
+            insert(&mut out, InferredType::ClassName(common), order, trace);
+        }
+    }
+    if out.len() > UNION_WIDTH_CAP {
+        out.sort();
+        trace(&|| Widening::Top { members: out.clone() });
+        return InferredType::Unknown;
+    }
+    out.sort();
+    let value = match out.len() {
+        0 => None,
+        1 => out.pop(),
+        _ => Some(InferredType::Union(UnionArms(out))),
+    };
+    match (value, maybe_undef) {
+        (Some(t), true) => InferredType::Optional(Box::new(t)),
+        (Some(t), false) => t,
+        (None, _) => InferredType::Undef,
+    }
+}
+
+/// The one type above two union-free arms short of a union, if the lattice
+/// has one:
+/// - equal → that type
+/// - a class and one of its ancestors → the ancestor
+/// - an object over a hash shape → the object, where the language declares
+///   [`Subsumption::ObjectAbsorbsHash`]
+/// - two keyed hashes → every key either holds, sorted by key so the join
+///   is commutative and its bytes don't depend on arm order; each key's
+///   values [`join`]ed. Other hash shapes → `HashRef`; array shapes →
+///   `ArrayRef`
+/// - `Bool` ⊔ `Numeric` → `Numeric`, where the language declares
+///   [`Subsumption::BoolIntoNumeric`]
+fn join_precise(
+    a: &InferredType,
+    b: &InferredType,
+    order: &dyn TypeOrder,
+    trace: &mut dyn FnMut(&dyn Fn() -> Widening),
+) -> Option<InferredType> {
+    use InferredType as T;
+    if a == b {
+        return Some(a.clone());
+    }
+    match (a.class_name(), b.class_name()) {
+        // TODO(brand-join): one class spelled two ways (a mark, a
+        // parametric flavor) stays two arms until the join agrees on the
+        // base and keeps the shared marks (docs/adr/brands.md).
+        (Some(x), Some(y)) if x == y => return None,
+        (Some(x), Some(y)) if order.isa(x, y) => return Some(b.clone()),
+        (Some(x), Some(y)) if order.isa(y, x) => return Some(a.clone()),
+        (Some(_), Some(_)) => return None,
+        (Some(_), None) if b.is_hash_shaped() && order.holds(Subsumption::ObjectAbsorbsHash) => {
+            return Some(a.clone())
+        }
+        (None, Some(_)) if a.is_hash_shaped() && order.holds(Subsumption::ObjectAbsorbsHash) => {
+            return Some(b.clone())
+        }
+        (Some(_), None) | (None, Some(_)) => return None,
+        (None, None) => {}
+    }
+    match (a, b) {
+        (T::HashWithKeys { keys: ka, open: oa }, T::HashWithKeys { keys: kb, open: ob }) => {
+            let mut keys: Vec<(String, Option<Box<T>>)> = ka.iter().cloned().collect();
+            for (k, vb) in kb.iter() {
+                match keys.iter_mut().find(|(have, _)| have == k) {
+                    Some(slot) => {
+                        slot.1 = match (&slot.1, vb) {
+                            (Some(x), Some(y)) => Some(Box::new(join_traced(x, y, order, trace))),
+                            (x, y) => x.clone().or_else(|| y.clone()),
+                        }
+                    }
+                    None => keys.push((k.clone(), vb.clone())),
+                }
+            }
+            keys.sort_by(|x, y| x.0.cmp(&y.0));
+            Some(T::HashWithKeys { keys: SharedKeys::new(keys), open: *oa || *ob })
+        }
+        _ if a.is_hash_shaped() && b.is_hash_shaped() => Some(T::HashRef),
+        _ if a.is_array_shaped() && b.is_array_shaped() => Some(T::ArrayRef),
+        (T::Bool, T::Numeric) | (T::Numeric, T::Bool) if order.holds(Subsumption::BoolIntoNumeric) => {
+            Some(T::Numeric)
+        }
+        // Tags naming different subjects (or a tag and a literal) are all
+        // strings; what one arm's tag says about its subject the join can't keep.
+        _ if a.is_string() && b.is_string() => Some(T::String),
+        _ => None,
+    }
+}
+
+/// `join` over every type in `types`; `None` for an empty list.
+pub fn join_all(types: &[InferredType], order: &dyn TypeOrder) -> Option<InferredType> {
+    let (first, rest) = types.split_first()?;
+    Some(rest.iter().fold(first.clone(), |acc, t| join(&acc, t, order)))
+}
+
+/// [`join_all`], with every widening step it took.
+pub fn join_all_traced(types: &[InferredType], order: &dyn TypeOrder) -> Option<(InferredType, Vec<Widening>)> {
+    let (first, rest) = types.split_first()?;
+    let mut steps = Vec::new();
+    let t = rest
+        .iter()
+        .fold(first.clone(), |acc, t| join_traced(&acc, t, order, &mut |w| steps.push(w())));
+    Some((t, steps))
 }
 
 /// Join return/branch arms where some arm may be `undef` (a bare
-/// `return;`, `return undef`, or an `undef` branch). The value arms fold
-/// by [`resolve_return_type`]; if any arm was undef and the value arms
-/// agree on a single non-optional `T`, the result is `Optional<T>` —
-/// `{Foo, undef} → Optional<Foo>`. No undef arm leaves the fold
-/// unchanged; genuinely-conflicting value arms (`Foo` vs `Bar`) stay
-/// `None` (no arbitrary union); only-undef arms stay `None` (no useful
-/// value type). See `docs/adr/optional-types.md`.
-pub fn join_return_arms(value_types: &[InferredType], has_undef_arm: bool) -> Option<InferredType> {
-    let base = resolve_return_type(value_types);
-    match base {
-        // `Optional<Unknown>` would be a claim ("maybe undef, else a value")
-        // whose value half nothing supports; the undef arm folds into the
-        // same `Unknown`.
-        Some(t) if has_undef_arm && !matches!(t, InferredType::Optional(_)) && t.is_known() => {
-            Some(InferredType::Optional(Box::new(t)))
-        }
-        other => other,
-    }
+/// `return;`, `return undef`, or an `undef` branch): the value arms'
+/// [`join_all`], joined with `Undef` when an undef arm exists —
+/// `{Foo, undef} → Optional<Foo>`, `{Foo, Bar, undef} → Optional<Bar|Foo>`.
+/// Only-undef arms stay `None` (no useful value type). See
+/// `docs/adr/optional-types.md`.
+pub fn join_return_arms(
+    value_types: &[InferredType],
+    has_undef_arm: bool,
+    order: &dyn TypeOrder,
+) -> Option<InferredType> {
+    let base = join_all(value_types, order)?;
+    Some(if has_undef_arm { join(&base, &InferredType::Undef, order) } else { base })
 }
 

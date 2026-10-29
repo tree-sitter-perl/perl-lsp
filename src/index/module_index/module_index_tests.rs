@@ -2830,3 +2830,76 @@ fn sweep_probe_memo_is_stamp_keyed_and_keeps_only_proven_verdicts() {
     assert_eq!(probe(&idx, sym(), None), None);
     assert_eq!(runs.get(), 5);
 }
+
+/// A stripped copy replays its recorded feed, handler-owner bridges
+/// included: owning a handler bridges it, and the owner is read from the
+/// symbols the strip drops.
+#[test]
+fn a_stripped_copy_keeps_its_handler_owner_bridges() {
+    use crate::index::module_index::ModuleEdgeIndexes;
+    let mut fa = build_fa(
+        "package My::Emitter;\nuse parent 'Mojo::EventEmitter';\n\
+         sub register { my $self = shift; $self->on('ready', sub { 1 }); }\n",
+    );
+    // Only ownership may carry the bridge here.
+    fa.plugin.namespaces.clear();
+    assert!(
+        fa.symbols().iter().any(|s| s.kind == crate::model::file_analysis::SymKind::Handler),
+        "the fixture must emit a handler"
+    );
+    let bridges = |edges: &ModuleEdgeIndexes| -> Vec<String> {
+        edges
+            .snapshot()
+            .into_iter()
+            .filter(|(map, _, _)| *map == "bridges")
+            .map(|(_, key, _)| key)
+            .collect()
+    };
+    let path = PathBuf::from("/fake/emitter.pm");
+    let edges = ModuleEdgeIndexes::new();
+    edges.feed("My::Emitter", &path, &fa);
+    let whole = bridges(&edges);
+    assert!(!whole.is_empty(), "the owned handler bridges its owner");
+
+    fa.evict_symbols();
+    edges.purge_module("My::Emitter");
+    edges.feed("My::Emitter", &path, &fa);
+    assert_eq!(bridges(&edges), whole, "the stripped replay lost a bridge");
+}
+
+/// The server's shape of a gated file: a STRIPPED registered copy that
+/// rehydrates on demand. Its views still hand out the applied copy, and a
+/// consumer resolves the gated accessor through it.
+#[test]
+fn a_stripped_gated_copy_rehydrates_into_its_applied_view() {
+    use crate::index::pack_bag_cache::PackBagCache;
+    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    let mid = parse_source_to_cached("package Mid;\nuse parent 'DBIx::Class::Core';\n1;\n", "Mid");
+    let leaf = parse_source_to_cached(
+        "package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n",
+        "Leaf",
+    );
+    assert!(!leaf.analysis.plugin.gated_emissions.is_empty(), "fixture: gate is cross-file");
+    let whole = leaf.analysis.clone();
+    let cache = Arc::new(PackBagCache::new(8 * 1024 * 1024, move |_p: &std::path::Path, _want_bag: bool| {
+        Ok((*whole).clone())
+    }));
+    let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
+    idx.insert_cache("Mid", Some(mid));
+    let mut stripped = (*leaf.analysis).clone();
+    stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
+    assert!(stripped.symbols_are_evicted(), "fixture must model the workspace strip");
+    let stripped = Arc::new(CachedModule::new(leaf.path.clone(), Arc::new(stripped)));
+    idx.insert_cache("Leaf", Some(stripped.clone()));
+
+    let view = idx.symbols_present(&stripped);
+    assert!(
+        view.symbols().iter().any(|s| s.name == "name" && s.kind == SymKind::Method),
+        "the rehydrated view carries the gated accessor"
+    );
+    let consumer = parse_source_to_cached("package Use;\nsub f { 1 }\n1;\n", "Use");
+    assert!(matches!(
+        consumer.analysis.resolve_method_in_ancestors("Leaf", "name", Some(&idx)),
+        Some(MethodResolution::CrossFile { .. })
+    ));
+}

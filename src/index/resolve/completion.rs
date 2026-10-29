@@ -26,13 +26,7 @@ impl<'a> CandidateSet<'a> {
                 .symbols()
                 .iter()
                 .find(|s| s.name == type_name && wanted(&s.kind))?;
-            Some(RefLocation {
-                key: FileKey::Path(cached.path.clone()),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None
-            })
+            Some(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration))
         })
     }
 

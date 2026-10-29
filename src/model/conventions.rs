@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, MemberNamespace, NameSpellings};
+use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
@@ -33,6 +33,56 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
 };
+
+/// Perl's language id: the native builder's, and `FileAnalysis::language`'s
+/// default for blobs that predate the field.
+pub const PERL_LANGUAGE: &str = "perl";
+
+/// Perl's subsumption rules: an object is a blessed hash, and truth is a
+/// number (`1` / `''`).
+pub static PERL_LATTICE: LatticeRules =
+    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
+
+/// Each pack language's subsumption rules, by `FileAnalysis::language`. The
+/// model cannot see the packs that declare them, so the build layer registers
+/// each served language's set (`docs/adr/union-types.md`); Perl's are
+/// declared here, beside its other conventions, and never registered. Append-only slots, not a
+/// locked map: every bag query reads this, and a shared lock's reader count is
+/// one contended cache line across a sweep's workers.
+static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+    [const { std::sync::OnceLock::new() }; 16];
+
+/// Register `language`'s rules once; later calls are no-ops, so `rules` is
+/// built only on the first.
+pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
+    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's rules are declared, not registered");
+    let mut rules = Some(rules);
+    for slot in &LANGUAGE_LATTICES {
+        // A racing registration of another language can take this slot
+        // between the check and the init; the loop then moves on.
+        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        if *id == language {
+            return;
+        }
+    }
+    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
+}
+
+/// The subsumption rules of the language an analysis was built in. A
+/// language nobody registered holds no rules: it never borrows another's.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    static NO_RULES: LatticeRules = LatticeRules::new(&[]);
+    if language == PERL_LANGUAGE {
+        return &PERL_LATTICE;
+    }
+    let registered = LANGUAGE_LATTICES
+        .iter()
+        .map_while(|slot| slot.get())
+        .find(|(id, _)| *id == language)
+        .map(|(_, rules)| rules);
+    debug_assert!(registered.is_some(), "no lattice registered for language {language:?}");
+    registered.unwrap_or(&NO_RULES)
+}
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
 ///

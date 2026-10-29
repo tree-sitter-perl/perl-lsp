@@ -274,11 +274,13 @@ the relation that answers it, and the soundness constraint.
 - **Over-approximate toward the decode.** The member probe is kind-blind and
   matches name OR key: a wasted decode is the cheap error, a hidden member is
   the silent-wrong-goto-def one.
-- **Know what the rows cannot see.** Deferred plugin emissions materialize
-  into resident copies AFTER the shred (`materialize_gated_emissions`), so
-  their symbols have no rows; any file carrying `gated_emissions` fails open.
-  A new post-shred mutator of cached copies must be added to this list — or
-  better, not built.
+- **Know what the rows cannot see.** Deferred plugin emissions shred into
+  their own presence table, `held` (`FileAnalysis::held_row_names`), never
+  into `refs`/`syms`, whose rows every view shows. Every retrieval that
+  licenses a skip (candidate files, the per-file probes, the dead-export
+  view, the heatmap prune) reads `held` too and fails open on a hit. A new
+  post-shred mutator of cached copies must shred its content the same way —
+  or better, not be built.
 - **Ship the switch that checks the assumption.** Each skip lands with its
   disable control and an equivalence mode that runs the skipped work anyway
   and screams on divergence (`PERL_LSP_RESTAMP_EQUIV` is the pattern; the

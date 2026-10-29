@@ -1435,3 +1435,83 @@ fn moose_isa_string_instance_of_reaches_the_class() {
         "Optional<Foo>, got {y:?}",
     );
 }
+
+/// A CLOSED gated file answers cross-file through the index's views, with no
+/// open document and no enrichment: every view of `Leaf` carries the DBIC
+/// accessors its cross-file ancestry licenses, a consumer's method
+/// resolution finds them, and an ancestry change re-decides the gate.
+#[test]
+fn a_closed_gated_file_is_viewed_with_its_firing_emissions() {
+    use crate::index::module_index::{CachedModule, ModuleIndex};
+    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, Namespace};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    let idx = ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+    let mid = |parents: &[&str]| {
+        fake_cached_for_class("Mid", &PathBuf::from("/fake/Mid.pm"), &[], parents)
+    };
+    idx.insert_cache("Mid", Some(mid(&["DBIx::Class::Core"])));
+    let leaf = build_fa(
+        "package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n",
+    );
+    assert!(!leaf.plugin.gated_emissions.is_empty(), "the gate is cross-file: deferred");
+    assert!(leaf.symbols().iter().all(|s| s.name != "name"));
+    let leaf = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/Leaf.pm")), Arc::new(leaf)));
+    idx.insert_cache("Leaf", Some(leaf.clone()));
+
+    let has_accessor = |fa: &crate::model::file_analysis::FileAnalysis| {
+        fa.symbols().iter().any(|s| {
+            s.name == "name"
+                && s.kind == SymKind::Method
+                && matches!(&s.namespace, Namespace::Framework { id } if id == "dbic")
+        })
+    };
+    assert!(has_accessor(&idx.whole_present(&leaf)), "whole view");
+    assert!(has_accessor(&idx.symbols_present(&leaf)), "symbols view");
+    assert!(has_accessor(&idx.refs_present(&leaf)), "rows view");
+    assert!(has_accessor(&idx.bag_present(&leaf)), "bag view");
+    assert!(
+        Arc::ptr_eq(&idx.whole_present(&leaf), &idx.symbols_present(&leaf)),
+        "one applied copy serves every view"
+    );
+
+    let consumer = build_fa("package Use;\nsub f { 1 }\n1;\n");
+    assert!(
+        matches!(
+            consumer.resolve_method_in_ancestors("Leaf", "name", Some(&idx)),
+            Some(MethodResolution::CrossFile { .. })
+        ),
+        "a consumer resolves the closed file's gated accessor"
+    );
+
+    let listed = |idx: &ModuleIndex| idx.shown_gated_symbols(&leaf, "nam").iter().any(|s| s.name == "name");
+    assert!(listed(&idx), "a listing shows the firing gate's symbols");
+    assert!(idx.shown_gated_symbols(&leaf, "zzz").is_empty(), "no match, no decide");
+
+    // `Mid` loses its DBIC parent: the gate no longer fires.
+    idx.insert_cache("Mid", Some(mid(&[])));
+    assert!(!has_accessor(&idx.whole_present(&leaf)), "the gate re-decides");
+    assert!(!listed(&idx), "and the listing with it");
+    idx.insert_cache("Mid", Some(mid(&["DBIx::Class::Core"])));
+    assert!(has_accessor(&idx.whole_present(&leaf)), "and fires again");
+}
+
+/// The producer side states a gated emission as declared: its accessors
+/// shred as held presence rows (never base rows, which every view shows),
+/// and editing only gated content moves the Surface, so consumers are
+/// dirtied.
+#[test]
+fn gated_content_is_declared_to_rows_and_surface() {
+    let a = build_fa("package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n");
+    let b = build_fa("package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id title/);\n1;\n");
+    let seeds = a.row_seeds();
+    assert!(seeds.held.iter().any(|n| n == "name"), "a held row");
+    assert!(!seeds.syms.iter().any(|s| s.name == "name"), "no base row");
+    assert_ne!(
+        crate::model::surface::Surface::project(&a),
+        crate::model::surface::Surface::project(&b),
+        "a gated-only edit is a cross-file change"
+    );
+}

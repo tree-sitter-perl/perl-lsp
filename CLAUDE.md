@@ -41,7 +41,7 @@ repo — recipe, incl. the restricted-sandbox mirror workaround, in the
 gold asserts answers, these measure behaviour at scale — wall, RSS, and the
 pathologies no fixture reproduces. Every scaling limit in
 `docs/scaling-limits.md` came from them, and none reproduced on synthetic
-input. `corpus/bootstrap.sh` reconstructs all eight on a fresh box (idempotent;
+input. `corpus/bootstrap.sh` reconstructs all nine on a fresh box (idempotent;
 `corpus/bootstrap.sh "" FHEM` for one). `./kick.sh` opens one in an editor
 without typing paths — `--nodeps`, `--dry`, `--debug`.
 
@@ -124,7 +124,7 @@ See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-
 
    Recurring forms of this antipattern:
    - **Method-name allowlists** in consumers (`if target_name in {search, find}`). Push the rule onto the *type*: `InferredType::hash_key_class()` for the parametric-arg case. See `docs/adr/parametric-types.md`.
-   - **Lossy-string returns** (`Option<String>` for a class name when the source had `Option<InferredType>`). The string is a consumer-side projection, not a return-type contract. Helpers that resolve "what type does this expression produce" return `Option<InferredType>`. Class-name accessors (`class_name()`, `dispatch_class()`, etc.) are caller-side methods on the rich type. Cleanup pass landed; back-compat thin wrappers remain (`method_call_invocant_class`, `resolve_invocant_class_tree`, `invocant_text_to_class`) — they each call the typed sibling and project at the consumer. `method_call_invocant_type` is THE invocant ladder (token-blind receiver value); `method_call_invocant_class` is its dispatch projection (the SUPER/qualified method-token arm + `dispatch_class_of` + DBIC moniker resolve).
+   - **Lossy-string returns** (`Option<String>` for a class name when the source had `Option<InferredType>`). The string is a consumer-side projection, not a return-type contract. Helpers that resolve "what type does this expression produce" return `Option<InferredType>`. Class-name accessors (`class_name()`, `dispatch_class()`, etc.) are caller-side methods on the rich type. Cleanup pass landed; back-compat thin wrappers remain (`resolve_invocant_class_tree`, `invocant_text_classes`) — they each call the typed sibling and project at the consumer. `method_call_invocant_type` is THE invocant ladder (token-blind receiver value); `method_call_invocant_classes` is its dispatch projection (the SUPER/qualified method-token arm + `dispatch_classes_of` over every arm + DBIC moniker resolve), and `receiver_classes` (frozen edge, else that) is what consumers read — a `ReceiverClasses`, never a lone class string.
    - **Real vs synthetic branches** in worker code (`if synthetic { skip step }`). Synthetic paths run the same body, factored to a function. Termination concerns go on the dispatcher (seen-sets, depth caps) — not on the worker.
    - **Per-base / per-name lookup tables in core** for behavior plugins should own. The plugin trait carries the rule; core dispatches generically.
 
@@ -214,7 +214,7 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 2. **Reduce** via `ReducerRegistry` in `src/model/witnesses/`. Reducers in registration order — earlier entries claim first:
    - `PluginOverrideReducer` — Plugin-priority `Symbol(_) + InferredType` short-circuit. `WitnessSource::priority()` returns 100 for `Plugin(_)`; 10 for everything else.
    - `ReturnExprReducer` — `WitnessPayload::ReturnExpr(_)` shapes: `Concrete` / `Receiver` (substitutes `q.receiver`) / `Operator(RowOf(_))` / `UnionOnArgs` (dispatches `q.arity_hint`). See `docs/adr/return-expr.md`.
-   - `SymbolReturnArmFold` — `SymbolReturnArm(sid)` attachment; folds per-arm `Edge(Expr(body_span))` witnesses via `resolve_return_type` (1+ arms agree → `Some(t)`, disagree → `None`). `Symbol(sid)` carries one `Edge(SymbolReturnArm(sid))` chain witness per arm so consumers querying the symbol's return materialize through.
+   - `SymbolReturnArmFold` — `SymbolReturnArm(sid)` attachment; folds per-arm `Edge(Expr(body_span))` witnesses via `join_return_arms` — the lattice's one total join (`types.rs::join`, read by every arm/slot fold under the query's `ClassOrder`; arms nothing sits above become a canonical `Union`, widened past 4 arms — `docs/adr/union-types.md`). `Symbol(sid)` carries one `Edge(SymbolReturnArm(sid))` chain witness per arm so consumers querying the symbol's return materialize through.
    - `BranchArmFold` — agreement across ≥2 `branch_arm`-source `Edge` witnesses on `Variable` / `Expr` for ternary RHS.
    - `FrameworkAwareTypeFold` — folds `TypeObservation` (rep / class / bless / numeric / regex / string) using package's `FrameworkFact`. Class-identity dominates rep when frameworks agree (Mojo `$self->{x} = ...; return $self` keeps `ClassName`). Temporal: skips witnesses past the query point.
    - `ExprReturn` — `Expr(_) + InferredType` latest-wins.
@@ -256,7 +256,7 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
 8. `FileAnalysis::new(...)` — construct FA, build indices. A variable bound to a call reads its value through its flow edge (`Variable → Edge(Expr(rhs))`), so no binding is re-pushed as a value.
 9. `fa.finalize_post_walk()` — seal `base_*_count` for idempotent re-enrichment.
 
-`Builder::resolve_invocant_class_tree` is the **single** build-time symbolic-execution function (chain typing, return-arm refresh, invocant filling); `invocant_type_at_node` is its node-kind dispatcher. Adding a second is wrong; add cases. Query-time expression typing is **tree-free**: `FileAnalysis::expr_type_at_span(span, module_index)` is the one entry — it reads the `Expr(span)` witnesses the walk emits at every expression (`emit_expr_witness`, edges for name-dependent shapes) plus exact-span call-ref returns, materializing edges through the registry. `method_call_invocant_class(r, module_index)` resolves an invocant via it (no tree). `resolve_expression_type(node, …)` is now a thin `node → span → expr_type_at_span` adapter, degrading to a node-kind walk only for raw-cursor/incomplete-ERROR completion. There is no second structure-discovery walker to "keep in sync."
+`Builder::resolve_invocant_class_tree` is the **single** build-time symbolic-execution function (chain typing, return-arm refresh, invocant filling); `invocant_type_at_node` is its node-kind dispatcher. Adding a second is wrong; add cases. Query-time expression typing is **tree-free**: `FileAnalysis::expr_type_at_span(span, module_index)` is the one entry — it reads the `Expr(span)` witnesses the walk emits at every expression (`emit_expr_witness`, edges for name-dependent shapes) plus exact-span call-ref returns, materializing edges through the registry. `method_call_invocant_classes(r, module_index)` resolves an invocant via it (no tree). `resolve_expression_type(node, …)` is now a thin `node → span → expr_type_at_span` adapter, degrading to a node-kind walk only for raw-cursor/incomplete-ERROR completion. There is no second structure-discovery walker to "keep in sync."
 
 ### Worklist invariants
 

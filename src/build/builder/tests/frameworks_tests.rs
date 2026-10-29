@@ -1283,10 +1283,10 @@ export('not_an_export');
     assert!(fa.export_ok.is_empty());
 }
 
-/// Gate 5: `find_sub_for_call` (resolution path) must check `export_ok`, not
+/// Gate 5: `find_subs_for_call` (resolution path) must check `export_ok`, not
 /// just `export`. A name that Foo records only in `@EXPORT_OK` suppresses the
 /// diagnostic in symbols.rs (already checks both), but before this fix
-/// `signature_for_call` / goto-def would fall through because the resolution
+/// `signatures_for_call` / goto-def would fall through because the resolution
 /// path only tested `export`. Now both lists are checked.
 #[test]
 fn test_export_ok_resolves_cross_file() {
@@ -1317,8 +1317,8 @@ fn test_export_ok_resolves_cross_file() {
         "package My::App;\nuse Data::Fetcher;\nfetch_data('http://example.com');\n",
     );
 
-    // signature_for_call exercises find_sub_for_call → bare-import path.
-    let sig = consumer_fa.signature_for_call(
+    // signatures_for_call exercises find_subs_for_call → bare-import path.
+    let sig = consumer_fa.signatures_for_call(
         "fetch_data",
         false,
         None,
@@ -1326,8 +1326,8 @@ fn test_export_ok_resolves_cross_file() {
         Some(&idx),
     );
     assert!(
-        sig.is_some(),
-        "signature_for_call must resolve fetch_data via @EXPORT_OK, got None",
+        !sig.is_empty(),
+        "signatures_for_call must resolve fetch_data via @EXPORT_OK, got none",
     );
 }
 

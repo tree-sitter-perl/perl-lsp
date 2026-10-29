@@ -1271,7 +1271,7 @@ def f(h: Holder):
 
 /// A write to a member is an assignment to it, through any receiver: a
 /// declared attribute keeps its annotation over what is written to it,
-/// and an undeclared one whose writes disagree on the class has no value.
+/// and an undeclared one whose writes disagree on the class is either.
 #[cfg(feature = "python")]
 #[test]
 fn a_member_write_is_an_assignment_to_the_member() {
@@ -1315,7 +1315,11 @@ class Outer:
     let (defs, _, _) = landing(&idx, &path, Point::new(16, 25));
     assert_eq!(defs, [("mod.py".to_string(), 1)], "the annotation governs `made`");
     let (defs, _, _) = landing(&idx, &path, Point::new(18, 27));
-    assert_eq!(defs, [], "`either` is written a Widget and a Gadget");
+    assert_eq!(
+        defs,
+        [("mod.py".to_string(), 5), ("mod.py".to_string(), 1)],
+        "`either` is written a Widget and a Gadget, so it dispatches on both",
+    );
     let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
     assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
     let (defs, _, _) = landing(&idx, &path, Point::new(32, 32));
@@ -1418,9 +1422,9 @@ make().spin()
 }
 
 /// A receiver expression is typed by its value, never read as a class
-/// spelling: `self.either` (written two classes) and `self.unknown`
-/// (never written) type nothing, while a class name read still types
-/// the class.
+/// spelling: `self.either` (written two classes) is either class,
+/// `self.unknown` (never written) types nothing, and a class name read
+/// still types the class.
 #[cfg(feature = "python")]
 #[test]
 fn an_attribute_receiver_is_no_class_spelling() {
@@ -1450,7 +1454,11 @@ def make():
     let path = t.0.join("pkg/mod.py");
     let fa = idx.workspace_file_for_test(&path).unwrap();
     let recv = |at: Point| fa.method_call_invocant_type(fa.ref_at(at).unwrap(), Some(&idx));
-    assert_eq!(recv(Point::new(14, 27)), None, "a slot written two classes");
+    let either = recv(Point::new(14, 27)).expect("a slot written two classes");
+    let mut classes: Vec<String> =
+        either.receiver_arms().iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    classes.sort();
+    assert_eq!(classes, ["pkg.mod.Gadget", "pkg.mod.Widget"], "a slot written two classes is either");
     assert_eq!(recv(Point::new(16, 28)), None, "a slot never written");
     assert_eq!(
         recv(Point::new(19, 18)).and_then(|t| t.class_name().map(str::to_string)).as_deref(),

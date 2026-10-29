@@ -115,7 +115,7 @@ fn check_cursor_contracts(
     // a variable rename edits the bare name inside the sigil'd reference
     // span, so the edit is a sub-span of its reference site — outside ANY
     // reference span is the violation.
-    if cs.renameable() {
+    if cs.renameable() == Ok(true) {
         if let Ok(edits) = cs.rename_edits("zzz_consistency_probe") {
             for (loc, _text) in &edits {
                 let in_refs = refs_img.iter().any(|l| {

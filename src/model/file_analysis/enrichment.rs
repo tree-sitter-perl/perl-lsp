@@ -57,38 +57,11 @@ impl FileAnalysis {
             if shapes.is_empty() {
                 continue;
             }
-            let agreed = if shapes.windows(2).all(|w| w[0] == w[1]) {
-                shapes.pop().unwrap()
-            } else {
-                // disagree → widen: union of keys when every shape is
-                // keyed, OPEN (a key any caller passes may arrive);
-                // anything else declines.
-                let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
-                let mut all_keyed = true;
-                for sh in &shapes {
-                    match sh {
-                        InferredType::HashWithKeys { keys: ks, .. } => {
-                            for (k, v) in ks.iter() {
-                                match keys.iter_mut().find(|(ek, _)| ek == k) {
-                                    None => keys.push((k.clone(), v.clone())),
-                                    Some((_, ev)) => {
-                                        if *ev != *v {
-                                            *ev = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            all_keyed = false;
-                            break;
-                        }
-                    }
-                }
-                if !all_keyed {
-                    continue;
-                }
-                InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open: true }
+            // Every caller's shape, joined: keyed hashes keep every key any
+            // caller passes. Callers that pass no one shape type nothing.
+            let agreed = match crate::model::file_analysis::join_all(&shapes, &self.type_order(module_index)) {
+                Some(InferredType::Union(_) | InferredType::Unknown) | None => continue,
+                Some(t) => t,
             };
             // Anchored at the parameter's binding token (a write marker at
             // its declaration retires what lies strictly before it), else
@@ -107,48 +80,115 @@ impl FileAnalysis {
         }
     }
 
-    /// Materialize deferred plugin pattern emissions ([`GatedEmission`])
-    /// whose `ClassIsa` gate is now satisfied CROSS-FILE. Called from
-    /// `enrich_imported_types_with_keys` after the symbol/ref/witness
-    /// truncation, so the re-fired content sits above the baselines and is
-    /// re-derived every enrichment cycle (idempotent). Deterministic: gate
-    /// resolution goes through `class_isa_prefix` (the single MRO seam), and
-    /// symbols are minted with positional `SymbolId`s exactly as the builder
-    /// would have — a file enriched late converges to one built with the
-    /// ancestry known. Rule #10: the "should this synthesis apply?" question
-    /// is answered by asking the ancestry graph, never by a shape branch.
-    fn apply_gated_emissions(&mut self, module_index: Option<&dyn CrossFileLookup>) {
+    /// Which of this file's [`GatedEmission`]s fire under `module_index`,
+    /// one verdict per emission: each asks its [`Question`], so a file read
+    /// late converges to one built with its ancestry known. Emissions
+    /// asking the same question (one DBIC class's `add_columns` +
+    /// relationships) ask it once.
+    pub fn gate_verdicts(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<bool> {
+        let facts = InFile { fa: self, index: module_index };
+        let mut asked: Vec<(Question, bool)> = Vec::new();
+        self.plugin
+            .gated_emissions
+            .iter()
+            .map(|em| {
+                let question = em.question();
+                if let Some((_, fires)) = asked.iter().find(|(q, _)| *q == question) {
+                    return *fires;
+                }
+                let fires = question.decide(&facts) == Verdict::Yes;
+                asked.push((question, fires));
+                fires
+            })
+            .collect()
+    }
+
+    /// Every gated emission's content as if each gate fired. The producer
+    /// feeds (ref/sym rows, the reverse index, bridges) index these as
+    /// CANDIDATES; whether a gate holds is asked where a copy is handed to a
+    /// reader, so a candidate the gate refuses costs a wasted decode, never
+    /// a wrong answer.
+    pub fn gated_candidates(&self) -> GatedMint {
+        self.mint_gated(|_| true)
+    }
+
+    /// The symbols a listing adds to this file under `verdicts`, with no
+    /// view built. A symbol-evicted copy cannot dedup them against its own
+    /// symbols; a listing dedups its results.
+    pub fn shown_gated_symbols(&self, verdicts: &[bool]) -> Vec<Symbol> {
+        self.mint_gated(|i| verdicts.get(i).copied().unwrap_or(false)).symbols
+    }
+
+    /// Every name a gated emission could add to this file, as the rows key
+    /// them: its own presence rows (`held`), so a retrieval that must not
+    /// miss a view finds the file without the base rows claiming the names.
+    pub fn held_row_names(&self) -> Vec<String> {
         if self.plugin.gated_emissions.is_empty() {
-            return;
+            return Vec::new();
         }
+        let names = &self.pack.names;
+        let mint = self.gated_candidates();
+        let mut out: Vec<String> = mint.refs.iter().map(|r| r.match_key(names)).collect();
+        for s in &mint.symbols {
+            out.push(s.name.clone());
+            out.push(crate::model::conventions::name_match_key(&s.name, names));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Everything the relational rows store of this file.
+    pub fn row_seeds(&self) -> RowSeeds {
+        RowSeeds { refs: self.ref_row_seeds(), syms: self.sym_row_seeds(), held: self.held_row_names() }
+    }
+
+    /// A copy with the emissions `verdicts` fires applied: the view of a
+    /// gated file. The applied content sits above the enrichment baselines,
+    /// so a later enrichment of the copy truncates and re-applies it.
+    pub fn with_gated_emissions(&self, verdicts: &[bool]) -> FileAnalysis {
+        let mut copy = self.clone();
+        copy.apply_gated_emissions(verdicts);
+        copy.rebuild_enrichment_indices();
+        copy
+    }
+
+    fn apply_gated_emissions(&mut self, verdicts: &[bool]) {
+        let mint = self.mint_gated(|i| verdicts.get(i).copied().unwrap_or(false));
+        for sym in mint.symbols {
+            self.symbols.push(sym);
+        }
+        for r in mint.refs {
+            self.refs.push(r);
+        }
+        for w in mint.witnesses {
+            self.witnesses.push(w);
+        }
+    }
+
+    /// The symbols, refs and witnesses the emissions `fires` selects add to
+    /// this file, minted as the builder would have: positional `SymbolId`s
+    /// after the current symbols, and never a second copy of a symbol
+    /// already present (the builder's `apply_emit_action` dedup).
+    fn mint_gated(&self, fires: impl Fn(usize) -> bool) -> GatedMint {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        // Snapshot: the borrow of `self.plugin.gated_emissions` can't overlap the
-        // `&mut self` symbol/ref/witness pushes below.
-        let emissions = std::mem::take(&mut self.plugin.gated_emissions);
-        for em in &emissions {
-            let fires = em.gate_prefixes.iter().any(|prefix| {
-                class_isa_prefix(&em.package, prefix, &self.packages, module_index)
-            });
-            if !fires {
+        let mut mint = GatedMint::default();
+        for (i, em) in self.plugin.gated_emissions.iter().enumerate() {
+            if !fires(i) {
                 continue;
             }
             let scope = self.scope_at(em.scope_point).unwrap_or(ScopeId(0));
             let ns = Namespace::framework(em.plugin_id.clone());
             for gs in &em.symbols {
                 let pkg = gs.on_class.clone().or_else(|| Some(em.package.clone()));
-                // Same dedup the builder's `apply_emit_action` runs: never
-                // stack a second identical synthesized symbol.
-                let dup = self.symbols.iter().any(|s| {
-                    s.name == gs.name
-                        && s.kind == gs.kind
-                        && s.package == pkg
-                        && s.namespace == ns
-                });
-                if dup {
+                let same = |s: &Symbol| {
+                    s.name == gs.name && s.kind == gs.kind && s.package == pkg && s.namespace == ns
+                };
+                if self.symbols.iter().any(same) || mint.symbols.iter().any(same) {
                     continue;
                 }
-                let id = SymbolId(self.symbols.len() as u32);
-                self.symbols.push(Symbol {
+                let id = SymbolId((self.symbols.len() + mint.symbols.len()) as u32);
+                mint.symbols.push(Symbol {
                     id,
                     name: gs.name.clone(),
                     kind: gs.kind,
@@ -167,11 +207,11 @@ impl FileAnalysis {
                 });
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
-                    // the builder's Method emit. Class-scoped methods also get
-                    // the `PackageSymbol{package,name} → Edge(Symbol(sid))`
-                    // mirror the fold writeback would have pushed, so cross-
-                    // file return-type queries resolve the relationship shape.
-                    self.witnesses.push(Witness {
+                    // the builder's Method emit, plus the
+                    // `PackageSymbol{package,name}` mirror the fold writeback
+                    // would have pushed so cross-file return-type queries
+                    // resolve the relationship shape.
+                    mint.witnesses.push(Witness {
                         attachment: WitnessAttachment::Symbol(id),
                         source: WitnessSource::Plugin(em.plugin_id.clone()),
                         payload: WitnessPayload::InferredType(rt.clone()),
@@ -179,7 +219,7 @@ impl FileAnalysis {
                     });
                     if matches!(gs.kind, SymKind::Method | SymKind::Sub) {
                         if let Some(class) = &pkg {
-                            self.witnesses.push(Witness {
+                            mint.witnesses.push(Witness {
                                 attachment: WitnessAttachment::PackageSymbol {
                                     package: class.clone(),
                                     name: gs.name.clone(),
@@ -193,7 +233,7 @@ impl FileAnalysis {
                 }
             }
             for gr in &em.refs {
-                self.refs.push(Ref {
+                mint.refs.push(Ref {
                     kind: gr.kind.clone(),
                     span: gr.span,
                     scope,
@@ -205,25 +245,7 @@ impl FileAnalysis {
                 });
             }
         }
-        self.plugin.gated_emissions = emissions;
-    }
-
-    /// Materialize deferred gated emissions into a WORKSPACE-resident cached
-    /// copy, standalone (not inside the full enrichment pass). Used by the
-    /// index-completion pass so `whole_present` — the view every cross-file
-    /// goto-def / references reader consults — sees a DBIC result class's
-    /// synthesized accessors WITHOUT paying the per-query enriched overlay.
-    /// Idempotent: `apply_gated_emissions` dedups against existing symbols, so
-    /// a second call is a no-op; the emissions sit above the symbol table's
-    /// enrichment baseline and a later full enrichment re-derives them the
-    /// same way. Rebuilds the name/scope indices so `symbols_named` /
-    /// `sub_info_view` find them.
-    pub fn materialize_gated_emissions(&mut self, module_index: &dyn CrossFileLookup) {
-        if self.plugin.gated_emissions.is_empty() {
-            return;
-        }
-        self.apply_gated_emissions(Some(module_index));
-        self.rebuild_enrichment_indices();
+        mint
     }
 
 }
@@ -448,7 +470,8 @@ impl FileAnalysis {
         // reaching `DBIx::Class` through a cross-file intermediate base).
         // Runs first so the synthesized symbols exist for the rest of the
         // pass and the final `rebuild_enrichment_indices`. See `GatedEmission`.
-        self.apply_gated_emissions(module_index);
+        let verdicts = self.gate_verdicts(module_index);
+        self.apply_gated_emissions(&verdicts);
 
         // Loader-config param typing: join my `loader_config_params`
         // markers with caller-side `PluginLoad` facts across the index.
@@ -808,6 +831,7 @@ impl FileAnalysis {
                 module_index,
                 package_parents: &self.packages,
                 app_surface_consumers: &self.plugin.app_surface_consumers,
+                lattice: crate::model::conventions::lattice_for(&self.language),
             };
             crate::model::witnesses::emit_mutation_extension_witnesses(
                 &mut self.witnesses,
@@ -892,7 +916,7 @@ impl FileAnalysis {
     /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
     /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
     /// when present, else cross-file resolution of the call's invocant via
-    /// `method_call_invocant_class` with the module index — which lights up
+    /// `method_call_invocant_classes` with the module index — which lights up
     /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
     /// `$self->_minion->enqueue`) that only type once other modules are in
     /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
@@ -902,31 +926,40 @@ impl FileAnalysis {
         gated: &'a ProvisionalDispatch,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> GateResult<&'a DispatchCandidate> {
-        let recv = self.dispatch_receiver_class(gated, module_index);
-        gated.resolve_for(recv.as_deref(), &self.packages, module_index)
+        // A union receiver applies the handler when any arm passes the gate.
+        let mut out = GateResult::ReceiverUntyped;
+        for recv in self.dispatch_receiver_classes(gated, module_index) {
+            match gated.resolve_for(Some(&recv), &self.packages, module_index) {
+                applies @ GateResult::Applies(_) => return applies,
+                other => out = other,
+            }
+        }
+        out
     }
 
-    /// Resolve the receiver class for a gated dispatch candidate: the
+    /// Resolve the receiver classes for a gated dispatch candidate: the
     /// build-time hint, else the call's invocant via the MethodCall ref at
     /// `call_span` (cross-file aware through the bag). Uses only the gate-input
     /// accessors, never the gated handler payload.
-    fn dispatch_receiver_class(
+    fn dispatch_receiver_classes(
         &self,
         gated: &ProvisionalDispatch,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<String> {
-        gated.receiver_hint().cloned().or_else(|| {
-            let call_span = gated.call_span();
-            let dispatcher = gated.dispatcher();
-            self.refs
-                .iter()
-                .find(|r| {
-                    r.span == call_span
-                        && r.target_name == dispatcher
-                        && matches!(r.kind, RefKind::MethodCall { .. })
-                })
-                .and_then(|r| self.method_call_invocant_class(r, module_index))
-        })
+    ) -> ReceiverClasses {
+        if let Some(hint) = gated.receiver_hint() {
+            return [hint.clone()].into_iter().collect();
+        }
+        let call_span = gated.call_span();
+        let dispatcher = gated.dispatcher();
+        self.refs
+            .iter()
+            .find(|r| {
+                r.span == call_span
+                    && r.target_name == dispatcher
+                    && matches!(r.kind, RefKind::MethodCall { .. })
+            })
+            .map(|r| self.method_call_invocant_classes(r, module_index))
+            .unwrap_or_default()
     }
 
     /// Query-time handler call-sites in THIS file: every gated dispatch

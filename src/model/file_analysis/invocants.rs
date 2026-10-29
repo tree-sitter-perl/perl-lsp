@@ -36,50 +36,34 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let class_name = self.method_call_invocant_class(r, module_index);
+                    let classes = self.method_call_invocant_classes(r, module_index);
                     // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
                     let method = r.unqualified_target_name(self.names());
-                    // Try inheritance-aware resolution first
-                    if let Some(ref cn) = class_name {
-                        match self.resolve_method_in_ancestors(cn, method, module_index) {
-                            Some(MethodResolution::Local { sym_id, .. }) => {
-                                return Some((sym_id, true));
-                            }
-                            Some(MethodResolution::CrossFile { .. }) => {
-                                // Cross-file: no local SymbolId. Match
-                                // a local symbol only when its package
-                                // equals the resolved class — no
-                                // same-name cross-class latching.
-                                for &sid in self.symbols_named(method) {
-                                    let sym = self.symbol(sid);
-                                    if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                                    if sym.package.as_deref() == Some(cn.as_str()) {
-                                        return Some((sid, true));
-                                    }
-                                }
-                            }
-                            None => {}
+                    // Inheritance-aware resolution first, on each class the
+                    // receiver may be; the first arm with a local anchor
+                    // answers (the CandidateSet groups the arms cross-file).
+                    for cn in classes.iter() {
+                        if let Some(MethodResolution::Local { sym_id, .. }) =
+                            self.resolve_method_in_ancestors(cn, method, module_index)
+                        {
+                            return Some((sym_id, true));
                         }
-                        // No local match, and the class is known but
-                        // has no local decl — return a synthetic
-                        // target by name filtered to the class, so
-                        // collect_refs_for_target still walks refs
-                        // correctly. If there's NO matching symbol on
-                        // the class locally, produce no target —
-                        // better than cross-linking a same-named
-                        // method on a different class.
+                        // Cross-file, or no definer: match a local symbol
+                        // only when its package equals the resolved class —
+                        // no same-name cross-class latching.
                         for &sid in self.symbols_named(method) {
                             let sym = self.symbol(sid);
                             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                            if sym.package.as_deref() == Some(cn.as_str()) {
+                            if sym.package.as_deref() == Some(cn) {
                                 return Some((sid, true));
                             }
                         }
-                        // Class known but not defined locally — no
-                        // local symbol to anchor on. Caller may still
-                        // collect refs via `refs_to` at the LSP layer,
-                        // but highlight/definition within this file
-                        // have nothing to return.
+                    }
+                    // Class known but not defined locally — no local symbol
+                    // to anchor on. Caller may still collect refs via
+                    // `refs_to` at the LSP layer, but highlight/definition
+                    // within this file have nothing to return.
+                    if !classes.is_empty() {
                         return None;
                     }
                     // Invocant class couldn't be pinned at all —
@@ -95,13 +79,13 @@ impl FileAnalysis {
                 RefKind::FieldAccess { .. } => {
                     // The value walk only, and no name-match fallback: an
                     // unpinned receiver is an honest miss for a field.
-                    let cn = self.method_call_invocant_class(r, module_index)?;
-                    if let Some(MethodResolution::Local { sym_id, .. }) =
-                        self.resolve_field_in_ancestors(&cn, r.unqualified_target_name(self.names()), module_index)
-                    {
-                        return Some((sym_id, true));
-                    }
-                    return None;
+                    let field = r.unqualified_target_name(self.names());
+                    return self.method_call_invocant_classes(r, module_index).iter().find_map(|cn| {
+                        match self.resolve_field_in_ancestors(cn, field, module_index) {
+                            Some(MethodResolution::Local { sym_id, .. }) => Some((sym_id, true)),
+                            _ => None,
+                        }
+                    });
                 }
                 RefKind::PackageRef => {
                     for &sid in self.symbols_named(&r.target_name) {
@@ -205,10 +189,7 @@ impl FileAnalysis {
         t: &InferredType,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(String, InferredType)> {
-        let mut t = t;
-        while let Some(inner) = t.optional_inner() {
-            t = inner;
-        }
+        let Some(t) = t.defined_part() else { return Vec::new() };
         let mut out: Vec<(String, InferredType)> = Vec::new();
         if let Some(p) = t.as_parametric() {
             if let Some(spelling) = p.exact_spelling() {
@@ -325,21 +306,23 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
-        // The whole ladder, most-specific first: a member the winning spec
-        // doesn't define falls through to the next rung (ultimately the
-        // primary) — same never-pruned order goto-def presents.
-        for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
-            if let Some(t) =
-                self.method_return_type_on(&class, &recv, member, module_index, arg_count)
-            {
-                return Some(t);
+        receiver.join_over_arms(&self.type_order(module_index), |arm| {
+            // The whole `dispatch_ladder_of`, most-specific first: a member
+            // the winning spec doesn't define falls through to the next
+            // rung (ultimately the primary).
+            for (class, recv) in self.dispatch_ladder_of(arm, module_index) {
+                if let Some(t) =
+                    self.method_return_type_on(&class, &recv, member, module_index, arg_count)
+                {
+                    return Some(t);
+                }
+                let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
+                    continue;
+                };
+                return Some(self.substitute_member_type(raw, &class, &recv, module_index));
             }
-            let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
-                continue;
-            };
-            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
-        }
-        None
+            None
+        })
     }
 
     /// A VALUE member's type on a receiver — what a `FieldAccess` ref
@@ -352,13 +335,12 @@ impl FileAnalysis {
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
-            let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
-                continue;
-            };
-            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
-        }
-        None
+        receiver.join_over_arms(&self.type_order(module_index), |arm| {
+            self.dispatch_ladder_of(arm, module_index).into_iter().find_map(|(class, recv)| {
+                let raw = self.field_type_on_class(&class, member, module_index)?;
+                Some(self.substitute_member_type(raw, &class, &recv, module_index))
+            })
+        })
     }
 
     /// A field's declared type with the class's template params substituted
@@ -414,54 +396,66 @@ impl FileAnalysis {
             || module_index.is_some_and(|mi| mi.get_cached(name).is_some())
     }
 
-    /// The class a `MethodCall` ref's method lookup STARTS at — the
-    /// dispatch projection over `method_call_invocant_type` (THE invocant
-    /// ladder). A qualified method token (`Foo::m` / `::m` / `SUPER::m`)
-    /// overrides where lookup starts without changing what the receiver
-    /// IS, so the token arm lives here in the projection, not in the
-    /// value ladder (Parametric arg-claiming on `$rs->SUPER::search`
-    /// still sees the resultset). Every other shape projects the
-    /// ladder's type through `dispatch_class_of` plus the DBIC
-    /// source-moniker resolve.
-    pub fn method_call_invocant_class(
+    /// The classes a member access's lookup STARTS at — one per value its
+    /// receiver may be (`receiver_arms`), resolved fresh: the dispatch
+    /// projection over `method_call_invocant_type` (THE invocant ladder).
+    /// A qualified method token (`Foo::m` / `::m` / `SUPER::m`) overrides
+    /// where lookup starts without changing what the receiver IS, so the
+    /// token arm lives here in the projection, not in the value ladder
+    /// (Parametric arg-claiming on `$rs->SUPER::search` still sees the
+    /// resultset). Every other shape projects the ladder's type through
+    /// `dispatch_classes_of` plus the DBIC source-moniker resolve. A
+    /// consumer reads `receiver_classes`, which prefers the frozen edge;
+    /// this is the resolution that edge freezes.
+    pub fn method_call_invocant_classes(
         &self,
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<String> {
-        let invocant = r.member_site()?.invocant;
-        let cn = 'cn: {
-            // A qualified method token names its dispatch class explicitly
-            // — Perl ignores the invocant's class for the lookup, so the
-            // token wins ahead of invocant resolution. (A plugin-bridged
-            // token is never method-qualified; the ladder's bridged arm
-            // owns it.)
-            if matches!(invocant, crate::model::conventions::Invocant::Name(_)) {
-                use crate::model::conventions::MethodToken;
-                match MethodToken::parse(&r.target_name) {
-                    MethodToken::Super(name) => {
-                        // SUPER searches the enclosing package's parents'
-                        // MRO; the dispatch class is whichever ancestor
-                        // actually defines it (multi-parent safe). `None`
-                        // when the index isn't available yet (build-time
-                        // stamp of a dependency file, cross-file parent) —
-                        // every query-time consumer re-resolves with the
-                        // index: open docs via the enrichment re-stamp,
-                        // goto-def via the cross-file path,
-                        // references/rename via `refs_to`'s SUPER arm.
-                        let encl = self.enclosing_class_for_scope(r.scope)?;
-                        break 'cn self
-                            .resolve_super_method(&encl, name, module_index)
-                            .map(|res| res.class().to_string())?;
-                    }
-                    token => {
-                        if let Some(pkg) = token.literal_package() {
-                            break 'cn pkg.to_string();
-                        }
+    ) -> ReceiverClasses {
+        self.invocant_classes_under(r, module_index, ReceiverPolicy::Navigate)
+    }
+
+    /// `method_call_invocant_classes` under an explicit `ReceiverPolicy`.
+    pub fn invocant_classes_under(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+        policy: ReceiverPolicy,
+    ) -> ReceiverClasses {
+        let Some(site) = r.member_site() else { return ReceiverClasses::default() };
+        // A qualified method token names its dispatch class explicitly —
+        // Perl ignores the invocant's class for the lookup, so the token
+        // wins ahead of invocant resolution. (A plugin-bridged token is
+        // never method-qualified; the ladder's bridged arm owns it.)
+        if matches!(site.invocant, crate::model::conventions::Invocant::Name(_)) {
+            use crate::model::conventions::MethodToken;
+            match MethodToken::parse(&r.target_name) {
+                MethodToken::Super(name) => {
+                    // SUPER searches the enclosing package's parents' MRO;
+                    // the dispatch class is whichever ancestor actually
+                    // defines it (multi-parent safe). Empty when the index
+                    // isn't available yet (build-time stamp of a dependency
+                    // file, cross-file parent) — every query-time consumer
+                    // re-resolves with the index: open docs via the
+                    // enrichment re-stamp, goto-def via the cross-file path,
+                    // references/rename via `refs_to`'s SUPER arm.
+                    let class = self
+                        .enclosing_class_for_scope(r.scope)
+                        .and_then(|encl| self.resolve_super_method(&encl, name, module_index))
+                        .map(|res| self.resolve_dbic_source_moniker(res.class().to_string(), None, module_index));
+                    return class.into_iter().collect();
+                }
+                token => {
+                    if let Some(pkg) = token.literal_package() {
+                        return [self.resolve_dbic_source_moniker(pkg.to_string(), None, module_index)]
+                            .into_iter()
+                            .collect();
                     }
                 }
             }
-            self.method_call_invocant_type(r, module_index)
-                .and_then(|t| self.dispatch_class_of(&t, module_index))?
+        }
+        let Some(t) = self.invocant_type_under(r, module_index, policy) else {
+            return ReceiverClasses::default();
         };
         // A DBIC resultset row projects to `ClassName(<source moniker>)` —
         // the short registration name (`Artist`), not the FQ result class
@@ -470,7 +464,38 @@ impl FileAnalysis {
         // `$row->method` start the ancestor walk from a real class. Only a
         // single-segment name that names no real class is a moniker
         // candidate, so ordinary class receivers are untouched.
-        Some(self.resolve_dbic_source_moniker(cn, None, module_index))
+        let mut out = ReceiverClasses::default();
+        for class in self.dispatch_classes_of(&t, module_index) {
+            out.push(self.resolve_dbic_source_moniker(class, None, module_index));
+        }
+        out
+    }
+
+    /// The classes a member access dispatches on: the edge the build froze
+    /// on the ref when there is one, else `method_call_invocant_classes`.
+    /// The one API every receiver consumer reads.
+    pub fn receiver_classes(&self, r: &Ref, module_index: Option<&dyn CrossFileLookup>) -> ReceiverClasses {
+        match r.method_target() {
+            // The frozen edge can carry an UNRESOLVED DBIC source moniker
+            // (`Artist`) when it was stamped at build with no index (a closed
+            // call-site file — enrichment re-stamps OPEN docs only); map it
+            // here, index in hand. No-op for a class that already resolves.
+            Some(t) => [self.resolve_dbic_source_moniker(t.invocant_class().to_string(), None, module_index)]
+                .into_iter()
+                .collect(),
+            None => self.method_call_invocant_classes(r, module_index),
+        }
+    }
+
+    /// The class each value a type may be dispatches against
+    /// (`receiver_arms` through `dispatch_class_of`), deduplicated in arm
+    /// order. Empty when no arm is an object.
+    pub fn dispatch_classes_of(
+        &self,
+        t: &InferredType,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> ReceiverClasses {
+        t.receiver_arms().iter().filter_map(|arm| self.dispatch_class_of(arm, module_index)).collect()
     }
 
     /// Resolve a DBIC source moniker (`Artist`) to the FQ result class
@@ -666,7 +691,7 @@ impl FileAnalysis {
     /// The `InferredType` of a `MethodCall` ref's invocant — **the**
     /// invocant ladder, resolved via the witness bag. No tree, no text
     /// fallback, no per-reader parallel paths: every reader routes
-    /// through here, and `method_call_invocant_class` is its dispatch
+    /// through here, and `method_call_invocant_classes` is its dispatch
     /// projection. Token-blind by design: a `SUPER::`/`Foo::` method
     /// qualifier overrides where lookup starts, never what the receiver
     /// IS, so the token arm lives in the projection while Parametric
@@ -716,6 +741,17 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
+        self.invocant_type_under(r, module_index, ReceiverPolicy::Navigate)
+    }
+
+    /// `method_call_invocant_type` under an explicit `ReceiverPolicy`.
+    fn invocant_type_under(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+        policy: ReceiverPolicy,
+    ) -> Option<InferredType> {
+        let navigate = policy == ReceiverPolicy::Navigate;
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
         let invocant = match invocant {
@@ -749,7 +785,7 @@ impl FileAnalysis {
             if InvocantText::parse(invocant).is_element_place() {
                 if let Some(t) = self.inferred_type_via_bag_ctx(invocant, span.start, module_index)
                 {
-                    if self.dispatch_class_of(&t, module_index).is_some() {
+                    if !self.dispatch_classes_of(&t, module_index).is_empty() {
                         return Some(t);
                     }
                 }
@@ -777,7 +813,7 @@ impl FileAnalysis {
                             &self.refs[recv_idx].target_name,
                             Some(0),
                         ) {
-                            if self.dispatch_class_of(&t, module_index).is_some() {
+                            if !self.dispatch_classes_of(&t, module_index).is_empty() {
                                 return Some(t);
                             }
                         }
@@ -794,7 +830,7 @@ impl FileAnalysis {
         // row-class narrowing survives the hop.
         if let Some(span) = invocant_span {
             if let Some(t) = self.expr_type_at_span(*span, module_index) {
-                if self.dispatch_class_of(&t, module_index).is_some() {
+                if !self.dispatch_classes_of(&t, module_index).is_empty() {
                     return Some(t);
                 }
             }
@@ -819,21 +855,19 @@ impl FileAnalysis {
                 if contained && !is_self {
                     if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
                         let recv = &self.refs[recv_idx];
-                        if let Some(recv_class) =
-                            self.method_call_invocant_class(recv, module_index)
-                        {
-                            let recv_method = recv.unqualified_target_name(self.names());
-                            if crate::model::conventions::is_constructor_name(recv_method) {
-                                return Some(InferredType::ClassName(recv_class));
-                            }
-                            if let Some(t) = self.find_method_return_type(
-                                &recv_class,
-                                recv_method,
-                                module_index,
-                                None,
-                            ) {
-                                return Some(t);
-                            }
+                        let recv_method = recv.unqualified_target_name(self.names());
+                        let answers: Vec<InferredType> = self
+                            .method_call_invocant_classes(recv, module_index)
+                            .into_iter()
+                            .filter_map(|recv_class| {
+                                if crate::model::conventions::is_constructor_name(recv_method) {
+                                    return Some(InferredType::ClassName(recv_class));
+                                }
+                                self.find_method_return_type(&recv_class, recv_method, module_index, None)
+                            })
+                            .collect();
+                        if let Some(t) = join_all(&answers, &self.type_order(module_index)) {
+                            return Some(t);
                         }
                         // A chain receiver's invocant text is the whole
                         // receiver expression, never a variable or
@@ -862,7 +896,8 @@ impl FileAnalysis {
                 // enclosing class — identity outranks a classless value
                 // type (`$self->{count}++` observations must not demote
                 // `$self` to a plain hashref).
-                if self.dispatch_class_of(&t, module_index).is_none()
+                if navigate
+                    && self.dispatch_classes_of(&t, module_index).is_empty()
                     && self.is_receiver_at(invocant, point)
                 {
                     return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
@@ -871,7 +906,7 @@ impl FileAnalysis {
             }
             // Enclosing-class fallback for an untyped receiver. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if self.is_receiver_at(invocant, point) {
+            if navigate && self.is_receiver_at(invocant, point) {
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;
@@ -943,7 +978,7 @@ impl FileAnalysis {
             .any(|s| matches!(s.kind, SymKind::Variable) && s.name == name)
     }
 
-    /// Test-only wrapper over the private `resolve_invocant_class`.
+    /// Test-only wrapper over the private `invocant_classes_in_scope`.
     #[cfg(test)]
     pub(crate) fn resolve_invocant_class_test(
         &self,
@@ -951,15 +986,15 @@ impl FileAnalysis {
         scope: ScopeId,
         point: Point,
     ) -> Option<String> {
-        self.resolve_invocant_class(invocant, scope, point)
+        self.invocant_classes_in_scope(invocant, scope, point).single().map(str::to_string)
     }
 
     /// Resolve an invocant string to a class name. Internal helper
     /// used by string-based completion / hover-context paths that
     /// don't have a `Ref` in hand. The ref-aware
-    /// `method_call_invocant_class` is preferred everywhere a
+    /// `receiver_classes` is preferred everywhere a
     /// `&Ref` is available.
-    pub(super) fn resolve_invocant_class(&self, invocant: &str, scope: ScopeId, point: Point) -> Option<String> {
+    pub(super) fn invocant_classes_in_scope(&self, invocant: &str, scope: ScopeId, point: Point) -> ReceiverClasses {
         use crate::model::conventions::InvocantText;
         let enclosing = || {
             for scope_id in &self.scope_chain(scope) {
@@ -973,28 +1008,29 @@ impl FileAnalysis {
             }
             None
         };
-        match InvocantText::parse(invocant) {
+        let class = match InvocantText::parse(invocant) {
             InvocantText::CurrentPackage | InvocantText::PositionalReceiver => enclosing(),
             InvocantText::NonScalar(_) => None,
             InvocantText::Scalar(_) => {
                 // Scalar invocant → infer type via the witness bag so
-                // framework/branch/arity rules refine the answer.
-                self.inferred_type_via_bag(invocant, point)
-                    .and_then(|t| t.class_name().map(|s| s.to_string()))
-                    .or_else(|| {
-                        // Enclosing-class fallback only applies to
-                        // receivers — other variable invocants
-                        // whose type we don't know stay None, not poisoned
-                        // with the surrounding package. Otherwise `$r->to(...)`
-                        // with `$r` un-typed would pretend `to` is a method on
-                        // the enclosing package (MyApp), and goto-def on the
-                        // method name lands on `package MyApp;`.
-                        if self.is_receiver_at(invocant, point) {
-                            enclosing()
-                        } else {
-                            None
-                        }
-                    })
+                // framework/branch/arity rules refine the answer; a class
+                // per value it may be.
+                let classes = self
+                    .inferred_type_via_bag(invocant, point)
+                    .map(|t| self.dispatch_classes_of(&t, None))
+                    .unwrap_or_default();
+                if !classes.is_empty() {
+                    return classes;
+                }
+                // Enclosing-class fallback only applies to receivers —
+                // other variable invocants whose type we don't
+                // know stay None, not poisoned with the surrounding package.
+                // Otherwise `$r->to(...)` with `$r` un-typed would pretend
+                // `to` is a method on the enclosing package (MyApp), and
+                // goto-def on the method name lands on `package MyApp;`.
+                self.is_receiver_at(invocant, point)
+                    .then(enclosing)
+                    .flatten()
             }
             InvocantText::Bareword(_) => {
                 // Bareword invocant: ambiguous between class-name and
@@ -1008,11 +1044,13 @@ impl FileAnalysis {
                 if let Some(InferredType::ClassName(c)) =
                     self.sub_return_type_at_arity(bare, Some(0))
                 {
-                    return Some(c);
+                    Some(c)
+                } else {
+                    Some(self.class_spelling_identity(invocant, point))
                 }
-                Some(self.class_spelling_identity(invocant, point))
             }
-        }
+        };
+        class.into_iter().collect()
     }
 
     /// Find a method definition within a class/package.
@@ -1067,16 +1105,7 @@ impl FileAnalysis {
             .candidate_defining_sub_in_package(&module, &on_class, &name)
             .or_else(|| idx.get_cached(&module))?;
         let whole = idx.whole_present(&cached);
-        let is_bridge = whole.plugin.namespaces.iter().any(|ns| {
-            ns.bridges
-                .iter()
-                .any(|b| matches!(b, Bridge::Class(c) if c == &on_class))
-                && ns.entities.iter().any(|sid| {
-                    whole.symbols.get(sid.0 as usize).is_some_and(|s| {
-                        matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
-                    })
-                })
-        });
+        let is_bridge = whole.bridges_callable(&on_class, &name);
         is_bridge.then_some(module)
     }
 
@@ -1283,14 +1312,7 @@ impl FileAnalysis {
                 return true;
             }
         }
-        self.plugin.namespaces.iter().any(|ns| {
-            ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls))
-                && ns.entities.iter().any(|sid| {
-                    self.symbols.get(sid.0 as usize).is_some_and(|s| {
-                        matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name
-                    })
-                })
-        })
+        self.bridges_callable(cls, name)
     }
 
     /// Any non-contract Sub/Method named `name` in this file,
@@ -1320,16 +1342,18 @@ impl FileAnalysis {
     }
 
     /// Collect every Handler visible from `class_name` whose `dispatchers`
-    /// list contains `dispatcher`. Walks the inheritance chain and at
-    /// each level pulls Handlers from (1) this file's symbols with
-    /// matching owner, (2) this file's `plugin_namespaces` bridged to
-    /// the current class, and (3) cross-file via
-    /// `module_index.for_each_entity_bridged_to` — rule #8.
+    /// list names any of `dispatchers` (an empty `dispatchers` takes every
+    /// Handler on the class). Walks the inheritance chain and at
+    /// each level pulls the Handlers bridged to the current class, from
+    /// this file and cross-file — rule #8. A class owns its Handlers by
+    /// bridging them (`FileAnalysis::for_each_entity_bridged_to`).
     ///
     /// Shares `for_each_ancestor_class` with `resolve_method_in_ancestors`
-    /// so the two dispatch paths can't drift on MRO rules. Both
-    /// `dispatch_target_completions` and `class_has_dispatch_handlers`
-    /// in `symbols.rs` funnel through here.
+    /// so the two dispatch paths can't drift on MRO rules. Every
+    /// handler-by-class reader in `lsp/symbols/signature.rs` (dispatch
+    /// completion, plugin-delegated `dispatch_targets_for`, handler
+    /// signature help, `class_has_dispatch_handlers`) funnels through here.
+    /// A symbol is visited once per class it is reached from.
     ///
     /// `visit(symbol, provenance)` — provenance is `"this file"` for
     /// local hits and the cached module's filename for cross-file
@@ -1337,36 +1361,23 @@ impl FileAnalysis {
     pub fn for_each_dispatch_handler_on_class(
         &self,
         class_name: &str,
-        dispatcher: &str,
+        dispatchers: &[&str],
         module_index: Option<&dyn CrossFileLookup>,
         mut visit: impl FnMut(&Symbol, &str),
     ) {
-        let disp_matches = |dd: &[String]| dd.iter().any(|d| d == dispatcher);
+        let disp_matches = |dd: &[String]| {
+            dispatchers.is_empty() || dd.iter().any(|d| dispatchers.contains(&d.as_str()))
+        };
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            // (1) Local Handler symbols owned by this class.
-            for sym in &self.symbols {
-                if let SymbolDetail::Handler {
-                    owner: HandlerOwner::Class(n), dispatchers, ..
-                } = &sym.detail
-                {
-                    if n == cls && disp_matches(dispatchers) {
+            let _ = self.for_each_entity_bridged_to(cls, |sym| {
+                if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
+                    if disp_matches(dispatchers) {
                         visit(sym, "this file");
                     }
                 }
-            }
-            // (2) Local plugin-namespace bridge to `cls`.
-            for ns in &self.plugin.namespaces {
-                if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
-                for sym_id in &ns.entities {
-                    let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                    if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
-                        if disp_matches(dispatchers) {
-                            visit(sym, "this file");
-                        }
-                    }
-                }
-            }
-            // (3) Cross-file plugin-namespace bridge.
+                std::ops::ControlFlow::Continue(())
+            });
+            // Cross-file.
             if let Some(idx) = module_index {
                 idx.for_each_entity_bridged_to(cls, &mut |_mod, cached, sym| {
                     if let SymbolDetail::Handler { dispatchers, .. } = &sym.detail {
