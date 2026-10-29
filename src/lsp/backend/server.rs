@@ -632,10 +632,11 @@ impl LanguageServer for Backend {
                 // sits outside the CandidateSet and still needs this file's
                 // closure scope; the set scopes itself at construction.
                 // Inside the `cross_file_words` caps gate — a pack-only lane.
+                let canon = cx.open_docs().file_path_of(&uri);
                 let scoped = crate::model::file_analysis::ScopedLookup::new(
                     base_idx,
                     &analysis.pack.include_closure,
-                    self_path.as_deref(),
+                    canon.as_ref(),
                     crate::model::file_analysis::VisibilityAxis::IncludeClosure,
                 );
                 if let Some((target, span, _)) =
@@ -1148,12 +1149,12 @@ impl LanguageServer for Backend {
                 // a macro / enum-constant / global whose token no ref captures
                 // — show its definition line.
                 if caps.cross_file_words {
-                    let self_path = uri.to_file_path().ok();
+                    let canon = cx.open_docs().file_path_of(&uri);
                     // Inside the `cross_file_words` caps gate — pack-only.
                     let scoped = crate::model::file_analysis::ScopedLookup::new(
                         base_idx,
                     &analysis.pack.include_closure,
-                    self_path.as_deref(),
+                    canon.as_ref(),
                     crate::model::file_analysis::VisibilityAxis::IncludeClosure,
                 );
                     if let Some((_, _, line)) =
@@ -1195,7 +1196,7 @@ impl LanguageServer for Backend {
                     doc.text.clone(),
                     doc.tree.clone(),
                     doc.language,
-                    doc.path.clone(),
+                    doc.path.as_ref().map(|_| doc.canonical_path.clone()),
                     doc.stable_outline.package_lines().to_vec(),
                 ),
                 None => return self.not_ready_or_null(uri),
@@ -1215,7 +1216,7 @@ impl LanguageServer for Backend {
                         &tree,
                         point,
                         language,
-                        path.as_deref(),
+                        path.as_ref(),
                         cx.index(),
                     )
                 })
@@ -1547,7 +1548,7 @@ impl LanguageServer for Backend {
                 visit(url.clone(), &doc.analysis, &[]);
             });
             cx.index().for_each_registered_file(&mut |cached| {
-                if open_paths.contains(&cached.path) {
+                if open_paths.contains(cached.path.as_path()) {
                     return;
                 }
                 let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {

@@ -426,7 +426,7 @@ impl ModuleIndex {
         path: std::path::PathBuf,
         analysis: Arc<FileAnalysis>,
     ) -> SurfaceDirty {
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let sd = self.record_and_dirty(&path, &analysis, SurfaceWrite::Background);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
@@ -672,7 +672,7 @@ impl ModuleIndex {
     /// token for the file itself and for providers whose facts aren't
     /// surface-covered (a body edit re-registers with a new generation,
     /// where a surface fingerprint deliberately stands still).
-    pub(crate) fn bump_registration_gen(&self, path: &std::path::Path) {
+    pub(crate) fn bump_registration_gen(&self, path: &crate::util::canonical_path::CanonicalPath) {
         self.core.mint_registration_gen(path);
     }
 
@@ -739,12 +739,12 @@ impl ModuleIndex {
                 });
             }
         }
-        if !ENRICHING.with(|s| s.borrow_mut().insert(cached.path.clone())) {
+        if !ENRICHING.with(|s| s.borrow_mut().insert(cached.path.to_path_buf())) {
             DECLINED.with(|c| c.set(c.get() + 1));
             crate::util::ghost_stats::count("enriched_snapshot.cycle_decline");
             return None;
         }
-        let _entered = Entered(cached.path.clone());
+        let _entered = Entered(cached.path.to_path_buf());
         let declined_before = DECLINED.with(|c| c.get());
         // BYTE-bounded first (enriched copies are whole analyses — 64 of a
         // tree's biggest generated modules would quietly re-pin the
@@ -897,7 +897,7 @@ impl ModuleIndex {
             let mut order = self.enriched_order.lock().unwrap();
             order.retain(|p| p != path);
             order.push_back(path.clone());
-            let total_bytes = |order: &std::collections::VecDeque<std::path::PathBuf>| {
+            let total_bytes = |order: &std::collections::VecDeque<crate::util::canonical_path::CanonicalPath>| {
                 order
                     .iter()
                     .filter_map(|p| self.enriched.get(p))
@@ -1162,7 +1162,7 @@ impl ModuleIndex {
         parts: WorkspaceRegistrationParts,
     ) {
         let WorkspaceRegistrationParts { arc, names, surface: _ } = parts;
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, arc));
         self.all_files.insert(cached.path.clone(), cached.clone());
@@ -1505,7 +1505,7 @@ impl ModuleIndex {
                     crate::util::ghost_stats::count("sweep.memo_invalidated");
                     return None;
                 }
-                memo.map.get(&(cached.path.clone(), want_bag)).cloned()
+                memo.map.get(&(cached.path.to_path_buf(), want_bag)).cloned()
             });
             if let Some(hit) = memoed {
                 crate::util::ghost_stats::count("sweep.memo_hit");
@@ -1565,7 +1565,7 @@ impl ModuleIndex {
                                     );
                                 }
                                 memo.map
-                                    .insert((cached.path.clone(), want_bag), Arc::clone(&full));
+                                    .insert((cached.path.to_path_buf(), want_bag), Arc::clone(&full));
                             }
                         }
                     });
@@ -1745,7 +1745,7 @@ impl ModuleIndex {
         let PackRegistrationParts { arc: analysis, feed, specs: specializes, surface: _ } = parts;
         let feed = &feed;
         let specializes = &specializes;
-        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
         // The registration record FIRST — before all_files/all_defs/cache

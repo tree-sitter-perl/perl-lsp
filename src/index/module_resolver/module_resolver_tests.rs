@@ -77,7 +77,7 @@ sub new {
     );
 
     let core = IndexCore::new();
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/x/Demo/Has/Event.pm"), analysis));
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
     core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
@@ -94,7 +94,7 @@ sub new {
     // protects against None-over-Some).
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
-    let cached2 = Arc::new(CachedModule::new(PathBuf::from("/y/Demo/Has/Event.pm"), analysis2));
+    let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
     core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
@@ -223,7 +223,7 @@ fn import_tier_strip_gates_on_persistence() {
     let fa = crate::build::builder::build(&tree, source.as_bytes());
     assert!(!fa.witnesses.is_empty());
     let cm = Arc::new(CachedModule::new(
-        PathBuf::from("/inc/Strip.pm"),
+        crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/inc/Strip.pm")),
         Arc::new(fa),
     ));
 
@@ -401,11 +401,11 @@ fn a_workspace_file_still_shadows_an_inc_provider_of_the_same_name() {
     let inc_fa = build(inc_src);
     let ws_fa = build(ws_src);
 
-    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(inc_pm.clone(), inc_fa))));
+    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(inc_pm.clone()), inc_fa))));
     idx.register_workspace_module(ws_pm.clone(), ws_fa);
 
     assert_eq!(
-        idx.get_cached("Shadowed").map(|c| c.path.clone()),
+        idx.get_cached("Shadowed").map(|c| c.path.to_path_buf()),
         Some(std::fs::canonicalize(&ws_pm).unwrap_or(ws_pm.clone())),
         "the workspace file must hold the name slot",
     );
@@ -485,7 +485,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
         let axis = VisibilityAxis::for_origin(fa, None, &idx, crate::model::file_analysis::PackVisibility::Host);
         let scoped = ScopedLookup::new(&idx, &empty, None, axis);
-        scoped.get_cached("Twin").map(|c| c.path.clone())
+        scoped.get_cached("Twin").map(|c| c.path.to_path_buf())
     };
 
     assert_eq!(

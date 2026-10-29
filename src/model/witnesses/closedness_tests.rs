@@ -32,7 +32,7 @@ impl World {
     fn provide(&mut self, class: &str, path: &str, src: &str, fp: u64) -> &mut Self {
         let p = PathBuf::from(path);
         self.providers.entry(class.to_string()).or_default().push(Arc::new(
-            CachedModule::new(p.clone(), Arc::new(build(src))),
+            CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(p.clone()), Arc::new(build(src))),
         ));
         self.fingerprints.insert(p, fp);
         self

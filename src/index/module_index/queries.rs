@@ -311,7 +311,7 @@ impl ModuleIndex {
     }
 
     /// Return cached module path only — never does I/O.
-    pub fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    pub fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         self.core.cache
             .get(module_name)
             .and_then(|entry| entry.as_ref().map(|m| m.path.clone()))

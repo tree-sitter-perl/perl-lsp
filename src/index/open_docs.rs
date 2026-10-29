@@ -7,7 +7,7 @@
 //! index copy (it is the fresher text); walks claim open paths first and
 //! skip the index entry for them.
 
-use std::path::PathBuf;
+use crate::util::canonical_path::CanonicalPath;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -35,8 +35,14 @@ pub enum FileRole {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum FileKey {
-    Path(PathBuf),
+    Path(CanonicalPath),
     Url(Url),
+}
+
+/// A document URL's canonical spelling: the file it names, or — for a URL
+/// that names no file — its own text, which no index fact is filed under.
+fn canonical_spelling(url: &Url) -> CanonicalPath {
+    CanonicalPath::resolve(url.to_file_path().unwrap_or_else(|_| std::path::PathBuf::from(url.as_str())))
 }
 
 /// The unified store.
@@ -85,7 +91,7 @@ impl OpenDocs {
                 return false;
             }
         }
-        let doc = if !driver.caps().hub_enrichment {
+        let mut doc = if !driver.caps().hub_enrichment {
             match Document::new_routed(text, driver, path.clone()) {
                 Some(d) => d,
                 None => return false,
@@ -96,14 +102,25 @@ impl OpenDocs {
                 None => return false,
             }
         };
+        doc.canonical_path = canonical_spelling(&url);
         self.open.insert(url, doc);
         true
     }
 
     /// Install an already-built Document — the CLI stages its query file
     /// this way, with the analysis it built and enriched itself.
-    pub fn insert_open(&self, url: Url, doc: Document) {
+    pub fn insert_open(&self, url: Url, mut doc: Document) {
+        doc.canonical_path = canonical_spelling(&url);
         self.open.insert(url, doc);
+    }
+
+    /// The canonical file path of an open document, minted when it entered
+    /// the store. `None` when the URL is not open or names no file.
+    ///
+    /// Takes a shard read lock: the `for_each_open` deadlock rule applies.
+    pub fn file_path_of(&self, url: &Url) -> Option<CanonicalPath> {
+        url.to_file_path().ok()?;
+        self.open.get(url).map(|doc| doc.canonical_path.clone())
     }
 
     /// Close an open file. Its index copy (the on-disk text) answers from

@@ -66,7 +66,7 @@ impl<'a> CandidateSet<'a> {
         // defining header — walk it directly, applying the same owner test.
         // Only reached when both keyed lookups miss (a namespace-qualified
         // member), so the broad scan stays off the hot path.
-        let mut hit: Option<(String, Span)> = None;
+        let mut hit: Option<(CanonicalPath, Span)> = None;
         idx.for_each_cached_file(&mut |cached| {
             if !connected(cached) || Url::from_file_path(&cached.path).is_err() {
                 return;
@@ -74,13 +74,13 @@ impl<'a> CandidateSet<'a> {
             // Broad scan, cold tail only (both keyed lookups missed) — the
             // rehydration LRU bounds the per-file cost for evicted copies.
             if let Some(span) = member_span_in(&idx.whole_present(cached)) {
-                let p = cached.path.to_string_lossy().into_owned();
-                if hit.as_ref().is_none_or(|(hp, _)| p < *hp) {
-                    hit = Some((p, span));
+                // String order, so the pick is the lexically first spelling.
+                if hit.as_ref().is_none_or(|(hp, _)| cached.path.to_string_lossy() < hp.to_string_lossy()) {
+                    hit = Some((cached.path.clone(), span));
                 }
             }
         });
-        hit.map(|(p, span)| RefLocation::at(FileKey::Path(PathBuf::from(p)), span, AccessKind::Declaration))
+        hit.map(|(p, span)| RefLocation::at(FileKey::Path(p), span, AccessKind::Declaration))
     }
 
     /// Decl→def preference (pack routing): when a resolved location is a
@@ -628,7 +628,7 @@ impl<'a> CandidateSet<'a> {
         let Some(idx) = self.idx() else {
             return Vec::new();
         };
-        let line_loc = |path: PathBuf, line: u32| -> RefLocation {
+        let line_loc = |path: CanonicalPath, line: u32| -> RefLocation {
             let p = tree_sitter::Point::new(line as usize, 0);
             RefLocation::at(FileKey::Path(path), Span { start: p, end: p }, AccessKind::Declaration)
         };

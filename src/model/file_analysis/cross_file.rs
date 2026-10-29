@@ -9,12 +9,12 @@ use super::*;
 /// its source. Shared by reference-count so async handlers don't deep-copy.
 #[derive(Debug)]
 pub struct CachedModule {
-    pub path: std::path::PathBuf,
+    pub path: crate::util::canonical_path::CanonicalPath,
     pub analysis: std::sync::Arc<FileAnalysis>,
 }
 
 impl CachedModule {
-    pub fn new(path: std::path::PathBuf, analysis: std::sync::Arc<FileAnalysis>) -> Self {
+    pub fn new(path: crate::util::canonical_path::CanonicalPath, analysis: std::sync::Arc<FileAnalysis>) -> Self {
         CachedModule { path, analysis }
     }
 
@@ -865,7 +865,7 @@ pub trait CrossFileLookup {
     }
     /// The on-disk path a module name resolves to (Perl module goto-def).
     /// Default `None` for impls without a path map.
-    fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, _module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         None
     }
     /// The querying file's visibility scope when this lookup is bound to one
@@ -900,7 +900,7 @@ pub trait CrossFileLookup {
         let mut seen: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
         self.for_each_cached(&mut |_n, cached| {
-            if seen.insert(cached.path.clone()) {
+            if seen.insert(cached.path.to_path_buf()) {
                 f(cached);
             }
         });
@@ -1232,20 +1232,19 @@ impl VisibilityAxis {
 
 impl<'a> ScopedLookup<'a> {
     /// Build the visibility set from a querying file's include closure plus its
-    /// own path (a file always sees the classes it declares itself). Canonicalize
-    /// the self path so it matches the candidates' canonical `CachedModule.path`.
+    /// own path (a file always sees the classes it declares itself). The self
+    /// path is canonical so it matches the candidates' `CachedModule.path`.
     pub fn new(
         inner: &'a dyn CrossFileLookup,
         include_closure: &path_intern::ClosureList,
-        self_path: Option<&std::path::Path>,
+        self_path: Option<&crate::util::canonical_path::CanonicalPath>,
         axis: VisibilityAxis,
     ) -> Self {
         let mut visible: std::collections::HashSet<String> =
             include_closure.iter_strs().map(|a| a.as_ref().to_owned()).collect();
         let self_path = self_path.map(|p| {
-            let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            visible.insert(canon.to_string_lossy().into_owned());
-            canon
+            visible.insert(p.to_string_lossy().into_owned());
+            p.to_path_buf()
         });
         ScopedLookup { inner, visible, self_path, axis }
     }
@@ -1534,7 +1533,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String> {
         self.inner.module_declaring_method_in_package(name, class)
     }
-    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         // Scope-aware: the path must name the same candidate the scoped
         // `get_cached` answers with, or a consumer that pairs this path with a
         // scoped range splices two different files (wrong file at a
@@ -1634,7 +1633,7 @@ pub struct WidenedClassRef {
 /// A same-leaf class standing in for `identity` in a file `index` holds.
 #[derive(Debug, Clone)]
 pub struct WidenedStandIn {
-    pub path: std::path::PathBuf,
+    pub path: crate::util::canonical_path::CanonicalPath,
     pub span: Span,
     pub class: String,
 }
