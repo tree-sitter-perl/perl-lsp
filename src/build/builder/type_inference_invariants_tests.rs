@@ -437,3 +437,15 @@ fn operand_uses_do_not_outrank_the_assigned_value() {
     // With no value in hand, the use still answers.
     assert_eq!(fa.inferred_type_via_bag("$s", at), Some(InferredType::String));
 }
+
+/// A block deref observes a representation like the arrow form does: it
+/// answers only when no value does.
+#[test]
+fn block_derefs_are_observations() {
+    let src = "sub f {\n    my ($s, $t) = @_;\n    my $c = $s . \"\";\n    my @a = @{$c};\n    my %h = %{$t};\n    return $c;\n}\n";
+    let tree = parse(src);
+    let fa = crate::build::builder::build(&tree, src.as_bytes());
+    let at = tree_sitter::Point { row: 5, column: 12 };
+    assert_eq!(fa.inferred_type_via_bag("$c", at), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$t", at), Some(InferredType::HashRef));
+}

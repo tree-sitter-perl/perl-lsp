@@ -75,11 +75,11 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        // If this scalar is inside a block-deref, infer the type from the outer sigil.
+        // A scalar inside a block-deref is observed as the outer sigil's representation.
         // Parent chain: scalar → expression_statement → block → varname → outer_node
         if node.kind() == "scalar" {
-            if let Some((deref_type, context)) = self.block_deref_context(node) {
-                self.push_var_type_constraint(node, context, deref_type);
+            if let Some((rep, context)) = self.block_deref_context(node) {
+                self.push_rep_observation(node, context, rep);
             }
         }
 
@@ -255,12 +255,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Walk up from a scalar to detect block-deref context.
-    /// Returns the inferred type and a context node (for constraint span) if inside
-    /// @{$x}, %{$y}, or &{$z}.
+    /// Returns the representation the deref observes and a context node (for
+    /// the observation's span) if inside @{$x}, %{$y}, or &{$z}.
     ///
     /// Parent chain: scalar → expression_statement → block → varname → outer_node
     /// where outer_node.kind() is "array" (@{}), "hash" (%{}), or "function" (&{}).
-    pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(InferredType, Node<'a>)> {
+    pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(TypeObservation, Node<'a>)> {
         let stmt = node.parent()?;
         if stmt.kind() != "expression_statement" { return None; }
         let block = stmt.parent()?;
@@ -269,12 +269,12 @@ impl<'a> Builder<'a> {
         if varname.kind() != "varname" { return None; }
         let outer = varname.parent()?;
         match outer.kind() {
-            "array" => Some((InferredType::ArrayRef, outer)),
-            "hash" => Some((InferredType::HashRef, outer)),
+            "array" => Some((TypeObservation::ArrayRefAccess, outer)),
+            "hash" => Some((TypeObservation::HashRefAccess, outer)),
             "function" => {
                 if let Ok(text) = outer.utf8_text(self.source) {
                     if text.starts_with("&{") {
-                        return Some((InferredType::CodeRef { return_edge: None }, outer));
+                        return Some((TypeObservation::CodeRefInvocation, outer));
                     }
                 }
                 None
