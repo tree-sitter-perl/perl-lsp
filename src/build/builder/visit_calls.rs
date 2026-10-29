@@ -102,13 +102,12 @@ impl<'a> Builder<'a> {
             // record it as an open-switching KeyWrite at the escape span,
             // and the mutation-extension pass widens the shape from that
             // point on — temporal, so reads BEFORE the first escape keep
-            // their closed shape. One site per var suffices.
+            // their closed shape. One site per variable suffices.
             if access == AccessKind::Read
                 && text.starts_with('$')
                 && !crate::cst::is_element_access_base(node)
-                && !self.escape_recorded.contains(text)
+                && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
-                self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
             // Write with the variable itself as assignment target =
@@ -116,21 +115,17 @@ impl<'a> Builder<'a> {
             // scalar is the access base and the Write came from the
             // grandparent rule) is a shape mutation instead — modeled by
             // the mutation-extension pass, not a trust break.
-            if access == AccessKind::Write
+            let reassigns = access == AccessKind::Write
                 && (text.starts_with('$') || text.starts_with('%'))
-                && !crate::cst::is_element_access_base(node)
-            {
-                self.reassigned_scalars.insert(text.to_string());
-            }
+                && !crate::cst::is_element_access_base(node);
             // Hash variables escape only by reference-taking (`\%h`):
             // a bare `%h` in a call or list FLATTENS TO COPIES — the
             // callee can't add keys to the original, so it's not an
             // escape (unlike a scalar, whose value IS the shared ref).
             if text.starts_with('%')
                 && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
-                && !self.escape_recorded.contains(text)
+                && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
-                self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
             // Fully-qualified read (`$Foo::Bar::x`): the span is the bare
@@ -138,6 +133,9 @@ impl<'a> Builder<'a> {
             // survives, mirroring the FQ-call narrowing. The full
             // `target_name` keeps the path; `qualified_var_target()` decodes
             // `(pkg, sigil+basename)` for cross-package resolution.
+            if reassigns {
+                self.reassigning_refs.push(self.refs.len());
+            }
             self.add_ref(
                 RefKind::Variable,
                 ref_span,

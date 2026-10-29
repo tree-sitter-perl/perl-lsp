@@ -25,16 +25,13 @@ const STUB_VERSION: &str = "10";
 /// before a stub-consuming warm scan.
 pub fn validate_stub_version(conn: &Connection) {
     let cur: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key = 'stub_version'", [], |r| r.get(0))
+        .query_row(sql::META_GET.registered(), params!["stub_version"], |r| r.get(0))
         .ok();
     if cur.as_deref() == Some(STUB_VERSION) {
         return;
     }
-    let _ = conn.execute("DELETE FROM stubs", []);
-    let _ = conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('stub_version', ?1)",
-        params![STUB_VERSION],
-    );
+    let _ = conn.execute(sql::STUBS_CLEAR.registered(), []);
+    let _ = conn.execute(sql::META_SET.registered(), params!["stub_version", STUB_VERSION]);
 }
 
 /// Encode by reference (`&[T]` and `Vec<T>` share a bincode encoding) so
@@ -71,14 +68,11 @@ pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
 /// The single speller of stub-row removal — every modules-row rewrite or
 /// invalidation routes here so a schema change edits one string.
 pub fn delete_stub(conn: &Connection, path: &str) {
-    let _ = conn.execute("DELETE FROM stubs WHERE path = ?1", params![path]);
+    let _ = conn.execute(sql::STUB_DELETE.registered(), params![path]);
 }
 
 pub fn save_stub(conn: &Connection, path: &str, blob: &[u8]) {
-    let r = conn.execute(
-        "INSERT OR REPLACE INTO stubs (path, stub) VALUES (?1, ?2)",
-        params![path, blob],
-    );
+    let r = conn.execute(sql::STUB_SAVE.registered(), params![path, blob]);
     if let Err(e) = r {
         log::warn!("Failed to save warm stub for '{}': {}", path, e);
     }
@@ -91,9 +85,7 @@ pub fn save_stub(conn: &Connection, path: &str, blob: &[u8]) {
 /// fresh-looking row.
 pub fn save_stub_if_current(conn: &Connection, path: &str, blob: &[u8], stamp: (i64, i64)) {
     let _ = conn.execute(
-        "INSERT OR REPLACE INTO stubs (path, stub)
-         SELECT ?1, ?2 FROM modules
-         WHERE path = ?1 AND mtime_secs = ?3 AND file_size = ?4",
+        sql::STUB_SAVE_IF_CURRENT.registered(),
         params![path, blob, stamp.0, stamp.1],
     );
 }
@@ -103,7 +95,7 @@ pub fn save_stub_if_current(conn: &Connection, path: &str, blob: &[u8], stamp: (
 /// writing this generation's stubs under the other generation's stamp
 /// would serve mixed meanings to the next warm.
 pub fn stub_version_current(conn: &Connection) -> bool {
-    conn.query_row("SELECT value FROM meta WHERE key = 'stub_version'", [], |r| {
+    conn.query_row(sql::META_GET.registered(), params!["stub_version"], |r| {
         r.get::<_, String>(0)
     })
     .map(|v| v == STUB_VERSION)
