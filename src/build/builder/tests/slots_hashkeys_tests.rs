@@ -1413,3 +1413,23 @@ fn levels_on_a_write_path_are_not_read_as_drills() {
     let names: Vec<&str> = inner.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(names, ["system", "emeter"]);
 }
+
+/// Escapes and reassignments belong to a variable, not to its spelling:
+/// one sub handing its `$p` to a call must not use up another sub's escape
+/// (the FHEM HttpUtils false unknown-hash-key), and one sub reassigning its
+/// `$q` must not silence another sub's typo.
+#[test]
+fn escapes_and_reassignments_are_per_variable() {
+    let src = "\
+package Foo;
+sub a1 { my $p = { url => 1 }; fetch($p); }
+sub a2 { my $p = { url => 1 }; fetch($p); print $p->{header}; }
+sub b1 { my $q = { url => 1 }; $q = {}; }
+sub b2 { my $q = { url => 1 }; print $q->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 4)]);
+}

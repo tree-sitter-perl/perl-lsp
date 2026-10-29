@@ -373,7 +373,7 @@ struct Builder<'a> {
     /// keyed by what each name resolves to (`consts.rs`).
     consts: consts::ConstTable,
     /// Variable/field declarations by `(scope, sigiled name)`, in walk
-    /// order — the walk-time half of variable visibility, for `const_key`.
+    /// order — the walk-time half of variable visibility, for `binding_key_in`.
     var_decls: std::collections::HashMap<(ScopeId, String), Vec<SymbolId>>,
     /// Names declared via `use constant` (NAME and block forms), per the
     /// enclosing package. A standalone bareword whose text is in this set is
@@ -543,16 +543,18 @@ struct Builder<'a> {
     /// `FileAnalysis.attr_accessors`.
     attr_projections: Vec<crate::model::file_analysis::AttrProjection>,
 
-    /// Vars whose first escape site is already recorded as an
+    /// Variables whose first escape site is already recorded as an
     /// open-switching `KeyWrite` (walk-local dedup — one escape write
-    /// per var is enough: it widens the shape from that point on, and
+    /// per variable is enough: it widens the shape from that point on, and
     /// the mutation-extension pass charges one bag query per record).
-    escape_recorded: std::collections::HashSet<String>,
+    /// Keyed by binding: two subs' `my $p` are two variables.
+    escape_recorded: std::collections::HashSet<consts::BindingKey>,
 
-    /// Scalars reassigned after declaration (`$v = …` targeting the
-    /// variable itself; element writes go to `key_writes` instead).
-    /// Flushed into `FileAnalysis.reassigned_scalars`.
-    reassigned_scalars: std::collections::HashSet<String>,
+    /// The `Variable` refs that reassign their variable (`$v = …` targeting
+    /// the variable itself; element writes go to `key_writes` instead).
+    /// Resolved to their symbols into `FileAnalysis.reassigned_vars` once
+    /// `resolve_variable_refs` has bound them.
+    reassigning_refs: Vec<usize>,
 
     /// `$var->{key} = …` writes in walk order — input to the
     /// mutation-extension pass (shape extension / open-widening).

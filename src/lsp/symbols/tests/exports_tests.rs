@@ -1165,6 +1165,56 @@ my $silent = $taken{anything};
     assert!(keys[0].contains("%config"), "names the hash variable: {:?}", keys);
 }
 
+/// A slot's shape can live only in a PARENT's file, written through the
+/// grandparent's spelling (`my $self = Grand->new; $self->{_area} = {..}`):
+/// the parent file states `Field{Grand, _area}`, never `Field{Base, _area}`.
+/// The child's `Field{Base, _area}` reaches it through `Base.pm`'s own bag
+/// re-keyed to the grandparent — a hop the candidate fan-out's on-path skip
+/// must not take with it.
+#[test]
+fn test_unknown_key_diagnostic_through_parent_file_ancestry() {
+    let module = |name: &str, src: &str| {
+        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(format!("/fake/{name}.pm")),
+            std::sync::Arc::new(parse_analysis(src)),
+        )))
+    };
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+    idx.insert_cache(
+        "Grand",
+        module("Grand", "package Grand;\nsub new { my $class = shift; return bless {}, $class }\n1;\n"),
+    );
+    idx.insert_cache(
+        "Base",
+        module(
+            "Base",
+            "\
+package Base;
+our @ISA = qw(Grand);
+sub new { my $class = shift; my $self = Grand->new(); $self->{_area} = { _layout => 1 }; bless $self, $class; return $self }
+1;
+",
+        ),
+    );
+    let analysis = parse_analysis(
+        "\
+package Kid;
+our @ISA = qw(Base);
+sub draw { my $self = shift; return $self->{_area}->{_typo} }
+1;
+",
+    );
+    let diags = collect_diagnostics(&analysis, &idx, DiagnosticOptions::default());
+    let keys: Vec<&str> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unknown-hash-key"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(keys.len(), 1, "the typo against Base's slot shape: {:?}", keys);
+    assert!(keys[0].contains("'_typo'") && keys[0].contains("_layout"), "{:?}", keys);
+}
+
 /// Expression-base spelling: `cfg()->{kye}` hints off the producer's
 /// closed return shape — no variable in hand, the drill's Projected
 /// witness carries the (base, key) pair. Known keys stay silent, and

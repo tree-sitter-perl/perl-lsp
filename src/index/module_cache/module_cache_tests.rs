@@ -2205,7 +2205,7 @@ fn a_cleared_conclusion_row_is_re_baked_to_the_same_map() {
 /// `invalidate_generation` is the "this path's persisted derivation is void"
 /// eraser — it takes the modules row, the stub and the ref rows. The
 /// conclusion map is a derivation of that same blob, and leaving it behind
-/// risks a wrong answer rather than a slow one: `moc_cross_file_primary`
+/// risks a wrong answer rather than a slow one: `class_candidates`
 /// consults the map before it decodes anything, and `Outcome::Answer`
 /// short-circuits the chase.
 ///
