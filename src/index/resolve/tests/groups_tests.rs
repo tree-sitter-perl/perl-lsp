@@ -1691,7 +1691,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/vis/use.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/vis/use.c"))),
             tree_sitter::Point { row: 1, column: 16 }, // on OP_VIS_A
             Some(&idx),
             OverrideScope::default(),
@@ -1741,7 +1741,7 @@ mod pack_symmetry {
         let cs2 = resolve(
             &store,
             &origin2.analysis,
-            FileKey::Path(PathBuf::from("/fake/vis/use2.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/vis/use2.c"))),
             tree_sitter::Point { row: 1, column: 16 },
             Some(&idx),
             OverrideScope::default(),
@@ -1778,7 +1778,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &fa,
-            FileKey::Path(PathBuf::from("/fake/dd/one.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/dd/one.c"))),
             tree_sitter::Point { row: 0, column: 11 }, // on the decl's name
             None,
             OverrideScope::default(),
@@ -1807,7 +1807,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/dd/state.h")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/dd/state.h"))),
             tree_sitter::Point { row: 0, column: 18 }, // on `g_state`
             Some(&idx),
             OverrideScope::default(),
@@ -1868,7 +1868,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/mt/writer.cc")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/mt/writer.cc"))),
             tree_sitter::Point { row: 1, column: 12 }, // on `Add`
             Some(&idx),
             OverrideScope::default(),
@@ -1896,7 +1896,7 @@ mod pack_symmetry {
         let cs2 = resolve(
             &store,
             &hdr_origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/mt/memtable.h")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/mt/memtable.h"))),
             tree_sitter::Point { row: 1, column: 7 }, // on `Add` in the decl
             Some(&idx),
             OverrideScope::default(),
@@ -1947,7 +1947,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/inc/lib.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/inc/lib.c"))),
             tree_sitter::Point { row: 0, column: 4 }, // on the def's name
             Some(&idx),
             OverrideScope::default(),
@@ -2000,7 +2000,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(dir.join("use.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(dir.join("use.c"))),
             tree_sitter::Point { row: 1, column: 16 }, // on OP_HOV_A
             Some(&idx),
             OverrideScope::default(),
@@ -2020,7 +2020,7 @@ mod pack_symmetry {
         let cs_blank = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(dir.join("use.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(dir.join("use.c"))),
             tree_sitter::Point { row: 2, column: 0 }, // the closing `}` line
             Some(&idx),
             OverrideScope::default(),
@@ -2096,7 +2096,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin,
-            FileKey::Path(hpath),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(hpath)),
             tree_sitter::Point::new(0, 24),
             Some(&idx),
             OverrideScope::default(),

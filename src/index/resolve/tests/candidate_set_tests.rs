@@ -299,7 +299,7 @@ fn complete_qualified_path_pack_gathers_owner_members_only() {
     let cs = resolve(
         &store,
         &fa,
-        FileKey::Path(PathBuf::from("/fake/use.cpp")),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/use.cpp"))),
         tree_sitter::Point { row: 8, column: 11 },
         None,
         OverrideScope::default(),

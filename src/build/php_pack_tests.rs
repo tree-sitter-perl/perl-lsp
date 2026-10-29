@@ -558,7 +558,7 @@ fn php_landing(
     let p = std::path::PathBuf::from(path);
     let fa = idx.workspace_file_for_test(&p).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(p), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p)), at, Some(idx), OverrideScope::default());
     let short = |k: &FileKey| match k {
         FileKey::Path(p) => p.strip_prefix("/fake/php").unwrap().display().to_string(),
         FileKey::Url(u) => u.to_string(),
