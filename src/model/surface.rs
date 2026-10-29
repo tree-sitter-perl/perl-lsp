@@ -348,16 +348,10 @@ impl Surface {
             v.dedup();
             v
         };
-        let mut plugin_bridges: Vec<String> = feed
-            .plugin_namespaces
-            .iter()
-            .flat_map(|ns| {
-                ns.bridges.iter().map(|b| {
-                    let crate::model::file_analysis::Bridge::Class(c) = b;
-                    c.clone()
-                })
-            })
-            .collect();
+        let mut plugin_bridges: Vec<String> =
+            crate::model::file_analysis::bridge_classes(feed.symbols, feed.plugin_namespaces)
+                .map(str::to_string)
+                .collect();
         plugin_bridges.sort_unstable();
         plugin_bridges.dedup();
         let mut macros: Vec<MacroSurface> = feed

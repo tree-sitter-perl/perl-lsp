@@ -187,6 +187,47 @@ pub enum Bridge {
     Class(String),
 }
 
+/// Every class this file's entities are reachable from: each namespace
+/// bridge, and the owner of each class-owned Handler. Owning a handler IS
+/// bridging it to the owner — one stored fact, read as both.
+pub(crate) fn bridge_classes<'a>(
+    symbols: &'a [Symbol],
+    namespaces: &'a [PluginNamespace],
+) -> impl Iterator<Item = &'a str> {
+    let bridged = namespaces.iter().flat_map(|ns| ns.bridges.iter().map(|Bridge::Class(c)| c.as_str()));
+    let owners = symbols.iter().filter_map(|s| match &s.detail {
+        SymbolDetail::Handler { owner: HandlerOwner::Class(c), .. } => Some(c.as_str()),
+        _ => None,
+    });
+    bridged.chain(owners)
+}
+
+/// The entities this file makes visible from `class`, each once: the
+/// entities of namespaces bridged to it, and the Handlers it owns.
+pub(crate) fn for_each_entity_bridged_to<'a>(
+    symbols: &'a [Symbol],
+    namespaces: &'a [PluginNamespace],
+    class: &str,
+    mut visit: impl FnMut(&'a Symbol) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    for ns in namespaces {
+        if !ns.bridges.iter().any(|Bridge::Class(c)| c == class) { continue; }
+        for id in &ns.entities {
+            let Some(sym) = symbols.get(id.0 as usize) else { continue };
+            if seen.insert(*id) { visit(sym)?; }
+        }
+    }
+    for sym in symbols {
+        if matches!(&sym.detail, SymbolDetail::Handler { owner: HandlerOwner::Class(c), .. } if c == class)
+            && seen.insert(sym.id)
+        {
+            visit(sym)?;
+        }
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
 /// Fictional "app surface" class — the synthetic ancestor that the
 /// Mojolicious app / controller / command classes (the manifest-declared
 /// consumer set, see `FrameworkPlugin::app_surface_consumers`) all
@@ -817,3 +858,33 @@ pub struct KeyTypoSite {
     pub spelling: Option<String>,
 }
 
+
+impl FileAnalysis {
+    /// Every class this file's entities are reachable from
+    /// (see [`bridge_classes`]).
+    pub fn bridge_classes(&self) -> impl Iterator<Item = &str> {
+        bridge_classes(self.symbols.as_slice(), &self.plugin.namespaces)
+    }
+
+    /// The entities this file makes visible from `class`, each once
+    /// (see [`for_each_entity_bridged_to`]).
+    pub fn for_each_entity_bridged_to<'a>(
+        &'a self,
+        class: &str,
+        visit: impl FnMut(&'a Symbol) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
+        for_each_entity_bridged_to(self.symbols.as_slice(), &self.plugin.namespaces, class, visit)
+    }
+
+    /// Does this file bridge a Sub/Method named `name` onto `class`?
+    pub fn bridges_callable(&self, class: &str, name: &str) -> bool {
+        self.for_each_entity_bridged_to(class, |s| {
+            if matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        })
+        .is_break()
+    }
+}

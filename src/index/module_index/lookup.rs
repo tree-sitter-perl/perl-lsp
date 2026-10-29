@@ -196,23 +196,14 @@ impl ModuleIndex {
             // Namespaces ride the never-evicted plugin lane, so symbols are
             // the only evictable axis this read touches.
             let whole = self.symbols_present(&cached);
-            for ns in &whole.plugin.namespaces {
-                let bridges_class = ns.bridges.iter().any(|b|
-                    matches!(b, crate::model::file_analysis::Bridge::Class(c) if c == class_name));
-                if !bridges_class { continue; }
-                // Namespace membership IS the filter — if this namespace
-                // bridges to `class_name`, every entity it owns is
-                // visible from `class_name`. No `sym.package` gate: the
-                // plugin picks ONE canonical home package and the
-                // namespace's bridges control visibility, so no
-                // per-bridge Method fan-out is needed.
-                for sym_id in &ns.entities {
-                    let idx = sym_id.0 as usize;
-                    let Some(sym) = whole.symbols().get(idx) else { continue };
-                    if visit(&mod_name, &cached, sym).is_break() {
-                        return;
-                    }
-                }
+            // Bridging IS the filter: no `sym.package` gate, since the plugin
+            // picks ONE canonical home package and the bridges control
+            // visibility, so no per-bridge Method fan-out is needed.
+            if whole
+                .for_each_entity_bridged_to(class_name, |sym| visit(&mod_name, &cached, sym))
+                .is_break()
+            {
+                return;
             }
             }
         }

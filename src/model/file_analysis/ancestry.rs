@@ -548,14 +548,17 @@ impl FileAnalysis {
             }
         }
         // (b) Local plugin-namespace entities bridged to `cls`.
-        for ns in self.plugin.namespaces.iter().filter(|_| reaches_callables) {
-            if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
-            for sym_id in &ns.entities {
-                let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                if sym.name == method_name {
-                    return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
+        if reaches_callables {
+            let mut hit = None;
+            let _ = self.for_each_entity_bridged_to(cls, |sym| {
+                if matches!(sym.kind, SymKind::Sub | SymKind::Method) && sym.name == method_name {
+                    hit = Some(sym.id);
+                    return std::ops::ControlFlow::Break(());
                 }
+                std::ops::ControlFlow::Continue(())
+            });
+            if let Some(sym_id) = hit {
+                return Some(MethodResolution::Local { class: cls.to_string(), sym_id });
             }
         }
         // (c) Cross-file: the cached module for `cls` itself (real
@@ -1021,39 +1024,33 @@ impl FileAnalysis {
             }
         }
 
-        // Local plugin-namespace entities bridged to this class. The
-        // same-file equivalent of `for_each_entity_bridged_to` — plugin
-        // namespaces in THIS FileAnalysis whose bridges include
-        // `class_name`. Namespace membership is the sole filter (per
-        // `for_each_entity_bridged_to` docs); entity packages can be
-        // different from `class_name` (e.g. a helper Method whose
-        // package is `Mojolicious::Controller` surfacing from a
-        // `Mojolicious` query when the namespace bridges both).
-        for ns in &self.plugin.namespaces {
-            let bridges_class = ns.bridges.iter().any(|b|
-                matches!(b, Bridge::Class(c) if c == class_name));
-            if !bridges_class { continue; }
-            for sym_id in &ns.entities {
-                let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                if seen_names.contains(&sym.name) { continue; }
-                if !visible(sym) { continue; }
-                seen_names.insert(sym.name.clone());
-                let defining = if class_name != original_class { Some(class_name) } else { None };
-                let display_override = sym.presentation.display;
-                candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
-                    kind: sym.kind,
-                    is_static: sym.flags.contains(SymbolFlags::STATIC),
-                    detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
-                    insert_text: None,
-                    sort_priority: PRIORITY_LOCAL,
-                    additional_edits: vec![],
-                    import_fact: None,
-                    display_override,
-                });
+        // Local entities bridged to this class. Bridging is the sole
+        // filter; entity packages can differ from `class_name` (a helper
+        // Method whose package is `Mojolicious::Controller` surfacing from
+        // a `Mojolicious` query when the namespace bridges both).
+        let _ = self.for_each_entity_bridged_to(class_name, |sym| {
+            if !matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                || seen_names.contains(&sym.name)
+                || !visible(sym)
+            {
+                return std::ops::ControlFlow::Continue(());
             }
-        }
+            seen_names.insert(sym.name.clone());
+            let defining = if class_name != original_class { Some(class_name) } else { None };
+            let display_override = sym.presentation.display;
+            candidates.push(CompletionCandidate {
+                label: sym.name.clone(),
+                kind: sym.kind,
+                is_static: sym.flags.contains(SymbolFlags::STATIC),
+                detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
+                insert_text: None,
+                sort_priority: PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override,
+            });
+            std::ops::ControlFlow::Continue(())
+        });
 
         // Cross-file entity + own-class method collection.
         if let Some(idx) = module_index {

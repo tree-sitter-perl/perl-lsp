@@ -432,15 +432,10 @@ impl ModuleEdgeIndexes {
         names.into_iter().collect()
     }
 
-    /// The bridge classes an analysis' plugin namespaces declare, deduped.
+    /// The classes an analysis bridges entities onto, deduped.
     fn bridge_classes(analysis: &FileAnalysis) -> Vec<String> {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for ns in &analysis.plugin.namespaces {
-            for crate::model::file_analysis::Bridge::Class(c) in &ns.bridges {
-                seen.insert(c.clone());
-            }
-        }
-        seen.into_iter().collect()
+        let seen: std::collections::HashSet<&str> = analysis.bridge_classes().collect();
+        seen.into_iter().map(str::to_string).collect()
     }
 
     /// Every primary a specialization in the analysis names — the values of
