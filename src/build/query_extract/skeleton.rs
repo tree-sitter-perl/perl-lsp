@@ -152,10 +152,10 @@ pub struct SkeletonAnalysis {
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
     pub flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
-    /// `std::move(x)` sites: (moved var name, move-call span, enclosing scope).
-    /// A read of the var after the call and before its next rebind is a
+    /// `std::move` sites, rooted into `MoveSite`s in `into_file_analysis`.
+    /// A read of the moved part after the call and before it is reset is a
     /// use-after-move bug (`FileAnalysis::use_after_move_reads`).
-    pub moved_from: Vec<(String, crate::model::file_analysis::Span, crate::model::file_analysis::ScopeId)>,
+    pub moved_from: Vec<MoveCall>,
     /// Control-flow construct spans (`if`/`while`/`for`/`switch`/ternary/preproc
     /// conditionals). The use-after-move check reads these to decide whether a
     /// move is straight-line in its enclosing scope (`use_after_move_reads`).
@@ -211,6 +211,17 @@ pub struct SkeletonAnalysis {
     /// undecided: which member each writes is the receiver's type's, settled by
     /// `settle_member_writes`.
     pub member_writes: Vec<MemberWrite>,
+    /// Member reads (`@expr.member`): the whole access, its receiver and the
+    /// member. A receiver that is itself a member read, down to a variable,
+    /// makes the access a place (`PackPlaces`).
+    pub member_reads: Vec<MemberRead>,
+    /// Member places an access writes (`obj.x = …`, `obj.x.clear()`), by
+    /// the written member read's span, value or not: what ends a narrowing
+    /// or a move of that place.
+    pub place_writes: Vec<crate::model::file_analysis::Span>,
+    /// Guard narrowings whose subject is a member read: rooted, cut off and
+    /// attached to their place in `into_file_analysis`.
+    pub place_narrowings: Vec<PlaceNarrowing>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -231,6 +242,34 @@ pub struct MemberWrite {
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
     pub value: crate::model::file_analysis::Span,
+}
+
+/// A member read (`recv.x`, `recv->x`): the whole access, the receiver
+/// expression, and the member's name.
+#[derive(Debug, Clone)]
+pub struct MemberRead {
+    pub span: crate::model::file_analysis::Span,
+    pub receiver: crate::model::file_analysis::Span,
+    pub member: String,
+}
+
+/// A `std::move(x)` call: the subject as written and its node, the call,
+/// and the scope it runs in.
+#[derive(Debug, Clone)]
+pub struct MoveCall {
+    pub spelling: String,
+    pub subject: crate::model::file_analysis::Span,
+    pub call: crate::model::file_analysis::Span,
+    pub scope: crate::model::file_analysis::ScopeId,
+}
+
+/// A guard narrowing a member read (`isinstance(self.x, T)`): the subject,
+/// its refined type, and the arm the guard enters.
+#[derive(Debug, Clone)]
+pub struct PlaceNarrowing {
+    pub subject: crate::model::file_analysis::Span,
+    pub refined: InferredType,
+    pub region: crate::model::file_analysis::Span,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -996,6 +1035,9 @@ impl SkeletonAnalysis {
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
+        // Each resolved read's declaration, by the read's span: the root of
+        // the places built on it.
+        let mut var_at: std::collections::HashMap<Span, SymbolId> = std::collections::HashMap::new();
         // Reads that found no LOCAL decl — a Variable ref is still minted for
         // each (below, once call/member spans are known) so query-time
         // cross-file resolution can chase it by name (a file-scope value like
@@ -1024,6 +1066,9 @@ impl SkeletonAnalysis {
                 }
                 None
             });
+            if let Some(did) = resolved {
+                var_at.insert(*read_span, did);
+            }
             match resolved {
                 Some(did) => local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
@@ -1074,6 +1119,55 @@ impl SkeletonAnalysis {
                 )
             })
             .collect();
+        let member_reads = std::mem::take(&mut self.member_reads);
+        let places = super::places::PackPlaces::new(var_at, &member_reads);
+        let place_writes = std::mem::take(&mut self.place_writes);
+        let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
+            .into_iter()
+            .filter_map(|m| {
+                let place = places.at(m.subject)?;
+                Some(crate::model::file_analysis::MoveSite {
+                    reads: places.reads_of(&place),
+                    resets: places.writes_to(&place, &place_writes),
+                    place,
+                    spelling: m.spelling,
+                    call: m.call,
+                    scope: m.scope,
+                })
+            })
+            .collect();
+        // A guard narrows its place over the arm it enters, up to the place's
+        // first disturbance there or a rebind of its root.
+        let place_narrowings = std::mem::take(&mut self.place_narrowings);
+        let narrowed: Vec<_> = place_narrowings
+            .into_iter()
+            .filter_map(|n| Some((places.at(n.subject).filter(|p| !p.is_variable())?, n)))
+            .collect();
+        if !narrowed.is_empty() {
+            use crate::model::file_analysis::Binding;
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let wanted = narrowed.iter().map(|(p, _)| p.root.clone()).collect();
+            let disturbances = places.disturbances(&wanted, &place_writes);
+            let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
+            for (place, n) in narrowed {
+                let Binding::Lexical(root) = &place.root else { continue };
+                let Some(root) = symbols.iter().find(|s| s.id == *root) else { continue };
+                let end = [disturbances.earliest_in(&place, n.region), rebinds.earliest_in(&root.name, n.region)]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .unwrap_or(n.region.end);
+                if end <= n.region.start {
+                    continue;
+                }
+                bag.push(Witness {
+                    attachment: WA::Place(Box::new(place)),
+                    source: WitnessSource::Builder("skeleton-narrow".into()),
+                    payload: WP::InferredType(n.refined),
+                    span: Span { start: n.region.start, end },
+                });
+            }
+        }
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
             .iter()
@@ -1106,6 +1200,7 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        let invocant = places.receiver(inv_span, invocant);
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1118,6 +1213,7 @@ impl SkeletonAnalysis {
                     // flow from it.
                     RefCap::MemberCall => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        let invocant = places.receiver(inv_span, invocant);
                         RefKind::MethodCall {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1436,7 +1532,7 @@ impl SkeletonAnalysis {
                 .collect(),
             use_rows: std::mem::take(&mut self.use_rows),
             domain_sites: std::mem::take(&mut self.domain_sites),
-            moved_from: std::mem::take(&mut self.moved_from),
+            moved_from: move_sites,
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
             ..Default::default()

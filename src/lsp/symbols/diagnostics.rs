@@ -517,8 +517,8 @@ pub fn collect_diagnostics(
         });
     }
 
-    // 5g: undef-deref (D1) — a method call or hash deref on a receiver the
-    // lattice proves is `Undef` at that point (the `else` of `if defined`,
+    // 5g: undef-deref (D1) — a method or code call on a receiver the
+    // lattice proves is `Undef` at that point (an element deref autovivifies) (the `else` of `if defined`,
     // the fall-through after `return if defined`, an `unless defined` body).
     // Runtime is a hard die. Maximal confidence — the type *is* undef, not
     // *may be* — so this is always-on `WARNING`, the one narrowing diagnostic
@@ -531,7 +531,7 @@ pub fn collect_diagnostics(
     // not "is" → opt-in, INFORMATION, with a guard-insertion quick-fix.
     for site in analysis.deref_receiver_sites(Some(module_index)) {
         match &site.receiver_ty {
-            InferredType::Undef => {
+            InferredType::Undef if site.form.dies_on_undef() => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -545,7 +545,7 @@ pub fn collect_diagnostics(
                     ..Default::default()
                 });
             }
-            InferredType::Optional(_) if options.optional_deref => {
+            InferredType::Optional(_) if options.optional_deref && site.form.dies_on_undef() => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::INFORMATION),

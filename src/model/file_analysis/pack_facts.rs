@@ -133,11 +133,11 @@ pub struct PackFacts {
     #[serde(default)]
     pub domain_sites: Vec<DomainSite>,
 
-    /// `std::move(x)` sites: (moved var name, move-call span, enclosing scope).
-    /// A read of the var after the call and before its next rebind is a
-    /// use-after-move bug — see `use_after_move_reads`.
+    /// `std::move` sites. A read of the moved part after the call and
+    /// before it is reset is a use-after-move bug — see
+    /// `use_after_move_reads`.
     #[serde(default)]
-    pub moved_from: Vec<(String, Span, ScopeId)>,
+    pub moved_from: Vec<MoveSite>,
 
     /// Control-flow construct spans (`if`/`while`/`for`/`switch`/ternary/preproc
     /// conditionals). `use_after_move_reads` reads these for its straight-line
@@ -252,4 +252,23 @@ impl PackFacts {
 fn span_within(inner: &Span, outer: &Span) -> bool {
     (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
         && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
+}
+
+/// A `std::move` of a place (`x`, `other.msg`): what it moved, the call,
+/// the scope it runs in, and the accesses that touch the moved part,
+/// decided where the places are built so the check never re-reads a
+/// spelling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveSite {
+    pub place: super::Place,
+    /// The moved subject as written, for the rendered message.
+    pub spelling: String,
+    pub call: Span,
+    pub scope: ScopeId,
+    /// The variable token of every read reaching the moved part: a read of
+    /// a sibling member (`other.id` after moving `other.msg`) is not one.
+    pub reads: Vec<Span>,
+    /// Writes of the moved part or of what holds it (`other.msg = …`),
+    /// each of which gives it a value again.
+    pub resets: Vec<Span>,
 }

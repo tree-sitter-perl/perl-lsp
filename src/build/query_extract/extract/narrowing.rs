@@ -14,6 +14,10 @@ pub(super) struct State {
     /// precede the guard in source (`a if isinstance(x, T) else b`), so the
     /// join waits for `finish`.
     narrow_var: HashMap<usize, (String, ScopeId, Option<String>)>,
+    /// The subject's node, by byte range and span: a subject that is a
+    /// member read narrows the place it denotes, decided once the reads are
+    /// all in (`finish`).
+    narrow_node: HashMap<usize, ((usize, usize), Span)>,
     narrow_type: HashMap<usize, String>,
     narrow_guard: HashMap<usize, String>,
     narrow_arm: HashMap<usize, Span>,
@@ -33,7 +37,7 @@ pub(super) struct State {
     /// the moved subject, the call span the region start + enclosing scope.
     move_scope_txt: HashMap<usize, String>,
     move_name_txt: HashMap<usize, String>,
-    move_var_txt: HashMap<usize, String>,
+    move_var_txt: HashMap<usize, (String, Span)>,
     move_call: HashMap<usize, (Span, ScopeId)>,
 }
 
@@ -63,6 +67,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 .rev()
                 .find_map(|&(_, sid)| n.annot_text_by_var.get(&(subject.clone(), sid)).cloned());
             n.narrow_var.insert(e.match_id, (subject, st.cur_scope, annot));
+            n.narrow_node.insert(e.match_id, ((e.start_byte, e.end_byte), e.span()));
         }
         Capture::Narrow(NarrowCap::Arm) => {
             n.narrow_arm.insert(e.match_id, e.span());
@@ -80,7 +85,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             n.move_name_txt.insert(e.match_id, e.text.clone());
         }
         Capture::Move(MoveCap::Var) => {
-            n.move_var_txt.insert(e.match_id, e.text.clone());
+            n.move_var_txt.insert(e.match_id, (e.text.clone(), e.span()));
         }
         Capture::Move(MoveCap::Call) => {
             // Drop moves inside an unevaluated operand — they never execute,
@@ -112,8 +117,19 @@ pub(super) fn finish(st: &mut ExtractState) {
         let Some((subject, scope, annot)) = n.narrow_var.get(&mid) else { continue };
         let Some(ty) = n.narrow_type.get(&mid).or(annot.as_ref()) else { continue };
         let guard = n.narrow_guard.get(&mid).map(String::as_str);
-        if let Some(refined) = (st.pack.narrow_guard)(guard, ty) {
-            pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope));
+        let Some(refined) = (st.pack.narrow_guard)(guard, ty) else { continue };
+        // A member subject (`isinstance(self.x, T)`) narrows its place, which
+        // only the assembled analysis can root (`PackPlaces`).
+        match n.narrow_node.get(&mid) {
+            Some((bytes, span)) if st.flow.is_member_read(*bytes) => {
+                let refined = written_type_at(out, &st.pack.names, refined, n.narrow_arm[&mid].start);
+                out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+                    subject: *span,
+                    refined,
+                    region: n.narrow_arm[&mid],
+                });
+            }
+            _ => pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope)),
         }
     }
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
@@ -153,13 +169,22 @@ pub(super) fn finish(st: &mut ExtractState) {
     }
     // std::move sites → moved-from facts. The qualifier/name verify the
     // call IS `std::move` here (no query predicates), so the diagnostic never
-    // sees the call shape — it reads the recorded var + span + scope.
-    for (mid, (span, scope)) in &n.move_call {
+    // sees the call shape — it reads the recorded subject + span + scope. The
+    // subject becomes a place once the assembled analysis can root it.
+    let mut move_mids: Vec<&usize> = n.move_call.keys().collect();
+    move_mids.sort_unstable();
+    for mid in move_mids {
+        let (span, scope) = &n.move_call[mid];
         if n.move_scope_txt.get(mid).map(String::as_str) == Some("std")
             && n.move_name_txt.get(mid).map(String::as_str) == Some("move")
         {
-            if let Some(v) = n.move_var_txt.get(mid) {
-                out.moved_from.push(((st.pack.shape_name)(v), *span, *scope));
+            if let Some((v, subject)) = n.move_var_txt.get(mid) {
+                out.moved_from.push(crate::build::query_extract::MoveCall {
+                    spelling: v.clone(),
+                    subject: *subject,
+                    call: *span,
+                    scope: *scope,
+                });
             }
         }
     }

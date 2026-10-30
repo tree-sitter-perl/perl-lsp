@@ -216,15 +216,16 @@
 ; expression yields when the test holds, the right of `and`. The pack's
 ; narrow_guard maps the guard + type token to the refinement; core attaches
 ; it in the guard's scope over the arm (an `if` body is no scope in Python).
+; A member subject (`self.x`) narrows the place it denotes.
 (if_statement
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (elif_clause
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (conditional_expression
   (_) @narrow.arm
@@ -233,11 +234,11 @@
   .
   (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type)))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type)))
 (boolean_operator
   left: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   operator: "and"
   right: (_) @narrow.arm)
 

@@ -1653,6 +1653,34 @@ void f() {
 }
 
 #[test]
+fn cpp_member_move_flags_only_reads_of_the_moved_part() {
+    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` or of all of `p`
+    // is a use of the moved part until `p.msg` is written again.
+    let src = "\
+struct Msg {};
+struct Packet { Msg msg; int id; };
+void f() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p.id);
+  use(p.msg);
+  p.msg = Msg();
+  use(p.msg);
+}
+void g() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    reads.sort();
+    assert_eq!(reads, vec![("p.msg".to_string(), 6), ("p.msg".to_string(), 13)]);
+}
+
+#[test]
 fn cpp_conditional_move_does_not_flag_sibling_arm() {
     // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
     // `if` arm bounds its moved-from region to that arm — the read of `x` in the
@@ -1907,6 +1935,32 @@ void f(Base* b) {
         Some(InferredType::ClassName("Derived".into())),
         "dynamic_cast narrows b to Derived inside the guard",
     );
+}
+
+#[test]
+fn cpp_dynamic_cast_narrows_a_member() {
+    // A member subject narrows the place it denotes: `h.b` is Derived inside
+    // the guard and its declared Base outside.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder { Base* b; };
+void f(Holder h) {
+    if (dynamic_cast<Derived*>(h.b)) {
+        h.b->run();
+    }
+    h.b->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    assert_eq!(classes, vec![(5, Some("Derived".to_string())), (7, Some("Base".to_string()))]);
 }
 
 #[test]
