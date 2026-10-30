@@ -84,6 +84,7 @@ pub fn document_captures(language: &Language, pack: &LangPack) -> Vec<Capture> {
 
 mod extract;
 mod packs;
+mod places;
 mod skeleton;
 mod vocab;
 pub use extract::*;

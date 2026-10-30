@@ -1503,3 +1503,26 @@ def f(self):
     assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
     assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
 }
+
+#[test]
+fn a_member_receiver_down_to_a_variable_is_its_place() {
+    use crate::model::file_analysis::{Binding, PathStep, Place, RefKind};
+    let fa = py_in("class A:\n    def go(self):\n        self.a.b.run()\n        f().x.run()\n        self.c.run()\n", None);
+    let me = fa.symbols().iter().find(|s| s.name == "self" && s.kind == SymKind::Variable).expect("self param").id;
+    let places: Vec<Option<Place>> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| r.member_site().unwrap().invocant.place().cloned())
+        .collect();
+    let member = |m: &str| PathStep::Member(m.to_string());
+    assert_eq!(
+        places,
+        vec![
+            Some(Place { root: Binding::Lexical(me), path: vec![member("a"), member("b")] }),
+            None,
+            Some(Place { root: Binding::Lexical(me), path: vec![member("c")] }),
+        ],
+        "a value-rooted receiver is no place"
+    );
+}

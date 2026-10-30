@@ -211,6 +211,10 @@ pub struct SkeletonAnalysis {
     /// undecided: which member each writes is the receiver's type's, settled by
     /// `settle_member_writes`.
     pub member_writes: Vec<MemberWrite>,
+    /// Member reads (`@expr.member`): the whole access, its receiver and the
+    /// member. A receiver that is itself a member read, down to a variable,
+    /// makes the access a place (`PackPlaces`).
+    pub member_reads: Vec<MemberRead>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -231,6 +235,15 @@ pub struct MemberWrite {
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
     pub value: crate::model::file_analysis::Span,
+}
+
+/// A member read (`recv.x`, `recv->x`): the whole access, the receiver
+/// expression, and the member's name.
+#[derive(Debug, Clone)]
+pub struct MemberRead {
+    pub span: crate::model::file_analysis::Span,
+    pub receiver: crate::model::file_analysis::Span,
+    pub member: String,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -996,6 +1009,9 @@ impl SkeletonAnalysis {
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
+        // Each resolved read's declaration, by the read's span: the root of
+        // the places built on it.
+        let mut var_at: std::collections::HashMap<Span, SymbolId> = std::collections::HashMap::new();
         // Reads that found no LOCAL decl — a Variable ref is still minted for
         // each (below, once call/member spans are known) so query-time
         // cross-file resolution can chase it by name (a file-scope value like
@@ -1024,6 +1040,9 @@ impl SkeletonAnalysis {
                 }
                 None
             });
+            if let Some(did) = resolved {
+                var_at.insert(*read_span, did);
+            }
             match resolved {
                 Some(did) => local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
@@ -1074,6 +1093,8 @@ impl SkeletonAnalysis {
                 )
             })
             .collect();
+        let member_reads = std::mem::take(&mut self.member_reads);
+        let places = super::places::PackPlaces::new(var_at, &member_reads);
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
             .iter()
@@ -1106,6 +1127,7 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        let invocant = places.receiver(inv_span, invocant);
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1118,6 +1140,7 @@ impl SkeletonAnalysis {
                     // flow from it.
                     RefCap::MemberCall => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        let invocant = places.receiver(inv_span, invocant);
                         RefKind::MethodCall {
                             invocant,
                             invocant_span: Some(inv_span),

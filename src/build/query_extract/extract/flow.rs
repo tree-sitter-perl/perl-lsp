@@ -238,6 +238,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 let member = (pack.shape_name)(&name.text);
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
                 f.member_reads.insert((e.start_byte, e.end_byte), (recv.span(), member.clone()));
+                out.member_reads.push(crate::build::query_extract::MemberRead {
+                    span,
+                    receiver: recv.span(),
+                    member: member.clone(),
+                });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",

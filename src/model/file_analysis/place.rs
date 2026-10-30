@@ -40,6 +40,8 @@ pub enum PathStep {
     Hash(Slots<String>),
     /// Into an array's slots.
     Array(Slots<i64>),
+    /// To an object's named member (`obj.x`, `obj->x` in a pack language).
+    Member(String),
 }
 
 /// Which slots a step reaches: one (an element), several (a slice), or any
@@ -110,9 +112,11 @@ impl PathStep {
             (PathStep::Deref, PathStep::Deref) => true,
             (PathStep::Hash(a), PathStep::Hash(b)) => a.meets(b),
             (PathStep::Array(a), PathStep::Array(b)) => a.meets(b),
-            (PathStep::Deref, PathStep::Hash(_) | PathStep::Array(_))
-            | (PathStep::Hash(_), PathStep::Deref | PathStep::Array(_))
-            | (PathStep::Array(_), PathStep::Deref | PathStep::Hash(_)) => false,
+            (PathStep::Member(a), PathStep::Member(b)) => a == b,
+            (PathStep::Deref, PathStep::Hash(_) | PathStep::Array(_) | PathStep::Member(_))
+            | (PathStep::Hash(_), PathStep::Deref | PathStep::Array(_) | PathStep::Member(_))
+            | (PathStep::Array(_), PathStep::Deref | PathStep::Hash(_) | PathStep::Member(_))
+            | (PathStep::Member(_), PathStep::Deref | PathStep::Hash(_) | PathStep::Array(_)) => false,
         }
     }
 
@@ -120,7 +124,7 @@ impl PathStep {
     /// key on.
     pub fn is_exact(&self) -> bool {
         match self {
-            PathStep::Deref => true,
+            PathStep::Deref | PathStep::Member(_) => true,
             PathStep::Hash(s) => matches!(s, Slots::One(Slot::Const(_))),
             PathStep::Array(s) => matches!(s, Slots::One(Slot::Const(_))),
         }
@@ -128,7 +132,7 @@ impl PathStep {
 
     fn key_vars(&self) -> Box<dyn Iterator<Item = &Binding> + '_> {
         match self {
-            PathStep::Deref => Box::new(std::iter::empty()),
+            PathStep::Deref | PathStep::Member(_) => Box::new(std::iter::empty()),
             PathStep::Hash(s) => Box::new(s.vars()),
             PathStep::Array(s) => Box::new(s.vars()),
         }
