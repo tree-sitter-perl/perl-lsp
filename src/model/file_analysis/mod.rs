@@ -42,7 +42,6 @@ mod deferral;
 pub use deferral::*;
 mod queries;
 mod enrichment;
-pub use enrichment::{declare_enrichment_profile, enrichment_profile, EnrichmentProfile};
 mod class_queries;
 mod cursor_queries;
 mod invocants;

@@ -359,7 +359,7 @@ impl FileAnalysis {
     /// Stamp the `Method` binding on every `MethodCall` ref — the NAV
     /// unification edge (build pipeline phase 6 `PostFold`, then re-stamped
     /// at enrichment). The invocant class is resolved ONCE here (via the
-    /// bag-routed `method_call_invocant_classes`) and frozen on the ref;
+    /// bag-routed `resolve_receiver`) and frozen on the ref;
     /// `refs_to` / `find_definition` / hover read the frozen edge instead of
     /// re-deriving the class at query time, so they can never diverge.
     ///
@@ -424,7 +424,7 @@ impl FileAnalysis {
     }
 
     pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
-        // Collect resolutions first; `method_call_invocant_classes` /
+        // Collect resolutions first; `resolve_receiver` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
         // `&mut self.refs[i]` while calling them.
         // MEASUREMENT: this pass is the dominant driver of cross-file bag
@@ -444,7 +444,7 @@ impl FileAnalysis {
         // the pass borrows immutably until the collect loop ends, so a
         // receiver chain resolved for one ref is reused by the next.
         let _pass = super::ResolvePass::open(self, module_index);
-        let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
+        let mut stamped: Vec<(usize, FrozenReceiver)> = Vec::new();
         // Narrowest spans first, so an inner chain hop is answered before
         // the call wrapping it. The answer is the same in any order, but an
         // outer-first chase down a long chain hits RESOLVE_DEPTH_CAP, and a
@@ -470,14 +470,14 @@ impl FileAnalysis {
             // than stopping at a hit), so apportioning the pass's cost by ref
             // COUNT would misattribute it in an unknown direction.
             let _t0 = std::time::Instant::now();
-            // The edge holds ONE class: a union receiver stays unfrozen, and
-            // `receiver_classes` resolves its arms fresh for every consumer.
-            let target = (|| self
-                .method_call_invocant_classes(r, module_index)
-                .single()
+            // Every arm is frozen with its own resolution, and an empty
+            // answer is frozen too, so no consumer re-runs the ladder for a
+            // stamped ref (`FrozenReceiver::answers_for` says when it must).
+            let (classes, source) = self.resolve_receiver(r, module_index);
+            let member = r.unqualified_target_name(self.names());
+            let arms = classes
+                .into_iter()
                 .map(|cn| {
-                    let cn = cn.to_string();
-                    let member = r.unqualified_target_name(self.names());
                     let resolved = match &r.kind {
                         RefKind::FieldAccess { .. } => {
                             self.resolve_field_in_ancestors(&cn, member, module_index)
@@ -500,11 +500,13 @@ impl FileAnalysis {
                         // method-not-found arm returns None honestly.
                         _ => MethodTarget::CrossFile { invocant_class: cn },
                     }
-                }))();
+                })
+                .collect();
+            let target = FrozenReceiver::from_arms(arms, source, ReceiverView::of(module_index));
             if crate::util::ghost_stats::enabled() {
                 let ns = _t0.elapsed().as_nanos();
                 crate::util::ghost_stats::add_ns(
-                    if target.is_some() { "stamp.resolve_hit" } else { "stamp.resolve_miss" },
+                    if target.targets().is_empty() { "stamp.resolve_miss" } else { "stamp.resolve_hit" },
                     ns,
                 );
             }
@@ -522,7 +524,7 @@ impl FileAnalysis {
                     .map(|cn| self.ancestry_is_wholly_local(&cn, module_index, &mut local_memo))
                     .unwrap_or(false);
                 crate::util::ghost_stats::add_ns("pred.cost", _p0.elapsed().as_nanos());
-                let changed_now = match (r.method_target(), target.as_ref()) {
+                let changed_now = match (r.method_target(), target.single()) {
                     (Some(old), Some(new)) => old != new,
                     (Some(_), None) | (None, Some(_)) => true,
                     (None, None) => false,
@@ -563,7 +565,7 @@ impl FileAnalysis {
             // action that offers to write `requires`.
             if crate::util::ghost_stats::probe("demands") {
                 if let Some(idx) = module_index {
-                    for cn in self.method_call_invocant_classes(r, module_index) {
+                    for cn in self.resolve_receiver(r, module_index).0 {
                         let name = r.unqualified_target_name(self.names());
                         // Demanded here and provided by NOBODY up-chain — the
                         // degenerate-singleton case pass 2 would fire on.
@@ -631,7 +633,7 @@ impl FileAnalysis {
                 }
             }
             if module_index.is_some() && crate::util::ghost_stats::probe("owner") {
-                for cn in self.method_call_invocant_classes(r, module_index) {
+                for cn in self.resolve_receiver(r, module_index).0 {
                     let name = r.unqualified_target_name(self.names());
                     let arity = r.arg_count.map(|c| c as usize);
                     let owner = match self.resolve_method_in_ancestors(&cn, name, module_index) {
@@ -751,14 +753,15 @@ impl FileAnalysis {
                 }
             }
             if module_index.is_some() {
-                match (r.method_target(), target.as_ref()) {
-                    (Some(old), Some(new)) if old == new => {
+                let old = r.frozen_receiver().map(FrozenReceiver::targets).unwrap_or_default();
+                match (old, target.targets()) {
+                    (old, new) if !old.is_empty() && old == new => {
                         crate::util::ghost_stats::count("stamp.unchanged")
                     }
-                    (Some(_), Some(_)) => crate::util::ghost_stats::count("stamp.changed"),
-                    (None, Some(_)) => crate::util::ghost_stats::count("stamp.newly_resolved"),
-                    (Some(_), None) => crate::util::ghost_stats::count("stamp.would_erase"),
-                    (None, None) => crate::util::ghost_stats::count("stamp.still_unresolved"),
+                    ([], []) => crate::util::ghost_stats::count("stamp.still_unresolved"),
+                    ([], _) => crate::util::ghost_stats::count("stamp.newly_resolved"),
+                    (_, []) => crate::util::ghost_stats::count("stamp.would_erase"),
+                    _ => crate::util::ghost_stats::count("stamp.changed"),
                 }
             }
             stamped.push((i, target));
@@ -768,11 +771,13 @@ impl FileAnalysis {
             // Monotone: a re-stamp that can't re-derive the invocant class must
             // not ERASE an authoritative freeze. Witnesses only accrue (finalize
             // → enrichment adds the index), so a class never legitimately
-            // retracts; the only Some→None here is a synthesized member ref
+            // retracts; the only answer→empty here is a synthesized member ref
             // whose class was frozen from the field decl (a macro-body
             // `->field` whose receiver is an untypeable macro parameter). Keep it.
-            if let Some(target) = target {
-                self.refs[i].bind_method(target);
+            let keeps_old = target.targets().is_empty()
+                && self.refs[i].frozen_receiver().is_some_and(|old| !old.targets().is_empty());
+            if !keeps_old {
+                self.refs[i].bind_receiver(target);
             }
         }
     }

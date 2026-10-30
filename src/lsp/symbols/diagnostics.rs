@@ -491,7 +491,7 @@ pub fn collect_diagnostics(
         if !matches!(invocant.classify(), InvocantText::Bareword(_) | InvocantText::Scalar(_)) {
             continue;
         }
-        let classes = analysis.invocant_classes_under(r, Some(module_index), ReceiverPolicy::Stated);
+        let classes = analysis.receiver_classes(r, Some(module_index), ReceiverPolicy::Stated);
 
         // Each arm is checked on its own, so a union receiver warns for the
         // arms that lack the method even when another arm answers it — the
@@ -686,7 +686,7 @@ pub fn collect_diagnostics(
             if !matches!(invocant.classify(), InvocantText::Bareword(_) | InvocantText::Scalar(_)) {
                 continue;
             }
-            let classes = analysis.invocant_classes_under(r, Some(module_index), ReceiverPolicy::Stated);
+            let classes = analysis.receiver_classes(r, Some(module_index), ReceiverPolicy::Stated);
             // The helper's provider on whichever class the receiver may be
             // bridges it.
             // One hint per (class, helper) per file — the fix is one

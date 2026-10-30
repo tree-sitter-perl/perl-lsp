@@ -681,7 +681,7 @@ impl FileAnalysis {
         let (class, name) = match &r.kind {
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                 // A subject is one owner's slot; a union receiver reads several.
-                let class = self.method_call_invocant_classes(r, module_index).single()?.to_string();
+                let class = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).single()?.to_string();
                 (class, r.unqualified_target_name(self.names()).to_string())
             }
             RefKind::HashKeyAccess { .. } => {
@@ -822,7 +822,7 @@ impl FileAnalysis {
             .iter()
             .find(|r| r.span == site.slot_span && r.member_site().is_some())?;
         // A site votes for one subject; a union receiver names several.
-        let classes = self.method_call_invocant_classes(r, module_index);
+        let classes = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
         let class = classes.single()?;
         let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
             self.field_subject(class, &site.slot, module_index)

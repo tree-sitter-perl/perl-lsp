@@ -22,13 +22,6 @@ pub(crate) fn cli_check(args: &[String]) {
     }
     timings::enable_from_env();
 
-    // Declared BEFORE startup, because startup enriches: the profile has to be
-    // in force by the time the first analysis is enriched, not by the time the
-    // first diagnostic is asked for.
-    //
-    // Sound because this is a one-shot CLI process serving exactly one verb —
-    // see `declare_enrichment_profile`. A server verb must not do this.
-    file_analysis::declare_enrichment_profile(file_analysis::EnrichmentProfile::diagnostics());
 
     let (_ws, module_index) = cli_full_startup(root);
 

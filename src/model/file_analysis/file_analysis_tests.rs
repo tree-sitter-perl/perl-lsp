@@ -546,7 +546,7 @@ fn test_fq_method_call_nav_dispatches_from_named_class() {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "Widget::build")
         .expect("FQ method ref present");
     assert_eq!(
-        fa.method_call_invocant_classes(mref, None).single().map(str::to_string).as_deref(),
+        fa.receiver_classes(mref, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Widget"),
         "FQ call dispatches from the named class, not the (untyped) invocant"
     );
@@ -612,7 +612,7 @@ fn test_super_method_nav_resolves_to_parent() {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "SUPER::greet")
         .expect("SUPER method ref present");
     assert_eq!(
-        fa.method_call_invocant_classes(sref, None).single().map(str::to_string).as_deref(),
+        fa.receiver_classes(sref, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Base"),
         "SUPER dispatches to the enclosing package's parent"
     );
@@ -2066,7 +2066,7 @@ fn test_route_controller_token_resolves_cross_file() {
         })
         .expect("plugin emits MethodCall {invocant: users, method: list} for ->to('users#list')");
 
-    let class = app.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
+    let class = app.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(
         class.as_deref(),
         Some("Some::App::Controller::Users"),
@@ -2153,7 +2153,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
                 panic!("partial ->to('#{action}') should emit MethodCall {{invocant: Alerts (camelized), method: {action}}}")
             });
 
-        let class = app.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
+        let class = app.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
         assert_eq!(
             class.as_deref(),
             Some("GenericCo::Controller::Alerts"),
@@ -2172,7 +2172,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
         })
         .expect("sibling group partial ->to('#index') should inherit `billing` (camelized)");
     assert_eq!(
-        app.method_call_invocant_classes(index_ref, Some(&idx)).single().map(str::to_string).as_deref(),
+        app.receiver_classes(index_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("GenericCo::Controller::Billing"),
         "sibling group must re-brand to `billing`, not leak `alerts`",
     );
@@ -2234,7 +2234,7 @@ fn test_route_controller_token_disambiguates_by_ownership() {
         })
         .expect("MethodCall for ->to('reports#monthly')");
 
-    let class = app.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
+    let class = app.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(
         class.as_deref(),
         Some("Beta::Controller::Reports"),
@@ -3037,7 +3037,7 @@ fn deep_isa_chain_within_visit_budget_still_resolves() {
 #[test]
 fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
     use crate::index::module_index::ModuleIndex;
-    use crate::model::file_analysis::{MethodTarget, RefBinding};
+    use crate::model::file_analysis::{FrozenReceiver, MethodTarget, ReceiverSource, ReceiverView};
 
     let path = std::path::PathBuf::from("/tmp/RestampGate.pm");
     let mut fa = build_fa_from_source(
@@ -3066,9 +3066,11 @@ fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
 
     // Poison it. With no NEW mark, the file's stamp is at or past the only
     // mark there is, so the gate must skip and the poison must survive.
-    fa.refs[i].binding = Some(RefBinding::Method(MethodTarget::CrossFile {
-        invocant_class: "SENTINEL".into(),
-    }));
+    fa.refs[i].bind_receiver(FrozenReceiver::from_arms(
+        vec![MethodTarget::CrossFile { invocant_class: "SENTINEL".into() }],
+        ReceiverSource::Stated,
+        ReceiverView::Index,
+    ));
     fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
     assert_eq!(
         fa.refs[i].method_target().map(|t| t.invocant_class()),
