@@ -332,22 +332,15 @@ pub fn index_workspace_with_index(
                 writer_conn.as_ref(),
                 "workspace persist writer",
                 |conn, batch: &[WsFresh]| {
-                    for e in batch {
-                        let path_str = e.path.to_string_lossy();
-                        module_cache::save_blob_to_db_stamped(
-                            conn, &path_str, &e.path, &e.closure, &e.blob, "workspace",
-                            e.stamp,
-                        );
-                        if let Err(err) = module_cache::shred_derived_rows(
-                            conn, &path_str, "workspace", &e.seeds,
-                        ) {
-                            log::error!(
-                                "Failed to shred derived rows for {:?}: {}",
-                                e.path,
-                                err
-                            );
-                        }
-                    }
+                    batch
+                        .iter()
+                        .map(|e| {
+                            module_cache::save_generation_stamped(
+                                conn, &e.path, &e.closure, &e.blob, &e.seeds, "workspace",
+                                e.stamp,
+                            )
+                        })
+                        .collect()
                 },
                 |e: WsFresh| {
                     // Clear any stale LRU pin BEFORE the stripped copy
@@ -359,8 +352,8 @@ pub fn index_workspace_with_index(
                     }
                 },
                 |e: WsFresh| {
-                    // The chunk never landed but the copies were stripped
-                    // for it. The blob in hand IS the whole analysis —
+                    // This entry's generation never landed (its chunk failed,
+                    // or its own write did) but the copy was stripped for it. The blob in hand IS the whole analysis —
                     // register full copies instead, so nothing is lost
                     // beyond the persistence itself (disk full / lock storm
                     // stays loud AND self-heals) — up to the budget.

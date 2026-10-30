@@ -52,7 +52,8 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
 /// together (`docs/adr/relational-ref-index.md` — rows and blob describe the
 /// same analysis or neither exists). `save_to_db` skips degraded analyses;
 /// mirror that here so no rows exist for an unpersisted blob.
-/// Returns whether the blob row landed (the strip-legality signal).
+/// Returns whether the blob row AND its derived rows landed (the
+/// strip-legality signal).
 /// Persist EVERY provider of `module_name` — one row per file, because the
 /// name maps to a set. `true` only when all of them landed: a partial write
 /// must not license the resident strip, or the un-persisted provider loses
@@ -101,6 +102,9 @@ fn save_one_provider(
                 &seeds,
             ) {
                 log::error!("Failed to shred derived rows for '{}': {}", module_name, e);
+                // Without its rows the file is invisible to retrieval; a
+                // whole copy still answers from the resident sweep.
+                return false;
             }
         }
     }
@@ -241,18 +245,23 @@ pub(crate) fn send_to_writer<E>(tx: &std::sync::mpsc::SyncSender<E>, entry: E) {
 /// the channel (≤128 per txn), owns BEGIN IMMEDIATE / COMMIT / ROLLBACK
 /// (IMMEDIATE — a deferred txn that reads before writing can hit an
 /// unretryable SQLITE_BUSY_SNAPSHOT against a concurrent writer), and hands
-/// every entry to exactly one of `on_committed` (deferred registration) or
-/// `on_fallback` (commit failure OR chunk panic — the whole-copy self-heal;
-/// a panic must not kill the writer, workers keep stripping copies whose
-/// sends would silently fail). With no Connection the channel drains
-/// unregistered. Registration runs inside the panic guard, mirroring the
-/// txn: entries a mid-batch registration panic leaves behind take the
-/// fallback lane instead of vanishing.
+/// every entry to exactly one of `on_committed` (deferred registration, the
+/// strip) or `on_fallback` (the whole-copy self-heal). `write_batch` returns
+/// one verdict per entry — did THAT entry's blob and rows land — and only an
+/// entry that landed in a chunk that committed reaches `on_committed`: a
+/// statement fails alone inside a transaction that still commits, and a copy
+/// stripped against the blob that failed answers empty. Commit failure and
+/// chunk panic send the whole chunk to the fallback (a panic must not kill
+/// the writer, workers keep stripping copies whose sends would silently
+/// fail). With no Connection the channel drains unregistered. Registration
+/// runs inside the panic guard, mirroring the txn: entries a mid-batch
+/// registration panic leaves behind take the fallback lane instead of
+/// vanishing.
 pub(crate) fn run_persist_writer<E>(
     rx: std::sync::mpsc::Receiver<E>,
     conn: Option<&rusqlite::Connection>,
     label: &str,
-    write_batch: impl Fn(&rusqlite::Connection, &[E]),
+    write_batch: impl Fn(&rusqlite::Connection, &[E]) -> Vec<bool>,
     mut on_committed: impl FnMut(E),
     mut on_fallback: impl FnMut(E),
 ) {
@@ -274,7 +283,8 @@ pub(crate) fn run_persist_writer<E>(
                     false
                 }
             };
-            write_batch(conn, batch);
+            let landed = write_batch(conn, batch);
+            debug_assert_eq!(landed.len(), n, "{label}: one verdict per entry");
             let committed = txn_open
                 && match conn.execute_batch(module_cache::sql::TXN_COMMIT.registered()) {
                     Ok(()) => true,
@@ -287,8 +297,12 @@ pub(crate) fn run_persist_writer<E>(
                     }
                 };
             if committed {
-                for e in batch.drain(..) {
-                    on_committed(e);
+                for (i, e) in batch.drain(..).enumerate() {
+                    if landed.get(i).copied().unwrap_or(false) {
+                        on_committed(e);
+                    } else {
+                        on_fallback(e);
+                    }
                 }
             } else {
                 for e in batch.drain(..) {
