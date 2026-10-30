@@ -427,7 +427,10 @@ impl FileAnalysis {
         // Perl ignores the invocant's class for the lookup, so the token
         // wins ahead of invocant resolution. (A plugin-bridged token is
         // never method-qualified; the ladder's bridged arm owns it.)
-        if matches!(site.invocant, crate::model::conventions::Invocant::Name(_)) {
+        if matches!(
+            site.invocant,
+            crate::model::conventions::Invocant::Name(_) | crate::model::conventions::Invocant::Place { .. }
+        ) {
             use crate::model::conventions::MethodToken;
             match MethodToken::parse(&r.target_name) {
                 MethodToken::Super(name) => {
@@ -754,7 +757,7 @@ impl FileAnalysis {
         let navigate = policy == ReceiverPolicy::Navigate;
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
-        let receiver_place = site.receiver_place;
+        let receiver_place = site.invocant.place();
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self
@@ -766,7 +769,9 @@ impl FileAnalysis {
                     )
                     .map(InferredType::ClassName);
             }
-            crate::model::conventions::Invocant::Name(n) | crate::model::conventions::Invocant::Expr(n) => n,
+            crate::model::conventions::Invocant::Name(n)
+            | crate::model::conventions::Invocant::Expr(n)
+            | crate::model::conventions::Invocant::Place { name: n, .. } => n,
         };
         let spelled_class_possible = matches!(site.invocant, crate::model::conventions::Invocant::Name(_));
         if invocant.is_empty() {

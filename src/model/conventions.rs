@@ -418,6 +418,11 @@ pub enum Invocant {
     /// spelling, however much it looks like one (`self.x`).
     Expr(InvocantName),
     Bridged { plugin: String, token: String, match_mode: BridgedMatch },
+    /// A receiver that is a part of a variable (`$self->{a}->m`): its value
+    /// is that place's, narrowings included, and its text is never a class
+    /// spelling. The place rides here, on the receiver it describes, so
+    /// every member ref carries it at no cost to the ones without.
+    Place { name: InvocantName, place: Box<crate::model::file_analysis::Place> },
 }
 
 /// How a [`Bridged`](Invocant::Bridged) token resolves to a class. Strict
@@ -463,8 +468,16 @@ impl Invocant {
     /// `Class->`) bind through this and skip bridged tokens.
     pub fn as_name(&self) -> Option<&InvocantName> {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => Some(n),
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => Some(n),
             Invocant::Bridged { .. } => None,
+        }
+    }
+
+    /// The receiver's place, when it is a part of a variable.
+    pub fn place(&self) -> Option<&crate::model::file_analysis::Place> {
+        match self {
+            Invocant::Place { place, .. } => Some(place),
+            Invocant::Name(_) | Invocant::Expr(_) | Invocant::Bridged { .. } => None,
         }
     }
 
@@ -478,7 +491,7 @@ impl Invocant {
     /// callers match the variant instead.
     pub fn text(&self) -> &str {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => n,
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => n,
             Invocant::Bridged { token, .. } => token,
         }
     }

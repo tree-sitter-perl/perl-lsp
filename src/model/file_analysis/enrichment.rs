@@ -1063,7 +1063,7 @@ impl FileAnalysis {
                     if !matches!(name.classify(), InvocantText::Scalar(_)) {
                         continue;
                     }
-                    let place = r.member_site().and_then(|m| m.receiver_place).cloned();
+                    let place = invocant.place().cloned();
                     (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()), place)
                 }
                 // A scalar `var_text` is the arrow form `$x->{k}`; the direct
