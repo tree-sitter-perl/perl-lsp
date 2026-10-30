@@ -93,6 +93,24 @@ pub fn sweep_bag_cache_cap(persisted_source_bytes: u64, stock: usize) -> usize {
     usize::try_from(capped).unwrap_or(usize::MAX).max(stock)
 }
 
+/// How many dependency names one landing frontier places at once — located
+/// and parsed in parallel, then landed in order on the resolver thread.
+/// Derived from the persist chunk, never from RAM: a landed copy is
+/// resident WHOLE until its chunk's rows commit, and the resolver flushes
+/// between frontiers, so a frontier no wider than one chunk keeps the
+/// whole-copy peak at the one chunk the batched writer already holds.
+/// Floored at the pool's width, which only a pool wider than a chunk
+/// reaches, so no worker idles on a wide frontier.
+/// `PERL_LSP_LANDING_FRONTIER` pins it; `1` is the serial landing, the A/B
+/// control.
+pub fn landing_frontier(persist_chunk: usize) -> usize {
+    std::env::var("PERL_LSP_LANDING_FRONTIER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| persist_chunk.max(rayon::current_num_threads()))
+        .max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

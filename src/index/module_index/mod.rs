@@ -114,6 +114,9 @@ pub(crate) struct ResolveQueue {
     /// The thread has read its map and warmed its store; before that an
     /// empty queue is not idle.
     pub started: std::sync::atomic::AtomicBool,
+    /// Names a batch places at once (`cache_policy::landing_frontier`);
+    /// `0` derives it. Set only where a caller pins the width.
+    pub frontier: std::sync::atomic::AtomicUsize,
 }
 
 impl ResolveQueue {
@@ -125,6 +128,7 @@ impl ResolveQueue {
             map_moved: Default::default(),
             busy: Default::default(),
             started: Default::default(),
+            frontier: Default::default(),
         }
     }
 

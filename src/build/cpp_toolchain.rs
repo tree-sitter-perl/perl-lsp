@@ -137,20 +137,17 @@ impl Toolchain {
     /// that won't answer `-E -v`) falls back to its language's default
     /// driver, so a stale database still resolves system headers.
     pub fn info(&self) -> Option<std::sync::Arc<ToolchainInfo>> {
-        static MEMO: OnceLock<Mutex<HashMap<Toolchain, Option<std::sync::Arc<ToolchainInfo>>>>> = OnceLock::new();
-        let memo = MEMO.get_or_init(Default::default);
-        if let Some(hit) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(self) {
-            return hit.clone();
-        }
-        let probed = |compiler: &str| probe_full(compiler, self.lang, self.std.as_deref(), None);
-        let info = self
-            .compiler
-            .as_deref()
-            .and_then(probed)
-            .or_else(|| default_compiler(self.lang).and_then(|c| probed(&c)))
-            .map(std::sync::Arc::new);
-        memo.lock().unwrap_or_else(|e| e.into_inner()).insert(self.clone(), info.clone());
-        info
+        static MEMO: OnceLock<Mutex<HashMap<Toolchain, Once<Option<std::sync::Arc<ToolchainInfo>>>>>> = OnceLock::new();
+        let slot = once_slot(MEMO.get_or_init(Default::default), self);
+        slot.get_or_init(|| {
+            let probed = |compiler: &str| probe_full(compiler, self.lang, self.std.as_deref(), None);
+            self.compiler
+                .as_deref()
+                .and_then(probed)
+                .or_else(|| default_compiler(self.lang).and_then(|c| probed(&c)))
+                .map(std::sync::Arc::new)
+        })
+        .clone()
     }
 
     /// The identity of what the probe answered: compiler version, include
@@ -202,8 +199,21 @@ struct ToolchainKey {
     lang: Lang,
 }
 
-fn cache() -> &'static Mutex<HashMap<ToolchainKey, Option<ToolchainInfo>>> {
-    static C: OnceLock<Mutex<HashMap<ToolchainKey, Option<ToolchainInfo>>>> = OnceLock::new();
+/// A memo slot computed once: concurrent first askers (the parallel landing
+/// frontier, the workspace walk) wait on the one probe instead of each
+/// shelling out.
+type Once<V> = std::sync::Arc<OnceLock<V>>;
+
+/// `key`'s slot in `memo`, made on first ask. The map's lock is held only
+/// to find the slot, never across the probe, so toolchains probe
+/// independently.
+fn once_slot<K: Clone + Eq + std::hash::Hash, V>(memo: &Mutex<HashMap<K, Once<V>>>, key: &K) -> Once<V> {
+    let mut m = memo.lock().unwrap_or_else(|e| e.into_inner());
+    std::sync::Arc::clone(m.entry(key.clone()).or_default())
+}
+
+fn cache() -> &'static Mutex<HashMap<ToolchainKey, Once<Option<ToolchainInfo>>>> {
+    static C: OnceLock<Mutex<HashMap<ToolchainKey, Once<Option<ToolchainInfo>>>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -236,14 +246,8 @@ pub fn probe_full(
         lang,
     };
 
-    if let Some(hit) = cache().lock().unwrap().get(&key).cloned() {
-        return hit;
-    }
-
-    let driver = key.compiler.to_string_lossy().into_owned();
-    let info = run_probe(&driver, lang, std, target);
-    cache().lock().unwrap().insert(key, info.clone());
-    info
+    let slot = once_slot(cache(), &key);
+    slot.get_or_init(|| run_probe(&key.compiler.to_string_lossy(), lang, std, target)).clone()
 }
 
 /// The default driver for a language, honoring `$CC` / `$CXX` first,

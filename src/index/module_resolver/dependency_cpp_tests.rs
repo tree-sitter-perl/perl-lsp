@@ -235,3 +235,54 @@ fn dependency_persists_batch_into_one_transaction() {
     let (batched, autocommit) = (frames(true), frames(false));
     assert!(batched * 4 < autocommit, "batched {batched} WAL frames vs {autocommit} autocommitted");
 }
+
+/// A frontier places in parallel and lands in order: landing the same
+/// closure one name at a time and a whole frontier at once registers the
+/// same slots, candidate orders, generations and edge homes. Headers that
+/// declare the same names make the order observable — whichever lands
+/// first is each shared name's first candidate.
+#[test]
+fn a_frontier_placed_in_parallel_registers_as_the_serial_landing_does() {
+    let mut files: Vec<(String, String)> = (0..24)
+        .map(|i| {
+            let next = if i % 3 == 0 && i + 1 < 24 { format!("#include \"h{}.h\"\n", i + 1) } else { String::new() };
+            let body = format!(
+                "#pragma once\n{next}int only_{i}(int a);\nint shared_fn(int a);\n#define SHARED_{} {i}\ntypedef int t{i}_t;\n",
+                i % 4
+            );
+            (format!("third_party/include/h{i}.h"), body)
+        })
+        .collect();
+    let includes: String = (0..24).map(|i| format!("#include <h{i}.h>\n")).collect();
+    files.push(("proj/src/main.cpp".into(), format!("{includes}int main() {{ return shared_fn(only_3(1)); }}\n")));
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, b)| (p.as_str(), b.as_str())).collect();
+    let base = tree("frontier", &refs);
+    let proj = base.join("proj");
+    let db = serde_json::json!([{
+        "directory": proj,
+        "file": "src/main.cpp",
+        "arguments": ["c++", "-I../third_party/include", "-c", "src/main.cpp"],
+    }]);
+    std::fs::write(proj.join("compile_commands.json"), db.to_string()).unwrap();
+
+    let landed = |width: usize| -> Vec<String> {
+        let store = std::env::temp_dir().join(format!("cpp-deps-frontier-{width}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).unwrap();
+        crate::index::module_cache::with_test_cache_dir(&store, std::time::Duration::from_secs(5), || {
+            let idx = ModuleIndex::new_for_test();
+            idx.set_landing_frontier_for_test(width);
+            super::index_pack_language(cpp(), &proj, None, &idx, None, 0);
+            idx.wait_idle();
+            idx.registrations_for_test()
+        })
+    };
+    let serial = landed(1);
+    let parallel = landed(64);
+    assert!(
+        serial.iter().filter(|l| l.starts_with("gen ")).count() >= 24,
+        "every header landed: {serial:#?}"
+    );
+    assert!(serial.iter().any(|l| l.starts_with("defs shared_fn ")), "a shared name has candidates");
+    assert_eq!(serial, parallel);
+}

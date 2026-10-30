@@ -1,13 +1,14 @@
 //! The one resolver loop: workspace-root wait, the dependency map, the
-//! store and its warm, queue drain, and the per-name acquisition
-//! (`acquire`), server and headless, for every served language.
+//! store and its warm, queue drain, and the acquisition (`acquire`: a
+//! frontier placed in parallel, landed in order here), server and
+//! headless, for every served language.
 
 use super::*;
 
 /// The ONE resolver loop, server and headless alike. Mode differences are
-/// explicit `server` gates inside this body — the per-name protocol
-/// (locate, parse, persist, `land_dependency`) has a single spelling and
-/// cannot drift between the two spawn fronts.
+/// explicit `server` gates inside this body — the acquisition (place a
+/// frontier, then per name land, queue the persist, descend) has a single
+/// spelling and cannot drift between the two spawn fronts.
 pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>) {
     let served = crate::build::language_driver::LanguageRegistry::served();
     let ws_root = wait_for_workspace_root(&core);
@@ -91,88 +92,80 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // always ends with a fire — diagnostics converge once the queue
         // drains.
         let mut resolved_any = false;
-        for module_name in batch {
-            let is_re_resolve = core.stale_modules.contains_key(&module_name);
-            // A warm load or a front door answered it since it was asked.
-            if !is_re_resolve && matches!(core.cache.get(&module_name).as_deref(), Some(Some(_))) {
-                continue;
+        // A batch is a breadth-first frontier: descent's asks queue for the
+        // next one. Each slice of it places (locate + parse) in parallel
+        // with no lock held, then lands here in batch order — registration,
+        // generations, persist hand-off and descent stay on this thread,
+        // and the order is the serial one.
+        let width = match core.queue.frontier.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => crate::index::cache_policy::landing_frontier(PERSIST_CHUNK),
+            n => n,
+        };
+        let mut asked: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let todo: Vec<String> =
+            batch.iter().filter(|n| asked.insert(n.as_str()) && wants_landing(&core, &seen, n)).cloned().collect();
+        for slice in todo.chunks(width) {
+            let snap = core.map_snapshot();
+            let mut placed = match &snap {
+                Some(snap) => place_frontier(snap, slice),
+                None => Vec::new(),
             }
-            // Allow re-resolution when extract version is outdated.
-            if let Some(&ver) = seen.get(&module_name) {
-                if ver >= module_cache::EXTRACT_VERSION {
+            .into_iter();
+            for module_name in slice {
+                let placed = placed.next();
+                // Re-asked here, since an earlier landing of this batch may
+                // have answered it (a file declaring several asked names).
+                if !wants_landing(&core, &seen, module_name) {
                     continue;
                 }
-            }
-            seen.insert(module_name.clone(), module_cache::EXTRACT_VERSION);
+                let is_re_resolve = core.stale_modules.contains_key(module_name);
+                seen.insert(module_name.clone(), module_cache::EXTRACT_VERSION);
 
-            if is_re_resolve {
-                log::info!("Re-resolving stale module '{}'", module_name);
-            } else {
-                log::info!("Resolving module '{}'", module_name);
-            }
-
-            crate::util::ghost_stats::count("resolver.module_resolved");
-            let whole = match acquire(&core, &module_name, &mut persists) {
-                Ok(whole) => whole,
-                Err(_moved) => {
-                    // Asked again once the loop adopts the new map.
-                    seen.remove(&module_name);
-                    core.queue.ask([module_name]);
-                    continue;
+                if is_re_resolve {
+                    log::info!("Re-resolving stale module '{}'", module_name);
+                } else {
+                    log::info!("Resolving module '{}'", module_name);
                 }
-            };
-            match &whole {
-                Some(providers) => log::info!("Resolved '{}': {} provider(s)", module_name, providers.len()),
-                None => log::info!("Nothing provides '{}'", module_name),
-            }
-            if let Some(providers) = &whole {
-                ask_unresolved(&core, &seen, descent(providers, prefetch));
-            }
 
-            // Remove from stale set after re-resolution (no-op otherwise).
-            core.stale_modules.remove(&module_name);
-
-            // Report the prefetch's progress.
-            if let Some(srv) = &server {
-                if progress.total > 0 && progress.done < progress.total {
-                    progress.done += 1;
-                    let pct = (progress.done * 100 / progress.total) as u32;
-                    let token = NumberOrString::String("perl-lsp/indexing".to_string());
-                    if progress.done < progress.total {
-                        srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
-                            ProgressParams {
-                                token,
-                                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                                    WorkDoneProgressReport {
-                                        cancellable: Some(false),
-                                        message: Some(format!("{} ({}/{})", module_name, progress.done, progress.total)),
-                                        percentage: Some(pct),
-                                    },
-                                )),
-                            },
-                        ));
-                    } else {
-                        srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
-                            ProgressParams {
-                                token,
-                                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                                    WorkDoneProgressEnd {
-                                        message: Some(format!("Indexed {} modules", progress.total)),
-                                    },
-                                )),
-                            },
-                        ));
-                    }
+                crate::util::ghost_stats::count("resolver.module_resolved");
+                let whole = match (&snap, placed) {
+                    (Some(snap), Some(placed)) => match land_placed(&core, snap, module_name, placed, &mut persists) {
+                        Ok(whole) => whole,
+                        Err(_moved) => {
+                            // Asked again once the loop adopts the new map.
+                            seen.remove(module_name);
+                            core.queue.ask([module_name.clone()]);
+                            continue;
+                        }
+                    },
+                    _ => None,
+                };
+                match &whole {
+                    Some(providers) => log::info!("Resolved '{}': {} provider(s)", module_name, providers.len()),
+                    None => log::info!("Nothing provides '{}'", module_name),
                 }
-            }
+                if let Some(providers) = &whole {
+                    ask_unresolved(&core, &seen, descent(providers, prefetch));
+                }
 
-            if persists.is_full() {
-                persists.flush(&core, db.as_ref());
-            }
+                // Remove from stale set after re-resolution (no-op otherwise).
+                core.stale_modules.remove(module_name);
 
-            // Signal waiters (per module — bounded waits key on names).
-            notify_resolved(&core);
-            resolved_any = true;
+                if let Some(srv) = &server {
+                    report_progress(srv, &mut progress, module_name);
+                }
+
+                if persists.is_full() {
+                    persists.flush(&core, db.as_ref());
+                }
+
+                // Signal waiters (per module — bounded waits key on names).
+                notify_resolved(&core);
+                resolved_any = true;
+            }
+            // Before the next slice parses: its landings strip once their
+            // rows commit, so whole copies never outgrow one slice.
+            persists.flush(&core, db.as_ref());
         }
         // Before idle: a waiter reads the settled residency, and the next
         // adoption's fingerprint gate sees every row this map wrote.
@@ -188,6 +181,40 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
         }
     }
+}
+
+/// Whether the loop still lands `name`: not already answered (a warm load,
+/// a front door, an earlier landing) unless stale, and not tried under
+/// this map at the current extract version.
+fn wants_landing(core: &IndexCore, seen: &HashMap<String, i64>, name: &str) -> bool {
+    let is_re_resolve = core.stale_modules.contains_key(name);
+    if !is_re_resolve && matches!(core.cache.get(name).as_deref(), Some(Some(_))) {
+        return false;
+    }
+    seen.get(name).is_none_or(|&ver| ver < module_cache::EXTRACT_VERSION)
+}
+
+/// Report the prefetch's progress for one landed name.
+fn report_progress(srv: &ServerSession, progress: &mut Progress, module_name: &str) {
+    if progress.total == 0 || progress.done >= progress.total {
+        return;
+    }
+    progress.done += 1;
+    let pct = (progress.done * 100 / progress.total) as u32;
+    let token = NumberOrString::String("perl-lsp/indexing".to_string());
+    let value = if progress.done < progress.total {
+        WorkDoneProgress::Report(WorkDoneProgressReport {
+            cancellable: Some(false),
+            message: Some(format!("{} ({}/{})", module_name, progress.done, progress.total)),
+            percentage: Some(pct),
+        })
+    } else {
+        WorkDoneProgress::End(WorkDoneProgressEnd { message: Some(format!("Indexed {} modules", progress.total)) })
+    };
+    srv.handle.block_on(srv.client.send_notification::<notification::Progress>(ProgressParams {
+        token,
+        value: ProgressParamsValue::WorkDone(value),
+    }));
 }
 
 /// How far a session's prefetch of the declared dependencies has got.

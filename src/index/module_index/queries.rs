@@ -585,6 +585,39 @@ impl ModuleIndex {
         idx
     }
 
+    /// Test-only: pin how many names a landing frontier places at once
+    /// (`1` is the serial landing).
+    #[cfg(test)]
+    pub fn set_landing_frontier_for_test(&self, width: usize) {
+        self.core.queue.frontier.store(width, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Test-only: every registration the index holds, one sorted line each
+    /// — name slots, candidate relations in precedence order, the landings'
+    /// registration generations, edge homes and the edge buckets — for
+    /// comparing two landings of the same tree.
+    #[cfg(test)]
+    pub fn registrations_for_test(&self) -> Vec<String> {
+        let c = &self.core;
+        let mut out: Vec<String> = Vec::new();
+        for e in c.cache.iter() {
+            out.push(format!("slot {} -> {:?}", e.key(), e.value().as_ref().map(|m| m.path.clone())));
+            out.push(format!("fed {} -> {:?}", e.key(), self.modules_with_symbol(e.key())));
+        }
+        for e in c.all_defs.iter() {
+            out.push(format!("defs {} -> {:?}", e.key(), e.value().iter().map(|m| m.path.clone()).collect::<Vec<_>>()));
+        }
+        // The front doors' generations follow the parallel walk's order.
+        for e in c.registration_gen.iter().filter(|e| !c.is_front_door(e.key())) {
+            out.push(format!("gen {} {}", e.key().display(), e.value()));
+        }
+        for e in c.edge_homes.iter() {
+            out.push(format!("home {} {}", e.key().display(), e.value()));
+        }
+        out.sort();
+        out
+    }
+
     /// Test-only: seed the builtins map directly (bypasses SQLite +
     /// the resolver thread). Used by hover tests so they don't have
     /// to spin up the perlfunc.pod parse pipeline.

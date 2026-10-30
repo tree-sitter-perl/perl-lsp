@@ -834,6 +834,55 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A frontier places in parallel and lands in order, for Perl as for every
+/// language: one name at a time and a whole frontier at once register the
+/// same slots, candidate orders, generations and edge homes. Modules that
+/// declare a common package make the order observable, and parents land
+/// in a later frontier than the names that asked for them.
+#[test]
+fn a_frontier_placed_in_parallel_registers_as_the_serial_landing_does() {
+    let dir = std::env::temp_dir().join(format!("perl-frontier-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut files: Vec<(String, String)> = (0..16)
+        .map(|i| {
+            let parent = if i % 4 == 0 { format!("use parent -norequire, 'Base{i}';\n") } else { String::new() };
+            (
+                format!("local/lib/perl5/Dep{i}.pm"),
+                format!("package Dep{i};\n{parent}sub own{i} {{ 1 }}\npackage Shared;\nsub from{i} {{ 1 }}\n1;\n"),
+            )
+        })
+        .collect();
+    for i in (0..16).step_by(4) {
+        files.push((format!("local/lib/perl5/Base{i}.pm"), format!("package Base{i};\nsub base{i} {{ 1 }}\n1;\n")));
+    }
+    let uses: String = (0..16).map(|i| format!("use Dep{i};\n")).collect();
+    files.push(("lib/App.pm".into(), format!("package App;\n{uses}1;\n")));
+    for (rel, body) in &files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let landed = |width: usize| -> Vec<String> {
+        let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+        idx.set_landing_frontier_for_test(width);
+        idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+        index_workspace_with_index(&dir, &idx, None, None);
+        idx.request_dependency_demand();
+        idx.wait_idle();
+        idx.registrations_for_test()
+    };
+    let serial = landed(1);
+    let parallel = landed(64);
+    assert!(serial.iter().any(|l| l.starts_with("slot Base8 -> Some")), "a parent landed: {serial:#?}");
+    assert!(
+        serial.iter().any(|l| l.starts_with("defs Shared ") && l.matches("Dep").count() == 16),
+        "every module is a candidate for the package they share: {serial:#?}"
+    );
+    assert_eq!(serial, parallel);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The file a name's path spells is that name's file, whatever package it
 /// declares: `require JSON::backportPP` loads `JSON/backportPP.pm`, which
 /// declares `JSON::PP`. (Spelled afresh: the process `@INC` may hold the

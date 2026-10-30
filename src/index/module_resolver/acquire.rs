@@ -1,8 +1,11 @@
 //! The one acquisition, for every served language: locate a name through
 //! the dependency map, parse what it places, persist where the process has
-//! a store, and land it. Only the resolver thread runs it; every asker —
-//! a didOpen's imports, the bulk indexer's demand, an invalidated save,
-//! descent from a landed file — reaches it through `request_resolve`.
+//! a store, and land it. Every asker — a didOpen's imports, the bulk
+//! indexer's demand, an invalidated save, descent from a landed file —
+//! reaches it through `request_resolve`. The resolver thread drives it: a
+//! frontier of names places (locates and parses) in parallel on Rayon
+//! (`place_frontier`), and the thread lands each name in order
+//! (`land_placed`), so the shared state only ever moves on that thread.
 
 use super::*;
 use crate::build::language_driver::{LanguageDriver, Located, LocatedBy};
@@ -22,16 +25,51 @@ pub(crate) struct Placed {
 /// file that is unreadable, at or over the driver's cap, or whose
 /// analysis panics is left out.
 pub(crate) fn locate_and_parse(snap: &MapSnapshot, name: &str) -> Vec<Placed> {
+    place_frontier(snap, &[name.to_string()]).pop().unwrap_or_default()
+}
+
+/// `locate_and_parse` for every name of a frontier at once, on Rayon:
+/// each name locates in parallel, then every located file parses in
+/// parallel, so a frontier of one-file names and a name with many twins
+/// spread the same way. Out is indexed like `names`, each in the map's
+/// precedence order — the order the landing registers in, so the result
+/// is the serial one whatever the pool's width.
+pub(crate) fn place_frontier(snap: &MapSnapshot, names: &[String]) -> Vec<Vec<Placed>> {
+    use rayon::prelude::*;
     let cap = snap.driver.caps().file_cap;
-    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut out: Vec<Placed> = Vec::new();
-    for Located { path, by } in snap.locator.locate(name) {
-        let canon = std::fs::canonicalize(&path).unwrap_or(path);
-        if !seen.insert(canon.clone()) || !snap.in_tier(&canon) {
-            continue;
-        }
-        if let Some(file) = parse_one(snap, &canon, cap, name) {
-            out.push(Placed { file, by });
+    let located: Vec<Vec<(PathBuf, LocatedBy)>> = names
+        .par_iter()
+        .map(|name| {
+            let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+            snap.locator
+                .locate(name)
+                .into_iter()
+                .filter_map(|Located { path, by }| {
+                    let canon = std::fs::canonicalize(&path).unwrap_or(path);
+                    (seen.insert(canon.clone()) && snap.in_tier(&canon)).then_some((canon, by))
+                })
+                .collect()
+        })
+        .collect();
+    let jobs: Vec<(usize, &PathBuf, LocatedBy)> = located
+        .iter()
+        .enumerate()
+        .flat_map(|(i, files)| files.iter().map(move |(p, by)| (i, p, *by)))
+        .collect();
+    // Per file, as the workspace walk does: a panic outside the driver's
+    // own guard loses that file, never the frontier or the thread.
+    let parsed: Vec<Option<Arc<CachedModule>>> = jobs
+        .par_iter()
+        .map(|&(i, canon, _)| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_one(snap, canon, cap, &names[i])))
+                .ok()
+                .flatten()
+        })
+        .collect();
+    let mut out: Vec<Vec<Placed>> = names.iter().map(|_| Vec::new()).collect();
+    for ((i, _, by), file) in jobs.into_iter().zip(parsed) {
+        if let Some(file) = file {
+            out[i].push(Placed { file, by });
         }
     }
     out
@@ -60,20 +98,19 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
     Some(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::new(fa))))
 }
 
-/// Resolve `name` under the current map: locate and parse with no lock
-/// held, land the whole copies, and queue their persist on `persists` —
-/// the strip waits for the blob's commit (`DependencyPersists::flush`).
+/// Land `name`'s placed files under the generation they were placed at,
+/// and queue their persist on `persists` — the strip waits for the blob's
+/// commit (`DependencyPersists::flush`). The resolver thread's half of an
+/// acquisition; `place_frontier` is the half that runs with no lock held.
 /// Returns the WHOLE providers (descent reads what a strip drops); `Err`
-/// when the map moved meanwhile.
-pub(super) fn acquire(
+/// when the map moved since the placing.
+pub(super) fn land_placed(
     core: &IndexCore,
+    snap: &MapSnapshot,
     name: &str,
+    placed: Vec<Placed>,
     persists: &mut DependencyPersists,
 ) -> Result<Option<Providers>, MapMoved> {
-    let Some(snap) = core.map_snapshot() else {
-        return Ok(None);
-    };
-    let placed = locate_and_parse(&snap, name);
     let answers = answering(snap.driver, name, &placed);
     let whole: Providers = placed.into_iter().map(|p| p.file).collect();
     let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
