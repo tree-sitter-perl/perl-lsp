@@ -139,6 +139,18 @@ pub(super) fn finish(st: &mut ExtractState) {
         });
     }
     out.witnesses.extend(narrowed);
+    for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
+        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
+        if (region.start.row, region.start.column) >= (end.row, end.column) {
+            continue;
+        }
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
+            payload: crate::model::witnesses::WitnessPayload::Observation(obs),
+            span: Span { start: region.start, end },
+        });
+    }
     // std::move sites → moved-from facts. The qualifier/name verify the
     // call IS `std::move` here (no query predicates), so the diagnostic never
     // sees the call shape — it reads the recorded var + span + scope.
