@@ -827,6 +827,10 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
         "the project's own `Mine` keeps the slot",
     );
     assert_eq!(idx.def_candidates("Mine").len(), 2, "the dependency's `Mine` is still a candidate");
+    // Registered once, under the name it was asked by: its other packages
+    // bind the file without feeding its edges again.
+    assert_eq!(idx.modules_with_symbol("deep"), ["Outer"]);
+    assert_eq!(idx.modules_with_symbol("theirs"), ["Outer"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

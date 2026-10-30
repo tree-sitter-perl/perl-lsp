@@ -318,7 +318,8 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 "module_index",
                 2,
                 "insert_resolved's body, and the resolver thread's dependency landing \
-                 (each name a landed file declares, fresh or warm) — stripped once \
+                 (binds each name a landed file declares to its one stored copy, fresh \
+                 or warm) — stripped once \
                  persisted; whole only where no row licenses the strip (always-loaded \
                  files, by-products of another name's ask, a process with no store) or \
                  a one-shot warm keeps it whole for wall, bounded by the demand closure \

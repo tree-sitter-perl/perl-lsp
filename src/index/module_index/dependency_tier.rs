@@ -302,8 +302,9 @@ impl IndexCore {
     /// Land `whole` — the files the map placed for an asked name (none:
     /// its always-loaded files), parsed under `generation`, in the map's
     /// precedence order — under the asked name for the files `asked`
-    /// says answer it, and under every name each file declares. One
-    /// stored copy per file serves all its names; a name nobody asked for
+    /// says answer it, and under every name each file declares. Each file
+    /// registers once (`register_landed`, under its first name) and one
+    /// stored copy serves all its names; a name nobody asked for
     /// only fills a slot nothing answers yet, since an ask's own answer
     /// outranks a file that happens to declare the name too. Returns the
     /// asked name's stored providers; `None` is a miss.
@@ -344,6 +345,21 @@ impl IndexCore {
             .enumerate()
             .map(|(i, m)| super::index_core::strip_import_copy_one(m, persisted && answers.contains(&i), strip))
             .collect();
+        // Each file registers ONCE, under its home: the first name in
+        // precedence order it answers (the asked name, when it does). Its
+        // other names only bind it below, so a header declaring hundreds
+        // of names costs one feed, not one per name.
+        let mut homes: Vec<(&str, Providers)> = Vec::new();
+        for (i, m) in whole.iter().enumerate() {
+            let Some((home, _)) = declared.iter().find(|(_, at)| at.contains(&i)) else { continue };
+            match homes.iter_mut().find(|(h, _)| h == home) {
+                Some((_, files)) => files.push(Arc::clone(m)),
+                None => homes.push((home.as_str(), vec![Arc::clone(m)])),
+            }
+        }
+        for (home, files) in &homes {
+            self.register_landed(home, files);
+        }
         let mut out = None;
         for (name, at) in declared {
             let claim = asked.is_some_and(|(a, _)| a == name);
@@ -351,12 +367,11 @@ impl IndexCore {
                 self.insert_resolved(&name, None, persisted, strip);
                 continue;
             }
-            let w: Providers = at.iter().map(|&i| Arc::clone(&whole[i])).collect();
             let s: Providers = at.iter().map(|&i| Arc::clone(&stored[i])).collect();
             for &i in &at {
                 st.landed.entry(whole[i].path.clone()).or_default().push(name.clone());
             }
-            let landed = self.publish_resolved(&name, Some(&w), Some(s), claim);
+            let landed = self.publish_resolved(&name, Some(s), claim);
             if claim {
                 out = landed;
             }

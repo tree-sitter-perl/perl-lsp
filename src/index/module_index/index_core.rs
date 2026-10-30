@@ -259,6 +259,12 @@ impl IndexCore {
         self.registration_gen.insert(path.to_path_buf(), g);
     }
 
+    /// A shape mutation landed — invalidate every memo keyed on the
+    /// enrichment epoch. Over-invalidation is the safe direction.
+    pub(crate) fn note_shape_change(&self) {
+        self.shape_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// THE one spelling of "a module resolution landed in the name-keyed
     /// cache slot" — the resolver thread and the CLI both route here.
     /// `result` is the WHOLE parsed copy; `persisted` says its blob landed
@@ -278,12 +284,6 @@ impl IndexCore {
     /// cover), and clobbering would leave the reverse index pointing at a
     /// module the cache no longer holds (the orphan that broke cross-file
     /// Handler / dispatch lookup).
-    /// A shape mutation landed — invalidate every memo keyed on the
-    /// enrichment epoch. Over-invalidation is the safe direction.
-    pub(crate) fn note_shape_change(&self) {
-        self.shape_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub(crate) fn insert_resolved(
         &self,
         module_name: &str,
@@ -297,37 +297,50 @@ impl IndexCore {
                 .map(|m| strip_import_copy_one(m, persisted, strip))
                 .collect()
         });
-        self.publish_resolved(module_name, result.as_deref(), stored, true)
+        if let Some(ref whole) = result {
+            self.register_landed(module_name, whole);
+        }
+        self.publish_resolved(module_name, stored, true)
     }
 
-    /// `insert_resolved` for copies already prepared: `whole` feeds the
-    /// projections, `stored` (the same files, possibly stripped) is what
-    /// the relation and the slot hold. Lets one file land under several
-    /// names as ONE stored copy. `claim: false` joins the relation without
-    /// replacing a slot that already answers.
+    /// The per-FILE half of a landing: bag invalidation, a fresh
+    /// registration generation, the edge feed and the loader-config shapes,
+    /// all read off the WHOLE copies, published under `home`. A file is
+    /// registered once per landing however many names it binds
+    /// (`publish_resolved`): the feed is O(the file's symbols), and a name
+    /// that only binds the file adds nothing to it — readers reach the file
+    /// through any of its names' candidates (`def_candidates`).
+    pub(crate) fn register_landed(&self, home: &str, whole: &[Arc<CachedModule>]) {
+        crate::util::ghost_stats::count_by("dependency.registered", whole.len() as u64);
+        self.note_shape_change();
+        // One purge, then one push per provider: `record_loader_shapes`
+        // clears the contributor's entries before pushing, so calling it
+        // per provider would leave only the last one's shapes.
+        self.purge_loader_shapes(home);
+        for m in whole {
+            if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
+                bc.invalidate(&m.path);
+            }
+            self.mint_registration_gen(&m.path);
+            self.edges.feed(home, &m.path, &m.analysis);
+            self.push_loader_shapes(home, &m.analysis);
+        }
+    }
+
+    /// The per-NAME half of a landing: `stored` (copies `register_landed`
+    /// already registered, possibly stripped) joins `module_name`'s
+    /// relation and, with `claim` or an empty slot, its name slot. Lets one
+    /// file land under several names as ONE stored copy. A `None` miss
+    /// never clobbers a slot that already answers.
     pub(crate) fn publish_resolved(
         &self,
         module_name: &str,
-        whole: Option<&[Arc<CachedModule>]>,
         stored: Option<Providers>,
         claim: bool,
     ) -> Option<Providers> {
         crate::util::ghost_stats::count("epoch.shape.insert_resolved");
         self.note_shape_change();
-        if let Some(providers) = whole {
-            // One purge, then one push per provider: `record_loader_shapes`
-            // clears the contributor's entries before pushing, so calling it
-            // per provider would leave only the last one's shapes.
-            self.purge_loader_shapes(module_name);
-            for m in providers {
-                if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
-                    bc.invalidate(&m.path);
-                }
-                self.mint_registration_gen(&m.path);
-                self.edges.feed(module_name, &m.path, &m.analysis);
-                self.push_loader_shapes(module_name, &m.analysis);
-            }
-        } else if matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
+        if stored.is_none() && matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
             return None;
         }
         // The relation holds every provider; the name-keyed slot holds the

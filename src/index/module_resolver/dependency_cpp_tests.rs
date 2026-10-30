@@ -159,3 +159,25 @@ fn a_landed_header_warms_from_the_store() {
     });
 }
 
+
+/// A header lands under every name it declares, as one registration: its
+/// edges are fed once, under the path it was asked by, so a header with
+/// hundreds of names costs one feed rather than one per name.
+#[test]
+fn a_landed_header_registers_once_however_many_names_it_declares() {
+    let base = tree(
+        "fed-once",
+        &[
+            ("proj/src/main.cpp", "#include <many.h>\nint main() { return m1(); }\n"),
+            ("include/many.h", "int m1();\nint m2();\nint m3();\n#define M4 4\ntypedef int m5_t;\nstruct m6 { int x; };\n"),
+        ],
+    );
+    let idx = indexed(&base.join("proj"));
+    let header = base.join("include/many.h");
+    for name in ["m1", "m2", "m3", "M4", "m5_t", "m6"] {
+        assert_eq!(idx.get_cached(name).map(|c| c.path.clone()), Some(header.clone()), "{name} binds the header");
+    }
+    let fed = idx.modules_with_symbol("m2");
+    assert_eq!(fed.len(), 1, "fed under one name, not one per declared name: {fed:?}");
+    assert_eq!(idx.get_cached(&fed[0]).map(|c| c.path.clone()), Some(header));
+}
