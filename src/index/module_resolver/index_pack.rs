@@ -245,7 +245,7 @@ pub fn index_pack_language(
                         "workspace",
                         seeds,
                     ) {
-                        log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
+                        log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
                     }
                 },
             );
@@ -327,7 +327,7 @@ pub fn index_pack_language(
                             if let Err(err) = module_cache::shred_derived_rows(
                                 conn, &path_str, "workspace", &e.seeds,
                             ) {
-                                log::warn!(
+                                log::error!(
                                     "Failed to shred derived rows for {:?}: {}",
                                     e.path,
                                     err

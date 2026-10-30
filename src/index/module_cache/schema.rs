@@ -135,7 +135,17 @@ mod fingerprint_tests {
     }
 }
 
+/// Create the schema and run every version gate, as ONE `BEGIN IMMEDIATE`
+/// transaction. Two writers open the same DB (resolver thread + workspace
+/// indexer); with the check and its rebuild split across autocommit
+/// statements, both read "no stamp" on a fresh file, both rebuild, and one
+/// fails mid-rebuild with `table … already exists`. Under the write lock the
+/// second opener waits, then finds the schema finished and changes nothing.
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    in_immediate_txn(conn, || init_schema_in_txn(conn))
+}
+
+fn init_schema_in_txn(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(sql::SCHEMA_CREATE.registered())?;
     // Row-format generation for the derived tables (see REF_ROWS_VERSION).
     let rows_version: Option<String> = conn
@@ -212,7 +222,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Stub generation gate — stamped here so every fresh DB is writable by
     // the persist writers (their per-chunk `stub_version_current` check
     // would otherwise fail-closed until the first warm scan stamped it).
-    validate_stub_version(conn);
+    validate_stub_version_in_txn(conn)?;
 
     let version: Option<String> = conn
         .query_row(sql::META_GET.registered(), params!["schema_version"], |row| row.get(0))
@@ -239,7 +249,9 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// alongside every `DELETE FROM modules` hard-clear: the rows are shredded
 /// from the blobs, so a generation that invalidates the blobs invalidates
 /// the rows with it. Cheap to rebuild — the next warm re-shreds from the
-/// decoded analyses it is loading anyway.
+/// decoded analyses it is loading anyway. Callers hold the write transaction
+/// of the check that decided to clear, so the wipe and its generation bump
+/// land together.
 pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(sql::DERIVED_ROWS_CLEAR.registered())?;
     bump_strings_generation(conn)
@@ -278,6 +290,11 @@ pub fn compute_inc_hash(inc_paths: &[PathBuf]) -> String {
 }
 
 pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
+    // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.
+    in_immediate_txn(conn, || validate_inc_paths_inner(conn, inc_paths))
+}
+
+fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
     let current_hash = compute_inc_hash(inc_paths);
     let stored: Option<String> = conn
         .query_row(sql::META_GET.registered(), params!["inc_hash"], |row| row.get(0))
@@ -327,18 +344,20 @@ pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, S
 
     if need_parse {
         if let Some(p) = parsed.as_ref() {
-            conn.execute(sql::BUILTINS_CLEAR.registered(), [])?;
+            // Clear, refill and stamp together: a stamp that lands without its
+            // rows would serve an empty table as current from then on.
             in_immediate_txn(conn, || {
+                conn.execute(sql::BUILTINS_CLEAR.registered(), [])?;
                 let mut stmt = conn.prepare(sql::BUILTINS_INSERT.registered())?;
                 for (name, doc) in &p.entries {
                     stmt.execute(params![name, doc])?;
                 }
+                conn.execute(
+                    sql::META_SET.registered(),
+                    params!["builtins_perl_version", p.perl_version],
+                )?;
                 Ok(())
             })?;
-            conn.execute(
-                sql::META_SET.registered(),
-                params!["builtins_perl_version", p.perl_version],
-            )?;
             log::info!("Indexed {} Perl builtins from {}", p.entries.len(), p.perl_version);
         }
     }

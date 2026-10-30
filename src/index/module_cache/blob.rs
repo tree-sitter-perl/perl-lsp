@@ -675,7 +675,7 @@ pub fn save_blob_to_db_stamped(
         ],
     );
     if let Err(e) = r {
-        log::warn!("Failed to save module blob for '{}': {}", module_name, e);
+        log::error!("Failed to save module blob for '{}': {}", module_name, e);
     }
     persist_conclusions(conn, &path.to_string_lossy(), blob);
     persist_surface(conn, &path.to_string_lossy(), blob);
@@ -841,7 +841,7 @@ pub fn save_to_db(
         // (Negative sentinels have no blob by design and nothing to strip.)
         Ok(_) => result.is_none() || analysis_blob.is_some(),
         Err(e) => {
-            log::warn!("Failed to save module cache for '{}': {}", module_name, e);
+            log::error!("Failed to save module cache for '{}': {}", module_name, e);
             false
         }
     };

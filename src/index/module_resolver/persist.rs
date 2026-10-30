@@ -100,7 +100,7 @@ fn save_one_provider(
                 module_cache::NAME_KEYED_SOURCE,
                 &seeds,
             ) {
-                log::warn!("Failed to shred derived rows for '{}': {}", module_name, e);
+                log::error!("Failed to shred derived rows for '{}': {}", module_name, e);
             }
         }
     }
@@ -267,8 +267,13 @@ pub(crate) fn run_persist_writer<E>(
         }
         let n = batch.len();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let txn_open =
-                conn.execute_batch(module_cache::sql::TXN_BEGIN_IMMEDIATE.registered()).is_ok();
+            let txn_open = match conn.execute_batch(module_cache::sql::TXN_BEGIN_IMMEDIATE.registered()) {
+                Ok(()) => true,
+                Err(err) => {
+                    log::error!("{label}: BEGIN failed ({n} files, registering whole copies): {err}");
+                    false
+                }
+            };
             write_batch(conn, batch);
             let committed = txn_open
                 && match conn.execute_batch(module_cache::sql::TXN_COMMIT.registered()) {
