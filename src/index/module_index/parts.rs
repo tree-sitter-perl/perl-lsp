@@ -127,7 +127,7 @@ pub struct ModuleEdgeIndexes {
     /// blinding `modules_with_symbol`/`find_exporters`. Keyed by PATH, not
     /// module name: several files can feed under one package name (Perl
     /// reopens packages anywhere), and a name-keyed record would replay one
-    /// file's names for its siblings. `clear()` and `purge_module` keep it
+    /// file's names for its siblings. `purge_module` keeps it
     /// (re-feeds are exactly when it's needed); `remove_path_record` drops
     /// it when the file itself goes.
     name_records: DashMap<std::path::PathBuf, FedNames>,
@@ -386,21 +386,6 @@ impl ModuleEdgeIndexes {
     /// Drop `path`'s recorded name list (the file itself is gone).
     pub fn remove_path_record(&self, path: &std::path::Path) {
         self.name_records.remove(path);
-    }
-
-    /// Wipe the edge maps for a rebuild. Deliberately KEEPS `name_records`
-    /// — the rebuild re-feeds from cache copies that may be symbol-evicted,
-    /// and the records are their only complete name source.
-    pub fn clear(&self) {
-        self.names.clear();
-        self.bridges.clear();
-        self.children.clear();
-        self.specs.clear();
-        self.providers.clear();
-        // The marks describe the maps just emptied; keeping them would let
-        // a later purge take the sweep for a module with no edges left,
-        // and — worse — a re-feed would find its mark already set.
-        self.fed_modules.clear();
     }
 
     /// One walk of `symbols()` for both symbol-derived feed halves — the

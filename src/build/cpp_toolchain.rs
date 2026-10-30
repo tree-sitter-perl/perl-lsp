@@ -127,6 +127,7 @@ impl Toolchain {
         Toolchain { compiler, lang, std }
     }
 
+    #[cfg(test)]
     pub fn lang(&self) -> Lang {
         self.lang
     }
@@ -210,6 +211,7 @@ fn cache() -> &'static Mutex<HashMap<ToolchainKey, Option<ToolchainInfo>>> {
 /// optional `-std=` value (e.g. `c++20`) forwarded so `__cplusplus` and
 /// the `c++/<ver>` roots match the project. Returns `None` when no
 /// compiler is on PATH — never panics; a machine may have none.
+#[cfg(test)]
 pub fn probe(compiler: &str, std: Option<&str>) -> Option<ToolchainInfo> {
     probe_full(compiler, Lang::Cpp, std, None)
 }
