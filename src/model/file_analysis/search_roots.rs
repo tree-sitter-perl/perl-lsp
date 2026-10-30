@@ -88,26 +88,69 @@ pub struct RootReach {
     pub namer: PathBuf,
 }
 
+/// What a root of the process's search path holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootHolds {
+    /// The project's own code: under the workspace and outside every
+    /// dependency tier root (Perl's `lib/`).
+    Project,
+    /// Installed code: a dependency tier root (carton's `local/`) or
+    /// anywhere outside the workspace (the system `@INC`).
+    Installed,
+}
+
+/// One root of the process's search path, classified where the map
+/// publishes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessRoot {
+    pub path: PathBuf,
+    pub holds: RootHolds,
+}
+
+impl ProcessRoot {
+    /// `path` (canonical) for a project at `workspace` whose dependency
+    /// tier roots are `tier_roots`.
+    pub fn classify(path: PathBuf, workspace: Option<&Path>, tier_roots: &[PathBuf]) -> ProcessRoot {
+        let project = workspace.is_some_and(|ws| path.starts_with(ws))
+            && !tier_roots.iter().any(|t| path.starts_with(t));
+        let holds = if project { RootHolds::Project } else { RootHolds::Installed };
+        ProcessRoot { path, holds }
+    }
+}
+
 /// Where a root an asker searches came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootTier {
     /// The asker names it.
     Own,
+    /// The process's search path, where it holds the project's own code.
+    Project,
     /// A file that uses the asker, transitively, names it: the asker
     /// runs in that file's process.
     Stack { namer: PathBuf },
     /// Some other registered file names it. Over-approximate: nothing says
     /// the asker runs under that file.
     Registered { namer: PathBuf },
-    /// The process's search path.
-    Process,
+    /// The process's search path, where it holds installed code.
+    Installed,
+}
+
+impl RootTier {
+    /// Whether another file's root put this one on the asker's path.
+    fn borrowed(&self) -> bool {
+        matches!(self, RootTier::Stack { .. } | RootTier::Registered { .. })
+    }
 }
 
 /// An asker's search roots, most-preferred first, each with its tier: the
-/// asker's own, then the stack's (nearest first), then every other
-/// registered root, then the process's. THE ranking an asker's search
-/// path has; `VisibilityAxis::for_origin` derives it for the search-path
-/// axis and the supplier stamp reads the same list.
+/// asker's own, then the project's code, then the stack's (nearest
+/// first), then every other registered root, then installed code. A root
+/// another file names is borrowed: it fills what the project's own code
+/// lacks and outranks an installed copy (a patched CPAN module under a
+/// script's `use lib`), but never shadows the project's code (a `t/lib`
+/// mock of a `lib/` module). THE ranking an asker's search path has;
+/// `VisibilityAxis::for_origin` derives it for the search-path axis and
+/// the supplier stamp reads the same list.
 #[derive(Debug, Default)]
 pub struct RankedRoots {
     pub roots: Vec<(PathBuf, RootTier)>,
@@ -125,10 +168,14 @@ impl RankedRoots {
                 ranked.push(d, RootTier::Own);
             }
         }
+        let process = |holds: RootHolds| inc.iter().filter(move |r| r.holds == holds);
+        for r in process(RootHolds::Project) {
+            ranked.push(r.path.clone(), RootTier::Project);
+        }
         if !registry.named.is_empty() {
             // A root every asker searches anyway (`use lib 'lib'` naming the
             // project's own lib) is the process's, whoever else names it.
-            let theirs = |root: &PathBuf| !inc.contains(root);
+            let theirs = |root: &PathBuf| !inc.iter().any(|r| r.path == *root);
             let me = self_path.map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
             let mut stack: Vec<&RootReach> =
                 me.as_ref().and_then(|p| registry.reach.get(p)).map(|v| v.iter().collect()).unwrap_or_default();
@@ -142,8 +189,8 @@ impl RankedRoots {
                 }
             }
         }
-        for r in inc.iter() {
-            ranked.push(r.clone(), RootTier::Process);
+        for r in process(RootHolds::Installed) {
+            ranked.push(r.path.clone(), RootTier::Installed);
         }
         ranked
     }
@@ -158,7 +205,7 @@ impl RankedRoots {
     /// Whether only the process's roots are ranked: the asker names none
     /// and no registered file does.
     pub fn is_process_only(&self) -> bool {
-        self.roots.iter().all(|(_, t)| matches!(t, RootTier::Process))
+        self.roots.iter().all(|(_, t)| matches!(t, RootTier::Project | RootTier::Installed))
     }
 
     /// The rank of the root `path` is under: longest prefix wins, then
@@ -183,7 +230,7 @@ impl RankedRoots {
                 namer: namer.clone(),
                 stack: matches!(tier, RootTier::Stack { .. }),
             }),
-            RootTier::Own | RootTier::Process => None,
+            RootTier::Own | RootTier::Project | RootTier::Installed => None,
         }
     }
 }
@@ -220,7 +267,7 @@ impl FileAnalysis {
         scoped: &dyn CrossFileLookup,
     ) -> Vec<SuppliedImport> {
         let ranked = RankedRoots::for_origin(self, self_path, index);
-        if ranked.roots.iter().all(|(_, t)| matches!(t, RootTier::Own | RootTier::Process)) {
+        if !ranked.roots.iter().any(|(_, t)| t.borrowed()) {
             return Vec::new();
         }
         self.imports

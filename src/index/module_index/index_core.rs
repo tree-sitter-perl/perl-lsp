@@ -74,7 +74,7 @@ pub(crate) struct IndexCore {
     /// preferred first. Recorded ONCE by the resolver thread (discovery
     /// shells out to `perl`, so no query path may re-derive it) and read by
     /// every origin's `VisibilityAxis::for_origin`.
-    pub(crate) inc_roots: std::sync::RwLock<Arc<Vec<std::path::PathBuf>>>,
+    pub(crate) inc_roots: std::sync::RwLock<Arc<Vec<crate::model::file_analysis::ProcessRoot>>>,
     pub(crate) queue: ResolveQueue,
     pub(crate) resolved: ResolveNotify,
     pub(crate) workspace_root: WorkspaceRootChannel,
@@ -227,11 +227,20 @@ impl IndexCore {
     }
 
     /// Record the process `@INC`, canonicalized so the per-asker rank can
-    /// prefix-match candidate paths without query-time filesystem I/O.
-    pub(crate) fn set_inc_roots(&self, roots: &[std::path::PathBuf]) {
-        let canon: Vec<std::path::PathBuf> = roots
+    /// prefix-match candidate paths without query-time filesystem I/O, and
+    /// classified against the project at `workspace` with dependency tier
+    /// roots `tier_roots`.
+    pub(crate) fn set_inc_roots(
+        &self,
+        roots: &[std::path::PathBuf],
+        workspace: Option<&std::path::Path>,
+        tier_roots: &[std::path::PathBuf],
+    ) {
+        let canon = |p: &std::path::PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        let tier_roots: Vec<std::path::PathBuf> = tier_roots.iter().map(canon).collect();
+        let canon: Vec<crate::model::file_analysis::ProcessRoot> = roots
             .iter()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .map(|p| crate::model::file_analysis::ProcessRoot::classify(canon(p), workspace, &tier_roots))
             .collect();
         if let Ok(mut g) = self.inc_roots.write() {
             *g = Arc::new(canon);

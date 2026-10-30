@@ -573,7 +573,7 @@ impl ModuleIndex {
     /// shells out to `perl`, and a unit net needs its own roots).
     #[cfg(test)]
     pub fn set_inc_roots_for_test(&self, roots: &[std::path::PathBuf]) {
-        self.core.set_inc_roots(roots);
+        self.core.set_inc_roots(roots, None, &[]);
     }
 
     #[cfg(test)]

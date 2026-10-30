@@ -134,6 +134,60 @@ fn naming_a_process_root_supplies_nothing() {
     assert!(supplied.is_empty(), "{supplied:?}");
 }
 
+/// A test's `use lib 't/lib'` mock answers the test itself, but never
+/// shadows the project's own copy for a file the test loads: that file
+/// runs under every other caller too.
+#[test]
+fn a_borrowed_root_never_shadows_the_projects_code() {
+    let base = tree(
+        "mock",
+        &[
+            ("ws/t/basic.t", "use lib 't/lib';\nuse My::App;\nuse My::Dep;\n"),
+            ("ws/t/lib/My/Dep.pm", DEP_PM),
+            ("ws/lib/My/App.pm", APP_PM),
+            ("ws/lib/My/Dep.pm", DEP_PM),
+        ],
+    );
+    let ws = base.join("ws");
+    let idx = indexed_perl(&ws);
+
+    let (winner, supplied) = seen_by(&idx, &ws.join("t/basic.t"), "My::Dep");
+    assert_eq!(winner, Some(ws.join("t/lib/My/Dep.pm")), "the test's own root");
+    assert!(supplied.is_empty(), "{supplied:?}");
+
+    let (winner, supplied) = seen_by(&idx, &ws.join("lib/My/App.pm"), "My::Dep");
+    assert_eq!(winner, Some(ws.join("lib/My/Dep.pm")), "the project's code beats a borrowed root");
+    assert!(supplied.is_empty(), "{supplied:?}");
+}
+
+/// A patched copy of an installed module under a script's `use lib`
+/// beats the installed copy for the files the script loads, and for a
+/// file nobody loads (the registered tier), each stamped.
+#[test]
+fn a_borrowed_root_outranks_an_installed_copy() {
+    let base = tree(
+        "patch",
+        &[
+            ("ws/bin/app.pl", "use FindBin;\nuse lib \"$FindBin::Bin/../patches\";\nuse My::App;\n"),
+            ("ws/lib/My/App.pm", APP_PM),
+            ("ws/lib/My/Lone.pm", "package My::Lone;\nuse My::Dep;\n1;\n"),
+            ("ws/patches/My/Dep.pm", DEP_PM),
+            ("ws/local/lib/perl5/My/Dep.pm", DEP_PM),
+        ],
+    );
+    let ws = base.join("ws");
+    let idx = indexed_perl(&ws);
+    let patched = ws.join("patches/My/Dep.pm");
+
+    let (winner, supplied) = seen_by(&idx, &ws.join("lib/My/App.pm"), "My::Dep");
+    assert_eq!(winner, Some(patched.clone()), "app.pl loads App.pm");
+    assert_eq!(supplied, [("My::Dep".to_string(), ws.join("bin/app.pl"), true)]);
+
+    let (winner, supplied) = seen_by(&idx, &ws.join("lib/My/Lone.pm"), "My::Dep");
+    assert_eq!(winner, Some(patched));
+    assert_eq!(supplied, [("My::Dep".to_string(), ws.join("bin/app.pl"), false)]);
+}
+
 /// A root stays while any file names it; when the last one drops it, what
 /// landed under it retires.
 #[test]

@@ -837,12 +837,12 @@ pub trait CrossFileLookup {
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
     /// The process's search-path roots — `@INC`, most-preferred first,
-    /// ALREADY CANONICAL (canonicalized once when the resolver published
-    /// it, never per query: this is read on request paths). Roots files
+    /// ALREADY CANONICAL and classified (once, when the resolver published
+    /// them, never per query: this is read on request paths). Roots files
     /// name are `root_registry`'s, not these. Default empty (an index with
     /// no module universe), which makes the search-path axis transparent
     /// rather than blind.
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+    fn inc_roots(&self) -> std::sync::Arc<Vec<ProcessRoot>> {
         std::sync::Arc::new(Vec::new())
     }
     /// The roots registered files name, and what their namers reach.
@@ -1296,7 +1296,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     ) -> Option<std::sync::Arc<CachedModule>> {
         self.get_cached(module_name)
     }
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+    fn inc_roots(&self) -> std::sync::Arc<Vec<ProcessRoot>> {
         self.inner.inc_roots()
     }
     fn root_registry(&self) -> std::sync::Arc<RootRegistry> {
