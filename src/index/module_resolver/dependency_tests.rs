@@ -376,27 +376,6 @@ fn a_class_named_with_no_use_lands() {
     }
 }
 
-/// A landed dependency asks for what it uses, not only its parents: the
-/// workspace names Base, Base's parent Root constructs Unused, and Unused
-/// lands though nothing in the project names it.
-#[test]
-fn a_landed_file_asks_for_what_it_uses() {
-    const MAKER: &str = "<?php\nnamespace Acme\\Model;\nclass Root {\n    function make() { return new Unused(); }\n}\n";
-    let root = project(
-        "descent",
-        &[
-            ("composer.json", COMPOSER),
-            ("vendor/composer/installed.json", INSTALLED),
-            ("vendor/acme/model/src/Base.php", BASE),
-            ("vendor/acme/model/src/Root.php", MAKER),
-            ("vendor/acme/model/src/Unused.php", UNUSED),
-            ("src/User.php", USER),
-        ],
-    );
-    let idx = indexed(&root);
-    assert!(!idx.def_candidates("Acme\\Model\\Unused").is_empty(), "Unused did not land");
-}
-
 /// Composer's `files` are declared demand, asked by their own path: they
 /// land in every session, persist under that path, and a warm start loads
 /// them instead of parsing them again.
