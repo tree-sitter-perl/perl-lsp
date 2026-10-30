@@ -1107,6 +1107,22 @@ impl<'a> Builder<'a> {
         crate::model::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
     }
 
+    /// What a narrowing subject holds at `point`, asked from `scope`.
+    pub(super) fn bag_query_subject(
+        &self,
+        subject: &crate::model::file_analysis::Subject,
+        scope: ScopeId,
+        point: Point,
+    ) -> Option<InferredType> {
+        use crate::model::file_analysis::Subject;
+        match subject {
+            Subject::Variable(name) => self.bag_query_variable(name, scope, point),
+            Subject::Place(place) => {
+                crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point)
+            }
+        }
+    }
+
     /// Bag-routed lookup for a sub's return type by name. Goes through
     /// `query_sub_return_type` so symbol-declarative arity dispatch
     /// (`ReturnExprReducer` on `UnionOnArgs`), the per-Symbol stored

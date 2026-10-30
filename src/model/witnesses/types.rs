@@ -152,6 +152,21 @@ pub enum WitnessAttachment {
     /// `Field` does. Kept at the END for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Param { package: String, name: String, index: u32 },
+    /// A part of a variable's value (`$self->{a}`, `$h{k}[0]`), named by
+    /// what its root binds, so every spelling of the place shares one
+    /// attachment and no scope walk is needed. Temporal like `Variable`:
+    /// its facts hold over the regions their spans cover. Boxed: a place
+    /// is wider than every other attachment, and every witness (and every
+    /// payload that names an attachment) is as wide as the widest.
+    Place(Box<crate::model::file_analysis::Place>),
+}
+
+impl WitnessAttachment {
+    /// A storage location whose facts hold over regions of its lifetime:
+    /// a query at a point reads only what reaches that point.
+    pub fn is_temporal(&self) -> bool {
+        matches!(self, WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_))
+    }
 }
 
 /// Index into `FileAnalysis::refs`.

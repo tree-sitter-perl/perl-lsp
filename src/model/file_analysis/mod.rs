@@ -40,6 +40,8 @@ mod ancestry;
 pub use ancestry::*;
 mod deferral;
 pub use deferral::*;
+mod place;
+pub use place::*;
 mod queries;
 mod enrichment;
 pub use enrichment::{declare_enrichment_profile, enrichment_profile, EnrichmentProfile};

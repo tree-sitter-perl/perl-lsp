@@ -418,6 +418,11 @@ pub enum Invocant {
     /// spelling, however much it looks like one (`self.x`).
     Expr(InvocantName),
     Bridged { plugin: String, token: String, match_mode: BridgedMatch },
+    /// A receiver that is a part of a variable (`$self->{a}->m`): its value
+    /// is that place's, narrowings included, and its text is never a class
+    /// spelling. The place rides here, on the receiver it describes, so
+    /// every member ref carries it at no cost to the ones without.
+    Place { name: InvocantName, place: Box<crate::model::file_analysis::Place> },
 }
 
 /// How a [`Bridged`](Invocant::Bridged) token resolves to a class. Strict
@@ -463,8 +468,16 @@ impl Invocant {
     /// `Class->`) bind through this and skip bridged tokens.
     pub fn as_name(&self) -> Option<&InvocantName> {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => Some(n),
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => Some(n),
             Invocant::Bridged { .. } => None,
+        }
+    }
+
+    /// The receiver's place, when it is a part of a variable.
+    pub fn place(&self) -> Option<&crate::model::file_analysis::Place> {
+        match self {
+            Invocant::Place { place, .. } => Some(place),
+            Invocant::Name(_) | Invocant::Expr(_) | Invocant::Bridged { .. } => None,
         }
     }
 
@@ -478,7 +491,7 @@ impl Invocant {
     /// callers match the variant instead.
     pub fn text(&self) -> &str {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => n,
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => n,
             Invocant::Bridged { token, .. } => token,
         }
     }
@@ -530,24 +543,6 @@ impl<'a> InvocantText<'a> {
             t if t.starts_with('@') || t.starts_with('%') => Self::NonScalar(&t[1..]),
             t => Self::Bareword(t),
         }
-    }
-
-    /// True when the invocant is a hash/array **element place** — `$h{k}`,
-    /// `$a[0]`, `$h{a}{b}`, or the arrow forms `$x->{k}` / `$x->[0]` — i.e.
-    /// a stable slot that flow-narrowing may have refined, so the receiver
-    /// query consults a place witness for it. A scalar **deref** (`${$ref}`,
-    /// `${name}`) is NOT a place: its brace follows the sigil directly,
-    /// whereas a place's subscript follows the container name (or an arrow /
-    /// a prior subscript). Plain scalars and non-scalars are never places.
-    pub fn is_element_place(&self) -> bool {
-        let Self::Scalar(inner) = self else { return false };
-        // `inner` is the text after the `$` sigil. A deref spelling leads
-        // with the brace (`${…}` → inner `"{…}"`); a place has its container
-        // name / `->` / prior subscript before the first `{` or `[`.
-        let b = inner.as_bytes();
-        b.iter().position(|&c| c == b'{' || c == b'[').is_some_and(|i| {
-            i > 0 && !matches!(b[i - 1], b'$' | b'@' | b'%')
-        })
     }
 }
 
@@ -674,25 +669,6 @@ mod tests {
         assert_eq!(InvocantText::parse("$_[0]"), InvocantText::PositionalReceiver);
         assert_eq!(InvocantText::parse("@_[0]"), InvocantText::PositionalReceiver);
         assert_eq!(InvocantText::parse("Foo::Bar"), InvocantText::Bareword("Foo::Bar"));
-    }
-
-    #[test]
-    fn element_place_vs_deref() {
-        // Element places: subscript follows the container name / arrow.
-        for place in ["$h{k}", "$a[0]", "$h{a}{b}", "$self->{x}", "$self->[0]"] {
-            assert!(
-                InvocantText::parse(place).is_element_place(),
-                "{place} should be an element place",
-            );
-        }
-        // Scalar derefs and plain vars are NOT places — `${...}`'s brace
-        // follows the sigil directly.
-        for not_place in ["${name}", "${$ref}", "$obj", "@list", "Foo::Bar", "shift"] {
-            assert!(
-                !InvocantText::parse(not_place).is_element_place(),
-                "{not_place} should NOT be an element place",
-            );
-        }
     }
 
     #[test]

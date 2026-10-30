@@ -171,6 +171,7 @@ impl<'a> Builder<'a> {
             crate::cst::canonical_var_name(n, self.source)
                 .or_else(|| n.text(self.source).map(|s| s.to_string()))
         });
+        let receiver_place = invocant_node.and_then(|n| self.place_subject(n));
         let invocant = invocant_text.as_ref().map(|s| {
             // Resolve __PACKAGE__ to enclosing package name. This is THE
             // canonical producer for ref invocants — varname spelling
@@ -179,6 +180,11 @@ impl<'a> Builder<'a> {
                 crate::model::conventions::Invocant::assume_canonical(
                     self.current_package.clone().unwrap_or_else(|| s.to_string()),
                 )
+            } else if let Some(place) = receiver_place.clone() {
+                crate::model::conventions::Invocant::Place {
+                    name: crate::model::conventions::InvocantName::assume_canonical(s),
+                    place: Box::new(place),
+                }
             } else {
                 crate::model::conventions::Invocant::assume_canonical(s)
             }
@@ -231,6 +237,7 @@ impl<'a> Builder<'a> {
                                 method_name_span,
                                 member_op: None,
                                 named_by_string: false,
+
                             },
                             node_to_span(node),
                             rname,
@@ -253,6 +260,7 @@ impl<'a> Builder<'a> {
                         method_name_span,
                         member_op: None,
                         named_by_string: false,
+
                     },
                     node_to_span(node),
                     name.clone(),

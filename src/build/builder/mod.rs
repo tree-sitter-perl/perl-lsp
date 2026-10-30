@@ -372,9 +372,11 @@ struct Builder<'a> {
     /// Known compile-time string values, accumulated during the walk and
     /// keyed by what each name resolves to (`consts.rs`).
     consts: consts::ConstTable,
-    /// Variable/field declarations by `(scope, sigiled name)`, in walk
-    /// order — the walk-time half of variable visibility, for `binding_key_in`.
-    var_decls: std::collections::HashMap<(ScopeId, String), Vec<SymbolId>>,
+    /// Variable/field declarations by sigiled name, then scope, in walk
+    /// order — the walk-time half of variable visibility, for
+    /// `binding_key_in`. Name first so a lookup borrows the name it is
+    /// given instead of building a key per scope on the chain.
+    var_decls: std::collections::HashMap<String, std::collections::HashMap<ScopeId, Vec<SymbolId>>>,
     /// Names declared via `use constant` (NAME and block forms), per the
     /// enclosing package. A standalone bareword whose text is in this set is
     /// a usage of the constant sub, so it earns a `FunctionCall` ref back to
@@ -548,7 +550,7 @@ struct Builder<'a> {
     /// per variable is enough: it widens the shape from that point on, and
     /// the mutation-extension pass charges one bag query per record).
     /// Keyed by binding: two subs' `my $p` are two variables.
-    escape_recorded: std::collections::HashSet<consts::BindingKey>,
+    escape_recorded: std::collections::HashSet<crate::model::file_analysis::Binding>,
 
     /// The `Variable` refs that reassign their variable (`$v = …` targeting
     /// the variable itself; element writes go to `key_writes` instead).

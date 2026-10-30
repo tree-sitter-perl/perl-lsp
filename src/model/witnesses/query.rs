@@ -85,6 +85,37 @@ pub fn query_sub_return_type(
     reg.free_function_cross_file(ctx, sub_name, None, arity_hint, receiver, &[], &mut QueryState::new())
 }
 
+/// What `place` holds at `point`. The place names its storage, so there
+/// is no chain to walk; `scope` (where the question is asked) supplies only
+/// the framework the fold reads under.
+pub fn query_place_type(
+    bag: &WitnessBag,
+    ctx: &BagContext,
+    place: &crate::model::file_analysis::Place,
+    scope: ScopeId,
+    point: Point,
+) -> Option<InferredType> {
+    let framework = crate::model::file_analysis::lookup_chain(ctx.scopes, scope)
+        .scopes()
+        .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
+        .and_then(|pkg| ctx.package_framework.framework_of(pkg))
+        .unwrap_or(FrameworkFact::Plain);
+    let att = WitnessAttachment::Place(Box::new(place.clone()));
+    let q = ReducerQuery {
+        attachment: &att,
+        point: Some(point),
+        framework,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context: Some(ctx),
+    };
+    match ReducerRegistry::with_defaults().query(bag, &q) {
+        ReducedValue::Type(t) => Some(t),
+        ReducedValue::FactMap(_) | ReducedValue::None => None,
+    }
+}
+
 /// Walk the scope chain from `scope` upward, folding every Variable
 /// witness for `var`; returns the first scope that produces a typed
 /// answer, else `None`.
