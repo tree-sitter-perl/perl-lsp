@@ -440,12 +440,10 @@ impl IndexCore {
                     }
                 }
             }
-            // A front door that declares the name publishes under it too;
-            // its edges outlive the dependency's.
-            if !self.front_door_declares(name) {
-                self.edges.purge_module(name);
-            }
         }
+        // Its home's other files — a front door's among them — are fed
+        // again; only this file's edges go.
+        self.retract_edges(path);
         self.edges.remove_path_record(path);
         if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
             bc.invalidate(path);

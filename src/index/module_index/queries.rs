@@ -593,11 +593,6 @@ impl ModuleIndex {
         self.core.builtins.insert(name.to_string(), doc.to_string());
     }
 
-    /// Direct access to the raw cache DashMap (tests seeding a warm load).
-    #[cfg(test)]
-    pub fn cache_raw(&self) -> &DashMap<String, Option<Arc<CachedModule>>> {
-        &self.core.cache
-    }
 
     /// Insert a module directly into the cache (for CLI and testing).
     /// After indexing completes (cross-file ancestry fully populated),

@@ -524,19 +524,22 @@ impl ModuleIndex {
                 None => v.push(cached.clone()),
             }
         }
+        // Edges once per file, under its first package (`feed_files`).
+        match names.first() {
+            Some((home, _)) => self.core.feed_files(home, std::slice::from_ref(&cached)),
+            None => self.core.retract_edges(&cached.path),
+        }
         for name in &affected {
             self.rebuild_name_registration(name);
         }
     }
 
     /// Recompute everything keyed on `name` from the CURRENT candidate set:
-    /// the edge feeds (purge, then one feed per candidate — a sibling
-    /// file's edges survive any one file's re-registration by
-    /// construction), the name-keyed cache winner (`best_candidate`:
-    /// order-independent, smallest-path tie-break), and the workspace-name
-    /// mark. With no candidates left, a workspace-owned slot empties; an
-    /// occupant the workspace never owned (the @INC tier) is left alone.
-    /// Evicted candidates replay their name feeds from the per-path records.
+    /// the name-keyed cache winner (`best_candidate`: order-independent,
+    /// smallest-path tie-break) and the workspace-name mark. With no
+    /// candidates left, a workspace-owned slot empties; an occupant the
+    /// workspace never owned (the @INC tier) is left alone. Edges are the
+    /// file's, not the name's (`IndexCore::feed_files`).
     fn rebuild_name_registration(&self, name: &str) {
         // `get_cached` answers can move here without a registration-gen
         // mint — the enrichment epoch must move too.
@@ -547,10 +550,6 @@ impl ModuleIndex {
             .get(name)
             .map(|v| v.clone())
             .unwrap_or_default();
-        self.core.edges.purge_module(name);
-        for c in &cands {
-            self.core.edges.feed(name, &c.path, &c.analysis);
-        }
         if cands.is_empty() {
             if self.workspace_modules.remove(name).is_some() {
                 // The slot held the last workspace winner; an @INC
@@ -1308,8 +1307,11 @@ impl ModuleIndex {
                     v.retain(|c| c.path != canon);
                 }
                 self.core.all_defs.remove_if(name, |_, v| v.is_empty());
-                // Survivors keep their edges and re-pick the winner; the
-                // last candidate's departure empties the slot.
+            }
+            // Survivors keep their edges and re-pick the winner; the last
+            // candidate's departure empties the slot.
+            self.core.retract_edges(&canon);
+            for (name, _) in &names {
                 self.rebuild_name_registration(name);
             }
             return;
@@ -1323,8 +1325,8 @@ impl ModuleIndex {
                 .filter(|cm| cm.path == canon || cm.path == path)
                 .map(|_| entry.key().clone())
         });
+        self.core.retract_edges(&canon);
         if let Some(name) = name {
-            self.core.edges.purge_module(&name);
             self.core.cache.remove(&name);
             self.workspace_modules.remove(&name);
         }
@@ -1999,23 +2001,6 @@ impl ModuleIndex {
 
     pub fn registered_file_count(&self) -> usize {
         self.all_files.len()
-    }
-
-    /// Rebuild the reverse index (`func → modules`) from the current cache,
-    /// so `find_exporters` answers identically on cold and warm runs — a
-    /// blind one degrades "exported by X (not yet imported)" hints to a bare
-    /// "not defined" (the B6 cold/warm attribution regression).
-    pub fn rebuild_reverse_index_from_cache(&self) {
-        self.core.rebuild_reverse_index();
-        // The cache holds one WINNER per name; a same-name sibling file's
-        // edges live only through the candidate table — re-feed every
-        // candidate (idempotent) so a rebuild never blinds
-        // `modules_with_symbol` to a reopened package's other files.
-        for entry in self.core.all_defs.iter() {
-            for c in entry.value().iter() {
-                self.core.edges.feed(entry.key(), &c.path, &c.analysis);
-            }
-        }
     }
 }
 

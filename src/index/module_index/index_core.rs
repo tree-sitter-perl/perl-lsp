@@ -156,6 +156,10 @@ pub(crate) struct IndexCore {
     /// tier test: a dependency landing never takes a name one of these
     /// paths declares.
     pub(crate) registered_names: DashMap<std::path::PathBuf, Vec<(String, bool)>>,
+    /// Path → the one name its edges are fed under (`feed_files`). A file
+    /// is fed once, under its home, however many names bind it; the other
+    /// names reach it through their candidates.
+    pub(crate) edge_homes: DashMap<std::path::PathBuf, String>,
 }
 
 impl IndexCore {
@@ -195,6 +199,7 @@ impl IndexCore {
             named_roots_moved: Default::default(),
             named_files: Default::default(),
             registered_names: DashMap::new(),
+            edge_homes: DashMap::new(),
         }
     }
 
@@ -322,8 +327,51 @@ impl IndexCore {
                 bc.invalidate(&m.path);
             }
             self.mint_registration_gen(&m.path);
-            self.edges.feed(home, &m.path, &m.analysis);
             self.push_loader_shapes(home, &m.analysis);
+        }
+        self.feed_files(home, whole);
+    }
+
+    /// THE edge registration, for every tier: `files`' edges, fed under
+    /// `home` and nowhere else. A file that was homed elsewhere leaves its
+    /// old home first. Edges are retracted per home — purge the name, feed
+    /// again every file still homed there — so a sibling's edges survive
+    /// any one file's re-registration.
+    pub(crate) fn feed_files(&self, home: &str, files: &[Arc<CachedModule>]) {
+        for f in files {
+            let prev = self.edge_homes.insert(f.path.clone(), home.to_string());
+            if let Some(prev) = prev.filter(|p| p != home) {
+                self.refeed_home(&prev, &[]);
+            }
+        }
+        self.refeed_home(home, files);
+    }
+
+    /// Drop `path`'s edges: it leaves its home, whose other files are fed
+    /// again. Its name record stays for a re-registration to replay.
+    pub(crate) fn retract_edges(&self, path: &std::path::Path) {
+        if let Some((_, home)) = self.edge_homes.remove(path) {
+            self.refeed_home(&home, &[]);
+        }
+    }
+
+    /// Purge `home`'s edges and feed every file homed there: `files`, plus
+    /// the relation's candidates under `home` that are homed there.
+    fn refeed_home(&self, home: &str, files: &[Arc<CachedModule>]) {
+        self.edges.purge_module(home);
+        let others: Vec<Arc<CachedModule>> = self
+            .all_defs
+            .get(home)
+            .map(|v| {
+                v.iter()
+                    .filter(|c| !files.iter().any(|f| f.path == c.path))
+                    .filter(|c| self.edge_homes.get(&c.path).is_some_and(|h| h.as_str() == home))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for c in files.iter().chain(&others) {
+            self.edges.feed(home, &c.path, &c.analysis);
         }
     }
 
@@ -429,18 +477,6 @@ impl IndexCore {
                     .entry(contributor.to_string())
                     .or_default()
                     .push(f.name.clone());
-            }
-        }
-    }
-
-    /// Rebuild the edge indexes (`func → modules`, bridges, children, specs)
-    /// from the current cache, for a caller that cannot vouch every copy in
-    /// it was fed (cold/warm attribution, the B6 class).
-    pub(crate) fn rebuild_reverse_index(&self) {
-        self.edges.clear();
-        for entry in self.cache.iter() {
-            if let Some(ref cached) = *entry.value() {
-                self.edges.feed(entry.key(), &cached.path, &cached.analysis);
             }
         }
     }

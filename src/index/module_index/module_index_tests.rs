@@ -296,23 +296,14 @@ fn test_find_exporters_uses_reverse_index() {
 }
 
 #[test]
-fn test_rebuild_reverse_index_recovers_warm_path_exporters() {
-    // A copy written straight into `cache_raw()` never touches the reverse
-    // index, so `find_exporters` is blind until a rebuild. The export-only name (`weaken`-style XS export with no Perl
-    // body, hence no `symbols` entry) is the case `indexable_symbol_names`
-    // alone misses — the B6 cold/warm attribution regression.
+fn test_registration_feeds_export_only_names() {
+    // The export-only name (`weaken`-style XS export with no Perl body,
+    // hence no `symbols` entry) is the case `indexable_symbol_names` alone
+    // misses — the B6 cold/warm attribution regression. Every registration
+    // feeds through `IndexCore::feed_files`, so there is no rebuild to miss.
     let idx = ModuleIndex::new_for_test();
     let src = "package Scalar::Util;\nour @EXPORT_OK = qw(weaken blessed);\n1;";
-    let cached = parse_source_to_cached(src, "Scalar::Util");
-
-    // Direct insert, no reverse-index update.
-    idx.cache_raw().insert("Scalar::Util".to_string(), Some(cached));
-    assert!(
-        idx.find_exporters("weaken").is_empty(),
-        "warm insert must not populate the reverse index on its own"
-    );
-
-    idx.rebuild_reverse_index_from_cache();
+    idx.insert_cache("Scalar::Util", Some(parse_source_to_cached(src, "Scalar::Util")));
     assert_eq!(idx.find_exporters("weaken"), vec!["Scalar::Util"]);
     assert_eq!(idx.find_exporters("blessed"), vec!["Scalar::Util"]);
 }
@@ -454,18 +445,12 @@ fn test_children_index_direct_and_transitive() {
 }
 
 #[test]
-fn test_children_index_survives_warm_rebuild_and_purge() {
-    // B6: the children edge must be fed by the warm rebuild path, not
-    // just the insert path — and purged on re-registration.
+fn test_children_index_fed_on_registration_and_purged() {
+    // B6: the children edge is fed on registration — and purged when the
+    // same file registers again through another tier's door.
     let idx = ModuleIndex::new_for_test();
     let child = "package Kid;\nuse parent 'Base::Class';\n1;";
-    let cached = parse_source_to_cached(child, "Kid");
-
-    // Direct insert, indexes untouched.
-    idx.cache_raw().insert("Kid".to_string(), Some(cached));
-    assert!(idx.modules_with_parent("Base::Class").is_empty());
-
-    idx.rebuild_reverse_index_from_cache();
+    idx.insert_cache("Kid", Some(parse_source_to_cached(child, "Kid")));
     assert_eq!(idx.modules_with_parent("Base::Class"), vec!["Kid"]);
 
     // Re-registration with the parent edge gone must drop the stale edge.
@@ -1998,7 +1983,7 @@ fn unregistering_a_workspace_file_retracts_its_loader_shapes() {
 /// directly on the same state rather than asserting a hand-written expected
 /// shape, and it does it on the case that motivated the change: SEVERAL
 /// FILES feeding under ONE module name, which is what an installed @INC tree
-/// is full of and what `rebuild_name_registration` replays after each purge.
+/// is full of and what `IndexCore::feed_files` replays after each purge.
 #[test]
 fn the_record_driven_purge_matches_the_whole_map_sweep() {
     use crate::index::module_index::ModuleEdgeIndexes;

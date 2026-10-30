@@ -343,13 +343,6 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         return (ws, module_index);
     }
 
-    // `insert_cache` only indexes export/export_ok. Rebuild the full
-    // `func → modules` index from the cache so `find_exporters` answers
-    // identically on cold and warm runs (B6 export-attribution regression).
-    timings::phase("cli::rebuild_reverse_index", || {
-        module_index.rebuild_reverse_index_from_cache()
-    });
-
     // Ancestry is now fully populated: materialize deferred cross-file
     // `ClassIsa` plugin emissions (DBIC column/relationship accessors reached
     // through a cross-file base) into the whole resident cached copies, so

@@ -39,7 +39,7 @@ use super::*;
 /// scan per insert makes a bulk feed quadratic in bucket size, and the
 /// worst case is also the common one: `new` is declared by every module in
 /// the workspace, so its bucket IS the workspace. Measured at 8k synthetic
-/// modules, the scan cost `rebuild_reverse_index` 4,108 ms of a 15 s CLI
+/// modules, the scan cost a whole-cache re-feed 4,108 ms of a 15 s CLI
 /// startup and grew as ~n^2.5; without it, 137 ms and linear.
 ///
 /// The set materializes only once a bucket is big enough for the scan to
@@ -121,8 +121,8 @@ pub struct ModuleEdgeIndexes {
     pub(super) providers: DashMap<String, ModuleBucket>,
     /// The indexable-name list each FILE last fed — the symbols-derived
     /// half of `feed`, recorded from the WHOLE analysis so a re-feed over
-    /// symbol-EVICTED cache copies (`rebuild_reverse_index*` after the
-    /// workspace indexer strips, sibling replay after a same-name purge)
+    /// symbol-EVICTED cache copies (a home's siblings fed again after its
+    /// purge, `IndexCore::feed_files`)
     /// replays the names instead of reading empty vecs and silently
     /// blinding `modules_with_symbol`/`find_exporters`. Keyed by PATH, not
     /// module name: several files can feed under one package name (Perl
@@ -250,8 +250,8 @@ impl ModuleEdgeIndexes {
             push_unique(&self.providers, pkg, &mut fed.providers);
         }
         // UNION, not replace: several files can feed under one package name
-        // (Perl reopens packages anywhere), and `rebuild_name_registration`
-        // feeds every candidate after one purge. Replacing would leave the
+        // (Perl reopens packages anywhere), and `IndexCore::feed_files`
+        // feeds every file homed there after one purge. Replacing would leave the
         // earlier siblings' keys unrecorded and their edges unpurgeable.
         let mut rec = self.fed_modules.entry(module_name.to_string()).or_default();
         rec.merge(&fed);
