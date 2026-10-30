@@ -120,6 +120,11 @@ registry! {
     WAL_CHECKPOINT_TRUNCATE => NoScratch, "PRAGMA wal_checkpoint(TRUNCATE)";
 
     // ---- schema and generation gates ----
+    // The row-store tables (`files`/`strings`/`refs`/`held`/`syms`) are NOT
+    // here: `ROWS_REBUILD` creates them under the row-version gate, which runs
+    // whenever the stamp is missing or the shape is off. Creating their
+    // indexes here would fail the whole open on an older shape before the
+    // gate could rebuild it.
     SCHEMA_CREATE => Unplanned("DDL batch, once per writer open"),
         "CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
@@ -141,43 +146,6 @@ registry! {
             name TEXT PRIMARY KEY,
             doc  TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS files (
-            file_id INTEGER PRIMARY KEY,
-            path    TEXT NOT NULL UNIQUE,
-            source  TEXT NOT NULL DEFAULT 'import'
-        );
-        CREATE TABLE IF NOT EXISTS strings (
-            str_id INTEGER PRIMARY KEY,
-            s      TEXT NOT NULL UNIQUE
-        );
-        CREATE TABLE IF NOT EXISTS refs (
-            name_id INTEGER NOT NULL,
-            file_id INTEGER NOT NULL,
-            PRIMARY KEY (name_id, file_id)
-        ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file_id);
-        CREATE TABLE IF NOT EXISTS held (
-            name_id INTEGER NOT NULL,
-            file_id INTEGER NOT NULL,
-            PRIMARY KEY (name_id, file_id)
-        ) WITHOUT ROWID;
-        CREATE INDEX IF NOT EXISTS idx_held_file ON held(file_id);
-        CREATE TABLE IF NOT EXISTS syms (
-            file_id      INTEGER NOT NULL,
-            name_id      INTEGER NOT NULL,
-            key_id       INTEGER NOT NULL,
-            kind         INTEGER NOT NULL,
-            start_row    INTEGER NOT NULL,
-            start_col    INTEGER NOT NULL,
-            end_row      INTEGER NOT NULL,
-            end_col      INTEGER NOT NULL,
-            container_id INTEGER,
-            flags        INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_syms_name ON syms(name_id);
-        CREATE INDEX IF NOT EXISTS idx_syms_key ON syms(key_id);
-        CREATE INDEX IF NOT EXISTS idx_syms_file_name ON syms(file_id, name_id, container_id);
-        CREATE INDEX IF NOT EXISTS idx_syms_file_key ON syms(file_id, key_id, container_id);
         CREATE TABLE IF NOT EXISTS conclusions (
             path       TEXT NOT NULL,
             generation INTEGER NOT NULL,
