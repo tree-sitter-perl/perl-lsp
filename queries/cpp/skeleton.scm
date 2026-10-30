@@ -940,7 +940,7 @@
 ; guard's scope over the arm, and the edge-driven cutoff ends it at any rebind.
 ;
 ; `dynamic_cast<Derived*>(b)` narrows b to Derived — the cpp analog of python
-; `isinstance`.
+; `isinstance`. A member subject (`o.b`) narrows the place it denotes.
 (if_statement
   condition: (condition_clause
     value: (call_expression
@@ -948,7 +948,7 @@
         name: (identifier) @narrow.guard
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
-      arguments: (argument_list (identifier) @narrow.var)))
+      arguments: (argument_list [(identifier) (field_expression)] @narrow.var)))
   consequence: (_) @narrow.arm)
 (conditional_expression
   condition: (call_expression
@@ -956,7 +956,7 @@
       name: (identifier) @narrow.guard
       arguments: (template_argument_list
         (type_descriptor type: (type_identifier) @narrow.type)))
-    arguments: (argument_list (identifier) @narrow.var))
+    arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
   consequence: (_) @narrow.arm)
 (binary_expression
   left: (call_expression
@@ -964,7 +964,7 @@
       name: (identifier) @narrow.guard
       arguments: (template_argument_list
         (type_descriptor type: (type_identifier) @narrow.type)))
-    arguments: (argument_list (identifier) @narrow.var))
+    arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
   operator: "&&"
   right: (_) @narrow.arm)
 

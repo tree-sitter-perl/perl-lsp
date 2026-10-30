@@ -47,6 +47,13 @@ pub(super) struct State {
     pub(super) observations: Vec<(String, ScopeId, crate::model::witnesses::TypeObservation, Span)>,
 }
 
+impl State {
+    /// Whether the node at `bytes` is a member read.
+    pub(super) fn is_member_read(&self, bytes: (usize, usize)) -> bool {
+        self.member_reads.contains_key(&bytes)
+    }
+}
+
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::TypeAnnot => {

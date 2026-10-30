@@ -1084,6 +1084,7 @@ fn remap_spans(
         slot_writes,
         member_writes,
         member_reads,
+        place_narrowings,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1163,6 +1164,11 @@ fn remap_spans(
         let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
+    }
+    for n in place_narrowings.iter_mut() {
+        let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;
+        *subject = rspan(*subject);
+        *region = rspan(*region);
     }
     for m in member_reads.iter_mut() {
         let crate::build::query_extract::MemberRead { span, receiver, member: _ } = m;

@@ -1910,6 +1910,32 @@ void f(Base* b) {
 }
 
 #[test]
+fn cpp_dynamic_cast_narrows_a_member() {
+    // A member subject narrows the place it denotes: `h.b` is Derived inside
+    // the guard and its declared Base outside.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder { Base* b; };
+void f(Holder h) {
+    if (dynamic_cast<Derived*>(h.b)) {
+        h.b->run();
+    }
+    h.b->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    assert_eq!(classes, vec![(5, Some("Derived".to_string())), (7, Some("Base".to_string()))]);
+}
+
+#[test]
 fn cpp_optional_engaged_guard_narrows_to_inner_type() {
     // Guard-testing a `std::optional<Widget>` as engaged proves it holds a
     // Widget inside the block, so `opt->` / `*opt` resolve on Widget there.

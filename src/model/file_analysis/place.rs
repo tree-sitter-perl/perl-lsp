@@ -4,9 +4,12 @@
 //! one place; `$h{a}{b}` and `$h{a}->{b}` are one place; `{'a'}` and `{a}` are
 //! one key.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use super::SymbolId;
+use serde::{Deserialize, Serialize};
+use tree_sitter::Point;
+
+use super::{Span, SymbolId};
 
 /// What a variable name denotes. Built only by the builder's binding
 /// resolution (`Builder::binding_key_in`), so a raw spelling never keys a
@@ -178,4 +181,114 @@ impl Place {
 pub enum Subject {
     Variable(String),
     Place(Place),
+}
+
+/// Every site that could disturb a place, per root binding in source
+/// order — the place sibling of `RebindIndex`, built in one pass over a
+/// file. Each site is an access of a place (`Place::disturbed_by`
+/// decides what it disturbs); a read that steps further in is not one.
+/// Conservative: it under-narrows.
+#[derive(Default)]
+pub struct PlaceDisturbanceIndex {
+    sites: HashMap<Binding, Vec<(Point, Access, Place)>>,
+    /// The same sites keyed by path, so a place whose every step is exact
+    /// reads only the sites on its own path: a file that writes thousands
+    /// of sibling slots (`$T{0}{a} = …; $T{0}{b} = …`) costs each fact a
+    /// lookup per step, not a scan of every sibling write in its region.
+    paths: HashMap<Binding, PathNode>,
+}
+
+/// The sites whose path runs through one node of a root's path tree.
+#[derive(Default)]
+struct PathNode {
+    /// Sites whose path ends here: every access, and the writes alone.
+    ends: Vec<Point>,
+    end_writes: Vec<Point>,
+    /// Sites whose next step names no single slot (a key variable, a
+    /// slice): checked by `disturbed_by`.
+    inexact: Vec<(Point, Access, Place)>,
+    next: HashMap<PathStep, PathNode>,
+}
+
+/// The first of `points` (sorted) inside `region`.
+fn first_in(points: &[Point], region: Span) -> Option<Point> {
+    let i = points.partition_point(|p| *p < region.start);
+    points.get(i).copied().filter(|p| *p < region.end)
+}
+
+impl PlaceDisturbanceIndex {
+    pub fn add(&mut self, at: Point, access: Access, place: Place) {
+        let mut node = self.paths.entry(place.root.clone()).or_default();
+        let mut exact = true;
+        for step in &place.path {
+            if !step.is_exact() {
+                exact = false;
+                break;
+            }
+            node = node.next.entry(step.clone()).or_default();
+        }
+        if exact {
+            node.ends.push(at);
+            if access == Access::Write {
+                node.end_writes.push(at);
+            }
+        } else {
+            node.inexact.push((at, access, place.clone()));
+        }
+        self.sites.entry(place.root.clone()).or_default().push((at, access, place));
+    }
+
+    pub fn seal(&mut self) {
+        fn seal_node(n: &mut PathNode) {
+            n.ends.sort_unstable_by_key(|p| (p.row, p.column));
+            n.end_writes.sort_unstable_by_key(|p| (p.row, p.column));
+            n.inexact.sort_by_key(|(p, ..)| (p.row, p.column));
+            n.next.values_mut().for_each(seal_node);
+        }
+        for sites in self.sites.values_mut() {
+            sites.sort_by_key(|(p, ..)| (p.row, p.column));
+        }
+        self.paths.values_mut().for_each(seal_node);
+    }
+
+    /// The earliest disturbance of `place` within `region` (start
+    /// inclusive, end exclusive).
+    pub fn earliest_in(&self, place: &Place, region: Span) -> Option<Point> {
+        if !place.path.iter().all(PathStep::is_exact) {
+            let sites = self.sites.get(&place.root)?;
+            let i = sites.partition_point(|(p, ..)| *p < region.start);
+            return sites[i..]
+                .iter()
+                .take_while(|(p, ..)| *p < region.end)
+                .find(|(_, access, other)| place.disturbed_by(*access, other))
+                .map(|(p, ..)| *p);
+        }
+        // Only the sites on the place's own path can disturb it: a write
+        // to it or above it, an opaque use strictly above it.
+        let mut node = self.paths.get(&place.root)?;
+        let mut best = None;
+        for depth in 0..=place.path.len() {
+            let ends = if depth < place.path.len() { &node.ends } else { &node.end_writes };
+            best = earliest_point(best, first_in(ends, region));
+            let i = node.inexact.partition_point(|(p, ..)| *p < region.start);
+            let inexact = node.inexact[i..]
+                .iter()
+                .take_while(|(p, ..)| *p < region.end)
+                .find(|(_, access, other)| place.disturbed_by(*access, other))
+                .map(|(p, ..)| *p);
+            best = earliest_point(best, inexact);
+            match place.path.get(depth).and_then(|step| node.next.get(step)) {
+                Some(n) => node = n,
+                None => break,
+            }
+        }
+        best
+    }
+}
+
+fn earliest_point(a: Option<Point>, b: Option<Point>) -> Option<Point> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (some, None) | (None, some) => some,
+    }
 }

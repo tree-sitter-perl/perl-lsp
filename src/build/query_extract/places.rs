@@ -3,12 +3,14 @@
 //! the variable's declaration, never by how the access is spelled
 //! (`docs/prompt-cfg-tier.md` §3.3).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use tree_sitter::Point;
 
 use crate::model::conventions::{Invocant, InvocantName};
-use crate::model::file_analysis::{Binding, PathStep, Place, Span, SymbolId};
+use crate::model::file_analysis::{Access, Binding, PathStep, Place, PlaceDisturbanceIndex, Span, SymbolId};
 
-use super::MemberRead;
+use super::{MemberRead, MemberWrite};
 
 /// Resolves an expression span to the place it denotes, from the facts the
 /// extractor minted: each variable read's declaration and each member read's
@@ -53,5 +55,39 @@ impl<'a> PackPlaces<'a> {
             },
             _ => invocant,
         }
+    }
+
+    /// Every access that could disturb a place rooted in `wanted`: a member
+    /// write is a write of its place; a variable or member read that no
+    /// further member read reads through is handed on whole (an argument, a
+    /// call's receiver), an opaque access.
+    pub(crate) fn disturbances(&self, wanted: &HashSet<Binding>, writes: &[MemberWrite]) -> PlaceDisturbanceIndex {
+        let mut idx = PlaceDisturbanceIndex::default();
+        let mut add = |at: Point, access: Access, place: Place| {
+            if wanted.contains(&place.root) {
+                idx.add(at, access, place);
+            }
+        };
+        for w in writes {
+            if let Some(mut place) = self.at(w.receiver) {
+                place.path.push(PathStep::Member(w.member.clone()));
+                add(w.receiver.start, Access::Write, place);
+            }
+        }
+        let read_through: HashSet<Span> = self.members.values().map(|m| m.receiver).collect();
+        for (&span, &sym) in &self.vars {
+            if !read_through.contains(&span) {
+                add(span.start, Access::Opaque, Place::variable(Binding::Lexical(sym)));
+            }
+        }
+        for &span in self.members.keys() {
+            if !read_through.contains(&span) {
+                if let Some(place) = self.at(span) {
+                    add(span.start, Access::Opaque, place);
+                }
+            }
+        }
+        idx.seal();
+        idx
     }
 }

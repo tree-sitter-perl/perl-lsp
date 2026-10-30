@@ -215,6 +215,9 @@ pub struct SkeletonAnalysis {
     /// member. A receiver that is itself a member read, down to a variable,
     /// makes the access a place (`PackPlaces`).
     pub member_reads: Vec<MemberRead>,
+    /// Guard narrowings whose subject is a member read: rooted, cut off and
+    /// attached to their place in `into_file_analysis`.
+    pub place_narrowings: Vec<PlaceNarrowing>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -244,6 +247,15 @@ pub struct MemberRead {
     pub span: crate::model::file_analysis::Span,
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
+}
+
+/// A guard narrowing a member read (`isinstance(self.x, T)`): the subject,
+/// its refined type, and the arm the guard enters.
+#[derive(Debug, Clone)]
+pub struct PlaceNarrowing {
+    pub subject: crate::model::file_analysis::Span,
+    pub refined: InferredType,
+    pub region: crate::model::file_analysis::Span,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -1095,6 +1107,38 @@ impl SkeletonAnalysis {
             .collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
+        // A guard narrows its place over the arm it enters, up to the place's
+        // first disturbance there or a rebind of its root.
+        let place_narrowings = std::mem::take(&mut self.place_narrowings);
+        let narrowed: Vec<_> = place_narrowings
+            .into_iter()
+            .filter_map(|n| Some((places.at(n.subject).filter(|p| !p.is_variable())?, n)))
+            .collect();
+        if !narrowed.is_empty() {
+            use crate::model::file_analysis::Binding;
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let wanted = narrowed.iter().map(|(p, _)| p.root.clone()).collect();
+            let disturbances = places.disturbances(&wanted, &member_writes);
+            let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
+            for (place, n) in narrowed {
+                let Binding::Lexical(root) = &place.root else { continue };
+                let Some(root) = symbols.iter().find(|s| s.id == *root) else { continue };
+                let end = [disturbances.earliest_in(&place, n.region), rebinds.earliest_in(&root.name, n.region)]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .unwrap_or(n.region.end);
+                if end <= n.region.start {
+                    continue;
+                }
+                bag.push(Witness {
+                    attachment: WA::Place(Box::new(place)),
+                    source: WitnessSource::Builder("skeleton-narrow".into()),
+                    payload: WP::InferredType(n.refined),
+                    span: Span { start: n.region.start, end },
+                });
+            }
+        }
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
             .iter()

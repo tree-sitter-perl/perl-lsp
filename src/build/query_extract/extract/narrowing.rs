@@ -14,6 +14,10 @@ pub(super) struct State {
     /// precede the guard in source (`a if isinstance(x, T) else b`), so the
     /// join waits for `finish`.
     narrow_var: HashMap<usize, (String, ScopeId, Option<String>)>,
+    /// The subject's node, by byte range and span: a subject that is a
+    /// member read narrows the place it denotes, decided once the reads are
+    /// all in (`finish`).
+    narrow_node: HashMap<usize, ((usize, usize), Span)>,
     narrow_type: HashMap<usize, String>,
     narrow_guard: HashMap<usize, String>,
     narrow_arm: HashMap<usize, Span>,
@@ -63,6 +67,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 .rev()
                 .find_map(|&(_, sid)| n.annot_text_by_var.get(&(subject.clone(), sid)).cloned());
             n.narrow_var.insert(e.match_id, (subject, st.cur_scope, annot));
+            n.narrow_node.insert(e.match_id, ((e.start_byte, e.end_byte), e.span()));
         }
         Capture::Narrow(NarrowCap::Arm) => {
             n.narrow_arm.insert(e.match_id, e.span());
@@ -112,8 +117,19 @@ pub(super) fn finish(st: &mut ExtractState) {
         let Some((subject, scope, annot)) = n.narrow_var.get(&mid) else { continue };
         let Some(ty) = n.narrow_type.get(&mid).or(annot.as_ref()) else { continue };
         let guard = n.narrow_guard.get(&mid).map(String::as_str);
-        if let Some(refined) = (st.pack.narrow_guard)(guard, ty) {
-            pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope));
+        let Some(refined) = (st.pack.narrow_guard)(guard, ty) else { continue };
+        // A member subject (`isinstance(self.x, T)`) narrows its place, which
+        // only the assembled analysis can root (`PackPlaces`).
+        match n.narrow_node.get(&mid) {
+            Some((bytes, span)) if st.flow.is_member_read(*bytes) => {
+                let refined = written_type_at(out, &st.pack.names, refined, n.narrow_arm[&mid].start);
+                out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+                    subject: *span,
+                    refined,
+                    region: n.narrow_arm[&mid],
+                });
+            }
+            _ => pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope)),
         }
     }
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region

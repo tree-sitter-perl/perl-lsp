@@ -1526,3 +1526,49 @@ fn a_member_receiver_down_to_a_variable_is_its_place() {
         "a value-rooted receiver is no place"
     );
 }
+
+/// The class each `run()` call's receiver types as, by row.
+fn run_receivers(src: &str) -> Vec<(usize, Option<String>)> {
+    use crate::model::file_analysis::RefKind;
+    let fa = py_in(src, None);
+    let mut out: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| {
+            let t = fa.method_call_invocant_type(r, None);
+            (r.span.start.row, t.and_then(|t| t.class_name().map(str::to_string)))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn isinstance_narrows_a_member_until_it_is_disturbed() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.other = 1
+            self.pet.run()
+            self.pet = make()
+            self.pet.run()
+        self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            self.reset()
+            self.pet.run()
+";
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        run_receivers(src),
+        vec![(6, foo.clone()), (8, foo), (10, None), (11, None), (15, None)],
+        "a sibling write leaves the narrowing; a write to the member, the arm's end, and the receiver handed \
+         whole to a call end it"
+    );
+}
