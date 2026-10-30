@@ -576,6 +576,29 @@ fn operator_evidence_holds_within_its_arm() {
     assert_eq!(at(4, 0), None, "past the arm");
 }
 
+/// A use's evidence ends at the subject's next rebind, the same edge-driven
+/// cutoff a guard's narrowing takes.
+#[test]
+fn operator_evidence_ends_at_a_rebind() {
+    let src = "my $x = f();\nmy $y = $x + 1;\n$x = g();\nmy $z = 1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &perl_pack())
+        .unwrap()
+        .into_file_analysis();
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+    let obs: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == "$x"))
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "skeleton-obs"))
+        .filter(|w| matches!(w.payload, WitnessPayload::Observation(_)))
+        .collect();
+    assert_eq!(obs.len(), 1);
+    assert_eq!(obs[0].span.end, tree_sitter::Point { row: 2, column: 0 }, "cut at `$x = g()`");
+}
+
 #[test]
 fn python_workspace_rename_for_free() {
     // The exact LSP rename path — resolve_symbol at the cursor, then
