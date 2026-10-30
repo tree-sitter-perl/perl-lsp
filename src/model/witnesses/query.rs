@@ -100,7 +100,7 @@ pub fn query_place_type(
         .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
         .and_then(|pkg| ctx.package_framework.framework_of(pkg))
         .unwrap_or(FrameworkFact::Plain);
-    let att = WitnessAttachment::Place(place.clone());
+    let att = WitnessAttachment::Place(Box::new(place.clone()));
     let q = ReducerQuery {
         attachment: &att,
         point: Some(point),

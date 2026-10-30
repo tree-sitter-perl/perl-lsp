@@ -1207,7 +1207,7 @@ impl FileAnalysis {
             matches!(&w.source, WitnessSource::Builder(s) if s == "narrowing" || s == "defined_narrowing")
                 && match (&w.attachment, subject) {
                     (WitnessAttachment::Variable { name, .. }, Subject::Variable(v)) => name == v,
-                    (WitnessAttachment::Place(p), Subject::Place(q)) => p == q,
+                    (WitnessAttachment::Place(p), Subject::Place(q)) => **p == *q,
                     _ => false,
                 }
         }) {

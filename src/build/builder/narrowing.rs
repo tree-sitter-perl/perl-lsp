@@ -289,7 +289,7 @@ fn subject_attachment(subject: Subject, scope: ScopeId) -> crate::model::witness
     use crate::model::witnesses::WitnessAttachment;
     match subject {
         Subject::Variable(name) => WitnessAttachment::Variable { name, scope },
-        Subject::Place(place) => WitnessAttachment::Place(place),
+        Subject::Place(place) => WitnessAttachment::Place(Box::new(place)),
     }
 }
 
