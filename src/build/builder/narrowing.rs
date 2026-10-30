@@ -1040,25 +1040,44 @@ impl<'a> Builder<'a> {
         for root in roots {
             // Each tree runs in document order; an injected tree restarts it.
             let mut binder = SurveyBinder { builder: self, scopes: super::infra::ScopeCursor::new(&self.scopes), wanted };
+            let mut read_through = std::collections::HashSet::new();
             super::pipeline::survey(root, |node| {
                 let kind = node.kind();
+                if !matches!(
+                    kind,
+                    "hash_element_expression"
+                        | "array_element_expression"
+                        | "slice_expression"
+                        | "keyval_expression"
+                        | "scalar"
+                        | "array"
+                        | "hash"
+                ) {
+                    return;
+                }
+                // Preorder reaches an access before what it reads through,
+                // so the outer access marks the inner one (`node.parent()`
+                // walks down from the root: asking upward costs the depth).
+                if let Some(inner) = crate::cst::place_inner(node) {
+                    read_through.insert(inner.id());
+                }
+                if read_through.remove(&node.id()) {
+                    return;
+                }
+                // Binding first: most accesses hang off a root no subject
+                // names, and classifying the access is the costly half.
+                let Some(read) = crate::cst::read_place(node, self.source, &mut binder) else { return };
                 let access = match kind {
                     "hash_element_expression" | "array_element_expression" => {
                         if self.element_write_kind(node).is_some() { Access::Write } else { Access::Opaque }
                     }
                     // A slice can write every slot it names, read or not.
                     "slice_expression" | "keyval_expression" => Access::Write,
-                    "scalar" | "array" | "hash" => {
+                    _ => {
                         if crate::cst::is_assignment_target(node) { Access::Write } else { Access::Opaque }
                     }
-                    _ => return,
                 };
-                if crate::cst::continues_place(node) {
-                    return;
-                }
-                if let Some(read) = crate::cst::read_place(node, self.source, &mut binder) {
-                    idx.add(node.start_position(), access, read.place);
-                }
+                idx.add(node.start_position(), access, read.place);
             });
         }
         idx.seal();

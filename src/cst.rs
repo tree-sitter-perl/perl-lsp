@@ -794,24 +794,18 @@ fn collect_steps(
     Some(())
 }
 
-/// `node` is read through to a longer place: the base of an element or
-/// slice access, or the operand of a deref spelling (`$x` in `$$x{a}`,
-/// `@{$x}`).
-pub(crate) fn continues_place(node: Node) -> bool {
-    let Some(parent) = node.parent() else { return false };
-    if matches!(parent.kind(), "hash_element_expression" | "array_element_expression" | "slice_expression" | "keyval_expression") {
-        return access_base(parent).is_some_and(|(b, _)| b == node);
-    }
-    // `$$x` → varname; `${$x}` → expression_statement, block, varname.
-    let mut up = Some(parent);
-    for _ in 0..4 {
-        let Some(n) = up else { return false };
-        if is_variable_kind(n.kind()) {
-            return deref_operand_expr(n) == Some(node);
+/// What a place access reads through to reach its own place: the base of
+/// an element or slice (`$x` of `$x->{a}`), or the operand of a deref
+/// spelling (`$x` of `$$x{a}`, `@{$x}`). That inner node is a read of the
+/// longer place, not an access of its own.
+pub(crate) fn place_inner(node: Node) -> Option<Node> {
+    match node.kind() {
+        "hash_element_expression" | "array_element_expression" | "slice_expression" | "keyval_expression" => {
+            access_base(node).map(|(b, _)| b)
         }
-        up = n.parent();
+        k if is_variable_kind(k) => deref_operand_expr(node),
+        _ => None,
     }
-    false
 }
 
 /// A subscript before it is typed as a hash key or an array index.
