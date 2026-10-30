@@ -36,7 +36,7 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::MethodCall { .. } => {
-                    let classes = self.method_call_invocant_classes(r, module_index);
+                    let classes = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
                     // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
                     let method = r.unqualified_target_name(self.names());
                     // Inheritance-aware resolution first, on each class the
@@ -80,7 +80,7 @@ impl FileAnalysis {
                     // The value walk only, and no name-match fallback: an
                     // unpinned receiver is an honest miss for a field.
                     let field = r.unqualified_target_name(self.names());
-                    return self.method_call_invocant_classes(r, module_index).iter().find_map(|cn| {
+                    return self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).iter().find_map(|cn| {
                         match self.resolve_field_in_ancestors(cn, field, module_index) {
                             Some(MethodResolution::Local { sym_id, .. }) => Some((sym_id, true)),
                             _ => None,
@@ -396,33 +396,50 @@ impl FileAnalysis {
             || module_index.is_some_and(|mi| mi.get_cached(name).is_some())
     }
 
-    /// The classes a member access's lookup STARTS at — one per value its
-    /// receiver may be (`receiver_arms`), resolved fresh: the dispatch
-    /// projection over `method_call_invocant_type` (THE invocant ladder).
-    /// A qualified method token (`Foo::m` / `::m` / `SUPER::m`) overrides
-    /// where lookup starts without changing what the receiver IS, so the
-    /// token arm lives here in the projection, not in the value ladder
-    /// (Parametric arg-claiming on `$rs->SUPER::search` still sees the
-    /// resultset). Every other shape projects the ladder's type through
-    /// `dispatch_classes_of` plus the DBIC source-moniker resolve. A
-    /// consumer reads `receiver_classes`, which prefers the frozen edge;
-    /// this is the resolution that edge freezes.
-    pub fn method_call_invocant_classes(
-        &self,
-        r: &Ref,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> ReceiverClasses {
-        self.invocant_classes_under(r, module_index, ReceiverPolicy::Navigate)
-    }
-
-    /// `method_call_invocant_classes` under an explicit `ReceiverPolicy`.
-    pub fn invocant_classes_under(
+    /// The classes a member access dispatches on under `policy` — one per
+    /// value its receiver may be. Reads the stamp's frozen answer when that
+    /// answers this reader (`FrozenReceiver::answers_for`), else resolves
+    /// fresh. The one API every receiver consumer reads.
+    pub fn receiver_classes(
         &self,
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
         policy: ReceiverPolicy,
     ) -> ReceiverClasses {
-        let Some(site) = r.member_site() else { return ReceiverClasses::default() };
+        let (classes, source) = match r.frozen_receiver().filter(|f| f.answers_for(module_index.is_some(), policy)) {
+            // A no-index freeze can carry an UNRESOLVED DBIC source moniker
+            // (`Artist`) — enrichment re-stamps OPEN docs only; map it here,
+            // index in hand. No-op for a class that already resolves.
+            Some(f) => (
+                f.targets()
+                    .iter()
+                    .map(|t| self.resolve_dbic_source_moniker(t.invocant_class().to_string(), None, module_index))
+                    .collect(),
+                f.source,
+            ),
+            None => self.resolve_receiver(r, module_index),
+        };
+        match (policy, source) {
+            (ReceiverPolicy::Stated, ReceiverSource::EnclosingClass) => ReceiverClasses::default(),
+            _ => classes,
+        }
+    }
+
+    /// The classes a member access's lookup STARTS at, resolved fresh, and
+    /// where they came from: the dispatch projection over the invocant
+    /// ladder. A qualified method token (`Foo::m` / `::m` / `SUPER::m`)
+    /// overrides where lookup starts without changing what the receiver
+    /// IS, so the token arm lives here in the projection, not in the value
+    /// ladder (Parametric arg-claiming on `$rs->SUPER::search` still sees
+    /// the resultset). Every other shape projects the ladder's type through
+    /// `dispatch_classes_of` plus the DBIC source-moniker resolve. Only the
+    /// stamp and `receiver_classes`' unstamped fallback call this.
+    pub(crate) fn resolve_receiver(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> (ReceiverClasses, ReceiverSource) {
+        let Some(site) = r.member_site() else { return (ReceiverClasses::default(), ReceiverSource::Stated) };
         // A qualified method token names its dispatch class explicitly —
         // Perl ignores the invocant's class for the lookup, so the token
         // wins ahead of invocant resolution. (A plugin-bridged token is
@@ -443,19 +460,23 @@ impl FileAnalysis {
                         .enclosing_class_for_scope(r.scope)
                         .and_then(|encl| self.resolve_super_method(&encl, name, module_index))
                         .map(|res| self.resolve_dbic_source_moniker(res.class().to_string(), None, module_index));
-                    return class.into_iter().collect();
+                    return (class.into_iter().collect(), ReceiverSource::Stated);
                 }
                 token => {
                     if let Some(pkg) = token.literal_package() {
-                        return [self.resolve_dbic_source_moniker(pkg.to_string(), None, module_index)]
-                            .into_iter()
-                            .collect();
+                        return (
+                            [self.resolve_dbic_source_moniker(pkg.to_string(), None, module_index)]
+                                .into_iter()
+                                .collect(),
+                            ReceiverSource::Stated,
+                        );
                     }
                 }
             }
         }
-        let Some(t) = self.invocant_type_under(r, module_index, policy) else {
-            return ReceiverClasses::default();
+        let mut source = ReceiverSource::Stated;
+        let Some(t) = self.invocant_type_sourced(r, module_index, &mut source) else {
+            return (ReceiverClasses::default(), source);
         };
         // A DBIC resultset row projects to `ClassName(<source moniker>)` —
         // the short registration name (`Artist`), not the FQ result class
@@ -468,23 +489,7 @@ impl FileAnalysis {
         for class in self.dispatch_classes_of(&t, module_index) {
             out.push(self.resolve_dbic_source_moniker(class, None, module_index));
         }
-        out
-    }
-
-    /// The classes a member access dispatches on: the edge the build froze
-    /// on the ref when there is one, else `method_call_invocant_classes`.
-    /// The one API every receiver consumer reads.
-    pub fn receiver_classes(&self, r: &Ref, module_index: Option<&dyn CrossFileLookup>) -> ReceiverClasses {
-        match r.method_target() {
-            // The frozen edge can carry an UNRESOLVED DBIC source moniker
-            // (`Artist`) when it was stamped at build with no index (a closed
-            // call-site file — enrichment re-stamps OPEN docs only); map it
-            // here, index in hand. No-op for a class that already resolves.
-            Some(t) => [self.resolve_dbic_source_moniker(t.invocant_class().to_string(), None, module_index)]
-                .into_iter()
-                .collect(),
-            None => self.method_call_invocant_classes(r, module_index),
-        }
+        (out, source)
     }
 
     /// The class each value a type may be dispatches against
@@ -691,7 +696,7 @@ impl FileAnalysis {
     /// The `InferredType` of a `MethodCall` ref's invocant — **the**
     /// invocant ladder, resolved via the witness bag. No tree, no text
     /// fallback, no per-reader parallel paths: every reader routes
-    /// through here, and `method_call_invocant_classes` is its dispatch
+    /// through here, and `resolve_receiver` is its dispatch
     /// projection. Token-blind by design: a `SUPER::`/`Foo::` method
     /// qualifier overrides where lookup starts, never what the receiver
     /// IS, so the token arm lives in the projection while Parametric
@@ -741,17 +746,17 @@ impl FileAnalysis {
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        self.invocant_type_under(r, module_index, ReceiverPolicy::Navigate)
+        self.invocant_type_sourced(r, module_index, &mut ReceiverSource::Stated)
     }
 
-    /// `method_call_invocant_type` under an explicit `ReceiverPolicy`.
-    fn invocant_type_under(
+    /// `method_call_invocant_type`, setting `source` to `EnclosingClass`
+    /// when the answer is the enclosing-class guess for an untyped receiver.
+    fn invocant_type_sourced(
         &self,
         r: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
-        policy: ReceiverPolicy,
+        source: &mut ReceiverSource,
     ) -> Option<InferredType> {
-        let navigate = policy == ReceiverPolicy::Navigate;
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
         let invocant = match invocant {
@@ -857,7 +862,7 @@ impl FileAnalysis {
                         let recv = &self.refs[recv_idx];
                         let recv_method = recv.unqualified_target_name(self.names());
                         let answers: Vec<InferredType> = self
-                            .method_call_invocant_classes(recv, module_index)
+                            .receiver_classes(recv, module_index, ReceiverPolicy::Navigate)
                             .into_iter()
                             .filter_map(|recv_class| {
                                 if crate::model::conventions::is_constructor_name(recv_method) {
@@ -896,17 +901,16 @@ impl FileAnalysis {
                 // enclosing class — identity outranks a classless value
                 // type (`$self->{count}++` observations must not demote
                 // `$self` to a plain hashref).
-                if navigate
-                    && self.dispatch_classes_of(&t, module_index).is_empty()
-                    && self.is_receiver_at(invocant, point)
-                {
+                if self.dispatch_classes_of(&t, module_index).is_empty() && self.is_receiver_at(invocant, point) {
+                    *source = ReceiverSource::EnclosingClass;
                     return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
                 }
                 return Some(t);
             }
             // Enclosing-class fallback for an untyped receiver. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if navigate && self.is_receiver_at(invocant, point) {
+            if self.is_receiver_at(invocant, point) {
+                *source = ReceiverSource::EnclosingClass;
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;

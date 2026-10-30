@@ -402,13 +402,13 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         path: Option<&std::path::Path>,
     ) {
-        let before: Vec<Option<MethodTarget>> =
-            self.refs.iter().map(|r| r.method_target().cloned()).collect();
+        let arms = |r: &Ref| r.frozen_receiver().map(|f| f.targets().to_vec());
+        let before: Vec<Option<Vec<MethodTarget>>> = self.refs.iter().map(arms).collect();
         self.stamp_method_call_targets(module_index);
         let diverged = self
             .refs
             .iter()
-            .map(|r| r.method_target().cloned())
+            .map(arms)
             .zip(before.iter())
             .filter(|(now, was)| now != *was)
             .count();
@@ -916,7 +916,7 @@ impl FileAnalysis {
     /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
     /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
     /// when present, else cross-file resolution of the call's invocant via
-    /// `method_call_invocant_classes` with the module index — which lights up
+    /// `resolve_receiver` with the module index — which lights up
     /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
     /// `$self->_minion->enqueue`) that only type once other modules are in
     /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
@@ -958,7 +958,7 @@ impl FileAnalysis {
                     && r.target_name == dispatcher
                     && matches!(r.kind, RefKind::MethodCall { .. })
             })
-            .map(|r| self.method_call_invocant_classes(r, module_index))
+            .map(|r| self.receiver_classes(r, module_index, ReceiverPolicy::Navigate))
             .unwrap_or_default()
     }
 

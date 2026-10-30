@@ -1479,10 +1479,17 @@ impl Ref {
         }
     }
 
-    /// The frozen dispatch target of a `MethodCall` ref.
+    /// The frozen dispatch target of a member access whose receiver is
+    /// one class. `None` for a union, a classless receiver, or an
+    /// unstamped ref — `FileAnalysis::receiver_classes` reads those.
     pub fn method_target(&self) -> Option<&MethodTarget> {
+        self.frozen_receiver()?.single()
+    }
+
+    /// The stamp's whole receiver answer; `None` when never stamped.
+    pub fn frozen_receiver(&self) -> Option<&FrozenReceiver> {
         match self.binding.as_ref()? {
-            RefBinding::Method(t) => Some(t),
+            RefBinding::Method(f) => Some(f),
             _ => None,
         }
     }
@@ -1524,7 +1531,7 @@ impl Ref {
     /// Whether matching this ref against a target consults only the frozen
     /// build-time verdict on the ref itself. `false` means the matcher's
     /// fallback arm re-derives the verdict at query time through this FILE's
-    /// witness bag (`method_call_invocant_classes` on an unstamped method
+    /// witness bag (`resolve_receiver` on an unstamped method
     /// call / `deferred_hash_key_owner` on an unowned or variable-owned
     /// key), so a bag-stripped `refs_present` view could silently drop the
     /// site — the caller upgrades that file to `whole_present` instead.
@@ -1545,8 +1552,8 @@ impl Ref {
         self.binding = Some(RefBinding::Symbol(sym));
     }
 
-    pub fn bind_method(&mut self, target: MethodTarget) {
-        self.binding = Some(RefBinding::Method(target));
+    pub fn bind_receiver(&mut self, receiver: FrozenReceiver) {
+        self.binding = Some(RefBinding::Method(receiver));
     }
 
     pub fn bind_function_package(&mut self, package: String) {
@@ -1773,21 +1780,99 @@ impl IntoIterator for ReceiverClasses {
     }
 }
 
-/// How far a receiver's classes reach past what its value states.
+/// What a reader takes as a receiver's classes: which freezes answer it,
+/// and whether the enclosing-class guess counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverPolicy {
-    /// Navigation: a conventional invocant (`$self`) whose value names no
-    /// class still dispatches on the enclosing class.
+    /// The frozen dispatch edge: a single-class freeze answers however it
+    /// was stamped, so a call that resolved at build stays matched (the
+    /// NAV unification the references matcher and hover read).
+    Edge,
+    /// Navigation wanting the index's answer: only a freeze stamped with
+    /// the index answers a reader holding one. A conventional invocant
+    /// (`$self`) whose value names no class dispatches on the enclosing
+    /// class.
     Navigate,
-    /// Only what the value states: a diagnostic must not warn about a
-    /// class the code never named.
+    /// `Navigate` without the enclosing-class guess: a diagnostic must not
+    /// warn about a class the code never named.
     Stated,
+}
+
+/// Where a receiver's classes came from — what lets one frozen answer
+/// serve every `ReceiverPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverSource {
+    /// The receiver's value (or a qualified method token) names them.
+    Stated,
+    /// A conventional invocant whose value names no class, dispatched on
+    /// the enclosing class. `ReceiverPolicy::Stated` reads this as empty.
+    EnclosingClass,
+}
+
+/// One arm per class the receiver may be. `One` is the dispatch edge
+/// `Ref::method_target` projects; a union's arms are only ever read as a
+/// set, so they never pose as one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverArms {
+    None,
+    One(MethodTarget),
+    /// Two or more arms.
+    Union(Vec<MethodTarget>),
+}
+
+/// A member access's receiver, resolved ONCE by the stamp
+/// (`stamp_method_call_targets`) and frozen on the ref, so every consumer
+/// reads one answer instead of re-running the invocant ladder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenReceiver {
+    pub arms: ReceiverArms,
+    pub source: ReceiverSource,
+    /// Stamped with the module index in hand — see `answers_for`.
+    pub with_index: bool,
+}
+
+impl FrozenReceiver {
+    pub fn from_arms(arms: Vec<MethodTarget>, source: ReceiverSource, with_index: bool) -> Self {
+        let mut arms = arms;
+        let arms = match arms.len() {
+            0 => ReceiverArms::None,
+            1 => ReceiverArms::One(arms.pop().expect("one arm")),
+            _ => ReceiverArms::Union(arms),
+        };
+        FrozenReceiver { arms, source, with_index }
+    }
+
+    /// The dispatch edge when the receiver is one class.
+    pub fn single(&self) -> Option<&MethodTarget> {
+        match &self.arms {
+            ReceiverArms::One(t) => Some(t),
+            ReceiverArms::None | ReceiverArms::Union(_) => None,
+        }
+    }
+
+    pub fn targets(&self) -> &[MethodTarget] {
+        match &self.arms {
+            ReceiverArms::None => &[],
+            ReceiverArms::One(t) => std::slice::from_ref(t),
+            ReceiverArms::Union(ts) => ts,
+        }
+    }
+
+    /// Does this freeze answer a reader holding `has_index` under
+    /// `policy`? A freeze stamped without the index saw only this file, so
+    /// it answers an index-holding reader only as the `Edge` policy's
+    /// single-class dispatch edge.
+    pub fn answers_for(&self, has_index: bool, policy: ReceiverPolicy) -> bool {
+        self.with_index
+            || !has_index
+            || (policy == ReceiverPolicy::Edge && matches!(self.arms, ReceiverArms::One(_)))
+    }
 }
 
 /// Build-time-resolved dispatch target for a `MethodCall` ref.
 /// `invocant_class` is the class the invocant resolved to at build time
 /// (frozen); it drives the inheritance rename-chain match in `refs_to`,
-/// replacing the query-time `method_call_invocant_classes` re-derivation.
+/// replacing the query-time `resolve_receiver` re-derivation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MethodTarget {
     /// Method found on a local symbol in this file (via the ancestor walk).
@@ -1835,7 +1920,7 @@ pub enum RefBinding {
     /// time, so they can never disagree (the NAV unification — a call
     /// that resolved at build time stays matched regardless of query-time
     /// inference flakiness).
-    Method(MethodTarget),
+    Method(FrozenReceiver),
     /// `HashKeyAccess` resolution: which hash this key belongs to, plus
     /// the linked `HashKeyDef` symbol once `build_indices` / enrichment
     /// finds one for `(target_name, owner)`.
@@ -1878,7 +1963,7 @@ pub enum RefKind {
     /// Method call site `$obj->m(...)` / `Class->m(...)` /
     /// `chain()->m(...)`. **Invocant class is NOT cached on the
     /// variant** — it's resolved on demand via
-    /// `FileAnalysis::method_call_invocant_classes(ref, module_index)`,
+    /// `FileAnalysis::receiver_classes(ref, module_index, policy)`,
     /// which dispatches by invocant shape (variable / chain receiver /
     /// function-call receiver / bareword / `__PACKAGE__` / `shift` /
     /// `$_[0]`) and queries the witness bag. This is intentional:
@@ -1893,7 +1978,7 @@ pub enum RefKind {
     MethodCall {
         invocant: crate::model::conventions::Invocant,
         /// Span of the invocant node. Used by
-        /// `method_call_invocant_classes` to find an inner-receiver
+        /// `resolve_receiver` to find an inner-receiver
         /// ref via `RefTable::call_at_start` (chain dispatch).
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).

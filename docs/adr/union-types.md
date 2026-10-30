@@ -113,12 +113,20 @@ The build-time chain walker (`invocant_type_at_node`) does not distribute
 yet (`TODO(union-chain-walker)`); the registry's projections above are
 the query-time answer.
 
-Navigation reads every arm too. `FileAnalysis::receiver_classes(ref)` is
-the one answer to "which classes does this member access dispatch on":
-the frozen edge when the build stamped one, else
-`method_call_invocant_classes` — one class per `receiver_arms` arm that
-dispatches (`dispatch_classes_of`), so a receiver dispatches when ANY arm
-does. It returns `ReceiverClasses`; a consumer whose answer is one class
+Navigation reads every arm too. `FileAnalysis::receiver_classes(ref,
+index, policy)` is the one answer to "which classes does this member
+access dispatch on": one class per `receiver_arms` arm that dispatches
+(`dispatch_classes_of`), so a receiver dispatches when ANY arm does. The
+stamp (`stamp_method_call_targets`) resolves it once (`resolve_receiver`)
+and freezes the whole answer on the ref as a `FrozenReceiver`: every arm
+with its own resolution, an empty answer too, whether the classes came
+from the value or from the enclosing-class guess, and whether the index
+was in hand. A reader re-resolves only when the freeze does not answer it
+(`FrozenReceiver::answers_for`): a freeze stamped without the index
+answers an index-holding reader only as `ReceiverPolicy::Edge`'s
+single-class dispatch edge. `ReceiverPolicy::Stated` (diagnostics) drops
+the enclosing-class guess, so a lint never warns about a class the code
+never named. It returns `ReceiverClasses`; a consumer whose answer is one class
 (the frozen edge itself, a hash-key or domain owner, an overload family)
 asks `.single()` and says why at the call. Every other consumer iterates:
 

@@ -1264,10 +1264,14 @@ impl SkeletonAnalysis {
                         // in-body use lands on `sym_id` — no query-time invocant
                         // typing (the receiver is an untypeable macro parameter).
                         binding: Some(crate::model::file_analysis::RefBinding::Method(
-                            crate::model::file_analysis::MethodTarget::Local {
-                                sym_id: *sym_id,
-                                invocant_class: class.to_string(),
-                            },
+                            crate::model::file_analysis::FrozenReceiver::from_arms(
+                                vec![crate::model::file_analysis::MethodTarget::Local {
+                                    sym_id: *sym_id,
+                                    invocant_class: class.to_string(),
+                                }],
+                                crate::model::file_analysis::ReceiverSource::Stated,
+                                false,
+                            ),
                         )),
                         folded_from: None,
                         arg_count: None,
