@@ -120,10 +120,12 @@ access dispatch on": one class per `receiver_arms` arm that dispatches
 stamp (`stamp_method_call_targets`) resolves it once (`resolve_receiver`)
 and freezes the whole answer on the ref as a `FrozenReceiver`: every arm
 with its own resolution, an empty answer too, whether the classes came
-from the value or from the enclosing-class guess, and whether the index
-was in hand. A reader re-resolves only when the freeze does not answer it
-(`FrozenReceiver::answers_for`): a freeze stamped without the index
-answers an index-holding reader only as `ReceiverPolicy::Edge`'s
+from the value or from the enclosing-class guess, and the view it was
+stamped under (`ReceiverView`: no index, the unscoped index, or one
+asker's `ScopedLookup` — each sees different classes). A reader
+re-resolves only when the freeze does not answer it
+(`FrozenReceiver::answers_for`): a freeze answers a reader holding the
+same view, and under any other view only as `ReceiverPolicy::Edge`'s
 single-class dispatch edge. `ReceiverPolicy::Stated` (diagnostics) drops
 the enclosing-class guess, so a lint never warns about a class the code
 never named. It returns `ReceiverClasses`; a consumer whose answer is one class

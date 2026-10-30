@@ -406,7 +406,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         policy: ReceiverPolicy,
     ) -> ReceiverClasses {
-        let (classes, source) = match r.frozen_receiver().filter(|f| f.answers_for(module_index.is_some(), policy)) {
+        let (classes, source) = match r.frozen_receiver().filter(|f| f.answers_for(ReceiverView::of(module_index), policy)) {
             // A no-index freeze can carry an UNRESOLVED DBIC source moniker
             // (`Artist`) — enrichment re-stamps OPEN docs only; map it here,
             // index in hand. No-op for a class that already resolves.

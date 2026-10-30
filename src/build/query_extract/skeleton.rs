@@ -1270,7 +1270,7 @@ impl SkeletonAnalysis {
                                     invocant_class: class.to_string(),
                                 }],
                                 crate::model::file_analysis::ReceiverSource::Stated,
-                                false,
+                                crate::model::file_analysis::ReceiverView::Local,
                             ),
                         )),
                         folded_from: None,

@@ -502,7 +502,7 @@ impl FileAnalysis {
                     }
                 })
                 .collect();
-            let target = FrozenReceiver::from_arms(arms, source, module_index.is_some());
+            let target = FrozenReceiver::from_arms(arms, source, ReceiverView::of(module_index));
             if crate::util::ghost_stats::enabled() {
                 let ns = _t0.elapsed().as_nanos();
                 crate::util::ghost_stats::add_ns(

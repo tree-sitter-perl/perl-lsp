@@ -1788,8 +1788,8 @@ pub enum ReceiverPolicy {
     /// was stamped, so a call that resolved at build stays matched (the
     /// NAV unification the references matcher and hover read).
     Edge,
-    /// Navigation wanting the index's answer: only a freeze stamped with
-    /// the index answers a reader holding one. A conventional invocant
+    /// Navigation wanting the answer its own view resolves: only a freeze
+    /// stamped under that view answers. A conventional invocant
     /// (`$self`) whose value names no class dispatches on the enclosing
     /// class.
     Navigate,
@@ -1807,6 +1807,30 @@ pub enum ReceiverSource {
     /// A conventional invocant whose value names no class, dispatched on
     /// the enclosing class. `ReceiverPolicy::Stated` reads this as empty.
     EnclosingClass,
+}
+
+/// What a receiver resolution could see. Answers differ by view — an
+/// index reaches classes a file alone cannot, and a scoped lookup ranks
+/// and gates providers by the asker's own visibility — so a freeze answers
+/// only a reader holding the view it was stamped under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverView {
+    /// No index: this file alone.
+    Local,
+    /// The whole index, unscoped.
+    Index,
+    /// The index through one asker's `ScopedLookup`.
+    Scoped,
+}
+
+impl ReceiverView {
+    pub fn of(module_index: Option<&dyn CrossFileLookup>) -> Self {
+        match module_index {
+            None => ReceiverView::Local,
+            Some(idx) if idx.is_scoped() => ReceiverView::Scoped,
+            Some(_) => ReceiverView::Index,
+        }
+    }
 }
 
 /// One arm per class the receiver may be. `One` is the dispatch edge
@@ -1827,19 +1851,19 @@ pub enum ReceiverArms {
 pub struct FrozenReceiver {
     pub arms: ReceiverArms,
     pub source: ReceiverSource,
-    /// Stamped with the module index in hand — see `answers_for`.
-    pub with_index: bool,
+    /// What the stamp could see — see `answers_for`.
+    pub view: ReceiverView,
 }
 
 impl FrozenReceiver {
-    pub fn from_arms(arms: Vec<MethodTarget>, source: ReceiverSource, with_index: bool) -> Self {
+    pub fn from_arms(arms: Vec<MethodTarget>, source: ReceiverSource, view: ReceiverView) -> Self {
         let mut arms = arms;
         let arms = match arms.len() {
             0 => ReceiverArms::None,
             1 => ReceiverArms::One(arms.pop().expect("one arm")),
             _ => ReceiverArms::Union(arms),
         };
-        FrozenReceiver { arms, source, with_index }
+        FrozenReceiver { arms, source, view }
     }
 
     /// The dispatch edge when the receiver is one class.
@@ -1858,14 +1882,12 @@ impl FrozenReceiver {
         }
     }
 
-    /// Does this freeze answer a reader holding `has_index` under
-    /// `policy`? A freeze stamped without the index saw only this file, so
-    /// it answers an index-holding reader only as the `Edge` policy's
-    /// single-class dispatch edge.
-    pub fn answers_for(&self, has_index: bool, policy: ReceiverPolicy) -> bool {
-        self.with_index
-            || !has_index
-            || (policy == ReceiverPolicy::Edge && matches!(self.arms, ReceiverArms::One(_)))
+    /// Does this freeze answer a reader holding `view` under `policy`? One
+    /// stamped under the reader's own view is the answer it would resolve.
+    /// Under any other view only `Edge`'s single-class dispatch edge
+    /// answers: a call that resolved stays resolved.
+    pub fn answers_for(&self, view: ReceiverView, policy: ReceiverPolicy) -> bool {
+        self.view == view || (policy == ReceiverPolicy::Edge && matches!(self.arms, ReceiverArms::One(_)))
     }
 }
 

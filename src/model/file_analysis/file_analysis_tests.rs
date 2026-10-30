@@ -3037,7 +3037,7 @@ fn deep_isa_chain_within_visit_budget_still_resolves() {
 #[test]
 fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
     use crate::index::module_index::ModuleIndex;
-    use crate::model::file_analysis::{FrozenReceiver, MethodTarget, ReceiverSource};
+    use crate::model::file_analysis::{FrozenReceiver, MethodTarget, ReceiverSource, ReceiverView};
 
     let path = std::path::PathBuf::from("/tmp/RestampGate.pm");
     let mut fa = build_fa_from_source(
@@ -3069,7 +3069,7 @@ fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
     fa.refs[i].bind_receiver(FrozenReceiver::from_arms(
         vec![MethodTarget::CrossFile { invocant_class: "SENTINEL".into() }],
         ReceiverSource::Stated,
-        true,
+        ReceiverView::Index,
     ));
     fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
     assert_eq!(
