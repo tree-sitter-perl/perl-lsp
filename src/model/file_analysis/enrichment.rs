@@ -250,134 +250,6 @@ impl FileAnalysis {
 
 }
 
-/// What a verb's consumers actually READ out of enrichment.
-///
-/// The verb declares what it
-/// needs and the machinery obeys, never asking which verb it serves. Soundness
-/// is by construction rather than by freshness — a product no consumer reads
-/// need not be produced, and that argument does not decay the way a cache's
-/// does.
-///
-/// The license for the first profile is an ablation, not a reading of the
-/// code: `--check`'s diagnostics lanes type invocants through the bag and
-/// resolve methods directly, so none of them consults `method_target()`. The
-/// re-stamp that fills it is therefore pure cost for that verb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnrichmentProfile {
-    stamp_method_targets: bool,
-}
-
-impl EnrichmentProfile {
-    /// Everything. The default, and what every server verb gets.
-    pub const fn full() -> Self {
-        EnrichmentProfile { stamp_method_targets: true }
-    }
-
-    /// Diagnostics only — no `MethodCall` dispatch-target re-stamp.
-    pub const fn diagnostics() -> Self {
-        EnrichmentProfile { stamp_method_targets: false }
-    }
-
-    /// Asked of the profile, never derived from a verb name by a consumer.
-    pub const fn stamps_method_targets(self) -> bool {
-        self.stamp_method_targets
-    }
-
-    /// Is a copy enriched under `self` usable by a request that needs
-    /// `needed`? The lattice's ≥, and the whole never-serve-partial-to-fuller
-    /// guarantee.
-    ///
-    /// Directional on purpose: `full` serves a `diagnostics` request (it
-    /// contains everything that one reads), and `diagnostics` does NOT serve a
-    /// `full` request. Getting this backwards is silent — the fuller verb
-    /// receives a copy missing exactly the product it asked for, and reads it
-    /// as a missing ANSWER.
-    pub const fn covers(self, needed: EnrichmentProfile) -> bool {
-        !needed.stamp_method_targets || self.stamp_method_targets
-    }
-
-    /// The least profile covering both. Test-only until a server verb
-    /// declares a partial profile (the overlay pins hold the join rule).
-    #[cfg(test)]
-    pub const fn join(self, other: EnrichmentProfile) -> EnrichmentProfile {
-        EnrichmentProfile {
-            stamp_method_targets: self.stamp_method_targets || other.stamp_method_targets,
-        }
-    }
-}
-
-/// The process's declared profile. `full()` until a verb says otherwise.
-static PROFILE: std::sync::OnceLock<EnrichmentProfile> = std::sync::OnceLock::new();
-
-/// Declare the profile for this process. **One-shot CLI verbs only.**
-///
-/// A process-wide cell is the verb's declaration precisely because a one-shot
-/// CLI process serves exactly one verb: there is no second consumer to be
-/// surprised, and nothing it enriches outlives the process — the
-/// `enriched_snapshot` overlay is resident, not persisted.
-///
-/// A SERVER verb must never call this — not because a partial profile is
-/// unavailable there, but because the cell is the wrong scope for it: one
-/// process serves many verbs, and a value set here outlives the verb that
-/// wanted it and answers the next one. The per-walk declaration a server
-/// verb would use (`ResolutionSession::declared_profile`) is a read-only
-/// slot today — no verb sets it, so every server walk enriches `full()`
-/// (docs/PARKED.md, design-debt tier).
-pub fn declare_enrichment_profile(profile: EnrichmentProfile) {
-    let _ = PROFILE.set(profile);
-}
-
-/// The profile in force. `full()` when nobody declared one.
-///
-/// `PERL_LSP_FULL_ENRICHMENT=1` overrides any declaration back to `full()`.
-/// That is the A/B CONTROL, and it is not optional decoration: once a verb
-/// declares a partial profile, the full behaviour is no longer reachable, and
-/// a claim of "set-identical output" becomes unfalsifiable the moment it
-/// cannot be re-run. `PERL_LSP_SKIP_MC_STAMP` only skips harder — it is the
-/// same direction as the profile, so it cannot serve as the control.
-pub fn enrichment_profile() -> EnrichmentProfile {
-    static FULL_OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let forced = *FULL_OVERRIDE
-        .get_or_init(|| std::env::var_os("PERL_LSP_FULL_ENRICHMENT").is_some());
-    // The open walk's declaration wins over the process cell: a server serves
-    // many verbs from one process, and the cell cannot tell them apart.
-    let declared = crate::model::witnesses::ResolutionSession::declared_profile()
-        .or_else(|| PROFILE.get().copied());
-    resolve_profile(declared, forced)
-}
-
-/// The precedence rule, separated from the cells that hold it so it can be
-/// tested. Both cells are `OnceLock`s — a test that set either would decide
-/// the answer for every other test in the process, so the rule has to be
-/// reachable without them.
-///
-/// This is where a mistake would be quiet rather than loud: get the precedence
-/// backwards and the CONTROL stops working, which does not fail anything — it
-/// just makes every future "set-identical" claim unfalsifiable, because the
-/// full behaviour is no longer reachable to compare against.
-pub(crate) fn resolve_profile(
-    declared: Option<EnrichmentProfile>,
-    full_override: bool,
-) -> EnrichmentProfile {
-    if full_override {
-        return EnrichmentProfile::full();
-    }
-    declared.unwrap_or_else(EnrichmentProfile::full)
-}
-
-/// Does this run fill the `MethodCall` dispatch-target edge?
-///
-/// Two independent reasons not to, and they are different in kind: the PROFILE
-/// is policy (no consumer of this verb reads the edge) and the ABLATION is
-/// measurement (the flag that licensed the policy, kept alive so the claim
-/// stays re-checkable). Either suppresses; neither implies the other.
-pub(crate) fn should_stamp_method_targets(
-    profile: EnrichmentProfile,
-    ablation_set: bool,
-) -> bool {
-    profile.stamps_method_targets() && !ablation_set
-}
-
 /// Score every re-stamp the gate skipped, by running it anyway and comparing.
 ///
 /// The gate's soundness is inherited, not proved: it is exactly as sound as
@@ -842,54 +714,31 @@ impl FileAnalysis {
             self.key_writes = key_writes;
         }
 
-        // Re-stamp the MethodCall dispatch-target edges now that the bag
-        // carries enriched cross-file invocant types. Enrichment truncated
-        // refs back to their baseline, wiping the build-time (local-only)
-        // edge; this re-derives it with the index so cross-file-typed
-        // invocants resolve. Single-sourced: refs_to / find_def / hover
-        // read this frozen edge, never re-derive at query time.
-        // Two gates, and they are different things.
+        // Re-stamp the receivers now that the bag carries enriched
+        // cross-file invocant types: every receiver consumer reads this
+        // freeze (`receiver_classes`), never re-derives at query time.
         //
-        // The PROFILE is policy: a verb whose consumers never read
-        // `method_target()` does not pay to fill it. Asked of the profile, so
-        // this code never learns which verb it serves.
-        //
-        // `PERL_LSP_SKIP_MC_STAMP` stays as MEASUREMENT: it is how the profile
-        // was licensed in the first place ("does this verb read the edge?"),
-        // and keeping the A/B alive is what lets the next person re-check the
-        // claim instead of trusting this comment.
-        //
-        // The GATE is neither: it is the freshness question. A re-stamp
-        // re-derives what the build already froze unless some provider of
-        // this file has moved, and the flush is what knows that — see
+        // The GATE is the freshness question: a re-stamp re-derives what the
+        // build already froze unless some provider of this file has moved,
+        // and the flush is what knows that — see
         // `CrossFileLookup::restamp_owed`. Every unknown fails open.
-        let profile_wants = enrichment_profile().stamps_method_targets();
-        let ablation = std::env::var_os("PERL_LSP_SKIP_MC_STAMP").is_some();
-        if should_stamp_method_targets(enrichment_profile(), ablation) {
-            let owed = match (path, module_index) {
-                (Some(p), Some(idx)) => idx.restamp_owed(p, self.stamped_at),
-                _ => true,
-            };
-            if owed {
-                self.stamp_method_call_targets(module_index);
-                if let Some(idx) = module_index {
-                    // Recorded only for a stamp that ran WITH the index: a
-                    // build-time stamp resolved nothing cross-file, so
-                    // treating it as a stamp would license skipping the very
-                    // first enrichment re-stamp — the one with the most to
-                    // add. The clock is read AFTER the stamp, so a wave that
-                    // lands mid-stamp is not credited to it.
-                    self.stamped_at = Some(idx.flush_epoch());
-                }
-            } else if restamp_gate_equiv() {
-                self.score_restamp_gate_skip(module_index, path);
+        let owed = match (path, module_index) {
+            (Some(p), Some(idx)) => idx.restamp_owed(p, self.stamped_at),
+            _ => true,
+        };
+        if owed {
+            self.stamp_method_call_targets(module_index);
+            if let Some(idx) = module_index {
+                // Recorded only for a stamp that ran WITH the index: a
+                // build-time stamp resolved nothing cross-file, so
+                // treating it as a stamp would license skipping the very
+                // first enrichment re-stamp — the one with the most to
+                // add. The clock is read AFTER the stamp, so a wave that
+                // lands mid-stamp is not credited to it.
+                self.stamped_at = Some(idx.flush_epoch());
             }
-        } else {
-            crate::util::ghost_stats::count(if profile_wants {
-                "enrich.mc_stamp_skipped_by_ablation"
-            } else {
-                "enrich.mc_stamp_skipped_by_profile"
-            });
+        } else if restamp_gate_equiv() {
+            self.score_restamp_gate_skip(module_index, path);
         }
         self.rebuild_enrichment_indices();
     }
@@ -1287,75 +1136,6 @@ impl FileAnalysis {
     }
 
 
-}
-
-#[cfg(test)]
-mod profile_tests {
-    use super::*;
-
-    /// The A/B control must win over a declared profile.
-    ///
-    /// Get this backwards and nothing fails: the control silently stops
-    /// working, and every future "output is set-identical with the profile"
-    /// claim becomes unfalsifiable because the full behaviour is no longer
-    /// reachable to compare against. That is the same shape as a watcher that
-    /// cannot tell quiet from blind — it reports success by being unable to
-    /// look.
-    #[test]
-    fn the_full_override_beats_a_declared_profile() {
-        assert!(
-            resolve_profile(Some(EnrichmentProfile::diagnostics()), true)
-                .stamps_method_targets(),
-            "PERL_LSP_FULL_ENRICHMENT must restore the full profile, or the A/B \
-             that licensed the partial one can never be re-run"
-        );
-        assert!(
-            !resolve_profile(Some(EnrichmentProfile::diagnostics()), false)
-                .stamps_method_targets(),
-            "without the override, the declared profile stands"
-        );
-        assert!(
-            resolve_profile(None, false).stamps_method_targets(),
-            "an undeclared profile is FULL — a server verb must never get a \
-             partial one by omission"
-        );
-    }
-
-    /// Profile and ablation are independent suppressors, and the truth table
-    /// is the whole contract: policy says "no consumer reads it", measurement
-    /// says "prove that". Collapsing them into one flag would make the
-    /// licensing evidence and the thing it licenses the same switch.
-    #[test]
-    fn either_the_profile_or_the_ablation_suppresses_the_stamp() {
-        let full = EnrichmentProfile::full();
-        let diag = EnrichmentProfile::diagnostics();
-        assert!(should_stamp_method_targets(full, false), "full + no ablation stamps");
-        assert!(!should_stamp_method_targets(full, true), "the ablation alone suppresses");
-        assert!(!should_stamp_method_targets(diag, false), "the profile alone suppresses");
-        assert!(!should_stamp_method_targets(diag, true), "both suppress");
-    }
-
-    /// The lattice's order, in the direction that matters.
-    ///
-    /// `covers` is not equality and not symmetry. A full copy contains
-    /// everything a diagnostics request reads, so refusing it would make two
-    /// verbs evict each other on every alternation; a diagnostics copy is
-    /// missing exactly what a full request came for, so serving it is a
-    /// silently short answer.
-    #[test]
-    fn the_profile_lattice_orders_full_above_diagnostics() {
-        let full = EnrichmentProfile::full();
-        let diag = EnrichmentProfile::diagnostics();
-        assert!(full.covers(diag), "full must serve a diagnostics request");
-        assert!(!diag.covers(full), "diagnostics must NOT serve a full request");
-        assert!(full.covers(full));
-        assert!(diag.covers(diag));
-        // The join is the least profile serving both, and it is full here
-        // because full is the top of a single-axis lattice.
-        assert_eq!(diag.join(full), full);
-        assert_eq!(full.join(diag), full);
-        assert_eq!(diag.join(diag), diag);
-    }
 }
 
 #[cfg(test)]
