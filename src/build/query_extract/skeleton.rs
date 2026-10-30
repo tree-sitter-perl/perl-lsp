@@ -1124,6 +1124,8 @@ impl SkeletonAnalysis {
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
                             named_by_string: false,
+
+                            receiver_place: None,
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a

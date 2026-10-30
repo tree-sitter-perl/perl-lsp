@@ -754,6 +754,7 @@ impl FileAnalysis {
         let navigate = policy == ReceiverPolicy::Navigate;
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
+        let receiver_place = site.receiver_place;
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self
@@ -780,14 +781,11 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
-        // Flow-narrowing place invocant.
-        if let Some(span) = invocant_span {
-            if InvocantText::parse(invocant).is_element_place() {
-                if let Some(t) = self.inferred_type_via_bag_ctx(invocant, span.start, module_index)
-                {
-                    if !self.dispatch_classes_of(&t, module_index).is_empty() {
-                        return Some(t);
-                    }
+        // A narrowed place receiver.
+        if let (Some(place), Some(span)) = (receiver_place, invocant_span) {
+            if let Some(t) = self.place_type_at(place, span.start, module_index) {
+                if !self.dispatch_classes_of(&t, module_index).is_empty() {
+                    return Some(t);
                 }
             }
         }

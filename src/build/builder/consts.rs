@@ -9,19 +9,8 @@
 //! write in source order, with no branch or loop joins.
 
 use super::*;
+use crate::model::file_analysis::Binding;
 use crate::model::conventions::{name_match_key, split_qualified, split_qualified_var, PERL_SPELLINGS};
-
-/// What a name denotes: the identity every per-variable fact keys on (the
-/// constant fold, escape recording). Built only by `Builder::binding_key_in`,
-/// so a raw spelling can never key a table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum BindingKey {
-    /// A `my` / `state` / loop variable: its declaring symbol.
-    Lexical(SymbolId),
-    /// A package variable or `use constant` name: `(package, sigil+name)`.
-    /// `our @ISA` under `package B` and `@B::ISA` are the same key.
-    Package(String, String),
-}
 
 struct Write {
     at: Point,
@@ -35,7 +24,7 @@ struct Write {
 
 #[derive(Default)]
 pub(super) struct ConstTable {
-    writes: std::collections::HashMap<BindingKey, Vec<Write>>,
+    writes: std::collections::HashMap<Binding, Vec<Write>>,
     /// Base spellings that ever held a value. A read of any other name
     /// answers `None` without resolving its key, which keeps the scope
     /// lookup off the common miss (`$self`, `$class`, …).
@@ -45,7 +34,7 @@ pub(super) struct ConstTable {
 impl ConstTable {
     /// The write a read at `at` sees: the latest at or before it, ties to
     /// the later write.
-    fn visible(&self, key: &BindingKey, at: Point) -> Option<&Write> {
+    fn visible(&self, key: &Binding, at: Point) -> Option<&Write> {
         self.writes
             .get(key)?
             .iter()
@@ -60,13 +49,13 @@ impl ConstTable {
 impl<'a> Builder<'a> {
     /// `name` as written at `at`, from any phase: the scope is found by
     /// position.
-    fn const_key(&self, name: &str, at: Point) -> BindingKey {
+    fn const_key(&self, name: &str, at: Point) -> Binding {
         self.binding_key_in(name, at, self.scope_at_point(at))
     }
 
     /// `name` as written at `at` during the walk, where the scope in force
     /// is in hand (`scope_at_point` scans every scope).
-    pub(super) fn binding_key_here(&self, name: &str, at: Point) -> BindingKey {
+    pub(super) fn binding_key_here(&self, name: &str, at: Point) -> Binding {
         self.binding_key_in(name, at, self.current_scope())
     }
 
@@ -75,31 +64,32 @@ impl<'a> Builder<'a> {
     /// `resolve_variable_refs` applies post-walk; an `our` declaration, an
     /// undeclared name, a qualified name and a bareword constant are
     /// package entries.
-    fn binding_key_in(&self, name: &str, at: Point, scope: ScopeId) -> BindingKey {
+    pub(super) fn binding_key_in(&self, name: &str, at: Point, scope: ScopeId) -> Binding {
         if let Some((pkg, base)) = split_qualified_var(name, &PERL_SPELLINGS) {
-            return BindingKey::Package(pkg.to_string(), base);
+            return Binding::Package(pkg.to_string(), base);
         }
         if let (Some(pkg), base) = split_qualified(name, &PERL_SPELLINGS) {
-            return BindingKey::Package(PERL_SPELLINGS.qualifier_package(pkg).to_string(), base.to_string());
+            return Binding::Package(PERL_SPELLINGS.qualifier_package(pkg).to_string(), base.to_string());
         }
         let use_pkg = self.package_at_pos(at);
         if name.starts_with(|c| PERL_SPELLINGS.is_sigil(c)) {
             if let Some(sym) = self.visible_variable_decl(name, at, scope, use_pkg) {
                 let sym = &self.symbols[sym.0 as usize];
                 return match super::fold::our_gate(sym) {
-                    Some(pkg) => BindingKey::Package(pkg.to_string(), name.to_string()),
-                    None => BindingKey::Lexical(sym.id),
+                    Some(pkg) => Binding::Package(pkg.to_string(), name.to_string()),
+                    None => Binding::Lexical(sym.id),
                 };
             }
         }
-        BindingKey::Package(use_pkg.unwrap_or("main").to_string(), name.to_string())
+        Binding::Package(use_pkg.unwrap_or("main").to_string(), name.to_string())
     }
 
     /// The innermost declaration of `name` visible at `at`: the scope
     /// chain innermost-out, the latest declaration at or before `at`.
     fn visible_variable_decl(&self, name: &str, at: Point, scope: ScopeId, use_pkg: Option<&str>) -> Option<SymbolId> {
+        let by_scope = self.var_decls.get(name)?;
         for sid in crate::model::file_analysis::lookup_chain(&self.scopes, scope).scopes() {
-            if let Some(decls) = self.var_decls.get(&(sid, name.to_string())) {
+            if let Some(decls) = by_scope.get(&sid) {
                 let hit = decls.iter().rev().find(|&&id| {
                     let sym = &self.symbols[id.0 as usize];
                     sym.span.start <= at

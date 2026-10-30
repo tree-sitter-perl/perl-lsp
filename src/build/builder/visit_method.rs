@@ -133,6 +133,8 @@ impl<'a> Builder<'a> {
                 method_name_span: node_to_span(io.method),
                 member_op: None,
                 named_by_string: false,
+
+                receiver_place: None,
             },
             node_to_span(node),
             method.clone(),
@@ -188,6 +190,7 @@ impl<'a> Builder<'a> {
         // and fill `invocant_class`, else class-scoped `refs_to` matches
         // too broadly.
         let invocant_span = invocant_node.map(|n| n.span());
+        let receiver_place = invocant_node.and_then(|n| self.place_subject(n)).map(Box::new);
 
         // Walk-time invocant_class: closed-under-syntax cases only
         // (constructor chain `Sner->new->hi`, `__PACKAGE__->m`, a scalar
@@ -231,6 +234,8 @@ impl<'a> Builder<'a> {
                                 method_name_span,
                                 member_op: None,
                                 named_by_string: false,
+
+                                receiver_place: receiver_place.clone(),
                             },
                             node_to_span(node),
                             rname,
@@ -253,6 +258,8 @@ impl<'a> Builder<'a> {
                         method_name_span,
                         member_op: None,
                         named_by_string: false,
+
+                        receiver_place: receiver_place.clone(),
                     },
                     node_to_span(node),
                     name.clone(),

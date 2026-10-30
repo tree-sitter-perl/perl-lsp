@@ -1409,12 +1409,13 @@ impl Ref {
     /// `None` for every other kind.
     pub fn member_site(&self) -> Option<MemberSite<'_>> {
         match &self.kind {
-            RefKind::MethodCall { invocant, invocant_span, method_name_span, member_op, .. } => {
+            RefKind::MethodCall { invocant, invocant_span, method_name_span, member_op, receiver_place, .. } => {
                 Some(MemberSite {
                     invocant,
                     invocant_span: *invocant_span,
                     name_span: *method_name_span,
                     member_op: member_op.as_ref(),
+                    receiver_place: receiver_place.as_deref(),
                 })
             }
             RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op } => {
@@ -1423,6 +1424,7 @@ impl Ref {
                     invocant_span: *invocant_span,
                     name_span: *member_name_span,
                     member_op: member_op.as_ref(),
+                    receiver_place: None,
                 })
             }
             _ => None,
@@ -1910,6 +1912,11 @@ pub enum RefKind {
         /// callable (PHPUnit providers, key/value pairs).
         #[serde(default)]
         named_by_string: bool,
+        /// The receiver is a part of a variable (`$self->{a}->m`): its
+        /// place, minted at the call so the receiver query reads the
+        /// narrowings on it without re-reading the spelling.
+        #[serde(default)]
+        receiver_place: Option<Box<Place>>,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the
@@ -1961,6 +1968,8 @@ pub struct MemberSite<'a> {
     /// The member token: the method name or the field name.
     pub name_span: Span,
     pub member_op: Option<&'a (MemberOp, Span)>,
+    /// The receiver's place, when it is a part of a variable.
+    pub receiver_place: Option<&'a Place>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

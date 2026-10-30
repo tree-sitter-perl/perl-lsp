@@ -367,6 +367,31 @@ impl FileAnalysis {
         self.gated_param_type_for(var_name, scope, point, module_index)
     }
 
+    /// What `place` holds at `point`: the narrowings and use evidence its
+    /// regions carry there.
+    pub fn place_type_at(
+        &self,
+        place: &Place,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        let scope = self.scope_at(point)?;
+        crate::model::witnesses::query_place_type(&self.witnesses, &self.bag_context(module_index), place, scope, point)
+    }
+
+    /// What a narrowing subject holds at `point`.
+    pub fn subject_type_at(
+        &self,
+        subject: &Subject,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        match subject {
+            Subject::Variable(name) => self.inferred_type_via_bag_ctx(name, point, module_index),
+            Subject::Place(place) => self.place_type_at(place, point, module_index),
+        }
+    }
+
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
     /// gated TC whose scope is on the chain and whose variable matches, then
     /// read its inner type ONLY if the enclosing package `isa` the rule's
