@@ -712,21 +712,24 @@ fn build_once(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());
 
-    // A place's type is only what attaches to that place, so a deref site on
-    // a place nothing attaches to can never answer: dropped here rather than
-    // carried per file. The survey mints only under narrowed roots, but a
-    // narrowing on `$h->{a}` still reaches every `$h->{b}{k}`.
+    // A deref site's diagnostics read a value on its receiver (undef,
+    // optional, a guard-proved rep), and a place holds a value only where a
+    // guard narrowed it: the deref's own rep observation can't fire one. A
+    // place site nothing narrows is dropped here rather than carried per
+    // file — FHEM minted 73k of them and paid +3% peak RSS for none firing.
     {
-        use crate::model::witnesses::WitnessAttachment;
-        let typed: std::collections::HashSet<&crate::model::file_analysis::Place> = b
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let valued: std::collections::HashSet<&crate::model::file_analysis::Place> = b
             .bag
-            .attachments()
-            .filter_map(|a| match a {
-                WitnessAttachment::Place(p) => Some(&**p),
+            .all()
+            .iter()
+            .filter_map(|w| match (&w.attachment, &w.payload) {
+                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_)) => Some(&**p),
                 _ => None,
             })
             .collect();
-        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| typed.contains(p)));
+        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        b.arrow_deref_sites.shrink_to_fit();
     }
 
     let packages = b.package_facts();
