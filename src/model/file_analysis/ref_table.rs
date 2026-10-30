@@ -51,6 +51,11 @@ pub struct RefTable {
     /// the call spanning exactly an expression.
     #[serde(skip, default)]
     calls_by_span: Vec<usize>,
+    /// Member refs spanning only their member token (the pack shape; a
+    /// Perl MethodCall spans the whole call) sorted by `(invocant start,
+    /// index)`: the member-chain hop, found by where its receiver opens.
+    #[serde(skip, default)]
+    member_hops: Vec<usize>,
     /// Most calls sharing one start point: a fluent chain's calls all open
     /// where its first receiver does, so this is the file's deepest chain.
     #[serde(skip, default)]
@@ -119,6 +124,23 @@ impl RefTable {
 
     /// Calls in the file's deepest fluent chain (`a->b->c` is 2, the
     /// receiver `a` is no call).
+    /// Call-shaped refs opening at `start`, sorted by `(end, index)`. A
+    /// query-time lookup by position reads an index like this one: a scan
+    /// of every ref per query is quadratic per file, since expression
+    /// typing asks once per receiver hop.
+    pub fn calls_starting_at(&self, start: Point) -> &[usize] {
+        let lo = self.calls_by_span.partition_point(|&i| self.refs[i].span.start < start);
+        let hi = self.calls_by_span.partition_point(|&i| self.refs[i].span.start <= start);
+        &self.calls_by_span[lo..hi]
+    }
+
+    /// Member-token refs whose invocant opens at `start`, in ref order.
+    pub fn member_hops_at(&self, start: Point) -> &[usize] {
+        let lo = self.member_hops.partition_point(|&i| member_hop_key(&self.refs[i]) < Some(start));
+        let hi = self.member_hops.partition_point(|&i| member_hop_key(&self.refs[i]) <= Some(start));
+        &self.member_hops[lo..hi]
+    }
+
     pub fn longest_call_chain(&self) -> usize {
         self.longest_call_chain
     }
@@ -164,6 +186,7 @@ impl RefTable {
         self.by_key.clear();
         self.by_target.clear();
         self.calls_by_span.clear();
+        self.member_hops.clear();
         for (i, r) in self.refs.iter().enumerate() {
             self.by_key.entry(r.match_key(names)).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
@@ -172,9 +195,13 @@ impl RefTable {
             if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
                 self.calls_by_span.push(i);
             }
+            if member_hop_key(r).is_some() {
+                self.member_hops.push(i);
+            }
         }
         let refs = &self.refs;
         self.calls_by_span.sort_by_key(|&i| (refs[i].span.start, refs[i].span.end, i));
+        self.member_hops.sort_by_key(|&i| (member_hop_key(&refs[i]), i));
         self.longest_call_chain = self
             .calls_by_span
             .chunk_by(|&a, &b| refs[a].span.start == refs[b].span.start)
@@ -184,12 +211,19 @@ impl RefTable {
     }
 
     /// Refresh the name/target lookups only — the enrichment refresh.
-    /// `calls_by_span` is left alone on purpose: every entry it holds
-    /// points into the baseline prefix (it is built before the baseline is
-    /// sealed, and no post-build pass mints call refs), and enrichment
-    /// restores that prefix verbatim before appending only synthetic
-    /// key refs.
+    /// `calls_by_span` and `member_hops` are left alone on purpose: every
+    /// entry they hold points into the baseline prefix (they are built
+    /// before the baseline is sealed, and no post-build pass mints call or
+    /// member refs), and enrichment restores that prefix verbatim before
+    /// appending only synthetic key refs.
     pub fn refresh_name_target_indices(&mut self, names: &NameSpellings) {
+        debug_assert!(
+            self.refs[self.base_count.min(self.refs.len())..].iter().all(|r| {
+                !matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. })
+                    && member_hop_key(r).is_none()
+            }),
+            "a ref appended above the baseline would be missing from the positional indices"
+        );
         self.by_key.clear();
         self.by_target.clear();
         for (i, r) in self.refs.iter().enumerate() {
@@ -209,6 +243,7 @@ impl RefTable {
         self.by_key = HashMap::new();
         self.by_target = HashMap::new();
         self.calls_by_span = Vec::new();
+        self.member_hops = Vec::new();
         self.longest_call_chain = 0;
         self.evicted = true;
     }
@@ -231,7 +266,7 @@ impl RefTable {
 
         let mut b = mcap(&self.by_target)
             + mcap(&self.by_key)
-            + self.calls_by_span.capacity() * std::mem::size_of::<usize>();
+            + (self.calls_by_span.capacity() + self.member_hops.capacity()) * std::mem::size_of::<usize>();
         for (k, v) in &self.by_key {
             b += k.capacity() + v.capacity() * std::mem::size_of::<usize>();
         }
@@ -240,6 +275,13 @@ impl RefTable {
         }
         h.rebuilt_indices += b;
     }
+}
+
+/// Where a member-token ref's receiver opens: the `member_hops` key, `None`
+/// for every other ref.
+fn member_hop_key(r: &Ref) -> Option<Point> {
+    let site = r.member_site()?;
+    (site.name_span == r.span).then_some(site.invocant_span?.start)
 }
 
 impl std::ops::Index<usize> for RefTable {

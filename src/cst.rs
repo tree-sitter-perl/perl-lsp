@@ -724,14 +724,21 @@ fn is_stable_subscript(sub: Node, src: &[u8]) -> bool {
     }
 }
 
-/// The plain-scalar key/index variables along a place path
-/// (`$self->{$k}` → `[$k]`, `$self->{$k}{$j}` → `[$k, $j]`). These are
-/// the dynamic stability dependencies of the place: reassigning any of
-/// them breaks its identity, so the narrowing region must truncate
-/// there. Empty for a fully-constant place. Assumes `node` already
-/// passed `canonical_place_path` (every subscript is stable).
-pub(crate) fn place_dynamic_key_vars<'a>(node: Node<'a>, src: &'a [u8]) -> Vec<String> {
-    let mut vars = Vec::new();
+/// What a place path's identity hangs on, read off its chain once.
+pub(crate) struct PlaceDeps {
+    /// The plain-scalar key/index variables along the path
+    /// (`$self->{$k}{$j}` → `[$k, $j]`): reassigning one breaks the place's
+    /// identity, so its narrowing truncates there.
+    pub key_vars: Vec<String>,
+    /// The keys of the path's proper element prefixes (`$self->{a}` of
+    /// `$self->{a}{b}`): an opaque use of one can disturb the slot.
+    pub prefixes: Vec<String>,
+}
+
+/// The dependencies of a place that passed `canonical_place_path` (every
+/// subscript is stable, so every prefix is a place of its own).
+pub(crate) fn place_deps<'a>(node: Node<'a>, src: &'a [u8]) -> PlaceDeps {
+    let mut deps = PlaceDeps { key_vars: Vec::new(), prefixes: Vec::new() };
     let mut cur = node;
     loop {
         let sub = match cur.kind() {
@@ -739,10 +746,15 @@ pub(crate) fn place_dynamic_key_vars<'a>(node: Node<'a>, src: &'a [u8]) -> Vec<S
             "array_element_expression" => cur.child_by_field_name("index"),
             _ => break,
         };
+        if cur != node {
+            if let Some(text) = cur.text(src) {
+                deps.prefixes.push(text.to_string());
+            }
+        }
         if let Some(sub) = sub {
             if sub.kind() == "scalar" {
                 if let Some(v) = canonical_var_name(sub, src) {
-                    vars.push(v);
+                    deps.key_vars.push(v);
                 }
             }
         }
@@ -751,7 +763,7 @@ pub(crate) fn place_dynamic_key_vars<'a>(node: Node<'a>, src: &'a [u8]) -> Vec<S
             None => break,
         }
     }
-    vars
+    deps
 }
 
 /// Per-word `(text, span)` pairs of a `quoted_word_list`, multi-line

@@ -115,7 +115,7 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
 
 /// Depth of the tree under `root`, calling `visit` on every node on the way
 /// — one iterative pass for every whole-tree screen the build needs.
-fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
+pub(super) fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
     let mut cursor = root.walk();
     let mut depth = 0usize;
     let mut max_depth = 0usize;
@@ -576,7 +576,7 @@ fn build_once(
     // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
     // narrowed region at the first edge that rebinds its subject (the
     // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
-    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
+    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs(tree));
 
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
