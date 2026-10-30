@@ -323,40 +323,15 @@ fn header_cache(
     C.get_or_init(|| GatherCache::new_labeled(gather_cap_bytes(HEADER_CACHE_MB), "gather-header"))
 }
 
-/// The default C/C++ toolchain's discovered surface (system include roots +
-/// predefined macros), probed once via the compiler and cached process-globally
-/// (`OnceLock`). `None` when no compiler is on PATH — include resolution then
-/// degrades to workspace-only (today's behavior). Probed as C++ so `include_dirs`
-/// is the SUPERSET that also resolves the C system headers (`<sys/mman.h>`);
-/// `predefined_macros` rides along for the `#if`-eval consumer.
-pub fn toolchain_info() -> Option<&'static crate::build::cpp_toolchain::ToolchainInfo> {
-    static INFO: std::sync::OnceLock<Option<crate::build::cpp_toolchain::ToolchainInfo>> =
-        std::sync::OnceLock::new();
-    INFO.get_or_init(|| {
-        crate::build::cpp_toolchain::default_compiler(crate::build::cpp_toolchain::Lang::Cpp)
-            .and_then(|c| crate::build::cpp_toolchain::probe(&c, None))
-    })
-    .as_ref()
-}
-
-/// Identity of the analysis-input toolchain: compiler version + system
-/// include roots + predefined macros, or a distinct sentinel when the probe
-/// failed. Rides every persist-tier validation key (macro tables, the
-/// pack modules DB) so a degraded generation — probe failure silently
-/// emptying the system include roots — can never freeze into the cache
-/// and be re-served after the toolchain comes back.
+/// Identity of the default toolchains, C and C++, or a distinct sentinel
+/// for one whose probe failed. Rides every persist-tier validation key
+/// (macro tables, the pack modules DB) so a degraded generation — probe
+/// failure silently emptying the system include roots — can never freeze
+/// into the cache and be re-served after the toolchain comes back. A unit's
+/// own toolchain joins its caches through `cpp_includes::roots_fingerprint`.
 pub fn toolchain_fingerprint() -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    match toolchain_info() {
-        Some(t) => {
-            t.compiler_version.hash(&mut h);
-            t.include_dirs.hash(&mut h);
-            t.predefined_macros.hash(&mut h);
-        }
-        None => "no-toolchain".hash(&mut h),
-    }
-    h.finish()
+    use crate::build::cpp_toolchain::{Lang, Toolchain};
+    Toolchain::for_lang(Lang::Cpp).fingerprint() ^ Toolchain::for_lang(Lang::C).fingerprint().rotate_left(3)
 }
 
 /// Resolve one `#include` path token as the extractor captures it (a

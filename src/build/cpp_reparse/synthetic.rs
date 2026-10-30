@@ -121,8 +121,13 @@ pub fn access_regions(parser: &mut tree_sitter::Parser, source: &str) -> Vec<Acc
 /// Classify member-block macros by struct-body usage, blank the uses, and mint
 /// the synthetic bases + parent edges. Runs BEFORE the expansion transform: the
 /// blanked source feeds it, so a role macro is never expanded. `parser` is
-/// reused sequentially (each `parse(None)` is independent).
-pub fn plan_member_blocks(parser: &mut tree_sitter::Parser, source: &str) -> MemberBlockPlan {
+/// reused sequentially (each `parse(None)` is independent). `path` names the
+/// unit whose toolchain ranks the field-block variants.
+pub fn plan_member_blocks(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    path: Option<&std::path::Path>,
+) -> MemberBlockPlan {
     let Some(tree) = parser.parse(source, None) else { return MemberBlockPlan::identity(source) };
     let src = source.as_bytes();
 
@@ -251,7 +256,11 @@ pub fn plan_member_blocks(parser: &mut tree_sitter::Parser, source: &str) -> Mem
 
     // One synthetic base per confirmed macro: members parsed from the config-
     // active field-block variant, positioned at the real body tokens.
-    let cfg = known_config(&variants);
+    let toolchain = match path {
+        Some(p) => crate::build::cpp_includes::unit_toolchain(p),
+        None => crate::build::cpp_toolchain::Toolchain::for_lang(crate::build::cpp_toolchain::Lang::Cpp),
+    };
+    let cfg = known_config(&variants, &toolchain);
     let mut bases: Vec<SyntheticBase> = Vec::new();
     for macro_name in &candidates {
         if !confirmed.contains(macro_name) {
@@ -434,7 +443,10 @@ fn field_block_variant_sites(
 /// The reachability config for variant ranking — every `#define` name is a
 /// knob (`universe`); unconditional ones are known ON (`defined`) ∪ the
 /// toolchain's predefined macros.
-fn known_config(variants: &BTreeMap<String, Vec<Macro>>) -> crate::build::cpp_macro_model::KnownConfig {
+fn known_config(
+    variants: &BTreeMap<String, Vec<Macro>>,
+    toolchain: &crate::build::cpp_toolchain::Toolchain,
+) -> crate::build::cpp_macro_model::KnownConfig {
     let mut defined = std::collections::HashSet::new();
     let mut universe = std::collections::HashSet::new();
     for (name, defs) in variants {
@@ -443,25 +455,27 @@ fn known_config(variants: &BTreeMap<String, Vec<Macro>>) -> crate::build::cpp_ma
             defined.insert(name.clone());
         }
     }
-    known_config_with_toolchain(defined, universe)
+    known_config_with_toolchain(defined, universe, toolchain)
 }
 
-/// Fold the toolchain's predefined macros (`__GNUC__`, `__x86_64__`, …) into a
-/// reachability config as known-ON knobs. The ONE seeding point for build-side
+/// Fold `toolchain`'s predefined macros (`__GNUC__`, `__x86_64__`, …) into a
+/// reachability config as known-ON knobs — the unit's own toolchain, so a C
+/// unit ranks with `__cplusplus` undefined. The ONE seeding point for build-side
 /// variant selection AND goto-def/hover navigation (`ranked_macro_variants`),
 /// so minting and navigation can't disagree on which config arm is Active.
 pub fn known_config_with_toolchain(
     mut defined: std::collections::HashSet<String>,
     mut universe: std::collections::HashSet<String>,
+    toolchain: &crate::build::cpp_toolchain::Toolchain,
 ) -> crate::build::cpp_macro_model::KnownConfig {
-    if let Some(tc) = toolchain_info() {
+    if let Some(tc) = toolchain.info() {
         seed_predefined(&mut defined, &mut universe, &tc.predefined_macros);
     }
     crate::build::cpp_macro_model::KnownConfig::new(defined, universe)
 }
 
 /// Predefined macros are unconditional defines: ON in `defined`, known knobs
-/// in `universe`. Split from the `toolchain_info()` wrapper so the seeding is
+/// in `universe`. Split from the `Toolchain::info()` wrapper so the seeding is
 /// unit-testable without a compiler probe.
 pub fn seed_predefined(
     defined: &mut std::collections::HashSet<String>,

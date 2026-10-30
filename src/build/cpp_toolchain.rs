@@ -18,10 +18,10 @@
 //!                                gcc has no such flag — those dirs
 //!                                already surface in (1).
 //!
-//! Consumed through `cpp_reparse::toolchain_info` (a OnceLock over one
-//! probe): `include_dirs` feeds the toolchain roots of `cpp_includes::resolve`,
-//! `predefined_macros` seeds the reachability config (`known_config`) and
-//! the external-table hash. This module is the self-contained, tested
+//! Consumed through `Toolchain::info`, one probe per toolchain per process:
+//! a unit's `include_dirs` are the toolchain roots `cpp_includes::resolve`
+//! searches for it, and its `predefined_macros` seed the reachability config
+//! (`known_config_with_toolchain`). This module is the self-contained, tested
 //! producer; `cpp_toolchain_tests.rs` exercises the parsers on captured
 //! compiler output so the tests never depend on the host's compiler.
 //!
@@ -42,13 +42,8 @@ use std::sync::{Mutex, OnceLock};
 /// Which language TU to probe. C++ adds the `c++/<ver>` roots and a
 /// higher `__cplusplus`, so the search path and macro set differ — the
 /// choice is part of the cache key, not a post-filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Lang {
-    /// Not probed yet: `.c` files currently ride the C++ toolchain info
-    /// (a superset for include roots; the predefined-macro delta is small).
-    /// The variant is the seam for a per-language probe when that stops
-    /// being good enough.
-    #[allow(dead_code)]
     C,
     Cpp,
 }
@@ -60,6 +55,118 @@ impl Lang {
             Lang::C => "-xc",
             Lang::Cpp => "-xc++",
         }
+    }
+
+    /// The language a compiler driver gives a SOURCE file by its extension
+    /// (gcc's and clang's rule); `None` for anything else — a header is no
+    /// unit, and takes its language from the source it is compiled with.
+    pub fn of_source(path: &Path) -> Option<Lang> {
+        match path.extension()?.to_str()? {
+            "c" => Some(Lang::C),
+            "cc" | "cpp" | "cxx" | "c++" | "cp" | "CPP" | "C" => Some(Lang::Cpp),
+            _ => None,
+        }
+    }
+
+    /// The language a `-x` value names, if it names C or C++.
+    fn of_x(x: &str) -> Option<Lang> {
+        match x {
+            "c" | "c-header" | "cpp-output" => Some(Lang::C),
+            "c++" | "c++-header" | "c++-cpp-output" => Some(Lang::Cpp),
+            _ => None,
+        }
+    }
+}
+
+/// What a translation unit compiles with — the driver, the language and
+/// the standard: the identity a probe answers for. A unit's toolchain comes
+/// from its compile command (`from_command`) or, with none, from its
+/// language (`for_lang`); a header reached from a unit compiles with that
+/// unit's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Toolchain {
+    /// The command's driver (`arguments[0]`); `None` is the language's
+    /// default driver (`default_compiler`).
+    compiler: Option<String>,
+    lang: Lang,
+    std: Option<String>,
+}
+
+impl Toolchain {
+    /// The default driver for `lang`, with no `-std`.
+    pub fn for_lang(lang: Lang) -> Toolchain {
+        Toolchain { compiler: None, lang, std: None }
+    }
+
+    /// The toolchain a compile command line names for `file`: its driver,
+    /// `-x` when given, else the driver's own language (a `++` driver
+    /// compiles every source as C++), else the file's; and its `-std=`.
+    pub fn from_command(args: &[String], file: &Path) -> Toolchain {
+        let compiler = args.first().filter(|c| !c.starts_with('-')).cloned();
+        let mut x = None;
+        let mut std = None;
+        let mut i = 1;
+        while i < args.len() {
+            let a = args[i].as_str();
+            if let Some(v) = a.strip_prefix("-std=") {
+                std = Some(v.to_string());
+            } else if a == "-x" {
+                x = args.get(i + 1).and_then(|v| Lang::of_x(v));
+                i += 1;
+            } else if let Some(v) = a.strip_prefix("-x") {
+                x = Lang::of_x(v);
+            }
+            i += 1;
+        }
+        let driver_lang = compiler
+            .as_deref()
+            .and_then(|c| Path::new(c).file_name()?.to_str())
+            .filter(|n| n.ends_with("++"))
+            .map(|_| Lang::Cpp);
+        let lang = x.or(driver_lang).or_else(|| Lang::of_source(file)).unwrap_or(Lang::Cpp);
+        Toolchain { compiler, lang, std }
+    }
+
+    pub fn lang(&self) -> Lang {
+        self.lang
+    }
+
+    /// The probe's answer for this toolchain, probed at most once per
+    /// process. A unit's own driver that will not probe (gone, or a wrapper
+    /// that won't answer `-E -v`) falls back to its language's default
+    /// driver, so a stale database still resolves system headers.
+    pub fn info(&self) -> Option<std::sync::Arc<ToolchainInfo>> {
+        static MEMO: OnceLock<Mutex<HashMap<Toolchain, Option<std::sync::Arc<ToolchainInfo>>>>> = OnceLock::new();
+        let memo = MEMO.get_or_init(Default::default);
+        if let Some(hit) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(self) {
+            return hit.clone();
+        }
+        let probed = |compiler: &str| probe_full(compiler, self.lang, self.std.as_deref(), None);
+        let info = self
+            .compiler
+            .as_deref()
+            .and_then(probed)
+            .or_else(|| default_compiler(self.lang).and_then(|c| probed(&c)))
+            .map(std::sync::Arc::new);
+        memo.lock().unwrap_or_else(|e| e.into_inner()).insert(self.clone(), info.clone());
+        info
+    }
+
+    /// The identity of what the probe answered: compiler version, include
+    /// roots and predefined macros, or a distinct sentinel when it failed —
+    /// so a degraded generation never validates once the toolchain answers.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match self.info() {
+            Some(t) => {
+                t.compiler_version.hash(&mut h);
+                t.include_dirs.hash(&mut h);
+                t.predefined_macros.hash(&mut h);
+            }
+            None => ("no-toolchain", self.lang).hash(&mut h),
+        }
+        h.finish()
     }
 }
 

@@ -256,8 +256,17 @@ pub(crate) fn ranked_macro_variants(
     defined.remove(word);
     // Toolchain predefined macros (`__GNUC__`, …) are ON here exactly as they
     // are in build-side variant selection — navigation and minting share the
-    // one seeding point so they can't disagree on which arm is Active.
-    let cfg = crate::build::cpp_reparse::known_config_with_toolchain(defined, universe);
+    // one seeding point so they can't disagree on which arm is Active. The
+    // asker's own toolchain: a `.c` file ranks with `__cplusplus` undefined.
+    let origin_path = match origin_key {
+        FileKey::Path(p) => Some(p.clone()),
+        FileKey::Url(u) => u.to_file_path().ok(),
+    };
+    let toolchain = match origin_path {
+        Some(p) => crate::build::cpp_includes::unit_toolchain(&p),
+        None => crate::build::cpp_toolchain::Toolchain::for_lang(crate::build::cpp_toolchain::Lang::Cpp),
+    };
+    let cfg = crate::build::cpp_reparse::known_config_with_toolchain(defined, universe, &toolchain);
 
     // Rank, active-first. Never prune — a lower-ranked (e.g. win32) def stays,
     // labeled. The secondary (path, line, col) key is a TOTAL order so the

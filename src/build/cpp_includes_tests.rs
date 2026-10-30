@@ -63,7 +63,7 @@ fn every_include_flag_lands_in_its_search_lane() {
             .iter()
             .map(|s| s.to_string())
             .collect();
-    let r = unit_roots(Path::new("/w"), &args);
+    let r = unit_roots(Path::new("/w"), &args, Path::new("/w/f.c"));
     let p = |s: &[&str]| s.iter().map(|d| PathBuf::from("/w").join(d)).collect::<Vec<_>>();
     assert_eq!(r.angle, p(&["a", "b", "c", "d"]));
     assert_eq!(r.quote, p(&["q"]));
@@ -182,4 +182,87 @@ fn the_roots_database_is_an_analysis_input() {
     std::fs::write(root.join("compile_commands.json"), database(&root, &["-Ia", "-Ib"])).unwrap();
     assert_ne!(input_fingerprint(Some(&root)), before);
     assert_eq!(input_fingerprint(None), crate::build::cpp_reparse::toolchain_fingerprint());
+}
+
+/// A unit's toolchain is its command's: `-x` first, then a `++` driver,
+/// then the file's own language; `-std=` rides along.
+#[test]
+fn a_command_names_its_units_toolchain() {
+    use crate::build::cpp_toolchain::{Lang, Toolchain};
+    let tc = |args: &[&str], file: &str| {
+        Toolchain::from_command(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), Path::new(file))
+    };
+    assert_eq!(tc(&["cc", "-c", "f.c"], "f.c").lang(), Lang::C);
+    assert_eq!(tc(&["cc", "-c", "f.cpp"], "f.cpp").lang(), Lang::Cpp);
+    assert_eq!(tc(&["/usr/bin/g++", "-c", "f.c"], "f.c").lang(), Lang::Cpp, "g++ compiles a .c as C++");
+    assert_eq!(tc(&["clang++", "-x", "c", "f.c"], "f.c").lang(), Lang::C, "-x outranks the driver");
+    assert_eq!(tc(&["gcc", "-xc++", "f.c"], "f.c").lang(), Lang::Cpp);
+    assert_eq!(tc(&["cc", "-std=c11", "f.c"], "f.c"), tc(&["cc", "-std=c11", "g.c"], "g.c"));
+    assert_ne!(tc(&["cc", "-std=c11", "f.c"], "f.c"), tc(&["cc", "-std=c99", "f.c"], "f.c"));
+}
+
+/// With no database a source is its own language, and a header borrows the
+/// language of the source compiled beside it: the same stem first, else the
+/// directory's sources when they agree, else C++.
+#[test]
+fn a_unit_with_no_entry_takes_its_language_and_a_header_its_neighbours() {
+    use crate::build::cpp_toolchain::Lang;
+    let root = tree(
+        "unit-lang",
+        &[
+            ("c/main.c", ""),
+            ("c/util.c", ""),
+            ("c/util.h", ""),
+            ("c/other.h", ""),
+            ("mixed/a.c", ""),
+            ("mixed/b.cpp", ""),
+            ("mixed/a.h", ""),
+            ("mixed/x.h", ""),
+            ("bare/y.h", ""),
+        ],
+    );
+    let lang = |rel: &str| unit_toolchain(&root.join(rel)).lang();
+    assert_eq!(lang("c/main.c"), Lang::C);
+    assert_eq!(lang("c/util.h"), Lang::C, "util.h is compiled with util.c");
+    assert_eq!(lang("c/other.h"), Lang::C, "every source beside it is C");
+    assert_eq!(lang("mixed/b.cpp"), Lang::Cpp);
+    assert_eq!(lang("mixed/a.h"), Lang::C, "the same stem decides a mixed directory");
+    assert_eq!(lang("mixed/x.h"), Lang::Cpp, "a mixed directory says nothing: the superset");
+    assert_eq!(lang("bare/y.h"), Lang::Cpp);
+}
+
+/// A database entry's `-x c` makes even a `.cpp` unit a C unit.
+#[test]
+fn a_database_entry_names_its_units_language() {
+    use crate::build::cpp_toolchain::Lang;
+    let root = built("unit-db-lang", &["-x", "c"], &[("src/main.cpp", "")]);
+    assert_eq!(unit_toolchain(&root.join("src/main.cpp")).lang(), Lang::C);
+}
+
+/// The redis symptom, end to end against the host's compiler: a `.c` unit
+/// resolves `<stdio.h>` and `<math.h>` through the C toolchain — no
+/// libstdc++ root, so not libstdc++'s `math.h` wrapper — and ranks its
+/// macro arms with `__cplusplus` undefined, while a `.cpp` beside it keeps
+/// C++'s. Skipped where no compiler probes.
+#[test]
+fn a_c_unit_resolves_system_headers_through_the_c_toolchain() {
+    use crate::build::cpp_toolchain::{Lang, Toolchain};
+    if Toolchain::for_lang(Lang::C).info().is_none() || Toolchain::for_lang(Lang::Cpp).info().is_none() {
+        eprintln!("no C and C++ toolchain probes here — skipping");
+        return;
+    }
+    let root = tree("c-unit-sys", &[("main.c", "#include <stdio.h>\n"), ("main.cpp", "#include <cstdio>\n")]);
+    let (c, cpp) = (root.join("main.c"), root.join("main.cpp"));
+    let libstdcxx = |p: &Path| p.components().any(|c| c.as_os_str() == "c++");
+    assert!(!system_roots_for(&c).iter().any(|r| libstdcxx(r)), "{:?}", system_roots_for(&c));
+    let stdio = resolve(&c, &c, &angle("stdio.h")).expect("<stdio.h> resolves for a C unit");
+    assert!(!libstdcxx(&stdio), "{stdio:?}");
+    if let Some(math) = resolve(&c, &c, &angle("math.h")) {
+        assert!(!libstdcxx(&math), "a C unit never reaches libstdc++'s <math.h> wrapper: {math:?}");
+    }
+    let cfg = |unit: &Path| {
+        crate::build::cpp_reparse::known_config_with_toolchain(Default::default(), Default::default(), &unit_toolchain(unit))
+    };
+    assert!(!cfg(&c).defined.contains("__cplusplus"));
+    assert!(cfg(&cpp).defined.contains("__cplusplus"));
 }

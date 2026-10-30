@@ -579,7 +579,7 @@ struct op { BASEOP };
 struct unop { BASEOP int* op_first; };
 struct sv { REFCNT };
 ";
-    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src);
+    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src, None);
     assert!(!plan.is_empty(), "member-block macros should be detected");
 
     // Blank mode: the use is whitespace in the parse view, so the structs parse
@@ -627,7 +627,7 @@ fn funclike_member_block_comment_truncated_body_keeps_all_fields() {
 
 struct sv { _SV_HEAD(void*); };
 ";
-    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src);
+    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src, None);
     assert!(!plan.is_empty(), "function-like member block should be detected");
 
     let base = plan.bases.iter().find(|b| b.macro_name == "_SV_HEAD").expect("_SV_HEAD base");
@@ -664,7 +664,7 @@ fn comment_free_bitfield_block_synthesizes_every_field() {
     U8  op_private;
 struct op { BASEOP };
 ";
-    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src);
+    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src, None);
     let base = plan.bases.iter().find(|b| b.macro_name == "BASEOP").expect("BASEOP base");
     let names: Vec<&str> = base.members.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(
@@ -685,7 +685,7 @@ fn member_block_pointer_field_keeps_its_deref_stack() {
 #define BASEOP OP* op_next; unsigned op_type:9; OP** op_sibparent;
 struct op { BASEOP };
 ";
-    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src);
+    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src, None);
     let base = plan.bases.iter().find(|b| b.macro_name == "BASEOP").expect("BASEOP base");
     let member = |n: &str| base.members.iter().find(|m| m.name == n).unwrap_or_else(|| panic!("member {n}"));
     use crate::model::file_analysis::DerefKind;
@@ -711,7 +711,7 @@ fn non_member_block_macros_are_untouched() {
 #define MIN(a,b) ((a)<(b)?(a):(b))
 struct s { int x; };
 ";
-    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src);
+    let plan = crate::build::cpp_reparse::plan_member_blocks(&mut p, src, None);
     assert!(plan.is_empty(), "no member-block macros here");
     assert_eq!(plan.blanked_source, src, "source unchanged");
 }

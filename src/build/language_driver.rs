@@ -425,7 +425,7 @@ pub struct PackDriver {
     /// pasted standalone into a struct/class body, BLANK the use (so the base
     /// parses clean), and mint the synthetic base + parent edges. `None` for
     /// packs without a preprocessor.
-    member_blocks: Option<fn(&mut tree_sitter::Parser, &str) -> crate::build::cpp_reparse::MemberBlockPlan>,
+    member_blocks: Option<fn(&mut tree_sitter::Parser, &str, Option<&Path>) -> crate::build::cpp_reparse::MemberBlockPlan>,
     /// Transitive `#include` closure (C preprocessor only): file path + source →
     /// canonical header paths this file reaches — the cross-file VISIBILITY key
     /// (`ScopedLookup` ranks `get_cached` candidates by it). `None` for packs
@@ -651,7 +651,7 @@ impl PackDriver {
         // blank is length-preserving, so the transform + remap stay in original
         // coordinates; the ORIGINAL source keeps the token (goto-def-on-`BASEOP`
         // untouched). `docs/adr/macro-handling.md`.
-        let plan = self.member_blocks.map(|f| crate::util::timings::phase("cpp.member_blocks", || f(parser, source)));
+        let plan = self.member_blocks.map(|f| crate::util::timings::phase("cpp.member_blocks", || f(parser, source, path)));
         let module = path.and_then(|p| self.module_of(p));
         PackContext { external, plan, module }
     }

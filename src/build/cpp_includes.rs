@@ -8,7 +8,13 @@
 //! doesn't name — or a project with no database — searches the walk-up
 //! roots instead (each ancestor of the includer and its `include/`), then
 //! the toolchain's. A header reached from a unit borrows that unit's roots.
+//!
+//! The toolchain is the unit's too (`unit_toolchain`): its database entry's
+//! driver, `-x` and `-std`, else its language — so a `.c` unit searches the
+//! C toolchain's roots, never libstdc++'s wrappers, and ranks its macro arms
+//! with `__cplusplus` undefined.
 
+use crate::build::cpp_toolchain::{Lang, Toolchain};
 use crate::build::language_driver::{DependencyLocator, LanguageDriver, Located, LocatedBy};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,12 +54,14 @@ impl Directive {
     }
 }
 
-/// One unit's include flags, resolved against its `directory`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+/// One unit's include flags, resolved against its `directory`, and the
+/// toolchain its command compiles with.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct UnitRoots {
     quote: Vec<PathBuf>,
     angle: Vec<PathBuf>,
     after: Vec<PathBuf>,
+    toolchain: Toolchain,
 }
 
 /// A compilation database: each unit it names → its include flags.
@@ -78,17 +86,23 @@ impl CompileDb {
                 (None, Some(c)) => split_command(c),
                 _ => continue,
             };
-            let roots = unit_roots(&dir, &args);
+            let unit = canonical(&dir.join(file));
+            let roots = unit_roots(&dir, &args, &unit);
             let roots = Arc::clone(shared.entry(roots.clone()).or_insert_with(|| Arc::new(roots)));
-            units.insert(canonical(&dir.join(file)), roots);
+            units.insert(unit, roots);
         }
         Some(CompileDb { units, fingerprint: stamp_hash(path) })
     }
 }
 
 /// The include flags of one command line, in the compiler's order.
-fn unit_roots(dir: &Path, args: &[String]) -> UnitRoots {
-    let mut out = UnitRoots::default();
+fn unit_roots(dir: &Path, args: &[String], unit: &Path) -> UnitRoots {
+    let mut out = UnitRoots {
+        quote: Vec::new(),
+        angle: Vec::new(),
+        after: Vec::new(),
+        toolchain: Toolchain::from_command(args, unit),
+    };
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -176,13 +190,15 @@ fn stamp_hash(p: &Path) -> u64 {
     h.finish()
 }
 
-/// Every directory's nearest compilation database, and every database
-/// read: a resolve runs per directive, so neither is re-derived per call.
-/// Reading a project's map again (`locator`) forgets both.
+/// Every directory's nearest compilation database, every database read,
+/// and every directory's sources (a header's toolchain): a resolve runs per
+/// directive, so none is re-derived per call. Reading a project's map again
+/// (`locator`) forgets them all.
 #[derive(Default)]
 struct Databases {
     nearest: HashMap<PathBuf, Option<PathBuf>>,
     read: HashMap<PathBuf, Option<Arc<CompileDb>>>,
+    sources: HashMap<PathBuf, Arc<Vec<PathBuf>>>,
 }
 
 fn databases() -> &'static Mutex<Databases> {
@@ -209,22 +225,94 @@ fn forget_databases() {
     *databases().lock().unwrap_or_else(|e| e.into_inner()) = Databases::default();
 }
 
-/// What the roots `file` searches were read from, folded into every cache
-/// keyed on what its includes resolve to: 0 with no database.
+/// What the roots `file` searches were read from — its database's stamp
+/// and its toolchain — folded into every cache keyed on what its includes
+/// resolve to.
 pub fn roots_fingerprint(file: &Path) -> u64 {
-    database_for(file).map_or(0, |db| db.fingerprint)
+    database_for(file).map_or(0, |db| db.fingerprint) ^ unit_toolchain(file).fingerprint().rotate_left(7)
 }
 
-/// The toolchain's roots, in its search order.
-pub fn system_roots() -> &'static [PathBuf] {
-    static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    DIRS.get_or_init(|| crate::build::cpp_reparse::toolchain_info().map(|t| t.include_dirs.clone()).unwrap_or_default())
+/// `unit`'s own database entry, if its nearest database names it.
+fn unit_entry(unit: &Path) -> Option<Arc<UnitRoots>> {
+    database_for(unit).and_then(|db| db.units.get(&canonical(unit)).cloned())
+}
+
+/// The toolchain `unit` compiles with: its database entry's, else its
+/// language's. A header analyzed on its own is no unit, so it borrows the
+/// toolchain of the source compiled beside it (`header_lang`).
+pub fn unit_toolchain(unit: &Path) -> Toolchain {
+    if let Some(u) = unit_entry(unit) {
+        return u.toolchain.clone();
+    }
+    match Lang::of_source(unit) {
+        Some(lang) => Toolchain::for_lang(lang),
+        None => header_toolchain(unit),
+    }
+}
+
+/// A header's toolchain, interpolated as clangd interpolates a header's
+/// command: the same-stem source beside it (`util.h` → `util.c`), else the
+/// sources in its directory when they agree on a language; C++ — the
+/// superset — when nothing beside it says.
+fn header_toolchain(header: &Path) -> Toolchain {
+    let Some(dir) = header.parent() else { return Toolchain::for_lang(Lang::Cpp) };
+    let sources = sources_in(dir);
+    let stem = header.file_stem();
+    if let Some(src) = sources.iter().find(|p| p.file_stem() == stem) {
+        return match unit_entry(src) {
+            Some(u) => u.toolchain.clone(),
+            None => Toolchain::for_lang(Lang::of_source(src).unwrap_or(Lang::Cpp)),
+        };
+    }
+    let mut langs = sources.iter().filter_map(|p| Lang::of_source(p));
+    let lang = match langs.next() {
+        Some(first) if langs.all(|l| l == first) => first,
+        _ => Lang::Cpp,
+    };
+    Toolchain::for_lang(lang)
+}
+
+/// The source files directly in `dir`, listed once per map read.
+fn sources_in(dir: &Path) -> Arc<Vec<PathBuf>> {
+    if let Some(hit) = databases().lock().unwrap_or_else(|e| e.into_inner()).sources.get(dir) {
+        return Arc::clone(hit);
+    }
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| Lang::of_source(p).is_some())
+        .collect();
+    found.sort();
+    let found = Arc::new(found);
+    databases().lock().unwrap_or_else(|e| e.into_inner()).sources.insert(dir.to_path_buf(), Arc::clone(&found));
+    found
+}
+
+/// The toolchain roots `unit` searches, in its toolchain's order.
+fn system_roots_for(unit: &Path) -> Vec<PathBuf> {
+    unit_toolchain(unit).info().map(|t| t.include_dirs.clone()).unwrap_or_default()
+}
+
+/// The tier's roots: every default toolchain's, C++'s first. A unit's own
+/// search order is `system_roots_for`'s; this is only where the tier lives.
+fn tier_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for lang in [Lang::Cpp, Lang::C] {
+        for d in Toolchain::for_lang(lang).info().map(|t| t.include_dirs.clone()).unwrap_or_default() {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
 }
 
 /// The roots `includer` searches for `kind`, in order, reached from the
 /// unit `unit`.
 fn search_roots(includer: &Path, unit: &Path, kind: IncludeKind, system: &[PathBuf]) -> Vec<PathBuf> {
-    let db = database_for(unit).and_then(|db| db.units.get(&canonical(unit)).cloned());
+    let db = unit_entry(unit);
     let own = || includer.parent().map(Path::to_path_buf);
     let mut out: Vec<PathBuf> = Vec::new();
     match db {
@@ -254,7 +342,7 @@ fn search_roots(includer: &Path, unit: &Path, kind: IncludeKind, system: &[PathB
 /// The file `d` names from `includer`, reached from the unit `unit` (the
 /// includer itself when it was not reached through another).
 pub fn resolve(unit: &Path, includer: &Path, d: &Directive) -> Option<PathBuf> {
-    resolve_among(unit, includer, d, system_roots())
+    resolve_among(unit, includer, d, &system_roots_for(unit))
 }
 
 pub(crate) fn resolve_among(unit: &Path, includer: &Path, d: &Directive, system: &[PathBuf]) -> Option<PathBuf> {
@@ -292,15 +380,24 @@ pub struct IncludeMap {
 
 pub fn locator(root: &Path, _driver: &'static dyn LanguageDriver) -> Arc<dyn DependencyLocator> {
     forget_databases();
-    Arc::new(IncludeMap { system: system_roots().to_vec(), inputs: DATABASES.iter().map(|d| root.join(d)).collect() })
+    Arc::new(IncludeMap { system: tier_roots(), inputs: DATABASES.iter().map(|d| root.join(d)).collect() })
 }
 
-/// The external inputs a C/C++ analysis under `root` reads: the toolchain,
-/// and the root's compilation database.
+/// The external inputs a C/C++ analysis under `root` reads: the default C
+/// and C++ toolchains, the root's compilation database, and every toolchain
+/// its units name.
 pub fn input_fingerprint(root: Option<&Path>) -> u64 {
     let mut fp = crate::build::cpp_reparse::toolchain_fingerprint();
     if let Some(db) = root.and_then(|r| DATABASES.iter().map(|d| r.join(d)).find(|p| p.is_file())) {
         fp ^= stamp_hash(&db).rotate_left(1);
+        if let Some(read) = CompileDb::read(&db) {
+            let mut named: Vec<&Toolchain> = read.units.values().map(|u| &u.toolchain).collect();
+            named.sort();
+            named.dedup();
+            for t in named {
+                fp = fp.rotate_left(5) ^ t.fingerprint();
+            }
+        }
     }
     fp
 }
