@@ -256,6 +256,9 @@ pub struct ModuleIndex {
     /// (epoch, key) pairs overwrite in place, never accumulate — so the
     /// ceiling is the registered-file count × ~100 bytes.
     enrichment_key_memo: Arc<DashMap<std::path::PathBuf, (u64, u64)>>,
+    /// `root_registry` as of an enrichment epoch: its reach is a walk over
+    /// every namer's uses, so it is derived once per epoch.
+    root_registry_memo: Arc<std::sync::Mutex<Option<(u64, Arc<crate::model::file_analysis::RootRegistry>)>>>,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
     /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`

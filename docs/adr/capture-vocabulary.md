@@ -175,7 +175,7 @@ is.
 `query_extract/extract/` holds the driver (`mod.rs`: the event flatten,
 the sort, the shared `ExtractState`) and one file per family: `scopes`,
 `defs`, `refs`, `members`, `flow`, `narrowing`, `commands`, `imports`,
-plus `links`, which the driver reads while flattening (below).
+`roots`, plus `links`, which the driver reads while flattening (below).
 `family(Capture)` is an exhaustive match, so a new variant does not
 compile until it names its family. The family's state (its per-match
 joins) lives in the same file, on a sub-struct of the shared
@@ -345,6 +345,15 @@ capture fired, and its level is the number of separators the capture
 holds. What a level climbs from is the language's `ImportPrefix` rule
 (`PackageRelative` for Python); a language without relative imports
 (PHP's `use \A\B\{C}`) never captures one.
+
+A search-path edit is captured the same way. `@root` is a statement that
+adds a directory to the module search path (python's `sys.path.insert`),
+each `@root.path` one literal segment of that directory, and
+`@root.file_dir` the token that makes it relative to the file's own
+directory (`__file__` under `os.path.dirname`); without it the directory
+is relative to the working directory. The anchor is whether the capture
+fired. A directory the document cannot spell from literals is written not
+to match, so a computed `sys.path` edit mints nothing.
 
 ## Decision: depth is chained from links, never walked
 

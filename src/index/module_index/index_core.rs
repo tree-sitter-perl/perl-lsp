@@ -141,6 +141,12 @@ pub(crate) struct IndexCore {
     /// The dependency tier's map and what it landed (`dependency_tier`).
     /// `None` until an indexer or the resolver thread reads one.
     pub(crate) dependencies: Mutex<Option<super::dependency_tier::DependencyState>>,
+    /// The search roots registered files name (`dependency_tier::NamedRoots`),
+    /// and whether they moved since the map last read them.
+    pub(crate) named_roots: Mutex<super::dependency_tier::NamedRoots>,
+    pub(crate) named_roots_moved: std::sync::atomic::AtomicBool,
+    /// How many files `named_roots` holds, readable without its lock.
+    pub(crate) named_files: std::sync::atomic::AtomicUsize,
     /// Path → the names a FRONT DOOR (workspace or pack registration)
     /// registered it under, `(name, is-class)` — the exact inverse list
     /// `unregister_file` walks AND the class-rank source for the cache-slot
@@ -185,6 +191,9 @@ impl IndexCore {
             bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
             dependencies: Mutex::new(None),
+            named_roots: Mutex::new(Default::default()),
+            named_roots_moved: Default::default(),
+            named_files: Default::default(),
             registered_names: DashMap::new(),
         }
     }

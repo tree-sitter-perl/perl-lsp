@@ -24,18 +24,9 @@ impl<'a> Builder<'a> {
             .map(|(text, span)| plugin::ImportWord { text, span })
             .collect();
 
-        // `use lib` is not an import — it prepends search-path roots to the
-        // asker's @INC, which is what decides WHICH file a module name means
-        // for this file (`t/lib` for a test, `lib` for the app). Recorded as
-        // written; resolution against a root happens at query time.
-        if module_name == "lib" {
-            for arg in &imports {
-                if arg.is_empty() || self.lib_roots.iter().any(|r| r == arg) {
-                    continue;
-                }
-                self.lib_roots.push(arg.clone());
-            }
-        }
+        // `use lib` is not an import: it adds roots to the search path,
+        // which decides WHICH file a module name means for this file.
+        self.mint_use_roots(node, module_node, module_name);
 
         // Importer consumer form: `use Importer 'M' => qw/foo bar/` imports
         // foo/bar *from M*, not from Importer. Re-target so the import refs

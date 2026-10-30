@@ -204,6 +204,7 @@ fn adopt_map(
     progress: &mut Progress,
 ) {
     use crate::build::language_driver::Declared;
+    core.refresh_named_roots();
     let generation = core.dependency_generation();
     if generation == *adopted {
         return;

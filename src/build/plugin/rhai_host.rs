@@ -285,6 +285,7 @@ pub struct RhaiPlugin {
     app_surface_consumers: Vec<String>,
     role_makers: Vec<String>,
     framework_mode_makers: Vec<FrameworkModeMaker>,
+    search_root_makers: Vec<crate::build::plugin::SearchRootMaker>,
     column_keyed_verbs: Vec<String>,
     fluent_verbs: Vec<String>,
     meta_methods: Vec<String>,
@@ -351,6 +352,8 @@ impl RhaiPlugin {
             read_manifest_list(&engine, &ast, &signatures, &id, "role_makers");
         let framework_mode_makers: Vec<FrameworkModeMaker> =
             read_manifest_list(&engine, &ast, &signatures, &id, "framework_mode_makers");
+        let search_root_makers: Vec<crate::build::plugin::SearchRootMaker> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "search_root_makers");
         let column_keyed_verbs: Vec<String> =
             read_manifest_list(&engine, &ast, &signatures, &id, "column_keyed_verbs");
         let fluent_verbs: Vec<String> =
@@ -390,6 +393,7 @@ impl RhaiPlugin {
             app_surface_consumers,
             role_makers,
             framework_mode_makers,
+            search_root_makers,
             column_keyed_verbs,
             fluent_verbs,
             meta_methods,
@@ -505,6 +509,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn framework_mode_makers(&self) -> &[FrameworkModeMaker] {
         &self.framework_mode_makers
+    }
+
+    fn search_root_makers(&self) -> &[crate::build::plugin::SearchRootMaker] {
+        &self.search_root_makers
     }
 
     fn column_keyed_verbs(&self) -> &[String] {
@@ -628,6 +636,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("monkey-patch", include_str!("../../../frameworks/monkey-patch.rhai")),
     ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),
     ("cpp-attributes", include_str!("../../../frameworks/cpp-attributes.rhai")),
+    ("search-roots", include_str!("../../../frameworks/search-roots.rhai")),
 ];
 
 /// One bundled plugin by id — for registries composed from a custom
@@ -1002,6 +1011,7 @@ mod tests {
             ("moo", include_str!("../../../frameworks/moo.rhai")),
             ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),
             ("cpp-attributes", include_str!("../../../frameworks/cpp-attributes.rhai")),
+            ("search-roots", include_str!("../../../frameworks/search-roots.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));

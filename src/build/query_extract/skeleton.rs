@@ -123,6 +123,9 @@ pub struct SkeletonAnalysis {
     pub symbols: Vec<SkelSymbol>,
     pub refs: Vec<SkelRef>,
     pub imports: Vec<String>,
+    /// The directories the file adds to its module search path
+    /// (`@root`). Carried onto `FileAnalysis.search_roots`.
+    pub search_roots: Vec<crate::model::file_analysis::SearchRoot>,
     /// `#include`/`import` path tokens with spans: (raw path text, path-token
     /// span). Goto-def on the token resolves the header; the span is what the
     /// bare `imports` list drops. Carried onto `FileAnalysis.pack.include_directives`.
@@ -1645,6 +1648,7 @@ impl SkeletonAnalysis {
             pack,
             flow_edges: std::mem::take(&mut self.flow_edges),
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
+            search_roots: std::mem::take(&mut self.search_roots),
             ..Default::default()
         });
         fa.language = self.language.to_string();

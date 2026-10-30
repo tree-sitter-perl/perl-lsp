@@ -122,7 +122,7 @@ impl PackHealCtx {
         let diags = self
             .open_docs
             .get_open(uri)
-            .map(|doc| symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options));
+            .map(|doc| with_located(symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options), &doc.analysis, uri, &self.module_index));
         if let Some(diags) = diags {
             self.client
                 .publish_diagnostics(uri.clone(), diags, None)
@@ -257,7 +257,7 @@ impl Backend {
             }
             let diags = open_docs
                 .get_open(&uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, &module_index, options));
+                .map(|doc| with_located(symbols::pack_diagnostics(&doc.analysis, &module_index, options), &doc.analysis, &uri, &module_index));
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri.clone(), diags, None).await;
             }
@@ -481,7 +481,7 @@ impl DiagCtx {
                 tokio::task::spawn_blocking(move || {
                     match open_docs.enrich_open(&uri, &*idx) {
                         Some(analysis) => {
-                            symbols::collect_diagnostics(&analysis, &idx, options)
+                            with_located(symbols::collect_diagnostics(&analysis, &idx, options), &analysis, &uri, &idx)
                         }
                         None => vec![],
                     }
@@ -496,7 +496,7 @@ impl DiagCtx {
             Some(_) => self
                 .open_docs
                 .get_open(uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options))
+                .map(|doc| with_located(symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options), &doc.analysis, uri, &self.module_index))
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -595,12 +595,12 @@ pub(super) fn refresh_open_diagnostics(
     for (uri, language) in docs {
         let diagnostics = if hub(language) {
             match open_docs.enrich_open(&uri, module_index) {
-                Some(analysis) => symbols::collect_diagnostics(&analysis, module_index, options),
+                Some(analysis) => with_located(symbols::collect_diagnostics(&analysis, module_index, options), &analysis, &uri, module_index),
                 None => continue, // closed mid-iteration
             }
         } else {
             match open_docs.get_open(&uri) {
-                Some(doc) => symbols::pack_diagnostics(&doc.analysis, module_index, options),
+                Some(doc) => with_located(symbols::pack_diagnostics(&doc.analysis, module_index, options), &doc.analysis, &uri, module_index),
                 None => continue,
             }
         };
@@ -698,4 +698,17 @@ fn parent_process_alive(pid: u32) -> bool {
 #[cfg(not(target_os = "linux"))]
 fn parent_process_alive(_pid: u32) -> bool {
     true
+}
+
+/// `diags` plus the diagnostics that read where the file lives: an
+/// analysis is location-independent, so these take its path apart.
+fn with_located(
+    mut diags: Vec<Diagnostic>,
+    analysis: &crate::model::file_analysis::FileAnalysis,
+    uri: &Url,
+    module_index: &ModuleIndex,
+) -> Vec<Diagnostic> {
+    let path = crate::index::module_resolver::uri_to_path(uri.as_str());
+    diags.extend(symbols::search_root_diagnostics(analysis, path.as_deref(), module_index));
+    diags
 }

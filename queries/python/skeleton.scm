@@ -136,6 +136,117 @@
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias))
 
+; ---- search roots: a directory a statement adds to `sys.path` ----
+; `sys.path.insert(i, D)` / `sys.path.append(D)` where D is a literal path
+; (relative to the working directory) or a path under the file's own
+; directory: `os.path.dirname(__file__)`, alone or joined with up to three
+; literal segments, either wrapped in `abspath`/`realpath`. The segments are
+; spelled one pattern per count: a quantified segment under the anchors
+; that keep an f-string out does not repeat. A computed path matches
+; nothing.
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (string . (string_start) . (string_content) @root.path . (string_end) .) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#eq? @_join "join")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#eq? @_join "join") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#eq? @_join "join")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#eq? @_join "join") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#eq? @_join "join")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (identifier) @root.file_dir .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#eq? @_join "join") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#eq? @_join "join")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#eq? @_join "join") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#eq? @_join "join")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#eq? @_join "join") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#eq? @_join "join")) @root
+(call
+  function: (attribute
+    object: (attribute object: (identifier) @_sys attribute: (identifier) @_syspath)
+    attribute: (identifier) @_verb)
+  arguments: (argument_list (call function: (attribute attribute: (identifier) @_vw) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_join) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_dirname) arguments: (argument_list . (call function: (attribute attribute: (identifier) @_fw) arguments: (argument_list . (identifier) @root.file_dir .)) .)) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) . (string . (string_start) . (string_content) @root.path . (string_end) .) .)) .)) .)
+  (#eq? @_sys "sys") (#eq? @_syspath "path") (#any-of? @_verb "insert" "append") (#eq? @_dirname "dirname") (#eq? @root.file_dir "__file__") (#any-of? @_fw "abspath" "realpath") (#eq? @_join "join") (#any-of? @_vw "abspath" "realpath" "normpath")) @root
+
 ; Imported names are references to the remote def — this single
 ; pattern is what makes cross-file RENAME rewrite the import line too.
 (import_from_statement

@@ -318,6 +318,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_function_call(&mut self, node: Node<'a>) {
+        self.mint_search_path_edit(node);
         // Indirect-object filehandle: `print FH LIST` / `say FH ...` /
         // `printf FH ...` parses as the print verb whose `arguments` is a
         // nested call with `function` = the bareword filehandle. The

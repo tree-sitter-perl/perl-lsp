@@ -836,16 +836,21 @@ pub trait CrossFileLookup {
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
-    /// The search-path roots this index resolved modules from — the
-    /// process-wide `@INC`, most-preferred first, ALREADY CANONICAL
-    /// (canonicalized once when the resolver published it, never per
-    /// query: this is read on request paths). Shared, so the common origin
-    /// — one with no `use lib` of its own — builds its axis with an Arc
-    /// clone and no filesystem I/O at all. Default empty (an index with no
-    /// module universe), which makes the search-path axis transparent
+    /// The process's search-path roots — `@INC`, most-preferred first,
+    /// ALREADY CANONICAL (canonicalized once when the resolver published
+    /// it, never per query: this is read on request paths). Roots files
+    /// name are `root_registry`'s, not these. Default empty (an index with
+    /// no module universe), which makes the search-path axis transparent
     /// rather than blind.
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
+    }
+    /// The roots registered files name, and what their namers reach.
+    /// Shared and derived once per resolution epoch, so an origin in a
+    /// project where no file names a root builds its axis with no
+    /// filesystem I/O. Default empty.
+    fn root_registry(&self) -> std::sync::Arc<RootRegistry> {
+        std::sync::Arc::new(RootRegistry::default())
     }
     /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
     /// attribution for the masked backward walk: a dependency site is
@@ -1044,11 +1049,10 @@ pub enum VisibilityAxis {
     IncludeClosure,
     /// Search-path order (Perl `@INC`): a candidate is visible when it
     /// lives under one of the asker's roots, and ranks by that root's
-    /// position — the asker's own `use lib` first, then project libs, then
-    /// system. Roots are canonical directory paths, most-preferred first.
-    /// Empty ⇒ behaves as `Transparent`: an origin whose roots are unknown
-    /// must not have its answers narrowed to nothing.
-    SearchPath(std::sync::Arc<Vec<std::path::PathBuf>>),
+    /// position in the asker's tiers (`RankedRoots`). Empty ⇒ behaves as
+    /// `Transparent`: an origin whose roots are unknown must not have its
+    /// answers narrowed to nothing.
+    SearchPath(std::sync::Arc<RankedRoots>),
 }
 
 /// A name-keyed origin's leaf→namespace table (`FileAnalysis::
@@ -1136,61 +1140,13 @@ impl VisibilityAxis {
             }
             PackVisibility::Host => {}
         }
-        let inc = index.inc_roots();
-        // The overwhelmingly common origin declares no `use lib`, and this
-        // runs on every request path — so that case is an Arc clone with
-        // ZERO filesystem calls. Only a file that actually names its own
-        // roots pays to resolve them.
-        if origin.lib_roots.is_empty() {
-            return if inc.is_empty() {
-                // Roots unknown (no resolver has run yet): narrowing on an
-                // empty set would answer "no such module" everywhere.
-                VisibilityAxis::Transparent
-            } else {
-                VisibilityAxis::SearchPath(inc)
-            };
-        }
-        let ws = index.workspace_root_path();
-        let self_dir = self_path.and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let mut roots: Vec<std::path::PathBuf> = Vec::new();
-        let mut push = |p: std::path::PathBuf| {
-            let canon = std::fs::canonicalize(&p).unwrap_or(p);
-            // `canonicalize` already failed for a path that does not exist,
-            // so the survivors are real; the dir test rejects a `use lib`
-            // pointing at a FILE.
-            if canon.is_dir() && !roots.contains(&canon) {
-                roots.push(canon);
-            }
-        };
-        // The origin's OWN roots first — `use lib 't/lib'` is exactly the
-        // statement "for me, this root wins". An entry naming no directory
-        // (an interpolated `"$FindBin::Bin/../lib"`) drops out here.
-        for raw in &origin.lib_roots {
-            let p = std::path::Path::new(raw);
-            if p.is_absolute() {
-                push(p.to_path_buf());
-                continue;
-            }
-            // Relative entries are CWD-relative in Perl; for a server that
-            // is the project root, with the file's own directory as the
-            // fallback a script run from its own directory would see.
-            if let Some(ref ws) = ws {
-                push(ws.join(p));
-            }
-            if let Some(ref d) = self_dir {
-                push(d.join(p));
-            }
-        }
-        // The index's roots are already canonical — appended, never re-stat'd.
-        for r in inc.iter() {
-            if !roots.contains(r) {
-                roots.push(r.clone());
-            }
-        }
-        if roots.is_empty() {
+        let ranked = RankedRoots::for_origin(origin, self_path, index);
+        if ranked.roots.is_empty() {
+            // Roots unknown (no resolver has run yet): narrowing on an
+            // empty set would answer "no such module" everywhere.
             return VisibilityAxis::Transparent;
         }
-        VisibilityAxis::SearchPath(std::sync::Arc::new(roots))
+        VisibilityAxis::SearchPath(std::sync::Arc::new(ranked))
     }
 
     /// The asker's rank for a candidate path: `Some(0)` is most preferred,
@@ -1202,19 +1158,8 @@ impl VisibilityAxis {
             | VisibilityAxis::Flat
             | VisibilityAxis::UseMap(_)
             | VisibilityAxis::IncludeClosure => Some(0),
-            VisibilityAxis::SearchPath(roots) if roots.is_empty() => Some(0),
-            VisibilityAxis::SearchPath(roots) => {
-                // Longest-prefix wins, THEN root order: a vendored
-                // `local/lib/perl5` nested inside the project root would
-                // otherwise be attributed to whichever of the two roots
-                // came first, and the nested one is the more specific fact.
-                roots
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| path.starts_with(r))
-                    .min_by_key(|(i, r)| (std::cmp::Reverse(r.as_os_str().len()), *i))
-                    .map(|(i, _)| i)
-            }
+            VisibilityAxis::SearchPath(ranked) if ranked.roots.is_empty() => Some(0),
+            VisibilityAxis::SearchPath(ranked) => ranked.rank(path),
         }
     }
 }
@@ -1353,6 +1298,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         self.inner.inc_roots()
+    }
+    fn root_registry(&self) -> std::sync::Arc<RootRegistry> {
+        self.inner.root_registry()
     }
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.inner.workspace_root_path()

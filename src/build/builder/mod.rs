@@ -77,6 +77,7 @@ mod extract;
 mod fold;
 mod consts;
 mod docs;
+mod search_roots;
 
 /// Single CST walk that powers the post-walk `ChainTypingReducer`.
 /// Indexes the node sets the reducer needs:
@@ -402,9 +403,12 @@ struct Builder<'a> {
     /// Flushed into `FileAnalysis.reexport_modules`; the surface walks them
     /// transitively at query time. Dedup'd on insert via `record_reexport_edge`.
     reexport_modules: Vec<String>,
-    /// `use lib` arguments, as written. Flushed into
-    /// `FileAnalysis.lib_roots` — the per-asker half of module visibility.
-    lib_roots: Vec<String>,
+    /// The directories this file adds to `@INC`, with their anchors.
+    /// Flushed into `FileAnalysis.search_roots`.
+    search_roots: Vec<crate::model::file_analysis::SearchRoot>,
+    /// The plugins' search-root idioms (`search_root_makers()`), baked at
+    /// start; core holds no idiom list.
+    search_root_idioms: search_roots::SearchRootIdioms,
     /// Plugin-declared namespaces collected during the walk via
     /// `EmitAction::PluginNamespace`. Flushed into the final
     /// `FileAnalysis.plugin.namespaces`.

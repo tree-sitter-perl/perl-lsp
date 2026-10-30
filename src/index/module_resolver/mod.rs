@@ -93,3 +93,6 @@ mod dependency_tests;
 #[cfg(all(test, feature = "python"))]
 #[path = "dependency_python_tests.rs"]
 mod dependency_python_tests;
+#[cfg(test)]
+#[path = "search_roots_tests.rs"]
+mod search_roots_tests;

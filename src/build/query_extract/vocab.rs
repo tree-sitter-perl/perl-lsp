@@ -322,6 +322,20 @@ spelled! {
 }
 
 spelled! {
+    /// A directory a statement adds to the module search path (python's
+    /// `sys.path.insert`): `@root` is the statement, relative to the
+    /// working directory unless the match also captures `@root.file_dir`
+    /// (the file's own directory); each `@root.path` is one segment of the
+    /// path, in order. A match whose segments are not all literal is
+    /// written so it does not match: a computed root names nothing.
+    pub enum RootCap {
+        Statement = "",
+        FileDir = "file_dir",
+        Path = "path",
+    }
+}
+
+spelled! {
     pub enum CmdCap {
         /// The command identifier.
         Name = "",
@@ -464,6 +478,7 @@ pub enum Capture {
     Domain(DomainCap),
     Shape(ShapeCap),
     Cmd(CmdCap),
+    Root(RootCap),
     /// A pointer/reference declarator chain, peeled to its leaf.
     NestedTarget,
     /// An out-of-line def's `Class::` owner.
@@ -589,6 +604,8 @@ impl Capture {
             ["shape", k] => C::Shape(ShapeCap::parse(k)?),
             ["cmd"] => C::Cmd(CmdCap::Name),
             ["cmd", k] if !k.is_empty() => C::Cmd(CmdCap::parse(k)?),
+            ["root"] => C::Root(RootCap::Statement),
+            ["root", k] if !k.is_empty() => C::Root(RootCap::parse(k)?),
             ["nested", "target"] => C::NestedTarget,
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
@@ -661,6 +678,7 @@ impl fmt::Display for Capture {
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),
             C::Cmd(k) => family(f, "cmd", k.spelling()),
+            C::Root(k) => family(f, "root", k.spelling()),
             C::NestedTarget => f.write_str("nested.target"),
             C::Qualifier => f.write_str("qualifier"),
             C::OolDef => f.write_str("ool.def"),

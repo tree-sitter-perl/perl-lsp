@@ -479,7 +479,7 @@ impl ModuleIndex {
         // Path-keyed registry first: the relational retrieval resolves
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        self.insert_file(&cached);
         let names = analysis.package_names();
         if !names.is_empty() {
             // Whole copy: the feed inside the rebuild records the name list.
@@ -1002,6 +1002,26 @@ impl ModuleIndex {
     /// loader-shape rewrites). All only increase, so the sum moves whenever
     /// any leg does. A new mutation path must move one of the three legs —
     /// prefer bumping at the owning choke point, never at call sites.
+    /// File `cached` in the path-keyed registry, and name the search
+    /// roots it adds — the one write of `all_files`.
+    fn insert_file(&self, cached: &Arc<CachedModule>) {
+        self.all_files.insert(cached.path.clone(), Arc::clone(cached));
+        let roots = match cached.analysis.search_roots.is_empty() {
+            true => Vec::new(),
+            false => {
+                let ws = crate::model::file_analysis::CrossFileLookup::workspace_root_path(self);
+                cached.analysis.search_root_dirs(Some(&cached.path), ws.as_deref())
+            }
+        };
+        self.core.name_search_roots(&cached.path, roots);
+    }
+
+    /// `insert_file`'s inverse.
+    fn remove_file(&self, path: &std::path::Path) -> Option<Arc<CachedModule>> {
+        self.core.name_search_roots(path, Vec::new());
+        self.all_files.remove(path).map(|(_, c)| c)
+    }
+
     pub(super) fn enrichment_epoch(&self) -> u64 {
         self.core.gen_counter.load(std::sync::atomic::Ordering::Relaxed)
             + self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed)
@@ -1215,7 +1235,7 @@ impl ModuleIndex {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, arc));
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        self.insert_file(&cached);
         self.adopt_workspace_candidate(cached, names);
     }
 
@@ -1270,7 +1290,7 @@ impl ModuleIndex {
                 .and_then(|d| path.file_name().map(|f| d.join(f)))
                 .unwrap_or_else(|| path.to_path_buf())
         });
-        self.all_files.remove(&canon);
+        self.remove_file(&canon);
         self.core.edges.remove_path_record(&canon);
         // The inverse of `record_workspace_projections`' shape half. Its own
         // retraction only fires when the SAME file re-registers, so a deleted
@@ -1791,7 +1811,7 @@ impl ModuleIndex {
         self.core.registered_names.insert(cached.path.clone(), feed.to_vec());
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        self.insert_file(&cached);
         for (name, is_class) in feed {
             let sym_name = name;
             let incoming_is_class = *is_class;
@@ -1896,7 +1916,7 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("epoch.shape.unregister_file");
         self.core.note_shape_change();
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let Some((_, old)) = self.all_files.remove(&canon) else {
+        let Some(old) = self.remove_file(&canon) else {
             return;
         };
         // Symbols may be evicted on the resident copy, and rehydration

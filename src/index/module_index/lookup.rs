@@ -715,6 +715,11 @@ impl CrossFileLookup for ModuleIndex {
         self.workspace_root()
             .as_deref()
             .and_then(crate::index::module_resolver::uri_to_path)
+            .or_else(|| self.core.dependency_state().as_ref().and_then(|st| st.root.clone()))
+    }
+
+    fn root_registry(&self) -> Arc<crate::model::file_analysis::RootRegistry> {
+        self.root_registry()
     }
 
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {

@@ -919,6 +919,22 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
 }
 
+/// A plugin-declared idiom that adds a statically known directory to the
+/// module search path: a module whose import list is roots (`kind:
+/// "use"`), a package scalar holding a directory (`"variable"`), or an
+/// array that is the search path, edited by `verbs` (`"array"`). The
+/// kind and anchor vocabularies are core's, since they name what the
+/// builder reads; which names are idioms is the plugin's. The bundled set
+/// lives in `frameworks/search-roots.rhai`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchRootMaker {
+    pub kind: String,
+    pub name: String,
+    pub anchor: String,
+    #[serde(default)]
+    pub verbs: Vec<String>,
+}
+
 /// A plugin-asserted return type for a known sub/method. Plugins ship
 /// these as a static manifest (`overrides()` on the trait, `fn
 /// overrides()` at the top of a `.rhai` script) for cases where
@@ -1191,6 +1207,12 @@ pub trait FrameworkPlugin: Send + Sync {
     /// `frameworks/moo.rhai`; any plugin can declare another re-exporter.
     /// Default empty.
     fn framework_mode_makers(&self) -> &[FrameworkModeMaker] {
+        &[]
+    }
+
+    /// Idioms that add a directory to the module search path — see
+    /// [`SearchRootMaker`]. Default empty.
+    fn search_root_makers(&self) -> &[SearchRootMaker] {
         &[]
     }
 
@@ -1671,6 +1693,12 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.framework_mode_makers().iter())
+    }
+
+    /// Union of search-root idioms across the registry. The builder bakes
+    /// it at start.
+    pub fn search_root_makers<'a>(&'a self) -> impl Iterator<Item = &'a SearchRootMaker> + 'a {
+        self.plugins.iter().flat_map(|p| p.search_root_makers().iter())
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose

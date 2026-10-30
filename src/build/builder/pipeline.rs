@@ -379,7 +379,8 @@ fn build_once(
         export_ok: Vec::new(),
         export_tags: std::collections::HashMap::new(),
         reexport_modules: Vec::new(),
-        lib_roots: Vec::new(),
+        search_roots: Vec::new(),
+        search_root_idioms: Default::default(),
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::model::witnesses::WitnessBag::new(),
@@ -470,6 +471,7 @@ fn build_once(
     b.meta_methods = b.plugins.meta_methods().map(|s| s.to_string()).collect();
     b.role_maker_modules
         .extend(b.plugins.role_makers().map(|s| s.to_string()));
+    b.search_root_idioms = super::search_roots::SearchRootIdioms::from_makers(b.plugins.search_root_makers());
     b.framework_mode_modules = b
         .plugins
         .framework_mode_makers()
@@ -723,7 +725,7 @@ fn build_once(
         export_ok: b.export_ok,
         export_tags: b.export_tags,
         reexport_modules: b.reexport_modules,
-        lib_roots: b.lib_roots,
+        search_roots: b.search_roots,
         plugin: crate::model::file_analysis::PluginFacts {
             namespaces: b.plugin_namespaces,
             loads: b.plugin_loads,

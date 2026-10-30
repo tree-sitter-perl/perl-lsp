@@ -231,6 +231,12 @@ pub trait DependencyLocator: Send + Sync {
     /// completion offers before anything asks for a body. A directory the
     /// workspace sits in is never walked (`build::search_path::listable`).
     fn for_each_name(&self, _workspace: Option<&std::path::Path>, _visit: &mut dyn FnMut(&str)) {}
+    /// The same map searching `search`, in order, in place of its own
+    /// search roots: how the roots files name join the map. `None` for a
+    /// map that places names by something other than a search path.
+    fn searching(&self, _search: &[std::path::PathBuf]) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        None
+    }
 }
 
 /// A dependency a project declares outside its source.
@@ -1212,6 +1218,8 @@ fn remap_spans(
         symbols,
         refs,
         imports: _,
+        // paths, not source positions — no spans to fix.
+        search_roots: _,
         import_sites,
         use_rows,
         namespace_ranges,

@@ -14,6 +14,8 @@ mod cross_file;
 pub use cross_file::*;
 mod use_map;
 pub use use_map::*;
+mod search_roots;
+pub use search_roots::*;
 mod core_types;
 pub use core_types::*;
 mod ref_table;
@@ -124,18 +126,14 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub reexport_modules: Vec<String>,
 
-    /// Search-path roots this file prepends to `@INC` — the literal
-    /// arguments of its `use lib` lines, AS WRITTEN. THE per-asker half of
-    /// module visibility: `t/lib` for a test, `lib` for the app, a vendored
-    /// `local/lib/perl5`. Stored unresolved because the analysis must stay
-    /// location-independent to ride the cache; relative entries resolve
-    /// against the workspace root and the file's own directory at query
-    /// time, and an entry that names no directory (an interpolated
-    /// `"$FindBin::Bin/../lib"`) drops out THERE. Nothing is filtered here:
-    /// a text test for "looks interpolated" would be a guess, while
-    /// "resolves to a real directory" is the question that actually matters.
+    /// The directories this file adds to its language's module search path
+    /// (`use lib`, `sys.path.insert`), as written with their anchors —
+    /// location-independent, so the analysis rides the cache. They resolve
+    /// against the file and the working directory at registration and at
+    /// query time (`SearchRoot::resolve`); a root naming no directory drops
+    /// out there.
     #[serde(default)]
-    pub lib_roots: Vec<String>,
+    pub search_roots: Vec<SearchRoot>,
 
     /// Every class or package identity this file's references name that it
     /// does not declare itself, sorted. Minted once in `new` from the refs,
@@ -635,7 +633,7 @@ pub struct FileAnalysisParts {
     pub export_ok: Vec<String>,
     pub export_tags: HashMap<String, Vec<String>>,
     pub reexport_modules: Vec<String>,
-    pub lib_roots: Vec<String>,
+    pub search_roots: Vec<SearchRoot>,
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
     pub namespace_ranges: Vec<NamespaceRange>,
     pub witnesses: crate::model::witnesses::WitnessBag,

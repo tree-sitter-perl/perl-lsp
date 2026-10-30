@@ -19,6 +19,7 @@ impl ModuleIndex {
                 "enriched-overlay".into(),
             ),
             enrichment_key_memo: Arc::new(DashMap::new()),
+            root_registry_memo: Default::default(),
             ref_rows_opener: std::sync::RwLock::new(None),
             ref_rows_conn: crate::index::module_cache::RetainedReader::new(),
             workspace_modules: Arc::new(DashMap::new()),

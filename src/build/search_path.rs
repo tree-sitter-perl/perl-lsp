@@ -5,6 +5,7 @@
 use crate::build::language_driver::{Declared, DependencyLocator, LanguageDriver, Located, LocatedBy};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct SearchPathLocator {
     sep: String,
     module_paths: fn(&str) -> Vec<String>,
@@ -94,6 +95,9 @@ impl DependencyLocator for SearchPathLocator {
                 }
             }
         }
+    }
+    fn searching(&self, search: &[PathBuf]) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        Some(std::sync::Arc::new(SearchPathLocator { search: search.to_vec(), ..self.clone() }))
     }
 }
 

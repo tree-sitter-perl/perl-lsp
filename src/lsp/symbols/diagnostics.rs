@@ -18,6 +18,7 @@ pub mod codes {
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
     pub const MISSING_DECLARATION: &str = "missing-declaration";
     pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
+    pub const RESOLVED_THROUGH_SEARCH_ROOT: &str = "resolved-through-search-root";
 }
 
 /// `resolved-by-widening`: a class reference whose identity nothing indexed
@@ -46,6 +47,51 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
             message: format!(
                 "nothing indexed declares `{}`; resolved by its leaf to `{}`",
                 w.named, w.resolved
+            ),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// `resolved-through-search-root`: an import whose provider, as this file
+/// sees it, lives under a search root only another file names
+/// (`FileAnalysis::imports_supplied_by_other_roots`) — the file that runs
+/// this one may add it (`use lib` in a script further up the stack), or
+/// only some registered file does. Always on, because that answer stands
+/// on another file's search path and every verb now acts on it.
+pub fn search_root_diagnostics(
+    analysis: &FileAnalysis,
+    path: Option<&std::path::Path>,
+    module_index: &ModuleIndex,
+) -> Vec<Diagnostic> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    let base: &dyn CrossFileLookup = module_index;
+    if base.root_registry().named.is_empty() {
+        return Vec::new();
+    }
+    let visibility = LanguageRegistry::pack_visibility(&analysis.language);
+    let axis = VisibilityAxis::for_origin(analysis, path, base, visibility);
+    let scoped = ScopedLookup::new(base, &analysis.pack.include_closure, path, axis);
+    let ws = base.workspace_root_path();
+    let shown = |p: &std::path::Path| match ws.as_deref().and_then(|w| p.strip_prefix(w).ok()) {
+        Some(rel) => rel.display().to_string(),
+        None => p.display().to_string(),
+    };
+    analysis
+        .imports_supplied_by_other_roots(path, base, &scoped)
+        .into_iter()
+        .map(|s| Diagnostic {
+            range: span_to_range(s.span),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(NumberOrString::String(codes::RESOLVED_THROUGH_SEARCH_ROOT.into())),
+            source: Some("perl-lsp".into()),
+            message: format!(
+                "`{}` resolved through search root `{}` added by {}{}",
+                s.module,
+                shown(&s.supplier.root),
+                shown(&s.supplier.namer),
+                if s.supplier.stack { "" } else { ", which does not load this file" },
             ),
             ..Default::default()
         })

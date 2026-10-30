@@ -17,6 +17,7 @@ mod links;
 mod members;
 mod narrowing;
 mod refs;
+mod roots;
 mod scopes;
 
 /// One capture event, flattened from query matches and sorted by
@@ -62,6 +63,7 @@ enum Family {
     Narrowing,
     Commands,
     Imports,
+    Roots,
     /// Read while flattening; a link never becomes an event.
     Links,
 }
@@ -100,6 +102,7 @@ fn family(cap: Capture) -> Family {
             Family::Narrowing
         }
         C::Cmd(_) => Family::Commands,
+        C::Root(_) => Family::Roots,
         C::Import(_) => Family::Imports,
         C::LinkFrom(_) | C::Link(_) | C::Deref(_) | C::DerefLeaf(_) => Family::Links,
     }
@@ -129,6 +132,7 @@ struct ExtractState<'p> {
     narrowing: narrowing::State,
     commands: commands::State,
     imports: imports::State,
+    roots: roots::State,
     /// The module the file IS, when its language names it by path and the
     /// driver had one: its dotted name is the section every declaration
     /// without a namespace of its own joins.
@@ -315,6 +319,7 @@ pub fn extract_in(
         narrowing: Default::default(),
         commands: Default::default(),
         imports: Default::default(),
+        roots: Default::default(),
         file_module,
     };
     // A module named by its path is one section, the whole file.
@@ -378,6 +383,7 @@ pub fn extract_in(
             Family::Members => members::collect(&mut st, e),
             Family::Imports => imports::collect(&mut st, e),
             Family::Refs => refs::collect(&mut st, e),
+            Family::Roots => roots::collect(&mut st, e),
             Family::Commands | Family::Links => {}
         }
     }
@@ -403,7 +409,7 @@ pub fn extract_in(
             Family::Narrowing => narrowing::handle(&mut st, e),
             Family::Commands => commands::handle(&mut st, e),
             Family::Imports => imports::handle(&mut st, e),
-            Family::Links => {}
+            Family::Roots | Family::Links => {}
         }
     }
 
@@ -430,6 +436,7 @@ pub fn extract_in(
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);
+    roots::finish(&mut st);
     Ok(st.out)
 }
 

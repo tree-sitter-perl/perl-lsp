@@ -411,14 +411,23 @@ fn a_workspace_file_still_shadows_an_inc_provider_of_the_same_name() {
 }
 
 #[test]
-fn use_lib_declares_the_files_own_search_path_roots() {
-    // `use lib` is the per-asker half of module visibility: a test with
-    // `use lib 't/lib'` and an app file without it do NOT see the same
-    // provider for the same module name.
+fn search_roots_are_minted_with_their_anchor() {
+    // Each idiom folds where it is written; the anchor is what a relative
+    // path in it is relative to. Computed and environment forms mint nothing.
+    use crate::model::file_analysis::{RootAnchor as A, SearchRoot};
     let src = r#"
+use FindBin qw($Bin);
 use lib 't/lib';
 use lib qw(lib local/lib/perl5);
 use lib "$FindBin::Bin/../lib";
+use lib $FindBin::RealBin . '/inc';
+use lib "$Bin/../share";
+use lib::relative '../vendor';
+use lib '/opt/app/lib';
+use lib "$ENV{HOME}/perl5";
+use lib File::Spec->catdir($FindBin::Bin, 'computed');
+no lib 'gone';
+BEGIN { unshift @INC, 'early'; push @INC, "late" }
 use strict;
 package App;
 1;
@@ -426,14 +435,41 @@ package App;
     let mut parser = create_parser();
     let tree = parser.parse(src, None).unwrap();
     let fa = crate::build::builder::build(&tree, src.as_bytes());
+    let r = |anchor, path: &str| SearchRoot { anchor, path: path.to_string() };
     assert_eq!(
-        fa.lib_roots,
-        vec!["t/lib", "lib", "local/lib/perl5", "$FindBin::Bin/../lib"],
-        "both the single-string and qw spellings count; roots are stored as \
-         written, and one that names no directory drops out at resolution",
+        fa.search_roots,
+        vec![
+            r(A::WorkingDir, "t/lib"),
+            r(A::WorkingDir, "lib"),
+            r(A::WorkingDir, "local/lib/perl5"),
+            r(A::FileDir, "../lib"),
+            r(A::FileDir, "inc"),
+            r(A::FileDir, "../share"),
+            r(A::FileDir, "../vendor"),
+            r(A::Absolute, "/opt/app/lib"),
+            r(A::WorkingDir, "early"),
+            r(A::WorkingDir, "late"),
+        ],
     );
-    // `use strict` is not a search-path declaration.
-    assert!(!fa.lib_roots.iter().any(|r| r == "strict"));
+}
+
+#[test]
+fn a_relative_use_lib_is_relative_to_the_working_directory_only() {
+    // Perl resolves `use lib 'x'` against the process's working directory;
+    // the file's own directory is what `$FindBin::Bin` says.
+    use crate::model::file_analysis::{RootAnchor, SearchRoot};
+    let base = std::env::temp_dir().join(format!("perl-lsp-anchor-{}", std::process::id()));
+    let (ws, bin) = (base.join("ws"), base.join("ws").join("bin"));
+    std::fs::create_dir_all(bin.join("lib")).unwrap();
+    std::fs::create_dir_all(ws.join("lib")).unwrap();
+    let file = bin.join("app.pl");
+    let canon = |p: std::path::PathBuf| std::fs::canonicalize(p).unwrap();
+    let wd = SearchRoot::written(RootAnchor::WorkingDir, "lib");
+    assert_eq!(wd.resolve(Some(&file), Some(&ws)), Some(canon(ws.join("lib"))));
+    assert_eq!(wd.resolve(Some(&file), None), None, "no working directory, no guess");
+    let fd = SearchRoot::written(RootAnchor::FileDir, "lib");
+    assert_eq!(fd.resolve(Some(&file), Some(&ws)), Some(canon(bin.join("lib"))));
+    assert_eq!(SearchRoot::written(RootAnchor::WorkingDir, "missing").resolve(Some(&file), Some(&ws)), None);
 }
 
 #[test]

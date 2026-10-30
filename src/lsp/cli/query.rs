@@ -1175,7 +1175,9 @@ fn sweep_one_file(
                 // very different work, and a distribution that mixes them
                 // describes neither.
                 crate::util::ghost_stats::count_for_file("check.arm_enriched", 1);
-                symbols::collect_diagnostics(&fa, idx, options)
+                let mut d = symbols::collect_diagnostics(&fa, idx, options);
+                d.extend(symbols::search_root_diagnostics(&fa, Some(&cached.path), idx));
+                d
             }
             None => {
                 // Index copies may be refs/bag-evicted; diagnostics read refs AND
@@ -1183,7 +1185,9 @@ fn sweep_one_file(
                 // resident copy.
                 crate::util::ghost_stats::count_for_file("check.arm_whole_fallback", 1);
                 let whole = file_analysis::CrossFileLookup::whole_present(idx, &cached);
-                symbols::collect_diagnostics(&whole, idx, options)
+                let mut d = symbols::collect_diagnostics(&whole, idx, options);
+                d.extend(symbols::search_root_diagnostics(&whole, Some(&cached.path), idx));
+                d
             }
         }
     };
@@ -1331,7 +1335,9 @@ fn for_each_enriched_diagnostic(
         let file = cm.path.display().to_string();
         // Same whole-view routing: pack index copies are evicted.
         let whole = file_analysis::CrossFileLookup::whole_present(idx, cm);
-        for d in symbols::pack_diagnostics(&whole, idx, options) {
+        let mut diags = symbols::pack_diagnostics(&whole, idx, options);
+        diags.extend(symbols::search_root_diagnostics(&whole, Some(&cm.path), idx));
+        for d in diags {
             emit(&file, d);
         }
     });
