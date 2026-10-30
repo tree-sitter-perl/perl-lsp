@@ -610,6 +610,12 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // A plain `$x->{k}` is a deref site through its key ref; through a
+        // part of a variable (`$x->{a}{k}`) no ref names the receiver.
+        if let Some(base) = crate::cst::element_deref_base(node).filter(|b| b.kind() != "scalar") {
+            self.record_arrow_deref(node, base, crate::model::file_analysis::DerefForm::HashKey);
+        }
+
         // Visit children for the container variable ref
         self.queue_children(node);
     }

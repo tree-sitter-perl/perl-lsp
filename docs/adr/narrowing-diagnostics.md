@@ -12,13 +12,14 @@ they can't yet see is a silent miss, never a false positive.
 
 Every diagnostic routes through one of two `FileAnalysis` reads:
 
-- **`deref_receiver_sites`** — every scalar-receiver arrow deref paired
-  with the receiver's narrowed type at the use point. `undef-deref` (D1),
-  `optional-deref` (D2), and `deref-shape-mismatch` (D6) are filters over
-  this one stream. Method-call and hash-deref receivers come from refs;
-  array (`$x->[i]`) and code (`$x->()`) derefs carry no typed ref, so the
-  builder records them as `arrow_deref_sites` and the seam merges the two
-  sources — `DerefForm` is the common currency.
+- **`deref_receiver_sites`** — every deref whose receiver is a variable
+  or a part of one (a `Subject`), paired with the receiver's narrowed type
+  at the use point. `undef-deref` (D1), `optional-deref` (D2), and
+  `deref-shape-mismatch` (D6) are filters over this one stream. Method-call
+  and `$x->{k}` receivers come from refs; array (`$x->[i]`), code
+  (`$x->()`) and through-a-place hash (`$x->{a}{k}`) derefs carry no ref
+  naming their receiver, so the builder records them as `arrow_deref_sites`
+  and the seam merges the two sources — `DerefForm` is the common currency.
 - **`guard_redundancies`** over build-recorded `guard_sites` — the
   redundant/contradictory-guard verdicts (D3/D4).
 

@@ -1202,21 +1202,29 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
-    /// scalar, for the deref diagnostics (the array/code analog of the
-    /// method-call / hash-deref refs). Only a scalar operand can be undef /
-    /// Optional / rep-narrowed; a chain receiver (`f()->[0]`) is skipped.
-    pub(super) fn record_arrow_deref(&mut self, node: Node<'a>, form: crate::model::file_analysis::DerefForm) {
-        let Some(operand) = node.named_child(0) else { return };
-        if operand.kind() != "scalar" {
-            return;
-        }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        if !text.starts_with('$') {
-            return;
-        }
+    /// Record a deref whose receiver no typed ref names (`$x->[i]`,
+    /// `$x->()`, `$x->{a}{k}`) for the deref diagnostics. The receiver is a
+    /// variable or a part of one; a value (`f()->[0]`) can't be undef in a
+    /// way a narrowing would track, so it is skipped.
+    pub(super) fn record_arrow_deref(
+        &mut self,
+        node: Node<'a>,
+        receiver: Node<'a>,
+        form: crate::model::file_analysis::DerefForm,
+    ) {
+        use crate::model::file_analysis::Subject;
+        let subject = match self.place_subject(receiver) {
+            Some(place) => Subject::Place(place),
+            None if receiver.kind() == "scalar" && crate::cst::deref_operand(receiver).is_none() => {
+                let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
+                Subject::Variable(name)
+            }
+            None => return,
+        };
+        let Ok(text) = receiver.utf8_text(self.source) else { return };
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
             receiver: text.to_string(),
+            subject,
             span: node_to_span(node),
             form,
         });

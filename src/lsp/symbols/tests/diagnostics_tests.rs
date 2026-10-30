@@ -828,6 +828,28 @@ sub f {
 }
 
 #[test]
+fn d1_undef_deref_through_a_place() {
+    // The receiver is a part of a variable: the narrowing on that place
+    // reaches every deref form, the hash subscript after a subscript too.
+    let src = r#"
+package P;
+sub f {
+    my ($self) = @_;
+    return if defined $self->{cb};
+    $self->{cb}->();
+    $self->{cb}->[0];
+    $self->{cb}{k};
+    $self->{other}{k};
+}
+1;
+"#;
+    let diags = undef_deref_diags(src);
+    let messages: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(diags.len(), 3, "code, array and hash deref of the narrowed place fire: {messages:?}");
+    assert!(messages.iter().all(|m| m.starts_with("'$self->{cb}' is undef")), "{messages:?}");
+}
+
+#[test]
 fn d2_optional_array_deref() {
     let src = r#"
 package Foo;

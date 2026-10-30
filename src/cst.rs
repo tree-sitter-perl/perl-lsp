@@ -733,6 +733,13 @@ fn access_base(node: Node) -> Option<(Node, bool)> {
     Some((node.elements().next()?, true))
 }
 
+/// The operand an element access subscripts through the reference it
+/// holds (`$x` in `$x->[0]`, `$x->{a}` in `$x->{a}[0]`); `None` for a
+/// named container (`$a[0]`, `$h{k}`).
+pub(crate) fn element_deref_base(node: Node) -> Option<Node> {
+    access_base(node).and_then(|(base, through_ref)| through_ref.then_some(base))
+}
+
 /// The variable a place hangs off, bound; a deref spelling's operand
 /// leads to it.
 fn place_root(node: Node, src: &[u8], binder: &mut impl PlaceBinder) -> Option<Place> {

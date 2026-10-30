@@ -854,12 +854,14 @@ pub struct DerefSite {
     pub form: DerefForm,
 }
 
-/// A builder-recorded arrow-deref receiver for the forms that carry no
-/// typed ref of their own (`$x->[i]`, `$x->()`) — the array/code analog of
+/// A builder-recorded deref receiver for the forms that carry no typed
+/// ref of their own (`$x->[i]`, `$x->()`, `$x->{a}{k}`) — the analog of
 /// the method-call and hash-deref refs `deref_receiver_sites` reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrowDerefSite {
+    /// The receiver as written, for the rendered message.
     pub receiver: String,
+    pub subject: Subject,
     pub span: Span,
     pub form: DerefForm,
 }
