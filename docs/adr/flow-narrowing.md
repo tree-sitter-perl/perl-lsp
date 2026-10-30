@@ -30,8 +30,14 @@ enrichment truncation.
 
 A span-extent witness would shadow a *later* reassignment's temporal
 witness, so the region is truncated at the first op that could disturb
-the subject (`first_subject_write` / `first_place_invalidation`).
-Conservative by construction — it under-narrows, never lies. The bias is
+the subject. Both cutoffs are lookups in an index built once per file,
+never a search per fact — every use observes, so a per-fact scan is a
+scan per use (Znuny `PDF.t`: a whole-block CST scan per place use took
+one file's build to 100 s). A variable's cutoff is its first rebind
+(`RebindIndex`, from the FlowEdges, shared with the pack narrowing and the
+pack observations); a place's is its first disturbance
+(`PlaceDisturbanceIndex`, one pass over the file's trees, `s///e` code
+included). Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
