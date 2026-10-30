@@ -1,5 +1,13 @@
 # C/C++ system-header resolution — challenges (parked)
 
+> **Status:** out-of-workspace headers now land on the dependency tier, demanded by
+> each file's include closure and resolved by `build/cpp_includes.rs` (compile
+> database flags, toolchain roots, walk-up fallback, `#include_next`). Not yet
+> measured on a real corpus; the cost questions below are the ones that
+> measurement answers. Gaps: a header analyzed on its own searches the fallback
+> roots, not its first includer's flags; only the root compile database is a
+> persisted-row input.
+
 `iswspace` (and any libc/STL symbol) gets no goto-def/hover because we index
 only *project* files: the workspace walk skips non-project trees, and the
 macro gather's toolchain-probed `<...>` resolution (`resolve_include` in

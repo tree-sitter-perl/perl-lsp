@@ -149,11 +149,12 @@ pub trait LanguageDriver: Send + Sync {
         None
     }
     /// Fingerprint of the EXTERNAL inputs this driver's analyses depend on
-    /// beyond the source files themselves (C++: the probed toolchain — its
-    /// system include roots decide what a gather reaches). The persist tier
+    /// beyond the source files themselves (C++: the probed toolchain and the
+    /// project's compilation database — they decide what a gather reaches). The persist tier
     /// keys on it so an analysis built under one input generation is never
-    /// served under another. 0 = no external inputs.
-    fn analysis_input_fingerprint(&self) -> u64 {
+    /// served under another. `root` is the project's, `None` with none
+    /// open. 0 = no external inputs.
+    fn analysis_input_fingerprint(&self, _root: Option<&Path>) -> u64 {
         0
     }
     /// How this language spells a module as a file under a search root.
@@ -316,7 +317,7 @@ pub struct PerlDriver;
 
 impl LanguageDriver for PerlDriver {
     /// The plugin set: a `.rhai` edit changes what every analysis emits.
-    fn analysis_input_fingerprint(&self) -> u64 {
+    fn analysis_input_fingerprint(&self, _root: Option<&Path>) -> u64 {
         crate::build::plugin::rhai_host::plugin_fingerprint()
     }
     fn maturity(&self) -> Maturity {
@@ -433,7 +434,7 @@ pub struct PackDriver {
     /// External analysis-input fingerprint (see
     /// `LanguageDriver::analysis_input_fingerprint`). `None` = no external
     /// inputs (fingerprint 0).
-    input_fingerprint: Option<fn() -> u64>,
+    input_fingerprint: Option<fn(Option<&Path>) -> u64>,
     /// `public:`/`private:`/`protected:` region scan (C preprocessor-free
     /// languages only; `None` when the language has no access-specifier
     /// concept). Stamps a `non_public` attribute on member symbols so
@@ -553,8 +554,8 @@ impl LanguageDriver for PackDriver {
     fn trigger_chars(&self) -> &[&'static str] {
         (self.pack)().trigger_chars
     }
-    fn analysis_input_fingerprint(&self) -> u64 {
-        self.input_fingerprint.map(|f| f()).unwrap_or(0)
+    fn analysis_input_fingerprint(&self, root: Option<&Path>) -> u64 {
+        self.input_fingerprint.map(|f| f(root)).unwrap_or(0)
     }
     fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
         let root = root?;
@@ -834,10 +835,13 @@ fn cpp_driver() -> PackDriver {
         collect_macro_defs: Some(crate::build::cpp_reparse::collect_macro_defs),
         member_blocks: Some(crate::build::cpp_reparse::plan_member_blocks),
         include_closure: Some(crate::build::cpp_reparse::include_closure),
-        input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
+        input_fingerprint: Some(crate::build::cpp_includes::input_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
         file_module: None,
-        dependencies: None,
+        dependencies: Some(PackDependencies {
+            locator: crate::build::cpp_includes::locator,
+            manifests: &["compile_commands.json"],
+        }),
     }
 }
 

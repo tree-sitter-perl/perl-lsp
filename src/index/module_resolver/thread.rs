@@ -261,7 +261,7 @@ fn open_store(
 ) -> Option<rusqlite::Connection> {
     let snap = core.map_snapshot()?;
     let conn = module_cache::open_cache_db(ws_root, snap.driver.id())?;
-    let _ = module_cache::validate_store(&conn, snap.driver);
+    let _ = module_cache::validate_store(&conn, snap.driver, snap.root.as_deref());
     let _ = module_cache::validate_dependency_fingerprint(&conn, snap.fingerprint);
     if hub && server.is_some() {
         // Hydrate Perl builtin hover docs (cached in SQLite, re-parsed

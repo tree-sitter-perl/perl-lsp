@@ -116,7 +116,7 @@ pub fn index_pack_language(
         // change — or its probe FAILURE, which empties the system include
         // roots) must not be warmed: hard-clear.
         if let Some(ref conn) = conn {
-            let _ = module_cache::validate_store(conn, driver);
+            let _ = module_cache::validate_store(conn, driver, Some(root));
         }
 
         // WARM: stream valid cached analyses (keyed by file path) one row

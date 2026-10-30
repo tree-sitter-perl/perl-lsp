@@ -19,7 +19,7 @@
 //!                                already surface in (1).
 //!
 //! Consumed through `cpp_reparse::toolchain_info` (a OnceLock over one
-//! probe): `include_dirs` feeds the `<...>` search in `resolve_include`,
+//! probe): `include_dirs` feeds the toolchain roots of `cpp_includes::resolve`,
 //! `predefined_macros` seeds the reachability config (`known_config`) and
 //! the external-table hash. This module is the self-contained, tested
 //! producer; `cpp_toolchain_tests.rs` exercises the parsers on captured

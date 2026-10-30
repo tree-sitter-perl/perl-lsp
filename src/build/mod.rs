@@ -7,6 +7,10 @@ pub mod cpanfile;
 // Composer's autoload data: the php dependency tier's map
 #[cfg(feature = "php")]
 pub mod composer;
+// C/C++ include search: the one `#include` → file resolution, and the
+// C/C++ dependency tier's map
+#[cfg_attr(not(feature = "cpp"), allow(dead_code))]
+pub mod cpp_includes;
 // config-variant macro model: guard trail + reachability + join
 pub mod cpp_macro_model;
 // Compiled unconditionally (symbols.rs consumes the macro-model surface in

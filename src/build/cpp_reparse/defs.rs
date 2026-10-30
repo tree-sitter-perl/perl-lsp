@@ -55,10 +55,11 @@ pub(super) const EXCLUDE_QUERY_WIDE: &str = r#"
 (preproc_include) @x
 "#;
 
-pub(super) const INCLUDE_QUERY: &str = r#"
+pub(super) const INCLUDE_QUERY: &str = r##"
 (preproc_include path: (string_literal (string_content) @p))
 (preproc_include path: (system_lib_string) @s)
-"#;
+(preproc_call directive: (preproc_directive) @_d argument: (preproc_arg) @n (#eq? @_d "#include_next"))
+"##;
 
 /// A function-like macro use that already parses as a call — the "leave" set
 /// for the expansion flip (`clean_call_sites`).

@@ -36,8 +36,9 @@ pub(crate) struct DependencyState {
 impl DependencyState {
     /// The map's identity across processes: where it searches, which roots
     /// are the tier's, and the manifests it was read from with their stamps
-    /// — what moves a generation in a running process. The roots files
-    /// name are left out: every start reads the map before the walk
+    /// — what moves a generation in a running process — plus the inputs
+    /// every analysis was built under (a C toolchain), since a landed
+    /// header's macros read them. The roots files name are left out: every start reads the map before the walk
     /// registers anyone, so counting them would drop the persisted import
     /// tier on every start of a project that names one.
     fn fingerprint(&self) -> u64 {
@@ -47,6 +48,7 @@ impl DependencyState {
         self.base.roots().hash(&mut h);
         self.base.inputs().hash(&mut h);
         self.stamps.hash(&mut h);
+        self.driver.analysis_input_fingerprint(self.root.as_deref()).hash(&mut h);
         h.finish()
     }
 }

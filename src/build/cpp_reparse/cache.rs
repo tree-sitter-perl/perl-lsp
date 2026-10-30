@@ -370,9 +370,11 @@ pub(super) fn macro_table_cache() -> &'static GatherCache<std::path::PathBuf, u6
 
 /// Hash of the file's `#include` directives — the cache key's variable part.
 /// Cheap (one line scan); stable across edits that don't touch includes.
-pub(super) fn include_set_hash(src: &str) -> u64 {
+pub(super) fn include_set_hash(file_path: &std::path::Path, src: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // What the includes resolve to moves with the compilation database.
+    crate::build::cpp_includes::roots_fingerprint(file_path).hash(&mut h);
     for line in src.lines() {
         let t = line.trim_start();
         if t.starts_with('#') && t[1..].trim_start().starts_with("include") {
@@ -501,7 +503,7 @@ pub(super) fn included_macros_inner(
     allow_cold: bool,
 ) -> Option<std::sync::Arc<MacroTable>> {
     let key = file_path.to_path_buf();
-    let inc_hash = include_set_hash(src);
+    let inc_hash = include_set_hash(file_path, src);
     // Tier 1 (in-memory, this session) IS the GatherCache hit. On a miss the
     // single-flight claimant runs tiers 2+3; siblings on the same key wait for
     // its result rather than re-paying the cold gather.

@@ -450,21 +450,28 @@ impl FileAnalysis {
     }
 
     /// Every identity this file names across files, first-named first: what
-    /// it imports, the parents it declares, and the classes and packages its
-    /// references name (`referenced_identities`). The dependency tier's
-    /// demand: every asker and every descent reads this one list. Every lane
-    /// it reads survives a strip and rides the warm stub.
+    /// it imports, the parents it declares, the classes and packages its
+    /// references name (`referenced_identities`), and the files its include
+    /// closure reached. The dependency tier's demand: every asker and every
+    /// descent reads this one list. Every lane it reads survives a strip and
+    /// rides the warm stub.
+    ///
+    /// An include closure is named by path, not spelling: which file a
+    /// spelling places depends on the includer and the unit's flags, which
+    /// the closure was resolved under and the tier is not.
     pub fn used_identities(&self) -> Vec<String> {
         let mut seen: HashSet<&str> = HashSet::new();
         let imports = self.imports.iter().map(|i| i.module_name.as_str());
         let parents = self.package_parent_edges().flat_map(|(_, ps)| ps.iter().map(String::as_str));
         let referenced = self.referenced_identities.iter().map(String::as_str);
-        imports
+        let mut out: Vec<String> = imports
             .chain(parents)
             .chain(referenced)
             .filter(|n| !n.is_empty() && seen.insert(n))
             .map(str::to_string)
-            .collect()
+            .collect();
+        out.extend(self.pack.include_closure.iter_strs().filter(|p| !seen.contains(&**p)).map(|p| p.to_string()));
+        out
     }
 
     /// `referenced_identities` from the refs: each package reference's

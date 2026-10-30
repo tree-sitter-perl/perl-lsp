@@ -1,6 +1,7 @@
 //! Include-closure macro gathering: pre-expanded external tables, header
 //! parse/include caches, toolchain include resolution, and cache eviction.
 
+use crate::build::cpp_includes::{resolve, Directive, IncludeKind};
 use super::*;
 
 /// One pre-expanded variant of the external table + the identifiers its bodies
@@ -151,7 +152,7 @@ pub fn included_macros_pre_expanded(
     parser: &mut tree_sitter::Parser,
 ) -> std::sync::Arc<PreExpandedExternal> {
     let key = file_path.to_path_buf();
-    let inc_hash = include_set_hash(src);
+    let inc_hash = include_set_hash(file_path, src);
     pre_expanded_cache().get_or_fill(key, inc_hash, || {
         // In cached-only mode (on-open), a raw-table miss yields an EMPTY
         // external set that is deliberately NOT cached (`Transient`) — so the
@@ -223,7 +224,7 @@ pub(super) fn gather_included_macros(
     };
     let mut frontier: Vec<std::path::PathBuf> = include_paths(src, parser)
         .iter()
-        .filter_map(|inc| resolve_include(file_path, inc))
+        .filter_map(|d| resolve(file_path, file_path, d))
         .collect();
     while !frontier.is_empty() {
         // Canonicalize + dedup this level in queue order (cheap stat) so the
@@ -247,8 +248,8 @@ pub(super) fn gather_included_macros(
             for (k, v) in &info.macros {
                 macros.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            for inc in &info.includes {
-                if let Some(nx) = resolve_include(canon, inc) {
+            for d in &info.includes {
+                if let Some(nx) = resolve(file_path, canon, d) {
                     next.push(nx);
                 }
             }
@@ -302,7 +303,7 @@ fn header_info(canon: &std::path::Path, parser: &mut tree_sitter::Parser) -> Opt
 }
 
 fn header_heap_bytes(h: &CachedHeader) -> usize {
-    macro_table_heap_bytes(&h.macros) + strings_heap_bytes(&h.includes)
+    macro_table_heap_bytes(&h.macros) + h.includes.iter().map(|d| d.path.len() + 32).sum::<usize>()
 }
 
 /// A header's own #defines + its include edges — cached by (path, mtime)
@@ -311,7 +312,7 @@ fn header_heap_bytes(h: &CachedHeader) -> usize {
 /// rarely change mid-edit, and mtime invalidates when they do).
 struct CachedHeader {
     macros: BTreeMap<String, Macro>,
-    includes: Vec<String>,
+    includes: Vec<Directive>,
 }
 
 fn header_cache(
@@ -358,78 +359,39 @@ pub fn toolchain_fingerprint() -> u64 {
     h.finish()
 }
 
-/// System/stdlib include roots, in compiler search order — the `<...>` fallback
-/// for headers no workspace ancestor holds (`<sys/mman.h>`). Empty when no
-/// compiler was found.
-fn system_include_dirs() -> &'static [std::path::PathBuf] {
-    static DIRS: std::sync::OnceLock<Vec<std::path::PathBuf>> = std::sync::OnceLock::new();
-    DIRS.get_or_init(|| toolchain_info().map(|t| t.include_dirs.clone()).unwrap_or_default())
+/// Resolve one `#include` path token as the extractor captures it (a
+/// quoted path's content, or `<x>` with its brackets) to a real file. The
+/// seam for goto-def and find-references on an include token
+/// (`FileAnalysis::include_directives`).
+pub fn resolve_include_path(file_path: &std::path::Path, raw: &str) -> Option<std::path::PathBuf> {
+    crate::build::cpp_includes::resolve(file_path, file_path, &crate::build::cpp_includes::Directive::spelled(raw))
 }
 
-/// Resolve an include like `spdlog/common.h` or `<sys/mman.h>` to a real path.
-/// Workspace-first: walk up from the file's dir, first ancestor `R` where
-/// `R/<inc>` exists wins (project/relative headers, quoted or angle-bracket).
-/// Only when no ancestor has it do the toolchain's system roots answer — so a
-/// system `<sys/mman.h>` resolves (its subtree was silently lost before), while
-/// a project header still shadows a same-named system one.
-fn resolve_include(file_path: &std::path::Path, inc: &str) -> Option<std::path::PathBuf> {
-    if let Some(mut dir) = file_path.parent() {
-        loop {
-            let cand = dir.join(inc);
-            if cand.is_file() {
-                return Some(cand);
-            }
-            // The conventional `-Iinclude` layout: a test/src file spelling
-            // `#include "fmt/format.h"` reaches `<root>/include/fmt/format.h`.
-            // Without this the whole test/src tree gets an empty project
-            // closure and the visibility gate cuts it off from every target.
-            let cand = dir.join("include").join(inc);
-            if cand.is_file() {
-                return Some(cand);
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                None => break,
-            }
-        }
-    }
-    for root in system_include_dirs() {
-        let cand = root.join(inc);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
-}
-
-/// Resolve one `#include` path token (quoted or angle-bracket) to a real file,
-/// workspace-first then toolchain roots. The public seam for goto-def on an
-/// `#include` path token (`FileAnalysis::include_directives`).
-pub fn resolve_include_path(file_path: &std::path::Path, inc: &str) -> Option<std::path::PathBuf> {
-    resolve_include(file_path, inc)
-}
-
-/// Every `#include` directive's raw path text, by a cheap per-line scan (no
-/// parse) — the header BFS only needs the paths, so this stays far lighter than
-/// `header_info`'s full tree parse. Quoted `"x.h"` and angle-bracket `<x.h>`
-/// alike (the walk-up resolver finds project headers written either way).
-fn scan_include_directives(src: &str) -> Vec<String> {
+/// Every `#include` / `#include_next` directive, by a cheap per-line scan
+/// (no parse) — the header BFS only needs the paths, so this stays far
+/// lighter than `header_info`'s full tree parse.
+fn scan_include_directives(src: &str) -> Vec<Directive> {
     let mut out = Vec::new();
     for line in src.lines() {
         let t = line.trim_start();
         let Some(rest) = t.strip_prefix('#') else { continue };
         let rest = rest.trim_start();
-        let Some(rest) = rest.strip_prefix("include") else { continue };
-        let rest = rest.trim_start();
-        let path = match rest.as_bytes().first() {
-            Some(b'"') => rest[1..].split('"').next(),
-            Some(b'<') => rest[1..].split('>').next(),
-            _ => None,
+        let (rest, next) = match rest.strip_prefix("include_next") {
+            Some(r) => (r, true),
+            None => match rest.strip_prefix("include") {
+                Some(r) => (r, false),
+                None => continue,
+            },
         };
-        if let Some(p) = path {
-            if !p.is_empty() {
-                out.push(p.to_string());
-            }
+        let rest = rest.trim_start();
+        let (path, kind) = match rest.as_bytes().first() {
+            Some(b'"') => (rest[1..].split('"').next(), IncludeKind::Quoted),
+            Some(b'<') => (rest[1..].split('>').next(), IncludeKind::Angle),
+            _ => (None, IncludeKind::Angle),
+        };
+        if let Some(p) = path.filter(|p| !p.is_empty()) {
+            let kind = if next { IncludeKind::Next } else { kind };
+            out.push(Directive { path: p.to_string(), kind });
         }
     }
     out
@@ -467,7 +429,7 @@ fn include_closure_cache(
 /// closure boundary, deterministic across runs.
 pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, bool) {
     let key = file_path.to_path_buf();
-    let inc_hash = include_set_hash(src);
+    let inc_hash = include_set_hash(file_path, src);
     // The walk runs single-flight on a miss. A hit or a freshly-stored (COMPLETE)
     // closure resolves `Cached`; the cached-only placeholder and a truncated
     // closure resolve `Transient` (returned, never cached) → `complete = false`.
@@ -484,7 +446,7 @@ pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, 
         let mut complete = true;
         let mut frontier: Vec<std::path::PathBuf> = scan_include_directives(src)
             .iter()
-            .filter_map(|inc| resolve_include(file_path, inc))
+            .filter_map(|d| resolve(file_path, file_path, d))
             .collect();
         while !frontier.is_empty() {
             let mut next: Vec<std::path::PathBuf> = Vec::new();
@@ -496,8 +458,8 @@ pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, 
                 out.push(canon.to_string_lossy().into_owned());
                 match std::fs::read_to_string(&canon) {
                     Ok(hsrc) => {
-                        for inc in scan_include_directives(&hsrc) {
-                            if let Some(nx) = resolve_include(&canon, &inc) {
+                        for d in scan_include_directives(&hsrc) {
+                            if let Some(nx) = resolve(file_path, &canon, &d) {
                                 next.push(nx);
                             }
                         }
@@ -592,18 +554,16 @@ pub fn cache_size_report() -> String {
     )
 }
 
-fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<String> {
+fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<Directive> {
     match parser.parse(src, None) {
         Some(tree) => include_paths_tree(&tree, src),
         None => Vec::new(),
     }
 }
 
-/// Every include's path, quoted (`"x/y.h"`) and angle-bracket
-/// (`<lib/y.h>`) alike — library headers write project includes with
-/// `<>`, and the walk-up resolver finds both (true system headers like
-/// `<vector>` simply don't resolve in the workspace, and are skipped).
-fn include_paths_tree(tree: &Tree, src: &str) -> Vec<String> {
+/// Every include directive: quoted (`"x/y.h"`), angle-bracket
+/// (`<lib/y.h>`) and `#include_next`.
+fn include_paths_tree(tree: &Tree, src: &str) -> Vec<Directive> {
     let q = cached_query(&INCLUDE_Q, &tree.language(), INCLUDE_QUERY);
     let names = q.capture_names().to_vec();
     let mut out = Vec::new();
@@ -612,11 +572,14 @@ fn include_paths_tree(tree: &Tree, src: &str) -> Vec<String> {
     while let Some(m) = it.next() {
         for c in m.captures {
             let Ok(t) = c.node.utf8_text(src.as_bytes()) else { continue };
-            match names[c.index as usize] {
-                "p" => out.push(t.to_string()),
-                "s" => out.push(t.trim_start_matches('<').trim_end_matches('>').to_string()),
-                _ => {}
-            }
+            let kind = match names[c.index as usize] {
+                "p" => IncludeKind::Quoted,
+                "s" => IncludeKind::Angle,
+                "n" => IncludeKind::Next,
+                _ => continue,
+            };
+            let path = t.trim().trim_start_matches(['<', '"']).trim_end_matches(['>', '"']).to_string();
+            out.push(Directive { path, kind });
         }
     }
     out

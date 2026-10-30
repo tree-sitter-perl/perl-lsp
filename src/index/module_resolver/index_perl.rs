@@ -136,7 +136,11 @@ pub fn index_workspace_with_index(
     // fresh DB reads as a mismatch there — it would hard-clear the rows this
     // indexer is about to write.
     if let Some(ref conn) = conn {
-        let _ = module_cache::validate_store(conn, &crate::build::language_driver::PerlDriver);
+        let _ = module_cache::validate_store(
+            conn,
+            &crate::build::language_driver::PerlDriver,
+            cache_key.as_deref().map(std::path::Path::new),
+        );
     }
     // Persistence and eviction are independent: blobs + rows are written
     // whenever a DB exists (the parity harness runs under PERL_LSP_NO_EVICT

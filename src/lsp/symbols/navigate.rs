@@ -129,11 +129,8 @@ pub fn pack_include_definition(
         .iter()
         .find(|(span, _)| crate::model::file_analysis::contains_point(span, point))
         .map(|(_, raw)| raw.clone())?;
-    // `"foo.h"` captures the string CONTENT (no quotes); `<sys/x.h>` captures the
-    // whole token — strip the angle brackets so the resolver sees a bare path.
-    let inc = raw.trim_matches(|c| c == '<' || c == '>' || c == '"');
     let base = self_path?;
-    let header = crate::build::cpp_reparse::resolve_include_path(base, inc)?;
+    let header = crate::build::cpp_reparse::resolve_include_path(base, &raw)?;
     let uri = Url::from_file_path(&header).ok()?;
     Some(Location {
         uri,
@@ -170,13 +167,12 @@ pub fn pack_include_references(
         .iter()
         .find(|(span, _)| crate::model::file_analysis::contains_point(span, point))
         .map(|(_, raw)| raw.clone())?;
-    let trim = |r: &str| r.trim_matches(|c| c == '<' || c == '>' || c == '"').to_string();
     let base = self_path?;
-    let header = crate::build::cpp_reparse::resolve_include_path(base, &trim(&raw))?;
+    let header = crate::build::cpp_reparse::resolve_include_path(base, &raw)?;
     let mut out: Vec<(std::path::PathBuf, crate::model::file_analysis::Span)> = Vec::new();
     let mut collect = |path: &std::path::Path, a: &FileAnalysis| {
         for (span, r) in &a.pack.include_directives {
-            if crate::build::cpp_reparse::resolve_include_path(path, &trim(r)).as_deref()
+            if crate::build::cpp_reparse::resolve_include_path(path, r).as_deref()
                 == Some(header.as_path())
             {
                 out.push((path.to_path_buf(), *span));

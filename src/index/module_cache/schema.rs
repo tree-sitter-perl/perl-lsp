@@ -10,7 +10,7 @@ const SCHEMA_VERSION: &str = "10";
 /// Bumped when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 281;
+pub const EXTRACT_VERSION: i64 = 282;
 
 /// Bumped when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
@@ -484,8 +484,9 @@ pub fn validate_dependency_fingerprint(conn: &Connection, fingerprint: u64) -> r
 pub fn validate_store(
     conn: &Connection,
     driver: &dyn crate::build::language_driver::LanguageDriver,
+    root: Option<&std::path::Path>,
 ) -> rusqlite::Result<()> {
-    validate_input_fingerprint(conn, driver.analysis_input_fingerprint())?;
+    validate_input_fingerprint(conn, driver.analysis_input_fingerprint(root))?;
     validate_conclusion_fingerprint(conn, crate::index::module_cache::conclusion_fingerprint())
 }
 
