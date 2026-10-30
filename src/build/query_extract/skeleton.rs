@@ -152,10 +152,10 @@ pub struct SkeletonAnalysis {
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
     pub flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
-    /// `std::move(x)` sites: (moved var name, move-call span, enclosing scope).
-    /// A read of the var after the call and before its next rebind is a
+    /// `std::move` sites, rooted into `MoveSite`s in `into_file_analysis`.
+    /// A read of the moved part after the call and before it is reset is a
     /// use-after-move bug (`FileAnalysis::use_after_move_reads`).
-    pub moved_from: Vec<(String, crate::model::file_analysis::Span, crate::model::file_analysis::ScopeId)>,
+    pub moved_from: Vec<MoveCall>,
     /// Control-flow construct spans (`if`/`while`/`for`/`switch`/ternary/preproc
     /// conditionals). The use-after-move check reads these to decide whether a
     /// move is straight-line in its enclosing scope (`use_after_move_reads`).
@@ -215,6 +215,10 @@ pub struct SkeletonAnalysis {
     /// member. A receiver that is itself a member read, down to a variable,
     /// makes the access a place (`PackPlaces`).
     pub member_reads: Vec<MemberRead>,
+    /// Member places an access writes (`obj.x = …`, `obj.x.clear()`), by
+    /// the written member read's span, value or not: what ends a narrowing
+    /// or a move of that place.
+    pub place_writes: Vec<crate::model::file_analysis::Span>,
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
     pub place_narrowings: Vec<PlaceNarrowing>,
@@ -247,6 +251,16 @@ pub struct MemberRead {
     pub span: crate::model::file_analysis::Span,
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
+}
+
+/// A `std::move(x)` call: the subject as written and its node, the call,
+/// and the scope it runs in.
+#[derive(Debug, Clone)]
+pub struct MoveCall {
+    pub spelling: String,
+    pub subject: crate::model::file_analysis::Span,
+    pub call: crate::model::file_analysis::Span,
+    pub scope: crate::model::file_analysis::ScopeId,
 }
 
 /// A guard narrowing a member read (`isinstance(self.x, T)`): the subject,
@@ -1107,6 +1121,21 @@ impl SkeletonAnalysis {
             .collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
+        let place_writes = std::mem::take(&mut self.place_writes);
+        let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
+            .into_iter()
+            .filter_map(|m| {
+                let place = places.at(m.subject)?;
+                Some(crate::model::file_analysis::MoveSite {
+                    reads: places.reads_of(&place),
+                    resets: places.writes_to(&place, &place_writes),
+                    place,
+                    spelling: m.spelling,
+                    call: m.call,
+                    scope: m.scope,
+                })
+            })
+            .collect();
         // A guard narrows its place over the arm it enters, up to the place's
         // first disturbance there or a rebind of its root.
         let place_narrowings = std::mem::take(&mut self.place_narrowings);
@@ -1118,7 +1147,7 @@ impl SkeletonAnalysis {
             use crate::model::file_analysis::Binding;
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
             let wanted = narrowed.iter().map(|(p, _)| p.root.clone()).collect();
-            let disturbances = places.disturbances(&wanted, &member_writes);
+            let disturbances = places.disturbances(&wanted, &place_writes);
             let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
             for (place, n) in narrowed {
                 let Binding::Lexical(root) = &place.root else { continue };
@@ -1503,7 +1532,7 @@ impl SkeletonAnalysis {
                 .collect(),
             use_rows: std::mem::take(&mut self.use_rows),
             domain_sites: std::mem::take(&mut self.domain_sites),
-            moved_from: std::mem::take(&mut self.moved_from),
+            moved_from: move_sites,
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
             ..Default::default()

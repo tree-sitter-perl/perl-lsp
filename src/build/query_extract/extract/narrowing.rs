@@ -37,7 +37,7 @@ pub(super) struct State {
     /// the moved subject, the call span the region start + enclosing scope.
     move_scope_txt: HashMap<usize, String>,
     move_name_txt: HashMap<usize, String>,
-    move_var_txt: HashMap<usize, String>,
+    move_var_txt: HashMap<usize, (String, Span)>,
     move_call: HashMap<usize, (Span, ScopeId)>,
 }
 
@@ -85,7 +85,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             n.move_name_txt.insert(e.match_id, e.text.clone());
         }
         Capture::Move(MoveCap::Var) => {
-            n.move_var_txt.insert(e.match_id, e.text.clone());
+            n.move_var_txt.insert(e.match_id, (e.text.clone(), e.span()));
         }
         Capture::Move(MoveCap::Call) => {
             // Drop moves inside an unevaluated operand — they never execute,
@@ -169,13 +169,22 @@ pub(super) fn finish(st: &mut ExtractState) {
     }
     // std::move sites → moved-from facts. The qualifier/name verify the
     // call IS `std::move` here (no query predicates), so the diagnostic never
-    // sees the call shape — it reads the recorded var + span + scope.
-    for (mid, (span, scope)) in &n.move_call {
+    // sees the call shape — it reads the recorded subject + span + scope. The
+    // subject becomes a place once the assembled analysis can root it.
+    let mut move_mids: Vec<&usize> = n.move_call.keys().collect();
+    move_mids.sort_unstable();
+    for mid in move_mids {
+        let (span, scope) = &n.move_call[mid];
         if n.move_scope_txt.get(mid).map(String::as_str) == Some("std")
             && n.move_name_txt.get(mid).map(String::as_str) == Some("move")
         {
-            if let Some(v) = n.move_var_txt.get(mid) {
-                out.moved_from.push(((st.pack.shape_name)(v), *span, *scope));
+            if let Some((v, subject)) = n.move_var_txt.get(mid) {
+                out.moved_from.push(crate::build::query_extract::MoveCall {
+                    spelling: v.clone(),
+                    subject: *subject,
+                    call: *span,
+                    scope: *scope,
+                });
             }
         }
     }

@@ -10,7 +10,7 @@ use tree_sitter::Point;
 use crate::model::conventions::{Invocant, InvocantName};
 use crate::model::file_analysis::{Access, Binding, PathStep, Place, PlaceDisturbanceIndex, Span, SymbolId};
 
-use super::{MemberRead, MemberWrite};
+use super::MemberRead;
 
 /// Resolves an expression span to the place it denotes, from the facts the
 /// extractor minted: each variable read's declaration and each member read's
@@ -18,11 +18,17 @@ use super::{MemberRead, MemberWrite};
 pub(crate) struct PackPlaces<'a> {
     vars: HashMap<Span, SymbolId>,
     members: HashMap<Span, &'a MemberRead>,
+    /// The member read each receiver is read through, by the receiver.
+    through: HashMap<Span, &'a MemberRead>,
 }
 
 impl<'a> PackPlaces<'a> {
     pub(crate) fn new(vars: HashMap<Span, SymbolId>, member_reads: &'a [MemberRead]) -> Self {
-        PackPlaces { vars, members: member_reads.iter().map(|m| (m.span, m)).collect() }
+        PackPlaces {
+            vars,
+            members: member_reads.iter().map(|m| (m.span, m)).collect(),
+            through: member_reads.iter().map(|m| (m.receiver, m)).collect(),
+        }
     }
 
     /// The place `span` denotes: a variable read, or a member read of a
@@ -57,31 +63,29 @@ impl<'a> PackPlaces<'a> {
         }
     }
 
-    /// Every access that could disturb a place rooted in `wanted`: a member
-    /// write is a write of its place; a variable or member read that no
+    /// Every access that could disturb a place rooted in `wanted`: a place
+    /// write is a write; a variable or member read that no
     /// further member read reads through is handed on whole (an argument, a
     /// call's receiver), an opaque access.
-    pub(crate) fn disturbances(&self, wanted: &HashSet<Binding>, writes: &[MemberWrite]) -> PlaceDisturbanceIndex {
+    pub(crate) fn disturbances(&self, wanted: &HashSet<Binding>, writes: &[Span]) -> PlaceDisturbanceIndex {
         let mut idx = PlaceDisturbanceIndex::default();
         let mut add = |at: Point, access: Access, place: Place| {
             if wanted.contains(&place.root) {
                 idx.add(at, access, place);
             }
         };
-        for w in writes {
-            if let Some(mut place) = self.at(w.receiver) {
-                place.path.push(PathStep::Member(w.member.clone()));
-                add(w.receiver.start, Access::Write, place);
+        for &w in writes {
+            if let Some(place) = self.at(w) {
+                add(w.start, Access::Write, place);
             }
         }
-        let read_through: HashSet<Span> = self.members.values().map(|m| m.receiver).collect();
         for (&span, &sym) in &self.vars {
-            if !read_through.contains(&span) {
+            if !self.through.contains_key(&span) {
                 add(span.start, Access::Opaque, Place::variable(Binding::Lexical(sym)));
             }
         }
         for &span in self.members.keys() {
-            if !read_through.contains(&span) {
+            if !self.through.contains_key(&span) {
                 if let Some(place) = self.at(span) {
                     add(span.start, Access::Opaque, place);
                 }
@@ -89,5 +93,41 @@ impl<'a> PackPlaces<'a> {
         }
         idx.seal();
         idx
+    }
+
+    /// The token of every variable read that reaches a part of `place`: the
+    /// read, extended through the member reads made of it, overlaps it.
+    pub(crate) fn reads_of(&self, place: &Place) -> Vec<Span> {
+        let mut reads: Vec<Span> = self
+            .vars
+            .iter()
+            .filter(|(_, sym)| place.root == Binding::Lexical(**sym))
+            .filter(|(span, sym)| place.overlaps(&self.read_through(**span, **sym)))
+            .map(|(span, _)| *span)
+            .collect();
+        reads.sort_by_key(|s| s.start);
+        reads
+    }
+
+    /// The writes that give `place` a value again: of it, or of what holds it.
+    pub(crate) fn writes_to(&self, place: &Place, writes: &[Span]) -> Vec<Span> {
+        writes
+            .iter()
+            .filter(|&&w| self.at(w).is_some_and(|written| place.disturbed_by(Access::Write, &written)))
+            .copied()
+            .collect()
+    }
+
+    /// The deepest place a variable read reaches through the member reads
+    /// made of it (`self` in `self.a.b` reaches `self.a.b`).
+    fn read_through(&self, span: Span, sym: SymbolId) -> Place {
+        let mut place = Place::variable(Binding::Lexical(sym));
+        let mut at = span;
+        for _ in 0..=self.through.len() {
+            let Some(read) = self.through.get(&at) else { break };
+            place.path.push(PathStep::Member(read.member.clone()));
+            at = read.span;
+        }
+        place
     }
 }

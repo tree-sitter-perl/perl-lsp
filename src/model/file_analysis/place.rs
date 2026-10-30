@@ -158,6 +158,12 @@ impl Place {
         self.path.iter().flat_map(PathStep::key_vars)
     }
 
+    /// Could the two share a part: the same root, and one's path running
+    /// along the other's as far as the shorter goes.
+    pub fn overlaps(&self, other: &Place) -> bool {
+        self.root == other.root && self.path.iter().zip(&other.path).all(|(a, b)| a.overlaps(b))
+    }
+
     /// Does `access` on `other` disturb what this place holds? A write
     /// disturbs the place and everything under it; an opaque access
     /// disturbs only what lies strictly under it (a method call on the

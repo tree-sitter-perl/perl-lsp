@@ -1653,6 +1653,34 @@ void f() {
 }
 
 #[test]
+fn cpp_member_move_flags_only_reads_of_the_moved_part() {
+    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` or of all of `p`
+    // is a use of the moved part until `p.msg` is written again.
+    let src = "\
+struct Msg {};
+struct Packet { Msg msg; int id; };
+void f() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p.id);
+  use(p.msg);
+  p.msg = Msg();
+  use(p.msg);
+}
+void g() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    reads.sort();
+    assert_eq!(reads, vec![("p.msg".to_string(), 6), ("p.msg".to_string(), 13)]);
+}
+
+#[test]
 fn cpp_conditional_move_does_not_flag_sibling_arm() {
     // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
     // `if` arm bounds its moved-from region to that arm — the read of `x` in the

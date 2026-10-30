@@ -381,6 +381,9 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
     place_mids.sort_unstable();
     for mid in place_mids {
         let read = byte_range_of(events, *mid, Capture::Flow(FlowCap::Place)).and_then(|r| f.member_reads.get(&r));
+        if read.is_some() {
+            out.place_writes.push(f.flow_places[mid]);
+        }
         if let (Some((receiver, member)), Some(value)) = (read, source_value_span(f, events, *mid)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: *receiver,

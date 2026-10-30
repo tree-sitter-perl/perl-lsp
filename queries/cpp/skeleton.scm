@@ -877,6 +877,17 @@
     field: (field_identifier) @_m)
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
+; A write to a member, or one of those resets on it, gives that place a
+; value again: it ends a narrowing or a move of the member. It states no
+; value: the member's is its declaration's.
+(assignment_expression
+  left: (field_expression) @flow.place)
+(call_expression
+  function: (field_expression
+    argument: (field_expression) @flow.place
+    field: (field_identifier) @_m)
+  (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
+
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
@@ -886,7 +897,8 @@
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
-; Capture the moved var + the whole call span; the minter checks scope/name
+; Capture the moved var or member (`std::move(o.msg)` moves only that part)
+; + the whole call span; the minter checks scope/name
 ; against std/move (the driver has no query predicates). The moved-from region
 ; runs from the call to the first @flow rebind of x (or scope end) — the same
 ; cutoff the narrowing tier uses (`earliest_rebind_in`).
@@ -894,7 +906,7 @@
   function: (qualified_identifier
     scope: (namespace_identifier) @move.scope
     name: (identifier) @move.name)
-  arguments: (argument_list (identifier) @move.var)) @move.call
+  arguments: (argument_list [(identifier) (field_expression)] @move.var)) @move.call
 
 ; unevaluated operands — `noexcept(...)` / `sizeof(...)` / `decltype(...)`
 ; don't RUN their operand, so a `std::move` inside one never moves anything.
