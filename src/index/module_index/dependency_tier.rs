@@ -380,6 +380,40 @@ impl IndexCore {
         Ok(out)
     }
 
+    /// Swap each of `whole`'s resident copies — still the WHOLE copy a
+    /// landing under `generation` stored — for its stripped twin, now that
+    /// its rows committed. A copy landed again since, or a map that moved,
+    /// keeps what it holds.
+    pub(crate) fn strip_persisted(&self, generation: u64, whole: &[Arc<CachedModule>]) {
+        let guard = self.dependency_state();
+        let Some(st) = guard.as_ref().filter(|st| st.generation == generation) else { return };
+        for m in whole {
+            let Some(names) = st.landed.get(&m.path) else { continue };
+            let stripped = super::index_core::strip_import_copy_one(m, true, true);
+            if Arc::ptr_eq(&stripped, m) {
+                continue;
+            }
+            // Stale-pin clear BEFORE the stripped copy is reachable, so its
+            // first rehydration reads the just-committed blob.
+            if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
+                bc.invalidate(&m.path);
+            }
+            for name in names {
+                if let Some(mut v) = self.all_defs.get_mut(name) {
+                    for c in v.iter_mut().filter(|c| Arc::ptr_eq(c, m)) {
+                        *c = Arc::clone(&stripped);
+                    }
+                }
+                if let Some(mut slot) = self.cache.get_mut(name) {
+                    if slot.as_ref().is_some_and(|c| Arc::ptr_eq(c, m)) {
+                        *slot = Some(Arc::clone(&stripped));
+                    }
+                }
+            }
+        }
+        self.note_shape_change();
+    }
+
     /// Undo a landing of `path`: its candidates, any name slot it holds
     /// (re-picked from the survivors), and its edge feed.
     pub(crate) fn retire_dependency(&self, path: &std::path::Path, names: &[String]) {

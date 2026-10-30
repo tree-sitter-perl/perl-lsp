@@ -70,6 +70,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     let prefetch = hub;
     let mut adopted = 0u64;
     let mut progress = Progress::default();
+    let mut persists = DependencyPersists::default();
     // Adopted before the first wait as well as after each, so what the map
     // declares is asked though nothing else is.
     adopt_map(&core, db.as_ref(), server.as_ref(), &mut seen, &mut adopted, &mut listed, &mut progress);
@@ -111,7 +112,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
 
             crate::util::ghost_stats::count("resolver.module_resolved");
-            let whole = match acquire(&core, &module_name, db.as_ref()) {
+            let whole = match acquire(&core, &module_name, &mut persists) {
                 Ok(whole) => whole,
                 Err(_moved) => {
                     // Asked again once the loop adopts the new map.
@@ -165,10 +166,17 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 }
             }
 
+            if persists.is_full() {
+                persists.flush(&core, db.as_ref());
+            }
+
             // Signal waiters (per module — bounded waits key on names).
             notify_resolved(&core);
             resolved_any = true;
         }
+        // Before idle: a waiter reads the settled residency, and the next
+        // adoption's fingerprint gate sees every row this map wrote.
+        persists.flush(&core, db.as_ref());
         // After descent queued its asks, so "idle" never reads between the
         // batch and what it asked for.
         core.queue.busy.store(false, std::sync::atomic::Ordering::Release);

@@ -109,6 +109,77 @@ fn save_one_provider(
     persisted
 }
 
+/// Landings waiting for their rows, batched so a run of landings writes
+/// one transaction per `PERSIST_CHUNK` through `run_persist_writer`, not an
+/// autocommit per statement (each landing's blob plus thousands of ref and
+/// sym rows — the WAL checkpointed constantly and wrote ~200x the blob
+/// bytes). A landing is reachable WHOLE from the moment it lands; its
+/// stripped copy replaces it only once its rows commit
+/// (`IndexCore::strip_persisted`), so an evicted copy is never reachable
+/// before its blob can rehydrate it. The resolver flushes when a chunk
+/// fills and before it reports idle.
+#[derive(Default)]
+pub(crate) struct DependencyPersists {
+    pending: Vec<DependencyPersist>,
+}
+
+struct DependencyPersist {
+    name: String,
+    generation: u64,
+    /// The asked name's answering providers (`None`: a remembered miss).
+    rows: Option<Providers>,
+    /// Whether every row landed, set inside the chunk's transaction.
+    landed: std::cell::Cell<bool>,
+}
+
+impl DependencyPersists {
+    pub(crate) fn push(&mut self, name: &str, generation: u64, rows: Option<Providers>) {
+        self.pending.push(DependencyPersist {
+            name: name.to_string(),
+            generation,
+            rows,
+            landed: std::cell::Cell::new(false),
+        });
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.pending.len() >= PERSIST_CHUNK
+    }
+
+    /// Write what is pending, then strip each committed landing's resident
+    /// copies. With no store nothing is written and every copy stays whole.
+    pub(crate) fn flush(&mut self, core: &IndexCore, conn: Option<&rusqlite::Connection>) {
+        if self.pending.is_empty() {
+            return;
+        }
+        crate::util::ghost_stats::count("dependency.persist_flush");
+        let (tx, rx) = std::sync::mpsc::channel();
+        for e in self.pending.drain(..) {
+            let _ = tx.send(e);
+        }
+        drop(tx);
+        let strip = eviction_enabled();
+        run_persist_writer(
+            rx,
+            conn,
+            "dependency persist",
+            |conn, batch: &[DependencyPersist]| {
+                for e in batch {
+                    e.landed.set(save_module_generation(conn, &e.name, &e.rows));
+                }
+            },
+            |e| {
+                if let (true, true, Some(rows)) = (strip, e.landed.get(), &e.rows) {
+                    core.strip_persisted(e.generation, rows);
+                }
+            },
+            // Rolled back: the copies stay whole, their bags unrecoverable
+            // otherwise; the next run lands them again.
+            |_| {},
+        );
+    }
+}
+
 /// Stamp-before-read + re-stat-after-parse: capture the disk stamp, run the
 /// read+analyze, and return None when the file changed underneath — a
 /// write-time stamp would bless a stale parse as the current generation and

@@ -61,12 +61,14 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
 }
 
 /// Resolve `name` under the current map: locate and parse with no lock
-/// held, persist, then land. Returns the WHOLE providers (descent reads
-/// what a strip drops); `Err` when the map moved meanwhile.
+/// held, land the whole copies, and queue their persist on `persists` —
+/// the strip waits for the blob's commit (`DependencyPersists::flush`).
+/// Returns the WHOLE providers (descent reads what a strip drops); `Err`
+/// when the map moved meanwhile.
 pub(super) fn acquire(
     core: &IndexCore,
     name: &str,
-    db: Option<&rusqlite::Connection>,
+    persists: &mut DependencyPersists,
 ) -> Result<Option<Providers>, MapMoved> {
     let Some(snap) = core.map_snapshot() else {
         return Ok(None);
@@ -75,10 +77,10 @@ pub(super) fn acquire(
     let answers = answering(snap.driver, name, &placed);
     let whole: Providers = placed.into_iter().map(|p| p.file).collect();
     let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
+    core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), false, eviction_enabled())?;
     // Per FILE: each provider gets its own row, so a shadowed twin
     // survives the warm start too.
-    let persisted = db.is_some_and(|conn| save_module_generation(conn, name, &(!rows.is_empty()).then_some(rows)));
-    core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), persisted, eviction_enabled())?;
+    persists.push(name, snap.generation, (!rows.is_empty()).then_some(rows));
     Ok((!whole.is_empty()).then_some(whole))
 }
 

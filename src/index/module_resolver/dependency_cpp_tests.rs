@@ -146,6 +146,9 @@ fn a_landed_header_warms_from_the_store() {
     crate::index::module_cache::with_test_cache_dir(&store, busy, || {
         let idx = indexed(&proj);
         assert_eq!(defs(&idx, &base, &main, at(MAIN, "widget_count")), [widget.clone()]);
+        // The batched persist committed before idle, and only then stripped.
+        let held = idx.def_candidates(&base.join(&widget.0).display().to_string());
+        assert!(!held.is_empty() && held.iter().all(|c| c.analysis.bag_is_evicted()), "stripped once its rows committed");
     });
     assert_eq!(import_rows(&store, "%/third_party/%"), 2, "widget.h and detail.h persisted");
 
@@ -180,4 +183,55 @@ fn a_landed_header_registers_once_however_many_names_it_declares() {
     let fed = idx.modules_with_symbol("m2");
     assert_eq!(fed.len(), 1, "fed under one name, not one per declared name: {fed:?}");
     assert_eq!(idx.get_cached(&fed[0]).map(|c| c.path.clone()), Some(header));
+}
+
+/// Landings persist through the batched writer: one transaction per chunk
+/// rather than an autocommit per statement. Measured as WAL frames, the
+/// pages SQLite wrote: a landing's ref and sym rows are hundreds of
+/// statements, and autocommitting each rewrote the same b-tree pages every
+/// time (2 GB written for 10 MB of blobs on a libstdc++ closure).
+#[test]
+fn dependency_persists_batch_into_one_transaction() {
+    let header = |n: usize| (0..40).map(|i| format!("int f{n}_{i}(int a, int b);\n#define M{n}_{i} {i}\n")).collect::<String>();
+    let bodies: Vec<String> = (0..6).map(header).collect();
+    let files: Vec<(String, &str)> = bodies.iter().enumerate().map(|(i, b)| (format!("h{i}.h"), b.as_str())).collect();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
+    let base = tree("batch", &refs);
+    let landed: Vec<std::sync::Arc<crate::index::module_index::CachedModule>> = files
+        .iter()
+        .map(|(p, _)| {
+            let path = base.join(p);
+            let fa = crate::build::source_files::analyze_file(cpp(), &path, u64::MAX).unwrap();
+            std::sync::Arc::new(crate::index::module_index::CachedModule::new(path, std::sync::Arc::new(fa)))
+        })
+        .collect();
+    let busy = std::time::Duration::from_secs(5);
+    let frames = |batched: bool| -> i64 {
+        let store = std::env::temp_dir().join(format!("cpp-deps-batch-{batched}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).unwrap();
+        crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+            let conn = crate::index::module_cache::open_cache_db(None, "cpp").unwrap();
+            conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).unwrap();
+            if batched {
+                let mut persists = super::DependencyPersists::default();
+                for m in &landed {
+                    persists.push(&m.path.display().to_string(), 0, Some(vec![m.clone()]));
+                }
+                persists.flush(&crate::index::module_index::IndexCore::new(), Some(&conn));
+            } else {
+                for m in &landed {
+                    assert!(super::save_module_generation(&conn, &m.path.display().to_string(), &Some(vec![m.clone()])));
+                }
+            }
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM modules WHERE source = 'import'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(rows, landed.len() as i64, "every landing persisted (batched: {batched})");
+            conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| r.get::<_, i64>(1)).unwrap()
+        })
+    };
+    let (batched, autocommit) = (frames(true), frames(false));
+    assert!(batched * 4 < autocommit, "batched {batched} WAL frames vs {autocommit} autocommitted");
 }
