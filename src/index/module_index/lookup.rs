@@ -703,7 +703,7 @@ impl CrossFileLookup for ModuleIndex {
         self.module_path_cached(module_name)
     }
 
-    fn inc_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
+    fn inc_roots(&self) -> Arc<Vec<crate::model::file_analysis::ProcessRoot>> {
         self.core
             .inc_roots
             .read()

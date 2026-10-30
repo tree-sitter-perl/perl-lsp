@@ -237,7 +237,7 @@ impl IndexCore {
         // published before anything can land under it. The process's
         // roots only: the roots files name rank by who names them
         // (`RankedRoots`).
-        self.set_inc_roots(base.search_roots());
+        self.set_inc_roots(base.search_roots(), root.as_deref(), base.roots());
         *guard = Some(DependencyState {
             driver,
             root,
