@@ -712,6 +712,26 @@ fn build_once(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());
 
+    // A place's type is only what attaches to that place, so a deref site on
+    // a place nothing attaches to can never answer: dropped here rather than
+    // carried per file (every `$h->{a}{b}` mints one; FHEM paid +6% peak RSS).
+    {
+        use crate::model::file_analysis::Subject;
+        use crate::model::witnesses::WitnessAttachment;
+        let typed: std::collections::HashSet<&crate::model::file_analysis::Place> = b
+            .bag
+            .attachments()
+            .filter_map(|a| match a {
+                WitnessAttachment::Place(p) => Some(&**p),
+                _ => None,
+            })
+            .collect();
+        b.arrow_deref_sites.retain(|s| match &s.subject {
+            Subject::Place(p) => typed.contains(p),
+            Subject::Variable(_) => true,
+        });
+    }
+
     let packages = b.package_facts();
     let mut fa = FileAnalysis::new(crate::model::file_analysis::FileAnalysisParts {
         scopes: b.scopes,

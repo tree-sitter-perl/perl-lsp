@@ -795,6 +795,17 @@ impl DerefForm {
         }
     }
 
+    /// Whether the form dies on an undef receiver. Every receiver here is a
+    /// variable or a part of one, and an element access through one
+    /// autovivifies it (`my $x; $x->{a}` leaves `$x = {}`); a call has
+    /// nothing to call.
+    pub fn dies_on_undef(&self) -> bool {
+        match self {
+            DerefForm::HashKey | DerefForm::ArrayIndex => false,
+            DerefForm::Call | DerefForm::Method(_) => true,
+        }
+    }
+
     /// Human phrase for diagnostics ("a hash deref", …).
     pub fn access_phrase(&self) -> &'static str {
         match self {
