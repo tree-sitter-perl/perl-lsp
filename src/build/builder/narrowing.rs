@@ -845,7 +845,6 @@ impl<'a> Builder<'a> {
     pub(super) fn apply_narrowing_cutoffs(&mut self, tree: &'a Tree) {
         use crate::model::witnesses::{Witness, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
-        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         let wanted: std::collections::HashSet<String> = pending
             .iter()
             .filter_map(|pn| match &pn.subject {
@@ -853,10 +852,15 @@ impl<'a> Builder<'a> {
                 NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
             })
             .collect();
-        let places = (!wanted.is_empty()).then(|| {
+        let places = if wanted.is_empty() {
+            None
+        } else {
             let roots = std::iter::once(tree.root_node()).chain(self.eval_injections.values().copied());
-            self.place_disturbances(roots, &wanted)
-        });
+            let (idx, sites) = self.place_disturbances(roots, &wanted);
+            self.arrow_deref_sites.extend(sites);
+            Some(idx)
+        };
+        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
@@ -927,12 +931,17 @@ impl<'a> Builder<'a> {
 
     /// Every access of a place rooted at a `wanted` name, over the file's
     /// trees: one survey, with each name bound by position.
+    ///
+    /// The same survey mints the deref sites whose receiver is a part of a
+    /// variable (`$self->{cb}->()`): only a narrowed place can type one,
+    /// and only a wanted root is read here.
     fn place_disturbances(
         &self,
         roots: impl IntoIterator<Item = Node<'a>>,
         wanted: &std::collections::HashSet<String>,
-    ) -> PlaceDisturbanceIndex {
+    ) -> (PlaceDisturbanceIndex, Vec<crate::model::file_analysis::ArrowDerefSite>) {
         let mut idx = PlaceDisturbanceIndex::default();
+        let mut sites = Vec::new();
         for root in roots {
             // Each tree runs in document order; an injected tree restarts it.
             let mut binder = SurveyBinder { builder: self, scopes: super::infra::ScopeCursor::new(&self.scopes), wanted };
@@ -948,7 +957,23 @@ impl<'a> Builder<'a> {
                         | "scalar"
                         | "array"
                         | "hash"
+                        | "coderef_call_expression"
                 ) {
+                    return;
+                }
+                if let Some((receiver, form)) = crate::cst::deref_of_part(node) {
+                    let read = crate::cst::read_place(receiver, self.source, &mut binder)
+                        .filter(|r| r.exact && !r.place.is_variable());
+                    if let (Some(read), Ok(text)) = (read, receiver.utf8_text(self.source)) {
+                        sites.push(crate::model::file_analysis::ArrowDerefSite {
+                            receiver: text.to_string(),
+                            place: Some(Box::new(read.place)),
+                            span: node_to_span(node),
+                            form,
+                        });
+                    }
+                }
+                if kind == "coderef_call_expression" {
                     return;
                 }
                 // Preorder reaches an access before what it reads through,
@@ -977,7 +1002,7 @@ impl<'a> Builder<'a> {
             });
         }
         idx.seal();
-        idx
+        (idx, sites)
     }
 
     /// Run the declarative `@flow` query (`queries/perl/flow.scm`) and mint a

@@ -1202,29 +1202,25 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Record a deref whose receiver no typed ref names (`$x->[i]`,
-    /// `$x->()`, `$x->{a}{k}`) for the deref diagnostics. The receiver is a
-    /// variable or a part of one; a value (`f()->[0]`) can't be undef in a
-    /// way a narrowing would track, so it is skipped.
+    /// Record a `$x->[i]` / `$x->()` deref whose receiver is a plain
+    /// variable, for the deref diagnostics (the array/code analog of the
+    /// method-call / hash-deref refs). A receiver that is a part of a
+    /// variable is recorded by the place survey (`place_disturbances`),
+    /// only when a narrowing names its root; a value (`f()->[0]`) is never
+    /// narrowed, so it is skipped.
     pub(super) fn record_arrow_deref(
         &mut self,
         node: Node<'a>,
         receiver: Node<'a>,
         form: crate::model::file_analysis::DerefForm,
     ) {
-        use crate::model::file_analysis::Subject;
-        let subject = match self.place_subject(receiver) {
-            Some(place) => Subject::Place(place),
-            None if receiver.kind() == "scalar" && crate::cst::deref_operand(receiver).is_none() => {
-                let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
-                Subject::Variable(name)
-            }
-            None => return,
-        };
-        let Ok(text) = receiver.utf8_text(self.source) else { return };
+        if !crate::cst::is_plain_scalar(receiver) {
+            return;
+        }
+        let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
-            receiver: text.to_string(),
-            subject,
+            receiver: name,
+            place: None,
             span: node_to_span(node),
             form,
         });

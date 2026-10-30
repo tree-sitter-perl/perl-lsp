@@ -714,9 +714,9 @@ fn build_once(
 
     // A place's type is only what attaches to that place, so a deref site on
     // a place nothing attaches to can never answer: dropped here rather than
-    // carried per file (every `$h->{a}{b}` mints one; FHEM paid +6% peak RSS).
+    // carried per file. The survey mints only under narrowed roots, but a
+    // narrowing on `$h->{a}` still reaches every `$h->{b}{k}`.
     {
-        use crate::model::file_analysis::Subject;
         use crate::model::witnesses::WitnessAttachment;
         let typed: std::collections::HashSet<&crate::model::file_analysis::Place> = b
             .bag
@@ -726,10 +726,7 @@ fn build_once(
                 _ => None,
             })
             .collect();
-        b.arrow_deref_sites.retain(|s| match &s.subject {
-            Subject::Place(p) => typed.contains(p),
-            Subject::Variable(_) => true,
-        });
+        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| typed.contains(p)));
     }
 
     let packages = b.package_facts();

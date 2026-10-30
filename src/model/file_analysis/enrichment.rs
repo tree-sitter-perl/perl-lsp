@@ -1089,11 +1089,12 @@ impl FileAnalysis {
         // Derefs with no typed ref naming their receiver; the builder
         // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
-            if let Some(ty) = self.subject_type_at(&s.subject, s.span.start, module_index) {
+            let subject = s.subject();
+            if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
                 out.push(DerefSite {
                     span: s.span,
                     receiver: s.receiver.clone(),
-                    subject: s.subject.clone(),
+                    subject,
                     receiver_ty: ty,
                     form: s.form.clone(),
                 });

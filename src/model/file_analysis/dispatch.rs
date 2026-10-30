@@ -870,11 +870,22 @@ pub struct DerefSite {
 /// the method-call and hash-deref refs `deref_receiver_sites` reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrowDerefSite {
-    /// The receiver as written, for the rendered message.
+    /// The receiver as written: a variable's canonical name, or a part of
+    /// one's spelling for the rendered message.
     pub receiver: String,
-    pub subject: Subject,
+    /// The receiver's place, when it is a part of a variable.
+    pub place: Option<Box<Place>>,
     pub span: Span,
     pub form: DerefForm,
+}
+
+impl ArrowDerefSite {
+    pub fn subject(&self) -> Subject {
+        match &self.place {
+            Some(place) => Subject::Place((**place).clone()),
+            None => Subject::Variable(self.receiver.clone()),
+        }
+    }
 }
 
 /// What a recorded guard tests about its subject — the build-time
