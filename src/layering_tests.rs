@@ -1541,6 +1541,22 @@ fn one_table_maps_spellings_to_flags() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// `app_surface_parent` is the one speller of the app-surface edge
+/// condition. A consumer-membership test anywhere else drops its
+/// `APP_SURFACE_CLASS` guard, and the edge it answers drifts from the one
+/// the walks take.
+#[test]
+fn app_surface_edge_has_one_speller() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.contains("consumers") && (l.contains(".any(") || l.contains(".contains("))
+    });
+    let allow: &[(&str, usize, &str)] =
+        &[("model/file_analysis/ancestry.rs", 1, "`app_surface_parent` itself")];
+    let drift = allowlist_drift("app-surface edge spellers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,
