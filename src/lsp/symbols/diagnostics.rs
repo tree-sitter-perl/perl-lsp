@@ -611,7 +611,7 @@ pub fn collect_diagnostics(
                 GuardVerdict::AlwaysTrue => "redundant-guard",
                 GuardVerdict::AlwaysFalse => "contradictory-guard",
             };
-            let message = render_guard_message(&g);
+            let message = render_guard_message(analysis, &g);
             diagnostics.push(Diagnostic {
                 range: span_to_range(g.span),
                 severity: Some(DiagnosticSeverity::INFORMATION),
@@ -792,14 +792,17 @@ pub fn collect_diagnostics(
 /// Render a D3/D4 verdict into its user-facing message. The phrasing lives
 /// here in the adapter, not on the neutral `FileAnalysis` IR — a per-language
 /// concern in the multi-language design (`language_driver.rs`).
-fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> String {
+fn render_guard_message(
+    analysis: &FileAnalysis,
+    g: &crate::model::file_analysis::GuardRedundancy,
+) -> String {
     use crate::model::file_analysis::GuardPredicate;
     let subject = &g.subject;
     let fact = match (g.satisfied, &g.predicate) {
         (true, GuardPredicate::Defined) => format!("'{subject}' is always defined here"),
         (false, GuardPredicate::Defined) => format!("'{subject}' is undef here"),
-        (true, GuardPredicate::IsType(t)) => format!("'{subject}' is already {}", format_inferred_type(t)),
-        (false, GuardPredicate::IsType(t)) => format!("'{subject}' is not {} here", format_inferred_type(t)),
+        (true, GuardPredicate::IsType(t)) => format!("'{subject}' is already {}", analysis.render_type(t)),
+        (false, GuardPredicate::IsType(t)) => format!("'{subject}' is not {} here", analysis.render_type(t)),
     };
     let consequence = match g.verdict {
         GuardVerdict::AlwaysTrue => "this guard is redundant",

@@ -415,6 +415,39 @@ fn inferred_type_has_no_production_caller() {
     );
 }
 
+/// Human type labels read in the file's language: `FileAnalysis::render_type`
+/// / `display_type_of` carry the pack's vocabulary (`type_display`), so an
+/// adapter or index site rendering with the vocabulary-free engine spelling
+/// shows a PHP user Perl's words on that one surface. The engine spelling
+/// stays legal in the model (keys, `--dump-package` provenance) and in the
+/// CLI's machine-readable JSON.
+#[test]
+fn type_labels_go_through_the_language_vocabulary() {
+    let mut violations = Vec::new();
+    for (path, layer, _stem) in source_files() {
+        let in_cli = path.components().any(|c| c.as_os_str() == "cli");
+        if layer <= Layer::Model || in_cli {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        for (i, line) in text.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if t.contains("format_inferred_type") || t.contains(".display_type(") {
+                violations.push(format!("{}:{}: {}", path.display(), i + 1, t));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "render type labels through `FileAnalysis::render_type` / `display_type_of` \
+         (the language's vocabulary), not the engine spelling:\n{}",
+        violations.join("\n")
+    );
+}
+
 /// A narrow-axis view is BAG-STRIPPED. `symbols_present` / `refs_present`
 /// hand back a copy whose witness bag may be gone, so a bag-backed query on
 /// one answers `None` — not an error, not a panic, just a quietly missing
