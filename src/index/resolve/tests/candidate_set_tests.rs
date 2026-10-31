@@ -88,7 +88,7 @@ fn candidate_set_visibility_axis_flows_to_every_projection() {
         idx.insert_cache(
             name,
             Some(Arc::new(CachedModule::new(
-                crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/")))),
+                crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/")))),
                 Arc::new(parse(src)),
             ))),
         );
@@ -175,7 +175,7 @@ fn candidate_set_local_projections() {
     let store = OpenDocs::new();
     let src = "my $count = 0;\n$count++;\nprint $count;\n";
     let fa = parse(src);
-    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/tmp/cs_local.pl")));
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/cs_local.pl")));
     // Cursor on `$count` decl (row 0, col 3).
     let cs = resolve(&store, &fa, key, tree_sitter::Point { row: 0, column: 3 }, None, OverrideScope::default());
     assert!(matches!(cs.resolution(), Some(ResolvedTarget::Local)));
@@ -210,7 +210,7 @@ my $w = Widget->new(size => 3);
 print $w->size;
 ";
     let fa = parse(src);
-    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/tmp/cs_group_hl.pl")));
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/cs_group_hl.pl")));
     // Cursor on the `size` token of the `has` declaration (row 2).
     let decl_col = src.lines().nth(2).unwrap().find("size").unwrap();
     let cs = resolve(
@@ -262,7 +262,7 @@ fn candidate_set_definitions_local() {
     let store = OpenDocs::new();
     let src = "sub greet { 1 }\ngreet();\n";
     let fa = parse(src);
-    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/tmp/cs_defs.pl")));
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/cs_defs.pl")));
     // Cursor on the call `greet` (row 1, col 2).
     let cs = resolve(&store, &fa, key, tree_sitter::Point { row: 1, column: 2 }, None, OverrideScope::default());
     let defs = cs.definitions();
@@ -299,7 +299,7 @@ fn complete_qualified_path_pack_gathers_owner_members_only() {
     let cs = resolve(
         &store,
         &fa,
-        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/use.cpp"))),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/use.cpp"))),
         tree_sitter::Point { row: 8, column: 11 },
         None,
         OverrideScope::default(),

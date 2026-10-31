@@ -1123,7 +1123,7 @@ sub create { }
         resolve(
             &store,
             &fa,
-            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/tmp/dh_scope_test.pl"))),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/dh_scope_test.pl"))),
             pt,
             Some(&idx),
             OverrideScope::default(),

@@ -656,7 +656,7 @@ sub fetch {
     idx.insert_cache(
         "Fetcher",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/Fetcher.pm")),
+            crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/Fetcher.pm")),
             std::sync::Arc::new(fa_parent),
         ))),
     );

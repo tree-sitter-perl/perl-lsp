@@ -39,6 +39,15 @@ impl CanonicalPath {
         CanonicalPath(p)
     }
 
+    /// A path a test names for a file that is never on disk, kept
+    /// verbatim. Resolving it would ask the filesystem about the test box
+    /// (macOS spells `/tmp` as `/private/tmp`), so fixture keys stay the
+    /// same everywhere.
+    #[cfg(test)]
+    pub fn fixture(p: impl Into<PathBuf>) -> Self {
+        CanonicalPath(p.into())
+    }
+
     pub fn as_path(&self) -> &Path {
         &self.0
     }

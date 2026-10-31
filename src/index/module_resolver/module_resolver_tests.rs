@@ -77,7 +77,7 @@ sub new {
     );
 
     let core = IndexCore::new();
-    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
     core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
@@ -94,11 +94,11 @@ sub new {
     // protects against None-over-Some).
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
-    let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
+    let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
     core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
-        crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/y/Demo/Has/Event.pm")),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
     );
 }
 
@@ -223,7 +223,7 @@ fn import_tier_strip_gates_on_persistence() {
     let fa = crate::build::builder::build(&tree, source.as_bytes());
     assert!(!fa.witnesses.is_empty());
     let cm = Arc::new(CachedModule::new(
-        crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/inc/Strip.pm")),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/inc/Strip.pm")),
         Arc::new(fa),
     ));
 
