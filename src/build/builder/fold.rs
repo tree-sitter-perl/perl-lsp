@@ -810,7 +810,7 @@ impl<'a> Builder<'a> {
     pub(super) fn upgrade_variable_hash_key_owners(&mut self) {
         let mut upgrades: Vec<(usize, HashKeyOwner)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
-            let RefKind::HashKeyAccess { ref var_text } = r.kind else {
+            let RefKind::HashKeyAccess { ref var_text, .. } = r.kind else {
                 continue;
             };
             if !matches!(r.hash_key_owner(), Some(HashKeyOwner::Variable { .. })) {
@@ -896,6 +896,7 @@ impl<'a> Builder<'a> {
             self.refs.push(Ref {
                 kind: RefKind::HashKeyAccess {
                     var_text: String::new(),
+                    dies_on_undef: false,
                 },
                 span,
                 scope: self.scope_at_point(span.start),
@@ -1873,7 +1874,7 @@ impl<'a> Builder<'a> {
             .collect();
 
         for r in &mut self.refs {
-            if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+            if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                 let new_owner = if let Some(func_name) = binding_map.get(var_text.as_str()) {
                     let resolved = walk_return_delegation_chain(
                         func_name,
@@ -2053,7 +2054,7 @@ impl<'a> Builder<'a> {
             .iter()
             .enumerate()
             .filter_map(|(i, r)| {
-                let RefKind::HashKeyAccess { var_text } = &r.kind else { return None };
+                let RefKind::HashKeyAccess { var_text, .. } = &r.kind else { return None };
                 if r.hash_key_owner().is_some() {
                     return None;
                 }
@@ -2065,7 +2066,7 @@ impl<'a> Builder<'a> {
             .collect();
 
         for (i, r) in self.refs.iter_mut().enumerate() {
-            if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+            if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                 if r.hash_key_owner().is_some() { continue; }
 
                 let vt = var_text.clone();

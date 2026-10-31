@@ -1162,7 +1162,7 @@ impl<'a> Builder<'a> {
                 }
                 EmitAction::HashKeyAccess { name, owner, var_text, span, access } => {
                     refs.push(GatedRef {
-                        kind: RefKind::HashKeyAccess { var_text },
+                        kind: RefKind::HashKeyAccess { var_text, dies_on_undef: false },
                         span,
                         target_name: name,
                         access,

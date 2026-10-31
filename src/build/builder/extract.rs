@@ -658,7 +658,7 @@ impl<'a> Builder<'a> {
                 node_to_span(key_node)
             };
             self.refs.push(Ref {
-                kind: RefKind::HashKeyAccess { var_text: hash_name.to_string() },
+                kind: RefKind::HashKeyAccess { var_text: hash_name.to_string(), dies_on_undef: false },
                 span,
                 scope: self.scope_at_point(span.start),
                 target_name: key,
@@ -784,6 +784,7 @@ impl<'a> Builder<'a> {
             self.refs.push(Ref {
                 kind: RefKind::HashKeyAccess {
                     var_text: String::new(),
+                    dies_on_undef: false,
                 },
                 span,
                 scope: self.scope_at_point(span.start),

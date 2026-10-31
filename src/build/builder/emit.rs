@@ -1218,12 +1218,33 @@ impl<'a> Builder<'a> {
             return;
         }
         let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
+        let dies_on_undef = self.deref_dies_on_undef(node, &form);
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
             receiver: name,
             place: None,
             span: node_to_span(node),
             form,
+            dies_on_undef,
         });
+    }
+
+    /// Whether the deref at `node` dies on an undef receiver: a call
+    /// always does; an element access does where the `autovivification`
+    /// hints in force forbid vivifying its receiver, and vivifies it
+    /// otherwise.
+    pub(super) fn deref_dies_on_undef(&self, node: Node<'a>, form: &crate::model::file_analysis::DerefForm) -> bool {
+        use crate::model::file_analysis::{hint_in, vivify_dies_in, LexicalHint, VivifyAccess};
+        if form.dies_on_undef() {
+            return true;
+        }
+        let at = node.start_position();
+        let scope = self.scope_at_point(at);
+        // Most files never say `no autovivification`; asking the scopes
+        // first spares every element access its climb to its context.
+        let any_off = [VivifyAccess::Fetch, VivifyAccess::Store, VivifyAccess::Exists, VivifyAccess::Delete]
+            .into_iter()
+            .any(|a| hint_in(&self.scopes, scope, at, LexicalHint::NoVivify(a)));
+        any_off && vivify_dies_in(&self.scopes, scope, at, crate::cst::vivify_context(node))
     }
 
     /// Infer types from binary operator expressions.

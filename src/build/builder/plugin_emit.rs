@@ -343,7 +343,7 @@ impl<'a> Builder<'a> {
                 // for HashKeyAccess → HashKeyDef by name+owner) pairs these
                 // refs to both in-file and cross-file defs automatically.
                 self.refs.push(Ref {
-                    kind: RefKind::HashKeyAccess { var_text },
+                    kind: RefKind::HashKeyAccess { var_text, dies_on_undef: false },
                     span,
                     scope: self.current_scope(),
                     target_name: name,
@@ -551,7 +551,10 @@ impl<'a> Builder<'a> {
                 self.declare_package_variable(name, span);
             }
             plugin::EmitAction::RequireDeclaration { required, span } => {
-                self.switch_declaration_rule(span, required);
+                self.switch_hint(span, crate::model::file_analysis::LexicalHint::RequireDeclaration, required);
+            }
+            plugin::EmitAction::Hint { hint, on, span } => {
+                self.switch_hint(span, hint, on);
             }
             plugin::EmitAction::VarType { variable, at, inferred_type } => {
                 // Scope resolution is deferred to the end of the build —

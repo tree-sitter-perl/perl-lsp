@@ -240,6 +240,10 @@ The most common emissions:
   (or, with `required: false`, are no longer) an error — what
   `strict 'vars'` does (`frameworks/strict.rhai`). `ctx.negated` is true
   on `no Module LIST`, so a plugin can tell `no strict` from `use strict`.
+- **`Hint`** — `#{ hint, on, span }`: the same lexical switch for any
+  pragma bit. `hint` is `"RequireDeclaration"`, `"VivifyStrict"`, or
+  `#{ NoVivify: "Fetch" | "Store" | "Exists" | "Delete" }` — the
+  `autovivification` categories (`frameworks/autovivification.rhai`).
 
 ### Query hooks (cursor time)
 

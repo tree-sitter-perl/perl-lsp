@@ -24,7 +24,7 @@ impl<'a> Builder<'a> {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -35,13 +35,12 @@ impl<'a> Builder<'a> {
         self.scope_stack.pop()
     }
 
-    /// Switch the declaration rule from the end of `span` on, in the scope
-    /// `span` sits in.
-    pub(super) fn switch_declaration_rule(&mut self, span: Span, required: bool) {
+    /// Switch `hint` from the end of `span` on, in the scope `span` sits in.
+    pub(super) fn switch_hint(&mut self, span: Span, hint: crate::model::file_analysis::LexicalHint, on: bool) {
         let scope = self.scope_at_point(span.start);
         self.scopes[scope.0 as usize]
-            .declaration_rules
-            .push(crate::model::file_analysis::DeclarationRule { at: span.end, required });
+            .hints
+            .push(crate::model::file_analysis::HintSwitch { at: span.end, hint, on });
     }
 
     pub(super) fn current_scope(&self) -> ScopeId {
