@@ -698,7 +698,7 @@ Bler->new->hi;
 
 /// ALL FOUR LSP paths (hover, gd, gr, rename) must class-scope
 /// for two packages sharing a method name. Single resolver post
-/// option-2 — `FileAnalysis::method_call_invocant_classes(ref, idx)`
+/// option-2 — `FileAnalysis::receiver_classes`
 /// — but the four user-visible surfaces still each need their own
 /// integration coverage:
 ///

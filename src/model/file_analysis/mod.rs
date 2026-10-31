@@ -44,7 +44,6 @@ mod place;
 pub use place::*;
 mod queries;
 mod enrichment;
-pub use enrichment::{declare_enrichment_profile, enrichment_profile, EnrichmentProfile};
 mod class_queries;
 mod cursor_queries;
 mod invocants;
@@ -187,6 +186,10 @@ pub struct FileAnalysis {
     /// are sessional, so they die together and a fresh process fails open.
     #[serde(skip, default)]
     pub stamped_at: Option<u64>,
+
+    /// This copy's identity — what the session's receiver memo keys on.
+    #[serde(skip, default)]
+    pub(crate) instance: AnalysisInstance,
 
     /// Witness-bag baseline — `enrich_imported_types_with_keys`
     /// truncates back to this length before re-deriving so repeat

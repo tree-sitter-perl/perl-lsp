@@ -2,6 +2,7 @@
 //! it drives (`src/builder/narrowing.rs`). A child of the `tests`
 //! module so it shares `build_fa`.
 
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 use crate::model::file_analysis::{
     Binding, FileAnalysis, InferredType, PathStep, Place, Slot, Slots, TypeProvenance,
@@ -78,7 +79,7 @@ fn narrow_observed_through_method_dispatch() {
         .find(|r| r.target_name == "paint" && matches!(r.kind, RefKind::MethodCall { .. }))
         .expect("paint method-call ref");
     assert_eq!(
-        fa.method_call_invocant_classes(r, None).single().map(str::to_string).as_deref(),
+        fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Foo"),
         "narrowed invocant dispatches on Foo",
     );
@@ -255,7 +256,7 @@ fn optional_dispatches_leniently_without_guard() {
 fn optional_receiver_goto_def_resolves() {
     // The motivating case: goto-def on a method called on an unguarded
     // Optional<Foo> lands on Foo's method, via the stamped nav edge that
-    // `method_call_invocant_classes` now resolves leniently.
+    // `resolve_receiver` now resolves leniently.
     let fa = build_fa(
         "package Foo;\nsub go { my ($self) = @_; }\npackage P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    $r->go;\n}",
     );
@@ -437,7 +438,7 @@ fn invocant_class_of(fa: &FileAnalysis, method: &str) -> Option<String> {
         .iter()
         .find(|r| r.target_name == method && matches!(r.kind, RefKind::MethodCall { .. }))
         .unwrap_or_else(|| panic!("no method-call ref for {method}"));
-    fa.method_call_invocant_classes(r, None).single().map(str::to_string)
+    fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)
 }
 
 /// The place under the lexical `root` (declared once in the source) at `path`.
