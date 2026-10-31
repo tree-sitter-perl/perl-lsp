@@ -412,7 +412,7 @@ fn a_bag_evicted_analysis_projects_a_different_surface() {
     let fp_whole = surface_fingerprint(&Surface::project(&whole));
 
     let mut stripped = whole.clone();
-    stripped.evict_witness_bag();
+    stripped.evict_to(crate::model::file_analysis::Residency::RowsOnly);
     let fp_stripped = surface_fingerprint(&Surface::project(&stripped));
 
     assert_ne!(

@@ -165,7 +165,7 @@ impl FileAnalysis {
     /// rehydrate, which is the whole reason enrichment's provider chase is
     /// dominated by `bag_present` (measured: ~400 witnesses moved per return-type
     /// query answered).
-    pub fn evict_witness_bag(&mut self) {
+    pub(super) fn evict_witness_bag(&mut self) {
         self.witnesses = crate::model::witnesses::WitnessBag::default();
         self.bag_evicted = true;
     }
@@ -180,7 +180,7 @@ impl FileAnalysis {
     /// `RefTable::evict` drops the vec and every index over it in one place,
     /// so no index can survive its refs. Touches no other pinned field.
     /// Idempotent.
-    pub fn evict_refs(&mut self) {
+    pub(super) fn evict_refs(&mut self) {
         self.refs.evict();
     }
 
@@ -202,7 +202,7 @@ impl FileAnalysis {
     /// BEFORE this runs. Touches no other pinned field
     /// (`export`/`export_ok`/`export_lookup` derive from export lists, not
     /// symbols, and stay). Idempotent.
-    pub fn evict_symbols(&mut self) {
+    pub(super) fn evict_symbols(&mut self) {
         self.symbols.evict();
     }
 
@@ -220,10 +220,11 @@ impl FileAnalysis {
         !self.bag_evicted && !self.refs.is_evicted() && !self.symbols.is_evicted()
     }
 
-    /// The ONE speller of the registration strip. Every registration path
-    /// routes here so a new eviction axis is added in exactly one place; a
-    /// site spelling `evict_*` calls directly is re-stating this by
-    /// convention.
+    /// The ONE speller of the strip. Every path that strips a copy (the
+    /// registration tiers, the warm-stub decode, the narrow-axis loaders)
+    /// routes here so a new eviction axis is added in exactly one place; the
+    /// per-axis `evict_*` setters are private to the model, so no site
+    /// outside it can spell a strip of its own.
     ///
     /// Takes a `Residency` rather than a pair of flags because the axes are
     /// a LADDER, not independent switches — see that type. The pair could

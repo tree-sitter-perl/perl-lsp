@@ -59,9 +59,7 @@ pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
     // whole; the stub's skeleton is the opposite — stripped on all three
     // axes by construction. Re-mark it, or its empty bag/refs/symbols
     // would read as "no facts" instead of "on disk".
-    skeleton.evict_witness_bag();
-    skeleton.evict_refs();
-    skeleton.evict_symbols();
+    skeleton.evict_to(crate::model::file_analysis::Residency::Skeleton);
     Some(WarmStub { feed, specs, surface, skeleton })
 }
 

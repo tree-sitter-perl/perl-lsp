@@ -206,7 +206,7 @@ impl PackBagCache {
         // `get_or_load`'s stripped-resident check reads it to decide whether a
         // later bag request may be served from this entry.
         if !want_bag {
-            loaded.evict_witness_bag();
+            loaded.evict_to(crate::model::file_analysis::Residency::RowsOnly);
         }
         let fa = Arc::new(loaded);
         if self.cap_bytes() == 0 {
