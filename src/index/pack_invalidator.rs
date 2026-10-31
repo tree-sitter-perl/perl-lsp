@@ -515,11 +515,6 @@ impl PackInvalidator {
         }
         match conn {
             Some(ref conn) => {
-                // Paths whose blob row actually landed. Read by the committed
-                // lane only — the fallback lane's transaction is gone, so
-                // nothing in it landed whatever the per-file verdict said.
-                let landed: std::cell::RefCell<std::collections::HashSet<PathBuf>> =
-                    Default::default();
                 let (tx, rx) = std::sync::mpsc::channel();
                 for (p, arc) in &results {
                     let _ = tx.send((p.clone(), Arc::clone(arc)));
@@ -530,29 +525,31 @@ impl PackInvalidator {
                     Some(conn),
                     "pack swap persist",
                     |conn, batch: &[(PathBuf, Arc<FileAnalysis>)]| {
-                        for (p, arc) in batch {
-                            let p_str = p.to_string_lossy();
-                            let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
-                            if !module_cache::save_to_db(conn, &p_str, &Some(cached), "workspace") {
-                                // Shredding now would pair a new generation's
-                                // rows with a blob that isn't there — the same
-                                // write invariant `save_module_generation` holds.
-                                continue;
-                            }
-                            if !arc.degraded {
-                                let seeds = arc.row_seeds();
-                                if let Err(e) = module_cache::shred_derived_rows(
-                                    conn, &p_str, "workspace", &seeds,
-                                ) {
-                                    log::warn!("Failed to shred derived rows for {:?}: {}", p, e);
+                        batch
+                            .iter()
+                            .map(|(p, arc)| {
+                                let p_str = p.to_string_lossy();
+                                let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
+                                if !module_cache::save_to_db(conn, &p_str, &Some(cached), "workspace") {
+                                    // Shredding now would pair a new generation's
+                                    // rows with a blob that isn't there — the same
+                                    // write invariant `save_module_generation` holds.
+                                    return false;
                                 }
-                            }
-                            landed.borrow_mut().insert(p.clone());
-                        }
+                                match module_cache::shred_derived_rows(
+                                    conn, &p_str, "workspace", &arc.row_seeds(),
+                                ) {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        log::error!("Failed to shred derived rows for {:?}: {}", p, e);
+                                        false
+                                    }
+                                }
+                            })
+                            .collect()
                     },
                     |(p, arc): (PathBuf, Arc<FileAnalysis>)| {
-                        let ok = landed.borrow().contains(&p);
-                        self.register_after_swap(pack, &p, &arc, ok, event_gen);
+                        self.register_after_swap(pack, &p, &arc, true, event_gen);
                     },
                     |(p, arc): (PathBuf, Arc<FileAnalysis>)| {
                         self.register_after_swap(pack, &p, &arc, false, event_gen);

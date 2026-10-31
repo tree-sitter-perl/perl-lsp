@@ -649,6 +649,7 @@ pub(super) fn rehydrate_from_opens(
 /// next warm would then serve the pre-edit analysis as valid). Capture the
 /// stamp at parse time; a mid-index edit makes the row invalid by
 /// construction.
+/// Returns whether the modules row landed.
 pub fn save_blob_to_db_stamped(
     conn: &Connection,
     module_name: &str,
@@ -657,7 +658,7 @@ pub fn save_blob_to_db_stamped(
     blob: &EncodedAnalysis,
     source: &str,
     stamp: (i64, i64),
-) {
+) -> bool {
     let (mtime, size) = stamp;
     let deps = closure_stamp(include_closure, &mut std::collections::HashMap::new());
     let r = conn.execute(
@@ -675,7 +676,8 @@ pub fn save_blob_to_db_stamped(
         ],
     );
     if let Err(e) = r {
-        log::warn!("Failed to save module blob for '{}': {}", module_name, e);
+        log::error!("Failed to save module blob for '{}': {}", module_name, e);
+        return false;
     }
     persist_conclusions(conn, &path.to_string_lossy(), blob);
     persist_surface(conn, &path.to_string_lossy(), blob);
@@ -683,6 +685,35 @@ pub fn save_blob_to_db_stamped(
     // skeleton paired with a fresh stamp would be served as valid on the
     // next warm. Writers that have a fresh stub re-insert it right after.
     delete_stub(conn, &path.to_string_lossy());
+    true
+}
+
+/// One path-keyed generation, blob then its derived rows — the bulk
+/// writers' unit of persistence. `true` only when both landed: that verdict
+/// is the strip licence `run_persist_writer` hands out per entry. Rows are
+/// not shredded against a blob that failed, or they would describe a
+/// generation that is not on disk.
+#[allow(clippy::too_many_arguments)]
+pub fn save_generation_stamped(
+    conn: &Connection,
+    path: &std::path::Path,
+    include_closure: &crate::model::file_analysis::path_intern::ClosureList,
+    blob: &EncodedAnalysis,
+    seeds: &crate::model::file_analysis::RowSeeds,
+    source: &str,
+    stamp: (i64, i64),
+) -> bool {
+    let path_str = path.to_string_lossy();
+    if !save_blob_to_db_stamped(conn, &path_str, path, include_closure, blob, source, stamp) {
+        return false;
+    }
+    match shred_derived_rows(conn, &path_str, source, seeds) {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!("Failed to shred derived rows for {path:?}: {e}");
+            false
+        }
+    }
 }
 
 /// Write the baked map beside the blob it was derived from.
@@ -841,7 +872,7 @@ pub fn save_to_db(
         // (Negative sentinels have no blob by design and nothing to strip.)
         Ok(_) => result.is_none() || analysis_blob.is_some(),
         Err(e) => {
-            log::warn!("Failed to save module cache for '{}': {}", module_name, e);
+            log::error!("Failed to save module cache for '{}': {}", module_name, e);
             false
         }
     };

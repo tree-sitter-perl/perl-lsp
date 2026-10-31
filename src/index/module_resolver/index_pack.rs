@@ -245,7 +245,7 @@ pub fn index_pack_language(
                         "workspace",
                         seeds,
                     ) {
-                        log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
+                        log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
                     }
                 },
             );
@@ -313,32 +313,24 @@ pub fn index_pack_language(
                         // Chunk-scoped: a concurrent different-generation
                         // process may wipe/restamp the stubs table mid-run.
                         let stubs_writable = module_cache::stub_version_current(conn);
-                        for e in batch {
-                            let path_str = e.path.to_string_lossy();
-                            module_cache::save_blob_to_db_stamped(
-                                conn,
-                                &path_str,
-                                &e.path,
-                                &e.arc.pack.include_closure,
-                                &e.blob,
-                                "workspace",
-                                e.stamp,
-                            );
-                            if let Err(err) = module_cache::shred_derived_rows(
-                                conn, &path_str, "workspace", &e.seeds,
-                            ) {
-                                log::warn!(
-                                    "Failed to shred derived rows for {:?}: {}",
-                                    e.path,
-                                    err
+                        batch
+                            .iter()
+                            .map(|e| {
+                                let landed = module_cache::save_generation_stamped(
+                                    conn,
+                                    &e.path,
+                                    &e.arc.pack.include_closure,
+                                    &e.blob,
+                                    &e.seeds,
+                                    "workspace",
+                                    e.stamp,
                                 );
-                            }
-                            if let Some(sb) = &e.stub_blob {
-                                if stubs_writable {
-                                    module_cache::save_stub(conn, &path_str, sb);
+                                if let (true, true, Some(sb)) = (landed, stubs_writable, &e.stub_blob) {
+                                    module_cache::save_stub(conn, &e.path.to_string_lossy(), sb);
                                 }
-                            }
-                        }
+                                landed
+                            })
+                            .collect()
                     },
                     |e: FreshEntry| {
                         // Stale-pin clear BEFORE the stripped copy is

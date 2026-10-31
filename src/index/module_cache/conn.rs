@@ -86,12 +86,13 @@ fn apply_pragmas(conn: &Connection, busy: std::time::Duration) {
             sql::PRAGMA_SYNC_NORMAL
         }
     };
-    let _ = conn.execute_batch(sql::PRAGMA_JOURNAL_WAL.registered());
-    let _ = conn.execute_batch(sync.registered());
     // Two writers share the Perl DB (resolver thread + workspace indexer); a
     // busy writer must wait, not fail its txn — a failed commit after resident
-    // copies were stripped is unrecoverable for the session.
+    // copies were stripped is unrecoverable for the session. Set first, so the
+    // WAL switch on a fresh file waits for a sibling opener too.
     let _ = conn.busy_timeout(busy);
+    let _ = conn.execute_batch(sql::PRAGMA_JOURNAL_WAL.registered());
+    let _ = conn.execute_batch(sync.registered());
 }
 
 /// THE open: every cache connection goes through here, so the process-wide
@@ -120,7 +121,13 @@ fn open_db(path: &std::path::Path, flags: rusqlite::OpenFlags) -> rusqlite::Resu
     Connection::open_with_flags(path, flags)
 }
 
-/// the real body rather than a parallel one.
+/// The writer open, given the cache directory. Recreates the file only when
+/// SQLite reports it corrupt or not a database (`SQLITE_CORRUPT` /
+/// `SQLITE_NOTADB`):
+/// any other failure leaves the file alone and runs this connection without a
+/// cache, because a sibling writer may already be using that file, and
+/// deleting it strands that writer on an unlinked inode — every later write
+/// goes nowhere while the run reports success.
 pub(super) fn open_cache_db_at(
     dir: &std::path::Path,
     lang: &str,
@@ -130,37 +137,60 @@ pub(super) fn open_cache_db_at(
     let db_path = db_path_for(dir, lang);
     log::info!("Module cache: {:?}", db_path);
 
-    match open_db(&db_path, rusqlite::OpenFlags::default()) {
-        Ok(conn) => {
-            apply_pragmas(&conn, busy);
-            match init_schema(&conn) {
-                Ok(()) => Some(conn),
-                Err(e) => {
-                    // BUSY/LOCKED is contention (a sibling writer mid-init,
-                    // e.g. the one-time idx_modules_path build) — deleting
-                    // the live DB under its feet loses every blob the other
-                    // writer stripped against. Only recreate on real
-                    // corruption/shape failures.
-                    if matches!(
-                        e.sqlite_error_code(),
-                        Some(rusqlite::ErrorCode::DatabaseBusy)
-                            | Some(rusqlite::ErrorCode::DatabaseLocked)
-                    ) {
-                        log::warn!("Cache DB busy during init; running without cache: {}", e);
-                        return None;
-                    }
-                    log::warn!("Cache DB schema init failed: {}. Recreating.", e);
-                    drop(conn);
-                    let _ = std::fs::remove_file(&db_path);
-                    let conn = open_db(&db_path, rusqlite::OpenFlags::default()).ok()?;
-                    apply_pragmas(&conn, busy);
-                    init_schema(&conn).ok()?;
-                    Some(conn)
-                }
-            }
-        }
+    match open_writer(&db_path, busy) {
+        Ok(conn) => Some(conn),
+        Err(e) if is_corruption(&e) => recreate_corrupt(&db_path, busy, &e),
         Err(e) => {
-            log::warn!("Failed to open cache DB: {}", e);
+            log::error!("Cache DB {db_path:?} could not be opened ({e}); running without a cache");
+            None
+        }
+    }
+}
+
+fn open_writer(db_path: &std::path::Path, busy: std::time::Duration) -> rusqlite::Result<Connection> {
+    let conn = open_db(db_path, rusqlite::OpenFlags::default())?;
+    apply_pragmas(&conn, busy);
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+fn is_corruption(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+/// Replace a corrupt cache file. Serialized in-process, and the open is
+/// retried under the lock first: two openers that both saw the corrupt file
+/// must not both delete, or the second deletes the first one's fresh file.
+/// The `-wal`/`-shm` go with it, since SQLite would replay a leftover WAL
+/// into the new file.
+fn recreate_corrupt(
+    db_path: &std::path::Path,
+    busy: std::time::Duration,
+    first: &rusqlite::Error,
+) -> Option<Connection> {
+    static RECREATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = RECREATE.lock().unwrap_or_else(|p| p.into_inner());
+    match open_writer(db_path, busy) {
+        Ok(conn) => return Some(conn),
+        Err(e) if !is_corruption(&e) => {
+            log::error!("Cache DB {db_path:?} could not be opened ({e}); running without a cache");
+            return None;
+        }
+        Err(_) => {}
+    }
+    log::error!("Cache DB {db_path:?} is corrupt ({first}); recreating it");
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = db_path.as_os_str().to_owned();
+        file.push(suffix);
+        let _ = std::fs::remove_file(file);
+    }
+    match open_writer(db_path, busy) {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            log::error!("Cache DB {db_path:?} could not be recreated ({e}); running without a cache");
             None
         }
     }
