@@ -1146,7 +1146,15 @@ impl SkeletonAnalysis {
             .collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
-        let place_writes = std::mem::take(&mut self.place_writes);
+        // A plain assignment to a name (`head_ = …`) writes the place that
+        // name denotes, as much as a member assignment does: its target is
+        // the name read at the edge's target point.
+        let mut place_writes = std::mem::take(&mut self.place_writes);
+        {
+            let name_at: std::collections::HashMap<tree_sitter::Point, Span> =
+                places.name_reads().map(|s| (s.start, s)).collect();
+            place_writes.extend(self.flow_edges.iter().filter_map(|e| name_at.get(&e.target_at).copied()));
+        }
         let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
             .into_iter()
             .filter_map(|m| {

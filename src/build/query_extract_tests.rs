@@ -1691,17 +1691,24 @@ class C {
   Name name_;
   Name other_;
   void f();
+  void g();
 };
 void C::f() {
   sink(std::move(name_));
   use(other_);
   use(name_);
 }
+void C::g() {
+  sink(std::move(name_));
+  name_ = Name();
+  use(name_);
+}
 ";
     let fa = cpp_skel(src).into_file_analysis();
     let reads: Vec<(String, usize)> =
         fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
-    assert_eq!(reads, vec![("name_".to_string(), 8)]);
+    // Assigning `name_` gives it a value again (fmt's `args.h` list push).
+    assert_eq!(reads, vec![("name_".to_string(), 9)]);
 }
 
 #[test]
