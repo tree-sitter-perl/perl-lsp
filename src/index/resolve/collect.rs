@@ -164,6 +164,11 @@ pub(super) fn pack_inline_owner_set(fa: &crate::model::file_analysis::FileAnalys
 /// cursor anywhere in `STRING` of `dynamic::STRING`. Walks back to the token
 /// start (like `word_at_point`), then scans a leading `::` scope.
 /// `None` when the token has no leading `::` scope.
+///
+/// `::` here is an OWNER operator, not the namespace separator: C++ spells
+/// both with it, PHP spells static access with it and namespaces with `\`,
+/// Python has none. `NameSpellings` has no owner-operator field yet, so this
+/// stays C++'s spelling (`layering_tests::qualified_names_split_through_the_spellings`).
 pub(crate) fn qualifier_at_point(source: &str, point: tree_sitter::Point) -> Option<&str> {
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
     let b = source.as_bytes();
@@ -396,7 +401,12 @@ pub(super) fn names_visible_macro(
 /// plain unqualified call) matches rather than silently dropping the site —
 /// references bias to recall under partial attribution, and the `def_paths`
 /// closure gate has already pinned file connectivity.
-pub(super) fn pkg_agrees(relative: bool, a: Option<&str>, b: Option<&str>) -> bool {
+pub(super) fn pkg_agrees(
+    names: &crate::model::file_analysis::NameSpellings,
+    relative: bool,
+    a: Option<&str>,
+    b: Option<&str>,
+) -> bool {
     if a == b {
         return true;
     }
@@ -405,7 +415,8 @@ pub(super) fn pkg_agrees(relative: bool, a: Option<&str>, b: Option<&str>) -> bo
     }
     match (a, b) {
         (Some(x), Some(y)) => {
-            x.rsplit("::").next().unwrap_or(x) == y.rsplit("::").next().unwrap_or(y)
+            crate::model::file_analysis::split_qualified(x, names).1
+                == crate::model::file_analysis::split_qualified(y, names).1
         }
         _ => true,
     }
@@ -563,7 +574,7 @@ pub(super) fn symbol_defines_target(
                 _ => None,
             };
             let sym_pkg = sym.package.as_deref().or(recovered.as_deref());
-            let in_scope = pkg_agrees(relative, sym_pkg, package.as_deref())
+            let in_scope = pkg_agrees(analysis.names(), relative, sym_pkg, package.as_deref())
                 || (target.scope == OverrideScope::Hierarchy
                     && target
                         .method_classes
@@ -1056,7 +1067,7 @@ pub(super) fn collect_from_analysis(
                 // tolerance would re-open the bare-name sweep on members.
                 let ns_relative = relative_ns && matches!(target.kind, TargetKind::Sub { .. });
                 let pkg_matches = |pkg: &Option<String>| {
-                    pkg_agrees(ns_relative, pkg.as_deref(), scope.as_deref())
+                    pkg_agrees(analysis.names(), ns_relative, pkg.as_deref(), scope.as_deref())
                         // Inline-namespace transparency, BOTH directions. A
                         // qualified `mylib::is_thing` / `absl::X` keys on the
                         // transparent parent while the def sits under an inline

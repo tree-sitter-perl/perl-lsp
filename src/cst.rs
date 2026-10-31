@@ -99,11 +99,12 @@ pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
 /// No `::` → the node's own span. FQ identifiers are single-line tokens, so
 /// the tail column is `start.column + byte_offset_of_tail`.
 pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
-    match text.rfind("::") {
+    let sep = crate::model::conventions::PERL_SEP;
+    match text.rfind(sep) {
         Some(idx) => {
             let s = node.start_position();
             Span {
-                start: tree_sitter::Point { row: s.row, column: s.column + idx + 2 },
+                start: tree_sitter::Point { row: s.row, column: s.column + idx + sep.len() },
                 end: node.end_position(),
             }
         }
@@ -464,6 +465,37 @@ pub(crate) fn first_named_child_where<'a>(
 /// walking on the `fat_comma` node silently drops the plain-comma spelling
 /// (`{ 'GAMMA', 3 }` is identical to `{ GAMMA => 3 }`).
 pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
+    pair_items(children, Spreads::AsElements)
+        .into_iter()
+        .filter_map(|item| match item {
+            PairItem::Pair(k, v) => Some((k, v)),
+            PairItem::Spread(_) | PairItem::Dangling(_) => None,
+        })
+        .collect()
+}
+
+/// How [`pair_items`] treats a flattening element (`%other`, `@_`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Spreads {
+    /// An element like any other: strict key/value alternation.
+    AsElements,
+    /// One slot that flattens to an even count at runtime, skipped as a
+    /// unit so the pairs after it stay aligned.
+    AsUnits,
+}
+
+/// One position of a pair walk.
+pub(crate) enum PairItem<'a> {
+    Pair(Node<'a>, Node<'a>),
+    /// A flattening element, under [`Spreads::AsUnits`].
+    Spread(Node<'a>),
+    /// A trailing key with no value.
+    Dangling(Node<'a>),
+}
+
+/// The pair walk every positional key/value reader shares: `children` paired
+/// `elem[2k]` → key, `elem[2k+1]` → value, separators and trivia skipped.
+pub(crate) fn pair_items<'a>(children: &[Node<'a>], spreads: Spreads) -> Vec<PairItem<'a>> {
     let mut out = Vec::new();
     let count = children.len();
     let mut i = 0;
@@ -471,6 +503,10 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
         let k_node = children[i];
         i += 1;
         if !is_list_element(k_node) {
+            continue;
+        }
+        if spreads == Spreads::AsUnits && is_flattening(k_node) {
+            out.push(PairItem::Spread(k_node));
             continue;
         }
         // Skip the comma / fat comma to the next named node (the value).
@@ -481,9 +517,12 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
                 None => break None,
             }
         };
-        let Some(val) = val else { break };
+        let Some(val) = val else {
+            out.push(PairItem::Dangling(k_node));
+            break;
+        };
         i += 1; // step past the value so the next key isn't read off it
-        out.push((k_node, val));
+        out.push(PairItem::Pair(k_node, val));
     }
     out
 }

@@ -549,7 +549,7 @@ pub(super) fn sweep_candidate_may_answer(
     if fa.has_dynamic_parents(class) {
         return true;
     }
-    if fa.plugin.app_surface_consumers.iter().any(|c| c == class) {
+    if crate::model::file_analysis::app_surface_parent(class, &fa.plugin.app_surface_consumers).is_some() {
         return true;
     }
     if fa

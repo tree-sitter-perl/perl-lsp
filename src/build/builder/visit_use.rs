@@ -46,7 +46,7 @@ impl<'a> Builder<'a> {
         // aren't covered — only the `use Importer 'M' => @names` line.
         if module_name == "Importer" {
             if let Some((source_module, names)) = imports.split_first() {
-                if !source_module.is_empty() && source_module.contains("::") {
+                if crate::model::file_analysis::split_qualified(source_module, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
                     self.process_use(
                         source_module.clone(),
                         raw_args,
@@ -82,7 +82,8 @@ impl<'a> Builder<'a> {
         // `use Class::Tiny qw/a b/` / `use Class::Tiny { a => ..., b => ... }`
         // declares rw accessors at the use site (no `has` keyword), so
         // synthesis hangs off the `use` node rather than a framework-mode
-        // `has` dispatch. Recognized by the import shape, not a name list.
+        // `has` dispatch. The module is matched by name, like Sub::Exporter
+        // above; the import shape decides which words are attributes.
         if module_name == "Class::Tiny" {
             self.visit_class_tiny_use(node);
         }
@@ -191,10 +192,11 @@ impl<'a> Builder<'a> {
     /// pairs as a right-leaning `list_expression`, so recurse into those.
     pub(super) fn extract_class_tiny_hash_keys(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         let elems = crate::cst::list_elements(crate::cst::literal_body(node));
-        // Keys are at even indices (key, value, key, value, ...).
-        let mut i = 0;
-        while i < elems.len() {
-            let key = elems[i];
+        for item in crate::cst::pair_items(&elems, crate::cst::Spreads::AsElements) {
+            let key = match item {
+                crate::cst::PairItem::Pair(k, _) | crate::cst::PairItem::Dangling(k) => k,
+                crate::cst::PairItem::Spread(_) => continue,
+            };
             match key.kind() {
                 "autoquoted_bareword" | "bareword" => {
                     if let Ok(text) = key.utf8_text(self.source) {
@@ -208,7 +210,6 @@ impl<'a> Builder<'a> {
                 }
                 _ => {}
             }
-            i += 2; // skip the value element
         }
     }
 

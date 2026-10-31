@@ -17,9 +17,14 @@
 
 use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
+/// Perl's namespace separator. Source-side Perl code (the builder, the CST
+/// view, the cursor detector) spells it through this; a consumer that serves
+/// every language asks the analysis's `NameSpellings` instead.
+pub const PERL_SEP: &str = "::";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
-    namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
+    namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed("main")),
@@ -108,6 +113,17 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
         Some((pkg, base)) => (Some(pkg), base),
         None => (None, name),
     }
+}
+
+/// A Perl module's path relative to an `@INC` root: `Foo::Bar` → `Foo/Bar.pm`.
+pub fn perl_module_rel_path(module: &str) -> String {
+    format!("{}.pm", module.replace(PERL_SEP, "/"))
+}
+
+/// `perl_module_rel_path`'s inverse, over a root-relative path whose `.pm`
+/// the caller has already checked.
+pub fn perl_module_from_rel_path(rel: &std::path::Path) -> String {
+    rel.to_string_lossy().trim_end_matches(".pm").replace(std::path::MAIN_SEPARATOR, PERL_SEP)
 }
 
 /// `split_qualified`'s inverse: a namespace and a leaf as one qualified
@@ -276,18 +292,18 @@ pub fn is_bareword_class_name(text: &str, names: &NameSpellings) -> bool {
     text.split(sep).all(is_ident)
 }
 
-/// Perl's attribute vocabulary, spelling → flag — the one table for a
-/// Corinna `field` attribute (`:param`, `:reader`, the writer family
-/// `:writer` / `:mutator` / `:accessor`), the way a pack declares its own.
-/// A spelling with no declaration fact (`:ro` style hints) is display-only.
+/// Perl's spellings of a Corinna `field` attribute, mapped onto the
+/// canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`, the one
+/// spelling → flag table) the way a pack maps its own: `:param`, `:reader`,
+/// and the writer family `:writer` / `:mutator` / `:accessor`. A spelling
+/// with no declaration fact (`:ro` style hints) is display-only.
 pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::SymbolFlags> {
-    use crate::model::file_analysis::SymbolFlags;
-    Some(match attr {
-        "param" => SymbolFlags::PARAM,
-        "reader" => SymbolFlags::READER,
-        "writer" | "mutator" | "accessor" => SymbolFlags::WRITER,
+    let canonical = match attr {
+        "param" | "reader" | "writer" => attr,
+        "mutator" | "accessor" => "writer",
         _ => return None,
-    })
+    };
+    crate::model::file_analysis::SymbolFlags::try_from(canonical).ok()
 }
 
 /// A Perl sigil: what kind of thing a name, or a deref, denotes.
@@ -576,7 +592,7 @@ pub enum MethodToken<'a> {
 
 impl<'a> MethodToken<'a> {
     pub fn parse(token: &'a str) -> Self {
-        match token.rsplit_once("::") {
+        match token.rsplit_once(PERL_SEP) {
             None => Self::Bare(token),
             Some(("SUPER", tail)) => Self::Super(tail),
             Some(("", tail)) => Self::Main(tail),

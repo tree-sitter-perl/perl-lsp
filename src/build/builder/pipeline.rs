@@ -1027,10 +1027,7 @@ impl<'a> Builder<'a> {
             Err(_) => return,
         };
 
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&ts_parser_perl::LANGUAGE.into()).is_err() {
-            return;
-        }
+        let mut parser = super::create_parser();
         let Some(sub_tree) = parser.parse(&section_text, None) else { return };
         let sub_src = section_text.as_bytes();
 

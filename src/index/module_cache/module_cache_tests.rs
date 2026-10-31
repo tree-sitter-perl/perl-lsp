@@ -1144,9 +1144,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     let specs: Vec<(String, String)> = Vec::new();
     let surface = crate::model::surface::Surface::project(&whole);
     let mut skeleton = whole;
-    skeleton.evict_witness_bag();
-    skeleton.evict_refs();
-    skeleton.evict_symbols();
+    skeleton.evict_to(crate::model::file_analysis::Residency::Skeleton);
 
     let blob = encode_stub(&feed, &specs, &surface, &skeleton).expect("encodes");
     let stub = decode_stub(&blob).expect("decodes");
@@ -2282,7 +2280,7 @@ fn the_persisted_surface_is_the_cold_projection() {
 
     // And it is NOT what a warm reader would have produced on its own.
     let mut stripped = (*cached.analysis).clone();
-    stripped.evict_witness_bag();
+    stripped.evict_to(crate::model::file_analysis::Residency::RowsOnly);
     assert_ne!(
         crate::model::surface::surface_fingerprint(&crate::model::surface::Surface::project(
             &stripped

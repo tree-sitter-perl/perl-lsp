@@ -525,7 +525,7 @@ bitflags::bitflags! {
     /// language maps its own attribute spellings onto these where it
     /// mints the symbol — a pack at skeleton conversion through
     /// `TryFrom<&str>` over the canonical names, Perl through
-    /// `conventions::field_attribute_flag` — and consumers ask
+    /// `conventions::field_attribute_flag` onto those same names — and consumers ask
     /// `contains(..)`, never compare an attribute string. Closed on
     /// purpose: every flag so far has a language-generic meaning, and the
     /// set rides the cache blob (`docs/adr/symbol-flags.md`).
@@ -613,8 +613,9 @@ impl std::fmt::Display for UnknownAttribute {
 }
 
 /// The canonical attribute vocabulary — the ONE table from a spelling to
-/// a flag. A pack's skeleton conversion and its overlay validation both
-/// go through it, so a spelling that mints nothing is an error at the
+/// a flag. A pack's skeleton conversion, its overlay validation and Perl's
+/// field attributes all go through it
+/// (`layering_tests::one_table_maps_spellings_to_flags`), so a spelling that mints nothing is an error at the
 /// producer rather than a silent skip.
 impl TryFrom<&str> for SymbolFlags {
     type Error = UnknownAttribute;

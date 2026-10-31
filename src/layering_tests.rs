@@ -1403,7 +1403,7 @@ fn language_spellings_have_one_home() {
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
         ("build/query_extract/vocab.rs", 13, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
-        ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
+        ("model/conventions.rs", 2, "Perl's own attribute spellings (`field_attribute_flag`), mapped onto the canonical names: Perl's home"),
         ("model/file_analysis/core_types.rs", 17, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
         ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
@@ -1507,6 +1507,134 @@ fn packs_do_not_borrow_perls_current_package_token() {
     );
 }
 
+/// The namespace lane is written through `OpenSections`, the one closing
+/// rule: a section minted by hand never gets cut short by the next
+/// statement form at its depth, so a builder that pushes its own disagrees
+/// with the lookup about which section is in force.
+#[test]
+fn namespace_lane_is_written_through_open_sections() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("NamespaceRange {") || l.contains("namespace_ranges.push("));
+    let allow: &[(&str, usize, &str)] = &[(
+        "model/file_analysis/core_types.rs",
+        3,
+        "the struct itself and `OpenSections`' two writers",
+    )];
+    let drift = allowlist_drift("namespace lane writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `TryFrom<&str> for SymbolFlags` is the one table from a spelling to a
+/// flag: a language maps its own spellings onto the canonical names, never
+/// onto a flag directly, so a second table cannot drift from the first (and
+/// `language_spellings_have_one_home` reads its vocabulary out of this one).
+/// A line pairing a string literal with a flag constant is a second table.
+#[test]
+fn one_table_maps_spellings_to_flags() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.trim_start().starts_with('"') && l.contains("=> SymbolFlags::")
+    });
+    let allow: &[(&str, usize, &str)] =
+        &[("model/file_analysis/core_types.rs", 16, "the canonical table itself")];
+    let drift = allowlist_drift("spelling → flag tables", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `app_surface_parent` is the one speller of the app-surface edge
+/// condition. A consumer-membership test anywhere else drops its
+/// `APP_SURFACE_CLASS` guard, and the edge it answers drifts from the one
+/// the walks take.
+#[test]
+fn app_surface_edge_has_one_speller() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.contains("consumers") && (l.contains(".any(") || l.contains(".contains("))
+    });
+    let allow: &[(&str, usize, &str)] =
+        &[("model/file_analysis/ancestry.rs", 1, "`app_surface_parent` itself")];
+    let drift = allowlist_drift("app-surface edge spellers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// The `::` separator has two homes: Perl's (`conventions::PERL_SEP`, behind
+/// `PERL_SPELLINGS`) and a pack's own declaration. Everywhere else a name is
+/// split through `split_qualified` with the spellings of its language, so a
+/// qualified-name rule decided once cannot be re-decided per site, and a
+/// language with another separator is never split on Perl's.
+#[test]
+fn qualified_names_split_through_the_spellings() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp, Layer::Cst]);
+    let seen = count_lines(&files, &|l| l.contains("\"::\""));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/conventions.rs", 1, "`PERL_SEP`: Perl's home"),
+        ("build/packs/cpp.rs", 1, "`CPP_SEP`: the cpp pack's own declaration"),
+        (
+            "index/resolve/collect.rs",
+            1,
+            "retire: `qualifier_at_point` scans C++'s `::` OWNER operator for every pack; \
+             `NameSpellings` needs an owner-operator field (PHP's static `::`, none for Python)",
+        ),
+        (
+            "model/file_analysis/types.rs",
+            1,
+            "retire: `ParametricType::instance_from_spelling` parses a C++ template \
+             spelling in the model; it is text → structure the cpp pack should own (rule #15)",
+        ),
+    ];
+    let drift = allowlist_drift("separator literals", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `cst::pair_items` is the one key/value pair walk over Perl's CST. A
+/// hand-rolled `i += 2` stride in the builder re-decides what a separator, a
+/// comment or a spread is, and drifts from the walk every other pair reader
+/// takes. (Byte scans over source TEXT live outside the builder.)
+#[test]
+fn perl_pair_walks_go_through_pair_items() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Build, Layer::Cst])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("build/builder/") || rel == "cst.rs")
+        .collect();
+    let seen = count_lines(&files, &|l| l.contains("+= 2"));
+    let drift = allowlist_drift("hand-rolled pair strides", &seen, &[]);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `builder::create_parser` is the one Perl parser constructor, so a grammar
+/// upgrade or a parser setting (timeout, logger) lands on every parse.
+#[test]
+fn perl_parsers_come_from_create_parser() {
+    let files = layer_files(&[Layer::Build, Layer::Index, Layer::Lsp, Layer::Cst]);
+    let seen = count_lines(&files, &|l| l.contains("set_language(&ts_parser_perl"));
+    let allow: &[(&str, usize, &str)] =
+        &[("build/builder/mod.rs", 1, "`create_parser` itself")];
+    let drift = allowlist_drift("Perl parser constructors", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// The name-keyed winner slot (`IndexCore::cache`) is written only by
+/// `IndexCore::set_slot` / `clear_slot` / `offer_slot`, which move the
+/// enrichment epoch with the write. A direct write is a `get_cached` answer
+/// that changes under a memo still keyed on the old one.
+#[test]
+fn name_slot_writes_move_the_epoch() {
+    let files = layer_files(&[Layer::Index]);
+    let seen = count_lines(&files, &|l| {
+        [".cache.insert(", ".cache.remove(", ".cache.entry(", ".cache.clear(", ".cache.retain("]
+            .iter()
+            .any(|w| l.contains(w))
+            && !l.contains("bag_cache")
+    });
+    let allow: &[(&str, usize, &str)] = &[(
+        "index/module_index/index_core.rs",
+        3,
+        "`set_slot`, `clear_slot` and `offer_slot` themselves",
+    )];
+    let drift = allowlist_drift("name-slot writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,
@@ -1519,8 +1647,6 @@ fn rendered_strings_are_not_reparsed() {
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
         ("model/conventions.rs", 4, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and a `use VERSION` number"),
-        ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
-        ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),

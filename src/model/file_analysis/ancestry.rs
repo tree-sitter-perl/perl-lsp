@@ -35,8 +35,9 @@ pub fn real_parents_of(
 
 /// The synthetic app-surface ancestor (`APP_SURFACE_CLASS`) when `class`
 /// is one of the declared `consumers`. The ONE speller of the edge
-/// condition — `parents_of` composes it and the graph's
-/// `EdgeKind::AppSurface` derivation reads it directly.
+/// condition — `parents_of` composes it, and the graph's
+/// `EdgeKind::AppSurface` derivation and the consult prefilter read it
+/// directly (`layering_tests::app_surface_edge_has_one_speller`).
 pub fn app_surface_parent(class: &str, consumers: &[String]) -> Option<String> {
     if class != APP_SURFACE_CLASS && consumers.iter().any(|c| c == class) {
         Some(APP_SURFACE_CLASS.to_string())

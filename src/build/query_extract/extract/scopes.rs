@@ -33,7 +33,7 @@ pub(super) struct State {
 /// Record a namespace section under a use-map: a braced one is its body,
 /// a statement-form one runs to the end of the enclosing scope until the
 /// next one at its depth cuts it short.
-fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: SectionKind) {
+pub(super) fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: SectionKind) {
     if st.pack.names.use_map_sep().is_none() {
         return;
     }

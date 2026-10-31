@@ -555,7 +555,7 @@ impl FileAnalysis {
         schema_hint: Option<&str>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
-        if cn.contains("::") {
+        if split_qualified(&cn, self.names()).0.is_some() {
             return cn;
         }
         let Some(mi) = module_index else { return cn };
@@ -565,7 +565,7 @@ impl FileAnalysis {
         // Gather candidate result classes by basename / source_name match.
         let mut candidates: Vec<String> = Vec::new();
         mi.for_each_cached(&mut |name, cached| {
-            let basename = name.rsplit("::").next().unwrap_or(name);
+            let basename = split_qualified(name, self.names()).1;
             let hits = basename == cn
                 || cached.analysis.dbic_source_name.as_deref() == Some(cn.as_str());
             if hits && Self::class_is_dbic_result(name, mi) {
@@ -598,8 +598,8 @@ impl FileAnalysis {
         let prefixes: Vec<(String, String)> = candidates
             .iter()
             .map(|c| {
-                let parent = c.rsplit_once("::").map(|(p, _)| p).unwrap_or(c);
-                (c.clone(), format!("{parent}::"))
+                let parent = split_qualified(c, self.names()).0.unwrap_or(c);
+                (c.clone(), format!("{parent}{}", self.names().sep().unwrap_or_default()))
             })
             .collect();
         let mut fam_size: HashMap<String, usize> =
@@ -677,7 +677,8 @@ impl FileAnalysis {
         let matches = |class: &str| match match_mode {
             BridgedMatch::Exact => class == key,
             BridgedMatch::Tail => {
-                class == key || class.strip_suffix(key).is_some_and(|p| p.ends_with("::"))
+                class == key
+                    || class.strip_suffix(key).is_some_and(|p| self.names().sep().is_some_and(|sep| p.ends_with(sep)))
             }
         };
         let mut candidates: Vec<String> = self

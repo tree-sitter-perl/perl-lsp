@@ -130,7 +130,7 @@ impl<'a> CandidateSet<'a> {
         // out-of-line); reject the vacuous `Some`/`None` cross.
         let owner_agrees_forward = |a: Option<&str>, b: Option<&str>| match (a, b) {
             (None, None) => true,
-            (Some(x), Some(y)) => pkg_agrees(true, Some(x), Some(y)),
+            (Some(x), Some(y)) => pkg_agrees(self.origin_analysis().names(), true, Some(x), Some(y)),
             _ => false,
         };
         let cand_is_def = |a: &FileAnalysis, s: &crate::model::file_analysis::Symbol| {
@@ -314,7 +314,7 @@ impl<'a> CandidateSet<'a> {
         };
         let pkg_ok = |sp: Option<&str>| match &pkg {
             None => sp.is_none(),
-            Some(p) => pkg_agrees(true, Some(p), sp),
+            Some(p) => pkg_agrees(self.origin_analysis().names(), true, Some(p), sp),
         };
         let has_body =
             |a: &FileAnalysis, s: &crate::model::file_analysis::Symbol| a.scopes.iter().any(|sc| sc.span == s.span);
@@ -326,7 +326,7 @@ impl<'a> CandidateSet<'a> {
         // function stays in the set, just below. `None` anchor (a free-fn call)
         // leaves the axis flat, so non-member overloading is untouched.
         let owner_matched = |sp: Option<&str>| match (pkg.as_deref(), sp) {
-            (Some(p), Some(q)) => pkg_agrees(true, Some(p), Some(q)),
+            (Some(p), Some(q)) => pkg_agrees(self.origin_analysis().names(), true, Some(p), Some(q)),
             _ => false,
         };
         // Sort key, best-first: owner match, then arity fit, then bodied, then
@@ -946,7 +946,7 @@ impl<'a> CandidateSet<'a> {
                                             if let Some(sym) = whole.symbols().iter().find(|s| {
                                                 s.name == method
                                                     && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                                                    && pkg_agrees(true, s.package.as_deref(), Some(class))
+                                                    && pkg_agrees(self.origin_analysis().names(), true, s.package.as_deref(), Some(class))
                                             }) {
                                                 return self.prefer_member_defs(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration));
                                             }
