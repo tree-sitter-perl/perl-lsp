@@ -25,7 +25,7 @@ use tree_sitter::Node;
 use crate::model::conventions::Sigil;
 
 mod syntax;
-pub(crate) use syntax::SyntaxForest;
+pub(crate) use syntax::{NodeFacts, NodeId, Structure, SyntaxForest};
 use crate::model::file_analysis::Span;
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;

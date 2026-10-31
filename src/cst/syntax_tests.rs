@@ -57,3 +57,45 @@ fn a_parse_of_a_subtree_stops_at_its_root() {
     let inner = body.named_child(0).unwrap();
     assert_eq!(forest.parent(inner), Some(body));
 }
+
+#[test]
+fn subtree_and_site_agree_with_tree_sitter_on_every_node() {
+    let tree = parse(SRC);
+    let forest = SyntaxForest::new([tree.root_node()]);
+    let s = forest.main();
+    for n in every_node(tree.root_node()) {
+        let h = s.lift(n).unwrap();
+        assert_eq!(h.subtree().len(), n.descendant_count(), "subtree of {n:?}");
+        assert_eq!((h.start_byte(), h.end_byte()), (n.start_byte(), n.end_byte()));
+        let range = n.byte_range();
+        let mut head = n;
+        while let Some(p) = head.parent().filter(|p| p.byte_range() == range) {
+            head = p;
+        }
+        assert_eq!(h.site().ts(), head, "site of {n:?}");
+        let sites: Vec<_> = h.enclosing_sites().map(|a| a.ts()).collect();
+        let mut want = Vec::new();
+        let mut cur = head.parent();
+        while let Some(p) = cur {
+            if p.parent().is_none_or(|g| g.byte_range() != p.byte_range()) {
+                want.push(p);
+            }
+            cur = p.parent();
+        }
+        assert_eq!(sites, want, "enclosing sites of {n:?}");
+    }
+}
+
+#[test]
+fn facts_sit_on_their_nodes_in_arrival_order() {
+    let tree = parse("my $x = 1;\n");
+    let forest = SyntaxForest::new([tree.root_node()]);
+    let s = forest.main();
+    let ids: Vec<NodeId> = (0..s.len()).map(|i| s.node(NodeId(i as u32)).id()).collect();
+    let facts = NodeFacts::new(s.len(), vec![(ids[2], "b"), (ids[1], "a"), (ids[2], "c")]);
+    assert_eq!(&facts.all()[facts.on(ids[2])], ["b", "c"]);
+    assert_eq!(&facts.all()[facts.on(ids[1])], ["a"]);
+    // node 2 sits under node 1, so node 1's subtree holds all three
+    assert_eq!(facts.positions(s.node(ids[1]).subtree()), 0..3);
+    assert!(facts.on(ids[0]).is_empty());
+}

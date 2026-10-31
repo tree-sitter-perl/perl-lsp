@@ -15,8 +15,14 @@
 use tree_sitter::Node;
 
 /// A node's preorder index in its [`Structure`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct NodeId(u32);
+
+impl NodeId {
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 const NO_PARENT: u32 = u32::MAX;
 
@@ -26,7 +32,10 @@ struct Entry<'t> {
     // the last raw reader does.
     ts: Node<'t>,
     parent: u32,
+    /// One past the last id of the subtree: a subtree is `id..end`.
+    end: u32,
     start_byte: u32,
+    end_byte: u32,
 }
 
 /// The structure of one parse.
@@ -46,12 +55,16 @@ impl<'t> Structure<'t> {
             entries.push(Entry {
                 ts: node,
                 parent: open.last().copied().unwrap_or(NO_PARENT),
+                end: 0,
                 start_byte: node.start_byte() as u32,
+                end_byte: node.end_byte() as u32,
             });
+            let id = entries.len() - 1;
             if cursor.goto_first_child() {
-                open.push((entries.len() - 1) as u32);
+                open.push(id as u32);
                 continue;
             }
+            entries[id].end = entries.len() as u32;
             loop {
                 if cursor.goto_next_sibling() {
                     break;
@@ -59,9 +72,20 @@ impl<'t> Structure<'t> {
                 if !cursor.goto_parent() {
                     return Structure { entries };
                 }
-                open.pop();
+                if let Some(closed) = open.pop() {
+                    entries[closed as usize].end = entries.len() as u32;
+                }
             }
         }
+    }
+
+    /// How many nodes the parse has: every id is below it.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn node(&self, id: NodeId) -> SyntaxNode<'_, 't> {
+        SyntaxNode { tree: self, id }
     }
 
     fn root(&self) -> SyntaxNode<'_, 't> {
@@ -82,7 +106,7 @@ impl<'t> Structure<'t> {
             .map(|i| NodeId((first + i) as u32))
     }
 
-    fn lift(&self, node: Node<'t>) -> Option<SyntaxNode<'_, 't>> {
+    pub(crate) fn lift(&self, node: Node<'t>) -> Option<SyntaxNode<'_, 't>> {
         self.id_of(node).map(|id| SyntaxNode { tree: self, id })
     }
 }
@@ -106,6 +130,11 @@ impl<'t> SyntaxForest<'t> {
         let found = self.trees.iter().find_map(|t| t.lift(node));
         debug_assert!(found.is_some(), "node {node:?} is from a parse outside this build");
         found
+    }
+
+    /// The file's own parse, the first registered.
+    pub(crate) fn main(&self) -> &Structure<'t> {
+        &self.trees[0]
     }
 
     /// The root of each parse, main tree first.
@@ -160,6 +189,40 @@ impl<'a, 't> SyntaxNode<'a, 't> {
     pub(crate) fn ts(&self) -> Node<'t> {
         self.entry().ts
     }
+    pub(crate) fn id(&self) -> NodeId {
+        self.id
+    }
+    pub(crate) fn start_byte(&self) -> usize {
+        self.entry().start_byte as usize
+    }
+    pub(crate) fn end_byte(&self) -> usize {
+        self.entry().end_byte as usize
+    }
+    /// The ids of this node and everything under it, in preorder.
+    pub(crate) fn subtree(&self) -> std::ops::Range<usize> {
+        self.id.0 as usize..self.entry().end as usize
+    }
+    /// The outermost node sharing this node's range: the head of its
+    /// same-range chain (a node and the parent it fills exactly), so every
+    /// node of one chain answers the same site. O(chain length).
+    pub(crate) fn site(&self) -> SyntaxNode<'a, 't> {
+        let mut cur = *self;
+        while let Some(p) = cur.parent().filter(|p| p.range() == self.range()) {
+            cur = p;
+        }
+        cur
+    }
+    /// The sites holding this node's, nearest first.
+    pub(crate) fn enclosing_sites(&self) -> impl Iterator<Item = SyntaxNode<'a, 't>> {
+        self.site().ancestors().filter(|a| a.is_site())
+    }
+    /// Whether this node heads its same-range chain.
+    fn is_site(&self) -> bool {
+        self.parent().is_none_or(|p| p.range() != self.range())
+    }
+    fn range(&self) -> (u32, u32) {
+        (self.entry().start_byte, self.entry().end_byte)
+    }
     pub(crate) fn kind(&self) -> &'static str {
         self.entry().ts.kind()
     }
@@ -184,6 +247,48 @@ impl<'a, 't> SyntaxNode<'a, 't> {
             cur = cur.parent()?;
         }
         Some(cur)
+    }
+}
+
+/// The facts a consumer keeps per node, apart from the structure so a walk
+/// can hold node handles while it writes: every fact in node order, one
+/// slice per node. A consumer's own mutable state per fact is a `Vec`
+/// indexed by the fact's position here.
+pub(crate) struct NodeFacts<T> {
+    /// `first[id]..first[id + 1]` are node `id`'s facts.
+    first: Vec<u32>,
+    facts: Vec<T>,
+}
+
+impl<T> NodeFacts<T> {
+    /// Facts for a parse of `len` nodes. Facts on one node keep the order
+    /// they come in.
+    pub(crate) fn new(len: usize, mut items: Vec<(NodeId, T)>) -> Self {
+        items.sort_by_key(|(id, _)| id.0);
+        let mut first = vec![0u32; len + 1];
+        for (id, _) in &items {
+            first[id.0 as usize + 1] += 1;
+        }
+        for i in 1..first.len() {
+            first[i] += first[i - 1];
+        }
+        NodeFacts { first, facts: items.into_iter().map(|(_, t)| t).collect() }
+    }
+
+    /// Every fact, nodes in preorder.
+    pub(crate) fn all(&self) -> &[T] {
+        &self.facts
+    }
+
+    /// The positions of the facts on the nodes `ids` (a subtree is one
+    /// such interval).
+    pub(crate) fn positions(&self, ids: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        self.first[ids.start] as usize..self.first[ids.end] as usize
+    }
+
+    /// The positions of the facts on node `id`.
+    pub(crate) fn on(&self, id: NodeId) -> std::ops::Range<usize> {
+        self.positions(id.index()..id.index() + 1)
     }
 }
 
