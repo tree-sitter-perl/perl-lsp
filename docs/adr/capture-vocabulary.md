@@ -289,8 +289,11 @@ capture the document never uses.
 - A variant can have no reader. `@flow.assign` names a pattern's root so
   the document can anchor `@flow.target` and `@flow.source` under it; the
   driver reads the two halves, not the anchor.
-- The enum covers the pack skeleton documents only. `perl/flow.scm` (read
-  by `builder/narrowing.rs`), the rhai plugin patterns
+- The enum covers the pack skeleton documents and Perl's `perl/flow.scm`,
+  whose minter (`builder/narrowing.rs`) reads the same `@flow` variants and
+  refuses, at compile, any capture it does not read. `@flow.clear` (a bind
+  that resets the name, no value in) is Perl's today; a pack document may
+  name it, and no pack reader acts on it yet. The rhai plugin patterns
   (`pattern_dispatch.rs`) and cpp's internal reparse queries name their own
   captures, read by their own code.
 - The capture table lives as long as its compiled query: one per pack,
