@@ -135,11 +135,10 @@ pub(crate) fn cli_lang_analyze(file: &str) {
     println!("# {file} [{}] — {} symbols", driver.id(), fa.symbols().len());
     for s in fa.symbols() {
         let pkg = s.package.as_deref().unwrap_or("");
-        let sep = if pkg.is_empty() { "" } else { "::" };
+        let name = crate::model::conventions::join_qualified(pkg, &s.name, fa.names().sep().unwrap_or_default());
         println!(
-            "{:<8} {pkg}{sep}{}\t{}:{}",
+            "{:<8} {name}\t{}:{}",
             format!("{:?}", s.kind),
-            s.name,
             s.span.start.row + 1,
             s.span.start.column + 1,
         );

@@ -1557,6 +1557,35 @@ fn app_surface_edge_has_one_speller() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// The `::` separator has two homes: Perl's (`conventions::PERL_SEP`, behind
+/// `PERL_SPELLINGS`) and a pack's own declaration. Everywhere else a name is
+/// split through `split_qualified` with the spellings of its language, so a
+/// qualified-name rule decided once cannot be re-decided per site, and a
+/// language with another separator is never split on Perl's.
+#[test]
+fn qualified_names_split_through_the_spellings() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp, Layer::Cst]);
+    let seen = count_lines(&files, &|l| l.contains("\"::\""));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/conventions.rs", 1, "`PERL_SEP`: Perl's home"),
+        ("build/packs/cpp.rs", 1, "`CPP_SEP`: the cpp pack's own declaration"),
+        (
+            "index/resolve/collect.rs",
+            1,
+            "retire: `qualifier_at_point` scans C++'s `::` OWNER operator for every pack; \
+             `NameSpellings` needs an owner-operator field (PHP's static `::`, none for Python)",
+        ),
+        (
+            "model/file_analysis/types.rs",
+            1,
+            "retire: `ParametricType::instance_from_spelling` parses a C++ template \
+             spelling in the model; it is text → structure the cpp pack should own (rule #15)",
+        ),
+    ];
+    let drift = allowlist_drift("separator literals", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,
@@ -1569,8 +1598,6 @@ fn rendered_strings_are_not_reparsed() {
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
         ("model/conventions.rs", 4, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and a `use VERSION` number"),
-        ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
-        ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),

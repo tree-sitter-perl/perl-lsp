@@ -46,7 +46,7 @@ impl<'a> Builder<'a> {
         // aren't covered — only the `use Importer 'M' => @names` line.
         if module_name == "Importer" {
             if let Some((source_module, names)) = imports.split_first() {
-                if !source_module.is_empty() && source_module.contains("::") {
+                if crate::model::file_analysis::split_qualified(source_module, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
                     self.process_use(
                         source_module.clone(),
                         raw_args,

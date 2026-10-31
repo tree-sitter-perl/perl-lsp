@@ -23,10 +23,11 @@ impl ModuleIndex {
         if self.loaded_modules.contains_key(module) {
             return true;
         }
-        let tail = module.rsplit("::").next().unwrap_or(module);
+        use crate::model::{conventions::PERL_SPELLINGS, file_analysis::split_qualified};
+        let tail = split_qualified(module, &PERL_SPELLINGS).1;
         self.loaded_modules
             .iter()
-            .any(|e| e.key().rsplit("::").next() == Some(tail))
+            .any(|e| split_qualified(e.key(), &PERL_SPELLINGS).1 == tail)
     }
 
     /// Was `module` registered from the workspace tree (vs @INC)?

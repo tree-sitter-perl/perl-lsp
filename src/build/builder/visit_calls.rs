@@ -1526,12 +1526,13 @@ impl<'a> Builder<'a> {
             Err(_) => return vec![],
         };
 
-        // Find position of last "::" in the raw content
-        let colons_pos = match content_text.rfind("::") {
+        // Find the last separator in the raw content.
+        let sep = crate::model::conventions::PERL_SEP;
+        let colons_pos = match content_text.rfind(sep) {
             Some(p) => p,
             None => return vec![],
         };
-        let after_colons = colons_pos + 2;
+        let after_colons = colons_pos + sep.len();
 
         // Check if there's a named child (scalar variable) that starts after the "::"
         let last_idx = match content.named_child_count().checked_sub(1) {

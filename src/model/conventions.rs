@@ -17,9 +17,14 @@
 
 use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
+/// Perl's namespace separator. Source-side Perl code (the builder, the CST
+/// view, the cursor detector) spells it through this; a consumer that serves
+/// every language asks the analysis's `NameSpellings` instead.
+pub const PERL_SEP: &str = "::";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
-    namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
+    namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed("main")),
@@ -108,6 +113,17 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
         Some((pkg, base)) => (Some(pkg), base),
         None => (None, name),
     }
+}
+
+/// A Perl module's path relative to an `@INC` root: `Foo::Bar` → `Foo/Bar.pm`.
+pub fn perl_module_rel_path(module: &str) -> String {
+    format!("{}.pm", module.replace(PERL_SEP, "/"))
+}
+
+/// `perl_module_rel_path`'s inverse, over a root-relative path whose `.pm`
+/// the caller has already checked.
+pub fn perl_module_from_rel_path(rel: &std::path::Path) -> String {
+    rel.to_string_lossy().trim_end_matches(".pm").replace(std::path::MAIN_SEPARATOR, PERL_SEP)
 }
 
 /// `split_qualified`'s inverse: a namespace and a leaf as one qualified
@@ -576,7 +592,7 @@ pub enum MethodToken<'a> {
 
 impl<'a> MethodToken<'a> {
     pub fn parse(token: &'a str) -> Self {
-        match token.rsplit_once("::") {
+        match token.rsplit_once(PERL_SEP) {
             None => Self::Bare(token),
             Some(("SUPER", tail)) => Self::Super(tail),
             Some(("", tail)) => Self::Main(tail),
