@@ -698,11 +698,11 @@ pub(super) fn spawn_parent_liveness_monitor(process_id: Option<u32>) {
         loop {
             tokio::time::sleep(PARENT_LIVENESS_POLL).await;
             if !parent_process_alive(pid) {
-                // Client gone; nothing to flush after the connection drops.
-                // Exit hard so background `spawn_blocking` indexing (which parks
-                // on `send_request` once the client vanishes) can't keep the
-                // runtime — and a multi-GB workspace index — alive.
-                std::process::exit(0);
+                // Client gone. Exit hard so background `spawn_blocking`
+                // indexing (which parks on `send_request` once the client
+                // vanishes) can't keep the runtime — and a multi-GB workspace
+                // index — alive; the instrumentation still lands first.
+                crate::util::ghost_stats::exit_flushed(0, "parent-gone");
             }
         }
     });

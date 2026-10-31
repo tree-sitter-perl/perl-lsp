@@ -838,9 +838,8 @@ pub fn emit_attribution(moment: &str) {
 ///
 /// `main`'s CLI arms each `return` on their own, so one guard at the top of
 /// `main` reaches every verb without twenty call sites having to remember.
-/// It deliberately does NOT cover `std::process::exit`, which skips `Drop`:
-/// the server path emits explicitly before its hard exit, and the CLI's
-/// `exit(1)`/`exit(2)` arms are argument and I/O errors with no run to report.
+/// It cannot cover `std::process::exit`, which skips `Drop` — every hard exit
+/// goes through [`exit_flushed`] instead.
 pub struct EmitOnDrop(&'static str);
 
 impl EmitOnDrop {
@@ -1013,6 +1012,18 @@ pub fn emit_all(moment: &str) {
     }
     drop(regs);
     emit_attribution(moment);
+}
+
+/// The ONE process exit. `process::exit` skips destructors, so a bare call
+/// silently discards everything the run measured, and the failure rots: the
+/// next exit someone adds is unmeasured forever. Server EOF, parent death, the
+/// watchdog and every CLI error leave through here;
+/// `layering_tests::process_exits_flush_instrumentation` pins it.
+///
+/// `moment` labels the human report; the JSON sinks write regardless of it.
+pub fn exit_flushed(code: i32, moment: &str) -> ! {
+    emit_all(moment);
+    std::process::exit(code); // sanctioned-exit
 }
 
 /// Keys-only eviction ledger with lazy ring deletion: `ring` remembers

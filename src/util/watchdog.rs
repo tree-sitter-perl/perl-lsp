@@ -109,7 +109,5 @@ pub fn arm() {
 /// sinks are already written by then anyway.
 fn trip(code: i32, why: &str) -> ! {
     eprintln!("[watchdog] {why} — writing instrumentation and exiting {code}");
-    super::ghost_stats::write_json();
-    super::timings::write_json();
-    std::process::exit(code);
+    super::ghost_stats::exit_flushed(code, "watchdog")
 }
