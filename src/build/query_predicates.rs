@@ -8,6 +8,8 @@
 
 use tree_sitter::{Language, Node, Query, QueryMatch, QueryPredicate, QueryPredicateArg};
 
+use crate::cst::SyntaxForest;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Relation {
     /// The captured node's parent.
@@ -82,43 +84,32 @@ pub fn check(query: &Query, language: &Language, deferred: &[&str]) -> Result<()
 
 /// Whether `m` satisfies its pattern's structural predicates. Every node the
 /// predicate's capture holds must satisfy it; a capture with no node in the
-/// match passes. `root` is the node the cursor walked: ancestry is read by
-/// descending from it, because `Node::parent` also descends from the root
-/// and would repeat that walk per hop.
-pub fn admits(query: &Query, m: &QueryMatch<'_, '_>, root: Node<'_>) -> bool {
+/// match passes. Ancestry is read off the parse's [`SyntaxForest`], which
+/// `syntax` hands over only when a predicate needs it, so a pattern without
+/// structural predicates never pays for the tree.
+pub fn admits<'s, 't: 's>(
+    query: &Query,
+    m: &QueryMatch<'_, 't>,
+    syntax: impl FnOnce() -> &'s SyntaxForest<'t>,
+) -> bool {
     let preds = query.general_predicates(m.pattern_index);
     if preds.is_empty() {
         return true;
     }
+    let syn = syntax();
     preds.iter().filter_map(parse).filter_map(Result::ok).all(|s| {
         m.captures
             .iter()
             .filter(|c| c.index == s.capture)
-            .all(|c| holds(&s, c.node, root) != s.negated)
+            .all(|c| holds(&s, c.node, syn) != s.negated)
     })
 }
 
-fn holds(s: &Structural<'_>, node: Node<'_>, root: Node<'_>) -> bool {
-    if s.relation == Relation::Node {
-        return s.kinds.contains(&node.kind());
-    }
-    let mut cur = root;
-    let mut parent = None;
-    let mut ancestor_hit = false;
-    while cur != node {
-        if s.kinds.contains(&cur.kind()) {
-            ancestor_hit = true;
-        }
-        parent = Some(cur);
-        match cur.child_with_descendant(node) {
-            Some(next) => cur = next,
-            None => return false,
-        }
-    }
+fn holds<'t>(s: &Structural<'_>, node: Node<'t>, syn: &SyntaxForest<'t>) -> bool {
     match s.relation {
-        Relation::Parent => parent.is_some_and(|p| s.kinds.contains(&p.kind())),
-        Relation::Ancestor => ancestor_hit,
-        Relation::Node => unreachable!("answered before the walk"),
+        Relation::Node => s.kinds.contains(&node.kind()),
+        Relation::Parent => syn.parent(node).is_some_and(|p| s.kinds.contains(&p.kind())),
+        Relation::Ancestor => syn.ancestors(node).any(|a| s.kinds.contains(&a.kind())),
     }
 }
 
