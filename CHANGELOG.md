@@ -4,13 +4,7 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
-## v0.9.0 — 2026-10-31` section
-as-is. The "Undeclared variables" section is the one already on main, kept
-verbatim.
-
----
-
-## Unreleased
+## v0.9.0 — 2026-10-31
 
 ### Union types
 
