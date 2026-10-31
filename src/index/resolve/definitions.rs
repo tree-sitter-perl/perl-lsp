@@ -428,6 +428,55 @@ impl<'a> CandidateSet<'a> {
         Some(cands.into_iter().map(|c| c.7).collect())
     }
 
+    /// The file the cursor's include directive resolves to. A path token
+    /// names a FILE, not a symbol, so its projections answer from the
+    /// minted target ahead of name identity.
+    pub(super) fn include_target(&self) -> Option<&'a str> {
+        self.origin.pack.include_directive_at(self.point)?.target.as_deref()
+    }
+
+    /// Every directive resolving to `header`, across the origin, the other
+    /// open documents (their live text) and the registered files (the
+    /// included-by edge) — sorted (path, position).
+    pub(super) fn includer_sites(&self, header: &str) -> Vec<RefLocation> {
+        fn key_path(key: &FileKey) -> Option<PathBuf> {
+            match key {
+                FileKey::Path(p) => Some(p.clone()),
+                FileKey::Url(u) => u.to_file_path().ok(),
+            }
+        }
+        let mut out: Vec<RefLocation> = Vec::new();
+        let mut take = |key: &FileKey, fa: &FileAnalysis| {
+            for d in &fa.pack.include_directives {
+                if d.target.as_deref() == Some(header) {
+                    out.push(RefLocation::at(key.clone(), d.span, AccessKind::Read));
+                }
+            }
+        };
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        seen.extend(key_path(&self.origin_key));
+        take(&self.origin_key, self.origin);
+        self.files.for_each_open(|url, doc| {
+            let key = FileKey::Url(url.clone());
+            if key_path(&key).is_some_and(|p| seen.insert(p)) {
+                take(&key, &doc.analysis);
+            }
+        });
+        if let Some(idx) = self.module_index {
+            for cached in idx.includers_of(header) {
+                if seen.insert(cached.path.clone()) {
+                    take(&FileKey::Path(cached.path.clone()), &cached.analysis);
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            key_path(&a.key).cmp(&key_path(&b.key)).then_with(|| {
+                (a.span.start.row, a.span.start.column).cmp(&(b.span.start.row, b.span.start.column))
+            })
+        });
+        out
+    }
+
     /// A declaration site in the origin file.
     pub(super) fn origin_decl(&self, span: Span) -> RefLocation {
         RefLocation::at(self.origin_key.clone(), span, AccessKind::Declaration)
@@ -440,6 +489,16 @@ impl<'a> CandidateSet<'a> {
     pub fn definitions(&self) -> Vec<RefLocation> {
         let analysis = self.origin;
         let point = self.point;
+
+        // `#include "x.h"` → the header file itself (`#include` = `use`; the
+        // header is the module), as a whole-file location.
+        if let Some(header) = self.include_target() {
+            return vec![RefLocation::at(
+                FileKey::Path(PathBuf::from(header)),
+                Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) },
+                AccessKind::Declaration,
+            )];
+        }
 
         // Owner-anchored forward resolution: a `::`-qualified value read
         // (`dynamic::STRING`, `absl::StatusCode::kNotFound`) names its OWNER
@@ -1087,9 +1146,44 @@ impl<'a> CandidateSet<'a> {
                     if let Some(loc) = self.type_def_location(word, idx) {
                         return vec![loc];
                     }
+                    // A raw word naming a file-scope symbol no ref captured —
+                    // a macro use the expand-and-reparse erased, an enum
+                    // constant, a global: this file's own definition, else
+                    // the first visible candidate's.
+                    if let Some(span) = raw_word_def(analysis, word) {
+                        return vec![self.origin_decl(span)];
+                    }
+                    for cached in idx.visible_def_candidates(word) {
+                        if let Some(span) = raw_word_def(&idx.symbols_present(&cached), word) {
+                            if Url::from_file_path(&cached.path).is_ok() {
+                                return vec![RefLocation::at(
+                                    FileKey::Path(cached.path.clone()),
+                                    span,
+                                    AccessKind::Declaration,
+                                )];
+                            }
+                        }
+                    }
                 }
             }
         }
         Vec::new()
     }
+}
+
+/// The definition a raw `word` names in `analysis`: the `#define` of it when
+/// the file has one (the macro lane carries its span), else the earliest
+/// same-named symbol.
+fn raw_word_def(analysis: &FileAnalysis, word: &str) -> Option<Span> {
+    let named = || analysis.symbols().iter().filter(|s| s.name == word);
+    named()
+        .find(|s| {
+            analysis
+                .pack
+                .macro_defs
+                .iter()
+                .any(|m| m.name == word && m.selection_span == s.selection_span)
+        })
+        .or_else(|| named().min_by_key(|s| s.selection_span.start.row))
+        .map(|s| s.selection_span)
 }

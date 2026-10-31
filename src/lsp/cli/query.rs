@@ -398,21 +398,7 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-            let lang_id = language_driver::LanguageRegistry::served().id();
             let base_idx: &dyn file_analysis::CrossFileLookup = idx;
-            // `#include "x.h"` path → the resolved header (`#include` = `use`).
-            // A path token, not a name — slot-shaped, stays ahead of the set.
-            // The pack declares whether it has include tokens; asked, never
-            // named (rule #10) — the same gate the LSP handler asks.
-            if language_driver::LanguageRegistry::has_include_tokens(lang_id) {
-                if let Some(loc) = symbols::pack_include_definition(&analysis, point, Some(abs.as_path())) {
-                    let path = loc.uri.to_file_path().map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| loc.uri.to_string());
-                    let (line, col) = fmt.render_pos(
-                        loc.range.start.line as usize, loc.range.start.character as usize);
-                    return Ok(format!("{}:{}:{}", path, line, col));
-                }
-            }
             let _ = &uri;
             // Forward projection of the set (mirrors the LSP handler): the
             // source text unlocks the macro variant lane for pack routing.
@@ -452,24 +438,7 @@ fn run_one(
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
             let mut sources = SourceCache::new(fmt);
             let mut results = Vec::new();
-            let lang_id = language_driver::LanguageRegistry::served().id();
             let base_idx: &dyn file_analysis::CrossFileLookup = idx;
-            // `#include` reverse — "who includes this header" — owns the path
-            // token exclusively (its backward mirror of include goto-def).
-            // The pack declares whether it has include tokens; asked, never
-            // named (rule #10) — the same gate the LSP handler asks.
-            if language_driver::LanguageRegistry::has_include_tokens(lang_id) {
-                if let Some(incs) = symbols::pack_include_references(
-                    &analysis, point, Some(file_path.as_path()), base_idx)
-                {
-                    for (path, span) in incs {
-                        let ps = path.display().to_string();
-                        let (line, col) = sources.display(&ps, span.start.row, span.start.column);
-                        results.push(serde_json::json!({"file": ps, "line": line, "col": col}));
-                    }
-                    return Ok(serde_json::to_string_pretty(&results).unwrap());
-                }
-            }
             // Stage the enriched origin, then construct the set from the
             // staged snapshot — the same one-construction/one-projection
             // shape as the LSP handler, so CLI and editor answers can't

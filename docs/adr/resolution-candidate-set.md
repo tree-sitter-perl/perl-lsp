@@ -81,6 +81,14 @@ Every feature is a **projection** of the same CandidateSet:
 | documentHighlight | `highlights()` — the origin-file-narrowed image of `references()` (same identity, same matcher via `refs_to_in_file`, walk never leaves the cursor's document), carrying `RefLocation.access` for highlight kinds |
 | linkedEditingRange | `linked_editing_spans()` — the co-edit set: `highlights()` restricted to sites a rename writes the typed text at VERBATIM (`rewritable`, bare-text group members only — affix-derived accessors join references but can't co-edit one text), so it equals the rename image's site set by construction |
 
+An include path token (`#include "x.h"`) names a FILE, not a symbol, so
+goto-def and references answer it ahead of name identity, from the target
+the driver minted on the directive (`IncludeDirective::target`): goto-def is
+the header itself, references every directive minted to the same file —
+origin, open documents, and registered files through the included-by edge
+(`CrossFileLookup::includers_of`). Neither verb re-runs the header lookup at
+request time, and no handler keeps a lane of its own.
+
 Symmetry becomes **by construction**: an axis added to CandidateSet
 construction is inherited by every projection — the test
 `candidate_set_visibility_axis_flows_to_every_projection` demonstrates the

@@ -870,6 +870,23 @@ impl CrossFileLookup for ModuleIndex {
         out
     }
 
+    fn includers_of(&self, header: &str) -> Vec<Arc<CachedModule>> {
+        let members: Vec<String> = self
+            .core
+            .edges
+            .includers
+            .get(header)
+            .map(|b| b.as_slice().to_vec())
+            .unwrap_or_default();
+        members
+            .iter()
+            .filter_map(|p| CrossFileLookup::cached_by_path(self, std::path::Path::new(p)))
+            .filter(|c| {
+                c.analysis.pack.include_directives.iter().any(|d| d.target.as_deref() == Some(header))
+            })
+            .collect()
+    }
+
     fn direct_specializations_of(&self, primary: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let modules: Vec<String> = self

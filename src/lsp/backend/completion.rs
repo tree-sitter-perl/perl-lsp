@@ -26,17 +26,7 @@ pub fn pack_completion(
 ) -> (Vec<CompletionItem>, bool) {
     let base_idx: &dyn crate::model::file_analysis::CrossFileLookup = module_index;
     // Scope member/type resolution to the file's include closure.
-    let scoped = crate::model::file_analysis::ScopedLookup::new(
-        base_idx,
-        &analysis.pack.include_closure,
-        path,
-        crate::model::file_analysis::VisibilityAxis::for_origin(
-            analysis,
-            path,
-            base_idx,
-            crate::build::language_driver::LanguageRegistry::pack_visibility(language),
-        ),
-    );
+    let scoped = crate::index::resolve::origin_scope(base_idx, analysis, path);
     let xidx: &dyn crate::model::file_analysis::CrossFileLookup = &scoped;
     // The slot verdict — Member (sentinel reparse → receiver span →
     // type) or the bare-identifier fallback (no registered driver / no

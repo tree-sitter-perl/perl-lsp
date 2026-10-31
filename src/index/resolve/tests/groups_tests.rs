@@ -1969,6 +1969,81 @@ mod pack_symmetry {
         assert!(!has("noise.c"), "the disconnected file stays out: {refs:?}");
     }
 
+    /// An include path token names a FILE: goto-def answers the directive's
+    /// minted target, references answers every directive minted to the
+    /// same file — origin, open documents and registered files, through the
+    /// included-by edge, with no request-time header lookup. A registered
+    /// file whose edit dropped the directive leaves the image even though
+    /// its edge entry was never retracted.
+    #[test]
+    fn include_token_projections_read_the_minted_target() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("perl_lsp_inc_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let header = dir.join("inc.h");
+        std::fs::write(&header, "int shared(void);\n").unwrap();
+        let build = |name: &str, src: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, src).unwrap();
+            let fa = crate::build::language_driver::LanguageRegistry::compiled()
+                .for_id("cpp")
+                .unwrap()
+                .analyze_with_path(src, Some(&p));
+            (p, fa)
+        };
+        let (a_path, a) = build("a.c", "#include \"inc.h\"\nint a(void) { return shared(); }\n");
+        let (b_path, b) = build("b.c", "#include <inc.h>\nint b(void) { return 1; }\n");
+        let (c_path, c) = build("c.c", "int c(void) { return 2; }\n");
+        let header_str = header.to_string_lossy().into_owned();
+        assert_eq!(
+            a.pack.include_directives[0].target.as_deref(),
+            Some(header_str.as_str()),
+            "the driver mints the directive's target"
+        );
+
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        idx.register_symbols(a_path.clone(), Arc::new(a.clone()));
+        idx.register_symbols(b_path.clone(), Arc::new(b));
+        idx.register_symbols(c_path.clone(), Arc::new(c));
+
+        let store = OpenDocs::new();
+        let at_token = |fa: &FileAnalysis, key: FileKey| {
+            resolve(&store, fa, key, tree_sitter::Point { row: 0, column: 11 }, Some(&idx), OverrideScope::default())
+                .references()
+                .into_iter()
+                .filter_map(|r| match r.key {
+                    FileKey::Path(p) => Some((p, r.span.start.row)),
+                    FileKey::Url(_) => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let cs = resolve(
+            &store,
+            &a,
+            FileKey::Path(a_path.clone()),
+            tree_sitter::Point { row: 0, column: 11 },
+            Some(&idx),
+            OverrideScope::default(),
+        );
+        let defs = cs.definitions();
+        assert!(
+            matches!(defs.as_slice(), [d] if matches!(&d.key, FileKey::Path(p) if p == &header)),
+            "gd lands on the header file: {defs:?}"
+        );
+        assert_eq!(
+            at_token(&a, FileKey::Path(a_path.clone())),
+            vec![(a_path.clone(), 0), (b_path.clone(), 0)],
+            "both spellings reach the same file; the non-includer stays out"
+        );
+
+        // b.c's edit drops the directive; its stale edge member is rechecked.
+        let (_, b2) = build("b.c", "int b(void) { return 1; }\n");
+        idx.register_symbols(b_path.clone(), Arc::new(b2));
+        assert_eq!(at_token(&a, FileKey::Path(a_path.clone())), vec![(a_path, 0)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The hover/gd agreement invariant: hover presents the
     /// CandidateSet's top-ranked definition candidate, so a position answers
     /// BOTH verbs or NEITHER — hover-specific presentation aside, the two
