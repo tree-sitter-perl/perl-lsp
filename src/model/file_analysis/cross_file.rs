@@ -1245,10 +1245,25 @@ impl VisibilityAxis {
 }
 
 impl<'a> ScopedLookup<'a> {
+    /// The scope `origin` resolves names through: its visibility axis
+    /// (`VisibilityAxis::for_origin`, THE derivation) over `inner`. The only
+    /// constructor — a scope can't be built with an axis its origin didn't
+    /// derive. `visibility` is the origin language's routing fact
+    /// (`LanguageRegistry::pack_visibility`).
+    pub fn for_origin(
+        inner: &'a dyn CrossFileLookup,
+        origin: &FileAnalysis,
+        self_path: Option<&std::path::Path>,
+        visibility: PackVisibility,
+    ) -> Self {
+        let axis = VisibilityAxis::for_origin(origin, self_path, inner, visibility);
+        Self::new(inner, &origin.pack.include_closure, self_path, axis)
+    }
+
     /// Build the visibility set from a querying file's include closure plus its
     /// own path (a file always sees the classes it declares itself). Canonicalize
     /// the self path so it matches the candidates' canonical `CachedModule.path`.
-    pub fn new(
+    fn new(
         inner: &'a dyn CrossFileLookup,
         include_closure: &path_intern::ClosureList,
         self_path: Option<&std::path::Path>,

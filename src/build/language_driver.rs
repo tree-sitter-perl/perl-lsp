@@ -60,11 +60,6 @@ pub struct DriverCaps {
     /// + include-closure consumer eviction). Off = the Perl direct re-index
     /// path handles watcher/save events.
     pub pack_invalidation: bool,
-    /// A bare identifier can name a CROSS-FILE entity with no import
-    /// binding (macro / enum constant / global reached through the include
-    /// closure) — enables the raw-word goto-def/hover fallback lane outside
-    /// the CandidateSet.
-    pub cross_file_words: bool,
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
@@ -400,7 +395,6 @@ impl LanguageDriver for PackDriver {
             // a cached-only open is already full quality, nothing to heal.
             context_gather: self.gather_macros.is_some() || self.include_closure.is_some(),
             pack_invalidation: true,
-            cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
             ..Default::default()
         }

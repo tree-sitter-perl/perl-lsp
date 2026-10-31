@@ -1146,9 +1146,44 @@ impl<'a> CandidateSet<'a> {
                     if let Some(loc) = self.type_def_location(word, idx) {
                         return vec![loc];
                     }
+                    // A raw word naming a file-scope symbol no ref captured —
+                    // a macro use the expand-and-reparse erased, an enum
+                    // constant, a global: this file's own definition, else
+                    // the first visible candidate's.
+                    if let Some(span) = raw_word_def(analysis, word) {
+                        return vec![self.origin_decl(span)];
+                    }
+                    for cached in idx.visible_def_candidates(word) {
+                        if let Some(span) = raw_word_def(&idx.symbols_present(&cached), word) {
+                            if Url::from_file_path(&cached.path).is_ok() {
+                                return vec![RefLocation::at(
+                                    FileKey::Path(cached.path.clone()),
+                                    span,
+                                    AccessKind::Declaration,
+                                )];
+                            }
+                        }
+                    }
                 }
             }
         }
         Vec::new()
     }
+}
+
+/// The definition a raw `word` names in `analysis`: the `#define` of it when
+/// the file has one (the macro lane carries its span), else the earliest
+/// same-named symbol.
+fn raw_word_def(analysis: &FileAnalysis, word: &str) -> Option<Span> {
+    let named = || analysis.symbols().iter().filter(|s| s.name == word);
+    named()
+        .find(|s| {
+            analysis
+                .pack
+                .macro_defs
+                .iter()
+                .any(|m| m.name == word && m.selection_span == s.selection_span)
+        })
+        .or_else(|| named().min_by_key(|s| s.selection_span.start.row))
+        .map(|s| s.selection_span)
 }

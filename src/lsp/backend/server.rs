@@ -579,13 +579,12 @@ impl LanguageServer for Backend {
         self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, text, language) = match self.open_docs.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.text.clone(), doc.language),
+        let (analysis, text) = match self.open_docs.get_open(uri) {
+            Some(doc) => (Arc::clone(&doc.analysis), doc.text.clone()),
             None => return self.not_ready_or_null(uri),
         };
         let uri = uri.clone();
         self.run_query(move |cx| {
-            let self_path = uri.to_file_path().ok();
             let base_idx = cx.lookup();
             // Forward projection of the set. The source text unlocks the macro
             // variant lane (ranked, never pruned, see-through delegate) for pack
@@ -609,34 +608,10 @@ impl LanguageServer for Backend {
                 })
                 .collect();
             match locs.len() {
-                0 => {}
-                1 => return Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
-                _ => return Some(GotoDefinitionResponse::Array(locs)),
+                0 => None,
+                1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+                _ => Some(GotoDefinitionResponse::Array(locs)),
             }
-            // Member access (`obj->field`) flows through the set above: cpp
-            // mints a `MethodCall` ref core resolves like any other.
-            if crate::build::language_driver::LanguageRegistry::caps(language).cross_file_words {
-                // A macro / enum-constant / global usage (`OP_NULL`, `BASEOP`)
-                // — the raw word names a local-or-cross-file symbol. The lane
-                // sits outside the CandidateSet and still needs this file's
-                // closure scope; the set scopes itself at construction.
-                // Inside the `cross_file_words` caps gate — a pack-only lane.
-                let scoped = crate::model::file_analysis::ScopedLookup::new(
-                    base_idx,
-                    &analysis.pack.include_closure,
-                    self_path.as_deref(),
-                    crate::model::file_analysis::VisibilityAxis::IncludeClosure,
-                );
-                if let Some((target, span, _)) =
-                    cx.pack_xfile_word_at(&text, &analysis, pos, &scoped)
-                {
-                    return Some(GotoDefinitionResponse::Scalar(Location {
-                        uri: target.unwrap_or_else(|| uri.clone()),
-                        range: symbols::span_to_range(span),
-                    }));
-                }
-            }
-            None
         })
         .await
     }
@@ -1110,36 +1085,7 @@ impl LanguageServer for Backend {
                 .with_source(&text);
             let caps = crate::build::language_driver::LanguageRegistry::caps(language);
             if !caps.hover_info {
-                if let Some(h) = symbols::pack_hover(&cs, language) {
-                    return Some(h);
-                }
-                // The raw-word fallback outside the set (mirrors goto-def's):
-                // a macro / enum-constant / global whose token no ref captures
-                // — show its definition line.
-                if caps.cross_file_words {
-                    let self_path = uri.to_file_path().ok();
-                    // Inside the `cross_file_words` caps gate — pack-only.
-                    let scoped = crate::model::file_analysis::ScopedLookup::new(
-                        base_idx,
-                    &analysis.pack.include_closure,
-                    self_path.as_deref(),
-                    crate::model::file_analysis::VisibilityAxis::IncludeClosure,
-                );
-                    if let Some((_, _, line)) =
-                        cx.pack_xfile_word_at(&text, &analysis, pos, &scoped)
-                    {
-                        if !line.is_empty() {
-                            return Some(Hover {
-                                contents: HoverContents::Markup(MarkupContent {
-                                    kind: MarkupKind::Markdown,
-                                    value: format!("```{}\n{}\n```", language, line),
-                                }),
-                                range: None,
-                            });
-                        }
-                    }
-                }
-                return None;
+                return symbols::pack_hover(&cs, language);
             }
             symbols::perl_hover(&cs, cx.index())
         })

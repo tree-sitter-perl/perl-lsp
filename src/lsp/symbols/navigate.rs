@@ -114,10 +114,6 @@ pub(super) fn config_variant_leaf_display(
     Some(display.to_string())
 }
 
-/// Re-export: the raw-word key lives with the resolution seam
-/// (`resolve::word_at_point`); hover and the sig-help slot share it.
-pub use crate::index::resolve::word_at_point;
-
 /// documentHighlight: the set's origin-narrowed references projection
 /// (`highlights()`), adapted to LSP types — access classification becomes
 /// the highlight kind. Shared by the LSP handler and the

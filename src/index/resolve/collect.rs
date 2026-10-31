@@ -875,22 +875,19 @@ pub(super) fn collect_from_analysis(
         .collect();
 
     // Pack languages: name lookups during matching (invocant typing, the
-    // typedef chase) must resolve against THIS file's include closure — the
-    // same visibility goto-def uses at this file's cursors — or a scanned
-    // file's `o->op_type` types against a globally-arbitrary same-named
-    // candidate and the site silently drops out. Transparent for Perl
-    // (empty closure = the plain index).
+    // typedef chase) must resolve against THIS file's scope — the same
+    // visibility goto-def uses at this file's cursors — or a scanned file's
+    // `o->op_type` types against a globally-arbitrary same-named candidate
+    // and the site silently drops out.
+    // TODO(perl-scanned-scope): a scanned Perl file stays on the plain index
+    // although the set scopes a Perl ORIGIN by its search path; aligning the
+    // two changes Perl reference answers and costs a scope per scanned file,
+    // so it lands as its own measured change.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
+        Some(idx) if crate::build::language_driver::LanguageRegistry::is_pack_language(&analysis.language) => {
             let path = key_for_sort(key);
-            // Guarded by a non-empty include closure — a pack-only shape.
-            scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
-                idx,
-                &analysis.pack.include_closure,
-                Some(path.as_path()),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
-            ));
+            scoped_storage = Some(super::origin_scope(idx, analysis, Some(path.as_path())));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
             Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)

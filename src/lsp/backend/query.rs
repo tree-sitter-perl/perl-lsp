@@ -121,49 +121,5 @@ impl QueryCx {
     pub(super) fn sym_rows(&self, query: &str) -> Vec<crate::index::module_cache::SymRowHit> {
         self.module_index.sym_search(query)
     }
-
-    /// A bare identifier at the cursor that names a CROSS-FILE top-level
-    /// symbol — a macro (`OP_NULL`, `BASEOP`), enum constant, global, or
-    /// type. Resolves off the RAW word, so it works even when the macro
-    /// expanded AWAY in the analysis (the token isn't a captured ref).
-    /// Reads the target file + rehydrates its whole analysis on demand —
-    /// blocking-pool only, hence a `QueryCx` method.
-    /// Returns (target uri, def span, the def's source line for hover).
-    pub(super) fn pack_xfile_word_at(
-        &self,
-        text: &str,
-        doc_analysis: &crate::model::file_analysis::FileAnalysis,
-        pos: Position,
-        idx: &dyn crate::model::file_analysis::CrossFileLookup,
-    ) -> Option<(Option<Url>, crate::model::file_analysis::Span, String)> {
-        let word = symbols::word_at_point(text, symbols::position_to_point(pos))?;
-        // Pick the best DEFINITION among same-named symbols (a `#define X` plus
-        // its raw usages): prefer the `#define` line, else the earliest.
-        let pick = |analysis: &crate::model::file_analysis::FileAnalysis, src: &str| {
-            let lines: Vec<&str> = src.lines().collect();
-            let line_of = |s: &crate::model::file_analysis::Symbol| {
-                lines.get(s.selection_span.start.row).copied()
-            };
-            let cands: Vec<&crate::model::file_analysis::Symbol> =
-                analysis.symbols().iter().filter(|s| s.name == word).collect();
-            let sym = cands
-                .iter()
-                .find(|s| line_of(s).is_some_and(|l| l.trim_start().starts_with("#define")))
-                .or_else(|| cands.iter().min_by_key(|s| s.selection_span.start.row))
-                .copied()?;
-            Some((sym.selection_span, line_of(sym).map(|l| l.trim().to_string()).unwrap_or_default()))
-        };
-        // A macro defined in THIS file (`BASEOP` in op.h) — the usage isn't a
-        // captured ref, so find_definition missed it, but the def symbol is
-        // local. Fall back to the cross-file index for usages from elsewhere.
-        if let Some((span, line)) = pick(doc_analysis, text) {
-            return Some((None, span, line));
-        }
-        // Whichever candidate file yields a definition line.
-        idx.visible_def_candidates(word).iter().find_map(|cached| {
-            let text = std::fs::read_to_string(&cached.path).ok()?;
-            let (span, line) = pick(&idx.whole_present(cached), &text)?;
-            Some((Url::from_file_path(&cached.path).ok(), span, line))
-        })
-    }
 }
+

@@ -134,20 +134,7 @@ pub fn resolve<'a>(
     // roots ahead of the process @INC).
     let pack =
         crate::build::language_driver::LanguageRegistry::is_pack_language(&origin.language);
-    let scoped = module_index.map(|idx| {
-        let axis = crate::model::file_analysis::VisibilityAxis::for_origin(
-            origin,
-            self_path.as_deref(),
-            idx,
-            crate::build::language_driver::LanguageRegistry::pack_visibility(&origin.language),
-        );
-        crate::model::file_analysis::ScopedLookup::new(
-            idx,
-            &origin.pack.include_closure,
-            self_path.as_deref(),
-            axis,
-        )
-    });
+    let scoped = module_index.map(|idx| origin_scope(idx, origin, self_path.as_deref()));
     CandidateSet {
         files,
         origin,
@@ -165,6 +152,21 @@ pub fn resolve<'a>(
         visibility: std::sync::OnceLock::new(),
         visibility_override: None,
     }
+}
+
+/// The scope `origin` resolves names through, its language's routing fact
+/// read off the stamped `FileAnalysis.language`.
+pub fn origin_scope<'a>(
+    idx: &'a dyn CrossFileLookup,
+    origin: &FileAnalysis,
+    self_path: Option<&std::path::Path>,
+) -> crate::model::file_analysis::ScopedLookup<'a> {
+    crate::model::file_analysis::ScopedLookup::for_origin(
+        idx,
+        origin,
+        self_path,
+        crate::build::language_driver::LanguageRegistry::pack_visibility(&origin.language),
+    )
 }
 
 #[cfg(test)]
