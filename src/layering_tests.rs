@@ -1507,6 +1507,23 @@ fn packs_do_not_borrow_perls_current_package_token() {
     );
 }
 
+/// The namespace lane is written through `OpenSections`, the one closing
+/// rule: a section minted by hand never gets cut short by the next
+/// statement form at its depth, so a builder that pushes its own disagrees
+/// with the lookup about which section is in force.
+#[test]
+fn namespace_lane_is_written_through_open_sections() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("NamespaceRange {") || l.contains("namespace_ranges.push("));
+    let allow: &[(&str, usize, &str)] = &[(
+        "model/file_analysis/core_types.rs",
+        3,
+        "the struct itself and `OpenSections`' two writers",
+    )];
+    let drift = allowlist_drift("namespace lane writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,
