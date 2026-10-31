@@ -113,12 +113,25 @@ The build-time chain walker (`invocant_type_at_node`) does not distribute
 yet (`TODO(union-chain-walker)`); the registry's projections above are
 the query-time answer.
 
-Navigation reads every arm too. `FileAnalysis::receiver_classes(ref)` is
-the one answer to "which classes does this member access dispatch on":
-the frozen edge when the build stamped one, else
-`method_call_invocant_classes` — one class per `receiver_arms` arm that
-dispatches (`dispatch_classes_of`), so a receiver dispatches when ANY arm
-does. It returns `ReceiverClasses`; a consumer whose answer is one class
+Navigation reads every arm too. `FileAnalysis::receiver_classes(ref,
+index, policy)` is the one answer to "which classes does this member
+access dispatch on": one class per `receiver_arms` arm that dispatches
+(`dispatch_classes_of`), so a receiver dispatches when ANY arm does. The
+stamp (`stamp_method_call_targets`) resolves it once (`resolve_receiver`).
+Without an index it freezes the whole answer on the ref as a
+`FrozenReceiver`: every arm with its own resolution, an empty answer too,
+and whether the classes came from the value or from the enclosing-class
+guess. With an index it freezes only the single-class dispatch edge: a
+cross-file answer on the ref has nothing tracking its providers, so a
+union or empty answer stays in the resolution session's receiver memo
+(`resolve_receiver_shared`, keyed by analysis copy, ref and lookup),
+where the lints after the stamp in one publish read it. A freeze carries
+the view it was stamped under (`ReceiverView`) and answers a reader
+holding the same view, and under any other view only as
+`ReceiverPolicy::Edge`'s single-class edge (`FrozenReceiver::answers_for`);
+anything else resolves through the memo. `ReceiverPolicy::Stated` (diagnostics) drops
+the enclosing-class guess, so a lint never warns about a class the code
+never named. It returns `ReceiverClasses`; a consumer whose answer is one class
 (the frozen edge itself, a hash-key or domain owner, an overload family)
 asks `.single()` and says why at the call. Every other consumer iterates:
 

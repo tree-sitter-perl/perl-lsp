@@ -132,7 +132,7 @@ impl FileAnalysis {
                             let mname = mr.unqualified_target_name(self.names());
                             // One section per class the receiver may be.
                             let sections: Vec<String> = self
-                                .receiver_classes(mr, module_index)
+                                .receiver_classes(mr, module_index, ReceiverPolicy::Edge)
                                 .iter()
                                 .filter_map(|cn| self.method_hover_on(cn, mname, Some(&r.target_name), source, module_index))
                                 .collect();
@@ -211,7 +211,7 @@ impl FileAnalysis {
                     // same receiver projection find_def / refs_to read.
                     let method = r.unqualified_target_name(self.names());
                     let sections: Vec<String> = self
-                        .receiver_classes(r, module_index)
+                        .receiver_classes(r, module_index, ReceiverPolicy::Edge)
                         .iter()
                         .filter_map(|cn| self.method_hover_on(cn, method, None, source, module_index))
                         .collect();
@@ -247,7 +247,7 @@ impl FileAnalysis {
                         }
                     };
                     let sections: Vec<String> =
-                        self.receiver_classes(r, module_index).iter().filter_map(on).collect();
+                        self.receiver_classes(r, module_index, ReceiverPolicy::Edge).iter().filter_map(on).collect();
                     return (!sections.is_empty()).then(|| sections.join("\n\n---\n\n"));
                 }
                 RefKind::PackageRef => {

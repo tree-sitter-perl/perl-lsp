@@ -248,6 +248,15 @@ impl RefTable {
         self.evicted = true;
     }
 
+    /// `r`'s position in this table, when `r` is one of its refs (and not a
+    /// copy held elsewhere).
+    pub fn index_of(&self, r: &Ref) -> Option<usize> {
+        self.refs.as_ptr_range().contains(&(r as *const Ref)).then(|| {
+            // In range, so the offset is a whole number of elements.
+            (r as *const Ref as usize - self.refs.as_ptr() as usize) / std::mem::size_of::<Ref>()
+        })
+    }
+
     /// True when `evict` stripped this copy.
     pub fn is_evicted(&self) -> bool {
         self.evicted
