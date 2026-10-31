@@ -182,6 +182,24 @@ Two `PackFacts` fields (`layering_tests::pack_facts_fields_are_ratcheted`):
   only this file's own queries, and the store's input fingerprint folds every
   toolchain the project probes.
 
+The config a trail is ranked against is built in one place,
+`KnownConfig::from_defines` (`build/cpp_macro_model.rs`), from every
+`#define` site the closure holds (name + trail) and the toolchain's predefined
+names; build-side variant selection and navigation both reach it through
+`cpp_reparse::unit_config`. It then SETTLES: a knob whose every `#define`
+sits under a provably-false trail cannot be on, so it leaves the universe, and
+the pass repeats until nothing moves. It only shrinks the universe, so it
+terminates, and it never promotes a knob to ON (a later `#undef` could undo
+that; #255's undef spans are what would feed it). glibc's
+`__CORRECT_ISO_CPP_STRING_H_PROTO` is defined only under `defined
+__cplusplus && …`, so from a `.c` unit the `extern "C++"` overloads it
+guards rank unreachable, labelled `… undefined (__cplusplus undefined)`.
+The evaluator reads a term it does not model — a comparison, arithmetic, a
+function-like call such as `__GNUC_PREREQ (4, 4)` — as an opaque Unknown
+INSIDE the boolean structure, so `False && opaque` is still False; only a
+condition that does not parse is Unknown as a whole. A `\` line splice is
+whitespace.
+
 ### Parametric return
 
 An identity/projection macro (`#define ID(x) (x)`, `#define SEL2(a,b) (b)`,

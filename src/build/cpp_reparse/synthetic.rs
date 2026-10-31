@@ -452,52 +452,33 @@ fn field_block_variant_sites(
     out
 }
 
-/// The reachability config for variant ranking — every `#define` name is a
-/// knob (`universe`); unconditional ones are known ON (`defined`) ∪ the
-/// toolchain's predefined macros.
+/// The reachability config for variant ranking, from every gathered
+/// `#define` site.
 fn known_config(
     variants: &BTreeMap<String, Vec<Macro>>,
     toolchain: &crate::build::cpp_toolchain::Toolchain,
 ) -> crate::build::cpp_macro_model::KnownConfig {
-    let mut defined = std::collections::HashSet::new();
-    let mut universe = std::collections::HashSet::new();
+    let mut sites = crate::build::cpp_macro_model::DefineSites::default();
     for (name, defs) in variants {
-        universe.insert(name.clone());
-        if defs.iter().any(|m| m.guards.is_empty()) {
-            defined.insert(name.clone());
+        for m in defs {
+            sites.add(name, &m.guards);
         }
     }
-    known_config_with_toolchain(defined, universe, toolchain)
+    unit_config(sites, toolchain)
 }
 
-/// Fold `toolchain`'s predefined macros (`__GNUC__`, `__x86_64__`, …) into a
-/// reachability config as known-ON knobs — the unit's own toolchain, so a C
-/// unit ranks with `__cplusplus` undefined. The ONE seeding point for build-side
-/// variant selection AND goto-def/hover navigation (`ranked_macro_variants`),
-/// so minting and navigation can't disagree on which config arm is Active.
-pub fn known_config_with_toolchain(
-    mut defined: std::collections::HashSet<String>,
-    mut universe: std::collections::HashSet<String>,
+/// The config a unit ranks under: the closure's `#define` sites and
+/// `toolchain`'s predefined macros (`__GNUC__`, `__x86_64__`, …) — the
+/// unit's own toolchain, so a C unit ranks with `__cplusplus` undefined.
+/// Build-side variant selection AND goto-def/hover navigation
+/// (`ranked_macro_variants`) reach `KnownConfig::from_defines` through here.
+pub fn unit_config(
+    sites: crate::build::cpp_macro_model::DefineSites,
     toolchain: &crate::build::cpp_toolchain::Toolchain,
 ) -> crate::build::cpp_macro_model::KnownConfig {
-    if let Some(tc) = toolchain.info() {
-        seed_predefined(&mut defined, &mut universe, &tc.predefined_macros);
-    }
-    crate::build::cpp_macro_model::KnownConfig::new(defined, universe)
-}
-
-/// Predefined macros are unconditional defines: ON in `defined`, known knobs
-/// in `universe`. Split from the `Toolchain::info()` wrapper so the seeding is
-/// unit-testable without a compiler probe.
-pub fn seed_predefined(
-    defined: &mut std::collections::HashSet<String>,
-    universe: &mut std::collections::HashSet<String>,
-    predefined: &[(String, String)],
-) {
-    for (name, _) in predefined {
-        defined.insert(name.clone());
-        universe.insert(name.clone());
-    }
+    let info = toolchain.info();
+    let predefined = info.iter().flat_map(|tc| tc.predefined_macros.iter().map(|(name, _)| name.as_str()));
+    crate::build::cpp_macro_model::KnownConfig::from_defines(sites, predefined)
 }
 
 /// Advance a Point over `bytes` (newlines bump the row, reset the column).

@@ -82,3 +82,97 @@ fn rank_orders_active_unknown_unreachable() {
     assert!(unknown.rank() < unreachable.rank());
     assert_eq!(unreachable.label().as_deref(), Some("unreachable: WIN32 undefined"));
 }
+
+/// A function-like macro call in a guard is an opaque term, not a parse
+/// failure: the boolean structure around it still decides.
+#[test]
+fn a_call_shaped_term_is_opaque_inside_its_structure() {
+    let guard = t("defined __cplusplus && (__GNUC_PREREQ (4, 4) || __glibc_clang_prereq (3, 5))");
+    assert_eq!(
+        classify(&[guard.clone()], &cfg(&[], &[])),
+        Reachability::Unreachable { reason: "__cplusplus undefined".into() }
+    );
+    assert!(matches!(classify(&[guard], &cfg(&["__cplusplus"], &[])), Reachability::Unknown { .. }));
+}
+
+#[test]
+fn comparisons_and_arithmetic_are_opaque_terms() {
+    for expr in ["defined(A) && __GNUC__ >= 4", "defined(A) && (X + 1) * 2 != 3", "defined(A) && (B ? 1 : 0)", "defined(A) && -1"] {
+        assert_eq!(
+            classify(&[t(expr)], &cfg(&[], &[])),
+            Reachability::Unreachable { reason: "A undefined".into() },
+            "{expr}"
+        );
+        assert!(matches!(classify(&[t(expr)], &cfg(&["A"], &[])), Reachability::Unknown { .. }), "{expr}");
+    }
+}
+
+#[test]
+fn a_line_splice_continues_the_condition() {
+    let r = classify(&[t("defined(A) && \\ defined(B)")], &cfg(&["A"], &[]));
+    assert_eq!(r, Reachability::Unreachable { reason: "B undefined".into() });
+}
+
+/// A condition that does not parse is no answer, whatever it starts with.
+#[test]
+fn a_malformed_condition_is_unknown() {
+    for expr in ["0 && defined(", "0 && F(1", "0 && )"] {
+        assert!(matches!(classify(&[t(expr)], &cfg(&[], &[])), Reachability::Unknown { .. }), "{expr}");
+    }
+}
+
+fn sites(defs: &[(&str, &[CondTerm])]) -> DefineSites {
+    let mut s = DefineSites::default();
+    for (name, trail) in defs {
+        s.add(name, trail);
+    }
+    s
+}
+
+fn defined(name: &str) -> CondTerm {
+    CondTerm { test: CondTest::Defined(name.to_string()), negated: false }
+}
+
+/// A knob `#define`d only where the toolchain rules it out cannot be on, so
+/// what it guards is unreachable — and the label names the root cause.
+#[test]
+fn a_knob_defined_only_under_a_false_guard_settles_out() {
+    let only_cpp = [t("defined __cplusplus && __GNUC_PREREQ (4, 4)")];
+    let c = KnownConfig::from_defines(sites(&[("KNOB", &only_cpp)]), Vec::<String>::new());
+    assert_eq!(
+        classify(&[defined("KNOB")], &c),
+        Reachability::Unreachable { reason: "KNOB undefined (__cplusplus undefined)".into() }
+    );
+    let not_knob = CondTerm { test: CondTest::Defined("KNOB".into()), negated: true };
+    assert_eq!(classify(&[not_knob], &c), Reachability::Active);
+    // Under C++ the knob may be on: no answer.
+    let cpp = KnownConfig::from_defines(sites(&[("KNOB", &only_cpp)]), ["__cplusplus"]);
+    assert!(matches!(classify(&[defined("KNOB")], &cpp), Reachability::Unknown { .. }));
+}
+
+/// Settling is a fixed point: a knob defined only under a settled knob
+/// settles too, citing the same root.
+#[test]
+fn settling_chains_to_the_root_cause() {
+    let c = KnownConfig::from_defines(
+        sites(&[("KNOB2", &[defined("KNOB")]), ("KNOB", &[defined("__cplusplus")])]),
+        Vec::<String>::new(),
+    );
+    assert_eq!(
+        classify(&[defined("KNOB2")], &c),
+        Reachability::Unreachable { reason: "KNOB2 undefined (__cplusplus undefined)".into() }
+    );
+}
+
+/// One site that may hold keeps a knob: settling never guesses.
+#[test]
+fn a_knob_with_one_possible_site_stays() {
+    let c = KnownConfig::from_defines(
+        sites(&[("KNOB", &[defined("__cplusplus")]), ("KNOB", &[defined("OTHER")]), ("OTHER", &[defined("X")]), ("X", &[])]),
+        Vec::<String>::new(),
+    );
+    assert!(matches!(classify(&[defined("KNOB")], &c), Reachability::Unknown { .. }));
+    // An unconditional site anywhere makes it ON, whatever order the sites came in.
+    let on = KnownConfig::from_defines(sites(&[("K", &[defined("__cplusplus")]), ("K", &[])]), Vec::<String>::new());
+    assert_eq!(classify(&[defined("K")], &on), Reachability::Active);
+}

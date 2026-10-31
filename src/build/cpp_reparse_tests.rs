@@ -345,16 +345,14 @@ fn bodyless_define_joins_the_config_universe() {
     // #else arm provably unreachable — not the inverse.
     let tree = parse(&mut p, src);
     let variants = collect_macro_variants(&tree, src.as_bytes());
-    let mut defined = std::collections::HashSet::new();
-    let mut universe = std::collections::HashSet::new();
+    let mut sites = crate::build::cpp_macro_model::DefineSites::default();
     for (name, vs) in &variants {
-        universe.insert(name.clone());
-        if vs.iter().any(|m| m.guards.is_empty()) {
-            defined.insert(name.clone());
+        for m in vs {
+            sites.add(name, &m.guards);
         }
     }
-    assert!(defined.contains("MY_FEATURE"), "unconditional bodyless define is known ON");
-    let cfg = KnownConfig::new(defined, universe);
+    let cfg = KnownConfig::from_defines(sites, Vec::<String>::new());
+    assert!(cfg.defined.contains("MY_FEATURE"), "unconditional bodyless define is known ON");
     let lim = &variants["LIMIT"];
     let ifdef_arm = lim.iter().find(|m| m.def_line == 2).expect("#ifdef arm");
     let else_arm = lim.iter().find(|m| m.def_line == 4).expect("#else arm");
@@ -803,8 +801,8 @@ fn evict_analysis_caches_recovers_header_content_edits() {
 
 /// M5 lock: a toolchain-predefined macro (`__GNUC__`) is a known-ON knob in
 /// the reachability config — the arm it guards ranks ACTIVE, not
-/// "unreachable: __GNUC__ undefined". `seed_predefined` is the one seeding
-/// point navigation (`symbols::ranked_macro_variants`) and build-side variant
+/// "unreachable: __GNUC__ undefined". `KnownConfig::from_defines` is the one
+/// constructor navigation (`ranked_macro_variants`) and build-side variant
 /// selection (`known_config`) share.
 #[test]
 fn predefined_macros_seed_reachability_config() {
@@ -812,17 +810,10 @@ fn predefined_macros_seed_reachability_config() {
     use crate::model::file_analysis::{CondTerm, CondTest};
     let guards = vec![CondTerm { test: CondTest::Defined("__GNUC__".to_string()), negated: false }];
     // Unseeded: __GNUC__ is defined nowhere in the closure → provably absent.
-    let bare = KnownConfig::new(Default::default(), Default::default());
+    let bare = KnownConfig::from_defines(Default::default(), Vec::<String>::new());
     assert!(matches!(classify(&guards, &bare), Reachability::Unreachable { .. }));
     // Seeded with the toolchain's predefined set: the arm is ACTIVE.
-    let mut defined = std::collections::HashSet::new();
-    let mut universe = std::collections::HashSet::new();
-    crate::build::cpp_reparse::seed_predefined(
-        &mut defined,
-        &mut universe,
-        &[("__GNUC__".to_string(), "13".to_string())],
-    );
-    let seeded = KnownConfig::new(defined, universe);
+    let seeded = KnownConfig::from_defines(Default::default(), ["__GNUC__"]);
     assert_eq!(classify(&guards, &seeded), Reachability::Active);
 }
 

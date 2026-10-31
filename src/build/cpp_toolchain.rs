@@ -21,7 +21,7 @@
 //! Consumed through `Toolchain::info`, one probe per toolchain per process:
 //! a unit's `include_dirs` are the toolchain roots `cpp_includes::resolve`
 //! searches for it, and its `predefined_macros` seed the reachability config
-//! (`known_config_with_toolchain`). This module is the self-contained, tested
+//! (`unit_config`). This module is the self-contained, tested
 //! producer; `cpp_toolchain_tests.rs` exercises the parsers on captured
 //! compiler output so the tests never depend on the host's compiler.
 //!

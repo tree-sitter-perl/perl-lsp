@@ -118,3 +118,12 @@ fn a_fourth_capture_on_one_node_fails_the_load() {
     assert!(err.contains("line 2: a node holds at most three captures"), "{err}");
     assert!(crate::build::query_predicates::check_source("(x) @a @b @c ; @d @e\n(y \"@q @r\" @s) @t").is_ok());
 }
+
+/// Every arm capture parses back to itself.
+#[test]
+fn every_cond_capture_round_trips() {
+    for &cap in CondCap::ALL {
+        let name = format!("cond.{}", cap.spelling());
+        assert_eq!(Capture::parse(&name).ok(), Some(Capture::Cond(cap)), "@{name}");
+    }
+}

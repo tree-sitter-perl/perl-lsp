@@ -212,22 +212,15 @@ pub(crate) fn ranked_macro_variants(
     // cold reverse index — `modules_with_symbol` can be empty before it warms.
     let mut sites: Vec<(MacroDef, FileKey, Vec<CondTerm>)> = Vec::new();
     let mut seen: HashSet<(PathBuf, usize, usize)> = HashSet::new();
-    let mut defined: HashSet<String> = HashSet::new();
-    let mut universe: HashSet<String> = HashSet::new();
+    let mut defines = crate::build::cpp_macro_model::DefineSites::default();
     let mut push = |m: &MacroDef, k: &FileKey, arms: &CondArms, sites: &mut Vec<(MacroDef, FileKey, Vec<CondTerm>)>| {
         let key = (key_for_sort(k), m.selection_span.start.row, m.selection_span.start.column);
         if seen.insert(key) {
             sites.push((m.clone(), k.clone(), arms.trail(m.arm).to_vec()));
         }
     };
-    let note = |m: &MacroDef, defined: &mut HashSet<String>, universe: &mut HashSet<String>| {
-        universe.insert(m.name.clone());
-        if m.arm.is_none() {
-            defined.insert(m.name.clone());
-        }
-    };
     for m in &analysis.pack.macro_defs {
-        note(m, &mut defined, &mut universe);
+        defines.add(&m.name, analysis.pack.cond_arms.trail(m.arm));
         if m.name == word {
             push(m, origin_key, &analysis.pack.cond_arms, &mut sites);
         }
@@ -237,7 +230,7 @@ pub(crate) fn ranked_macro_variants(
     module_index.for_each_cached_file(&mut |cached| {
         let file_key = FileKey::Path(cached.path.clone());
         for m in &cached.analysis.pack.macro_defs {
-            note(m, &mut defined, &mut universe);
+            defines.add(&m.name, cached.analysis.pack.cond_arms.trail(m.arm));
             if m.name == word {
                 push(m, &file_key, &cached.analysis.pack.cond_arms, &mut sites);
             }
@@ -248,15 +241,9 @@ pub(crate) fn ranked_macro_variants(
         return Vec::new();
     }
 
-    // The include-guard idiom `#ifndef X … #define X … #endif` guards a macro's
-    // definition on its OWN not-yet-defined-ness. At that guard X is not yet
-    // defined, so X's own name must not count as `defined` when ranking X's
-    // variants — else every arm reads as unreachable. General over the pattern,
-    // not a per-name rule.
-    defined.remove(word);
     // Toolchain predefined macros (`__GNUC__`, …) are ON here exactly as they
     // are in build-side variant selection — navigation and minting share the
-    // one seeding point so they can't disagree on which arm is Active. The
+    // one constructor so they can't disagree on which arm is Active. The
     // asker's own toolchain: a `.c` file ranks with `__cplusplus` undefined.
     let origin_path = match origin_key {
         FileKey::Path(p) => Some(p.clone()),
@@ -266,7 +253,12 @@ pub(crate) fn ranked_macro_variants(
         Some(p) => crate::build::cpp_includes::unit_toolchain(&p),
         None => crate::build::cpp_toolchain::Toolchain::for_lang(crate::build::cpp_toolchain::Lang::Cpp),
     };
-    let cfg = crate::build::cpp_reparse::known_config_with_toolchain(defined, universe, &toolchain);
+    let mut cfg = crate::build::cpp_reparse::unit_config(defines, &toolchain);
+    // `#ifndef X … #define X …` guards a definition on its OWN
+    // not-yet-defined-ness, so X's own name must not count as ON when ranking
+    // X's variants — else every such arm reads as unreachable. General over
+    // the pattern, not a per-name rule.
+    cfg.defined.remove(word);
 
     // Rank, active-first. Never prune — a lower-ranked (e.g. win32) def stays,
     // labeled. The secondary (path, line, col) key is a TOTAL order so the
