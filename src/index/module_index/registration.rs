@@ -1828,6 +1828,13 @@ impl ModuleIndex {
                 self.core.edges.publish_child(parent, child);
             }
         }
+        // Include edges: header → this file. The directives ride every
+        // strip and the warm-stub skeleton (pack lane), so fresh, warm and
+        // whole registrations all publish them.
+        let includer = cached.path.to_string_lossy();
+        for target in analysis.pack.include_directives.iter().filter_map(|d| d.target.as_deref()) {
+            self.core.edges.publish_includer(target, &includer);
+        }
     }
 
     /// Remove a pack file's registrations: its `all_files` entry, its

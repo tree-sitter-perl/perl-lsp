@@ -638,27 +638,19 @@ fn every_return_arm_survives_enrichment() {
     assert_eq!(fa.sub_return_type_at_arity("pick", None), before, "enrichment keeps the arms");
 }
 
-// The by-id capability askers on the registry are THE include-token /
-// preprocessor gates for both serving surfaces (LSP handlers and their
-// CLI/--batch mirrors). Each answer is read off what the language's
-// document mints (`@import.path`, `@def.macro`), never a pack bool.
+// The by-id capability asker on the registry is the preprocessor gate for
+// both serving surfaces. Its answer is read off what the language's document
+// mints (`@def.macro`), never a pack bool.
 #[cfg(feature = "cpp")]
 #[test]
 fn capability_askers_answer_by_language_id() {
     use crate::build::language_driver::LanguageRegistry;
-    assert!(LanguageRegistry::has_include_tokens("cpp"),
-        "cpp declares include path tokens — CLI + server both gate on this");
     assert!(LanguageRegistry::has_preprocessor_macros("cpp"));
-    assert!(!LanguageRegistry::has_include_tokens("perl"),
+    assert!(!LanguageRegistry::has_preprocessor_macros("perl"),
         "perl has no LangPack: the asker answers false, no name branch");
-    assert!(!LanguageRegistry::has_preprocessor_macros("perl"));
-    assert!(!LanguageRegistry::has_include_tokens("no-such-language"));
+    assert!(!LanguageRegistry::has_preprocessor_macros("no-such-language"));
     #[cfg(feature = "python")]
-    {
-        assert!(!LanguageRegistry::has_include_tokens("python"),
-            "python imports are name-keyed, no path tokens");
-        assert!(!LanguageRegistry::has_preprocessor_macros("python"));
-    }
+    assert!(!LanguageRegistry::has_preprocessor_macros("python"));
 }
 
 // A function-pointer member (`int (*read)(char *)`) is a data member: the

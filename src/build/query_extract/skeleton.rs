@@ -1436,7 +1436,11 @@ impl SkeletonAnalysis {
             include_directives: self
                 .import_sites
                 .drain(..)
-                .map(|(raw, span)| (span, raw))
+                .map(|(raw, span)| crate::model::file_analysis::IncludeDirective {
+                    span,
+                    raw,
+                    target: None,
+                })
                 .collect(),
             use_rows: std::mem::take(&mut self.use_rows),
             domain_sites: std::mem::take(&mut self.domain_sites),

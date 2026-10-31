@@ -366,7 +366,9 @@ fn system_include_dirs() -> &'static [std::path::PathBuf] {
     DIRS.get_or_init(|| toolchain_info().map(|t| t.include_dirs.clone()).unwrap_or_default())
 }
 
-/// Resolve an include like `spdlog/common.h` or `<sys/mman.h>` to a real path.
+/// Resolve an include like `spdlog/common.h` or `<sys/mman.h>` to a real path —
+/// THE header lookup: the closure walk and each directive's minted
+/// `IncludeDirective::target` both come through here.
 /// Workspace-first: walk up from the file's dir, first ancestor `R` where
 /// `R/<inc>` exists wins (project/relative headers, quoted or angle-bracket).
 /// Only when no ancestor has it do the toolchain's system roots answer — so a
@@ -402,13 +404,6 @@ fn resolve_include(file_path: &std::path::Path, inc: &str) -> Option<std::path::
     None
 }
 
-/// Resolve one `#include` path token (quoted or angle-bracket) to a real file,
-/// workspace-first then toolchain roots. The public seam for goto-def on an
-/// `#include` path token (`FileAnalysis::include_directives`).
-pub fn resolve_include_path(file_path: &std::path::Path, inc: &str) -> Option<std::path::PathBuf> {
-    resolve_include(file_path, inc)
-}
-
 /// Every `#include` directive's raw path text, by a cheap per-line scan (no
 /// parse) — the header BFS only needs the paths, so this stays far lighter than
 /// `header_info`'s full tree parse. Quoted `"x.h"` and angle-bracket `<x.h>`
@@ -435,9 +430,47 @@ fn scan_include_directives(src: &str) -> Vec<String> {
     out
 }
 
+/// One file's include gather: the transitive closure plus where each of its
+/// OWN directives lands — memoized together because the BFS's first frontier
+/// already resolves every direct directive.
+#[derive(Debug, Default)]
+pub struct IncludeGather {
+    /// Canonical header paths reached transitively (sorted, unique).
+    pub closure: Vec<String>,
+    /// Bare directive path (`sys/mman.h`) → the canonical file it resolves
+    /// to. An unresolved directive has no entry.
+    direct: std::collections::HashMap<String, String>,
+}
+
+impl IncludeGather {
+    /// The file a raw directive token resolves to. `"foo.h"` captures the
+    /// string CONTENT, `<sys/x.h>` the whole token — both reach the bare path.
+    pub fn target_of(&self, raw: &str) -> Option<&str> {
+        let bare = raw.trim_matches(|c| c == '<' || c == '>' || c == '"');
+        self.direct.get(bare).map(String::as_str)
+    }
+
+    fn heap_bytes(&self) -> usize {
+        strings_heap_bytes(&self.closure)
+            + self.direct.iter().map(|(k, v)| k.len() + v.len() + 48).sum::<usize>()
+    }
+}
+
+/// Every direct directive of `src`, resolved and canonicalized — stats only,
+/// no header reads, so it runs even under the on-open cached-only gate.
+fn direct_targets(file_path: &std::path::Path, src: &str) -> std::collections::HashMap<String, String> {
+    scan_include_directives(src)
+        .into_iter()
+        .filter_map(|inc| {
+            let canon = resolve_include(file_path, &inc)?.canonicalize().ok()?;
+            Some((inc, canon.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
 fn include_closure_cache(
-) -> &'static GatherCache<std::path::PathBuf, u64, std::sync::Arc<Vec<String>>> {
-    static C: OnceLock<GatherCache<std::path::PathBuf, u64, std::sync::Arc<Vec<String>>>> =
+) -> &'static GatherCache<std::path::PathBuf, u64, std::sync::Arc<IncludeGather>> {
+    static C: OnceLock<GatherCache<std::path::PathBuf, u64, std::sync::Arc<IncludeGather>>> =
         OnceLock::new();
     C.get_or_init(|| {
         GatherCache::new_labeled(gather_cap_bytes(INCLUDE_CLOSURE_CACHE_MB), "gather-include-closure")
@@ -466,6 +499,16 @@ fn include_closure_cache(
 /// header off the search path) is NOT incompleteness — it's a legitimate
 /// closure boundary, deterministic across runs.
 pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, bool) {
+    let (gather, complete) = include_gather(file_path, src);
+    (gather.closure.clone(), complete)
+}
+
+/// `include_closure` plus each direct directive's target — the driver's
+/// include step, which mints `IncludeDirective::target` from it.
+pub fn include_gather(
+    file_path: &std::path::Path,
+    src: &str,
+) -> (std::sync::Arc<IncludeGather>, bool) {
     let key = file_path.to_path_buf();
     let inc_hash = include_set_hash(src);
     // The walk runs single-flight on a miss. A hit or a freshly-stored (COMPLETE)
@@ -474,7 +517,10 @@ pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, 
     let (arc, res) = include_closure_cache().resolve(key, inc_hash, || {
         if gather_cached_only() {
             // on-open placeholder: fill on background re-analyze
-            return Some(Fill::Transient(std::sync::Arc::new(Vec::new())));
+            return Some(Fill::Transient(std::sync::Arc::new(IncludeGather {
+                closure: Vec::new(),
+                direct: direct_targets(file_path, src),
+            })));
         }
         let mut seen = std::collections::HashSet::new();
         if let Ok(p) = file_path.canonicalize() {
@@ -482,10 +528,9 @@ pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, 
         }
         let mut out: Vec<String> = Vec::new();
         let mut complete = true;
-        let mut frontier: Vec<std::path::PathBuf> = scan_include_directives(src)
-            .iter()
-            .filter_map(|inc| resolve_include(file_path, inc))
-            .collect();
+        let direct = direct_targets(file_path, src);
+        let mut frontier: Vec<std::path::PathBuf> =
+            direct.values().map(std::path::PathBuf::from).collect();
         while !frontier.is_empty() {
             let mut next: Vec<std::path::PathBuf> = Vec::new();
             for path in frontier.drain(..) {
@@ -512,18 +557,18 @@ pub fn include_closure(file_path: &std::path::Path, src: &str) -> (Vec<String>, 
         }
         out.sort();
         out.dedup();
-        let arc = std::sync::Arc::new(out);
+        let arc = std::sync::Arc::new(IncludeGather { closure: out, direct });
         // Only memoize a COMPLETE closure: a transient truncation must re-gather
         // next call, not stick in the in-session cache.
         if complete {
-            let bytes = strings_heap_bytes(&arc);
+            let bytes = arc.heap_bytes();
             Some(Fill::Store(arc, bytes))
         } else {
             Some(Fill::Transient(arc))
         }
     });
     let complete = matches!(res, Resolution::Cached);
-    (arc.map(|a| (*a).clone()).unwrap_or_default(), complete)
+    (arc.unwrap_or_default(), complete)
 }
 
 /// Drop every per-file analysis cache entry for the given files (CANONICAL

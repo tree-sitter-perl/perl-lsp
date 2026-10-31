@@ -119,6 +119,15 @@ pub struct ModuleEdgeIndexes {
     /// Cross-package typeglob installs are the reason the key can differ
     /// from the module's registration name.
     pub(super) providers: DashMap<String, ModuleBucket>,
+    /// header path → paths of the files whose directives resolve to it
+    /// (inverse `IncludeDirective::target`): "who includes this header"
+    /// without a sweep. Keyed and membered by canonical PATH — an include
+    /// names a file, not a module — so it sits outside the module-keyed
+    /// purge record AND outside `clear()`: the rebuild re-feeds from the
+    /// name-keyed winners, and an include-only file wins no name. A stale
+    /// member (an edit dropped the directive, the file went) is rechecked
+    /// against the includer's current analysis at read.
+    pub(super) includers: DashMap<String, ModuleBucket>,
     /// The indexable-name list each FILE last fed — the symbols-derived
     /// half of `feed`, recorded from the WHOLE analysis so a re-feed over
     /// symbol-EVICTED cache copies (`rebuild_reverse_index*` after the
@@ -199,6 +208,7 @@ impl ModuleEdgeIndexes {
             children: DashMap::new(),
             specs: DashMap::new(),
             providers: DashMap::new(),
+            includers: DashMap::new(),
             name_records: DashMap::new(),
             fed_modules: DashMap::new(),
         }
@@ -282,6 +292,11 @@ impl ModuleEdgeIndexes {
         self.children.entry(parent.to_string()).or_default().insert(child);
     }
 
+    /// Publish ONE include edge (header → including file).
+    pub fn publish_includer(&self, header: &str, includer: &str) {
+        self.includers.entry(header.to_string()).or_default().insert(includer);
+    }
+
     /// Test-only REFERENCE implementation: the whole-map sweep the reverse
     /// record replaced. Kept so the record-driven purge can be checked
     /// against it directly rather than against hand-written expectations —
@@ -311,6 +326,7 @@ impl ModuleEdgeIndexes {
             ("children", &self.children),
             ("specs", &self.specs),
             ("providers", &self.providers),
+            ("includers", &self.includers),
         ] {
             for e in map.iter() {
                 let mut members = e.value().as_slice().to_vec();

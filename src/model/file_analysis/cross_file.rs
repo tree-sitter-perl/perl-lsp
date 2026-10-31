@@ -966,6 +966,13 @@ pub trait CrossFileLookup {
     fn direct_specializations_of(&self, _primary: &str) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// The registered files with a directive resolving to `header` (a
+    /// canonical path) — the inverse of `IncludeDirective::target`, each
+    /// rechecked against its current analysis. Default: none (no include
+    /// index).
+    fn includers_of(&self, _header: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        Vec::new()
+    }
     /// Registration-time loader-config shapes: every (load_name, shape)
     /// projected from `PluginLoad` facts across the workspace —
     /// INCLUDING packageless entrypoint scripts, which never enter the
@@ -1616,6 +1623,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn direct_specializations_of(&self, primary: &str) -> Vec<(String, String)> {
         self.inner.direct_specializations_of(primary)
+    }
+    fn includers_of(&self, header: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        self.inner.includers_of(header)
     }
     fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType)) {
         self.inner.for_each_loader_shape(f)

@@ -586,17 +586,6 @@ impl LanguageServer for Backend {
         let uri = uri.clone();
         self.run_query(move |cx| {
             let self_path = uri.to_file_path().ok();
-            // `#include "x.h"` path → the resolved header (`#include` = `use`).
-            // A path token, not a name — slot-shaped, so it stays ahead of the
-            // set (the ADR's honest boundary). The pack declares whether it has
-            // include tokens; asked, never named.
-            if crate::build::language_driver::LanguageRegistry::has_include_tokens(&language) {
-                if let Some(loc) = symbols::pack_include_definition(
-                    &analysis, symbols::position_to_point(pos), self_path.as_deref())
-                {
-                    return Some(GotoDefinitionResponse::Scalar(loc));
-                }
-            }
             let base_idx = cx.lookup();
             // Forward projection of the set. The source text unlocks the macro
             // variant lane (ranked, never pruned, see-through delegate) for pack
@@ -948,8 +937,8 @@ impl LanguageServer for Backend {
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.open_docs.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
 
@@ -960,26 +949,6 @@ impl LanguageServer for Backend {
         let degraded_flag = Arc::clone(&degraded);
         let out = self.run_query(move |cx| {
             let base_idx = cx.lookup();
-            let self_path = uri.to_file_path().ok();
-            // `#include` reverse — "who includes this header" — owns the path
-            // token exclusively (the backward mirror of include goto-def). The
-            // pack declares whether it has include tokens; asked, never named.
-            if crate::build::language_driver::LanguageRegistry::has_include_tokens(&language) {
-                if let Some(incs) = symbols::pack_include_references(
-                    &analysis, point, self_path.as_deref(), base_idx)
-                {
-                    let locs: Vec<Location> = incs
-                        .into_iter()
-                        .filter_map(|(path, span)| {
-                            Some(Location {
-                                uri: Url::from_file_path(&path).ok()?,
-                                range: symbols::span_to_range(span),
-                            })
-                        })
-                        .collect();
-                    return (!locs.is_empty()).then_some(locs);
-                }
-            }
             // (The reverse domain bridge — enum type → field-slot sites — is a
             // goto-implementation projection, NOT part of plain references.)
             // One construction, one projection — target/group/lexical
