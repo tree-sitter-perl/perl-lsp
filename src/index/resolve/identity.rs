@@ -354,7 +354,7 @@ pub fn resolve_symbol_scoped(
     }
     // A member access names the member on every class its receiver may be.
     if let Some(r) = analysis.member_token_at(point) {
-        let classes = analysis.method_call_invocant_classes(r, module_index);
+        let classes = analysis.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
         if let Some(t) = member_access_target(r, &classes, analysis, module_index, scope) {
             return Some(t);
         }

@@ -1120,7 +1120,7 @@ pub(super) fn collect_from_analysis(
                 {
                     // A union receiver dispatches on every arm, so the
                     // site references each arm's member.
-                    let resolved_classes = analysis.receiver_classes(r, module_index);
+                    let resolved_classes = analysis.receiver_classes(r, module_index, ReceiverPolicy::Edge);
                     let mut unmatched: Vec<String> = Vec::new();
                     let matched = match scope {
                         Some(pkg) => resolved_classes.into_iter().fold(false, |any, cn| {

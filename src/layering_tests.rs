@@ -1650,7 +1650,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/narrowing.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/narrowing.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/pipeline.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),

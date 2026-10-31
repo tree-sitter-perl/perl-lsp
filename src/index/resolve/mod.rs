@@ -22,7 +22,7 @@ use tower_lsp::lsp_types::Url;
 
 use crate::model::file_analysis::{
     AccessKind, CompletionCandidate, CrossFileLookup, FileAnalysis, HandlerOwner, MemberKind,
-    RefKind, Span, SymKind,
+    ReceiverPolicy, RefKind, Span, SymKind,
 };
 use crate::index::open_docs::{FileKey, OpenDocs};
 
