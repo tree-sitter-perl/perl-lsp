@@ -383,6 +383,8 @@ impl LanguageDriver for PackDriver {
         // routing from this origin-identity fact at construction.
         let mut fa = self.analyze_pipeline(source, path);
         fa.language = self.id.to_string();
+        let module = fa.pack.file_module.as_ref().map(|m| serde_json::to_string(m).expect("module serializes"));
+        crate::build::equiv_dump::record(source.as_bytes(), module.as_deref(), &fa);
         fa
     }
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {

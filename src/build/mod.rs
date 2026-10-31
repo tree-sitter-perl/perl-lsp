@@ -17,6 +17,8 @@ pub mod cpp_reparse;
 pub mod cpp_toolchain;
 // sentinel re-parse for member-access cursor context
 pub mod cursor_sentinel;
+// across-build whole-analysis dump (the L1 equivalence net)
+pub mod equiv_dump;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
 pub mod plugin;
