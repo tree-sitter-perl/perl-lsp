@@ -1,11 +1,7 @@
 use super::*;
 
 fn parse(source: &str) -> Tree {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .unwrap();
-    parser.parse(source, None).unwrap()
+    create_parser().parse(source, None).unwrap()
 }
 
 fn build_fa(source: &str) -> FileAnalysis {

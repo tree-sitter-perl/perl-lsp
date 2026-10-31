@@ -1601,6 +1601,18 @@ fn perl_pair_walks_go_through_pair_items() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// `builder::create_parser` is the one Perl parser constructor, so a grammar
+/// upgrade or a parser setting (timeout, logger) lands on every parse.
+#[test]
+fn perl_parsers_come_from_create_parser() {
+    let files = layer_files(&[Layer::Build, Layer::Index, Layer::Lsp, Layer::Cst]);
+    let seen = count_lines(&files, &|l| l.contains("set_language(&ts_parser_perl"));
+    let allow: &[(&str, usize, &str)] =
+        &[("build/builder/mod.rs", 1, "`create_parser` itself")];
+    let drift = allowlist_drift("Perl parser constructors", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,

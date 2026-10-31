@@ -1244,9 +1244,7 @@ impl<'a> Builder<'a> {
     }
 
     fn isa_type_of_string(&mut self, text: &str, mode: FrameworkMode) -> Option<InferredType> {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&ts_parser_perl::LANGUAGE.into()).ok()?;
-        let tree = parser.parse(text, None)?;
+        let tree = super::create_parser().parse(text, None)?;
         let src = text.as_bytes();
         let root = tree.root_node();
 
