@@ -8,7 +8,7 @@ impl<'a> Builder<'a> {
     /// Walks prev_sibling chain (tree-sitter CST traversal stays in builder).
     pub(super) fn extract_preceding_doc(&self, sub_node: Node<'a>, sub_name: &str) -> Option<String> {
         let source_str = std::str::from_utf8(self.source).ok()?;
-        let mut prev = sub_node.prev_sibling();
+        let mut prev = self.syntax.prev_sibling(sub_node);
         let mut comment_lines: Vec<String> = Vec::new();
 
         while let Some(node) = prev {
@@ -43,7 +43,7 @@ impl<'a> Builder<'a> {
                 }
                 _ => break, // hit code, stop
             }
-            prev = node.prev_sibling();
+            prev = self.syntax.prev_sibling(node);
         }
 
         if !comment_lines.is_empty() {

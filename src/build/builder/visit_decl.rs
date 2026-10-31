@@ -43,7 +43,7 @@ impl<'a> Builder<'a> {
             // Blocks create scopes (but only standalone blocks, not sub/class/for bodies)
             "block" | "do_block" => {
                 // Only create a Block scope if parent isn't already a scope-creator.
-                let parent_kind = node.parent().map(|p| p.kind()).unwrap_or("");
+                let parent_kind = self.syntax.parent(node).map(|p| p.kind()).unwrap_or("");
                 if !matches!(parent_kind,
                     "subroutine_declaration_statement" | "method_declaration_statement" |
                     "anonymous_subroutine_expression" |
@@ -190,7 +190,7 @@ impl<'a> Builder<'a> {
                 let body_span = crate::cst::nth_element(node, 0).map(node_to_span);
                 let scope = self.enclosing_sub_scope();
                 if let Some(scope) = scope {
-                    let arity_branch = classify_arity_branch(node, self.source);
+                    let arity_branch = classify_arity_branch(self.syntax, node, self.source);
                     self.return_infos.push(ReturnInfo {
                         scope,
                         arity_branch,
@@ -1531,8 +1531,9 @@ impl<'a> Builder<'a> {
                 _ => &[],
             };
             if !rhs_kinds.is_empty() {
-                if let Some(rhs) = node
-                    .parent()
+                if let Some(rhs) = self
+                    .syntax
+                    .parent(node)
                     .filter(|p| p.kind() == "assignment_expression")
                     .and_then(|p| p.child_by_field_name("right"))
                     .filter(|r| rhs_kinds.contains(&r.kind()))

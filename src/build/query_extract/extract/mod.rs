@@ -347,8 +347,11 @@ fn record_matches<'t>(
     let mut matches = cursor.matches(&compiled.query, root, source);
     let mut match_counter = 0usize;
     let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
+    let syntax = std::cell::OnceCell::new();
     while let Some(m) = matches.next() {
-        if !crate::build::query_predicates::admits(&compiled.query, m, root) {
+        if !crate::build::query_predicates::admits(&compiled.query, m, || {
+            syntax.get_or_init(|| crate::cst::SyntaxForest::new([root]))
+        }) {
             continue;
         }
         match_counter += 1;

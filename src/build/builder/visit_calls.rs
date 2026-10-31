@@ -7,7 +7,7 @@ use crate::cst::LiteralShape;
 impl<'a> Builder<'a> {
     pub(super) fn visit_var_ref(&mut self, node: Node<'a>) {
         // Skip if parent is a variable_declaration (handled by visit_variable_decl)
-        if let Some(parent) = node.parent() {
+        if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "variable_declaration" { return; }
             // Skip if inside a signature param
             if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter") {
@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
             // their closed shape. One site per variable suffices.
             if access == AccessKind::Read
                 && text.starts_with('$')
-                && !crate::cst::is_element_access_base(node)
+                && !crate::cst::is_element_access_base(self.syntax, node)
                 && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
                 self.record_escape_write(text.to_string(), node);
@@ -117,13 +117,13 @@ impl<'a> Builder<'a> {
             // the mutation-extension pass, not a trust break.
             let reassigns = access == AccessKind::Write
                 && (text.starts_with('$') || text.starts_with('%'))
-                && !crate::cst::is_element_access_base(node);
+                && !crate::cst::is_element_access_base(self.syntax, node);
             // Hash variables escape only by reference-taking (`\%h`):
             // a bare `%h` in a call or list FLATTENS TO COPIES — the
             // callee can't add keys to the original, so it's not an
             // escape (unlike a scalar, whose value IS the shared ref).
             if text.starts_with('%')
-                && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
+                && self.syntax.parent(node).is_some_and(|p| p.kind() == "refgen_expression")
                 && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
                 self.record_escape_write(text.to_string(), node);
@@ -259,7 +259,7 @@ impl<'a> Builder<'a> {
     /// package aggregate it names. `false` = a named container, not a deref.
     fn visit_deref_container(&mut self, node: Node<'a>) -> bool {
         let Some(operand) = crate::cst::deref_operand(node) else { return false };
-        if let Some(sigil) = crate::cst::container_sigil(node) {
+        if let Some(sigil) = crate::cst::container_sigil(self.syntax, node) {
             let access = self.determine_access(node);
             for (name, span, folded_from) in self.symbolic_variables(node, sigil) {
                 let idx = self.refs.len();
@@ -563,7 +563,7 @@ impl<'a> Builder<'a> {
             return false;
         }
         // Parent must be a print-family verb, with `node` in its argument slot.
-        let parent = match node.parent() {
+        let parent = match self.syntax.parent(node) {
             Some(p) => p,
             None => return false,
         };
