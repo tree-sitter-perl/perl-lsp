@@ -36,7 +36,21 @@ pub enum FileRole {
 #[allow(dead_code)]
 pub enum FileKey {
     Path(CanonicalPath),
-    Url(Url),
+    /// A document addressed by URL, with the canonical path it names (empty
+    /// when it names no file). Build it with `OpenDocs::key_of`, so a Url
+    /// key and a Path key for one file compare by the same spelling.
+    Url(Url, CanonicalPath),
+}
+
+impl FileKey {
+    /// The canonical file this key names; `None` for a URL that names no
+    /// file.
+    pub fn canonical_path(&self) -> Option<&CanonicalPath> {
+        match self {
+            FileKey::Path(p) => Some(p),
+            FileKey::Url(_, p) => (!p.as_os_str().is_empty()).then_some(p),
+        }
+    }
 }
 
 /// A document URL's canonical spelling: the file it names. A URL that
@@ -122,6 +136,13 @@ impl OpenDocs {
     /// open). `None` only when the URL names no file.
     ///
     /// Takes a shard read lock: the `for_each_open` deadlock rule applies.
+    /// The key a URL-addressed request resolves under.
+    ///
+    /// Takes a shard read lock: the `for_each_open` deadlock rule applies.
+    pub fn key_of(&self, url: &Url) -> FileKey {
+        FileKey::Url(url.clone(), self.file_path_of(url).unwrap_or_default())
+    }
+
     pub fn file_path_of(&self, url: &Url) -> Option<CanonicalPath> {
         let path = url.to_file_path().ok()?;
         if let Some(stamp) = self.open.get(url).map(|doc| doc.canonical_path.clone()) {

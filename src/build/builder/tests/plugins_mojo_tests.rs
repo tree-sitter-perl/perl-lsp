@@ -229,11 +229,11 @@ sub run {
 
     let producer_hits = results
         .iter()
-        .filter(|r| matches!(&r.key, crate::index::open_docs::FileKey::Path(p) if p == &producer_path))
+        .filter(|r| matches!(&r.key, crate::index::open_docs::FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&producer_path)))
         .count();
     let consumer_hits = results
         .iter()
-        .filter(|r| matches!(&r.key, crate::index::open_docs::FileKey::Path(p) if p == &consumer_path))
+        .filter(|r| matches!(&r.key, crate::index::open_docs::FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path)))
         .count();
 
     assert!(

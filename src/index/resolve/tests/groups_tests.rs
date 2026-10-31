@@ -139,7 +139,7 @@ my $val = $p->x;
     );
     let in_user: Vec<_> = locs
         .iter()
-        .filter(|l| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .filter(|l| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&user_path)))
         .map(|l| (l.span.start.row, l.span.start.column))
         .collect();
     assert!(
@@ -190,7 +190,7 @@ class Point {
     assert!(local_spans.is_empty(), "remote mint: no origin spans");
     assert_eq!(members.len(), 2, "reader + ctor-key members");
     assert!(
-        pinned_spans.iter().all(|(p, _)| p == &class_path),
+        pinned_spans.iter().all(|(p, _)| *p == crate::util::canonical_path::CanonicalPath::resolve(&class_path)),
         "pinned to the class file: {:?}",
         pinned_spans,
     );
@@ -250,7 +250,7 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
     .expect("no union sites");
     let user_edits: Vec<_> = edits
         .iter()
-        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&user_path)))
         .map(|(l, t)| (l.span.start.row, l.span.start.column, t.clone()))
         .collect();
     assert!(
@@ -349,7 +349,7 @@ fn package_var_our_renames_cross_file() {
     assert!(t.supports_cross_file_rename());
 
     let refs = refs_to(&store, Some(&idx), &t, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
     assert!(hit(&lib), "reaches the decl file. refs: {:?}", refs);
     assert!(hit(&app), "reaches the cross-file $Cfg::debug accesses. refs: {:?}", refs);
     // Both qualified accesses in app.pl + decl + unqualified in lib.
@@ -411,7 +411,7 @@ fn package_var_array_hash_globals_rename_name_tail_only() {
     // starting on the `$`/`@` sigil or the `Pkg::` qualifier.
     let app_edits: Vec<_> = refs
         .iter()
-        .filter(|r| matches!(&r.key, FileKey::Path(p) if p == &app))
+        .filter(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app)))
         .collect();
     assert_eq!(app_edits.len(), 2, "both element + slice accesses: {:?}", app_edits);
     for e in &app_edits {
@@ -467,7 +467,7 @@ fn package_var_main_global_does_not_cross_scripts() {
     )
     .expect("no union sites");
     assert!(
-        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &a)),
+        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&a))),
         "rename must stay in a.pl, never touch b.pl: {edits:?}",
     );
     assert_eq!(edits.len(), 2, "a.pl decl + bare read only: {edits:?}");
@@ -509,7 +509,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     );
     let hrefs = refs_to(&store, Some(&idx), &h, RoleMask::EDITABLE);
     assert!(
-        hrefs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &child)),
+        hrefs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&child))),
         "hierarchy rename must reach the Child override: {:?}",
         hrefs,
     );
@@ -548,7 +548,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
     idx.insert_workspace_for_test(cons.clone(), parse(cons_src));
 
     let hit = |refs: &[RefLocation], p: &PathBuf| {
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p))
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)))
     };
 
     // Source rename reaches the consumer's REMOTE `beta` token.
@@ -785,7 +785,7 @@ fn moo_attr_group_includes_cross_file_constructor_key() {
     .expect("no union sites");
     // app.pl row 1 is the `Widget->new(name => …)` ctor key.
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app)) && l.span.start.row == 1),
         "attr rename must reach the cross-file constructor key: {edits:?}",
     );
 }
@@ -840,7 +840,7 @@ fn inherited_attr_rename_reaches_subclass_constructor_key() {
     )
     .expect("no union sites");
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app)) && l.span.start.row == 1),
         "base attr rename must reach the subclass `Dog->new(name => …)` ctor key: {edits:?}",
     );
 }
@@ -876,7 +876,7 @@ fn corinna_field_subclass_does_not_bleed_to_ancestor() {
     )
     .expect("no union sites");
     assert!(
-        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &deriv)),
+        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&deriv))),
         "Corinna field rename must stay in the subclass, never touch the ancestor: {edits:?}",
     );
 }
@@ -915,7 +915,7 @@ fn overridden_attr_renames_whole_family_symmetrically() {
         .iter()
         .map(|(l, _)| match &l.key {
             FileKey::Path(p) => format!("{}:{}", p.file_name().unwrap().to_string_lossy(), l.span.start.row),
-            FileKey::Url(u) => format!("{u}:{}", l.span.start.row),
+            FileKey::Url(u, _) => format!("{u}:{}", l.span.start.row),
         })
         .collect();
         got.sort();
@@ -1122,7 +1122,7 @@ fn dbic_column_rename_reaches_cross_file_consumer_arg_key() {
     )
     .expect("no union sites");
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app)),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app))),
         "column rename reaches the cross-file `User->search({{ name }})` arg key: {edits:?}",
     );
 }
@@ -1190,7 +1190,7 @@ fn dbic_column_rename_owner_gated_excludes_framework_and_siblings() {
     // The owner's decl + its typed `$self->id` call both edit.
     let widget_rows: std::collections::BTreeSet<usize> = edits
         .iter()
-        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &widget))
+        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&widget)))
         .map(|(l, _)| l.span.start.row)
         .collect();
     assert!(widget_rows.contains(&2), "owner column decl (row 2) edits: {edits:?}");
@@ -1382,7 +1382,7 @@ fn test_internal_slot_pokes_join_group_cross_file() {
     .expect("no union sites");
     assert!(
         edits.iter().any(|(l, t)| {
-            matches!(&l.key, FileKey::Path(p) if p == &sub_path) && t == "extent"
+            matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&sub_path)) && t == "extent"
         }),
         "subclass slot poke renamed; edits: {:?}",
         edits,
@@ -1475,7 +1475,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
@@ -1528,7 +1528,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
@@ -1586,7 +1586,7 @@ fn refs_to_package_verb_reaches_cross_file_call_sites() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.file_name().unwrap().to_str().unwrap().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
 
@@ -1638,7 +1638,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
@@ -2221,7 +2221,7 @@ fn test_implementations_on_primary_enumerates_specialization_family() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(

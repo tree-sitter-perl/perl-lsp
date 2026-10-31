@@ -460,7 +460,7 @@ fn python_cross_file_function_refs_through_refs_to() {
                 crate::index::open_docs::FileKey::Path(p) => {
                     p.file_name().unwrap().to_string_lossy().to_string()
                 }
-                crate::index::open_docs::FileKey::Url(u) => u.to_string(),
+                crate::index::open_docs::FileKey::Url(u, _) => u.to_string(),
             };
             (f, l.access)
         })

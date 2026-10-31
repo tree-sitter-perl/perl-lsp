@@ -442,7 +442,7 @@ impl RefLocation {
 
     pub fn to_url(&self) -> Option<Url> {
         match &self.key {
-            FileKey::Url(u) => Some(u.clone()),
+            FileKey::Url(u, _) => Some(u.clone()),
             FileKey::Path(p) => Url::from_file_path(p).ok(),
         }
     }

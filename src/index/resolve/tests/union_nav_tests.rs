@@ -44,7 +44,7 @@ fn at<'a>(f: &'a Fixture, fa: &'a FileAnalysis, path: &Path, row: usize, col: us
 }
 
 fn in_file(locs: &[RefLocation], path: &Path, row: usize) -> bool {
-    locs.iter().any(|l| matches!(&l.key, FileKey::Path(p) if p == path) && l.span.start.row == row)
+    locs.iter().any(|l| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(path)) && l.span.start.row == row)
 }
 
 use std::path::Path;

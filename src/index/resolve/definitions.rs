@@ -168,8 +168,8 @@ impl<'a> CandidateSet<'a> {
         if let Some(idx) = self.idx() {
             if let Some((self_path, visible)) = idx.visibility_scope() {
                 let self_str = self_path.to_string_lossy().into_owned();
-                let decl_path = key_for_sort(&decl.key);
-                let decl_str = decl_path.to_string_lossy().into_owned();
+                let decl_path = decl.key.canonical_path();
+                let decl_str = decl_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
                 // Connected when the origin sees the def, when the def's TU
                 // includes the origin (the reverse `server.c` ⊇ `server.h`
                 // link), OR when the def's TU includes the DECL's file. The
@@ -182,7 +182,7 @@ impl<'a> CandidateSet<'a> {
                 // `db.c` textually.
                 let connected = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
                     let p = cached.path.to_string_lossy();
-                    cached.path != decl_path
+                    Some(&cached.path) != decl_path
                         && (visible.contains(p.as_ref())
                             || cached.analysis.pack.include_closure.contains(&self_str)
                             || cached.analysis.pack.include_closure.contains(&decl_str))
@@ -389,11 +389,11 @@ impl<'a> CandidateSet<'a> {
         // origin (same connectivity gate as the decl→def ranking).
         if let Some((self_path, visible)) = idx.visibility_scope() {
             let self_str = self_path.to_string_lossy().into_owned();
-            let origin_path = key_for_sort(&self.origin_key);
+            let origin_path = self.origin_key.canonical_path();
             let mut cached_files = idx.def_candidates(&name);
             cached_files.sort_by(|a, b| a.path.cmp(&b.path));
             for cached in cached_files {
-                if cached.path == origin_path {
+                if Some(&cached.path) == origin_path {
                     continue;
                 }
                 let p = cached.path.to_string_lossy().into_owned();

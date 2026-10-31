@@ -55,7 +55,7 @@ pub fn find_definition(
     let cs = crate::index::resolve::resolve(
         files,
         analysis,
-        crate::index::open_docs::FileKey::Url(uri.clone()),
+        files.key_of(uri),
         position_to_point(pos),
         Some(module_index),
         crate::index::resolve::OverrideScope::default(),
@@ -162,7 +162,7 @@ pub fn pack_include_definition(
 pub fn pack_include_references(
     analysis: &FileAnalysis,
     point: Point,
-    self_path: Option<&std::path::Path>,
+    self_path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &dyn CrossFileLookup,
 ) -> Option<Vec<(std::path::PathBuf, crate::model::file_analysis::Span)>> {
     let raw = analysis
@@ -186,7 +186,7 @@ pub fn pack_include_references(
     collect(base, analysis);
     // Per-FILE sweep; skip the cursor file (fresh copy already collected).
     module_index.for_each_cached_file(&mut |cached| {
-        if cached.path == base {
+        if &cached.path == base {
             return;
         }
         collect(&cached.path, &cached.analysis);
@@ -203,7 +203,7 @@ pub fn pack_include_references(
 pub fn pack_include_references(
     _analysis: &FileAnalysis,
     _point: Point,
-    _self_path: Option<&std::path::Path>,
+    _self_path: Option<&crate::util::canonical_path::CanonicalPath>,
     _module_index: &dyn CrossFileLookup,
 ) -> Option<Vec<(std::path::PathBuf, crate::model::file_analysis::Span)>> {
     None

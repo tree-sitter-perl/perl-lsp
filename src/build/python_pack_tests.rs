@@ -233,7 +233,7 @@ fn a_class_resolves_across_modules_by_identity() {
     let store = OpenDocs::new();
     let name_of = |k: &FileKey| match k {
         FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     let want_edits: Vec<(String, usize, usize)> =
         [("models.py", 0, 6), ("views.py", 0, 23), ("views.py", 2, 12), ("views.py", 5, 4)]
@@ -338,7 +338,7 @@ fn landing(
     use crate::index::resolve::{resolve, OverrideScope};
     let name_of = |k: &FileKey| match k {
         FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     let fa = idx.workspace_file_for_test(path).unwrap();
     let store = OpenDocs::new();
@@ -793,7 +793,7 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
         .into_iter()
         .map(|(l, _)| match &l.key {
             FileKey::Path(p) => (p.file_name().unwrap().to_string_lossy().to_string(), l.span.start.row, l.span.start.column),
-            FileKey::Url(u) => (u.to_string(), l.span.start.row, l.span.start.column),
+            FileKey::Url(u, _) => (u.to_string(), l.span.start.row, l.span.start.column),
         })
         .collect();
     edits.sort();
@@ -1128,7 +1128,7 @@ class Sub(Base):
             .map(|(l, _)| {
                 let name = match &l.key {
                     FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
-                    FileKey::Url(u) => u.to_string(),
+                    FileKey::Url(u, _) => u.to_string(),
                 };
                 (name, l.span.start.row, l.span.start.column)
             })

@@ -661,8 +661,8 @@ impl ModuleIndex {
     /// open-doc record stays as the last truth until a background write
     /// corrects it.
     pub fn mark_doc_closed(&self, path: &std::path::Path) -> Option<SurfaceDirty> {
-        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
-        self.open_doc_paths.remove(&canon);
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
+        self.open_doc_paths.remove(canon.as_path());
         let cm = self.all_files.get(&canon).map(|e| e.value().clone())?;
         let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, &cm);
         Some(self.record_and_dirty(&canon, &whole, SurfaceWrite::Background))
@@ -683,7 +683,7 @@ impl ModuleIndex {
         self.core.stamp_missing_import_gens();
     }
 
-    pub(super) fn registration_gen_of(&self, path: &std::path::Path) -> u64 {
+    pub(super) fn registration_gen_of(&self, path: &crate::util::canonical_path::CanonicalPath) -> u64 {
         self.core.registration_gen.get(path).map(|g| *g).unwrap_or(0)
     }
 
@@ -1185,9 +1185,9 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("epoch.shape.unregister_workspace_path");
         self.core.note_shape_change();
         self.remove_surface(path);
-        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.all_files.remove(&canon);
-        self.core.edges.remove_path_record(&canon);
+        self.core.edges.remove_path_record(canon.as_path());
         // The inverse of `record_workspace_projections`' shape half. Its own
         // retraction only fires when the SAME file re-registers, so a deleted
         // file would otherwise keep typing `$conf` in a plugin's `register`
@@ -1216,7 +1216,7 @@ impl ModuleIndex {
             entry
                 .value()
                 .as_ref()
-                .filter(|cm| cm.path == canon || cm.path == path)
+                .filter(|cm| cm.path == canon)
                 .map(|_| entry.key().clone())
         });
         if let Some(name) = name {
@@ -1826,7 +1826,7 @@ impl ModuleIndex {
         // gen mint — the epoch must move or the enrichment-key memo lies.
         crate::util::ghost_stats::count("epoch.shape.unregister_file");
         self.core.note_shape_change();
-        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
         let Some((_, old)) = self.all_files.remove(&canon) else {
             return;
         };

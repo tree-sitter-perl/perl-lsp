@@ -372,7 +372,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
         .iter()
-        .any(|r| matches!(&r.key, FileKey::Path(p) if p == &consumer_path));
+        .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path)));
     assert!(
         consumer_hit,
         "refs_to(HashKeyOfBridged(Schema::Result::Users), name) must include the \
@@ -383,7 +383,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     // Also: the producer's column def itself shows up (declaration entry).
     let producer_hit = refs
         .iter()
-        .any(|r| matches!(&r.key, FileKey::Path(p) if p == &producer_path));
+        .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&producer_path)));
     assert!(
         producer_hit,
         "refs_to must include the producer's `name` column def. hits: {:?}",
@@ -816,7 +816,7 @@ sub action {
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
         .iter()
-        .any(|r| matches!(&r.key, FileKey::Path(p) if p == &consumer_path));
+        .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path)));
     assert!(
         consumer_hit,
         "Mojo helper returning Parametric ResultSet must compose \
@@ -887,7 +887,7 @@ sub action {
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
         .iter()
-        .any(|r| matches!(&r.key, FileKey::Path(p) if p == &consumer_path));
+        .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path)));
     assert!(
         consumer_hit,
         "Mojo helper with `\\&Foo::bar` named-sub reference must compose \

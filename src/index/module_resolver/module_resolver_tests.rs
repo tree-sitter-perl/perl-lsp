@@ -98,7 +98,7 @@ sub new {
     core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
-        PathBuf::from("/y/Demo/Has/Event.pm"),
+        crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/y/Demo/Has/Event.pm")),
     );
 }
 
@@ -315,7 +315,7 @@ fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let found = resolve_module_paths(&[a.clone(), b.clone()], "Twin");
     assert_eq!(
         found,
-        vec![a.join("Twin.pm"), b.join("Twin.pm")],
+        vec![crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")), crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm"))],
         "both roots provide Twin; the relation must hold both, @INC order first",
     );
     // The winner is still exactly what `require` would load.
@@ -365,11 +365,11 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     let owner = idx
         .candidate_defining_sub("Twin", "only_in_b")
         .expect("only_in_b is defined by the shadowed provider");
-    assert_eq!(owner.path, b.join("Twin.pm"));
+    assert_eq!(owner.path, crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm")));
     let owner_a = idx
         .candidate_defining_sub("Twin", "only_in_a")
         .expect("only_in_a is defined by the winning provider");
-    assert_eq!(owner_a.path, a.join("Twin.pm"));
+    assert_eq!(owner_a.path, crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")));
 }
 
 #[test]

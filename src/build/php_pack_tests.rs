@@ -260,7 +260,7 @@ fn a_class_renames_across_files_through_its_identity() {
     let cs = resolve(&store, &user, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p_user.clone())), on_extends, Some(&idx), OverrideScope::default());
     let defs = cs.definitions();
     assert!(
-        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == p_model) && d.span.start.row == 2),
+        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&p_model)) && d.span.start.row == 2),
         "gd lands on the declaration: {defs:?}"
     );
 
@@ -561,7 +561,7 @@ fn php_landing(
     let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p)), at, Some(idx), OverrideScope::default());
     let short = |k: &FileKey| match k {
         FileKey::Path(p) => p.strip_prefix("/fake/php").unwrap().display().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     (
         cs.definitions().iter().map(|d| (short(&d.key), d.span.start.row, d.label.clone())).collect(),

@@ -510,7 +510,7 @@ fn requires_round_trip_holds_on_the_contract_fixtures() {
     };
     let covers = |locs: &[RefLocation], p: &PathBuf, pt: tree_sitter::Point| {
         locs.iter().any(|l| {
-            matches!(&l.key, FileKey::Path(q) if q == p)
+            matches!(&l.key, FileKey::Path(q) if *q == crate::util::canonical_path::CanonicalPath::resolve(p))
                 && l.span.start.row == pt.row
                 && l.span.start.column <= pt.column
                 && pt.column < l.span.end.column

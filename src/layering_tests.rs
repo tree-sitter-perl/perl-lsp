@@ -1543,11 +1543,10 @@ fn query_paths_never_canonicalize() {
 
     let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
     let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));
-    let allow: &[(&str, usize, &str)] = &[(
-        "index/module_cache/warm.rs",
-        1,
-        "the warm scan re-adopts the spelling its own writer persisted",
-    )];
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_cache/warm.rs", 1, "the warm scan re-adopts the spelling its own writer persisted"),
+        ("index/module_index/lookup.rs", 2, "ref-row retrieval hands back the paths registration shredded the rows under"),
+    ];
     drift.extend(allowlist_drift("CanonicalPath::from_stored", &seen, allow));
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }

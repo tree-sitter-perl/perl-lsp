@@ -44,12 +44,12 @@ fn candidate_set_rename_is_subset_of_references() {
 
     let refs = cs.references();
     assert!(
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))
             && r.access == AccessKind::Declaration),
         "references include the decl in A: {refs:?}",
     );
     assert!(
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)),
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))),
         "references include the call in B: {refs:?}",
     );
 
@@ -66,7 +66,7 @@ fn candidate_set_rename_is_subset_of_references() {
     }
     // And the B call site is edited (rename didn't silently shrink to one file).
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &path_b)),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))),
         "rename reaches the consumer call site: {edits:?}",
     );
 }
@@ -109,8 +109,8 @@ fn candidate_set_visibility_axis_flows_to_every_projection() {
     let wide = resolve(&store, &fa_a, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path_a.clone())), point, Some(&idx), OverrideScope::default());
     let wide_refs = wide.references();
     let wide_edits = wide.rename_edits("food").expect("perl rename never refuses");
-    assert!(wide_refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)));
-    assert!(wide_edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &path_b)));
+    assert!(wide_refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))));
+    assert!(wide_edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))));
     let wide_names = labels(&wide.complete("", true));
     assert!(wide_names.contains(&"foo".to_string()), "local sub gathered: {wide_names:?}");
     assert!(
@@ -426,7 +426,7 @@ fn goto_def_agrees_with_references_on_inherited_slot() {
     let decl_col = widget_src.lines().nth(2).unwrap().find("size").unwrap();
     let refs = cs.references();
     assert!(
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &widget)
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&widget))
             && r.span.start.row == 2
             && r.span.start.column == decl_col),
         "references reaches the base decl: {refs:?}",
@@ -434,7 +434,7 @@ fn goto_def_agrees_with_references_on_inherited_slot() {
 
     let defs = cs.definitions();
     assert!(
-        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if p == &widget)
+        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&widget))
             && d.span.start.row == 2
             && d.span.start.column == decl_col),
         "goto-def must land on the same base decl references already names: {defs:?}",
@@ -480,7 +480,7 @@ fn goto_def_agrees_with_references_on_template_method() {
     let decl_col = child_src.lines().nth(2).unwrap().find("step_one").unwrap();
     let refs = cs.references();
     assert!(
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &child)
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&child))
             && r.span.start.row == 2
             && r.span.start.column == decl_col),
         "references reaches the child decl: {refs:?}",
@@ -488,7 +488,7 @@ fn goto_def_agrees_with_references_on_template_method() {
 
     let defs = cs.definitions();
     assert!(
-        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if p == &child)
+        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&child))
             && d.span.start.row == 2
             && d.span.start.column == decl_col),
         "goto-def must land on the same child decl references already names: {defs:?}",

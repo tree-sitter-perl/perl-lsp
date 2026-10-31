@@ -341,7 +341,7 @@ pub(super) fn pack_symbol_def_location(
 pub(crate) fn key_for_sort(k: &FileKey) -> PathBuf {
     match k {
         FileKey::Path(p) => p.to_path_buf(),
-        FileKey::Url(u) => u.to_file_path().unwrap_or_else(|_| PathBuf::from(u.as_str())),
+        FileKey::Url(u, _) => k.canonical_path().map_or_else(|| PathBuf::from(u.as_str()), |p| p.to_path_buf()),
     }
 }
 

@@ -961,13 +961,13 @@ impl LanguageServer for Backend {
         let degraded_flag = Arc::clone(&degraded);
         let out = self.run_query(move |cx| {
             let base_idx = cx.lookup();
-            let self_path = uri.to_file_path().ok();
+            let self_path = cx.open_docs().file_path_of(&uri);
             // `#include` reverse — "who includes this header" — owns the path
             // token exclusively (the backward mirror of include goto-def). The
             // pack declares whether it has include tokens; asked, never named.
             if crate::build::language_driver::LanguageRegistry::has_include_tokens(&language) {
                 if let Some(incs) = symbols::pack_include_references(
-                    &analysis, point, self_path.as_deref(), base_idx)
+                    &analysis, point, self_path.as_ref(), base_idx)
                 {
                     let locs: Vec<Location> = incs
                         .into_iter()
@@ -1236,7 +1236,7 @@ impl LanguageServer for Backend {
         // Both halves are load-bearing: the gather runs through `run_query`
         // so it cannot stall the shared serve task, and it returns the cap
         // flag that decides `isIncomplete` below.
-        let key = FileKey::Url(uri.clone());
+        let key = self.open_docs.key_of(&uri);
         let (items, capped) = self
             .run_query(move |cx| {
                 symbols::completion_items(

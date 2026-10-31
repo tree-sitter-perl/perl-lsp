@@ -1,7 +1,6 @@
 //! `CanonicalPath`: a file path in the spelling every cross-file fact is
 //! keyed under, resolved once where the path enters the process.
 
-use std::borrow::Borrow;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
@@ -62,47 +61,9 @@ impl AsRef<Path> for CanonicalPath {
     }
 }
 
-impl Borrow<Path> for CanonicalPath {
-    fn borrow(&self) -> &Path {
-        &self.0
-    }
-}
-
 impl From<CanonicalPath> for PathBuf {
     fn from(p: CanonicalPath) -> PathBuf {
         p.0
-    }
-}
-
-impl PartialEq<Path> for CanonicalPath {
-    fn eq(&self, other: &Path) -> bool {
-        self.0.as_path() == other
-    }
-}
-
-impl PartialEq<PathBuf> for CanonicalPath {
-    fn eq(&self, other: &PathBuf) -> bool {
-        &self.0 == other
-    }
-}
-
-// Lookups by a raw spelling are fine — a registry only refuses to be
-// WRITTEN under one, and insertion takes a `CanonicalPath`.
-impl Borrow<PathBuf> for CanonicalPath {
-    fn borrow(&self) -> &PathBuf {
-        &self.0
-    }
-}
-
-impl PartialEq<&Path> for CanonicalPath {
-    fn eq(&self, other: &&Path) -> bool {
-        self.0.as_path() == *other
-    }
-}
-
-impl PartialEq<CanonicalPath> for PathBuf {
-    fn eq(&self, other: &CanonicalPath) -> bool {
-        self == &other.0
     }
 }
 
