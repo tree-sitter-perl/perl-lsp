@@ -1613,6 +1613,28 @@ fn perl_parsers_come_from_create_parser() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// The name-keyed winner slot (`IndexCore::cache`) is written only by
+/// `IndexCore::set_slot` / `clear_slot` / `offer_slot`, which move the
+/// enrichment epoch with the write. A direct write is a `get_cached` answer
+/// that changes under a memo still keyed on the old one.
+#[test]
+fn name_slot_writes_move_the_epoch() {
+    let files = layer_files(&[Layer::Index]);
+    let seen = count_lines(&files, &|l| {
+        [".cache.insert(", ".cache.remove(", ".cache.entry(", ".cache.clear(", ".cache.retain("]
+            .iter()
+            .any(|w| l.contains(w))
+            && !l.contains("bag_cache")
+    });
+    let allow: &[(&str, usize, &str)] = &[(
+        "index/module_index/index_core.rs",
+        3,
+        "`set_slot`, `clear_slot` and `offer_slot` themselves",
+    )];
+    let drift = allowlist_drift("name-slot writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,

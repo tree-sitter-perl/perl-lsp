@@ -508,7 +508,7 @@ impl ModuleIndex {
             if self.workspace_modules.remove(name).is_some() {
                 // The slot held the last workspace winner; an @INC
                 // re-resolve refills on demand.
-                self.core.cache.remove(name);
+                self.core.clear_slot(name);
             }
             return;
         }
@@ -530,7 +530,7 @@ impl ModuleIndex {
         if let Some(best) =
             best_candidate(&refs, name, &|m, n| self.module_defines_class(m, n))
         {
-            self.core.cache.insert(name.to_string(), Some(best));
+            self.core.set_slot(name, Some(best));
         }
     }
 
@@ -1237,7 +1237,7 @@ impl ModuleIndex {
         });
         if let Some(name) = name {
             self.core.edges.purge_module(&name);
-            self.core.cache.remove(&name);
+            self.core.clear_slot(&name);
             self.workspace_modules.remove(&name);
         }
     }
@@ -1768,30 +1768,15 @@ impl ModuleIndex {
             // per-process (the Rayon index registers in nondeterministic
             // order). Break the tie by the smallest canonical path — a
             // stable, order-independent choice.
-            use dashmap::mapref::entry::Entry;
-            match self.core.cache.entry(sym_name.clone()) {
-                Entry::Vacant(v) => {
-                    v.insert(Some(cached.clone()));
+            self.core.offer_slot(sym_name, &cached, |existing| {
+                let existing_is_class = self.module_defines_class(existing, sym_name);
+                match (incoming_is_class, existing_is_class) {
+                    (true, false) => true,  // Class beats Sub/value
+                    (false, true) => false, // Sub/value never beats a Class
+                    // Same rank: deterministic by path.
+                    _ => cached.path < existing.path,
                 }
-                Entry::Occupied(mut o) => {
-                    let replace = match o.get() {
-                        None => true,
-                        Some(existing) => {
-                            let existing_is_class =
-                                self.module_defines_class(existing, sym_name);
-                            match (incoming_is_class, existing_is_class) {
-                                (true, false) => true,  // Class beats Sub/value
-                                (false, true) => false, // Sub/value never beats a Class
-                                // Same rank: deterministic by path.
-                                _ => cached.path < existing.path,
-                            }
-                        }
-                    };
-                    if replace {
-                        o.insert(Some(cached.clone()));
-                    }
-                }
-            }
+            });
         }
         // A use-map class answers under its leaf too, in the widening
         // relation only — no slot, no `all_defs` entry, so the leaf never
@@ -1883,10 +1868,10 @@ impl ModuleIndex {
             if held {
                 match survivor {
                     Some(cand) => {
-                        self.core.cache.insert(name.clone(), Some(cand));
+                        self.core.set_slot(name, Some(cand));
                     }
                     None => {
-                        self.core.cache.remove(name);
+                        self.core.clear_slot(name);
                     }
                 }
             }
