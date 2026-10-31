@@ -53,6 +53,11 @@ impl<'a> PackPlaces<'a> {
         None
     }
 
+    /// Every name read that denotes a place.
+    pub(crate) fn name_reads(&self) -> impl Iterator<Item = Span> + '_ {
+        self.vars.keys().copied()
+    }
+
     /// A member access's receiver, carrying its place when it is a part of
     /// a variable that `valued` gives a value, so the receiver's narrowings
     /// reach the access.

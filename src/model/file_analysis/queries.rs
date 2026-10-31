@@ -215,7 +215,9 @@ impl FileAnalysis {
             let scope_end = scope_span.end;
             let region = Span { start: move_span.end, end: scope_end };
             let reset = m.resets.iter().map(|s| s.start).filter(|p| key(p) > key(&move_span.end)).min_by_key(key);
-            let cutoff = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset]
+            // A reset past the move's scope (a write in a sibling arm) must
+            // not stretch the cutoff beyond it.
+            let cutoff = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset, Some(scope_end)]
                 .into_iter()
                 .flatten()
                 .min_by_key(key)
