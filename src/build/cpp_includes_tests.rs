@@ -261,7 +261,7 @@ fn a_c_unit_resolves_system_headers_through_the_c_toolchain() {
         assert!(!libstdcxx(&math), "a C unit never reaches libstdc++'s <math.h> wrapper: {math:?}");
     }
     let cfg = |unit: &Path| {
-        crate::build::cpp_reparse::unit_config(Default::default(), &unit_toolchain(unit))
+        crate::build::cpp_reparse::unit_config(Default::default(), Some(&unit_toolchain(unit)))
     };
     assert!(!cfg(&c).defined.contains("__cplusplus"));
     assert!(cfg(&cpp).defined.contains("__cplusplus"));

@@ -99,6 +99,7 @@ impl<'a> CandidateSet<'a> {
                         PathBuf,
                         std::sync::Arc<crate::model::file_analysis::FileAnalysis>,
                     > = std::collections::HashMap::new();
+                    let ranker = super::collect::ArmRanker::new(self.origin, Some(idx));
                     for (name, cached) in idx.visible_defs_with_prefix(prefix, &visible) {
                         if !mask.contains(super::refs::index_role(idx, &cached.path)) {
                             continue;
@@ -111,14 +112,19 @@ impl<'a> CandidateSet<'a> {
                             .entry(cached.path.clone())
                             .or_insert_with(|| idx.whole_present(&cached))
                             .clone();
-                        let Some(sym) = whole
+                        // The declaration the asker's config reaches best;
+                        // one it cannot reach is still offered, last.
+                        let Some((reach, sym)) = whole
                             .symbols_named(&name)
                             .iter()
                             .map(|id| whole.symbol(*id))
-                            .find(|s| whole.is_linkage_visible(s))
+                            .filter(|s| whole.is_linkage_visible(s))
+                            .map(|s| (ranker.reach(&whole, s), s))
+                            .min_by_key(|(r, _)| r.rank())
                         else {
                             continue;
                         };
+                        let unreachable = matches!(reach, crate::build::cpp_macro_model::Reachability::Unreachable { .. });
                         let header = cached
                             .path
                             .file_name()
@@ -127,17 +133,24 @@ impl<'a> CandidateSet<'a> {
                         // An enum constant carries its parent enum as
                         // `package` — "opcode — opnames.h" reads the domain
                         // at a glance.
-                        let detail = match sym.package.as_deref() {
+                        let mut detail = match sym.package.as_deref() {
                             Some(p) if !p.is_empty() => format!("{} — {}", p, header),
                             _ => header,
                         };
+                        if let Some(why) = reach.label().filter(|_| unreachable) {
+                            detail = format!("{detail} ({why})");
+                        }
                         out.push(CompletionCandidate {
                             label: name.clone(),
                             is_static: false,
                             kind: sym.kind.clone(),
                             detail: Some(detail),
                             insert_text: None,
-                            sort_priority: crate::model::file_analysis::PRIORITY_CLOSURE,
+                            sort_priority: if unreachable {
+                                crate::model::file_analysis::PRIORITY_UNREACHABLE
+                            } else {
+                                crate::model::file_analysis::PRIORITY_CLOSURE
+                            },
                             additional_edits: vec![],
                             import_fact: None,
                             display_override: None,

@@ -349,23 +349,28 @@ impl<'a> CandidateSet<'a> {
             (Some(p), Some(q)) => pkg_agrees(true, Some(p), Some(q)),
             _ => false,
         };
-        // Sort key, best-first: owner match, then arity fit, then bodied, then
-        // local, then a total (path, row, col) order for cache determinism.
-        let mut cands: Vec<(bool, u8, bool, bool, PathBuf, usize, usize, RefLocation)> = Vec::new();
-        let push = |owner: bool,
+        // Sort key, best-first: reachable under the asker's config (the
+        // candidate's `#if` arm), owner match, arity fit, bodied, local, then a
+        // total (path, row, col) order for cache determinism.
+        let ranker = ArmRanker::new(analysis, Some(idx));
+        type Cand = (u8, bool, u8, bool, bool, PathBuf, usize, usize, RefLocation);
+        let mut cands: Vec<Cand> = Vec::new();
+        let push = |reach: crate::build::cpp_macro_model::Reachability,
+                    owner: bool,
                     fit: u8,
                     bodied: bool,
                     local: bool,
-                        key: &FileKey,
-                        span: Span,
-                        cands: &mut Vec<(bool, u8, bool, bool, PathBuf, usize, usize, RefLocation)>| {
+                    key: &FileKey,
+                    span: Span,
+                    cands: &mut Vec<Cand>| {
             if cands
                 .iter()
-                .any(|c| file_key_eq(&c.7.key, key) && c.7.span == span)
+                .any(|c| file_key_eq(&c.8.key, key) && c.8.span == span)
             {
                 return;
             }
             cands.push((
+                reach.rank(),
                 owner,
                 fit,
                 bodied,
@@ -378,7 +383,7 @@ impl<'a> CandidateSet<'a> {
                     span,
                     access: AccessKind::Declaration,
                     rewritable: true,
-                    label: None,
+                    label: reach.label(),
                 },
             ));
         };
@@ -388,7 +393,7 @@ impl<'a> CandidateSet<'a> {
                 && pkg_ok(s.package.as_deref())
         }) {
             let fit = s.param_arity().map(|a| a.fit(argc)).unwrap_or(0);
-            push(owner_matched(s.package.as_deref()), fit, has_body(analysis, s), true, &self.origin_key, s.selection_span, &mut cands);
+            push(ranker.reach(analysis, s), owner_matched(s.package.as_deref()), fit, has_body(analysis, s), true, &self.origin_key, s.selection_span, &mut cands);
         }
         // The receiver class's OWN cached file. A member method is not
         // linkage-visible, so the def-candidates table below (keyed on the
@@ -407,7 +412,7 @@ impl<'a> CandidateSet<'a> {
                         && pkg_ok(s.package.as_deref())
                 }) {
                     let fit = s.param_arity().map(|a| a.fit(argc)).unwrap_or(0);
-                    push(owner_matched(s.package.as_deref()), fit, has_body(&whole, s), false, &key, s.selection_span, &mut cands);
+                    push(ranker.reach(&whole, s), owner_matched(s.package.as_deref()), fit, has_body(&whole, s), false, &key, s.selection_span, &mut cands);
                 }
             }
         }
@@ -436,7 +441,7 @@ impl<'a> CandidateSet<'a> {
                         && pkg_ok(s.package.as_deref())
                 }) {
                     let fit = s.param_arity().map(|a| a.fit(argc)).unwrap_or(0);
-                    push(owner_matched(s.package.as_deref()), fit, has_body(&whole, s), false, &key, s.selection_span, &mut cands);
+                    push(ranker.reach(&whole, s), owner_matched(s.package.as_deref()), fit, has_body(&whole, s), false, &key, s.selection_span, &mut cands);
                 }
             }
         }
@@ -444,14 +449,15 @@ impl<'a> CandidateSet<'a> {
             return None;
         }
         cands.sort_by(|a, b| {
-            b.0.cmp(&a.0) // owner-matched first
-                .then_with(|| b.1.cmp(&a.1)) // arity fit, best first
-                .then_with(|| b.2.cmp(&a.2)) // bodied first
-                .then_with(|| b.3.cmp(&a.3)) // local first
-                .then_with(|| a.4.cmp(&b.4)) // path
-                .then_with(|| (a.5, a.6).cmp(&(b.5, b.6))) // row, col
+            a.0.cmp(&b.0) // reachable first
+                .then_with(|| b.1.cmp(&a.1)) // owner-matched first
+                .then_with(|| b.2.cmp(&a.2)) // arity fit, best first
+                .then_with(|| b.3.cmp(&a.3)) // bodied first
+                .then_with(|| b.4.cmp(&a.4)) // local first
+                .then_with(|| a.5.cmp(&b.5)) // path
+                .then_with(|| (a.6, a.7).cmp(&(b.6, b.7))) // row, col
         });
-        Some(cands.into_iter().map(|c| c.7).collect())
+        Some(cands.into_iter().map(|c| c.8).collect())
     }
 
     /// A declaration site in the origin file.

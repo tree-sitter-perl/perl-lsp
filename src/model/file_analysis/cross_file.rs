@@ -431,6 +431,13 @@ pub trait CrossFileLookup {
         0
     }
 
+    /// The index's slot for per-asker reachability configs, valid for one
+    /// `resolution_epoch`. `None` (the default): the caller rebuilds per
+    /// query, which is slower and never stale.
+    fn config_memo(&self) -> Option<&crate::model::toolchain::ConfigMemo> {
+        None
+    }
+
     /// Is a MethodCall re-stamp owed for `path`, last stamped at
     /// `stamped_at`?
     ///
@@ -1273,6 +1280,9 @@ impl<'a> ScopedLookup<'a> {
 impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
+    }
+    fn config_memo(&self) -> Option<&crate::model::toolchain::ConfigMemo> {
+        self.inner.config_memo()
     }
     fn is_dependency_path(&self, path: &std::path::Path) -> bool {
         self.inner.is_dependency_path(path)

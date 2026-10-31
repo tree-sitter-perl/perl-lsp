@@ -1259,6 +1259,31 @@ fn every_reduced_value_match_names_its_variants() {
     );
 }
 
+/// Rule #11: a query reads the asker's toolchain off its analysis
+/// (`PackFacts::toolchain`, minted by the build that used it), never
+/// re-derives it from a path. Only the build tier derives a toolchain.
+#[test]
+fn toolchains_are_derived_only_in_the_build_tier() {
+    let mut sites = Vec::new();
+    for (f, layer, _module) in source_files() {
+        if layer == Layer::Build {
+            continue;
+        }
+        let text = fs::read_to_string(&f).expect("read source");
+        for (ln, line) in text.lines().enumerate() {
+            if line.contains("unit_toolchain(") || line.contains("analysis_toolchain(") {
+                sites.push(format!("{}:{}", f.display(), ln + 1));
+            }
+        }
+    }
+    assert!(
+        sites.is_empty(),
+        "a query reads `analysis.pack.toolchain`; deriving a toolchain from a path \
+         outside `build/` re-derives what the build minted:\n{}",
+        sites.join("\n")
+    );
+}
+
 /// A bake-steering control must have exactly ONE reader.
 ///
 /// There are two producers of a conclusions row — the persist path's

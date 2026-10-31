@@ -200,6 +200,19 @@ INSIDE the boolean structure, so `False && opaque` is still False; only a
 condition that does not parse is Unknown as a whole. A `\` line splice is
 whitespace.
 
+A query ranks under the ASKER's config: `resolve::ranking_config` reads the
+asker's `PackFacts::toolchain` (never its path —
+`layering_tests::toolchains_are_derived_only_in_the_build_tier`) and every
+`#define` site the asker and the index hold, and the index holds the result
+for one `resolution_epoch` per (toolchain, fingerprint of the asker's own
+defines), at most eight entries (`ConfigMemo`). Macro variants
+(`ranked_macro_variants`) and declarations share it: reachability is the
+first sort key of the overload ranking and of `pack_symbol_def_location`, its
+verdict rides `RefLocation::label`, hover presents the top candidate, and
+completion offers a name whose every declaration is unreachable at
+`PRIORITY_UNREACHABLE`. `ArmRanker` builds the config only when a candidate
+sits in an arm, so a language that mints no arms never builds one.
+
 ### Parametric return
 
 An identity/projection macro (`#define ID(x) (x)`, `#define SEL2(a,b) (b)`,

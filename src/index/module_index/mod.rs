@@ -263,6 +263,8 @@ pub struct ModuleIndex {
     /// `root_registry` as of an enrichment epoch: its reach is a walk over
     /// every namer's uses, so it is derived once per epoch.
     root_registry_memo: Arc<std::sync::Mutex<Option<(u64, Arc<crate::model::file_analysis::RootRegistry>)>>>,
+    /// Per-asker reachability configs (`resolve::ranking_config`), one epoch.
+    config_memo: Arc<crate::model::toolchain::ConfigMemo>,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
     /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`

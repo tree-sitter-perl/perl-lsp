@@ -30,6 +30,9 @@ pub const PRIORITY_DYNAMIC: u8 = 50;
 /// Pack closure-universe names (headers' file-scope symbols) — sort after
 /// every in-scope identifier (the adapter renders this tier past `z`).
 pub const PRIORITY_CLOSURE: u8 = 90;
+/// A closure name whose every declaration sits in an `#if` arm the asker's
+/// config cannot reach — offered, after everything it can reach.
+pub const PRIORITY_UNREACHABLE: u8 = 95;
 
 // ---- Method resolution types ----
 

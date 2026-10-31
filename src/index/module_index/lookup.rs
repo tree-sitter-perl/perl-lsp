@@ -315,6 +315,10 @@ impl CrossFileLookup for ModuleIndex {
         self.enrichment_epoch()
     }
 
+    fn config_memo(&self) -> Option<&crate::model::toolchain::ConfigMemo> {
+        Some(&self.config_memo)
+    }
+
     fn flush_epoch(&self) -> u64 {
         self.core.flush_epoch.load(std::sync::atomic::Ordering::Relaxed)
     }

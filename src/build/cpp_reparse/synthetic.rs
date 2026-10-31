@@ -464,19 +464,19 @@ fn known_config(
             sites.add(name, &m.guards);
         }
     }
-    unit_config(sites, toolchain)
+    unit_config(sites, Some(toolchain))
 }
 
 /// The config a unit ranks under: the closure's `#define` sites and
 /// `toolchain`'s predefined macros (`__GNUC__`, `__x86_64__`, …) — the
-/// unit's own toolchain, so a C unit ranks with `__cplusplus` undefined.
-/// Build-side variant selection AND goto-def/hover navigation
-/// (`ranked_macro_variants`) reach `KnownConfig::from_defines` through here.
+/// unit's own toolchain, so a C unit ranks with `__cplusplus` undefined; no
+/// toolchain predefines nothing. Build-side variant selection AND navigation
+/// (`resolve::ranking_config`) reach `KnownConfig::from_defines` through here.
 pub fn unit_config(
     sites: crate::build::cpp_macro_model::DefineSites,
-    toolchain: &crate::build::cpp_toolchain::Toolchain,
+    toolchain: Option<&crate::build::cpp_toolchain::Toolchain>,
 ) -> crate::build::cpp_macro_model::KnownConfig {
-    let info = toolchain.info();
+    let info = toolchain.and_then(|t| t.info());
     let predefined = info.iter().flat_map(|tc| tc.predefined_macros.iter().map(|(name, _)| name.as_str()));
     crate::build::cpp_macro_model::KnownConfig::from_defines(sites, predefined)
 }

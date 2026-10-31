@@ -2823,7 +2823,7 @@ fn completion_tier_ladder_keeps_one_step_headroom() {
     use crate::model::file_analysis::{
         PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT, PRIORITY_BUILTIN, PRIORITY_CLOSURE,
         PRIORITY_DYNAMIC, PRIORITY_EXPLICIT_IMPORT, PRIORITY_FILE_WIDE, PRIORITY_LESS_RELEVANT,
-        PRIORITY_LOCAL, PRIORITY_UNIMPORTED,
+        PRIORITY_LOCAL, PRIORITY_UNIMPORTED, PRIORITY_UNREACHABLE,
     };
     let ladder = [
         PRIORITY_LOCAL,
@@ -2836,6 +2836,7 @@ fn completion_tier_ladder_keeps_one_step_headroom() {
         PRIORITY_BUILTIN,
         PRIORITY_DYNAMIC,
         PRIORITY_CLOSURE,
+        PRIORITY_UNREACHABLE,
     ];
     for w in ladder.windows(2) {
         assert!(

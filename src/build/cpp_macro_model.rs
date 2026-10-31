@@ -99,11 +99,12 @@ impl KnownConfig {
     fn settle(&mut self, mut pending: Vec<(String, Vec<Vec<Cond>>)>) {
         loop {
             let mut out: Vec<(String, String)> = Vec::new();
+            let asked = Asked { cfg: self, own: None };
             pending.retain(|(name, trails)| {
-                if !trails.iter().all(|t| conjunction(t, self) == Tri::False) {
+                if !trails.iter().all(|t| conjunction(t, &asked) == Tri::False) {
                     return true;
                 }
-                let root = trails.iter().map(|t| root_reason(t, self)).min().unwrap_or_default();
+                let root = trails.iter().map(|t| root_reason(t, &asked)).min().unwrap_or_default();
                 out.push((name.clone(), root));
                 false
             });
@@ -197,7 +198,7 @@ enum Cond {
 }
 
 impl Cond {
-    fn eval(&self, cfg: &KnownConfig) -> Tri {
+    fn eval(&self, cfg: &Asked) -> Tri {
         match self {
             Cond::Lit(b) => {
                 if *b {
@@ -238,10 +239,28 @@ impl Cond {
     }
 }
 
-fn defined_tri(x: &str, cfg: &KnownConfig) -> Tri {
-    if cfg.defined.contains(x) {
+/// A config as one question asks it: `own` is the macro whose variants are
+/// being ranked, which is never ON at its own definition — `#ifndef X …
+/// #define X …` guards a definition on X's not-yet-defined-ness.
+#[derive(Clone, Copy)]
+struct Asked<'a> {
+    cfg: &'a KnownConfig,
+    own: Option<&'a str>,
+}
+
+impl Asked<'_> {
+    fn on(&self, x: &str) -> bool {
+        self.own != Some(x) && self.cfg.defined.contains(x)
+    }
+    fn known(&self, x: &str) -> bool {
+        self.on(x) || self.cfg.universe.contains(x)
+    }
+}
+
+fn defined_tri(x: &str, cfg: &Asked) -> Tri {
+    if cfg.on(x) {
         Tri::True
-    } else if cfg.universe.contains(x) {
+    } else if cfg.known(x) {
         Tri::Unknown
     } else {
         Tri::False
@@ -275,16 +294,27 @@ fn term_cond(t: &CondTerm) -> Cond {
     if t.negated { Cond::Not(Box::new(c)) } else { c }
 }
 
-fn conjunction(conds: &[Cond], cfg: &KnownConfig) -> Tri {
+fn conjunction(conds: &[Cond], cfg: &Asked) -> Tri {
     conds.iter().fold(Tri::True, |acc, c| acc.and(c.eval(cfg)))
 }
 
-/// Evaluate the AND of a variant's enclosing guard terms under `cfg`.
+/// Evaluate the AND of a declaration's enclosing guard terms under `cfg`.
 pub fn classify(guards: &[CondTerm], cfg: &KnownConfig) -> Reachability {
+    classify_asked(guards, Asked { cfg, own: None })
+}
+
+/// Evaluate a variant of macro `own`'s guard terms: `own` itself never
+/// counts as ON while its own variants are ranked.
+pub fn classify_variant(guards: &[CondTerm], cfg: &KnownConfig, own: &str) -> Reachability {
+    classify_asked(guards, Asked { cfg, own: Some(own) })
+}
+
+fn classify_asked(guards: &[CondTerm], cfg: Asked) -> Reachability {
     if guards.is_empty() {
         return Reachability::Active;
     }
     let conds: Vec<Cond> = guards.iter().map(term_cond).collect();
+    let cfg = &cfg;
     match conjunction(&conds, cfg) {
         Tri::True => Reachability::Active,
         Tri::Unknown => Reachability::Unknown { guard: render_trail(guards) },
@@ -294,23 +324,19 @@ pub fn classify(guards: &[CondTerm], cfg: &KnownConfig) -> Reachability {
 
 /// The first atom that sinks a provably-false guard: a `defined(X)` that
 /// fails or a negated one that holds.
-fn failing_atom(conds: &[Cond], cfg: &KnownConfig) -> Option<(String, bool)> {
+fn failing_atom(conds: &[Cond], cfg: &Asked) -> Option<(String, bool)> {
     let mut atoms = Vec::new();
     for c in conds {
         c.atoms(true, &mut atoms);
     }
-    atoms.into_iter().find(|(x, positive)| {
-        let on = cfg.defined.contains(x);
-        let known = on || cfg.universe.contains(x);
-        (*positive && !known) || (!*positive && on)
-    })
+    atoms.into_iter().find(|(x, positive)| (*positive && !cfg.known(x)) || (!*positive && cfg.on(x)))
 }
 
 /// A short human reason for a provably-false guard (`X undefined`, `X
 /// defined`); a knob that settled out names the root it settled on.
-fn unreachable_reason(conds: &[Cond], cfg: &KnownConfig) -> String {
+fn unreachable_reason(conds: &[Cond], cfg: &Asked) -> String {
     match failing_atom(conds, cfg) {
-        Some((x, true)) => match cfg.settled.get(&x) {
+        Some((x, true)) => match cfg.cfg.settled.get(&x) {
             Some(root) => format!("{x} undefined ({root})"),
             None => format!("{x} undefined"),
         },
@@ -321,9 +347,9 @@ fn unreachable_reason(conds: &[Cond], cfg: &KnownConfig) -> String {
 
 /// The reason a settled knob carries: chained through any knob that
 /// settled before it, so a label names the config fact at the bottom.
-fn root_reason(conds: &[Cond], cfg: &KnownConfig) -> String {
+fn root_reason(conds: &[Cond], cfg: &Asked) -> String {
     match failing_atom(conds, cfg) {
-        Some((x, true)) => cfg.settled.get(&x).cloned().unwrap_or_else(|| format!("{x} undefined")),
+        Some((x, true)) => cfg.cfg.settled.get(&x).cloned().unwrap_or_else(|| format!("{x} undefined")),
         Some((x, false)) => format!("{x} defined"),
         None => "guard not satisfiable".to_string(),
     }

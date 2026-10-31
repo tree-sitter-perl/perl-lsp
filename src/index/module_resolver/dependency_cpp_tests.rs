@@ -286,3 +286,100 @@ fn a_frontier_placed_in_parallel_registers_as_the_serial_landing_does() {
     assert!(serial.iter().any(|l| l.starts_with("defs shared_fn ")), "a shared name has candidates");
     assert_eq!(serial, parallel);
 }
+
+/// glibc's `string.h` shape: the `extern "C++"` overloads sit under a knob
+/// defined only under `__cplusplus`, the C declaration under its `#else`.
+const STRING_H: &str = "\
+#ifndef _MYSTR_H
+#define _MYSTR_H 1
+#if defined __cplusplus && (__GNUC_PREREQ (4, 4) \\
+                            || __glibc_clang_prereq (3, 5))
+# define __CORRECT_ISO_CPP_STRING_H_PROTO
+#endif
+#ifdef __CORRECT_ISO_CPP_STRING_H_PROTO
+extern \"C++\"
+{
+extern char *strchr (char *__s, int __c);
+extern const char *strchr (const char *__s, int __c);
+}
+#else
+extern char *strchr (const char *__s, int __c);
+#endif
+#endif
+";
+
+/// goto-def's (row, label) answers, in rank order.
+fn ranked(idx: &ModuleIndex, file: &Path, at: Point) -> Vec<(usize, Option<String>)> {
+    let fa = std::sync::Arc::new(crate::build::source_files::analyze_file(cpp(), file, u64::MAX).unwrap());
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(file.to_path_buf()), at, Some(idx), OverrideScope::default());
+    cs.definitions().iter().map(|d| (d.span.start.row, d.label.clone())).collect()
+}
+
+/// A `.c` asker reaches the C declaration; the C++ overloads stay, ranked
+/// below it and labelled with why the asker cannot reach them.
+#[test]
+fn a_c_asker_ranks_the_c_declaration_above_the_cxx_overloads() {
+    use crate::build::cpp_toolchain::{Lang, Toolchain};
+    if Toolchain::for_lang(Lang::C).info().is_none() {
+        eprintln!("no C toolchain probe here — skipping");
+        return;
+    }
+    const MAIN_C: &str = "#include <mystr.h>\nchar *f(const char *s) { return strchr(s, 'c'); }\n";
+    let base = tree("strchr-c", &[("proj/src/main.c", MAIN_C), ("include/mystr.h", STRING_H)]);
+    let main = base.join("proj/src/main.c");
+    let idx = indexed(&base.join("proj"));
+    let got = ranked(&idx, &main, at(MAIN_C, "strchr"));
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], (13, None), "the C declaration first: {got:?}");
+    let why = Some("unreachable: __CORRECT_ISO_CPP_STRING_H_PROTO undefined (__cplusplus undefined)".to_string());
+    assert_eq!(got[1..], [(9, why.clone()), (10, why)], "{got:?}");
+}
+
+/// From a `.cpp` asker the overloads rank first. Whether the knob is on
+/// rests on `__GNUC_PREREQ (4, 4)`, whose value the evaluator does not
+/// model, so every candidate says so.
+#[test]
+fn a_cxx_asker_ranks_the_overloads_first() {
+    use crate::build::cpp_toolchain::{Lang, Toolchain};
+    if Toolchain::for_lang(Lang::Cpp).info().is_none() {
+        eprintln!("no C++ toolchain probe here — skipping");
+        return;
+    }
+    const MAIN_CPP: &str = "#include <mystr.h>\nchar *f(char *s) { return strchr(s, 'c'); }\n";
+    let base = tree("strchr-cpp", &[("proj/src/main.cpp", MAIN_CPP), ("include/mystr.h", STRING_H)]);
+    let main = base.join("proj/src/main.cpp");
+    let idx = indexed(&base.join("proj"));
+    let got = ranked(&idx, &main, at(MAIN_CPP, "strchr"));
+    let rows: Vec<usize> = got.iter().map(|(r, _)| *r).collect();
+    assert_eq!(rows, [9, 10, 13], "{got:?}");
+    assert_eq!(got[0].1.as_deref(), Some("if defined(__CORRECT_ISO_CPP_STRING_H_PROTO)"), "{got:?}");
+    assert_eq!(got[2].1.as_deref(), Some("if !defined(__CORRECT_ISO_CPP_STRING_H_PROTO)"), "{got:?}");
+}
+
+/// Completion drops nothing: a name declared only where the asker's config
+/// cannot reach is offered after every name it can, saying why.
+#[test]
+fn a_c_asker_completes_a_cxx_only_name_last() {
+    use crate::build::cpp_toolchain::{Lang, Toolchain};
+    use crate::model::file_analysis::{PRIORITY_CLOSURE, PRIORITY_UNREACHABLE};
+    if Toolchain::for_lang(Lang::C).info().is_none() {
+        eprintln!("no C toolchain probe here — skipping");
+        return;
+    }
+    let header = STRING_H.replace("#else\n", "extern int strcxx (int);\n#else\n");
+    const MAIN_C: &str = "#include <mystr.h>\nint f(void) { return str; }\n";
+    let base = tree("strchr-complete", &[("proj/src/main.c", MAIN_C), ("include/mystr.h", &header)]);
+    let main = base.join("proj/src/main.c");
+    let idx = indexed(&base.join("proj"));
+    let fa = std::sync::Arc::new(crate::build::source_files::analyze_file(cpp(), &main, u64::MAX).unwrap());
+    let store = OpenDocs::new();
+    let point = at(MAIN_C, "str;");
+    let cs = resolve(&store, &fa, FileKey::Path(main.clone()), point, Some(&idx), OverrideScope::default());
+    let items = cs.complete("str", false);
+    let item = |name: &str| items.iter().find(|c| c.label == name).unwrap_or_else(|| panic!("{name}: {items:?}"));
+    assert_eq!(item("strchr").sort_priority, PRIORITY_CLOSURE);
+    let cxx = item("strcxx");
+    assert_eq!(cxx.sort_priority, PRIORITY_UNREACHABLE);
+    assert!(cxx.detail.as_deref().is_some_and(|d| d.contains("unreachable: ")), "{:?}", cxx.detail);
+}

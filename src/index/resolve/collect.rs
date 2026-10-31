@@ -187,6 +187,69 @@ pub(crate) fn qualifier_at_point(source: &str, point: tree_sitter::Point) -> Opt
     (s < e).then(|| &source[s..e])
 }
 
+/// The reachability config `analysis` asks under: its own toolchain's
+/// predefined macros and every `#define` site it and the index hold,
+/// settled. Shared by macro-variant and declaration ranking, and held by the
+/// index for one `resolution_epoch` per (toolchain, own defines) — a sweep
+/// over every cached file's macro table is not a per-query cost.
+pub(crate) fn ranking_config(
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> std::sync::Arc<crate::build::cpp_macro_model::KnownConfig> {
+    use std::hash::{Hash, Hasher};
+    let build = || {
+        let mut defines = crate::build::cpp_macro_model::DefineSites::default();
+        for m in &analysis.pack.macro_defs {
+            defines.add(&m.name, analysis.pack.cond_arms.trail(m.arm));
+        }
+        if let Some(idx) = module_index {
+            idx.for_each_cached_file(&mut |cached| {
+                for m in &cached.analysis.pack.macro_defs {
+                    defines.add(&m.name, cached.analysis.pack.cond_arms.trail(m.arm));
+                }
+            });
+        }
+        crate::build::cpp_reparse::unit_config(defines, analysis.pack.toolchain.as_ref())
+    };
+    let Some((idx, memo)) = module_index.and_then(|i| i.config_memo().map(|m| (i, m))) else {
+        return std::sync::Arc::new(build());
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in &analysis.pack.macro_defs {
+        m.name.hash(&mut h);
+        analysis.pack.cond_arms.trail(m.arm).hash(&mut h);
+    }
+    memo.get_or_build(idx.resolution_epoch(), (analysis.pack.toolchain.clone(), h.finish()), build)
+}
+
+/// Reachability of declarations for one asker, its config built on the
+/// first candidate an arm encloses: a language with no arms never builds it.
+pub(super) struct ArmRanker<'a> {
+    analysis: &'a FileAnalysis,
+    module_index: Option<&'a dyn CrossFileLookup>,
+    cfg: std::cell::OnceCell<std::sync::Arc<crate::build::cpp_macro_model::KnownConfig>>,
+}
+
+impl<'a> ArmRanker<'a> {
+    pub(super) fn new(analysis: &'a FileAnalysis, module_index: Option<&'a dyn CrossFileLookup>) -> Self {
+        ArmRanker { analysis, module_index, cfg: Default::default() }
+    }
+
+    /// `sym`'s reachability, read from the arm table of the file it is in.
+    pub(super) fn reach(
+        &self,
+        owner: &FileAnalysis,
+        sym: &crate::model::file_analysis::Symbol,
+    ) -> crate::build::cpp_macro_model::Reachability {
+        let trail = owner.pack.cond_arms.trail(sym.arm);
+        if trail.is_empty() {
+            return crate::build::cpp_macro_model::Reachability::Active;
+        }
+        let cfg = self.cfg.get_or_init(|| ranking_config(self.analysis, self.module_index));
+        crate::build::cpp_macro_model::classify(trail, cfg)
+    }
+}
+
 /// Every `#define` of `word` across the origin file + the cached modules,
 /// ranked config-active first by the SAME total order goto-def and hover both
 /// consume (`docs/adr/macro-handling.md`): reachability rank, then
@@ -201,64 +264,38 @@ pub(crate) fn ranked_macro_variants(
     origin_key: &FileKey,
     module_index: &dyn CrossFileLookup,
 ) -> Vec<(crate::model::file_analysis::MacroDef, FileKey, crate::build::cpp_macro_model::Reachability)> {
-    use crate::build::cpp_macro_model::classify;
+    use crate::build::cpp_macro_model::classify_variant;
     use crate::model::file_analysis::{CondArms, CondTerm, MacroDef};
     use std::collections::HashSet;
 
-    // One pass over every cached module + this file: collect the def sites for
-    // `word` (config variants live in different headers — win32.h vs perl.h; we
-    // keep them ALL, never the last-writer only) AND the reachability config
-    // (the whole macro universe). Enumerating the cache directly is robust to a
-    // cold reverse index — `modules_with_symbol` can be empty before it warms.
+    // Every def site of `word` — config variants live in different headers
+    // (win32.h vs perl.h); we keep them ALL, never the last-writer only.
+    // Enumerating the cache directly is robust to a cold reverse index —
+    // `modules_with_symbol` can be empty before it warms.
     let mut sites: Vec<(MacroDef, FileKey, Vec<CondTerm>)> = Vec::new();
     let mut seen: HashSet<(PathBuf, usize, usize)> = HashSet::new();
-    let mut defines = crate::build::cpp_macro_model::DefineSites::default();
     let mut push = |m: &MacroDef, k: &FileKey, arms: &CondArms, sites: &mut Vec<(MacroDef, FileKey, Vec<CondTerm>)>| {
         let key = (key_for_sort(k), m.selection_span.start.row, m.selection_span.start.column);
         if seen.insert(key) {
             sites.push((m.clone(), k.clone(), arms.trail(m.arm).to_vec()));
         }
     };
-    for m in &analysis.pack.macro_defs {
-        defines.add(&m.name, analysis.pack.cond_arms.trail(m.arm));
-        if m.name == word {
-            push(m, origin_key, &analysis.pack.cond_arms, &mut sites);
-        }
+    for m in analysis.pack.macro_defs.iter().filter(|m| m.name == word) {
+        push(m, origin_key, &analysis.pack.cond_arms, &mut sites);
     }
     // Per-FILE sweep: the name-keyed cache view both repeats files and hides
     // a file that lost every name tie.
     module_index.for_each_cached_file(&mut |cached| {
         let file_key = FileKey::Path(cached.path.clone());
-        for m in &cached.analysis.pack.macro_defs {
-            defines.add(&m.name, cached.analysis.pack.cond_arms.trail(m.arm));
-            if m.name == word {
-                push(m, &file_key, &cached.analysis.pack.cond_arms, &mut sites);
-            }
+        for m in cached.analysis.pack.macro_defs.iter().filter(|m| m.name == word) {
+            push(m, &file_key, &cached.analysis.pack.cond_arms, &mut sites);
         }
     });
 
     if sites.is_empty() {
         return Vec::new();
     }
-
-    // Toolchain predefined macros (`__GNUC__`, …) are ON here exactly as they
-    // are in build-side variant selection — navigation and minting share the
-    // one constructor so they can't disagree on which arm is Active. The
-    // asker's own toolchain: a `.c` file ranks with `__cplusplus` undefined.
-    let origin_path = match origin_key {
-        FileKey::Path(p) => Some(p.clone()),
-        FileKey::Url(u) => u.to_file_path().ok(),
-    };
-    let toolchain = match origin_path {
-        Some(p) => crate::build::cpp_includes::unit_toolchain(&p),
-        None => crate::build::cpp_toolchain::Toolchain::for_lang(crate::build::cpp_toolchain::Lang::Cpp),
-    };
-    let mut cfg = crate::build::cpp_reparse::unit_config(defines, &toolchain);
-    // `#ifndef X … #define X …` guards a definition on its OWN
-    // not-yet-defined-ness, so X's own name must not count as ON when ranking
-    // X's variants — else every such arm reads as unreachable. General over
-    // the pattern, not a per-name rule.
-    cfg.defined.remove(word);
+    let cfg = ranking_config(analysis, Some(module_index));
 
     // Rank, active-first. Never prune — a lower-ranked (e.g. win32) def stays,
     // labeled. The secondary (path, line, col) key is a TOTAL order so the
@@ -266,7 +303,7 @@ pub(crate) fn ranked_macro_variants(
     let mut ranked: Vec<(MacroDef, FileKey, _)> = sites
         .into_iter()
         .map(|(m, k, trail)| {
-            let r = classify(&trail, &cfg);
+            let r = classify_variant(&trail, &cfg, word);
             (m, k, r)
         })
         .collect();
@@ -284,7 +321,9 @@ pub(crate) fn ranked_macro_variants(
 /// its def location — local symbols and the cross-file index, preferring a
 /// DEFINITION over a prototype: a definition's body mints a scope spanning
 /// the symbol (the universal `(function_definition) @scope`), a declaration
-/// doesn't, so `fix_optchain` see-through lands in op.c, not proto.h. Ties
+/// doesn't, so `fix_optchain` see-through lands in op.c, not proto.h. A
+/// declaration the asker's config can reach ranks above one it cannot (its
+/// `#if` arm, `ArmRanker`), and carries the verdict as its label. Ties
 /// break local-first then (path, position) so the pick is deterministic
 /// across the cache's randomized iteration order.
 pub(super) fn pack_symbol_def_location(
@@ -297,11 +336,14 @@ pub(super) fn pack_symbol_def_location(
     let has_body = |a: &FileAnalysis, s: &crate::model::file_analysis::Symbol| {
         a.scopes.iter().any(|sc| sc.span == s.span)
     };
-    // (bodied, local, path, row, col) — the bodied/local flags are inverted
-    // in the sort below so `true` ranks first.
-    let mut candidates: Vec<(bool, bool, PathBuf, usize, usize, RefLocation)> = Vec::new();
+    let ranker = ArmRanker::new(analysis, Some(module_index));
+    // (reach, bodied, local, path, row, col) — the bodied/local flags are
+    // inverted in the sort below so `true` ranks first.
+    let mut candidates: Vec<(u8, bool, bool, PathBuf, usize, usize, RefLocation)> = Vec::new();
     for sym in analysis.symbols().iter().filter(|s| s.name == name && wanted(&s.kind)) {
+        let reach = ranker.reach(analysis, sym);
         candidates.push((
+            reach.rank(),
             has_body(analysis, sym),
             true,
             key_for_sort(origin_key),
@@ -312,7 +354,7 @@ pub(super) fn pack_symbol_def_location(
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
                 rewritable: true,
-                label: None,
+                label: reach.label(),
             },
         ));
     }
@@ -327,7 +369,9 @@ pub(super) fn pack_symbol_def_location(
         }
         let whole = module_index.whole_present(&cached);
         for sym in whole.symbols().iter().filter(|s| s.name == name && wanted(&s.kind)) {
+            let reach = ranker.reach(&whole, sym);
             candidates.push((
+                reach.rank(),
                 has_body(&whole, sym),
                 false,
                 cached.path.clone(),
@@ -338,18 +382,19 @@ pub(super) fn pack_symbol_def_location(
                     span: sym.selection_span,
                     access: AccessKind::Declaration,
                     rewritable: true,
-                    label: None,
+                    label: reach.label(),
                 },
             ));
         }
     }
     candidates.sort_by(|a, b| {
-        b.0.cmp(&a.0) // bodied first
-            .then_with(|| b.1.cmp(&a.1)) // then local
-            .then_with(|| a.2.cmp(&b.2))
-            .then_with(|| (a.3, a.4).cmp(&(b.3, b.4)))
+        a.0.cmp(&b.0) // reachable first
+            .then_with(|| b.1.cmp(&a.1)) // bodied first
+            .then_with(|| b.2.cmp(&a.2)) // then local
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| (a.4, a.5).cmp(&(b.4, b.5)))
     });
-    candidates.into_iter().next().map(|c| c.5)
+    candidates.into_iter().next().map(|c| c.6)
 }
 
 pub(crate) fn key_for_sort(k: &FileKey) -> PathBuf {
