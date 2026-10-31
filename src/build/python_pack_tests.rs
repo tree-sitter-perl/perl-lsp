@@ -1507,7 +1507,11 @@ def f(self):
 #[test]
 fn a_member_receiver_down_to_a_variable_is_its_place() {
     use crate::model::file_analysis::{Binding, PathStep, Place, RefKind};
-    let fa = py_in("class A:\n    def go(self):\n        self.a.b.run()\n        f().x.run()\n        self.c.run()\n", None);
+    // Only a place a narrowing gives a value rides on its receiver.
+    let fa = py_in(
+        "class B:\n    pass\nclass A:\n    def go(self):\n        if isinstance(self.a.b, B):\n            self.a.b.run()\n        f().x.run()\n        if isinstance(self.c, B):\n            self.c.run()\n        self.d.run()\n",
+        None,
+    );
     let me = fa.symbols().iter().find(|s| s.name == "self" && s.kind == SymKind::Variable).expect("self param").id;
     let places: Vec<Option<Place>> = fa
         .refs()
@@ -1522,8 +1526,9 @@ fn a_member_receiver_down_to_a_variable_is_its_place() {
             Some(Place { root: Binding::Lexical(me), path: vec![member("a"), member("b")] }),
             None,
             Some(Place { root: Binding::Lexical(me), path: vec![member("c")] }),
+            None,
         ],
-        "a value-rooted receiver is no place"
+        "a value-rooted receiver is no place, and an unnarrowed one carries none"
     );
 }
 

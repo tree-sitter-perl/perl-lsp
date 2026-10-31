@@ -926,6 +926,8 @@ impl<'a> Builder<'a> {
         match binding {
             Binding::Lexical(sid) => &self.symbols[sid.0 as usize].name,
             Binding::Package(_, name) => name,
+            // Perl has no elided receiver: `$self` is a lexical.
+            Binding::Receiver(_) => "",
         }
     }
 

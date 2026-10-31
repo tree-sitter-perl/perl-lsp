@@ -183,8 +183,12 @@ resolved variable read is that variable's declaration plus a `Member` step
 per read. A guard whose subject is a member read (`isinstance(self.x, T)`,
 `dynamic_cast<D*>(o.b)`) narrows that place, cut by the same index: a
 member write is a write of its place, and a variable or member read that no
-further member read reads through is an opaque use. `this->x` has no root
-yet: `this` is no declared variable.
+further member read reads through is an opaque use. A bare member name in
+a member function is rooted at the body's elided receiver
+(`Binding::Receiver`); an explicit `this->x` has no root yet, since `this`
+is read as no name. A receiver carries its place (`Invocant::Place`) only
+where a narrowing gives that place a value; elsewhere the place would
+answer nothing, so the ref keeps its plain receiver.
 
 Truncation is `Place::disturbed_by`: a **write** disturbs the place and
 everything under it — the place itself, a proper prefix, or an

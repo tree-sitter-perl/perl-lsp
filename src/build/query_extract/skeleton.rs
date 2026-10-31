@@ -771,6 +771,20 @@ impl SkeletonAnalysis {
             }
             out
         };
+        // The same walk, answering whose receiver the body elides: the
+        // method itself, the root of every bare member name in it.
+        let elided_receiver: Vec<Option<SymbolId>> = {
+            let mut out: Vec<Option<SymbolId>> = Vec::with_capacity(self.scopes.len());
+            for sc in &self.scopes {
+                let method = if sc.implicit_receiver {
+                    sc.owner.filter(|sid| symbols.get(sid.0 as usize).is_some_and(|s| matches!(s.kind, SymKind::Method)))
+                } else {
+                    sc.parent.and_then(|p| out.get(p.0 as usize).copied().flatten())
+                };
+                out.push(method);
+            }
+            out
+        };
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -1035,9 +1049,12 @@ impl SkeletonAnalysis {
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
-        // Each resolved read's declaration, by the read's span: the root of
-        // the places built on it.
-        let mut var_at: std::collections::HashMap<Span, SymbolId> = std::collections::HashMap::new();
+        // The place each name read denotes, by the read's span: the root of
+        // the places built on it. A name no declaration in reach claims, in
+        // a body that elides its receiver, is a member of that receiver —
+        // C++'s lookup order, locals before members.
+        let mut var_at: std::collections::HashMap<Span, crate::model::file_analysis::Place> =
+            std::collections::HashMap::new();
         // Reads that found no LOCAL decl — a Variable ref is still minted for
         // each (below, once call/member spans are known) so query-time
         // cross-file resolution can chase it by name (a file-scope value like
@@ -1066,8 +1083,16 @@ impl SkeletonAnalysis {
                 }
                 None
             });
-            if let Some(did) = resolved {
-                var_at.insert(*read_span, did);
+            use crate::model::file_analysis::{Binding, PathStep, Place};
+            let place = match resolved {
+                Some(did) => Some(Place::variable(Binding::Lexical(did))),
+                None => elided_receiver.get(read_scope.0 as usize).copied().flatten().map(|m| Place {
+                    root: Binding::Receiver(m),
+                    path: vec![PathStep::Member(name.clone())],
+                }),
+            };
+            if let Some(place) = place {
+                var_at.insert(*read_span, place);
             }
             match resolved {
                 Some(did) => local_refs.push(crate::model::file_analysis::Ref {
@@ -1143,6 +1168,11 @@ impl SkeletonAnalysis {
             .into_iter()
             .filter_map(|n| Some((places.at(n.subject).filter(|p| !p.is_variable())?, n)))
             .collect();
+        // A receiver carries its place only where a narrowing gives that
+        // place a value; anywhere else the place answers nothing, and a box
+        // per member ref would be paid for nothing.
+        let valued: std::collections::HashSet<crate::model::file_analysis::Place> =
+            narrowed.iter().map(|(p, _)| p.clone()).collect();
         if !narrowed.is_empty() {
             use crate::model::file_analysis::Binding;
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
@@ -1150,9 +1180,22 @@ impl SkeletonAnalysis {
             let disturbances = places.disturbances(&wanted, &place_writes);
             let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
             for (place, n) in narrowed {
-                let Binding::Lexical(root) = &place.root else { continue };
-                let Some(root) = symbols.iter().find(|s| s.id == *root) else { continue };
-                let end = [disturbances.earliest_in(&place, n.region), rebinds.earliest_in(&root.name, n.region)]
+                // Nothing in the body rebinds an elided receiver.
+                let rebound = match &place.root {
+                    Binding::Lexical(root) => {
+                        let Some(root) = symbols
+                            .get(root.0 as usize)
+                            .filter(|s| s.id == *root)
+                            .or_else(|| symbols.iter().find(|s| s.id == *root))
+                        else {
+                            continue;
+                        };
+                        rebinds.earliest_in(&root.name, n.region)
+                    }
+                    Binding::Receiver(_) => None,
+                    Binding::Package(..) => continue,
+                };
+                let end = [disturbances.earliest_in(&place, n.region), rebound]
                     .into_iter()
                     .flatten()
                     .min()
@@ -1200,7 +1243,7 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
-                        let invocant = places.receiver(inv_span, invocant);
+                        let invocant = places.receiver(inv_span, invocant, &valued);
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1213,7 +1256,7 @@ impl SkeletonAnalysis {
                     // flow from it.
                     RefCap::MemberCall => {
                         let (inv_span, invocant) = r.invocant.clone()?;
-                        let invocant = places.receiver(inv_span, invocant);
+                        let invocant = places.receiver(inv_span, invocant, &valued);
                         RefKind::MethodCall {
                             invocant,
                             invocant_span: Some(inv_span),

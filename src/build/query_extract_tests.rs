@@ -1654,8 +1654,10 @@ void f() {
 
 #[test]
 fn cpp_member_move_flags_only_reads_of_the_moved_part() {
-    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` or of all of `p`
-    // is a use of the moved part until `p.msg` is written again.
+    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` is a use of the
+    // moved part until `p.msg` is written again. A read of all of `p` hands
+    // the whole on (a copy, a log line) and reads none of the moved state
+    // itself.
     let src = "\
 struct Msg {};
 struct Packet { Msg msg; int id; };
@@ -1677,7 +1679,29 @@ void g() {
     let mut reads: Vec<(String, usize)> =
         fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
     reads.sort();
-    assert_eq!(reads, vec![("p.msg".to_string(), 6), ("p.msg".to_string(), 13)]);
+    assert_eq!(reads, vec![("p.msg".to_string(), 6)]);
+}
+
+#[test]
+fn cpp_move_of_an_implicit_member_flags_its_reads() {
+    // A bare `name_` in a member function is `this->name_`: rooted at the
+    // body's receiver, so its move and its reads are one place.
+    let src = "\
+class C {
+  Name name_;
+  Name other_;
+  void f();
+};
+void C::f() {
+  sink(std::move(name_));
+  use(other_);
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    assert_eq!(reads, vec![("name_".to_string(), 8)]);
 }
 
 #[test]

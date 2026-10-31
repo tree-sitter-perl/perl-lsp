@@ -21,6 +21,9 @@ pub enum Binding {
     /// A package variable or `use constant` name: `(package, sigil+name)`.
     /// `our @ISA` under `package B` and `@B::ISA` are the same binding.
     Package(String, String),
+    /// The object a method body elides (C++'s `this`): its method's
+    /// symbol. A bare member name in that body is a step from it.
+    Receiver(SymbolId),
 }
 
 /// A root binding plus the steps from it. An empty path is the variable
@@ -162,6 +165,15 @@ impl Place {
     /// along the other's as far as the shorter goes.
     pub fn overlaps(&self, other: &Place) -> bool {
         self.root == other.root && self.path.iter().zip(&other.path).all(|(a, b)| a.overlaps(b))
+    }
+
+    /// Does reading this place read what `part` holds: the same root, and
+    /// this path running through all of `part`'s (`p.msg.size()` reads
+    /// `p.msg`; `p` and `p.id` do not)?
+    pub fn reads_into(&self, part: &Place) -> bool {
+        self.root == part.root
+            && self.path.len() >= part.path.len()
+            && self.path.iter().zip(&part.path).all(|(a, b)| a.overlaps(b))
     }
 
     /// Does `access` on `other` disturb what this place holds? A write

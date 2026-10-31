@@ -521,8 +521,9 @@ pub fn collect_diagnostics(
     }
 
     // 5g: undef-deref (D1) — a method or code call on a receiver the
-    // lattice proves is `Undef` at that point (an element deref autovivifies) (the `else` of `if defined`,
-    // the fall-through after `return if defined`, an `unless defined` body).
+    // lattice proves is `Undef` at that point (the `else` of `if defined`,
+    // the fall-through after `return if defined`, an `unless defined` body);
+    // an element deref autovivifies instead.
     // Runtime is a hard die. Maximal confidence — the type *is* undef, not
     // *may be* — so this is always-on `WARNING`, the one narrowing diagnostic
     // that doesn't wait behind an opt-in flag (rule #10: it reads the type
