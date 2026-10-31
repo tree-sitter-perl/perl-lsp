@@ -219,16 +219,40 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
 /// The compiled `@flow` query (`queries/perl/flow.scm`), compiled once.
 /// `Query::new` is expensive and `build` runs per file — see `warm_flow_query`
 /// for why this is warmed at startup rather than lazily on the first build.
-pub(super) fn flow_query() -> Option<&'static tree_sitter::Query> {
+///
+/// Each capture id comes with its parsed `Capture`, so the minter matches the
+/// closed vocabulary instead of spellings. The document is compiled into the
+/// binary, so a capture outside the vocabulary — or one the minter does not
+/// read — is a constant defect: it panics here, on the first build any test
+/// runs, rather than extracting nothing.
+pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::build::query_extract::Capture]) {
+    use crate::build::query_extract::Capture;
     use std::sync::OnceLock;
     static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
-    static FLOW_QUERY: OnceLock<Option<tree_sitter::Query>> = OnceLock::new();
-    FLOW_QUERY
-        .get_or_init(|| {
-            let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
-            tree_sitter::Query::new(&lang, FLOW_SCM).ok()
+    static FLOW_QUERY: OnceLock<(tree_sitter::Query, Vec<Capture>)> = OnceLock::new();
+    let (query, caps) = FLOW_QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+        let query = tree_sitter::Query::new(&lang, FLOW_SCM).expect("queries/perl/flow.scm compiles");
+        let caps = flow_capture_table(&query).unwrap_or_else(|e| panic!("queries/perl/flow.scm: {e}"));
+        (query, caps)
+    });
+    (query, caps)
+}
+
+/// The flow minter's capture table: each capture id's parsed `Capture`, or
+/// the first capture it would not read.
+pub(super) fn flow_capture_table(
+    query: &tree_sitter::Query,
+) -> Result<Vec<crate::build::query_extract::Capture>, String> {
+    use crate::build::query_extract::{Capture, FlowCap};
+    query
+        .capture_names()
+        .iter()
+        .map(|n| match Capture::parse(n) {
+            Ok(c @ Capture::Flow(FlowCap::Target | FlowCap::Clear | FlowCap::Rebind | FlowCap::Source)) => Ok(c),
+            _ => Err(format!("`@{n}` is not a capture the flow minter reads")),
         })
-        .as_ref()
+        .collect()
 }
 
 /// Force the flow query to compile now, off the parallel per-file path.

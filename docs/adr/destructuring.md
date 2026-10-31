@@ -17,7 +17,7 @@ supplies its sources.
    ArrayIndex(n) }`. The registry's `ArrayIndex` arm projects
    `element_at(n)` off whatever the RHS materializes to — at query time,
    index in hand, so a cross-file tuple return works. Perl mints the edge
-   from the `@flow.lhs` capture (queries/perl/flow.scm; paren-list slots);
+   from the `@flow.target` capture (queries/perl/flow.scm; paren-list slots);
    php from `@flow.slot` on a `list_literal` (queries/php/skeleton.scm),
    with the slot's position counted over the list text's top-level commas
    so `[, $b] = …` lands on index 1. A slurpy tail is
