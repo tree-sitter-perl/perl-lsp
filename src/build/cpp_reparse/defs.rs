@@ -3,6 +3,7 @@
 //! the body-cleanup + textual-expansion primitives they feed.
 
 use super::*;
+use crate::model::file_analysis::{CondTerm, CondTest};
 
 pub(super) const MACRO_DEF_QUERY: &str = r#"
 (preproc_def name: (identifier) @oname value: (preproc_arg) @obody)
@@ -180,6 +181,7 @@ pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
 pub fn collect_macro_defs(
     parser: &mut tree_sitter::Parser,
     source: &str,
+    arms: &mut crate::model::file_analysis::CondArms,
 ) -> Vec<crate::model::file_analysis::MacroDef> {
     use crate::model::file_analysis::{MacroDef, Span};
     let Some(tree) = parser.parse(source, None) else { return Vec::new() };
@@ -198,7 +200,7 @@ pub fn collect_macro_defs(
             name,
             params: m.params,
             body: m.body,
-            guards: m.guards,
+            arm: arms.intern(m.guards),
             selection_span: Span { start, end },
             delegate,
         });
@@ -609,8 +611,8 @@ pub fn collect_macro_variants(
 /// because each `#elif`/`#else` is the `alternative` child of the arm before
 /// it, and ascending through an `alternative` edge negates that arm's own
 /// condition.
-pub(super) fn guard_trail(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
-    let mut terms: Vec<String> = Vec::new();
+pub(super) fn guard_trail(node: tree_sitter::Node, src: &[u8]) -> Vec<CondTerm> {
+    let mut terms: Vec<CondTerm> = Vec::new();
     let mut prev = node;
     let mut cur = node.parent();
     while let Some(p) = cur {
@@ -625,7 +627,7 @@ pub(super) fn guard_trail(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
                     .and_then(|c| c.utf8_text(src).ok())
                     .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
                     .unwrap_or_else(|| "1".to_string());
-                terms.push(if is_alt { negate(&cond) } else { cond });
+                terms.push(CondTerm { test: CondTest::Expr(cond), negated: is_alt });
             }
             "preproc_ifdef" => {
                 // Node kind is shared by #ifdef and #ifndef; the leading
@@ -647,15 +649,8 @@ pub(super) fn guard_trail(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
                 // "!defined(X)" as a guard term (every macro
                 // in a guarded header would pick up its file's own include
                 // guard as a bogus UNKNOWN reachability label).
-                if ndef && !is_alt && is_self_defining_guard(p, &name, src) {
-                    // term suppressed — always-true past this point.
-                } else {
-                    let base = if ndef {
-                        format!("!defined({name})")
-                    } else {
-                        format!("defined({name})")
-                    };
-                    terms.push(if is_alt { negate(&base) } else { base });
+                if !(ndef && !is_alt && is_self_defining_guard(p, &name, src)) {
+                    terms.push(CondTerm { test: CondTest::Defined(name), negated: ndef != is_alt });
                 }
             }
             // #else contributes no condition of its own — the negation of the
@@ -733,18 +728,6 @@ fn is_self_defining_guard(p: tree_sitter::Node, name: &str, src: &[u8]) -> bool 
             && child.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok()) == Some(name)
     });
     hit
-}
-
-fn negate(cond: &str) -> String {
-    if let Some(inner) = cond.strip_prefix("!(").and_then(|s| s.strip_suffix(')')) {
-        inner.to_string()
-    } else if cond.starts_with("defined(") {
-        format!("!{cond}")
-    } else if cond.starts_with("!defined(") {
-        cond.trim_start_matches('!').to_string()
-    } else {
-        format!("!({cond})")
-    }
 }
 
 /// Largest a macro body may grow to during pre-expansion — a backstop

@@ -256,10 +256,7 @@ pub fn plan_member_blocks(
 
     // One synthetic base per confirmed macro: members parsed from the config-
     // active field-block variant, positioned at the real body tokens.
-    let toolchain = match path {
-        Some(p) => crate::build::cpp_includes::unit_toolchain(p),
-        None => crate::build::cpp_toolchain::Toolchain::for_lang(crate::build::cpp_toolchain::Lang::Cpp),
-    };
+    let toolchain = crate::build::cpp_includes::analysis_toolchain(path);
     let cfg = known_config(&variants, &toolchain);
     let mut bases: Vec<SyntheticBase> = Vec::new();
     for macro_name in &candidates {
@@ -388,7 +385,7 @@ fn synth_base(
 /// A field-block `#define` variant of a macro: its guard trail plus the body's
 /// original bytes and start Point (for positioning members).
 struct VariantSite {
-    guards: Vec<String>,
+    guards: Vec<crate::model::file_analysis::CondTerm>,
     /// The body's ORIGINAL bytes verbatim (offsets map 1:1 for positioning).
     body: String,
     start_point: tree_sitter::Point,

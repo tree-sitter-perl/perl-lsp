@@ -420,7 +420,13 @@ pub struct PackDriver {
     /// The macro identity/navigation lane collector (C preprocessor only):
     /// original source → every `#define` as a `MacroDef` (guard trail, def
     /// span, delegation callee). `None` for packs without a preprocessor.
-    collect_macro_defs: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::model::file_analysis::MacroDef>>,
+    collect_macro_defs: Option<
+        fn(&mut tree_sitter::Parser, &str, &mut crate::model::file_analysis::CondArms) -> Vec<crate::model::file_analysis::MacroDef>,
+    >,
+    /// The toolchain a file is built with (C preprocessor only), stamped on
+    /// its analysis so a query asked from it ranks `#if` arms under it.
+    /// `None` for packs with no toolchain.
+    unit_toolchain: Option<fn(Option<&Path>) -> crate::model::toolchain::Toolchain>,
     /// Member-block macros as roles (C preprocessor only): classify a macro
     /// pasted standalone into a struct/class body, BLANK the use (so the base
     /// parses clean), and mint the synthetic base + parent edges. `None` for
@@ -710,7 +716,8 @@ impl PackDriver {
         mint_erased_macro_reads(skel, source, src, map, ctx.plan.as_ref());
         // Macro identity lane: collect every `#define` off the ORIGINAL
         // source (spans in user coordinates, no splice remap needed).
-        let macro_defs = self.collect_macro_defs.map(|collect| collect(parser, source)).unwrap_or_default();
+        let macro_defs =
+            self.collect_macro_defs.map(|collect| collect(parser, source, &mut skel.cond_arms)).unwrap_or_default();
         // Nested-macro-body references: a use of macro `A` inside `B`'s
         // `#define` body is preproc-excluded from the code parse (one opaque
         // `preproc_arg` token), so no query capture reaches it and gr on `A`
@@ -783,6 +790,7 @@ impl PackDriver {
     ) {
         fa.pack.macro_defs = macro_defs;
         fa.pack.file_module = ctx.module.clone();
+        fa.pack.toolchain = self.unit_toolchain.map(|f| f(path));
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
@@ -833,6 +841,7 @@ fn cpp_driver() -> PackDriver {
         transform: Some(crate::build::cpp_reparse::preprocess_validated_with),
         gather_macros: Some(crate::build::cpp_reparse::included_macros_pre_expanded),
         collect_macro_defs: Some(crate::build::cpp_reparse::collect_macro_defs),
+        unit_toolchain: Some(crate::build::cpp_includes::analysis_toolchain),
         member_blocks: Some(crate::build::cpp_reparse::plan_member_blocks),
         include_closure: Some(crate::build::cpp_reparse::include_closure),
         input_fingerprint: Some(crate::build::cpp_includes::input_fingerprint),
@@ -860,6 +869,7 @@ fn python_driver() -> PackDriver {
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
+        unit_toolchain: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -887,6 +897,7 @@ fn php_driver() -> PackDriver {
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
+        unit_toolchain: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -914,6 +925,7 @@ fn r_driver() -> PackDriver {
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
+        unit_toolchain: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -939,6 +951,7 @@ fn cmake_driver() -> PackDriver {
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
+        unit_toolchain: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -1261,6 +1274,8 @@ fn remap_spans(
         member_writes,
         // scope-keyed — no spans to fix.
         class_scopes: _,
+        // arm ids and trails — no spans to fix.
+        cond_arms: _,
     } = skel;
 
     for s in symbols.iter_mut().chain(slot_writes.iter_mut().map(|w| &mut w.symbol)) {

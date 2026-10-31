@@ -251,6 +251,9 @@ pub struct SkeletonAnalysis {
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
+    /// The `#if` trails the file's declarations sit under, the table every
+    /// arm id points into. Carried onto `FileAnalysis.pack.cond_arms`.
+    pub cond_arms: crate::model::file_analysis::CondArms,
 }
 
 /// A write through a receiver (`obj.x = …`): the slot it would declare
@@ -1635,6 +1638,7 @@ impl SkeletonAnalysis {
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
+            cond_arms: std::mem::take(&mut self.cond_arms),
             ..Default::default()
         };
         let fold_ranges = fold_ranges_of(&self.scopes);
@@ -1881,6 +1885,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
         declared_with: None,
         deref_stack: s.deref_stack.clone(),
         arity: s.arity,
+        arm: crate::model::file_analysis::ArmId::NONE,
     }
 }
 

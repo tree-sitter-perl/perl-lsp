@@ -7,4 +7,5 @@ pub mod conventions;
 pub mod file_analysis;
 pub mod graph;
 pub mod surface;
+pub mod toolchain;
 pub mod witnesses;

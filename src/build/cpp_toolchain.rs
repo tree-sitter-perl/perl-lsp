@@ -39,14 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
-/// Which language TU to probe. C++ adds the `c++/<ver>` roots and a
-/// higher `__cplusplus`, so the search path and macro set differ — the
-/// choice is part of the cache key, not a post-filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Lang {
-    C,
-    Cpp,
-}
+pub use crate::model::toolchain::{Lang, Toolchain};
 
 impl Lang {
     /// The `-x` argument selecting the compile language.
@@ -78,26 +71,7 @@ impl Lang {
     }
 }
 
-/// What a translation unit compiles with — the driver, the language and
-/// the standard: the identity a probe answers for. A unit's toolchain comes
-/// from its compile command (`from_command`) or, with none, from its
-/// language (`for_lang`); a header reached from a unit compiles with that
-/// unit's.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Toolchain {
-    /// The command's driver (`arguments[0]`); `None` is the language's
-    /// default driver (`default_compiler`).
-    compiler: Option<String>,
-    lang: Lang,
-    std: Option<String>,
-}
-
 impl Toolchain {
-    /// The default driver for `lang`, with no `-std`.
-    pub fn for_lang(lang: Lang) -> Toolchain {
-        Toolchain { compiler: None, lang, std: None }
-    }
-
     /// The toolchain a compile command line names for `file`: its driver,
     /// `-x` when given, else the driver's own language (a `++` driver
     /// compiles every source as C++), else the file's; and its `-std=`.
@@ -124,12 +98,7 @@ impl Toolchain {
             .filter(|n| n.ends_with("++"))
             .map(|_| Lang::Cpp);
         let lang = x.or(driver_lang).or_else(|| Lang::of_source(file)).unwrap_or(Lang::Cpp);
-        Toolchain { compiler, lang, std }
-    }
-
-    #[cfg(test)]
-    pub fn lang(&self) -> Lang {
-        self.lang
+        Toolchain::new(compiler, lang, std)
     }
 
     /// The probe's answer for this toolchain, probed at most once per
@@ -140,11 +109,10 @@ impl Toolchain {
         static MEMO: OnceLock<Mutex<HashMap<Toolchain, Once<Option<std::sync::Arc<ToolchainInfo>>>>>> = OnceLock::new();
         let slot = once_slot(MEMO.get_or_init(Default::default), self);
         slot.get_or_init(|| {
-            let probed = |compiler: &str| probe_full(compiler, self.lang, self.std.as_deref(), None);
-            self.compiler
-                .as_deref()
+            let probed = |compiler: &str| probe_full(compiler, self.lang(), self.std(), None);
+            self.compiler()
                 .and_then(probed)
-                .or_else(|| default_compiler(self.lang).and_then(|c| probed(&c)))
+                .or_else(|| default_compiler(self.lang()).and_then(|c| probed(&c)))
                 .map(std::sync::Arc::new)
         })
         .clone()
@@ -162,7 +130,7 @@ impl Toolchain {
                 t.include_dirs.hash(&mut h);
                 t.predefined_macros.hash(&mut h);
             }
-            None => ("no-toolchain", self.lang).hash(&mut h),
+            None => ("no-toolchain", self.lang()).hash(&mut h),
         }
         h.finish()
     }

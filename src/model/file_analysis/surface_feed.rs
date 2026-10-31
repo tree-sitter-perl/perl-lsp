@@ -28,6 +28,9 @@ pub struct SurfaceFeed<'a> {
     pub plugin_namespaces: &'a [PluginNamespace],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
+    /// The trails `symbols` and `macro_defs` bind to: a declaration moving
+    /// into an `#ifdef` changes which configs see it.
+    pub cond_arms: &'a CondArms,
     pub include_directives: &'a [(Span, String)],
     pub dbic_source_name: &'a Option<String>,
     /// Derived-query handle — see the struct doc for its narrow license.
@@ -64,6 +67,7 @@ impl FileAnalysis {
                 PackFacts {
                     macro_defs,
                     include_directives,
+                    cond_arms,
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
                     import_rows: _import_rows, // editing aid, not cross-file-visible
@@ -86,6 +90,7 @@ impl FileAnalysis {
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
                     file_module: _file_module,       // the namespace this file's classes join: projected through their identities
+                    toolchain: _toolchain,           // ranks this file's OWN queries; a toolchain move is the store's input fingerprint
                 },
             plugin:
                 PluginFacts {
@@ -159,6 +164,7 @@ impl FileAnalysis {
             plugin_namespaces,
             app_surface_consumers,
             macro_defs,
+            cond_arms,
             include_directives,
             dbic_source_name,
             analysis: self,

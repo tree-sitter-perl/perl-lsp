@@ -277,12 +277,13 @@ struct s { M x:9; };
     let by_line: std::collections::HashMap<usize, &Macro> =
         m.iter().map(|v| (v.def_line, v)).collect();
     // win32 variant — guarded by the #ifdef.
-    assert_eq!(by_line[&1].guards, vec!["defined(WIN32)".to_string()]);
+    assert_eq!(rendered(&by_line[&1].guards), ["defined(WIN32)"]);
     assert_eq!(by_line[&1].body, "U16");
     // the `#if defined(...)` then-branch.
-    assert_eq!(by_line[&4].guards, vec!["defined(HAS_NON_INT_BITFIELDS)".to_string()]);
+    assert_eq!(rendered(&by_line[&4].guards), ["defined(HAS_NON_INT_BITFIELDS)"]);
     // the `#else` branch — the condition is NEGATED.
-    assert_eq!(by_line[&6].guards, vec!["!defined(HAS_NON_INT_BITFIELDS)".to_string()]);
+    assert_eq!(by_line[&6].guards[0].negated, true);
+    assert_eq!(rendered(&by_line[&6].guards), ["!(defined(HAS_NON_INT_BITFIELDS))"]);
     assert_eq!(by_line[&6].body, "unsigned");
 }
 
@@ -312,8 +313,8 @@ fn header_guard_is_not_a_config_knob() {
         variants["PLAIN"][0].guards
     );
     assert_eq!(
-        variants["GATED"][0].guards,
-        vec!["defined(ENABLE_X)".to_string()],
+        rendered(&variants["GATED"][0].guards),
+        ["defined(ENABLE_X)"],
         "a REAL conditional nested in the same guard keeps its own guard"
     );
 }
@@ -334,10 +335,10 @@ fn bodyless_define_joins_the_config_universe() {
 #endif
 ";
     // Identity lane: the flag is a MacroDef (goto-def on the flag lands).
-    let defs = crate::build::cpp_reparse::collect_macro_defs(&mut p, src);
+    let defs = crate::build::cpp_reparse::collect_macro_defs(&mut p, src, &mut Default::default());
     let flag = defs.iter().find(|d| d.name == "MY_FEATURE").expect("bodyless define collected");
     assert!(flag.body.is_empty());
-    assert!(flag.guards.is_empty());
+    assert!(flag.arm.is_none());
     assert!(flag.delegate.is_none());
 
     // Reachability: with the flag ON, the #ifdef arm is ACTIVE and the
@@ -431,7 +432,7 @@ fn variant_model_ranks_by_reachability() {
     // last one is the win32 variant, unreachable + labeled.
     let (last, r) = ranked.last().unwrap();
     assert_eq!(last.body, "short");
-    assert_eq!(last.guards, vec!["defined(WIN32)".to_string()]);
+    assert_eq!(rendered(&last.guards), ["defined(WIN32)"]);
     assert_eq!(r.label().as_deref(), Some("unreachable: WIN32 undefined"));
     // the two HAS branches are UNKNOWN (kept, not guessed).
     assert!(ranked[..2]
@@ -498,7 +499,7 @@ fn collect_macro_defs_recognizes_delegation() {
 #define NOTDELEG(x) realFunc(x) + 1
 #define OBJLIKE 100
 ";
-    let defs = crate::build::cpp_reparse::collect_macro_defs(&mut p, src);
+    let defs = crate::build::cpp_reparse::collect_macro_defs(&mut p, src, &mut Default::default());
     let by_name: std::collections::HashMap<&str, &crate::model::file_analysis::MacroDef> =
         defs.iter().map(|d| (d.name.as_str(), d)).collect();
 
@@ -808,7 +809,8 @@ fn evict_analysis_caches_recovers_header_content_edits() {
 #[test]
 fn predefined_macros_seed_reachability_config() {
     use crate::build::cpp_macro_model::{classify, KnownConfig, Reachability};
-    let guards = vec!["defined(__GNUC__)".to_string()];
+    use crate::model::file_analysis::{CondTerm, CondTest};
+    let guards = vec![CondTerm { test: CondTest::Defined("__GNUC__".to_string()), negated: false }];
     // Unseeded: __GNUC__ is defined nowhere in the closure → provably absent.
     let bare = KnownConfig::new(Default::default(), Default::default());
     assert!(matches!(classify(&guards, &bare), Reachability::Unreachable { .. }));
@@ -1222,4 +1224,9 @@ fn gather_cache_invalidate_predicate_selective() {
     // Odd keys still resident (no recompute).
     assert_eq!(*cache.get_or_fill(1, 0, || panic!("1 still cached")), 1);
     assert_eq!(*cache.get_or_fill(3, 0, || panic!("3 still cached")), 3);
+}
+
+/// A trail as its labels read.
+fn rendered(trail: &[crate::model::file_analysis::CondTerm]) -> Vec<String> {
+    trail.iter().map(crate::build::cpp_macro_model::render_term).collect()
 }

@@ -31,7 +31,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::file_analysis::{
-    FileAnalysis, HashKeyOwner, InferredType, ParametricType, SymKind,
+    CondTerm, FileAnalysis, HashKeyOwner, InferredType, ParametricType, SymKind,
 };
 
 /// One package/class/namespace's cross-file-visible facts.
@@ -67,6 +67,8 @@ pub struct MethodSurface {
     /// Hash keys owned by this sub (`HashKeyOwner::Sub`) — the
     /// imported-hash-key completion surface.
     pub hash_keys: Vec<String>,
+    /// The `#if` trail the declaration sits under: which configs see it.
+    pub guards: Vec<CondTerm>,
 }
 
 /// One cross-file-visible non-callable: a C global / enum constant /
@@ -79,6 +81,8 @@ pub struct ValueSurface {
     pub name: String,
     /// `SymKind` discriminant via `sym_kind_code`.
     pub kind: u8,
+    /// The `#if` trail the declaration sits under.
+    pub guards: Vec<CondTerm>,
 }
 
 /// One `#define`'s cross-file-visible contract. Under textual inclusion
@@ -90,7 +94,7 @@ pub struct MacroSurface {
     pub name: String,
     pub params: Option<Vec<String>>,
     pub body: String,
-    pub guards: Vec<String>,
+    pub guards: Vec<CondTerm>,
 }
 
 /// The whole file's span-free cross-file surface. `Default` is the empty
@@ -251,6 +255,7 @@ impl Surface {
                             .symbol_return_type_via_bag(sym.id, None)
                             .map(|t| despan(&t)),
                         hash_keys,
+                        guards: feed.cond_arms.trail(sym.arm).to_vec(),
                     };
                     match sym.package.clone() {
                         // Package-less callables (C free functions, subs in
@@ -281,6 +286,7 @@ impl Surface {
                     let v = ValueSurface {
                         name: sym.name.clone(),
                         kind: crate::model::file_analysis::sym_kind_code(&sym.kind),
+                        guards: feed.cond_arms.trail(sym.arm).to_vec(),
                     };
                     match sym.package.clone() {
                         Some(pkg) => {
@@ -301,8 +307,8 @@ impl Surface {
         }
         let mut packages: Vec<PackageSurface> = by_pkg.into_values().collect();
         let sort_values = |vs: &mut Vec<ValueSurface>| {
-            vs.sort_by(|a, b| (&a.name, a.kind).cmp(&(&b.name, b.kind)));
-            vs.dedup_by(|a, b| a.name == b.name && a.kind == b.kind);
+            vs.sort_by(|a, b| (&a.name, a.kind, &a.guards).cmp(&(&b.name, b.kind, &b.guards)));
+            vs.dedup();
         };
         // Duplicate names collapse only when FULLY equal (rw accessor
         // pairs). Name-only dedup would hide a contract edit to the
@@ -367,7 +373,7 @@ impl Surface {
                 name: m.name.clone(),
                 params: m.params.clone(),
                 body: m.body.clone(),
-                guards: m.guards.clone(),
+                guards: feed.cond_arms.trail(m.arm).to_vec(),
             })
             .collect();
         macros.sort_by(|a, b| (&a.name, &a.guards).cmp(&(&b.name, &b.guards)));

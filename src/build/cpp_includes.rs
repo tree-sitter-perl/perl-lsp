@@ -250,6 +250,14 @@ pub fn unit_toolchain(unit: &Path) -> Toolchain {
     }
 }
 
+/// The toolchain an analysis is built with: its unit's, and C++ — the
+/// superset — for a buffer with no path. Stamped on the analysis
+/// (`PackFacts::toolchain`), so every later question asked from it reads the
+/// answer instead of re-deriving it.
+pub fn analysis_toolchain(path: Option<&Path>) -> Toolchain {
+    path.map_or_else(|| Toolchain::for_lang(Lang::Cpp), unit_toolchain)
+}
+
 /// A header's toolchain, interpolated as clangd interpolates a header's
 /// command: the same-stem source beside it (`util.h` → `util.c`), else the
 /// sources in its directory when they agree on a language; C++ — the

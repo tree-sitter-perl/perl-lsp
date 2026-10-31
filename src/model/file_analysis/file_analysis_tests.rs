@@ -170,6 +170,7 @@ fn test_resolve_sub_return_type() {
             flags: Default::default(),
             declared_with: None,
             arity: None,
+            arm: ArmId::NONE,
         }],
         ..Default::default()
     });

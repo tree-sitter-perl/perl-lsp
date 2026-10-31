@@ -43,10 +43,10 @@ pub struct Macro {
     /// Enclosing `#if`/`#ifdef`/`#else` conditions at the `#define`, OUTERMOST
     /// first — the config guard trail (`docs`: `cpp_macro_model`). Empty =
     /// unconditional. Rides the expansion-side rep so a config-variant macro
-    /// carries WHICH config each body belongs to. `#[serde(default)]` for cache
-    /// blobs written before guards existed.
+    /// carries WHICH config each body belongs to. The terms themselves, not an
+    /// arm id: a gathered table merges macros from many headers' arm tables.
     #[serde(default)]
-    pub guards: Vec<String>,
+    pub guards: Vec<crate::model::file_analysis::CondTerm>,
     /// 0-based line of the `#define` — the variant's def site.
     #[serde(default)]
     pub def_line: usize,

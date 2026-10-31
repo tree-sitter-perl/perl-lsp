@@ -56,10 +56,10 @@ pub struct MacroDef {
     /// `Some(params)` = function-like; `None` = object-like.
     pub params: Option<Vec<String>>,
     pub body: String,
-    /// Enclosing `#if`/`#ifdef`/`#else` conditions, OUTERMOST first — the config
-    /// guard trail (`cpp_macro_model`). Empty = unconditional. What the
-    /// reachability rank is computed from.
-    pub guards: Vec<String>,
+    /// The innermost `#if` arm the `#define` sits in, into this file's
+    /// `PackFacts::cond_arms` — the config guard trail the reachability rank
+    /// is computed from (`cpp_macro_model`). `NONE` = unconditional.
+    pub arm: ArmId,
     /// The `#define NAME` span — where goto-def lands.
     pub selection_span: Span,
     /// A direct-delegation wrapper's callee: when the body is a single call
@@ -798,6 +798,12 @@ pub struct Symbol {
     /// `param_arity()`, which reads both sources).
     #[serde(default)]
     pub arity: Option<ParamArity>,
+    /// The innermost conditional-compilation arm the declaration sits in,
+    /// into this file's `PackFacts::cond_arms`; `NONE` where no conditional
+    /// encloses it, and for every language whose document declares no arms.
+    /// Ranks the declaration against an asker's config without pruning it.
+    #[serde(default)]
+    pub arm: ArmId,
 }
 
 /// A callable's declared parameter shape, as a set of counts — the fuel for

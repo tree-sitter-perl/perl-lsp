@@ -18,6 +18,8 @@ mod search_roots;
 pub use search_roots::*;
 mod core_types;
 pub use core_types::*;
+mod cond_arms;
+pub use cond_arms::*;
 mod ref_table;
 pub use ref_table::*;
 mod symbol_table;

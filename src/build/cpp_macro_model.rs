@@ -26,6 +26,7 @@
 //! don't know here (UNKNOWN); one that is defined nowhere and is not
 //! predefined cannot be turned on by any code we can see (UNREACHABLE).
 
+use crate::model::file_analysis::{CondTerm, CondTest};
 use std::collections::HashSet;
 
 /// What we can decide about the live config. `defined` are the macros known
@@ -172,19 +173,46 @@ fn defined_tri(x: &str, cfg: &KnownConfig) -> Tri {
     }
 }
 
+/// How a term reads in a label, as the preprocessor would spell it. Display
+/// only: the evaluator reads the structure, never this text.
+pub fn render_term(t: &CondTerm) -> String {
+    let bang = if t.negated { "!" } else { "" };
+    match &t.test {
+        CondTest::Defined(name) => format!("{bang}defined({name})"),
+        CondTest::Expr(e) if !t.negated => e.clone(),
+        CondTest::Expr(e) => format!("!({e})"),
+    }
+}
+
+/// A trail as the conjunction it states.
+pub fn render_trail(trail: &[CondTerm]) -> String {
+    trail.iter().map(render_term).collect::<Vec<_>>().join(" && ")
+}
+
+/// One trail term as a condition: an `#ifdef`'s name is a `defined` atom,
+/// an `#if`'s source text is parsed, and the negation is applied to the
+/// structure — never rendered and re-read.
+fn term_cond(t: &CondTerm) -> Cond {
+    let c = match &t.test {
+        CondTest::Defined(name) => Cond::Defined(name.clone()),
+        CondTest::Expr(text) => parse_cond(text),
+    };
+    if t.negated { Cond::Not(Box::new(c)) } else { c }
+}
+
 /// Evaluate the AND of a variant's enclosing guard terms under `cfg`.
-pub fn classify(guards: &[String], cfg: &KnownConfig) -> Reachability {
+pub fn classify(guards: &[CondTerm], cfg: &KnownConfig) -> Reachability {
     if guards.is_empty() {
         return Reachability::Active;
     }
     let mut combined = Tri::True;
-    let conds: Vec<Cond> = guards.iter().map(|g| parse_cond(g)).collect();
+    let conds: Vec<Cond> = guards.iter().map(term_cond).collect();
     for c in &conds {
         combined = combined.and(c.eval(cfg));
     }
     match combined {
         Tri::True => Reachability::Active,
-        Tri::Unknown => Reachability::Unknown { guard: guards.join(" && ") },
+        Tri::Unknown => Reachability::Unknown { guard: render_trail(guards) },
         Tri::False => Reachability::Unreachable { reason: unreachable_reason(&conds, cfg) },
     }
 }

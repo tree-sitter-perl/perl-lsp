@@ -202,7 +202,7 @@ pub(crate) fn ranked_macro_variants(
     module_index: &dyn CrossFileLookup,
 ) -> Vec<(crate::model::file_analysis::MacroDef, FileKey, crate::build::cpp_macro_model::Reachability)> {
     use crate::build::cpp_macro_model::classify;
-    use crate::model::file_analysis::MacroDef;
+    use crate::model::file_analysis::{CondArms, CondTerm, MacroDef};
     use std::collections::HashSet;
 
     // One pass over every cached module + this file: collect the def sites for
@@ -210,26 +210,26 @@ pub(crate) fn ranked_macro_variants(
     // keep them ALL, never the last-writer only) AND the reachability config
     // (the whole macro universe). Enumerating the cache directly is robust to a
     // cold reverse index — `modules_with_symbol` can be empty before it warms.
-    let mut sites: Vec<(MacroDef, FileKey)> = Vec::new();
+    let mut sites: Vec<(MacroDef, FileKey, Vec<CondTerm>)> = Vec::new();
     let mut seen: HashSet<(PathBuf, usize, usize)> = HashSet::new();
     let mut defined: HashSet<String> = HashSet::new();
     let mut universe: HashSet<String> = HashSet::new();
-    let mut push = |m: &MacroDef, k: &FileKey, sites: &mut Vec<(MacroDef, FileKey)>| {
+    let mut push = |m: &MacroDef, k: &FileKey, arms: &CondArms, sites: &mut Vec<(MacroDef, FileKey, Vec<CondTerm>)>| {
         let key = (key_for_sort(k), m.selection_span.start.row, m.selection_span.start.column);
         if seen.insert(key) {
-            sites.push((m.clone(), k.clone()));
+            sites.push((m.clone(), k.clone(), arms.trail(m.arm).to_vec()));
         }
     };
     let note = |m: &MacroDef, defined: &mut HashSet<String>, universe: &mut HashSet<String>| {
         universe.insert(m.name.clone());
-        if m.guards.is_empty() {
+        if m.arm.is_none() {
             defined.insert(m.name.clone());
         }
     };
     for m in &analysis.pack.macro_defs {
         note(m, &mut defined, &mut universe);
         if m.name == word {
-            push(m, origin_key, &mut sites);
+            push(m, origin_key, &analysis.pack.cond_arms, &mut sites);
         }
     }
     // Per-FILE sweep: the name-keyed cache view both repeats files and hides
@@ -239,7 +239,7 @@ pub(crate) fn ranked_macro_variants(
         for m in &cached.analysis.pack.macro_defs {
             note(m, &mut defined, &mut universe);
             if m.name == word {
-                push(m, &file_key, &mut sites);
+                push(m, &file_key, &cached.analysis.pack.cond_arms, &mut sites);
             }
         }
     });
@@ -273,8 +273,8 @@ pub(crate) fn ranked_macro_variants(
     // result is deterministic across processes.
     let mut ranked: Vec<(MacroDef, FileKey, _)> = sites
         .into_iter()
-        .map(|(m, k)| {
-            let r = classify(&m.guards, &cfg);
+        .map(|(m, k, trail)| {
+            let r = classify(&trail, &cfg);
             (m, k, r)
         })
         .collect();

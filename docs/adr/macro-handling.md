@@ -146,6 +146,39 @@ machinery (`cpp_macro_model::classify` + the per-file include closure the
 gather already computes). Symbol resolution and macro resolution converge on
 one pattern: **global set + reachability scope.**
 
+### Declarations ranked by their `#if` arm
+
+Every arm of a header is extracted, whatever the toolchain: a C view and a
+C++ view of `string.h` hold the same declarations. So the answer to "which
+`strchr` does a `.c` file mean" is not a second copy of the header but a fact
+on each declaration — the arm it sits in — ranked against the asker's config
+at query time, the way macro variants already are. Nothing is pruned.
+
+- `Symbol::arm` and `MacroDef::arm` are bindings: the innermost arm, an id
+  into the file's arm table. `NONE` is unconditional, and is what every
+  language whose document declares no arms mints.
+- A trail term is `CondTerm { test, negated }`: an `#if`'s source text or an
+  `#ifdef`'s name, and whether the code sits where it fails. The negation is a
+  field, so the evaluator never re-reads a rendered `!(…)` (rule #13). A
+  gathered `Macro` carries its terms directly, because a gathered table merges
+  defines from many headers' arm tables.
+
+Two `PackFacts` fields (`layering_tests::pack_facts_fields_are_ratcheted`):
+
+- `cond_arms` — the intern table those bindings point into, one trail per
+  arm. Not a witness (it types nothing), not a ref binding (the binding is the
+  id on the symbol), not a convention (each file has its own conditionals).
+  Projected onto the Surface through each entry's trail: a declaration moving
+  into an `#ifdef` changes which configs see it.
+- `toolchain` — the toolchain the file was built with, minted by the cpp
+  driver from `unit_toolchain` (`None` for every other language). Per file,
+  not per language: one project mixes `.c` and `.cpp` units, and a database
+  entry names its own driver and `-std`, so it is no convention reached by
+  language id. Not a witness or a binding: it is an input the build read, the
+  config a query asked from this file ranks under. A Surface discard: it moves
+  only this file's own queries, and the store's input fingerprint folds every
+  toolchain the project probes.
+
 ### Parametric return
 
 An identity/projection macro (`#define ID(x) (x)`, `#define SEL2(a,b) (b)`,

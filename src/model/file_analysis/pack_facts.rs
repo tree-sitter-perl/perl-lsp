@@ -164,6 +164,17 @@ pub struct PackFacts {
     /// instead of serving classes under the old name.
     #[serde(default)]
     pub file_module: Option<FileModule>,
+    /// The `#if` trails this file's declarations sit under, one per arm: the
+    /// table `Symbol::arm` and `MacroDef::arm` point into. An intern table
+    /// for those bindings, not a list joined at query time.
+    #[serde(default)]
+    pub cond_arms: CondArms,
+    /// The toolchain this file was built with — a C unit's is C, a `.cpp`'s
+    /// C++, a database entry's names its driver and `-std`. Per file, not
+    /// per language: one project mixes C and C++ units. A query asked FROM
+    /// this file ranks `#if` arms under it (`docs/adr/macro-handling.md`).
+    #[serde(default)]
+    pub toolchain: Option<crate::model::toolchain::Toolchain>,
 }
 
 /// The module a file is, for a language whose module names come from the
@@ -234,7 +245,8 @@ impl PackFacts {
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
             + vcap(&self.param_regions)
-            + vcap(&self.probe_regions);
+            + vcap(&self.probe_regions)
+            + self.cond_arms.heap_bytes();
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
@@ -244,7 +256,8 @@ impl PackFacts {
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display)
-            + self.file_module.as_ref().map_or(0, |m| vcap(&m.segments) + m.segments.iter().map(String::capacity).sum::<usize>());
+            + self.file_module.as_ref().map_or(0, |m| vcap(&m.segments) + m.segments.iter().map(String::capacity).sum::<usize>())
+            + self.toolchain.as_ref().map_or(0, crate::model::toolchain::Toolchain::heap_bytes);
     }
 }
 

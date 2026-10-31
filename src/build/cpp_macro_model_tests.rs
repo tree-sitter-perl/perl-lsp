@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// A trail term as an `#if` would write it.
+fn t(expr: &str) -> CondTerm {
+    CondTerm { test: CondTest::Expr(expr.to_string()), negated: false }
+}
+
 fn cfg(defined: &[&str], universe: &[&str]) -> KnownConfig {
     KnownConfig::new(
         defined.iter().map(|s| s.to_string()).collect(),
@@ -18,7 +23,7 @@ fn unconditional_define_is_active() {
 
 #[test]
 fn defined_guard_active_when_known_on() {
-    let r = classify(&["defined(HAS)".into()], &cfg(&["HAS"], &[]));
+    let r = classify(&[t("defined(HAS)")], &cfg(&["HAS"], &[]));
     assert_eq!(r, Reachability::Active);
 }
 
@@ -26,7 +31,7 @@ fn defined_guard_active_when_known_on() {
 fn platform_macro_never_defined_is_unreachable() {
     // WIN32 is neither predefined nor #defined anywhere in the closure → a
     // platform macro absent on this target → provably false.
-    let r = classify(&["defined(WIN32)".into()], &cfg(&[], &["HAS"]));
+    let r = classify(&[t("defined(WIN32)")], &cfg(&[], &["HAS"]));
     assert_eq!(r, Reachability::Unreachable { reason: "WIN32 undefined".into() });
 }
 
@@ -34,20 +39,20 @@ fn platform_macro_never_defined_is_unreachable() {
 fn knob_defined_somewhere_but_not_on_is_unknown() {
     // HAS_NON_INT_BITFIELDS is a Configure knob we've SEEN defined in the
     // closure (universe) but can't resolve here → UNKNOWN, not guessed.
-    let r = classify(&["defined(HAS)".into()], &cfg(&[], &["HAS"]));
+    let r = classify(&[t("defined(HAS)")], &cfg(&[], &["HAS"]));
     assert_eq!(r, Reachability::Unknown { guard: "defined(HAS)".into() });
 }
 
 #[test]
 fn negated_knob_is_unknown_too() {
     // `!defined(HAS)` with HAS a known-but-unresolved knob is equally unknown.
-    let r = classify(&["!defined(HAS)".into()], &cfg(&[], &["HAS"]));
+    let r = classify(&[t("!defined(HAS)")], &cfg(&[], &["HAS"]));
     assert!(matches!(r, Reachability::Unknown { .. }));
 }
 
 #[test]
 fn negated_active_knob_is_unreachable() {
-    let r = classify(&["!defined(HAS)".into()], &cfg(&["HAS"], &[]));
+    let r = classify(&[t("!defined(HAS)")], &cfg(&["HAS"], &[]));
     assert_eq!(r, Reachability::Unreachable { reason: "HAS defined".into() });
 }
 
@@ -55,13 +60,13 @@ fn negated_active_knob_is_unreachable() {
 fn conjunction_three_valued() {
     // !defined(WIN32) && defined(HAS): WIN32 absent → true; HAS knob → unknown.
     let r = classify(
-        &["!defined(WIN32)".into(), "defined(HAS)".into()],
+        &[t("!defined(WIN32)"), t("defined(HAS)")],
         &cfg(&[], &["HAS"]),
     );
     assert!(matches!(r, Reachability::Unknown { .. }));
     // with WIN32 present the whole thing is provably false regardless of HAS.
     let r2 = classify(
-        &["!defined(WIN32)".into(), "defined(HAS)".into()],
+        &[t("!defined(WIN32)"), t("defined(HAS)")],
         &cfg(&["WIN32"], &["HAS"]),
     );
     assert_eq!(r2, Reachability::Unreachable { reason: "WIN32 defined".into() });

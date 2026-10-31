@@ -272,6 +272,7 @@ impl<'a> Builder<'a> {
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
             // reads them. No pack-minted arity here.
             arity: None,
+            arm: crate::model::file_analysis::ArmId::NONE,
         });
         id
     }
