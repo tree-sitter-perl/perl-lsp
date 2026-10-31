@@ -1586,6 +1586,21 @@ fn qualified_names_split_through_the_spellings() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// `cst::pair_items` is the one key/value pair walk over Perl's CST. A
+/// hand-rolled `i += 2` stride in the builder re-decides what a separator, a
+/// comment or a spread is, and drifts from the walk every other pair reader
+/// takes. (Byte scans over source TEXT live outside the builder.)
+#[test]
+fn perl_pair_walks_go_through_pair_items() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Build, Layer::Cst])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("build/builder/") || rel == "cst.rs")
+        .collect();
+    let seen = count_lines(&files, &|l| l.contains("+= 2"));
+    let drift = allowlist_drift("hand-rolled pair strides", &seen, &[]);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,

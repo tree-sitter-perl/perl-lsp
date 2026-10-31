@@ -191,10 +191,11 @@ impl<'a> Builder<'a> {
     /// pairs as a right-leaning `list_expression`, so recurse into those.
     pub(super) fn extract_class_tiny_hash_keys(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         let elems = crate::cst::list_elements(crate::cst::literal_body(node));
-        // Keys are at even indices (key, value, key, value, ...).
-        let mut i = 0;
-        while i < elems.len() {
-            let key = elems[i];
+        for item in crate::cst::pair_items(&elems, crate::cst::Spreads::AsElements) {
+            let key = match item {
+                crate::cst::PairItem::Pair(k, _) | crate::cst::PairItem::Dangling(k) => k,
+                crate::cst::PairItem::Spread(_) => continue,
+            };
             match key.kind() {
                 "autoquoted_bareword" | "bareword" => {
                     if let Ok(text) = key.utf8_text(self.source) {
@@ -208,7 +209,6 @@ impl<'a> Builder<'a> {
                 }
                 _ => {}
             }
-            i += 2; // skip the value element
         }
     }
 
