@@ -276,18 +276,18 @@ pub fn is_bareword_class_name(text: &str, names: &NameSpellings) -> bool {
     text.split(sep).all(is_ident)
 }
 
-/// Perl's attribute vocabulary, spelling → flag — the one table for a
-/// Corinna `field` attribute (`:param`, `:reader`, the writer family
-/// `:writer` / `:mutator` / `:accessor`), the way a pack declares its own.
-/// A spelling with no declaration fact (`:ro` style hints) is display-only.
+/// Perl's spellings of a Corinna `field` attribute, mapped onto the
+/// canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`, the one
+/// spelling → flag table) the way a pack maps its own: `:param`, `:reader`,
+/// and the writer family `:writer` / `:mutator` / `:accessor`. A spelling
+/// with no declaration fact (`:ro` style hints) is display-only.
 pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::SymbolFlags> {
-    use crate::model::file_analysis::SymbolFlags;
-    Some(match attr {
-        "param" => SymbolFlags::PARAM,
-        "reader" => SymbolFlags::READER,
-        "writer" | "mutator" | "accessor" => SymbolFlags::WRITER,
+    let canonical = match attr {
+        "param" | "reader" | "writer" => attr,
+        "mutator" | "accessor" => "writer",
         _ => return None,
-    })
+    };
+    crate::model::file_analysis::SymbolFlags::try_from(canonical).ok()
 }
 
 /// A Perl sigil: what kind of thing a name, or a deref, denotes.

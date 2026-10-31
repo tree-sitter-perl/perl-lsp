@@ -1403,7 +1403,7 @@ fn language_spellings_have_one_home() {
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
         ("build/query_extract/vocab.rs", 13, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
-        ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
+        ("model/conventions.rs", 2, "Perl's own attribute spellings (`field_attribute_flag`), mapped onto the canonical names: Perl's home"),
         ("model/file_analysis/core_types.rs", 17, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
         ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
@@ -1521,6 +1521,23 @@ fn namespace_lane_is_written_through_open_sections() {
         "the struct itself and `OpenSections`' two writers",
     )];
     let drift = allowlist_drift("namespace lane writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `TryFrom<&str> for SymbolFlags` is the one table from a spelling to a
+/// flag: a language maps its own spellings onto the canonical names, never
+/// onto a flag directly, so a second table cannot drift from the first (and
+/// `language_spellings_have_one_home` reads its vocabulary out of this one).
+/// A line pairing a string literal with a flag constant is a second table.
+#[test]
+fn one_table_maps_spellings_to_flags() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.trim_start().starts_with('"') && l.contains("=> SymbolFlags::")
+    });
+    let allow: &[(&str, usize, &str)] =
+        &[("model/file_analysis/core_types.rs", 16, "the canonical table itself")];
+    let drift = allowlist_drift("spelling → flag tables", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
