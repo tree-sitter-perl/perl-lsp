@@ -1513,7 +1513,10 @@ fn packs_do_not_borrow_perls_current_package_token() {
 /// half of a heatmap sweep's kernel time. The canonical spelling is minted
 /// where a path enters (`CanonicalPath`, `util/canonical_path.rs`) and the
 /// query tiers read it; `from_stored` re-adopts a persisted spelling and
-/// stays with the cache that wrote it.
+/// stays with the cache that wrote it. Outside the query tiers the index
+/// and the server still resolve paths at their entry points, but only
+/// through `CanonicalPath::resolve`, the one owner of the spelling rule
+/// (a deleted file rejoins through its parent).
 #[test]
 fn query_paths_never_canonicalize() {
     let files: Vec<(String, String)> = layer_files(&[Layer::Model, Layer::Index])
@@ -1530,6 +1533,13 @@ fn query_paths_never_canonicalize() {
          not a registered path re-spelled; only an origin that declares `use lib` reaches it",
     )];
     let mut drift = allowlist_drift("query-time canonicalize", &seen, allow);
+
+    let files: Vec<(String, String)> = layer_files(&[Layer::Index, Layer::Lsp])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("index/") || rel.starts_with("lsp/backend/"))
+        .collect();
+    let seen = count_lines(&files, &|l| l.contains("canonicalize("));
+    drift.extend(allowlist_drift("raw canonicalize beside CanonicalPath::resolve", &seen, &[]));
 
     let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
     let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));

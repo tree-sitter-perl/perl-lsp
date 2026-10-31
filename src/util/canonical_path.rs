@@ -17,11 +17,20 @@ use std::path::{Path, PathBuf};
 pub struct CanonicalPath(PathBuf);
 
 impl CanonicalPath {
-    /// Resolve `p` against the filesystem. A path that does not resolve (a
-    /// deleted file, a synthetic key) keeps its own spelling.
+    /// Resolve `p` against the filesystem. A deleted file resolves through
+    /// its parent directory, so it keys where it was registered while it
+    /// existed (a symlinked root otherwise leaves its delete un-findable);
+    /// a path with no resolvable parent keeps its own spelling.
     pub fn resolve(p: impl Into<PathBuf>) -> Self {
         let p = p.into();
-        CanonicalPath(std::fs::canonicalize(&p).unwrap_or(p))
+        if let Ok(c) = std::fs::canonicalize(&p) {
+            return CanonicalPath(c);
+        }
+        let rejoined = match (p.parent(), p.file_name()) {
+            (Some(dir), Some(name)) => std::fs::canonicalize(dir).ok().map(|d| d.join(name)),
+            _ => None,
+        };
+        CanonicalPath(rejoined.unwrap_or(p))
     }
 
     /// A spelling a `CanonicalPath` already produced, read back from the
@@ -94,5 +103,29 @@ impl PartialEq<&Path> for CanonicalPath {
 impl PartialEq<CanonicalPath> for PathBuf {
     fn eq(&self, other: &CanonicalPath) -> bool {
         self == &other.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deleted_file_keys_where_it_was_registered() {
+        let base = std::env::temp_dir().join(format!("canon_path_test_{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let file = link.join("Gone.pm");
+        std::fs::write(&file, "1;").unwrap();
+
+        let registered = CanonicalPath::resolve(&file);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(CanonicalPath::resolve(&file), registered);
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

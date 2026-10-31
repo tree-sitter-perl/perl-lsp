@@ -82,10 +82,6 @@ fn consumes(path: impl FnOnce() -> Option<PathBuf>, analysis: &FileAnalysis, cha
     analysis.pack.include_closure.contains(change.canon_str).then_some(Consumes::Closure)
 }
 
-fn canonical(p: &Path) -> CanonicalPath {
-    CanonicalPath::resolve(p)
-}
-
 /// What a `file_changed` call decided, for the caller to act on. The
 /// invalidator mutates the index side itself; the caller (the LSP backend)
 /// only publishes: it maps `refresh_open` onto its gather/diagnostics
@@ -235,7 +231,7 @@ impl PackInvalidator {
         path: &Path,
         deleted: bool,
     ) -> InvalidationOutcome {
-        let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canon = CanonicalPath::resolve(path).into_path_buf();
         if self.coord.note_change(&canon, deleted) {
             return InvalidationOutcome::deferred();
         }
@@ -290,7 +286,7 @@ impl PackInvalidator {
         let gathers = self.driver.caps().context_gather;
         let mut out: Vec<Url> = Vec::new();
         open_docs.for_each_open(|u, doc| {
-            let doc_path = || u.to_file_path().ok().map(|p| canonical(&p).into_path_buf());
+            let doc_path = || u.to_file_path().ok().map(|_| doc.canonical_path.to_path_buf());
             let is_self = gathers && !deleted && doc_path().is_some_and(|p| p == canon);
             let stale = match consumes(doc_path, &doc.analysis, &change) {
                 Some(Consumes::Refile) => true,
@@ -315,7 +311,7 @@ impl PackInvalidator {
     /// register: they would revert a fresher copy.
     pub(crate) fn claim_source_gen(&self, path: &Path, gen: i64) -> bool {
         use dashmap::mapref::entry::Entry;
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = CanonicalPath::resolve(path).into_path_buf();
         match self.registered_source_gen.entry(canon) {
             Entry::Occupied(mut e) => {
                 if gen >= *e.get() {
@@ -335,7 +331,7 @@ impl PackInvalidator {
     /// Forget `path`'s source generation (H9-1) — a genuine delete, so a later
     /// recreation claims from the baseline again.
     fn forget_source_gen(&self, path: &Path) {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = CanonicalPath::resolve(path).into_path_buf();
         self.registered_source_gen.remove(&canon);
     }
 
@@ -363,7 +359,7 @@ impl PackInvalidator {
             return Swept::default();
         }
         let lang = driver.id();
-        let canon = canonical(path);
+        let canon = CanonicalPath::resolve(path);
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
         let refiled = driver

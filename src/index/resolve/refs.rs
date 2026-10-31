@@ -620,7 +620,7 @@ fn walk_refs(
     if let WalkScope::Origin { key, analysis } = scope {
         let file = match key {
             FileKey::Path(p) => p.clone(),
-            FileKey::Url(u) => files.get_open(u).map(|d| d.canonical_path.clone()).unwrap_or_default(),
+            FileKey::Url(u) => files.file_path_of(u).unwrap_or_default(),
         };
         collect_from_analysis(key, analysis, target, &aliases, module_index, &file, &memo, &mut out);
         return sorted_deduped(out);

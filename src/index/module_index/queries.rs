@@ -85,12 +85,10 @@ impl ModuleIndex {
             // as a fallback spelling; the discriminated helper survives the
             // readonly-open CANTOPEN/WAL race behind both.
             let raw = path.to_string_lossy().into_owned();
-            let canon = path
-                .canonicalize()
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned());
+            let canon = crate::util::canonical_path::CanonicalPath::resolve(path).to_string_lossy().into_owned();
             let mut spellings = vec![raw.clone()];
-            if let Some(c) = canon {
+            {
+                let c = canon;
                 if c != raw {
                     spellings.push(c);
                 }

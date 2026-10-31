@@ -561,7 +561,7 @@ impl ModuleIndex {
         surface: crate::model::surface::Surface,
         write: SurfaceWrite,
     ) -> SurfaceDirty {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         let verdict = self.record_surface_write(&canon, surface, write);
         let dirty = match verdict {
             crate::model::surface::SurfaceVerdict::Changed => self.dirty_consumers(&canon),
@@ -596,7 +596,7 @@ impl ModuleIndex {
         // Canonicalize here so every caller (open-doc, worker, watcher)
         // lands on one key — a fresh/canon split would make every edit
         // look FirstSeen and the gate never fires.
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         self.record_surface_write(&canon, surface, SurfaceWrite::Background)
     }
 
@@ -646,7 +646,7 @@ impl ModuleIndex {
     /// didOpen: the open-doc path owns `path`'s surface record until
     /// `mark_doc_closed` (see `SurfaceWrite`).
     pub fn mark_doc_open(&self, path: &std::path::Path) {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         // `false`: open, but the open-doc lane has recorded nothing yet, so a
         // Background write still lands. A re-open legitimately resets this —
         // `did_close` re-recorded the disk state on the way out.
@@ -661,7 +661,7 @@ impl ModuleIndex {
     /// open-doc record stays as the last truth until a background write
     /// corrects it.
     pub fn mark_doc_closed(&self, path: &std::path::Path) -> Option<SurfaceDirty> {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         self.open_doc_paths.remove(&canon);
         let cm = self.all_files.get(&canon).map(|e| e.value().clone())?;
         let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, &cm);
@@ -688,16 +688,8 @@ impl ModuleIndex {
     }
 
     /// Drop `path`'s recorded surface and its dep edges (file deleted).
-    /// A deleted file can't canonicalize, but the record was keyed under
-    /// the RESOLVED path while it existed — resolve the parent and rejoin
-    /// (the Perl watcher's delete fallback) so symlinked roots still hit.
     pub fn remove_surface(&self, path: &std::path::Path) {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| {
-            path.parent()
-                .and_then(|d| std::fs::canonicalize(d).ok())
-                .and_then(|d| path.file_name().map(|f| d.join(f)))
-                .unwrap_or_else(|| path.to_path_buf())
-        });
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         crate::util::ghost_stats::count("epoch.freshness.remove");
         self.freshness.remove(&canon);
         // Belt over braces: if the caller's raw spelling was the recorded
@@ -1106,7 +1098,7 @@ impl ModuleIndex {
         &self,
         path: &std::path::Path,
     ) -> std::collections::HashSet<std::path::PathBuf> {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         self.freshness.dirty_consumers(&canon)
     }
 
@@ -1124,7 +1116,7 @@ impl ModuleIndex {
     ) -> Vec<(String, bool)> {
         let names = package_names(fa);
         if !names.is_empty() {
-            let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
             self.core.edges.record_names(&canon, fa);
         }
         names
@@ -1193,15 +1185,7 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("epoch.shape.unregister_workspace_path");
         self.core.note_shape_change();
         self.remove_surface(path);
-        // Registration keyed everything canonical; a deleted file can't
-        // canonicalize, so rejoin through the parent (same fallback as
-        // `remove_surface`).
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| {
-            path.parent()
-                .and_then(|d| std::fs::canonicalize(d).ok())
-                .and_then(|d| path.file_name().map(|f| d.join(f)))
-                .unwrap_or_else(|| path.to_path_buf())
-        });
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         self.all_files.remove(&canon);
         self.core.edges.remove_path_record(&canon);
         // The inverse of `record_workspace_projections`' shape half. Its own
@@ -1842,7 +1826,7 @@ impl ModuleIndex {
         // gen mint — the epoch must move or the enrichment-key memo lies.
         crate::util::ghost_stats::count("epoch.shape.unregister_file");
         self.core.note_shape_change();
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         let Some((_, old)) = self.all_files.remove(&canon) else {
             return;
         };

@@ -183,7 +183,7 @@ impl IndexCore {
     pub(crate) fn set_inc_roots(&self, roots: &[std::path::PathBuf]) {
         let canon: Vec<std::path::PathBuf> = roots
             .iter()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .map(|p| crate::util::canonical_path::CanonicalPath::resolve(p.as_path()).into_path_buf())
             .collect();
         if let Ok(mut g) = self.inc_roots.write() {
             *g = Arc::new(canon);
