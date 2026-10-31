@@ -3089,6 +3089,50 @@ fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
     );
 }
 
+/// A stamp holding the index keeps a union receiver off the ref and in the
+/// session's receiver memo, where the readers after it in the same session
+/// find it; the ref keeps only what the file alone resolved.
+#[test]
+fn an_index_stamp_leaves_a_union_receiver_to_the_session_memo() {
+    use crate::index::module_index::ModuleIndex;
+    use crate::model::file_analysis::{ReceiverPolicy, ReceiverView};
+    use crate::model::witnesses::ResolutionSession;
+
+    let mut fa = build_fa_from_source(
+        "package A;\nsub new { bless {}, shift }\nsub m { 1 }\n\
+         package B;\nsub new { bless {}, shift }\nsub m { 2 }\n\
+         package main;\nmy $c = 1;\nmy $x = $c ? A->new : B->new;\n$x->m;\n",
+    );
+    let idx = ModuleIndex::new_for_test();
+    let i = fa
+        .refs
+        .iter()
+        .position(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "m")
+        .expect("the `$x->m` MethodCall ref");
+
+    let _session = ResolutionSession::enter_with_receivers(&idx);
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let (classes, _) = ResolutionSession::receiver_answer(&idx, fa.instance.id(), i)
+        .expect("the stamp left its answer in the memo");
+    assert_eq!(classes.iter().collect::<Vec<_>>(), ["A", "B"]);
+    assert!(
+        fa.refs[i].frozen_receiver().is_none_or(|f| f.view == ReceiverView::Local),
+        "a union resolved under the index is not frozen on the ref"
+    );
+    assert_eq!(
+        fa.receiver_classes(&fa.refs[i], Some(&idx), ReceiverPolicy::Navigate)
+            .iter()
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+
+    let copy = fa.clone();
+    assert!(
+        ResolutionSession::receiver_answer(&idx, copy.instance.id(), i).is_none(),
+        "a clone is another copy and shares nothing"
+    );
+}
+
 /// PROBE: does `heap_estimate` track the truth on a GIANT file?
 ///
 /// The FHEM investigation's RSS hypothesis: the hub LRU held 176-232 entries

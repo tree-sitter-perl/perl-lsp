@@ -399,7 +399,8 @@ impl FileAnalysis {
     /// The classes a member access dispatches on under `policy` — one per
     /// value its receiver may be. Reads the stamp's frozen answer when that
     /// answers this reader (`FrozenReceiver::answers_for`), else resolves
-    /// fresh. The one API every receiver consumer reads.
+    /// through the session's receiver memo. The one API every receiver
+    /// consumer reads.
     pub fn receiver_classes(
         &self,
         r: &Ref,
@@ -417,12 +418,34 @@ impl FileAnalysis {
                     .collect(),
                 f.source,
             ),
-            None => self.resolve_receiver(r, module_index),
+            None => self.resolve_receiver_shared(r, module_index),
         };
         match (policy, source) {
             (ReceiverPolicy::Stated, ReceiverSource::EnclosingClass) => ReceiverClasses::default(),
             _ => classes,
         }
+    }
+
+    /// `resolve_receiver`, answered once per analysis copy, ref and lookup
+    /// within a resolution session that has the receiver memo on — so the
+    /// stamp and every lint after it in one publish share one resolution.
+    pub(crate) fn resolve_receiver_shared(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> (ReceiverClasses, ReceiverSource) {
+        use crate::model::witnesses::ResolutionSession;
+        let key = module_index.zip(self.refs.index_of(r));
+        if let Some((idx, i)) = key {
+            if let Some(hit) = ResolutionSession::receiver_answer(idx, self.instance.id(), i) {
+                return hit;
+            }
+        }
+        let answer = self.resolve_receiver(r, module_index);
+        if let Some((idx, i)) = key {
+            ResolutionSession::remember_receiver(idx, self.instance.id(), i, &answer);
+        }
+        answer
     }
 
     /// The classes a member access's lookup STARTS at, resolved fresh, and
@@ -432,8 +455,8 @@ impl FileAnalysis {
     /// IS, so the token arm lives here in the projection, not in the value
     /// ladder (Parametric arg-claiming on `$rs->SUPER::search` still sees
     /// the resultset). Every other shape projects the ladder's type through
-    /// `dispatch_classes_of` plus the DBIC source-moniker resolve. Only the
-    /// stamp and `receiver_classes`' unstamped fallback call this.
+    /// `dispatch_classes_of` plus the DBIC source-moniker resolve. Read
+    /// through `resolve_receiver_shared`.
     pub(crate) fn resolve_receiver(
         &self,
         r: &Ref,

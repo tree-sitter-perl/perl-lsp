@@ -1844,9 +1844,14 @@ pub enum ReceiverArms {
     Union(Vec<MethodTarget>),
 }
 
-/// A member access's receiver, resolved ONCE by the stamp
-/// (`stamp_method_call_targets`) and frozen on the ref, so every consumer
-/// reads one answer instead of re-running the invocant ladder.
+/// A member access's receiver as the stamp (`stamp_method_call_targets`)
+/// froze it on the ref. The build-time (`Local`) stamp freezes the whole
+/// answer — every arm, an empty one, its source — because it is a function
+/// of the file alone. A stamp holding an index freezes only the
+/// single-class dispatch edge: a cross-file answer stored on the ref goes
+/// stale with nothing tracking its providers, so the rest of that answer
+/// lives in the resolution session's receiver memo instead
+/// (`FileAnalysis::resolve_receiver_shared`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrozenReceiver {
     pub arms: ReceiverArms,
@@ -1888,6 +1893,33 @@ impl FrozenReceiver {
     /// answers: a call that resolved stays resolved.
     pub fn answers_for(&self, view: ReceiverView, policy: ReceiverPolicy) -> bool {
         self.view == view || (policy == ReceiverPolicy::Edge && matches!(self.arms, ReceiverArms::One(_)))
+    }
+}
+
+/// One in-memory analysis copy's identity, for sessional memos keyed on
+/// "this copy" rather than on its file: enrichment clones an analysis and
+/// enriches the clone, and two copies of one file answer differently.
+/// Minted fresh on construction AND on clone; never serialized.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct AnalysisInstance(u64);
+
+impl AnalysisInstance {
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for AnalysisInstance {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        AnalysisInstance(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Clone for AnalysisInstance {
+    /// A clone is another copy, so it gets its own identity.
+    fn clone(&self) -> Self {
+        AnalysisInstance::default()
     }
 }
 

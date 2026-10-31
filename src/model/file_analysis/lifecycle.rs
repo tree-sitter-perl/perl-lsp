@@ -92,6 +92,7 @@ impl FileAnalysis {
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
             stamped_at: None,
+            instance: AnalysisInstance::default(),
             pack,
             plugin,
             scopes,
@@ -470,10 +471,10 @@ impl FileAnalysis {
             // than stopping at a hit), so apportioning the pass's cost by ref
             // COUNT would misattribute it in an unknown direction.
             let _t0 = std::time::Instant::now();
-            // Every arm is frozen with its own resolution, and an empty
-            // answer is frozen too, so no consumer re-runs the ladder for a
-            // stamped ref (`FrozenReceiver::answers_for` says when it must).
-            let (classes, source) = self.resolve_receiver(r, module_index);
+            // Every arm is resolved, and an empty answer is an answer. The
+            // shared resolve leaves it in the session's receiver memo for the
+            // readers after this stamp; what goes on the ref is below.
+            let (classes, source) = self.resolve_receiver_shared(r, module_index);
             let member = r.unqualified_target_name(self.names());
             let arms = classes
                 .into_iter()
@@ -776,7 +777,11 @@ impl FileAnalysis {
             // `->field` whose receiver is an untypeable macro parameter). Keep it.
             let keeps_old = target.targets().is_empty()
                 && self.refs[i].frozen_receiver().is_some_and(|old| !old.targets().is_empty());
-            if !keeps_old {
+            // With the index, only the single-class dispatch edge goes on the
+            // ref (see `FrozenReceiver`); a union or empty answer is the
+            // session memo's.
+            let edge_only = module_index.is_some() && target.single().is_none();
+            if !keeps_old && !edge_only {
                 self.refs[i].bind_receiver(target);
             }
         }

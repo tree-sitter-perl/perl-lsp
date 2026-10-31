@@ -1160,6 +1160,8 @@ fn sweep_one_file(
     // large self-time here is the signal that something inside it is
     // uninstrumented.)
     let diags = {
+        // The overlay's stamp and the lints share receiver resolutions.
+        let _session = crate::model::witnesses::ResolutionSession::enter_with_receivers(idx);
         let _g_enrich =
             crate::util::ghost_stats::ScopedNs::start("diag.0_enriched_snapshot");
         match idx.enriched_snapshot(&cached) {

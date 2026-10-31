@@ -185,6 +185,10 @@ pub struct FileAnalysis {
     #[serde(skip, default)]
     pub stamped_at: Option<u64>,
 
+    /// This copy's identity — what the session's receiver memo keys on.
+    #[serde(skip, default)]
+    pub(crate) instance: AnalysisInstance,
+
     /// Witness-bag baseline — `enrich_imported_types_with_keys`
     /// truncates back to this length before re-deriving so repeat
     /// calls stay idempotent.
