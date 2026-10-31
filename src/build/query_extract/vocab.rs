@@ -77,6 +77,9 @@ spelled! {
         Constructor = "constructor",
         Contract = "contract",
         DynamicMembers = "dynamic_members",
+        /// A preprocessor macro the document mints under another def kind
+        /// (an object-like `#define` is a constant, so a `Variable`).
+        Macro = "macro",
     }
 }
 
@@ -647,6 +650,7 @@ impl MarkCap {
             MarkCap::Constructor => F::CONSTRUCTOR,
             MarkCap::Contract => F::CONTRACT,
             MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
+            MarkCap::Macro => F::MACRO,
         }
     }
 }

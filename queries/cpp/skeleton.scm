@@ -24,6 +24,8 @@
 ; the surface. Object-like (`#define MAX 1`) → a constant (Variable);
 ; function-like (`#define MIN(a,b) ...`) → a callable (Sub).
 (preproc_def name: (identifier) @def.var.name) @def.var
+; …and tagged a macro, so it presents as one (hover says "macro").
+(preproc_def name: (identifier) @mark.macro)
 ; a distinct skel-kind (not the plain "sub" a real function uses) so the
 ; Symbol can be tagged "macro" (hover/completion say "macro", not
 ; "function") while still resolving as a callable Sub everywhere else.
