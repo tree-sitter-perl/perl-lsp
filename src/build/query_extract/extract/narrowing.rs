@@ -53,7 +53,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // "does this move run", asked of the region, not a shape-branch
             // downstream).
             let ad = st.adorned;
-            if !st.around(e).any(|a| ad.events[a].cap == Capture::Unevaluated) {
+            if !st.around(e).any(|a| ad.events()[a].cap == Capture::Unevaluated) {
                 st.narrowing.move_calls.push((e.match_id, e.span(), st.cur_scope));
             }
         }

@@ -19,11 +19,12 @@ mod narrowing;
 mod refs;
 mod scopes;
 
-/// One capture event, flattened from query matches and sorted by
-/// position so the driver can run its state machine in source order.
+/// One capture, as a fact on the node it tags: the node's site, its span,
+/// and what the match said there.
 struct Event {
-    start_byte: usize,
-    end_byte: usize,
+    /// The head of the tagged node's same-range chain: every capture on a
+    /// range is on one site.
+    site: crate::cst::NodeId,
     start: Point,
     end: Point,
     cap: Capture,
@@ -42,52 +43,55 @@ enum Payload {
     Recv(crate::model::conventions::Invocant),
 }
 
+/// A capture before it is placed: the live node it tags, and the event.
+type Flattened<'t> = (tree_sitter::Node<'t>, Event);
+
 impl Event {
-    fn at(node: tree_sitter::Node<'_>, cap: Capture, text: String, match_id: usize) -> Event {
-        Event {
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
+    fn at<'t>(node: tree_sitter::Node<'t>, cap: Capture, text: String, match_id: usize) -> Flattened<'t> {
+        let event = Event {
+            site: crate::cst::NodeId::default(),
             start: node.start_position(),
             end: node.end_position(),
             cap,
             text,
             match_id,
             payload: None,
-        }
-    }
-
-    fn with(mut self, payload: Payload) -> Event {
-        self.payload = Some(Box::new(payload));
-        self
+        };
+        (node, event)
     }
 
     fn span(&self) -> Span {
         Span { start: self.start, end: self.end }
     }
-
-    fn range(&self) -> (usize, usize) {
-        (self.start_byte, self.end_byte)
-    }
 }
 
-/// The capture events adorned onto the tree. Sorted outermost-first, the
-/// events are a preorder walk of the tagged nodes, so the events a node
-/// contains are one contiguous run after it; indexed by match, every
-/// capture of one match is a lookup. A handler asks "the `@x` of my
-/// match" or "what else is tagged on this node" instead of keeping a
-/// join table of its own.
-struct Adorned {
-    events: Vec<Event>,
-    /// Event indices grouped by match id (`match_start[m]..match_start[m+1]`
-    /// in `by_match`), each group in event order.
+/// Attach `payload` to a flattened capture.
+fn with(f: Flattened<'_>, payload: Payload) -> Flattened<'_> {
+    let (node, mut e) = f;
+    e.payload = Some(Box::new(payload));
+    (node, e)
+}
+
+/// The captures as facts on the syntax tree. Each sits on its node's
+/// site, so the captures of a node are its facts, those inside it are its
+/// subtree's id interval, and those holding it are up its `parent` chain.
+/// The one list beside the tree is match → captures: a match spans nodes.
+/// A handler asks "the `@x` of my match" or "what else is tagged on this
+/// node" instead of keeping a join table of its own.
+struct Adorned<'a, 't> {
+    tree: &'a crate::cst::Structure<'t>,
+    tags: crate::cst::NodeFacts<Event>,
+    /// Tag positions grouped by match id (`match_start[m]..match_start[m+1]`
+    /// in `by_match`), each group in walk order.
     by_match: Vec<u32>,
     match_start: Vec<u32>,
 }
 
-impl Adorned {
-    fn new(events: Vec<Event>, match_count: usize) -> Self {
+impl<'a, 't> Adorned<'a, 't> {
+    fn new(tree: &'a crate::cst::Structure<'t>, tags: crate::cst::NodeFacts<Event>, match_count: usize) -> Self {
+        let events = tags.all();
         let mut match_start = vec![0u32; match_count + 2];
-        for e in &events {
+        for e in events {
             match_start[e.match_id + 1] += 1;
         }
         for m in 1..match_start.len() {
@@ -99,68 +103,92 @@ impl Adorned {
             by_match[fill[e.match_id] as usize] = ix as u32;
             fill[e.match_id] += 1;
         }
-        Adorned { events, by_match, match_start }
+        Adorned { tree, tags, by_match, match_start }
     }
 
-    /// The indices of every capture of match `mid`, in event order.
+    /// Every capture, in walk order: sites in preorder.
+    fn events(&self) -> &[Event] {
+        self.tags.all()
+    }
+
+    /// The indices of every capture of match `mid`, in walk order.
     fn of_match_ixs(&self, mid: usize) -> impl Iterator<Item = usize> + '_ {
         let (lo, hi) = (self.match_start[mid] as usize, self.match_start[mid + 1] as usize);
         self.by_match[lo..hi].iter().map(|&ix| ix as usize)
     }
 
-    /// Every capture of match `mid`, in event order.
+    /// Every capture of match `mid`, in walk order.
     fn of_match(&self, mid: usize) -> impl Iterator<Item = &Event> + '_ {
-        self.of_match_ixs(mid).map(|ix| &self.events[ix])
+        self.of_match_ixs(mid).map(|ix| &self.events()[ix])
     }
 
     /// Match `mid`'s `cap` capture: the first, where a quantified capture
     /// repeats.
     fn in_match(&self, mid: usize, cap: Capture) -> Option<&Event> {
-        self.in_match_ix(mid, cap).map(|ix| &self.events[ix])
+        self.in_match_ix(mid, cap).map(|ix| &self.events()[ix])
     }
 
     fn in_match_ix(&self, mid: usize, cap: Capture) -> Option<usize> {
-        self.of_match_ixs(mid).find(|&ix| self.events[ix].cap == cap)
+        self.of_match_ixs(mid).find(|&ix| self.events()[ix].cap == cap)
     }
 
     /// Every match's captures, matches in id order.
     fn by_match(&self) -> impl Iterator<Item = &Event> + '_ {
-        self.by_match.iter().map(|&ix| &self.events[ix as usize])
+        self.by_match.iter().map(|&ix| &self.events()[ix as usize])
     }
 
-    /// The events tagged on exactly `range`.
-    fn on_range(&self, range: (usize, usize)) -> impl Iterator<Item = &Event> + '_ {
-        self.on_range_ixs(range).map(|ix| &self.events[ix])
+    /// The captures on `e`'s node (and every node sharing its range).
+    fn on(&self, e: &Event) -> impl Iterator<Item = &Event> + '_ {
+        self.on_ixs(e).map(|ix| &self.events()[ix])
     }
 
-    fn on_range_ixs(&self, range: (usize, usize)) -> impl Iterator<Item = usize> + '_ {
-        let lo = self.events.partition_point(|e| (e.start_byte, std::cmp::Reverse(e.end_byte)) < (range.0, std::cmp::Reverse(range.1)));
-        (lo..self.events.len()).take_while(move |&ix| self.events[ix].range() == range)
+    fn on_ixs(&self, e: &Event) -> std::ops::Range<usize> {
+        self.tags.on(e.site)
     }
 
-    /// The events tagged in `list`'s subtree that are its own: a list of
-    /// the same tag nested in it (a call in an argument, a callback's
+    /// The indices of the captures holding `e`'s node: on it, and on each
+    /// node above it.
+    fn around(&self, e: &Event) -> impl Iterator<Item = usize> + '_ {
+        let up = self.tree.node(e.site).enclosing_sites();
+        self.on_ixs(e).chain(up.flat_map(|n| self.tags.on(n.id())))
+    }
+
+    /// The captures in `list`'s subtree that are its own: a list of the
+    /// same tag nested in it (a call in an argument, a callback's
     /// parameters) holds its own items, so its subtree is skipped.
-    fn list_items<'a>(&'a self, list: &'a Event) -> impl Iterator<Item = &'a Event> + 'a {
+    fn list_items<'e>(&'e self, list: &'e Event) -> impl Iterator<Item = &'e Event> + 'e {
         let mut nested_end = 0;
-        self.within(list.range()).map(|ix| &self.events[ix]).filter(move |t| {
-            if t.start_byte < nested_end {
-                return false;
+        self.within(list).filter_map(move |ix| {
+            let t = &self.events()[ix];
+            if ix < nested_end {
+                return None;
             }
-            if t.cap == list.cap && t.range() != list.range() {
-                nested_end = t.end_byte;
-                return false;
+            if t.cap == list.cap && t.site != list.site {
+                nested_end = self.within(t).end;
+                return None;
             }
-            true
+            Some(t)
         })
     }
 
-    /// The indices of the events inside `range` (and on it): the subtree
-    /// of the node there, in preorder.
-    fn within(&self, range: (usize, usize)) -> impl Iterator<Item = usize> + '_ {
-        let lo = self.events.partition_point(|e| e.start_byte < range.0);
-        let hi = self.events.partition_point(|e| e.start_byte < range.1);
-        (lo..hi).filter(move |&ix| self.events[ix].end_byte <= range.1)
+    /// The indices of the captures on `e`'s node and inside it, in
+    /// preorder.
+    fn within(&self, e: &Event) -> std::ops::Range<usize> {
+        self.tags.positions(self.tree.node(e.site).subtree())
+    }
+
+    fn start_byte(&self, e: &Event) -> usize {
+        self.tree.node(e.site).start_byte()
+    }
+
+    fn end_byte(&self, e: &Event) -> usize {
+        self.tree.node(e.site).end_byte()
+    }
+
+    /// The width of `e`'s node, in bytes: of two nodes holding a third,
+    /// the narrower is the inner.
+    fn width(&self, e: &Event) -> usize {
+        self.end_byte(e) - self.start_byte(e)
     }
 }
 
@@ -236,9 +264,9 @@ fn family(cap: Capture) -> Family {
 /// Everything the family handlers share: the output under construction,
 /// the scope stack in force at the current event, and each family's
 /// per-match joins.
-struct ExtractState<'p> {
+struct ExtractState<'p, 't> {
     pack: &'p LangPack,
-    adorned: &'p Adorned,
+    adorned: &'p Adorned<'p, 't>,
     out: SkeletonAnalysis,
     /// (end_byte, ScopeId) — real Scope rows are minted as we go so the
     /// resulting FileAnalysis carries a genuine lexical tree.
@@ -247,8 +275,6 @@ struct ExtractState<'p> {
     /// pops with it (Python class blocks); one set at file depth is sticky
     /// (Perl's flat `package Foo;`).
     context_stack: Vec<(usize, ContextKind, String)>,
-    /// The events whose node holds the current event's, outermost first.
-    ancestors: Vec<usize>,
     /// Per event, what the walk minted on it so far.
     minted: Vec<Minted>,
     /// The innermost scope and sticky context at the current event.
@@ -266,11 +292,11 @@ struct ExtractState<'p> {
 
 pub use crate::model::file_analysis::FileModule;
 
-impl ExtractState<'_> {
+impl ExtractState<'_, '_> {
     /// The current event `e`'s enclosing events and the others tagged on
     /// its own node: the ones a fact "around this token" is stated by.
     fn around<'a>(&'a self, e: &Event) -> impl Iterator<Item = usize> + 'a {
-        self.ancestors.iter().copied().chain(self.adorned.on_range_ixs(e.range()))
+        self.adorned.around(e)
     }
 
     /// The section of the namespace lane in force at `at`, as written so
@@ -302,10 +328,9 @@ impl ExtractState<'_> {
     /// The scope a def at the current event binds in: the innermost one,
     /// or for a def written in a header (a parameter), the def scope the
     /// header belongs to.
-    /// The class a def minted on the node `range` names, as its def filed
-    /// it.
-    fn class_on(&self, range: (usize, usize)) -> Option<&str> {
-        self.adorned.on_range_ixs(range).find_map(|ix| self.minted[ix].class.as_deref())
+    /// The class a def minted on `e`'s node names, as its def filed it.
+    fn class_on(&self, e: &Event) -> Option<&str> {
+        self.adorned.on_ixs(e).find_map(|ix| self.minted[ix].class.as_deref())
     }
 
     fn bind_scope(&self) -> ScopeId {
@@ -338,6 +363,7 @@ fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::
 #[allow(clippy::type_complexity)]
 fn record_matches<'t>(
     compiled: &CompiledPack,
+    syntax: &crate::cst::SyntaxForest<'t>,
     root: tree_sitter::Node<'t>,
     source: &[u8],
 ) -> (links::Links<'t>, Vec<(tree_sitter::Node<'t>, Capture, usize)>) {
@@ -347,11 +373,8 @@ fn record_matches<'t>(
     let mut matches = cursor.matches(&compiled.query, root, source);
     let mut match_counter = 0usize;
     let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
-    let syntax = std::cell::OnceCell::new();
     while let Some(m) = matches.next() {
-        if !crate::build::query_predicates::admits(&compiled.query, m, || {
-            syntax.get_or_init(|| crate::cst::SyntaxForest::new([root]))
-        }) {
+        if !crate::build::query_predicates::admits(&compiled.query, m, || syntax) {
             continue;
         }
         match_counter += 1;
@@ -388,7 +411,10 @@ pub struct DeclaratorPeel<'t>(links::Links<'t>);
 impl<'t> DeclaratorPeel<'t> {
     pub fn of_tree(tree: &'t Tree, source: &[u8], pack: &LangPack) -> Self {
         match cached_query(&tree.language(), pack.query_source) {
-            Ok(compiled) => DeclaratorPeel(record_matches(compiled, tree.root_node(), source).0),
+            Ok(compiled) => {
+                let syntax = crate::cst::SyntaxForest::new([tree.root_node()]);
+                DeclaratorPeel(record_matches(compiled, &syntax, tree.root_node(), source).0)
+            }
             Err(_) => DeclaratorPeel(links::Links::default()),
         }
     }
@@ -432,42 +458,49 @@ pub fn extract_in(
         declaration_rules: Vec::new(),
     });
 
-    // ---- flatten matches into ordered events ----
-    let (links, captured) = record_matches(compiled, root, source);
+    // ---- flatten matches into captures on the tree ----
+    // The extractor reads the tree for every capture, so it is built
+    // up front.
+    let syntax = crate::cst::SyntaxForest::new([root]);
+    let (links, captured) = record_matches(compiled, &syntax, root, source);
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.
-    let mut events: Vec<Event> = Vec::new();
+    let mut flat: Vec<Flattened<'_>> = Vec::new();
     let match_count = captured.last().map_or(0, |&(_, _, mid)| mid);
     for (node, cap, match_id) in captured {
         match cap {
-            Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
-            Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut events),
+            Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut flat),
+            Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut flat),
             Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
-                events.push(members::flatten_recv(node, cap, pack, source, match_id))
+                flat.push(members::flatten_recv(node, cap, pack, source, match_id))
             }
-            Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
-            _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
+            Capture::Qualifier => flat.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
+            _ => flat.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
     }
-    // Source order; outermost first on ties so scopes push before their
-    // contents. A `@scope` on the SAME node as a `@def` (a function_definition
-    // carries its own body scope) must open AFTER the def is recorded, so the
-    // symbol attributes to its ENCLOSING scope, not its own body — hence scope
-    // sorts last among identical-span ties. A header holds no def of its own
-    // node, and a token can be the whole of one (`-> T`), so it opens first.
+    // Each capture sits on its node's site, sites in preorder. Within a
+    // site a `@scope` on the SAME node as a `@def` (a function_definition
+    // carries its own body scope) must open AFTER the def is recorded, so
+    // the symbol attributes to its ENCLOSING scope, not its own body —
+    // hence scope ranks last. A header holds no def of its own node, and a
+    // token can be the whole of one (`-> T`), so it opens first. Otherwise
+    // captures keep their match order.
     let tie_rank = |e: &Event| match e.cap {
         Capture::Scope(ScopeCap::Header) => 0,
         Capture::Scope(_) => 2,
         _ => 1,
     };
-    events.sort_by(|a, b| {
-        a.start_byte
-            .cmp(&b.start_byte)
-            .then(b.end_byte.cmp(&a.end_byte))
-            .then(tie_rank(a).cmp(&tie_rank(b)))
-    });
-    let adorned = Adorned::new(events, match_count);
+    let tree = syntax.main();
+    let mut placed: Vec<(crate::cst::NodeId, Event)> = flat
+        .into_iter()
+        .map(|(node, mut e)| {
+            e.site = tree.lift(node).expect("a capture is a node of the parse it matched").site().id();
+            (e.site, e)
+        })
+        .collect();
+    placed.sort_by_key(|(site, e)| (site.index(), tie_rank(e)));
+    let adorned = Adorned::new(tree, crate::cst::NodeFacts::new(tree.len(), placed), match_count);
 
     let mut st = ExtractState {
         pack,
@@ -475,8 +508,7 @@ pub fn extract_in(
         out,
         scope_stack: vec![(root.end_byte(), ScopeId(0))],
         context_stack: Vec::new(),
-        ancestors: Vec::new(),
-        minted: std::iter::repeat_with(Minted::default).take(adorned.events.len()).collect(),
+        minted: std::iter::repeat_with(Minted::default).take(adorned.events().len()).collect(),
         cur_scope: ScopeId(0),
         package: None,
         scopes: Default::default(),
@@ -495,23 +527,15 @@ pub fn extract_in(
         });
     }
 
-    // ---- one walk in document order: scope stack, sticky contexts and
-    // ancestors; everything else a handler needs, it looks up ----
-    let events = &adorned.events;
-    for (ix, e) in events.iter().enumerate() {
-        while st.scope_stack.len() > 1
-            && st.scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
-        {
+    // ---- one walk in document order: scope stack and sticky contexts;
+    // everything else a handler needs, it looks up ----
+    for (ix, e) in adorned.events().iter().enumerate() {
+        let at = adorned.start_byte(e);
+        while st.scope_stack.len() > 1 && st.scope_stack.last().is_some_and(|&(end, _)| at >= end) {
             st.scope_stack.pop();
             while st.context_stack.last().is_some_and(|&(d, ..)| d > st.scope_stack.len()) {
                 st.context_stack.pop();
             }
-        }
-        while st.ancestors.last().is_some_and(|&a| {
-            let a = &events[a];
-            a.start_byte > e.start_byte || a.end_byte < e.end_byte
-        }) {
-            st.ancestors.pop();
         }
         st.cur_scope = st.scope_stack.last().unwrap().1;
         st.package = st.context_stack.last().map(|(.., p)| p.clone());
@@ -528,7 +552,6 @@ pub fn extract_in(
             Family::Imports => imports::handle(&mut st, e),
             Family::Links => {}
         }
-        st.ancestors.push(ix);
     }
 
     // ---- post-passes, in the order their rows and witnesses land ----

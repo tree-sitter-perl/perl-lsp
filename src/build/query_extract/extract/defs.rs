@@ -9,7 +9,7 @@ use std::collections::HashMap;
 /// a `@parent` match) reads it rather than minting it a second time.
 pub(super) fn class_of_match<'s>(st: &'s ExtractState, match_id: usize) -> Option<&'s str> {
     let name = st.adorned.in_match(match_id, Capture::Def { kind: DefCap::Class, part: DefPart::Name })?;
-    st.class_on(name.range())
+    st.class_on(name)
 }
 
 /// `@ool.def`: a function definition whose declared name may be qualified
@@ -18,12 +18,12 @@ pub(super) fn class_of_match<'s>(st: &'s ExtractState, match_id: usize) -> Optio
 /// shapes they own; an unqualified one yields nothing here, because its own
 /// pattern owns it. The links reach any declarator depth and any number of
 /// qualifiers.
-pub(super) fn flatten_ool_def(
-    node: tree_sitter::Node<'_>,
-    links: &super::links::Links<'_>,
+pub(super) fn flatten_ool_def<'t>(
+    node: tree_sitter::Node<'t>,
+    links: &super::links::Links<'t>,
     source: &[u8],
     match_id: usize,
-    events: &mut Vec<Event>,
+    events: &mut Vec<Flattened<'t>>,
 ) {
     let Some((owner, leaf)) = links.qualified_def(node, source) else {
         return;
@@ -42,18 +42,18 @@ pub(super) fn flatten_ool_def(
 /// stack, then emit the leaf as if the query had captured it directly —
 /// downstream join/symbol/witness paths are unchanged, and arbitrary
 /// nesting works without enumerating it.
-pub(super) fn flatten_nested(
-    node: tree_sitter::Node<'_>,
-    links: &super::links::Links<'_>,
+pub(super) fn flatten_nested<'t>(
+    node: tree_sitter::Node<'t>,
+    links: &super::links::Links<'t>,
     source: &[u8],
     match_id: usize,
-    events: &mut Vec<Event>,
+    events: &mut Vec<Flattened<'t>>,
 ) {
     if let Some(super::links::Peeled { leaf, stack, def }) = links.peel_declarator(node, source) {
         let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
         events.push(Event::at(leaf, Capture::Flow(FlowCap::Target), ltext.clone(), match_id));
         let def = Capture::Def { kind: def, part: DefPart::Node };
-        events.push(Event::at(leaf, def, ltext, match_id).with(Payload::Deref(stack)));
+        events.push(with(Event::at(leaf, def, ltext, match_id), Payload::Deref(stack)));
     }
 }
 
@@ -66,11 +66,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     // (a zero-width token) or the def's own text.
     let name_ix = ad.in_match_ix(e.match_id, Capture::Def { kind, part: DefPart::Name });
     let (name, name_ix, defaulted) = match (name_ix, (pack.default_name)(kind)) {
-        (Some(n), _) => (ad.events[n].text.clone(), Some(n), false),
+        (Some(n), _) => (ad.events()[n].text.clone(), Some(n), false),
         (None, Some(default)) => (default.to_string(), None, true),
         (None, None) => (e.text.clone(), Some(ix), false),
     };
-    let name_tok = name_ix.map(|n| &ad.events[n]);
+    let name_tok = name_ix.map(|n| &ad.events()[n]);
     let (name_start, name_end) = name_tok.map_or((e.start, e.start), |n| (n.start, n.end));
     // A slot written through a receiver is a candidate: its owner is the
     // receiver's type, which the assembled analysis answers
@@ -107,7 +107,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     }
     // Flags another pattern states about the def's name token
     // (`@mark.<flag>`, `@ns.inline`).
-    let on_name: Vec<&Event> = name_tok.map(|n| ad.on_range(n.range()).collect()).unwrap_or_default();
+    let on_name: Vec<&Event> = name_tok.map(|n| ad.on(n).collect()).unwrap_or_default();
     let flags = on_name.iter().fold(crate::model::file_analysis::SymbolFlags::default(), |f, t| match t.cap {
         Capture::Mark(m) => f | m.flag(),
         _ => f,
@@ -169,12 +169,12 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
 pub(super) fn join_template_params(st: &mut ExtractState) {
     let ad = st.adorned;
     let mut rows: Vec<(String, String, usize)> = ad
-        .events
+        .events()
         .iter()
         .filter(|e| e.cap == Capture::Tmpl(TmplCap::Param))
         .filter_map(|p| {
             let owner = ad.in_match(p.match_id, Capture::Tmpl(TmplCap::Owner))?;
-            Some(((st.pack.shape_name)(&owner.text), p.text.clone(), p.start_byte))
+            Some(((st.pack.shape_name)(&owner.text), p.text.clone(), ad.start_byte(p)))
         })
         .collect();
     rows.sort_by_key(|&(_, _, pos)| pos);

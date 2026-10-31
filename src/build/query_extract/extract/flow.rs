@@ -133,15 +133,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // Arms nest, so the innermost around the site is the smallest
             // holding it; an arm that opens outside the scope holds the
             // whole scope, and so does every arm beneath it.
-            // `around`, spelled on its fields: `f` and `out` hold the state.
-            let end = st
-                .ancestors
-                .iter()
-                .copied()
-                .chain(ad.on_range_ixs(e.range()))
-                .map(|a| &ad.events[a])
+            let end = ad
+                .around(e)
+                .map(|a| &ad.events()[a])
                 .filter(|a| a.cap == Capture::Arm)
-                .min_by_key(|a| a.end_byte - a.start_byte)
+                .min_by_key(|a| ad.width(a))
                 .filter(|a| !before(a.start, scope.start))
                 .map_or(scope.end, |a| a.end);
             f.observations.push((
@@ -216,20 +212,20 @@ pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
     let ad = st.adorned;
     let shape = Capture::Expr(ExprCap::Shape);
     let mut seen = std::collections::HashSet::new();
-    for (ix, e) in ad.events.iter().enumerate() {
-        if e.cap != shape || !seen.insert(e.range()) {
+    for (ix, e) in ad.events().iter().enumerate() {
+        if e.cap != shape || !seen.insert(e.site) {
             continue;
         }
         let mut key_ixs: Vec<usize> = ad
-            .on_range(e.range())
+            .on(e)
             .filter(|s| s.cap == shape)
             .flat_map(|s| ad.of_match_ixs(s.match_id))
-            .filter(|&k| ad.events[k].cap == Capture::Shape(ShapeCap::Key))
+            .filter(|&k| ad.events()[k].cap == Capture::Shape(ShapeCap::Key))
             .collect();
         key_ixs.sort_unstable();
         key_ixs.dedup();
         let mut keys: Vec<(String, Option<Box<InferredType>>)> =
-            key_ixs.iter().map(|&k| (ad.events[k].text.clone(), None)).collect();
+            key_ixs.iter().map(|&k| (ad.events()[k].text.clone(), None)).collect();
         keys.dedup_by(|a, b| a.0 == b.0);
         st.minted[ix].value = true;
         let span = e.span();
@@ -324,7 +320,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     // binding, which `@flow.target` writes and rebinds; a place no read
     // projects (a call, a literal) takes nothing.
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
-        let read = ad.on_range_ixs(place.range()).filter_map(|i| st.minted[i].projects.as_deref()).last();
+        let read = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last();
         if let (Some((receiver, member)), Some(value)) = (read, source_value_span(ad, &st.minted, place.match_id)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: *receiver,
@@ -360,10 +356,10 @@ pub(super) fn finish(st: &mut ExtractState) {
 fn source_value_span(ad: &Adorned, minted: &[Minted], mid: usize) -> Option<Span> {
     let src = ad.in_match(mid, Capture::Flow(FlowCap::Source))?;
     Some(
-        ad.within(src.range())
+        ad.within(src)
             .filter(|&ix| minted[ix].value)
-            .map(|ix| &ad.events[ix])
-            .max_by_key(|v| v.end_byte - v.start_byte)
+            .map(|ix| &ad.events()[ix])
+            .max_by_key(|v| ad.width(v))
             .map_or(src.span(), Event::span),
     )
 }

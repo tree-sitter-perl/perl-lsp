@@ -109,7 +109,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 direct: scope_cap == ScopeCap::Direct,
                 declaration_rules: Vec::new(),
             });
-            st.scope_stack.push((e.end_byte, id));
+            st.scope_stack.push((st.adorned.end_byte(e), id));
             st.out.scope_count += 1;
             // a context deferred to THIS scope (C++ namespace) →
             // register at the body depth so it pops with the block.
@@ -143,7 +143,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // context belongs to that (not-yet-pushed) body — defer it
             // so it registers at the body depth and pops with the block.
             let own_scope = st.adorned.of_match(e.match_id).find(|t| matches!(t.cap, Capture::Scope(_)));
-            if own_scope.is_some_and(|s| s.start_byte > e.start_byte) {
+            if own_scope.is_some_and(|s| st.adorned.start_byte(s) > st.adorned.start_byte(e)) {
                 st.scopes.pending_context.insert(e.match_id, (kind, identity.unwrap_or(text)));
             } else {
                 // Replace any context at the same depth; deeper ones
