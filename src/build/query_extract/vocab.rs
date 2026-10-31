@@ -177,6 +177,27 @@ spelled! {
 }
 
 spelled! {
+    /// A conditional-compilation arm (`build/query_extract/cond.rs`).
+    pub enum CondCap {
+        /// An arm that tests (`#if`, `#ifdef`, `#elif`, …): the region it
+        /// covers, alternatives included.
+        If = "if",
+        /// What its arm tests, as written (`#if EXPR`).
+        Test = "test",
+        /// The name its arm needs defined (`#ifdef NAME`).
+        TestDefined = "test.defined",
+        /// The name its arm needs undefined (`#ifndef NAME`).
+        TestUndefined = "test.undefined",
+        /// An arm that runs where the arm it hangs off fails (`#else`, or
+        /// an `#elif`, which also tests).
+        Else = "else",
+        /// The name an include guard tests: its own `#define` makes the
+        /// test hold for the rest of the file, so it guards nothing.
+        Guard = "guard",
+    }
+}
+
+spelled! {
     /// The two halves of a type alias (`typedef`/`using`, or an object-like
     /// `#define` under `@macro.alias.*`), joined by match.
     pub enum AliasPart { Name = "name", Of = "of" }
@@ -506,6 +527,8 @@ pub enum Capture {
     /// A declarator chain's leaf; the suffix names the def the leaf mints.
     DerefLeaf(DefCap),
     Link(LinkCap),
+    /// A conditional-compilation arm, its test, or an include guard.
+    Cond(CondCap),
 }
 
 /// A capture name outside the vocabulary.
@@ -620,6 +643,7 @@ impl Capture {
             ["deref", "leaf", k] => C::DerefLeaf(DefCap::parse(k)?),
             ["deref", k] => C::Deref(DerefCap::parse(k)?),
             ["link", k] => C::Link(LinkCap::parse(k)?),
+            ["cond", rest @ ..] if !rest.is_empty() => C::Cond(CondCap::parse(&rest.join("."))?),
             _ => return None,
         })
     }
@@ -693,6 +717,7 @@ impl fmt::Display for Capture {
             C::Deref(k) => write!(f, "deref.{k}"),
             C::DerefLeaf(k) => write!(f, "deref.leaf.{k}"),
             C::Link(k) => write!(f, "link.{k}"),
+            C::Cond(k) => write!(f, "cond.{k}"),
         }
     }
 }

@@ -1053,3 +1053,93 @@ fn this_is_an_instance_of_the_methods_class() {
         .collect();
     assert_eq!(classes, [Some("C".to_string()), Some("C".to_string())]);
 }
+
+/// Each declaration's arm, as the label its trail renders to.
+#[cfg(feature = "cpp")]
+fn arm_labels(fa: &FileAnalysis) -> std::collections::BTreeMap<String, String> {
+    let trail = |arm| crate::build::cpp_macro_model::render_trail(fa.pack.cond_arms.trail(arm));
+    fa.symbols()
+        .iter()
+        .map(|s| (s.name.clone(), trail(s.arm)))
+        .chain(fa.pack.macro_defs.iter().map(|m| (format!("#{}", m.name), trail(m.arm))))
+        .collect()
+}
+
+/// Every declaration sits in the innermost arm around it: an `#elif` takes
+/// the negation of the arms before it, an `#else` the negation of all of
+/// them, a nested arm its own term after its parent's — and an include
+/// guard's own test guards nothing inside it, while its `#else` still
+/// negates it.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_declaration_carries_the_trail_of_its_innermost_arm() {
+    let src = "\
+#ifndef GUARD_H
+#define GUARD_H
+int plain;
+#if A
+int a1;
+#elif defined(B)
+int b1;
+#else
+int c1;
+#ifdef D
+int d1;
+#endif
+#define IN_ELSE 1
+#endif
+#ifndef NOPE
+int n1;
+#endif
+#else
+int outside_guard;
+#endif
+";
+    let fa = cpp_driver().analyze(src);
+    let labels = arm_labels(&fa);
+    let at = |name: &str| labels.get(name).unwrap_or_else(|| panic!("{name}: {labels:?}")).as_str();
+    assert_eq!(at("plain"), "");
+    assert_eq!(at("#GUARD_H"), "", "the guard's own #define is unconditional");
+    assert_eq!(at("a1"), "A");
+    assert_eq!(at("b1"), "!(A) && defined(B)");
+    assert_eq!(at("c1"), "!(A) && !(defined(B))");
+    assert_eq!(at("d1"), "!(A) && !(defined(B)) && defined(D)");
+    assert_eq!(at("#IN_ELSE"), "!(A) && !(defined(B))");
+    assert_eq!(at("n1"), "!defined(NOPE)");
+    assert_eq!(at("outside_guard"), "defined(GUARD_H)", "the guard's #else is where it was already defined");
+    let a1 = fa.symbols().iter().find(|s| s.name == "a1").unwrap();
+    let in_else = fa.pack.macro_defs.iter().find(|m| m.name == "IN_ELSE").unwrap();
+    let c1 = fa.symbols().iter().find(|s| s.name == "c1").unwrap();
+    assert_ne!(a1.arm, c1.arm);
+    assert_eq!(c1.arm, in_else.arm, "a symbol and a #define in one arm share its id");
+}
+
+/// A language whose document declares no arms mints none: every Perl and
+/// PHP symbol is unconditional, and the arm table stays empty.
+#[test]
+fn a_language_with_no_arm_captures_mints_no_arm() {
+    let check = |fa: &FileAnalysis, lang: &str| {
+        assert!(!fa.symbols().is_empty(), "{lang}: symbols extracted");
+        assert!(fa.symbols().iter().all(|s| s.arm.is_none()), "{lang}: every symbol is unconditional");
+        assert!(fa.pack.cond_arms.is_empty(), "{lang}: no arm table");
+    };
+    check(&PerlDriver.analyze("package Foo;\nif (1) { sub bar { 1 } }\nsub baz { 2 }\n"), "perl");
+    #[cfg(feature = "php")]
+    {
+        let php = LanguageRegistry::compiled().for_id("php").expect("php driver");
+        check(&php.analyze("<?php\nif (PHP_OS === 'x') { function f() {} }\nclass C { function m() {} }\n"), "php");
+    }
+}
+
+/// The arm table round-trips through the store's blob codec with the ids
+/// that point into it, so a warm copy ranks exactly as the fresh one.
+#[cfg(feature = "cpp")]
+#[test]
+fn the_arm_table_survives_a_warm_round_trip() {
+    let fa = cpp_driver().analyze("#ifdef X\nint x;\n#else\nint y;\n#endif\n");
+    let enc = crate::index::module_cache::encode_analysis(&fa).expect("encodes");
+    let warm = enc.decode_whole().expect("decodes");
+    assert!(!fa.pack.cond_arms.is_empty());
+    assert_eq!(warm.pack.cond_arms, fa.pack.cond_arms);
+    assert_eq!(arm_labels(&warm), arm_labels(&fa));
+}

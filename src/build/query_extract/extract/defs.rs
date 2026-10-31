@@ -328,6 +328,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
         flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
+        // Placed once every arm is in (`extract_in`).
+        arm: Default::default(),
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),

@@ -156,7 +156,10 @@ at query time, the way macro variants already are. Nothing is pruned.
 
 - `Symbol::arm` and `MacroDef::arm` are bindings: the innermost arm, an id
   into the file's arm table. `NONE` is unconditional, and is what every
-  language whose document declares no arms mints.
+  language whose document declares no arms mints. The extractor and the
+  gather's `#define` walk both place arms from the `@cond.*` captures of
+  `queries/cpp/cond.scm` (`docs/adr/capture-vocabulary.md`), so an include
+  guard is recognised in one place.
 - A trail term is `CondTerm { test, negated }`: an `#if`'s source text or an
   `#ifdef`'s name, and whether the code sits where it fails. The negation is a
   field, so the evaluator never re-reads a rendered `!(…)` (rule #13). A

@@ -121,10 +121,12 @@ pub fn identity_prefix_at(tree: &Tree, source: &str, pack: &LangPack, at: usize)
     Some(if absolute { &typed[sep.len()..] } else { typed }.to_string())
 }
 
+mod cond;
 mod extract;
 mod packs;
 mod skeleton;
 mod vocab;
+pub use cond::*;
 pub use extract::*;
 pub use packs::*;
 pub use skeleton::*;

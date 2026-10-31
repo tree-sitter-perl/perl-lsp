@@ -385,6 +385,8 @@ fn synth_base(
 /// A field-block `#define` variant of a macro: its guard trail plus the body's
 /// original bytes and start Point (for positioning members).
 struct VariantSite {
+    /// Where its `#define` names it: the position its arm is read at.
+    name_at: tree_sitter::Point,
     guards: Vec<crate::model::file_analysis::CondTerm>,
     /// The body's ORIGINAL bytes verbatim (offsets map 1:1 for positioning).
     body: String,
@@ -402,13 +404,21 @@ fn field_block_variant_sites(
     let src = source.as_bytes();
     let query = cached_query(&MACRO_DEF_Q, &tree.language(), MACRO_DEF_QUERY);
     let names: Vec<&str> = query.capture_names().to_vec();
+    let cond = cond_captures(&names);
+    let mut arms = crate::build::query_extract::ArmBuilder::default();
     let mut cursor = QueryCursor::new();
     let mut it = cursor.matches(query, tree.root_node(), src);
     let mut out = Vec::new();
+    let mut match_id = 0usize;
     while let Some(m) = it.next() {
+        match_id += 1;
         let mut name_node: Option<tree_sitter::Node> = None;
         let mut body_node: Option<tree_sitter::Node> = None;
         for c in m.captures {
+            if let Some(k) = cond[c.index as usize] {
+                arms.capture(k, c.node, c.node.utf8_text(src).unwrap_or(""), match_id);
+                continue;
+            }
             // Object- and function-like field-block macros both mint a base; the
             // params of a function-like one (`_SV_HEAD(ptrtype)`) are absorbed by
             // the paste, so only name + body matter for positioning members.
@@ -429,10 +439,15 @@ fn field_block_variant_sites(
             continue;
         }
         out.push(VariantSite {
-            guards: guard_trail(nn, src),
+            name_at: nn.start_position(),
+            guards: Vec::new(),
             body: body_text.to_string(),
             start_point: bn.start_position(),
         });
+    }
+    let arms = arms.finish();
+    for site in &mut out {
+        site.guards = arms.trail_at(site.name_at).to_vec();
     }
     out
 }

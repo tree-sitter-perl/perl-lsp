@@ -1102,6 +1102,8 @@ fn inject_member_blocks(
                 arity: None,
                 qualifier_owned: false,
                 flags: Default::default(),
+                // A member-block base is no arm of the file's own.
+                arm: Default::default(),
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1296,6 +1298,8 @@ fn remap_spans(
             arity: _,
             qualifier_owned: _,
             flags: _,
+            // an id, placed in transformed coordinates before the remap
+            arm: _,
         } = s;
         *start = r(*start);
         *end = r(*end);

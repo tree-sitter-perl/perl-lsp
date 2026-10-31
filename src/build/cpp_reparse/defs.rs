@@ -3,16 +3,32 @@
 //! the body-cleanup + textual-expansion primitives they feed.
 
 use super::*;
-use crate::model::file_analysis::{CondTerm, CondTest};
 
-pub(super) const MACRO_DEF_QUERY: &str = r#"
+/// Every `#define`, plus the arm shapes (`cond.scm`, shared with the
+/// skeleton document) that place each one in its `#if` arm.
+pub(super) const MACRO_DEF_QUERY: &str = concat!(
+    r#"
 (preproc_def name: (identifier) @oname value: (preproc_arg) @obody)
 (preproc_def name: (identifier) @bname !value)
 (preproc_function_def
   name: (identifier) @fname
   parameters: (preproc_params) @fparams
   value: (preproc_arg) @fbody)
-"#;
+"#,
+    include_str!("../../../queries/cpp/cond.scm")
+);
+
+/// The `@cond.*` capture each of `names` is, if any.
+pub(super) fn cond_captures(names: &[&str]) -> Vec<Option<crate::build::query_extract::CondCap>> {
+    use crate::build::query_extract::Capture;
+    names
+        .iter()
+        .map(|n| match Capture::parse(n) {
+            Ok(Capture::Cond(k)) => Some(k),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Spans to never expand inside: string/char literals, comments, and
 /// the preprocessor definition/conditional DIRECTIVE lines themselves.
@@ -96,11 +112,17 @@ pub(super) fn walk_macro_defs(
 ) {
     let query = cached_query(&MACRO_DEF_Q, &tree.language(), MACRO_DEF_QUERY);
     let names: Vec<&str> = query.capture_names().to_vec();
+    let cond = cond_captures(&names);
     // Bodies are re-derived from raw source (comment truncation), not node text.
     let source = std::str::from_utf8(src).unwrap_or("");
+    let mut arms = crate::build::query_extract::ArmBuilder::default();
+    // Each def's arm is known once every arm is in, so the defs wait.
+    let mut pending: Vec<(String, Macro, (tree_sitter::Point, tree_sitter::Point))> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut it = cursor.matches(query, tree.root_node(), src);
+    let mut match_id = 0usize;
     while let Some(m) = it.next() {
+        match_id += 1;
         let mut oname = None;
         let mut obody = None;
         let mut bname = None;
@@ -111,6 +133,10 @@ pub(super) fn walk_macro_defs(
         let mut name_node: Option<tree_sitter::Node> = None;
         for c in m.captures {
             let txt = c.node.utf8_text(src).unwrap_or("");
+            if let Some(k) = cond[c.index as usize] {
+                arms.capture(k, c.node, txt, match_id);
+                continue;
+            }
             match names[c.index as usize] {
                 "oname" => {
                     oname = Some(txt.to_string());
@@ -139,13 +165,13 @@ pub(super) fn walk_macro_defs(
                 _ => {}
             }
         }
-        let guards = name_node.map(|n| guard_trail(n, src)).unwrap_or_default();
         let def_line = name_node.map(|n| n.start_position().row).unwrap_or(0);
         let name_span = name_node
             .map(|n| (n.start_position(), n.end_position()))
             .unwrap_or_default();
+        let def = |params, body| Macro { params, body, guards: Vec::new(), def_line };
         if let (Some(n), Some(b)) = (oname, obody) {
-            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line }, name_span);
+            pending.push((n, def(None, b), name_span));
         }
         // Bodyless `#define FLAG` — the canonical config knob (feature
         // toggles, include guards, `PERL_CORE`-style markers). It must enter
@@ -153,15 +179,16 @@ pub(super) fn walk_macro_defs(
         // exactly inverted; its empty body is also C-correct for expansion
         // (a bare use of the flag expands to nothing).
         if let Some(n) = bname {
-            emit(
-                n,
-                Macro { params: None, body: String::new(), guards: guards.clone(), def_line },
-                name_span,
-            );
+            pending.push((n, def(None, String::new()), name_span));
         }
         if let (Some(n), Some(p), Some(b)) = (fname, fparams, fbody) {
-            emit(n, Macro { params: Some(p), body: b, guards, def_line }, name_span);
+            pending.push((n, def(Some(p), b), name_span));
         }
+    }
+    let arms = arms.finish();
+    for (name, mut m, span) in pending {
+        m.guards = arms.trail_at(span.0).to_vec();
+        emit(name, m, span);
     }
 }
 
@@ -604,72 +631,6 @@ pub fn collect_macro_variants(
     out
 }
 
-/// The config guard trail for a `#define` at `node` (a name identifier inside
-/// the preproc_def): the enclosing `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`
-/// conditions, OUTERMOST first. An else/elif branch negates the condition it
-/// falls under; chained elifs accumulate the negations of preceding arms
-/// because each `#elif`/`#else` is the `alternative` child of the arm before
-/// it, and ascending through an `alternative` edge negates that arm's own
-/// condition.
-pub(super) fn guard_trail(node: tree_sitter::Node, src: &[u8]) -> Vec<CondTerm> {
-    let mut terms: Vec<CondTerm> = Vec::new();
-    let mut prev = node;
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        let is_alt = p
-            .child_by_field_name("alternative")
-            .map(|a| a.id())
-            == Some(prev.id());
-        match p.kind() {
-            "preproc_if" | "preproc_elif" => {
-                let cond = p
-                    .child_by_field_name("condition")
-                    .and_then(|c| c.utf8_text(src).ok())
-                    .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
-                    .unwrap_or_else(|| "1".to_string());
-                terms.push(CondTerm { test: CondTest::Expr(cond), negated: is_alt });
-            }
-            "preproc_ifdef" => {
-                // Node kind is shared by #ifdef and #ifndef; the leading
-                // directive text disambiguates.
-                let name = p
-                    .child_by_field_name("name")
-                    .and_then(|c| c.utf8_text(src).ok())
-                    .unwrap_or("")
-                    .to_string();
-                let ndef = src
-                    .get(p.start_byte()..)
-                    .and_then(|s| std::str::from_utf8(s).ok())
-                    .map(|s| s.trim_start().starts_with("#ifndef"))
-                    .unwrap_or(false);
-                // The header-guard idiom (`#ifndef X` / `#define X` as the
-                // FIRST thing inside it) makes X true for the rest of the
-                // file from here on — it's not a real config knob, so a
-                // descendant nested in the primary branch must not inherit
-                // "!defined(X)" as a guard term (every macro
-                // in a guarded header would pick up its file's own include
-                // guard as a bogus UNKNOWN reachability label).
-                if !(ndef && !is_alt && is_self_defining_guard(p, &name, src)) {
-                    terms.push(CondTerm { test: CondTest::Defined(name), negated: ndef != is_alt });
-                }
-            }
-            // #else contributes no condition of its own — the negation of the
-            // arm it belongs to is applied when we ascend into the parent
-            // conditional and see this else as its `alternative` child.
-            _ => {}
-        }
-        prev = p;
-        cur = p.parent();
-    }
-    terms.reverse();
-    terms
-}
-
-/// True when `p` (a `#ifndef NAME` / `#ifdef NAME` `preproc_ifdef`) directly
-/// `#define`s `NAME` as one of its own children — the canonical include-guard
-/// idiom (`#ifndef X` / `#define X` / ... / `#endif`). Structural, not a name
-/// list: any macro whose enclosing conditional it also defines is self-
-/// guarding, regardless of the guard's own spelling.
 /// Names `#define`d as their file's own include guard: a BODYLESS object-like
 /// `#define X` sitting directly inside `#ifndef X` (the self-guarding idiom
 /// `#ifndef X` / `#define X` / … / `#endif`). Such a macro is pure compilation
@@ -719,15 +680,6 @@ pub fn collect_include_guard_names(
         }
     }
     out
-}
-
-fn is_self_defining_guard(p: tree_sitter::Node, name: &str, src: &[u8]) -> bool {
-    let mut c = p.walk();
-    let hit = p.named_children(&mut c).any(|child| {
-        child.kind() == "preproc_def"
-            && child.child_by_field_name("name").and_then(|n| n.utf8_text(src).ok()) == Some(name)
-    });
-    hit
 }
 
 /// Largest a macro body may grow to during pre-expansion — a backstop

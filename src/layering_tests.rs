@@ -1663,7 +1663,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/visit_decl.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
+        ("build/cpp_reparse/defs.rs", 6, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/synthetic.rs", 2, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
         ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),

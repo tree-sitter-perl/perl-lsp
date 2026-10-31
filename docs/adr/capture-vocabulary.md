@@ -355,6 +355,18 @@ is relative to the working directory. The anchor is whether the capture
 fired. A directory the document cannot spell from literals is written not
 to match, so a computed `sys.path` edit mints nothing.
 
+Conditional-compilation arms are captured the same way (`queries/cpp/cond.scm`).
+`@cond.if` is an arm that tests, its `@cond.test` / `@cond.test.defined` /
+`@cond.test.undefined` what it tests, `@cond.else` an arm that runs where the
+one it hangs off fails, and `@cond.guard` an include guard's name. The node
+kinds, the `alternative` field and the `#ifndef` spelling live there, read by
+the skeleton document and by the macro gather's `#define` walk alike.
+`query_extract/cond.rs` places the arms (read while flattening, like links):
+each region's trail is the trail around it plus its own term, a declaration's
+arm is the innermost region around its name, and `ArmRegions::arm_at` is the
+one answer to "is this position conditional" (`ArmId::NONE` when not). A
+document with no `@cond.*` capture places no arm.
+
 ## Decision: depth is chained from links, never walked
 
 A tree-sitter pattern has a fixed depth: no descendant axis, no recursion,

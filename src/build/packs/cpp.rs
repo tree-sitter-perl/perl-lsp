@@ -6,7 +6,9 @@ use crate::model::file_analysis::{ClassCall, InferredType, MemberNamespace, Name
 pub fn cpp_pack() -> LangPack {
     LangPack {
         id: "cpp",
-        query_source: include_str!("../../../queries/cpp/skeleton.scm"),
+        // The arm shapes live in their own document, shared with the macro
+        // gather's `#define` walk.
+        query_source: concat!(include_str!("../../../queries/cpp/skeleton.scm"), include_str!("../../../queries/cpp/cond.scm")),
         // One member namespace: the nearest declaration of a name wins,
         // whether it is a data member or a member function. Calling a class
         // constructs it (a functional cast, `Foo(x)`).

@@ -48,6 +48,9 @@ pub struct SkelSymbol {
     /// (a receiver parameter). Or-ed onto the flags the kind and the
     /// attributes give.
     pub flags: SymbolFlags,
+    /// The innermost conditional-compilation arm the name token sits in,
+    /// into `SkeletonAnalysis::cond_arms`. Flows to `Symbol.arm`.
+    pub arm: crate::model::file_analysis::ArmId,
 }
 
 impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
@@ -1885,7 +1888,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
         declared_with: None,
         deref_stack: s.deref_stack.clone(),
         arity: s.arity,
-        arm: crate::model::file_analysis::ArmId::NONE,
+        arm: s.arm,
     }
 }
 

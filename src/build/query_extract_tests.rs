@@ -1000,6 +1000,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         arity: None,
         qualifier_owned: false,
         flags: Default::default(),
+        arm: Default::default(),
     }
 }
 

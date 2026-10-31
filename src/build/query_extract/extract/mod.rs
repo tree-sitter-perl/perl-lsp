@@ -66,6 +66,9 @@ enum Family {
     Roots,
     /// Read while flattening; a link never becomes an event.
     Links,
+    /// Read while flattening into the arm builder; placed once every arm
+    /// is in.
+    Cond,
 }
 
 fn family(cap: Capture) -> Family {
@@ -105,6 +108,7 @@ fn family(cap: Capture) -> Family {
         C::Root(_) => Family::Roots,
         C::Import(_) => Family::Imports,
         C::LinkFrom(_) | C::Link(_) | C::Deref(_) | C::DerefLeaf(_) => Family::Links,
+        C::Cond(_) => Family::Cond,
     }
 }
 
@@ -133,6 +137,7 @@ struct ExtractState<'p> {
     commands: commands::State,
     imports: imports::State,
     roots: roots::State,
+    cond: ArmBuilder,
     /// The module the file IS, when its language names it by path and the
     /// driver had one: its dotted name is the section every declaration
     /// without a namespace of its own joins.
@@ -320,6 +325,7 @@ pub fn extract_in(
         commands: Default::default(),
         imports: Default::default(),
         roots: Default::default(),
+        cond: Default::default(),
         file_module,
     };
     // A module named by its path is one section, the whole file.
@@ -351,6 +357,7 @@ pub fn extract_in(
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
             Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
+            Capture::Cond(k) => st.cond.capture(k, node, node.utf8_text(source).unwrap_or(""), match_id),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
     }
@@ -384,7 +391,7 @@ pub fn extract_in(
             Family::Imports => imports::collect(&mut st, e),
             Family::Refs => refs::collect(&mut st, e),
             Family::Roots => roots::collect(&mut st, e),
-            Family::Commands | Family::Links => {}
+            Family::Commands | Family::Links | Family::Cond => {}
         }
     }
 
@@ -409,7 +416,7 @@ pub fn extract_in(
             Family::Narrowing => narrowing::handle(&mut st, e),
             Family::Commands => commands::handle(&mut st, e),
             Family::Imports => imports::handle(&mut st, e),
-            Family::Roots | Family::Links => {}
+            Family::Roots | Family::Links | Family::Cond => {}
         }
     }
 
@@ -437,6 +444,13 @@ pub fn extract_in(
     narrowing::finish(&mut st);
     members::finish(&mut st);
     roots::finish(&mut st);
+    // Every declaration, whichever pass minted it, sits in the arm its name
+    // token is written in.
+    let regions = std::mem::take(&mut st.cond).finish();
+    for s in st.out.symbols.iter_mut().chain(st.out.slot_writes.iter_mut().map(|w| &mut w.symbol)) {
+        s.arm = regions.arm_at(s.name_start);
+    }
+    st.out.cond_arms = regions.into_arms();
     Ok(st.out)
 }
 
