@@ -2173,7 +2173,9 @@ mod pack_symmetry {
         // forwarding to different callees. The using file's build sees both
         // through its include closure and mints the edge on the use site, so
         // gr on either callee lists `WRAP(1)` with no query-time macro scan.
-        let dir = std::env::temp_dir().join("perl_lsp_delegation_header");
+        // Per-process dir: the header cache is keyed by stamp, so a stale
+        // `wrap.h` from a concurrent or older run must never be read.
+        let dir = std::env::temp_dir().join(format!("perl_lsp_delegation_header_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let header_src = "int real(int x);\nint real_t(int x);\n#ifdef THREADED\n#define WRAP(x) real_t(x)\n#else\n#define WRAP(x) real(x)\n#endif\n";
         std::fs::write(dir.join("wrap.h"), header_src).unwrap();

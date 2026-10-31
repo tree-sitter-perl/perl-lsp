@@ -130,6 +130,13 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   query-time visibility check — the file's own preprocessor view already
   decided it. Freshness rides the Surface: macro bodies are on it, so a
   header edit that changes a delegate re-analyzes its includers.
+  The chain is keyed by macro NAME per file rather than stamped on each ref
+  (rule #14's per-site shape): under one preprocessor view every use of the
+  name shares it, and one map entry per used name stays small where a
+  per-ref field would grow every `Ref` in every language. The cost is an
+  over-match the query-time scan had too: a use outside the `#define`'s live
+  range, or a plain identifier spelled like a function-like macro, lists as
+  a reference to the delegate.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 
