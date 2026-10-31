@@ -716,7 +716,9 @@ fn build_once(
     // optional, a guard-proved rep), and a place holds a value only where a
     // guard narrowed it: the deref's own rep observation can't fire one. A
     // place site nothing narrows is dropped here rather than carried per
-    // file — FHEM minted 73k of them and paid +3% peak RSS for none firing.
+    // file — FHEM minted 73k of them and paid +3% peak RSS for none firing
+    // (2026-10-30). A method receiver's place is read for the same value
+    // (a class to dispatch on), so one nothing narrows goes back to its name.
     {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
         let valued: std::collections::HashSet<&crate::model::file_analysis::Place> = b
@@ -730,6 +732,15 @@ fn build_once(
             .collect();
         b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
         b.arrow_deref_sites.shrink_to_fit();
+        for r in &mut b.refs {
+            if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {
+                if let crate::model::conventions::Invocant::Place { name, place } = invocant {
+                    if !valued.contains(&**place) {
+                        *invocant = crate::model::conventions::Invocant::Name(name.clone());
+                    }
+                }
+            }
+        }
     }
 
     let packages = b.package_facts();

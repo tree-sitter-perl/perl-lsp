@@ -8,22 +8,22 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::Point;
 
 use crate::model::conventions::{Invocant, InvocantName};
-use crate::model::file_analysis::{Access, Binding, PathStep, Place, PlaceDisturbanceIndex, Span, SymbolId};
+use crate::model::file_analysis::{Access, Binding, PathStep, Place, PlaceDisturbanceIndex, Span};
 
 use super::MemberRead;
 
 /// Resolves an expression span to the place it denotes, from the facts the
-/// extractor minted: each variable read's declaration and each member read's
-/// receiver.
+/// extractor minted: the place each name read denotes (its declaration, or
+/// a member of the elided receiver) and each member read's receiver.
 pub(crate) struct PackPlaces<'a> {
-    vars: HashMap<Span, SymbolId>,
+    vars: HashMap<Span, Place>,
     members: HashMap<Span, &'a MemberRead>,
     /// The member read each receiver is read through, by the receiver.
     through: HashMap<Span, &'a MemberRead>,
 }
 
 impl<'a> PackPlaces<'a> {
-    pub(crate) fn new(vars: HashMap<Span, SymbolId>, member_reads: &'a [MemberRead]) -> Self {
+    pub(crate) fn new(vars: HashMap<Span, Place>, member_reads: &'a [MemberRead]) -> Self {
         PackPlaces {
             vars,
             members: member_reads.iter().map(|m| (m.span, m)).collect(),
@@ -40,9 +40,11 @@ impl<'a> PackPlaces<'a> {
         // Each hop steps to a receiver inside the access; a macro remap can
         // fold spans onto one another, so the hops are bounded.
         for _ in 0..=self.members.len() {
-            if let Some(&sym) = self.vars.get(&at) {
+            if let Some(base) = self.vars.get(&at) {
                 steps.reverse();
-                return Some(Place { root: Binding::Lexical(sym), path: steps });
+                let mut place = base.clone();
+                place.path.extend(steps);
+                return Some(place);
             }
             let read = self.members.get(&at)?;
             steps.push(PathStep::Member(read.member.clone()));
@@ -52,10 +54,11 @@ impl<'a> PackPlaces<'a> {
     }
 
     /// A member access's receiver, carrying its place when it is a part of
-    /// a variable, so the receiver's narrowings reach the access.
-    pub(crate) fn receiver(&self, span: Span, invocant: Invocant) -> Invocant {
+    /// a variable that `valued` gives a value, so the receiver's narrowings
+    /// reach the access.
+    pub(crate) fn receiver(&self, span: Span, invocant: Invocant, valued: &HashSet<Place>) -> Invocant {
         match self.at(span) {
-            Some(place) if !place.is_variable() => Invocant::Place {
+            Some(place) if !place.is_variable() && valued.contains(&place) => Invocant::Place {
                 name: InvocantName::assume_canonical(invocant.text()),
                 place: Box::new(place),
             },
@@ -79,9 +82,9 @@ impl<'a> PackPlaces<'a> {
                 add(w.start, Access::Write, place);
             }
         }
-        for (&span, &sym) in &self.vars {
+        for (&span, base) in &self.vars {
             if !self.through.contains_key(&span) {
-                add(span.start, Access::Opaque, Place::variable(Binding::Lexical(sym)));
+                add(span.start, Access::Opaque, base.clone());
             }
         }
         for &span in self.members.keys() {
@@ -95,14 +98,16 @@ impl<'a> PackPlaces<'a> {
         idx
     }
 
-    /// The token of every variable read that reaches a part of `place`: the
-    /// read, extended through the member reads made of it, overlaps it.
+    /// The token of every name read that reads what `place` holds: the
+    /// read, extended through the member reads made of it, runs through
+    /// `place`. A read of what holds it (`p` after `p.msg` is moved) hands
+    /// the whole on and reads none of the moved state itself.
     pub(crate) fn reads_of(&self, place: &Place) -> Vec<Span> {
         let mut reads: Vec<Span> = self
             .vars
             .iter()
-            .filter(|(_, sym)| place.root == Binding::Lexical(**sym))
-            .filter(|(span, sym)| place.overlaps(&self.read_through(**span, **sym)))
+            .filter(|(_, base)| base.root == place.root)
+            .filter(|(span, base)| self.read_through(**span, base).reads_into(place))
             .map(|(span, _)| *span)
             .collect();
         reads.sort_by_key(|s| s.start);
@@ -118,10 +123,10 @@ impl<'a> PackPlaces<'a> {
             .collect()
     }
 
-    /// The deepest place a variable read reaches through the member reads
+    /// The deepest place a name read reaches through the member reads
     /// made of it (`self` in `self.a.b` reaches `self.a.b`).
-    fn read_through(&self, span: Span, sym: SymbolId) -> Place {
-        let mut place = Place::variable(Binding::Lexical(sym));
+    fn read_through(&self, span: Span, base: &Place) -> Place {
+        let mut place = base.clone();
         let mut at = span;
         for _ in 0..=self.through.len() {
             let Some(read) = self.through.get(&at) else { break };

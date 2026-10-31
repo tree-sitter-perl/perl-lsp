@@ -199,15 +199,23 @@ impl FileAnalysis {
             // base subobject a whole-parameter move feeds is decided by the
             // callee's parameter type, which no capture states. Only moves of
             // LOCALS are flagged. This is what clears the last real-header FPs.
-            let Binding::Lexical(root) = &m.place.root else { continue };
-            let decl = self.symbol(*root);
-            if self.pack.param_regions.iter().any(|pr| contains(pr, &decl.selection_span)) {
-                continue;
-            }
+            // A member of the elided receiver is no parameter, and nothing
+            // in the body rebinds the receiver.
+            let root_name = match &m.place.root {
+                Binding::Lexical(root) => {
+                    let decl = self.symbol(*root);
+                    if self.pack.param_regions.iter().any(|pr| contains(pr, &decl.selection_span)) {
+                        continue;
+                    }
+                    Some(decl.name.as_str())
+                }
+                Binding::Receiver(_) => None,
+                Binding::Package(..) => continue,
+            };
             let scope_end = scope_span.end;
             let region = Span { start: move_span.end, end: scope_end };
             let reset = m.resets.iter().map(|s| s.start).filter(|p| key(p) > key(&move_span.end)).min_by_key(key);
-            let cutoff = [rebinds.earliest_in(&decl.name, region), reset]
+            let cutoff = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset]
                 .into_iter()
                 .flatten()
                 .min_by_key(key)
