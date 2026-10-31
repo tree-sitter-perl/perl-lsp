@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 /// Cross-file helper chain completion: Users.pm inherits from
@@ -465,7 +466,7 @@ sub _generate_route {
         .expect("MethodCall ref for `_generate_route`");
 
     if matches!(gr_ref.kind, RefKind::MethodCall { .. }) {
-        let invocant_class = fa.method_call_invocant_classes(gr_ref, None).single().map(str::to_string);
+        let invocant_class = fa.receiver_classes(gr_ref, None, ReceiverPolicy::Navigate).single().map(str::to_string);
         assert_eq!(
             invocant_class.as_deref(),
             Some("Mojolicious::Routes::Route"),
@@ -504,7 +505,7 @@ sub inline {
         .expect("MethodCall ref for `inline`");
 
     if matches!(inline_ref.kind, RefKind::MethodCall { .. }) {
-        let invocant_class = fa.method_call_invocant_classes(inline_ref, None).single().map(str::to_string);
+        let invocant_class = fa.receiver_classes(inline_ref, None, ReceiverPolicy::Navigate).single().map(str::to_string);
         assert_eq!(
             invocant_class.as_deref(),
             Some("Mojolicious::Routes::Route"),

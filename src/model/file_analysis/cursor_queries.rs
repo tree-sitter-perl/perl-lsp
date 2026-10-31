@@ -102,7 +102,7 @@ impl FileAnalysis {
                     // $x->m`) returns None: honest miss. There is NO
                     // same-name fallback — a typed OR chained-method-return
                     // receiver now carries a real edge
-                    // (`method_call_invocant_classes` resolves chain
+                    // (`resolve_receiver` resolves chain
                     // receivers via `expr_type_at_span`), so jumping to an
                     // arbitrary same-named sub when the class can't infer is
                     // never right (the `->new` / `'Users#create'` flood, the
@@ -331,7 +331,7 @@ impl FileAnalysis {
                             // `method_name_span` to highlight just
                             // the identifier.
                             if sym_package.as_deref().is_some_and(|pkg| {
-                                self.method_call_invocant_classes(r, module_index).contains(pkg)
+                                self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(pkg)
                             }) {
                                 results.push((*method_name_span, r.access));
                             }
@@ -339,7 +339,7 @@ impl FileAnalysis {
                         (RefKind::FieldAccess { member_name_span, .. },
                          SymKind::Field | SymKind::Variable) if r.unqualified_target_name(self.names()) == sym.name => {
                             if sym_package.as_deref().is_some_and(|pkg| {
-                                self.method_call_invocant_classes(r, module_index).contains(pkg)
+                                self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(pkg)
                             }) {
                                 results.push((*member_name_span, r.access));
                             }
@@ -481,7 +481,7 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             if r.member_site().is_some() {
                 let bare = r.unqualified_target_name(self.names());
-                for class in self.receiver_classes(r, None) {
+                for class in self.receiver_classes(r, None, ReceiverPolicy::Edge) {
                     if let Some(g) = self.field_group_named(bare, &class) {
                         if g.has_reader {
                             return Some(g);
@@ -760,7 +760,7 @@ impl FileAnalysis {
                 if r.unqualified_target_name(self.names()) != method {
                     continue;
                 }
-                if self.receiver_classes(r, None).contains(&g.class) {
+                if self.receiver_classes(r, None, ReceiverPolicy::Edge).contains(&g.class) {
                     spans.push(*method_name_span);
                 }
             }
@@ -834,7 +834,7 @@ impl FileAnalysis {
                     if r.unqualified_target_name(self.names()) != g.bare {
                         continue;
                     }
-                    if self.receiver_classes(r, None).contains(&g.class) {
+                    if self.receiver_classes(r, None, ReceiverPolicy::Edge).contains(&g.class) {
                         spans.push(site.name_span);
                     }
                 }
@@ -898,7 +898,7 @@ impl FileAnalysis {
         if let (Some(enclosing), Some(idx)) = (enclosing_call, module_index) {
             let verb = enclosing.unqualified_target_name(self.names());
             if self.is_column_keyed_verb(verb) {
-                for class in self.receiver_classes(enclosing, module_index) {
+                for class in self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge) {
                     // The class's files as a SET: a shadow in ANY candidate
                     // overrides DBIC's verb (same gate as the builder's
                     // `user_shadows_verb`); the column may be minted by any.
@@ -934,7 +934,7 @@ impl FileAnalysis {
             // An owner is ONE producer: a union receiver's call has a
             // return per arm, and no single `Sub` owns the key.
             if let Some(class) =
-                self.receiver_classes(enclosing, module_index).single().map(str::to_string)
+                self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
             {
                 return Some(HashKeyOwner::Sub {
                     package: Some(class),
@@ -1169,7 +1169,7 @@ impl FileAnalysis {
                         // One class names one kind; a union member's arms are
                         // grouped by the CandidateSet, which asks per arm.
                         if let Some(class) =
-                            self.method_call_invocant_classes(r, module_index).single().map(str::to_string)
+                            self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).single().map(str::to_string)
                         {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
@@ -1340,7 +1340,7 @@ impl FileAnalysis {
                     // Member refs target a class — `None` scope
                     // doesn't reach members.
                     if scope.as_deref().is_some_and(|wanted| {
-                        self.method_call_invocant_classes(r, module_index).contains(wanted)
+                        self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(wanted)
                     }) {
                         edits.push((*method_name_span, new_name.to_string()));
                     }

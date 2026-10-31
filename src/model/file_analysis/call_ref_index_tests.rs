@@ -1,6 +1,6 @@
 //! Tiebreak / shape pins for the `RefTable` call index —
 //! the start-point → call-shaped-ref index that powers chain
-//! receiver dispatch in `method_call_invocant_classes`.
+//! receiver dispatch in `resolve_receiver`.
 //!
 //! The index is small but its rules are subtle: only MethodCall +
 //! FunctionCall refs go in; identical-start collisions are won by
@@ -53,7 +53,7 @@ fn is_function_call(k: &RefKind) -> bool {
 /// same point as the inner `Foo->new` call's start. The index must
 /// resolve that start point to the **inner** `new` ref, not the
 /// outer `bar` (smallest-span wins). This is the rule that makes
-/// chain dispatch in `method_call_invocant_classes` recurse onto the
+/// chain dispatch in `resolve_receiver` recurse onto the
 /// genuine receiver instead of looping back on itself.
 #[test]
 fn smallest_span_wins_method_chain() {
@@ -91,7 +91,7 @@ Foo->new->bar();
     );
 
     // And critically: not the outer ref itself. If this fires, the
-    // `is_self` guard in `method_call_invocant_classes` is the only
+    // `is_self` guard in `resolve_receiver` is the only
     // thing protecting against an infinite recursion.
     assert_ne!(resolved, Some(bar_idx));
 }
@@ -103,7 +103,7 @@ Foo->new->bar();
 /// MethodCall's span — so smallest-span wins picks the
 /// FunctionCall.
 ///
-/// This is what lets `method_call_invocant_classes` chase
+/// This is what lets `resolve_receiver` chase
 /// `make_b()->touch()` back to `make_b`'s zero-arg return type
 /// without depending on any cached field.
 #[test]
@@ -213,7 +213,7 @@ my $k = $x->{key};
 /// `is_self` guard: when `Foo->m()` is the only call-shaped ref at
 /// the chain's leftmost point, the index lookup from `m`'s
 /// `invocant_span` returns `m` itself. The recursion in
-/// `method_call_invocant_classes` must detect that (pointer compare
+/// `resolve_receiver` must detect that (pointer compare
 /// against the input ref) and bail out, so the bareword invocant
 /// branch can resolve `Foo` → "Foo" at the bottom of the function.
 ///
@@ -242,7 +242,7 @@ Foo->m();
 
     // The functional consequence of the guard: resolution returns
     // "Foo" (the bareword invocant), not None or a hang.
-    let class = fa.method_call_invocant_classes(m, None).single().map(str::to_string);
+    let class = fa.receiver_classes(m, None, ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(class.as_deref(), Some("Foo"));
 }
 
@@ -284,8 +284,8 @@ $x->m();
 
     // Functional consequence: `$x` is typed as `Bar` via the
     // build-time TC; the variable branch in
-    // `method_call_invocant_classes` reads that from the bag.
-    assert_eq!(fa.method_call_invocant_classes(m, None).single().map(str::to_string).as_deref(), Some("Bar"));
+    // `resolve_receiver` reads that from the bag.
+    assert_eq!(fa.receiver_classes(m, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(), Some("Bar"));
 }
 
 /// Equal spans: when two MethodCall refs occupy the exact same
@@ -404,7 +404,7 @@ a()->b()->c()->d()->e()->f();
 
     // No panic, no hang. Return value can be None (no return-type
     // info available); the point is termination.
-    let _ = fa.method_call_invocant_classes(f, None).single().map(str::to_string);
+    let _ = fa.receiver_classes(f, None, ReceiverPolicy::Navigate).single().map(str::to_string);
 }
 
 /// Cross-check: every ref in the call index is actually a

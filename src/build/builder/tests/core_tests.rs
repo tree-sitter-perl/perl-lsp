@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 #[test]
@@ -1290,7 +1291,7 @@ fn stamp_pass_sharing_matches_lone_resolutions() {
                 let fa = build_fa(&src);
                 let mut checked = 0;
                 for r in fa.refs().iter().filter(|r| r.member_site().is_some()) {
-                    let lone = fa.method_call_invocant_classes(r, None).single().map(str::to_string);
+                    let lone = fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string);
                     let stamped = r.method_target().map(|t| t.invocant_class().to_string());
                     assert_eq!(stamped, lone, "ref at {:?}", r.span);
                     checked += 1;
