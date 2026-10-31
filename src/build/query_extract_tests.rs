@@ -1712,6 +1712,28 @@ void C::g() {
 }
 
 #[test]
+fn cpp_reset_past_the_move_scope_does_not_stretch_it() {
+    // spdlog's `user_chars`: the move sits in an `if` arm; the read and the
+    // reassignment are in the `else` arm, outside the move's scope.
+    let src = "\
+class C {
+  Name name_;
+  void f(bool c);
+};
+void C::f(bool c) {
+  if (c) {
+    sink(std::move(name_));
+  } else {
+    use(name_);
+    name_ = Name();
+  }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    assert!(fa.use_after_move_reads().is_empty(), "{:?}", fa.use_after_move_reads());
+}
+
+#[test]
 fn cpp_conditional_move_does_not_flag_sibling_arm() {
     // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
     // `if` arm bounds its moved-from region to that arm — the read of `x` in the
