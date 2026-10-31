@@ -26,6 +26,17 @@ that answers "where is this node" is built beside it.
 - **Parent is a load.** Each entry stores its parent's id. Ancestors,
   `prev_sibling` (the preorder predecessor climbed back to the parent's
   level, O(depth)) and the parse's root follow from it.
+- **A subtree is an id interval.** Each entry stores its subtree's end id
+  and its end byte, so "everything under this node" is `id..end`. A node's
+  *site* is the head of the same-range chain it sits in (a node and the
+  parent it fills exactly); a fact about a range lives on its site, and the
+  sites holding a node are its enclosing sites.
+- **Facts are a half of the tree.** `NodeFacts<T>` is a consumer's facts
+  per node, in node order, one slice per node, kept apart from the
+  structure so a walk can hold node handles while it writes its own
+  per-fact state. The pack extractor's captures are its first facts
+  (`docs/adr/capture-vocabulary.md`); beside the tree it keeps only match
+  → captures, because a match spans nodes.
 - **A raw node maps to its id by identity, not position.** The preorder is
   tree-sitter's descendant order and start bytes never decrease along it,
   so `id_of` binary-searches the start byte and then matches tree-sitter's
@@ -50,8 +61,10 @@ reads, or the C++ reparse's own trees. It only shrinks.
 
 One entry per CST node for the length of one file's build, freed when the
 build returns; never resident, never persisted. An entry today is the raw
-node plus a parent id and a start byte (40 B). Webmin, all 1,397 files,
-single thread: 3.38 M nodes, the largest file 141k nodes (5.6 MB), and the cursor pass costs about 0.4 s against 2.3 s of parsing.
+node plus a parent id, a subtree end id and its start and end bytes (48 B).
+Webmin, all 1,397 files, single thread (2026-10-31, at 40 B): 3.38 M nodes,
+the largest file 141k nodes (5.6 MB; 6.8 MB at 48 B), and the cursor pass
+costs about 0.4 s against 2.3 s of parsing.
 
 ## Where it goes next
 
@@ -60,18 +73,11 @@ the tree still gets a `Node`. Fields move into the entry as their readers
 port, and the node goes with the last raw reader:
 
 - kind, field-in-parent, flags (named / extra / error / missing), end
-  points, and the subtree end (`id..end` as an interval, next sibling as a
-  load), with the typed wrappers in `cst.rs` moving from `Node` to a
-  `SyntaxNode` handle;
-- per-node facts as a half of the tree the consumer types (`F` per node),
-  kept separate from the structure so the walk can hold handles while it
-  writes facts;
+  points, and next sibling as a load (`end` is its id), with the typed
+  wrappers in `cst.rs` moving from `Node` to a `SyntaxNode` handle;
 - the indices built off the tree retire as their consumers move:
   `ChainTypingIndex`'s span maps, `PlaceDisturbanceIndex`'s spelling keys,
   `find_local_sub_body`'s whole-file scan per loop;
-- the pack extractor's capture events become facts on their nodes, leaving
-  only the match → captures list beside the tree, because a match spans
-  nodes;
 - the injected `s///e` trees spliced under their replacement node, which
   closes `TODO(injected-trees)` (post-walk passes that traverse from the
   main root miss replacement code).

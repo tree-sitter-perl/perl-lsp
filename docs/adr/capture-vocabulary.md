@@ -99,16 +99,21 @@ entry points, each run by the driver at a fixed point:
   latest-wins for some reducers, and a flow join reads the symbol table
   only after def dedup and the command defs.
 
-## Decision: the extractor joins on an adorned tree, not on tables
+## Decision: the extractor joins on the syntax tree, not on tables
 
-Sorted outermost-first, the capture events are a preorder walk of the
-tagged nodes. `Adorned` indexes them by match, so every capture a pattern
-made is one lookup from any other (`in_match`), and by node, so the tags
-other patterns put on the same node are one lookup (`on_range`); a node's
-subtree is the run of events right after it (`within`). The walk keeps the
-events around the current one on an ancestor stack, and records what it
-minted on each event (`Minted`: a value witness, a declaring name, a
-class's identity), so a capture of any match asks the node it names.
+Every capture is a fact on its node in the core syntax tree
+(`docs/adr/core-syntax-tree.md`): a `NodeFacts` entry on the node's site,
+the head of the same-range chain it sits in, so the tags other patterns put
+on one node are that site's facts (`on`). A node's subtree is an id
+interval, so the captures inside it are one slice (`within`, and
+`list_items`, which skips a nested list of the same tag by its subtree
+end); the captures holding it are on its enclosing sites (`around`). The
+walk visits sites in preorder, a site's captures by tie rank then match
+order. Beside the tree sits only match → captures, because a match spans
+nodes: every capture a pattern made is one lookup from any other
+(`in_match`). The walk records what it minted on each capture (`Minted`: a
+value witness, a declaring name, a class's identity, a member read's
+projection), so a capture of any match asks the node it names.
 
 A handler therefore keeps no join table. The state a family keeps is only
 what the walk alone knows when it reaches an event: the scope a target
