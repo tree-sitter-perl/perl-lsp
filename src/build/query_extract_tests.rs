@@ -133,11 +133,8 @@ fn query_skeleton_differential_report() {
                     // recall number speaks only about syntactic defs:
                     // plugin namespace, requires markers, and the
                     // has-accessor projection families.
-                    let sym_id = crate::model::file_analysis::SymbolId(
-                        fa.symbols().iter().position(|s2| std::ptr::eq(s2, sym)).unwrap() as u32,
-                    );
                     let plugin_or_marker = !matches!(sym.namespace, crate::model::file_analysis::Namespace::Language)
-                        || fa.contract_symbols.contains(&sym_id)
+                        || sym.flags.contains(crate::model::file_analysis::SymbolFlags::CONTRACT)
                         || fa.attr_projections.iter().any(|pr| {
                             pr.attr == sym.name
                                 && Some(pr.class.as_str()) == sym.package.as_deref()
@@ -437,7 +434,7 @@ class Greeter:
 
 #[test]
 fn python_cross_file_function_refs_through_refs_to() {
-    // Two pack-built FileAnalyses in the production FileStore; the
+    // Two pack-built FileAnalyses in the production OpenDocs; the
     // production refs_to walks them — declaration in a.py, call in
     // b.py — with zero Perl and zero engine edits.
     let (fa_a, _) = python_fa("def helper(x):\n    return x\n");
@@ -448,21 +445,22 @@ fn python_cross_file_function_refs_through_refs_to() {
         crate::index::resolve::TargetKind::Sub { package: None },
         &fa_b,
     );
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
-    store.insert_workspace(pa.clone(), fa_a);
-    store.insert_workspace(pb.clone(), fa_b);
+    idx.insert_workspace_for_test(pa.clone(), fa_a);
+    idx.insert_workspace_for_test(pb.clone(), fa_b);
 
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
         .iter()
         .map(|l| {
             let f = match &l.key {
-                crate::index::file_store::FileKey::Path(p) => {
+                crate::index::open_docs::FileKey::Path(p) => {
                     p.file_name().unwrap().to_string_lossy().to_string()
                 }
-                crate::index::file_store::FileKey::Url(u) => u.to_string(),
+                crate::index::open_docs::FileKey::Url(u) => u.to_string(),
             };
             (f, l.access)
         })
@@ -562,6 +560,45 @@ fn operator_evidence_types_through_usage() {
     assert_eq!(fa.inferred_type_via_bag("$s", end), Some(InferredType::String));
 }
 
+/// A use inside a conditionally-run arm observes its operand within the
+/// arm only, as the walker's does.
+#[test]
+fn operator_evidence_holds_within_its_arm() {
+    let src = "my $x = f();\nmy $c = g();\nmy $y = $c ? $x + 1 : 0;\nmy $z = 1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &perl_pack())
+        .unwrap()
+        .into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |row, column| fa.inferred_type_via_bag("$x", tree_sitter::Point { row, column });
+    assert_eq!(at(2, 19), Some(InferredType::Numeric), "inside the arm");
+    assert_eq!(at(4, 0), None, "past the arm");
+}
+
+/// A use's evidence ends at the subject's next rebind, the same edge-driven
+/// cutoff a guard's narrowing takes.
+#[test]
+fn operator_evidence_ends_at_a_rebind() {
+    let src = "my $x = f();\nmy $y = $x + 1;\n$x = g();\nmy $z = 1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &perl_pack())
+        .unwrap()
+        .into_file_analysis();
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+    let obs: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == "$x"))
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "skeleton-obs"))
+        .filter(|w| matches!(w.payload, WitnessPayload::Observation(_)))
+        .collect();
+    assert_eq!(obs.len(), 1);
+    assert_eq!(obs[0].span.end, tree_sitter::Point { row: 2, column: 0 }, "cut at `$x = g()`");
+}
+
 #[test]
 fn python_workspace_rename_for_free() {
     // The exact LSP rename path — resolve_symbol at the cursor, then
@@ -571,14 +608,15 @@ fn python_workspace_rename_for_free() {
     let (fa_a, _) = python_fa(src_a);
     let (fa_b, _) = python_fa(src_b);
 
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
-    store.insert_workspace(pa.clone(), fa_a);
-    store.insert_workspace(pb.clone(), fa_b);
+    idx.insert_workspace_for_test(pa.clone(), fa_a);
+    idx.insert_workspace_for_test(pb.clone(), fa_b);
 
     // Cursor on the CALL in b.py (line 2, inside "helper").
-    let fa_b_view = store.workspace_raw().get(&pb).unwrap().clone();
+    let fa_b_view = idx.workspace_file_for_test(&pb).unwrap();
     let point = tree_sitter::Point { row: 2, column: 6 };
     let resolved = crate::index::resolve::resolve_symbol(&fa_b_view, point, None);
     let target = match resolved {
@@ -587,7 +625,7 @@ fn python_workspace_rename_for_free() {
     };
     assert_eq!(target.name, "helper");
 
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     assert_eq!(locs.len(), 3, "decl + import spelling + call, got {locs:?}");
 
     // Apply the edits the way backend::rename does: replace each span
@@ -595,7 +633,7 @@ fn python_workspace_rename_for_free() {
     let mut texts: std::collections::HashMap<std::path::PathBuf, String> =
         [(pa.clone(), src_a.to_string()), (pb.clone(), src_b.to_string())].into();
     for loc in &locs {
-        let crate::index::file_store::FileKey::Path(p) = &loc.key else { panic!() };
+        let crate::index::open_docs::FileKey::Path(p) = &loc.key else { panic!() };
         let text = texts.get_mut(p).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         let line = lines[loc.span.start.row];
@@ -726,24 +764,24 @@ fn r_cross_file_refs_and_workspace_rename() {
     );
 
     // rename across the two files via the production path
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let pm = std::path::PathBuf::from("/fake/r/analysis.R");
     let pu = std::path::PathBuf::from("/fake/r/util.R");
-    store.insert_workspace(pm.clone(), fa_main);
-    store.insert_workspace(pu.clone(), fa_util);
+    idx.insert_workspace_for_test(pm.clone(), fa_main);
+    idx.insert_workspace_for_test(pu.clone(), fa_util);
 
     let point = tree_sitter::Point { row: 2, column: 12 }; // on fetch_data call
-    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pm).unwrap();
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "fetch_data");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
-            crate::index::file_store::FileKey::Path(p) => {
+            crate::index::open_docs::FileKey::Path(p) => {
                 p.file_name().unwrap().to_string_lossy().to_string()
             }
             _ => unreachable!(),
@@ -993,6 +1031,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
+        pair: None,
         return_type: None,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
@@ -1320,24 +1359,24 @@ fn cpp_cross_file_include_resolution_and_rename() {
 
     // cross-file rename: cursor on the call `compute` in main → def in
     // util.h + call in main, through the production resolve/refs path
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let pm = std::path::PathBuf::from("/fake/cpp/main.cpp");
     let ph = std::path::PathBuf::from("/fake/cpp/util.h");
-    store.insert_workspace(pm.clone(), main_skel.into_file_analysis());
-    store.insert_workspace(ph.clone(), cpp_skel(header).into_file_analysis());
+    idx.insert_workspace_for_test(pm.clone(), main_skel.into_file_analysis());
+    idx.insert_workspace_for_test(ph.clone(), cpp_skel(header).into_file_analysis());
 
-    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pm).unwrap();
     let point = tree_sitter::Point { row: 3, column: 11 };
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "compute");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
-            crate::index::file_store::FileKey::Path(p) => {
+            crate::index::open_docs::FileKey::Path(p) => {
                 p.file_name().unwrap().to_string_lossy().to_string()
             }
             _ => unreachable!(),
@@ -1381,7 +1420,7 @@ fn cpp_cross_file_enum_variant_goto_def() {
 
     let uri = tower_lsp::lsp_types::Url::from_file_path("/fake/cpp/use.c").unwrap();
     let pos = tower_lsp::lsp_types::Position { line: 1, character: 16 };
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let resp = crate::lsp::symbols::find_definition(&store, &use_fa, pos, &uri, &idx)
         .expect("cross-file enum-variant goto-def resolves");
     let loc = match resp {
@@ -1416,24 +1455,24 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
     );
 
     // workspace rename of the function, cursor on the call site
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let pr = std::path::PathBuf::from("/fake/cmake/CMakeLists.txt");
     let pu = std::path::PathBuf::from("/fake/cmake/util.cmake");
-    store.insert_workspace(pr.clone(), fa_root);
-    store.insert_workspace(pu.clone(), fa_util);
+    idx.insert_workspace_for_test(pr.clone(), fa_root);
+    idx.insert_workspace_for_test(pu.clone(), fa_util);
 
-    let fa_view = store.workspace_raw().get(&pr).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pr).unwrap();
     let point = tree_sitter::Point { row: 3, column: 4 };
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "register_widget");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
-            crate::index::file_store::FileKey::Path(p) => {
+            crate::index::open_docs::FileKey::Path(p) => {
                 p.file_name().unwrap().to_string_lossy().to_string()
             }
             _ => unreachable!(),
@@ -1446,6 +1485,48 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
 
 
 
+
+#[test]
+fn python_union_annotations_are_unions() {
+    use crate::model::file_analysis::format_inferred_type;
+    let at = python_pack().annot_type;
+    let spelled = |t: &str| at(t).map(|t| format_inferred_type(&t));
+    for (src, want) in [
+        ("Cat | Bird", "Bird|Cat"),
+        ("Union[Cat, Bird]", "Bird|Cat"),
+        ("typing.Union[Cat, Bird]", "Bird|Cat"),
+        ("Cat | None", "Maybe<Cat>"),
+        ("Optional[Cat]", "Maybe<Cat>"),
+        ("Optional[Cat | Bird]", "Maybe<Bird|Cat>"),
+        ("int | float", "Numeric"),
+    ] {
+        assert_eq!(spelled(src).as_deref(), Some(want), "{src}");
+    }
+    // An arm nothing reads types the whole spelling as nothing.
+    assert_eq!(at("Cat | 3"), None);
+    // `None` alone types nothing; it is only ever an arm.
+    assert_eq!(at("None"), None);
+}
+
+#[test]
+fn python_a_union_annotation_types_the_variable() {
+    let src = "\
+class Cat:
+    def sound(self):
+        return 'meow'
+class Bird:
+    def sound(self):
+        return 'tweet'
+pet: Cat | Bird = adopt()
+y = 1
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+    let fa = skel.into_file_analysis();
+    let t = fa.inferred_type_via_bag("pet", tree_sitter::Point { row: 7, column: 0 });
+    assert_eq!(t.map(|t| crate::model::file_analysis::format_inferred_type(&t)).as_deref(), Some("Bird|Cat"));
+}
 
 #[test]
 fn python_isinstance_narrows_within_the_guard() {
@@ -1791,13 +1872,15 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, crate::lsp::symbols::DiagnosticOptions::default());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, &idx, crate::lsp::symbols::DiagnosticOptions::default());
     assert!(
         !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
         "off by default: {off:?}",
     );
     let on = crate::lsp::symbols::pack_diagnostics(
         &fa,
+        &idx,
         crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
     );
     assert!(
@@ -1874,6 +1957,51 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
         widget(),
         "`has_value()` narrows the engaged optional to its inner Widget",
     );
+}
+
+#[test]
+fn a_pack_guard_narrows_every_arm_it_enters() {
+    // One region rule for every pack guard: the arm the pattern tags
+    // `@narrow.arm`, whatever construct holds it, and nothing outside it.
+    let src = "\
+void f(Base* b, std::optional<Widget> o) {
+    if (o) return o->run();
+    int i = dynamic_cast<Derived*>(b) ? b->id() : 0;
+    bool ok = o.has_value() && o->ok();
+    b->tail();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(at("o", 1, 18), class("Widget"), "an `if` arm that is no block");
+    assert_eq!(at("b", 2, 40), class("Derived"), "a ternary's consequence");
+    assert_ne!(at("b", 2, 50), class("Derived"), "not its alternative");
+    assert_eq!(at("o", 3, 31), class("Widget"), "the right of `&&`");
+    assert_ne!(at("b", 4, 4), class("Derived"), "nothing after the statement");
+
+    let src = "\
+class Foo:
+    pass
+x = maybe()
+a = x.run() if isinstance(x, Foo) else x.other()
+b = isinstance(x, Foo) and x.run()
+if cond():
+    pass
+elif isinstance(x, Foo):
+    x.run()
+x.tail()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    let at = |row, column| fa.inferred_type_via_bag("x", tree_sitter::Point { row, column });
+    assert_eq!(at(3, 4), class("Foo"), "the value a conditional expression yields when the test holds");
+    assert_ne!(at(3, 39), class("Foo"), "not its else value");
+    assert_eq!(at(4, 27), class("Foo"), "the right of `and`");
+    assert_eq!(at(8, 4), class("Foo"), "an `elif` body");
+    assert_ne!(at(9, 0), class("Foo"), "nothing after");
 }
 
 #[test]
@@ -2555,7 +2683,7 @@ void use_box() {
     let fa = cpp_fa(src);
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let uri = tower_lsp::lsp_types::Url::from_file_path("/fake/cpp/box.cpp").unwrap();
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let gd = |line: u32, character: u32| {
         match crate::lsp::symbols::find_definition(
             &store,
@@ -3043,7 +3171,7 @@ void go() {
     let fa = cpp_fa(src);
     let gd = |line: u32, character: u32| {
         let uri = tower_lsp::lsp_types::Url::from_file_path("/fake/cpp/chain.cpp").unwrap();
-        let store = crate::index::file_store::FileStore::new();
+        let store = crate::index::open_docs::OpenDocs::new();
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
         match crate::lsp::symbols::find_definition(
             &store,
@@ -3072,11 +3200,28 @@ fn cpp_call_arg_count_skips_comments() {
 }
 
 // A comment ahead of a parenthesized C++ receiver is peeled with the parens.
+// The receiver stays an expression: the parens are how it was written.
 #[test]
 fn cpp_receiver_peel_skips_comments() {
     let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
     let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
-    assert_eq!(call.invocant.as_ref().unwrap().1, "w");
+    let (span, invocant) = call.invocant.as_ref().unwrap();
+    assert_eq!(*invocant, crate::model::conventions::Invocant::expr("w"));
+    assert_eq!(span.start, Point::new(1, 25));
+}
+
+// `this` is the object of the class whose body it is in, not a class named
+// `this`: its value types from the eliding body, never from its spelling.
+#[test]
+fn cpp_this_reads_the_enclosing_class() {
+    use crate::build::language_driver::LanguageRegistry;
+    let p = std::path::PathBuf::from("/x/this.cpp");
+    let src = "class Status {\n void Update() {\n  this->Ref();\n }\n void Ref();\n};\nvoid Status::Ref() { this->Update(); }\n";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    for at in [Point::new(2, 8), Point::new(6, 27)] {
+        let r = fa.ref_at(at).expect("member call");
+        assert_eq!(fa.method_call_invocant_type(r, None), Some(InferredType::ClassName("Status".into())), "{at:?}");
+    }
 }
 
 // A comment inside a Python argument list is not an argument.

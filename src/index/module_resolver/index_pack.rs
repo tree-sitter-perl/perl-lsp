@@ -1,36 +1,31 @@
-//! Pack-language bulk indexing: per-language sub-indexes, the
+//! Pack-language bulk indexing: the served pack language's walk, the
 //! stub-first warm lane, and the deferred persist-writer drain.
 
 use super::*;
 
-/// Index pack-language files (C++/Python/…) into per-language sub-indexes
-/// attached to `hub`. GENERIC: registry-driven, so every served pack
-/// language gets cross-file from this one walk. Each language keeps its
-/// OWN `ModuleIndex` (separate cache — names never comingle across
-/// languages), files registered by CLASS name. PERSISTED to a separate
-/// `modules-{lang}.db`: warm valid analyses from disk (mtime/size +
-/// EXTRACT_VERSION validated), re-analyze only new/changed/stale files,
-/// and write the fresh ones back — so a big monorepo doesn't re-analyze
-/// every header each launch. `cache_key` is the workspace root the cache
-/// dir hashes on (`None` ⇒ no persistence, e.g. tests).
-pub fn index_pack_languages(
+/// Index the served pack language's files (C++/Python/…) into the process
+/// `index`. GENERIC: driver-driven, so every pack language gets cross-file
+/// from this one walk; files register by CLASS name. Installs the index's
+/// rehydration LRU and row-store reader on the language's DB.
+/// PERSISTED to a separate `modules-{lang}.db`: warm valid analyses from disk
+/// (mtime/size + EXTRACT_VERSION validated), re-analyze only new/changed/stale
+/// files, and write the fresh ones back — so a big monorepo doesn't
+/// re-analyze every header each launch. `cache_key` is the workspace root the
+/// cache dir hashes on (`None` ⇒ no persistence, e.g. tests).
+pub fn index_pack_language(
+    driver: &'static dyn crate::build::language_driver::LanguageDriver,
     root: &std::path::Path,
     cache_key: Option<&str>,
-    hub: &crate::index::module_index::ModuleIndex,
-    // Per-file progress tick (done, grand_total) across ALL pack languages, so
-    // the single pack token's percentage is monotone. Called once per path
-    // (warm-skip OR analyzed) — `done` reaches the grand total at the end.
+    index: &crate::index::module_index::ModuleIndex,
+    // Per-file progress tick (done, total), so the pack token's percentage
+    // is monotone. Called once per path (warm-skip OR analyzed) — `done`
+    // reaches the total at the end.
     progress: Option<&(dyn Fn(usize, usize) + Sync)>,
     // Slice-2 rehydration LRU byte cap (`maxCacheMb * 1 MiB`). The resident
     // pack analyses are bag-stripped after indexing; a type query into an
     // evicted file rehydrates its exact bag from SQLite into this cap. `0`
     // disables retention (rehydrate-and-drop). See `docs/adr/memory-slice-2-lru.md`.
     bag_cache_bytes: usize,
-    // Which language families this caller needs. A pack language the scope
-    // does not want is not walked at all — on a CPAN-shaped tree the XS/C
-    // files beside the `.pm`s are 7.8% of the files and 54% of the startup,
-    // and a Perl query cannot consult any of it.
-    scope: &crate::build::language_driver::LanguageScope,
 ) -> usize {
     use ignore::types::TypesBuilder;
     use ignore::WalkBuilder;
@@ -43,45 +38,36 @@ pub fn index_pack_languages(
     // cache dir.
     crate::build::cpp_reparse::set_macro_persist_dir(module_cache::cache_dir_for_workspace(cache_key));
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-
-    // Collect every language's paths UP FRONT so the grand total (the progress
-    // denominator) is known before any file is analyzed — a single monotone
-    // 0→100% stream across all pack languages on the one shared token.
-    let mut lang_paths: Vec<(&'static str, Vec<PathBuf>)> = Vec::new();
-    for driver in reg.pack_drivers() {
-        let lang = driver.id();
-        if !scope.wants(lang) {
-            continue;
-        }
-        let exts: Vec<&'static str> = driver.extensions().to_vec();
-        if exts.is_empty() {
-            continue;
-        }
+    let lang = driver.id();
+    let paths: Vec<PathBuf> = {
         let mut tb = TypesBuilder::new();
-        for ext in &exts {
+        for ext in driver.extensions() {
             let _ = tb.add(lang, &format!("*.{ext}"));
         }
         let _ = tb.select(lang);
-        let Ok(types) = tb.build() else { continue };
-        let paths: Vec<PathBuf> = WalkBuilder::new(root)
-            .types(types)
-            .build()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-            .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
-            .map(|e| e.into_path())
-            .collect();
-        if paths.is_empty() {
-            continue;
+        match tb.build() {
+            Ok(types) if !driver.extensions().is_empty() => WalkBuilder::new(root)
+                .types(types)
+                .build()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .filter(|e| e.metadata().map(|m| m.len() < 2_000_000).unwrap_or(false))
+                .map(|e| e.into_path())
+                .collect(),
+            _ => Vec::new(),
         }
-        lang_paths.push((lang, paths));
+    };
+    let grand_total = paths.len();
+    // The walk already yielded every marker file (they are source files of
+    // the language): record where, so naming a module asks this snapshot
+    // instead of stating each ancestor directory per build.
+    if let Some(marker) = driver.module_marker() {
+        crate::build::walk_markers::record_walk(marker, root, &paths);
     }
-    let grand_total: usize = lang_paths.iter().map(|(_, p)| p.len()).sum();
 
     let total = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
-    for (lang, paths) in lang_paths {
+    if !paths.is_empty() {
         // Slice-2 bag-rehydration LRU: a loader that opens THIS lang's SQLite
         // conn on demand (rusqlite `Connection` isn't `Sync`, so we open per
         // rehydration miss — rare, and SQLite handles concurrent readers) and
@@ -118,11 +104,10 @@ pub fn index_pack_languages(
                 loader,
             ))
         };
-        let pack_index = Arc::new(
-            crate::index::module_index::ModuleIndex::new_for_cli().with_bag_cache(bag_cache),
-        );
-        // This sub-index's relational-ref-index reader — same per-language DB
-        // the drain below writes blobs + rows into.
+        let pack_index = index;
+        pack_index.set_bag_cache(bag_cache);
+        // The relational-ref-index reader — same per-language DB the drain
+        // below writes blobs + rows into.
         {
             let cache_key_owned = cache_key.map(|s| s.to_string());
             pack_index.set_ref_rows_opener(Arc::new(move || {
@@ -133,7 +118,7 @@ pub fn index_pack_languages(
         // A generation built under different analysis inputs (toolchain
         // change — or its probe FAILURE, which empties the system include
         // roots) must not be warmed: hard-clear, same as `validate_inc_paths`.
-        if let (Some(ref conn), Some(driver)) = (&conn, reg.for_id(lang)) {
+        if let Some(ref conn) = conn {
             let _ = module_cache::validate_input_fingerprint(
                 conn,
                 driver.analysis_input_fingerprint(),
@@ -155,11 +140,7 @@ pub fn index_pack_languages(
             let mut dead_rows: Vec<PathBuf> = Vec::new();
             // Deferred past the warm scan — same SQLITE_BUSY_SNAPSHOT
             // rationale as the workspace indexer's backfill.
-            let mut pending_backfill: Vec<(
-                PathBuf,
-                Vec<crate::model::file_analysis::RefRowSeed>,
-                Vec<crate::model::file_analysis::SymRowSeed>,
-            )> = Vec::new();
+            let mut pending_backfill: Vec<(PathBuf, crate::model::file_analysis::RowSeeds)> = Vec::new();
             // Stubs whose files warmed through the FULL path this scan —
             // written after it so the next warm takes the stub lane.
             let mut pending_stubs: Vec<(PathBuf, Vec<u8>, (i64, i64))> = Vec::new();
@@ -180,6 +161,10 @@ pub fn index_pack_languages(
                     dead_rows.push(path.to_path_buf());
                     false
                 },
+                // A row filed under a module its path no longer names (a
+                // package marker came or went since it was written)
+                // re-analyzes from the walk.
+                &mut |path, analysis| driver.path_inputs_current(path, analysis),
                 &mut |path, payload| {
                     use module_cache::{WarmDirective, WarmPayload};
                     let path_str = path.to_string_lossy().into_owned();
@@ -207,8 +192,7 @@ pub fn index_pack_languages(
                     if !rows_ok {
                         pending_backfill.push((
                             path.clone(),
-                            fa.ref_row_seeds(),
-                            fa.sym_row_seeds(),
+                            fa.row_seeds(),
                         ));
                     }
                     // The ladder that used to be `strip_bag && rows_ok`.
@@ -254,13 +238,12 @@ pub fn index_pack_languages(
                 &pending_backfill,
                 128,
                 "pack row backfill",
-                |conn, (path, seeds, sym_seeds)| {
+                |conn, (path, seeds)| {
                     if let Err(e) = module_cache::shred_derived_rows(
                         conn,
                         &path.to_string_lossy(),
                         "workspace",
                         seeds,
-                        sym_seeds,
                     ) {
                         log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
                     }
@@ -303,8 +286,7 @@ pub fn index_pack_languages(
             // same chunk txn as the blob so the next warm start registers
             // from it without decoding `blob`.
             stub_blob: Option<Vec<u8>>,
-            seeds: Vec<crate::model::file_analysis::RefRowSeed>,
-            sym_seeds: Vec<crate::model::file_analysis::SymRowSeed>,
+            seeds: crate::model::file_analysis::RowSeeds,
             stamp: (i64, i64),
         }
         let (fresh_tx, fresh_rx) = bounded_persist_channel::<FreshEntry>();
@@ -315,7 +297,7 @@ pub fn index_pack_languages(
         // can't account for (a silent RAM pin no functional test sees).
         let expected_whole = Arc::new(AtomicUsize::new(0));
         let writer_conn = conn;
-        let pack_index_writer = Arc::clone(&pack_index);
+        let pack_index_writer = pack_index;
         let expected_whole_writer = Arc::clone(&expected_whole);
         std::thread::scope(|scope| {
             let writer = scope.spawn(move || {
@@ -343,7 +325,7 @@ pub fn index_pack_languages(
                                 e.stamp,
                             );
                             if let Err(err) = module_cache::shred_derived_rows(
-                                conn, &path_str, "workspace", &e.seeds, &e.sym_seeds,
+                                conn, &path_str, "workspace", &e.seeds,
                             ) {
                                 log::warn!(
                                     "Failed to shred derived rows for {:?}: {}",
@@ -406,8 +388,6 @@ pub fn index_pack_languages(
                 if warmed.contains(&canon) {
                     return; // valid cache hit
                 }
-                let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-                let Some(driver) = reg.for_path(path).filter(|d| d.id() == lang) else { return };
                 crate::util::timings::trace_file(&canon);
                 crate::util::timings::set_current_file(Some(&canon));
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -433,10 +413,7 @@ pub fn index_pack_languages(
                     // (`save_*` skip degraded rows, so their bag would be lost).
                     let payload = if persist && !analysis.degraded {
                         module_cache::encode_analysis(&analysis).map(|blob| {
-                            let seeds: Vec<_> =
-                                analysis.ref_row_seeds();
-                            let sym_seeds = analysis.sym_row_seeds();
-                            (blob, seeds, sym_seeds)
+                            (blob, analysis.row_seeds())
                         })
                     } else {
                         None
@@ -458,7 +435,7 @@ pub fn index_pack_languages(
                         // Recording before the writer's COMMIT is safe — the
                         // freshness index is session-local.
                         parts.record_surface(&pack_index, &canon);
-                        let (blob, seeds, sym_seeds) = payload.unwrap();
+                        let (blob, seeds) = payload.unwrap();
                         let arc = Arc::clone(parts.arc());
                         send_to_writer(&fresh_tx, FreshEntry {
                             path: canon.clone(),
@@ -467,7 +444,6 @@ pub fn index_pack_languages(
                             blob,
                             stub_blob,
                             seeds,
-                            sym_seeds,
                             stamp,
                         });
                     } else {
@@ -477,7 +453,7 @@ pub fn index_pack_languages(
                         }
                         let arc = Arc::new(analysis);
                         pack_index.register_symbols(path.clone(), arc.clone());
-                        if let Some((blob, seeds, sym_seeds)) = payload {
+                        if let Some((blob, seeds)) = payload {
                             send_to_writer(&fresh_tx, FreshEntry {
                                 path: canon.clone(),
                                 arc,
@@ -485,7 +461,6 @@ pub fn index_pack_languages(
                                 blob,
                                 stub_blob: None,
                                 seeds,
-                                sym_seeds,
                                 stamp,
                             });
                         }
@@ -519,7 +494,6 @@ pub fn index_pack_languages(
                 expected_whole.load(Ordering::Relaxed),
             );
         }
-        hub.attach_pack_index(lang, pack_index);
     }
     if std::env::var_os("PERL_LSP_MEM_REPORT").is_some() {
         eprintln!("[mem-report] {}", crate::build::cpp_reparse::cache_size_report());
@@ -533,9 +507,9 @@ pub fn index_pack_languages(
     {
         let mut agg = crate::model::file_analysis::HeapBreakdown::default();
         let mut hj = crate::model::file_analysis::HeapJson::new();
-        hub.for_each_pack_registered_file(&mut |path, fa| {
-            agg.add(&fa.heap_estimate());
-            hj.push(path, fa);
+        index.for_each_registered_file(&mut |cached| {
+            agg.add(&cached.analysis.heap_estimate());
+            hj.push(&cached.path, &cached.analysis);
         });
         hj.finish();
         eprintln!("[heap-dump] {agg}");

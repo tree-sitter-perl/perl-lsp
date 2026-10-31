@@ -1,6 +1,6 @@
 # The scaling corpus
 
-Eight large open-source Perl applications, kept because each one measures
+Nine large open-source Perl applications, kept because each one measures
 something the others do not. Reconstruct on any box with `corpus/bootstrap.sh`.
 
 ```
@@ -35,7 +35,7 @@ FHEM's resolved-module count from **125 to 195** while the workspace stays at
 to resolve systematically understates resolution load, which is exactly how a
 5,004-distribution pile produced a "cliff" that no real codebase has.
 
-## The eight, and what each is for
+## The nine, and what each is for
 
 | repo | files | measures |
 |---|---:|---|
@@ -47,6 +47,7 @@ to resolve systematically understates resolution load, which is exactly how a
 | [Webmin](https://github.com/webmin/webmin) | 1,383 | **Control: path-based `require`.** 101 package declarations across 1,383 files; lowest hit rate (95.95%). A genuinely different resolution shape. |
 | [BMO](https://github.com/mozilla-bteam/bmo) | 739 | **Control: healthy reference.** 206 attempts/file at 99.90% hit. |
 | [openfoodfacts](https://github.com/openfoodfacts/openfoodfacts-server) | 537 | **Control: densest static graph, near-zero fan-out.** A dense import graph does not imply expensive resolution. |
+| [Conch](https://github.com/joyent/conch) | 226 | **DBIC on a cross-file base.** All 35 result classes `use base 'Conch::DB::Result'`, which reaches `DBIx::Class::Core` in another file, so every column and relationship accessor is a deferred (gated) plugin emission. None of the other eight has more than two files mentioning `DBIx::Class`. |
 
 Deliberately excluded: `perl5` (44% vendored `cpan/` — a distribution pile
 wearing a repo's clothes), and MovableType / Freeside (30% / 28% vendored).
@@ -55,7 +56,7 @@ attempts/file and 98–99.9% hit, telling us nothing the four controls do not.
 
 ## Dependency manifests
 
-Six of the eight ship **no machine-readable manifest** — they are applications
+Six of the nine ship **no machine-readable manifest** — they are applications
 distributed as packages, not CPAN dists. `derive-cpanfile.pl` reconstructs one
 by scanning for `use`/`require` targets, subtracting what the repo defines and
 what is core for the running perl.
@@ -96,9 +97,25 @@ gives a local, non-root, reproducible set — no system mutation. `micromamba`
 covers most of the same ground. Both are heavier than the problem currently
 warrants.
 
+## House plugins
+
+Some of what a corpus does at runtime is invisible to any static reading, and
+is the corpus's own code, not a CPAN module's: openfoodfacts'
+`ProductOpener::Config` loads its export list from `Config_$flavor` chosen by
+an environment variable, and FHEM's modules use the globals `fhem.pl` declares
+with `use vars` before it `do`-loads them. A team using perl-lsp on such a
+codebase writes a plugin for it; `house/<name>/*.rhai` is that plugin, and
+`bootstrap.sh` copies it into the repo's `.perl-lsp/` (git-excluded), which
+the server loads for that workspace root with no environment. Without them the
+corpus reports the house's magic as `missing-declaration` thousands of times
+over, measuring a gap a real user has already closed.
+
+House plugins state names copied from the source at the pinned commit, so a
+pin bump re-reads them. Magic that comes from a CPAN module (`use Env`,
+Log4perl's tags) is not a house plugin; it ships bundled in `frameworks/`.
+
 ## Reproducibility caveat
 
-`bootstrap.sh` clones **default branches at depth 1** and installs **current**
-CPAN. Two runs weeks apart are not the same corpus. Nothing here is pinned,
-because the corpus exists to find pathologies rather than to gate CI — if it
-ever gates anything, pin the clones to SHAs and the deps to a snapshot first.
+`bootstrap.sh` pins each clone to a commit (fetched at depth 1) but installs
+**current** CPAN, so two runs weeks apart can still resolve different
+dependencies. Pin the deps to a snapshot before the corpus gates anything.

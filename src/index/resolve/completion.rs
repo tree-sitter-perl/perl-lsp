@@ -26,13 +26,7 @@ impl<'a> CandidateSet<'a> {
                 .symbols()
                 .iter()
                 .find(|s| s.name == type_name && wanted(&s.kind))?;
-            Some(RefLocation {
-                key: FileKey::Path(cached.path.clone()),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None
-            })
+            Some(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration))
         })
     }
 
@@ -85,7 +79,9 @@ impl<'a> CandidateSet<'a> {
         // models differ, not the seam.
         if self.pack {
             let mut out = Vec::new();
-            if mask.contains(RoleMask::DEPENDENCY) && !self.origin.pack.include_closure.is_empty() {
+            if mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY)
+                && !self.origin.pack.include_closure.is_empty()
+            {
                 if let Some(idx) = self.module_index {
                     let visible: std::collections::HashSet<String> =
                         self.origin.pack.include_closure.iter_strs().map(|a| a.as_ref().to_owned()).collect();
@@ -98,6 +94,9 @@ impl<'a> CandidateSet<'a> {
                         std::sync::Arc<crate::model::file_analysis::FileAnalysis>,
                     > = std::collections::HashMap::new();
                     for (name, cached) in idx.visible_defs_with_prefix(prefix, &visible) {
+                        if !mask.contains(super::refs::index_role(idx, &cached.path)) {
+                            continue;
+                        }
                         // Only linkage-visible defs (a TU-static never
                         // completes elsewhere). Symbol detail (kind, parent
                         // enum) reads the whole view — the resident copy may
@@ -302,8 +301,8 @@ impl<'a> CandidateSet<'a> {
     /// membership is `pack_member_of` over the inline-expanded owner set
     /// (inline namespaces are transparent), plus the nested containers
     /// (sub-namespaces, types) filed directly under the owner. Sources by
-    /// tier: OPEN = the origin's own symbols; DEPENDENCY = every cached file
-    /// closure-connected to the origin — the same connectivity the
+    /// tier: OPEN = the origin's own symbols; WORKSPACE/DEPENDENCY = every
+    /// indexed file of an admitted tier closure-connected to the origin — the same connectivity the
     /// owner-anchored goto-def scan walks, so completion offers exactly what
     /// gd can resolve. Empty when the qualifier resolves nothing (e.g. a
     /// macro-guarded namespace open left members unattributed) — the caller
@@ -356,10 +355,13 @@ impl<'a> CandidateSet<'a> {
         if mask.contains(RoleMask::OPEN) {
             gather(self.origin, None, &mut seen, &mut out);
         }
-        if mask.contains(RoleMask::DEPENDENCY) {
+        if mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY) {
             if let Some((self_path, visible)) = module_index.visibility_scope() {
                 let self_str = self_path.to_string_lossy().into_owned();
                 module_index.for_each_cached_file(&mut |cached| {
+                    if !mask.contains(super::refs::index_role(module_index, &cached.path)) {
+                        return;
+                    }
                     let p = cached.path.to_string_lossy();
                     let connected = visible.contains(p.as_ref())
                         || cached.analysis.pack.include_closure.contains(&self_str);

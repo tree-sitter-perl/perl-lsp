@@ -17,7 +17,7 @@ pub struct Witness {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum WitnessAttachment {
     /// Variable-in-scope facts — what `TypeConstraint` / `CallBinding`
     /// index by.
@@ -92,15 +92,6 @@ pub enum WitnessAttachment {
     /// and the shared `Expr` / `Variable` reducers never see arm
     /// witnesses.
     BranchArm(Span),
-    /// Typed-slot collector: "what type does instance slot `key` hold on
-    /// class `class`?" Seeded from typed hash-key WRITEs
-    /// (`$obj->{key} = <rhs>`) as one `Edge(Expr(rhs_span))` per write;
-    /// `SlotTypeFold` agrees the arms via `resolve_return_type` (1+ agree
-    /// → that type, disagree → None). Class-keyed so `$self->{h}` and a
-    /// differently-typed `$other->{h}` don't cross-contaminate. Nothing
-    /// consumes this yet — `$obj->{h}->m()` typing through it is a later
-    /// step.
-    SlotType { class: String, key: String },
     /// A named type alias — a C `typedef`/C++ `using`. "What does the type
     /// spelling `name` resolve to?" A `typedef unsigned short U16` pushes
     /// `TypeName("U16") → InferredType(ClassName("unsigned short"))`; a
@@ -117,7 +108,8 @@ pub enum WitnessAttachment {
     /// so `get_cached(name)` recurses into the header's bag (same shape as
     /// the `PackageSymbol` bridge).
     TypeName(String),
-    /// A storage slot — a named field DECLARATION — keyed
+    /// A storage slot — a named field DECLARATION, or an instance slot a
+    /// write creates (Perl's `$obj->{k}`, python's `self.k`) — keyed
     /// **language-generically** by `{owner, name}` (a C struct member, a
     /// Corinna `field`, a Moo `has`; NOT `{struct, name}`). Distinct from
     /// the bag's local subjects (`Variable{name,scope}`, `Expr{span}`):
@@ -132,11 +124,14 @@ pub enum WitnessAttachment {
     /// (`op_type: uint16_t` storage → `opcode` domain). The domain is a
     /// defeasible refinement for human surfaces; it never changes the
     /// storage type that flows. The slot's VALUE rides the same
-    /// attachment as an `Edge(Variable{decl})` the pack extractor pushes
-    /// per field declaration: `ProjectionStep::ValueHop` chases it, and
-    /// the registry's `Field` fallback walks the owner's candidate files
-    /// and parents the way `PackageSymbol`'s does — a field a parent
-    /// declares answers a child's read. Kept at the END for bincode
+    /// attachment: an `Edge(Variable{decl})` the pack extractor pushes per
+    /// field declaration, and an `Edge(Expr(rhs))` per write to a slot no
+    /// declaration in the writing file owns (`$obj->{k} = rhs`,
+    /// `obj.k = rhs`), each an arm `FieldValueReducer` agrees.
+    /// `ProjectionStep::ValueHop` and a class-typed `HashKey` drill chase
+    /// it, and the registry's `Field` fallback walks the owner's candidate
+    /// files and parents the way `PackageSymbol`'s does — a slot a parent
+    /// declares or writes answers a child's read. Kept at the END for bincode
     /// variant-index stability (bump `EXTRACT_VERSION`).
     Field { owner: String, name: String },
     /// Parameter `index` of the callable `name` in `package`, AS A BINDING
@@ -160,7 +155,7 @@ pub enum WitnessAttachment {
 }
 
 /// Index into `FileAnalysis::refs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct RefIdx(pub u32);
 
 /// What a `WitnessSource::Annotation` was declared BY — a closed set, so
@@ -432,9 +427,12 @@ pub enum Callee {
     /// definition lookup uses. `member_of`: the call is written in a body
     /// of this class that elides the receiver, so a member of the class
     /// (its own or inherited, in any file) answers before any free
-    /// function. Kept at the END for bincode variant-index stability (bump
+    /// function. `constructs`: in a language where calling a class
+    /// constructs it, the class identity the name spells at the call, so a
+    /// class declared under it in another file answers with an instance of
+    /// itself. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
-    Function { name: String, local: Option<SymbolId>, member_of: Option<String> },
+    Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String> },
 }
 
 /// Where a named method's lookup starts.
@@ -461,12 +459,11 @@ pub enum CallArg {
 pub enum ProjectionStep {
     HashKey(String),
     ArrayIndex(i32),
-    /// The UNIFORM element of a sequence — the foreach/iteration peel
+    /// An element of a sequence — the foreach/iteration peel
     /// (`foreach ($this->handlers as $handler)` types `$handler` as the
-    /// collection's element). Projects a `Sequence` all of whose elements
-    /// agree to that one type; a heterogeneous tuple or an untyped
-    /// `ArrayRef`/`HashRef` answers `None` (no index is in hand, so no
-    /// per-slot answer exists). Kept at the END for bincode variant-index
+    /// collection's element). Projects a `Sequence` to the join of its
+    /// elements (any of its values); an untyped `ArrayRef`/`HashRef`
+    /// answers `None`. Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
     /// A member VALUE read (`$this->prop`, `obj->field`): chases

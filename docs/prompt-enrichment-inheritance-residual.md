@@ -18,9 +18,9 @@ The short verdict:
   the **`ClassIsa` trigger** axis (H7-5) rides the `GatedEmission` deferral:
   the build records the syntactically-matched-but-ungated emission and
   enrichment re-fires it once `class_isa_prefix` resolves the ancestry
-  cross-file (plus `ModuleIndex::materialize_gated_emissions` so cross-file
-  readers see it through `whole_present`). See "The `ClassIsa` trigger axis"
-  below and `docs/open-forks.md` (Cross-file gated-emission visibility).
+  cross-file (plus the index's view seam, `ModuleIndex::gated_view`, so
+  cross-file readers see it through every `*_present` view). See "The `ClassIsa` trigger axis"
+  below and `docs/forks-resolved.md` (Cross-file gated-emission visibility).
 
 - **Dispatch-verb promotion in non-open files** WAS a real gap caused by
   the resolver lifecycle (only OPEN documents enriched). **Landed:** the
@@ -74,11 +74,12 @@ Two index-aware consumers re-fire it, both idempotent (truncate-to-baseline
 
 - `enrich_imported_types_with_keys` (`apply_gated_emissions`) — OPEN docs +
   the `--dump-package` / diagnostics enriched overlay.
-- `ModuleIndex::materialize_gated_emissions` (post-index, `cli_full_startup`
-  / `--batch`) — applies into the whole cached copy so cross-file goto-def /
-  references see it via `whole_present` (the enriched-overlay per-query
-  fallback was tried and reverted — it re-entered enrichment per hop and
-  overflowed the stack; see `docs/open-forks.md`).
+- `ModuleIndex::gated_view` — every `*_present` view of a closed file whose
+  gate fires hands out the copy with the emission applied (gate only, no
+  enrichment: the enriched-overlay per-query fallback re-entered enrichment
+  per hop and overflowed the stack; see `docs/open-forks.md`). Memoized by
+  (registered copy, verdicts) in a byte-capped store, so an ancestry change
+  re-applies and nothing invalidates.
 
 The in-file case composes as before
 (`plugin_mojo_events_triggers_through_transitive_parent` — Mid + Leaf same
@@ -94,7 +95,7 @@ fork ledger.
 synthesis, the cross-file `inheritance_cross` edge projection, and
 the MCB→bag bridge `emit_method_call_binding_edges`) is called ONLY for:
 
-- OPEN documents — through `FileStore::enrich_open`, the one open-doc
+- OPEN documents — through `OpenDocs::enrich_open`, the one open-doc
   enrichment writer (invoked by `publish_diagnostics`, the resolver refresh,
   and the cold-open heal).
 - The CLI focus file — `lsp/cli/query.rs` (`cli_open_document` + the
@@ -105,7 +106,7 @@ and **workspace-index files** (`index_workspace_with_index:655`) are built
 via `crate::builder::build(...)` which ends at `finalize_post_walk()` —
 they NEVER get `enrich_imported_types_with_keys`. The resolver refresh
 callback re-enriches only open docs (`refresh_open_diagnostics` →
-`FileStore::enrich_open`).
+`OpenDocs::enrich_open`).
 
 What this means per enrichment pass:
 
@@ -151,7 +152,7 @@ payload unreadable without the isa filter (`docs/adr/receiver-gated-dispatch.md`
   query-time `ReceiverGated` seam (`docs/adr/receiver-gated-dispatch.md`);
   `param_types` `in_role` cross-file, on the same seam; and cross-file
   `ClassIsa`-trigger emission (H7-5), via the `GatedEmission` deferral +
-  post-index `materialize_gated_emissions`. All three moved the
+  the index's view seam (`ModuleIndex::gated_view`). All three moved the
   ancestry check off the index-free build onto a post-index / query seam.
 
 ## Repros

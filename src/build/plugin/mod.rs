@@ -194,7 +194,20 @@ pub struct UseContext {
     pub imports: Vec<String>,
     /// Raw text of each arg — lets plugins detect flags like `-strict`.
     pub raw_args: Vec<String>,
+    /// The use-list's string words with their source spans, so an action
+    /// can anchor on the word it is about. Empty for a synthetic `use`.
+    #[serde(default)]
+    pub import_words: Vec<ImportWord>,
+    /// `no Module LIST` rather than `use Module LIST`.
+    #[serde(default)]
+    pub negated: bool,
     pub current_package: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportWord {
+    pub text: String,
     pub span: Span,
 }
 
@@ -598,6 +611,19 @@ pub enum EmitAction {
         span: Span,
     },
 
+    /// Declare a package global of the current package, as `our` does:
+    /// `use vars qw($x)` names `$x` at its word. `name` is sigiled and
+    /// unqualified; `span` is the word declaring it. The variable is
+    /// Perl's, not the plugin's — it lands in the language namespace and
+    /// resolves like any `our`.
+    PackageVariable { name: String, span: Span },
+
+    /// From the end of `span` to the end of its enclosing scope, every
+    /// variable must (`required`) or need not be declared: `use strict`,
+    /// `no strict 'vars'`, and the modules that turn strict on for their
+    /// importer (`frameworks/strict.rhai`).
+    RequireDeclaration { required: bool, span: Span },
+
     /// Declare a type for a variable inside a scope. Plugins use this
     /// when they know a framework-provided variable's type that the
     /// builder can't infer — the classic case being callback arguments:
@@ -893,6 +919,18 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
 }
 
+/// A library function that reports what a reference is (Scalar::Util's
+/// `reftype` / `blessed`): its result is a `RefTagOf` tag, so comparing it
+/// to a literal guards the operand. Fires only where the file imported the
+/// name from `module` or called it fully qualified — a `sub blessed` of
+/// one's own is just a sub.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefTagFunction {
+    pub module: String,
+    pub name: String,
+    pub tag: crate::model::file_analysis::RefTagFn,
+}
+
 /// A plugin-asserted return type for a known sub/method. Plugins ship
 /// these as a static manifest (`overrides()` on the trait, `fn
 /// overrides()` at the top of a `.rhai` script) for cases where
@@ -1168,6 +1206,12 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
+    /// Library functions whose result names what a reference is — see
+    /// [`RefTagFunction`]. Default empty.
+    fn ref_tag_functions(&self) -> &[RefTagFunction] {
+        &[]
+    }
+
     /// Method verbs whose FIRST hashref arg is keyed by the receiver class's
     /// COLUMN names (DBIC `search(\%cond, …)` / `create(\%cols)` etc.). Core
     /// links those keys to the class's columns for rename/references and walks
@@ -1365,7 +1409,7 @@ pub enum PluginSigHelpAnswer {
     /// Delegate to the core: "render the sig for this Handler". The
     /// plugin has already resolved which Handler the cursor points at
     /// and which param slot is active; the core does the param lookup
-    /// (including cross-file via `handlers_for_owner`) and invocant
+    /// (including cross-file via `for_each_dispatch_handler_on_class`) and invocant
     /// stripping. Same delegation pattern as completion's
     /// `dispatch_targets_for`.
     ShowHandler {
@@ -1645,6 +1689,11 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.framework_mode_makers().iter())
+    }
+
+    /// Union of ref-tag functions across the registry.
+    pub fn ref_tag_functions<'a>(&'a self) -> impl Iterator<Item = &'a RefTagFunction> + 'a {
+        self.plugins.iter().flat_map(|p| p.ref_tag_functions().iter())
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose

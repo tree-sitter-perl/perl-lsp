@@ -30,6 +30,110 @@ use super::*;
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
+/// What a cross-file fan-out asks the files of: a class-keyed attachment's
+/// candidate files (`class_candidates_node`), or a free function's exporters
+/// and linkage-visible definitions (`free_function_cross_file`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FanOut {
+    Class(WitnessAttachment),
+    Free { name: String, class: Option<String> },
+}
+/// A fan-out's identity: `VisitedKey` without the bag and the point (a
+/// fan-out is point-free).
+type FanOutKey = (FanOut, Option<String>, Option<u32>);
+
+/// What the class-keyed fallback ladder (`ReducerRegistry::class_fallback`)
+/// needs to know about an attachment, read off the attachment once so the
+/// ladder never asks which kind it serves.
+struct ClassLadder<'a> {
+    /// The class whose files and ancestry the ladder walks.
+    owner: &'a str,
+    /// The member's spelling in the rows pre-filter
+    /// (`sweep_candidate_may_answer`), with whether the rows attribute it to
+    /// the class (a declared symbol) or only record it (a hash-key ref).
+    /// `None`: the rows cannot prove this member's absence, so every
+    /// candidate is consulted.
+    rows_member: Option<(&'a str, bool)>,
+    /// Is the member a callable? An arity hint selects among a callable's
+    /// arms, so it rides the hops; a slot, a parameter or a type has none.
+    /// A callable is also what a plugin bridge can supply.
+    callable: Option<&'a str>,
+    /// The attachment re-keyed to a parent class; `None` when the
+    /// attachment has no ancestry to walk.
+    rekey: Option<fn(&WitnessAttachment, String) -> WitnessAttachment>,
+    /// Whether an index-less chase records each parent as a residual rung
+    /// up front (the `MethodOnClass` bake), rather than letting each
+    /// parent's own frame record its exit.
+    rungs_on_parents: bool,
+    /// The bake's residual-site tag (`note_bake_exit`).
+    site: &'static str,
+    /// The live consult's attribution tag (`mocsite.*`).
+    fetch_tag: &'static str,
+}
+
+impl<'a> ClassLadder<'a> {
+    fn of(att: &'a WitnessAttachment) -> Option<ClassLadder<'a>> {
+        Some(match att {
+            WitnessAttachment::PackageSymbol { package, name } => ClassLadder {
+                owner: package,
+                rows_member: Some((name, true)),
+                callable: Some(name),
+                rekey: Some(|att, p| match att {
+                    WitnessAttachment::PackageSymbol { name, .. } => {
+                        WitnessAttachment::PackageSymbol { package: p, name: name.clone() }
+                    }
+                    _ => unreachable!("rekey is minted from its own attachment"),
+                }),
+                rungs_on_parents: true,
+                site: "moc_primary",
+                fetch_tag: "mocsite.primary",
+            },
+            WitnessAttachment::Field { owner, name } => ClassLadder {
+                owner,
+                rows_member: Some((name, false)),
+                callable: None,
+                rekey: Some(|att, p| match att {
+                    WitnessAttachment::Field { name, .. } => {
+                        WitnessAttachment::Field { owner: p, name: name.clone() }
+                    }
+                    _ => unreachable!("rekey is minted from its own attachment"),
+                }),
+                rungs_on_parents: false,
+                site: "field",
+                fetch_tag: "mocsite.field",
+            },
+            WitnessAttachment::Param { package, .. } => ClassLadder {
+                owner: package,
+                rows_member: None,
+                callable: None,
+                rekey: Some(|att, p| match att {
+                    WitnessAttachment::Param { name, index, .. } => {
+                        WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
+                    }
+                    _ => unreachable!("rekey is minted from its own attachment"),
+                }),
+                rungs_on_parents: false,
+                site: "param",
+                fetch_tag: "mocsite.param",
+            },
+            WitnessAttachment::TypeName(name) => ClassLadder {
+                owner: name,
+                rows_member: None,
+                callable: None,
+                // An alias names one type; the alias graph has no ancestry.
+                rekey: None,
+                rungs_on_parents: false,
+                site: "type_name",
+                fetch_tag: "mocsite.type_name",
+            },
+            _ => return None,
+        })
+    }
+
+    fn arity(&self, q: &ReducerQuery) -> Option<u32> {
+        self.callable.and(q.arity_hint)
+    }
+}
 
 fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
     let point = match q.attachment {
@@ -43,59 +147,6 @@ fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
         q.arity_hint,
         point,
     )
-}
-
-/// Per-top-level-`query` traversal state: the cycle guard plus a result
-/// memo. The bag forms a DAG of edges; without memoization a diamond
-/// (two paths reaching one shared sub-attachment) re-chases the shared
-/// subtree on every path, which is exponential on dense files
-/// (SQL::Abstract's method graph took minutes). The memo caches each
-/// attachment's resolved value *for the duration of one top-level query*
-/// so a re-reached node returns in O(1).
-///
-/// Soundness vs the cycle guard: `query_rec` only consults/stores the
-/// memo for a key that is NOT currently on the path (the visited-guard
-/// has already returned for on-path keys). A cached value is therefore
-/// the node's resolution computed with that node off the path — exactly
-/// what any other off-path reentry would compute. The memo is dropped
-/// when the top-level query returns, so it never leaks state across
-/// queries whose context (scopes / module_index / framework) differs.
-/// Record a would-be consult, OUT OF LINE.
-///
-/// `#[inline(never)]` keeps `query_rec`'s frame small: it recurses once per MRO
-/// hop, so a temporary built inline is paid once per live hop. Stack growth
-/// keeps a big frame from overflowing, but every extra KiB per hop is another
-/// segment a deep chase has to map. Temporaries belong in a callee's frame,
-/// not in one that is live hundreds deep.
-#[inline(never)]
-fn note_moc_exit(state: &mut QueryState, class: &str, name: &str) {
-    state.note_exit(Some(super::ConclusionKey::MethodOnClass {
-        class: class.to_string(),
-        name: name.to_string(),
-    }));
-}
-
-#[inline(never)]
-fn note_type_name_exit(state: &mut QueryState, name: &str) {
-    state.note_exit(Some(super::ConclusionKey::TypeName(name.to_string())));
-}
-
-#[inline(never)]
-fn note_slot_exit(state: &mut QueryState, class: &str, key: &str) {
-    state.note_exit(Some(super::ConclusionKey::SlotType {
-        class: class.to_string(),
-        key: key.to_string(),
-    }));
-}
-
-#[inline(never)]
-fn note_parent_rungs(state: &mut QueryState, parents: &[String], name: &str) {
-    for p in parents {
-        state.note_exit(Some(super::ConclusionKey::MethodOnClass {
-            class: p.clone(),
-            name: name.to_string(),
-        }));
-    }
 }
 
 thread_local! {
@@ -281,8 +332,28 @@ fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Ar
     });
 }
 
+/// Per-top-level-`query` traversal state: the cycle guard plus a result
+/// memo. The bag forms a DAG of edges; without memoization a diamond
+/// (two paths reaching one shared sub-attachment) re-chases the shared
+/// subtree on every path, which is exponential on dense files
+/// (SQL::Abstract's method graph took minutes). The memo caches each
+/// attachment's resolved value *for the duration of one top-level query*
+/// so a re-reached node returns in O(1).
+///
+/// Soundness vs the cycle guard: `query_rec` only consults/stores the
+/// memo for a key that is NOT currently on the path (the visited-guard
+/// has already returned for on-path keys). A cached value is therefore
+/// the node's resolution computed with that node off the path — exactly
+/// what any other off-path reentry would compute. The memo is dropped
+/// when the top-level query returns, so it never leaks state across
+/// queries whose context (scopes / module_index / framework) differs.
 pub(super) struct QueryState {
     visited: VisitedSet,
+    /// The cross-file fan-outs on the current path, and the answers of those
+    /// already walked this query (`fan_out_node`). The bag-free twins of
+    /// `visited` and `memo`.
+    fan_outs: std::collections::HashSet<FanOutKey>,
+    fan_out_memo: std::collections::HashMap<FanOutKey, std::sync::Arc<ReducedValue>>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -336,9 +407,37 @@ pub(super) struct QueryState {
 }
 
 impl QueryState {
+    /// A cross-file fan-out as a node of its own, keyed WITHOUT the bag. Each
+    /// file the fan-out reaches is consulted by a chase of its own bag, and
+    /// that chase reaches this same fan-out when the file cannot answer
+    /// locally; keyed by the bag, every file re-walked every other one
+    /// (FHEM's 534 `main` files nested 512 deep per query). On the path the
+    /// frame below skips it — the frame that owns it walks the remaining
+    /// files — and off the path the first walk's answer serves the query.
+    fn fan_out_node(
+        &mut self,
+        key: FanOutKey,
+        walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
+    ) -> Option<ReducedValue> {
+        if let Some(v) = self.fan_out_memo.get(&key) {
+            return (**v != ReducedValue::None).then(|| (**v).clone());
+        }
+        if !self.fan_outs.insert(key.clone()) {
+            self.cuts += 1;
+            return None;
+        }
+        let v = walk(self);
+        self.fan_outs.remove(&key);
+        self.fan_out_memo
+            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
+        v
+    }
+
     pub(super) fn new() -> Self {
         QueryState {
             visited: std::collections::HashSet::new(),
+            fan_outs: std::collections::HashSet::new(),
+            fan_out_memo: std::collections::HashMap::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
             cuts: 0,
@@ -409,7 +508,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`PackageSymbol{class, name}` when `attributed`, `SlotType{class, key}`
+/// (`PackageSymbol{class, name}` when `attributed`, `Field{owner, name}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -654,11 +753,6 @@ impl ReducerRegistry {
         // shape; single-arm answers surface here, where BranchArmFold's
         // ≥2-arm rule would reject them.
         r.register(Box::new(SymbolReturnArmFold));
-        // SlotTypeFold claims the dedicated `SlotType{..}` shape. Nothing
-        // consumes it yet (typed `$obj->{k}` resolution is a later step),
-        // so placement here is non-load-bearing — grouped with the other
-        // arm-agreement folds for legibility.
-        r.register(Box::new(SlotTypeFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
@@ -951,460 +1045,49 @@ impl ReducerRegistry {
             }
         }
 
-        // Inheritance + bridge fallback for `PackageSymbol{C, m}` queries
-        // the local bag couldn't answer. Most cases are covered by
-        // build-time edge emission (local writeback emits
-        // `PackageSymbol(child, m) → Edge(PackageSymbol(parent, m))`;
-        // enrichment projects the same for cross-file parents), resolved
-        // by the generic edge-chase. This fallback covers the residual:
-        // hand-crafted FAs / isolated tests, and cross-file
-        // plugin-namespace bridges declared in other files. Three
-        // structural facts compose:
+        // The class-keyed fallback for an attachment the local bag couldn't
+        // answer — `PackageSymbol{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
+        // `TypeName(T)`: one ladder (`ClassLadder`, `class_fallback`) for
+        // all four. Most cases are covered by build-time edge emission
+        // (local writeback emits `PackageSymbol(child, m) →
+        // Edge(PackageSymbol(parent, m))`; enrichment projects the same for
+        // cross-file parents), resolved by the generic edge-chase; the ladder
+        // covers the residual: the class's other files, its ancestry, and
+        // plugin-namespace bridges declared elsewhere.
         //
-        //   1. `module_index.get_cached(C)` — when `C` lives in another
-        //      file, recurse into its cached bag for C's direct facts.
-        //   2. `package_parents[C]` (local) ∪ `parents_cached(C)`
-        //      (cross-file) — the Perl DFS-MRO chain; recurse on
-        //      `PackageSymbol{P, m}` per parent.
-        //   3. `for_each_entity_bridged_to(class, ...)` — entities in
-        //      other files' plugin namespaces bridged to `class`; query
-        //      each cached bag by `Symbol(sym.id)` (per-FA SymbolIds
-        //      can't be portably edge-encoded).
-        //
-        // The shared visited set breaks local and cross-file cycles.
-        //
-        // Budget gate for EVERY cross-file hop below (primary, ancestry,
-        // bridges, slot writes). The local reducers above have already run,
-        // so a spent walk still answers from what this bag knows and only
-        // stops CHASING. Gating the hops individually let the cheap ones
-        // through and the walk kept running; one gate at the boundary is
-        // the honest placement.
+        // Budget gate for EVERY cross-file hop below (candidates, ancestry,
+        // bridges). The local reducers above have already run, so a spent
+        // walk still answers from what this bag knows and only stops
+        // CHASING. Gating the hops individually let the cheap ones through
+        // and the walk kept running; one gate at the boundary is the honest
+        // placement.
         if let Some(idx) = q.context.and_then(|c| c.module_index) {
             if !super::session::budget_available(idx) {
                 return ReducedValue::None;
             }
         }
-        if let WitnessAttachment::PackageSymbol { package, name } = q.attachment {
-            if let Some(ctx) = q.context {
-                // (1) Cross-file primary lookup — every candidate file
-                // declaring `package` (a reopened package's method lives in
-                // whichever file defines it, not the name-slot winner).
-                if ctx.module_index.is_none() {
-                    super::note_bake_exit("moc_primary", true);
-                    note_moc_exit(state, package, name);
-                }
-                if let Some(idx) = ctx.module_index {
-                    if let Some(v) =
-                        self.moc_cross_file_primary(bag, q, state, ctx, idx, package)
-                    {
-                        return v;
-                    }
-                }
-                // (2) Inheritance walk via package_parents (local ∪
-                // cross-file ∪ synthetic app-surface edge — `parents_of`
-                // is the single edge-injection site shared with the
-                // FA-side ancestor walks).
-                if ctx.module_index.is_none() {
-                    // The parent NAME is local (`PackageFacts.parents`), so a
-                    // parent hop is nameable even though the parent's FILE is
-                    // not reachable from here. Each parent is a ladder rung and
-                    // is recorded in MRO order below.
-                    super::note_bake_exit("parent_walk", true);
-                }
-                let parents = crate::model::file_analysis::parents_of(
-                    package,
-                    ctx.package_parents,
-                    ctx.module_index,
-                    ctx.app_surface_consumers,
-                );
-                // Each parent is a ladder rung. Recorded in MRO order, because
-                // order IS the semantics of a `Link`'s fan-out: first answer
-                // wins, exactly as this loop behaves.
-                if ctx.module_index.is_none() {
-                    note_parent_rungs(state, &parents, name);
-                }
-                for p in parents {
-                    let parent_att = WitnessAttachment::PackageSymbol {
-                        package: p,
-                        name: name.clone(),
-                    };
-                    let sub_q = ReducerQuery {
-                        attachment: &parent_att,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: q.arity_hint,
-                        receiver: q.receiver.clone(),
-                        args: q.args.clone(),
-                        context: q.context,
-                    };
-                    let v = self.query_rec(bag, &sub_q, state);
-                    if *v != ReducedValue::None {
-                        return (*v).clone();
-                    }
-                }
-                // (3) Cross-file plugin-namespace bridges. Plugin entities
-                // declared in OTHER files bridged to `package` aren't
-                // reachable via the local bag's edges nor the cross-file
-                // primary (`get_cached(package)` returns the canonical package
-                // file, not the bridging-plugin file). Ask each matching
-                // cached entity for `Symbol(sym.id)` at arity=None —
-                // bridged Methods aren't arity-discriminated.
-                if ctx.module_index.is_none() {
-                    // NOT a poison and NOT a residual. A bridge target is a
-                    // per-file `SymbolId` that no portable key can name, so it
-                    // would poison every chase — 99.96% of them, measured. The
-                    // consult-side guard (`class_is_bridged_to`) now covers
-                    // exactly the forms this arm could contradict, so the bake
-                    // no longer has to reason about it at all.
-                    super::note_bake_exit("bridge", false);
-                }
-                if let Some(idx) = ctx.module_index {
-                    // LIVE-mode denominator for the bake's `residual.site.bridge`
-                    // count: how often would that consult have yielded anything
-                    // at all? A would-be consult that returns nothing is not a
-                    // dependence, and counting it as one makes the poison rate
-                    // look total when it may be negligible.
-                    let mut bridge_seen = false;
-                    idx.for_each_entity_bridged_to(package, &mut |_m, _c, _s| {
-                        bridge_seen = true;
-                        std::ops::ControlFlow::Break(())
-                    });
-                    crate::util::ghost_stats::count(if bridge_seen {
-                        "bridge.live_yields"
-                    } else {
-                        "bridge.live_empty"
-                    });
-                    // Per-CLASS, because the guard is per-class while the
-                    // 98.3%-vacuous figure is per-call. If the real yields
-                    // concentrate in a few hot classes, those stay guarded-off
-                    // permanently and the decode cost lands exactly where
-                    // bridges are real — which is what sizes the follow-on.
-                    if bridge_seen && crate::util::ghost_stats::enabled() {
-                        // `enabled()` first: `format!` allocates before `count`
-                        // can decline, so the naive spelling pays for a string
-                        // per yield even with stats off.
-                        crate::util::ghost_stats::count(&format!("bridgecls.{package}"));
-                    }
-                    let mut found: Option<InferredType> = None;
-                    idx.for_each_entity_bridged_to_named(package, name, &mut |_mod, cached, sym| {
-                        use std::ops::ControlFlow;
-                        if !matches!(
-                            sym.kind,
-                            crate::model::file_analysis::SymKind::Sub
-                                | crate::model::file_analysis::SymKind::Method
-                        ) {
-                            return ControlFlow::Continue(());
-                        }
-                        if &sym.name != name {
-                            return ControlFlow::Continue(());
-                        }
-                        // Bridged Method's return lives in the bridging file's
-                        // bag — rehydrate it if evicted before querying.
-                        crate::util::ghost_stats::count("moc.provider_fetched");
-                        crate::util::ghost_stats::count("mocsite.bridged");
-                        let full = idx.bag_present(cached);
-                        if let Some(t) = full.symbol_return_type_via_bag(sym.id, None) {
-                            found = Some(t);
-                            return ControlFlow::Break(());
-                        }
-                        // Fallback-on-miss (R4): the bridged Method's return may
-                        // chain through the bridging file's OWN imports — baked
-                        // only into the enriched overlay. `symbol_return_type_via_bag`
-                        // owns its answer (private registry + QueryState), so no
-                        // `state.pins` push is needed. Kept index-less by design:
-                        // a ctx-ful leaf query would spawn a fresh cycle guard per
-                        // bridged hop, so mutual bridges recurse unbounded; the
-                        // ENRICHING-guarded bake is the safe route to the same
-                        // transitive answer.
-                        crate::util::ghost_stats::count("consult.bridged");
-                        if idx.serves_enriched() {
-                            let enriched = idx.enriched_present(cached);
-                            if !std::sync::Arc::ptr_eq(&enriched, &full) {
-                                if let Some(t) =
-                                    enriched.symbol_return_type_via_bag(sym.id, None)
-                                {
-                                    found = Some(t);
-                                    return ControlFlow::Break(());
-                                }
-                            }
-                        }
-                        ControlFlow::Continue(())
-                    });
-                    if let Some(t) = found {
-                        return ReducedValue::Type(t);
-                    }
-                }
+        // `Param`: the callee's bag is the authority. Its own witness present
+        // but untyped → the position IS bound, so `Unknown` (a value flowed,
+        // nothing named it) rather than silence — silence would read as
+        // by-value.
+        if matches!(q.attachment, WitnessAttachment::Param { .. })
+            && !bag.for_attachment(q.attachment).is_empty()
+        {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
+        if let Some(ladder) = ClassLadder::of(q.attachment) {
+            if let Some(v) = self.class_fallback(bag, q, state, &ladder) {
+                return v;
             }
         }
 
-        // `SlotType{C, k}` the local bag couldn't answer: the typed
-        // slot WRITE may live in C's own file (cross-file primary) or
-        // anywhere up C's ancestry (a base class's BUILD populating
-        // `$self->{conn}`). Hops (1) and (2) of the `PackageSymbol`
-        // fallback above, same shared visited set; no bridge hop —
-        // slot writes are real code, not plugin entities.
-        if let WitnessAttachment::SlotType { class, key } = q.attachment {
-            if let Some(ctx) = q.context {
-                if ctx.module_index.is_none() {
-                    super::note_bake_exit("slot_type", true);
-                    note_slot_exit(state, class, key);
-                }
-                if let Some(idx) = ctx.module_index {
-                    // The point-free memo spelling, same as the primary's:
-                    // answers below are computed point-free, so one (class,
-                    // key, candidate) verdict serves every call site in the
-                    // sweep. This arm carried 99.99% of FHEM's 12.3M provider
-                    // ATTEMPTS — the sweep memo made each attempt's fetch an
-                    // Arc bump, but the CHASE per attempt (a full query_rec
-                    // into the provider bag) is what the answer memo removes.
-                    let memo_q = ReducerQuery {
-                        attachment: q.attachment,
-                        point: None,
-                        framework: q.framework,
-                        arity_hint: None,
-                        receiver: q.receiver.clone(),
-                        args: q.args.clone(),
-                        context: None,
-                    };
-                    let verdict_key = super::ConsultVerdictKey::of(&memo_q);
-                    for cached in super::session::visible_def_candidates(idx, class).iter() {
-                        if let Some(hit) =
-                            super::session::candidate_answer(idx, &cached.path, &memo_q)
-                        {
-                            if *hit != ReducedValue::None {
-                                return (*hit).clone();
-                            }
-                            continue;
-                        }
-                        // The sweep tier, behind the session memo — a verdict
-                        // another file's build already derived this sweep.
-                        if let Some(hit) =
-                            idx.sweep_consult_answer(&cached.path, &verdict_key)
-                        {
-                            super::session::remember_candidate_answer(
-                                idx, &cached.path, &memo_q, &hit,
-                            );
-                            if *hit != ReducedValue::None {
-                                return (*hit).clone();
-                            }
-                            continue;
-                        }
-                        // The rows-backed pre-filter — same placement and
-                        // memoized-skip discipline as the primary's (see
-                        // `moc_cross_file_primary`); the un-attributed
-                        // flavor, because a slot key is a hash-key ref,
-                        // not an attributed symbol.
-                        let prefilter_denied =
-                            !sweep_candidate_may_answer(idx, cached, class, key, false);
-                        if prefilter_denied {
-                            crate::util::ghost_stats::count("consult.prefilter_skip");
-                            if !consult_prefilter_equiv() {
-                                super::session::remember_candidate_answer(
-                                    idx,
-                                    &cached.path,
-                                    &memo_q,
-                                    &ReducedValue::None,
-                                );
-                                idx.remember_sweep_consult(
-                                    &cached.path,
-                                    &verdict_key,
-                                    &ReducedValue::None,
-                                );
-                                continue;
-                            }
-                        }
-                        let attempt =
-                            |full: &std::sync::Arc<crate::model::file_analysis::FileAnalysis>,
-                             state: &mut _| {
-                                let cached_ctx = BagContext {
-                                    scopes: &full.scopes,
-                                    package_framework: &full.packages,
-                                    module_index: Some(idx),
-                                    package_parents: &full.packages,
-                                    app_surface_consumers: &full.plugin.app_surface_consumers,
-                                };
-                                let sub_q = ReducerQuery {
-                                    attachment: q.attachment,
-                                    // Cross-file: the point is CONSUMER-file
-                                    // coordinates, meaningless against the
-                                    // provider's spans (the imported-sub
-                                    // recursion in query.rs already passes
-                                    // None). Point-free is also what lets a
-                                    // memo key collapse across call sites.
-                                    point: None,
-                                    framework: q.framework,
-                                    arity_hint: None,
-                                    receiver: q.receiver.clone(),
-                                    args: q.args.clone(),
-                                    context: Some(&cached_ctx),
-                                };
-                                (*self.query_rec(&full.witnesses, &sub_q, state)).clone()
-                            };
-                        crate::util::ghost_stats::count("moc.provider_fetched");
-                        crate::util::ghost_stats::count("mocsite.slot_type");
-                        let full = idx.bag_present(&cached);
-                        if !std::ptr::eq(bag, &full.witnesses) {
-                            let v = attempt(&full, state);
-                            crate::util::ghost_stats::count(if v == ReducedValue::None {
-                                "moc.provider_no_answer"
-                            } else {
-                                "moc.provider_answered"
-                            });
-                            if v != ReducedValue::None {
-                                if prefilter_denied {
-                                    crate::util::ghost_stats::count(
-                                        "consult.prefilter_break",
-                                    );
-                                    log::error!(
-                                        "consult pre-filter break: rows proved {:?} \
-                                         silent in {:?} but the chase answered {v:?}",
-                                        q.attachment,
-                                        cached.path
-                                    );
-                                    debug_assert!(
-                                        false,
-                                        "consult pre-filter hid an answer; see log"
-                                    );
-                                }
-                                super::session::remember_candidate_answer(
-                                    idx, &cached.path, &memo_q, &v,
-                                );
-                                idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
-                                return v;
-                            }
-                            // Fallback-on-miss (R4), symmetric with the
-                            // PackageSymbol primary: a slot WRITE typed only in
-                            // C's enriched copy resolves here. Today SlotType
-                            // seeds are build-gated on a resolvable RHS
-                            // (`builder.rs`), so a seed that exists already
-                            // answers on the raw bag and this retry is the
-                            // forward-looking twin — live the moment slot
-                            // seeding emits an unconditional edge. Pin the
-                            // enriched Arc: this chase threads the SHARED
-                            // QueryState, whose memo keys on bag pointers.
-                            crate::util::ghost_stats::count("consult.slot_type");
-                            if idx.serves_enriched() {
-                                let enriched = idx.enriched_present(&cached);
-                                if !std::sync::Arc::ptr_eq(&enriched, &full)
-                                    && !std::ptr::eq(bag, &enriched.witnesses)
-                                {
-                                    state.pins.push(std::sync::Arc::clone(&enriched));
-                                    let v = attempt(&enriched, state);
-                                    if v != ReducedValue::None {
-                                        if prefilter_denied {
-                                            crate::util::ghost_stats::count(
-                                                "consult.prefilter_break",
-                                            );
-                                            log::error!(
-                                                "consult pre-filter break (enriched): \
-                                                 rows proved {:?} silent in {:?} but \
-                                                 the chase answered {v:?}",
-                                                q.attachment,
-                                                cached.path
-                                            );
-                                            debug_assert!(
-                                                false,
-                                                "consult pre-filter hid an answer; see log"
-                                            );
-                                        }
-                                        super::session::remember_candidate_answer(
-                                            idx, &cached.path, &memo_q, &v,
-                                        );
-                                        idx.remember_sweep_consult(
-                                            &cached.path, &verdict_key, &v,
-                                        );
-                                        return v;
-                                    }
-                                }
-                            }
-                            super::session::remember_candidate_answer(
-                                idx,
-                                &cached.path,
-                                &memo_q,
-                                &ReducedValue::None,
-                            );
-                            idx.remember_sweep_consult(
-                                &cached.path, &verdict_key, &ReducedValue::None,
-                            );
-                        }
-                    }
-                }
-                let parents = crate::model::file_analysis::parents_of(
-                    class,
-                    ctx.package_parents,
-                    ctx.module_index,
-                    ctx.app_surface_consumers,
-                );
-                for p in parents {
-                    let parent_att = WitnessAttachment::SlotType {
-                        class: p,
-                        key: key.clone(),
-                    };
-                    let sub_q = ReducerQuery {
-                        attachment: &parent_att,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: None,
-                        receiver: q.receiver.clone(),
-                        args: q.args.clone(),
-                        context: q.context,
-                    };
-                    let v = self.query_rec(bag, &sub_q, state);
-                    if *v != ReducedValue::None {
-                        return (*v).clone();
-                    }
-                }
-            }
-        }
-
-        // `TypeName(name)` the local bag couldn't answer: the typedef may
-        // live in another file (a header the alias name is a Class symbol
-        // in). `get_cached(name)` finds that file; recurse into its bag —
-        // hop (1) of the `PackageSymbol` fallback, same shared visited set.
-        // Failing that, an unresolved alias IS a type of that name: the
-        // one-alias-graph terminal (`ClassName(name)`), so a plain struct
-        // tag / unknown class / primitive spelling resolves to itself.
+        // An unresolved alias IS a type of that name: the one-alias-graph
+        // terminal (`ClassName(name)`), so a plain struct tag / unknown
+        // class / primitive spelling resolves to itself. A template-shaped
+        // terminal (`TypeName("Box<Widget>")` — an alias chain that bottomed
+        // out on a template spelling) peels into the Instance flavor so
+        // dispatch keys the base, same as an annot-site spelling.
         if let WitnessAttachment::TypeName(name) = q.attachment {
-            if let Some(ctx) = q.context {
-                if ctx.module_index.is_none() {
-                    super::note_bake_exit("type_name", true);
-                    note_type_name_exit(state, name);
-                }
-                if let Some(idx) = ctx.module_index {
-                    for cached in idx.visible_def_candidates(name) {
-                        crate::util::ghost_stats::count("moc.provider_fetched");
-                        crate::util::ghost_stats::count("mocsite.type_name");
-                        let full = idx.bag_present(&cached);
-                        if !std::ptr::eq(bag, &full.witnesses) {
-                            let cached_ctx = BagContext {
-                                scopes: &full.scopes,
-                                package_framework: &full.packages,
-                                module_index: Some(idx),
-                                package_parents: &full.packages,
-                                app_surface_consumers: &full.plugin.app_surface_consumers,
-                            };
-                            let sub_q = ReducerQuery {
-                                attachment: q.attachment,
-                                // Cross-file: point normalized (see the slot arm).
-                                point: None,
-                                framework: q.framework,
-                                arity_hint: None,
-                                receiver: q.receiver.clone(),
-                                args: q.args.clone(),
-                                context: Some(&cached_ctx),
-                            };
-                            let v = self.query_rec(&full.witnesses, &sub_q, state);
-                            if *v != ReducedValue::None {
-                                return (*v).clone();
-                            }
-                        }
-                    }
-                }
-            }
-            // A template-shaped terminal (`TypeName("Box<Widget>")` — an
-            // alias chain that bottomed out on a template spelling) peels
-            // into the Instance flavor so dispatch keys the base, same as
-            // an annot-site spelling.
             return ReducedValue::Type(
                 crate::model::file_analysis::ParametricType::instance_from_spelling(name)
                     .map(InferredType::Parametric)
@@ -1412,125 +1095,114 @@ impl ReducerRegistry {
             );
         }
 
-        // `Field{owner, name}` the local bag couldn't answer: the slot's
-        // value edge lives in the file declaring `owner` (cross-file
-        // primary), or the slot is a PARENT's (ancestry) — hops (1) and (2)
-        // of the `PackageSymbol` ladder, same shared visited set. No bridge
-        // hop: a plugin entity is a callable, never a stored value.
-        if let WitnessAttachment::Field { owner, name } = q.attachment {
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, owner, "field", &|p| {
-                WitnessAttachment::Field { owner: p, name: name.clone() }
-            }) {
-                return v;
-            }
-        }
-
-        // `Param{package, name, index}`: the callee's bag is the authority.
-        // Its own witness present but untyped → the position IS bound, so
-        // `Unknown` (a value flowed, nothing named it) rather than silence —
-        // silence would read as by-value. Absent locally → the callee lives
-        // elsewhere (cross-file primary) or the position is a parent's
-        // (ancestry): the `Field` ladder, same shared visited set.
-        if let WitnessAttachment::Param { package, name, index } = q.attachment {
-            if !bag.for_attachment(q.attachment).is_empty() {
-                return ReducedValue::Type(InferredType::Unknown);
-            }
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "param", &|p| {
-                WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
-            }) {
-                return v;
-            }
-        }
-
         ReducedValue::None
     }
 
-    /// Resolve every Edge witness on `q.attachment` to an `InferredType`
-    /// witness via recursive query; non-edge witnesses pass through. The
-    /// returned list is fresh-owned so reducers can borrow into it.
+    /// The ladder for a class-keyed attachment the local bag couldn't
+    /// answer, first answer wins:
     ///
-    /// `Edge(Variable{...})` targets are special-cased — variable
-    /// resolution needs a scope-chain walk + the scope's framework. With
-    /// a `BagContext`, this delegates to `query_variable_with_visited` so
-    /// the recursion shares the caller's cycle guard (calling the public
-    /// `query_variable_type` would reset visited and reopen mutual
-    /// `Edge(Variable)` loops).
-
-
-
-    /// The owner-keyed ladder shared by the `Field` and `Param` fallbacks:
-    /// every candidate file declaring `owner` (cross-file primary), then the
-    /// same attachment re-keyed to each parent (`rekey`), one visited set
-    /// throughout. No bridge hop — neither a slot nor a parameter is a
-    /// plugin-synthesized callable.
+    ///   1. the class's candidate files (`class_candidates`) — a reopened
+    ///      package's member lives in whichever file defines it;
+    ///   2. the class's ancestry (`parents_of`: local ∪ cross-file ∪ the
+    ///      app-surface edge), the same attachment re-keyed per parent in MRO
+    ///      order;
+    ///   3. plugin-namespace bridges — callable entities in other files
+    ///      bridged to the class, asked by `Symbol(sym.id)` (per-FA SymbolIds
+    ///      can't be portably edge-encoded).
     ///
-    /// Out of line for the same reason as `moc_cross_file_primary`: this
-    /// block's locals would otherwise live in `query_rec_body`'s frame,
-    /// which is live once per inheritance hop.
+    /// The shared visited set breaks local and cross-file cycles.
+    ///
+    /// Out of line for the stack: `query_rec_body` is live once per hop.
     #[inline(never)]
-    fn owner_keyed_fallback(
+    fn class_fallback(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
-        owner: &str,
-        site: &'static str,
-        rekey: &dyn Fn(String) -> WitnessAttachment,
+        ladder: &ClassLadder,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
-        if ctx.module_index.is_none() {
-            // A value hop runs under an opaque frame (the projection
-            // combines it), so no conclusion key names this exit.
-            super::note_bake_exit(site, false);
-        }
-        if let Some(idx) = ctx.module_index {
-            for cached in idx.visible_def_candidates(owner) {
-                crate::util::ghost_stats::count("moc.provider_fetched");
-                crate::util::ghost_stats::count(if site == "field" {
-                    "mocsite.field"
-                } else {
-                    "mocsite.param"
-                });
-                let full = idx.bag_present(&cached);
-                if std::ptr::eq(bag, &full.witnesses) {
-                    continue;
+        match ctx.module_index {
+            Some(idx) => {
+                if let Some(v) = self.class_candidates_node(bag, q, state, ctx, idx, ladder) {
+                    return Some(v);
                 }
-                let cached_ctx = BagContext {
-                    scopes: &full.scopes,
-                    package_framework: &full.packages,
-                    module_index: Some(idx),
-                    package_parents: &full.packages,
-                    app_surface_consumers: &full.plugin.app_surface_consumers,
-                };
-                let sub_q = ReducerQuery {
-                    attachment: q.attachment,
-                    // Cross-file: point normalized (see the slot arm).
-                    point: None,
-                    framework: q.framework,
-                    arity_hint: None,
-                    receiver: q.receiver.clone(),
-                    args: q.args.clone(),
-                    context: Some(&cached_ctx),
-                };
-                let v = self.query_rec(&full.witnesses, &sub_q, state);
-                if *v != ReducedValue::None {
-                    return Some((*v).clone());
+            }
+            None => {
+                // Index-less (a bake, a hand-built FA): the candidates are an
+                // exit of the chase. Nameable iff a conclusion key names the
+                // attachment; an unnamed one (a value hop) runs under an opaque
+                // frame, so it is counted, not poisoned.
+                let key = super::ConclusionKey::from_attachment(q.attachment);
+                super::note_bake_exit(ladder.site, key.is_some());
+                if key.is_some() {
+                    state.note_exit(key);
                 }
             }
         }
+        if let Some(rekey) = ladder.rekey {
+            if let Some(v) = self.class_ancestry(bag, q, state, ctx, ladder, rekey) {
+                return Some(v);
+            }
+        }
+        Self::class_bridges(ctx, ladder)
+    }
+
+    /// Hop (1) of `class_fallback` as a fan-out node (`fan_out_node`). Only
+    /// the fan-out is bag-free: the ancestry hop reduces the
+    /// re-keyed attachment on the bag that asked, and a candidate's own bag
+    /// can know its parent's member (`my $self = Parent->new; $self->{k} =
+    /// {}`) where the asker's cannot, so the skipped frame still walks it.
+    fn class_candidates_node(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        ctx: &BagContext,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        ladder: &ClassLadder,
+    ) -> Option<ReducedValue> {
+        let key = (FanOut::Class(q.attachment.clone()), receiver_key(&q.receiver), ladder.arity(q));
+        state.fan_out_node(key, |state| self.class_candidates(bag, q, state, ctx, idx, ladder))
+    }
+
+    /// Hop (2) of `class_fallback`: the attachment re-keyed per parent, MRO
+    /// order.
+    fn class_ancestry(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        ctx: &BagContext,
+        ladder: &ClassLadder,
+        rekey: fn(&WitnessAttachment, String) -> WitnessAttachment,
+    ) -> Option<ReducedValue> {
         let parents = crate::model::file_analysis::parents_of(
-            owner,
+            ladder.owner,
             ctx.package_parents,
             ctx.module_index,
             ctx.app_surface_consumers,
         );
+        if ladder.rungs_on_parents && ctx.module_index.is_none() {
+            // The parent NAME is local (`PackageFacts.parents`), so a parent
+            // hop is nameable even though the parent's FILE is not reachable
+            // from here. Each parent is a ladder rung, recorded in MRO order:
+            // order IS the semantics of a `Link`'s fan-out.
+            super::note_bake_exit("parent_walk", true);
+            for p in &parents {
+                state.note_exit(super::ConclusionKey::from_attachment(&rekey(
+                    q.attachment,
+                    p.clone(),
+                )));
+            }
+        }
         for p in parents {
-            let parent_att = rekey(p);
+            let parent_att = rekey(q.attachment, p);
             let sub_q = ReducerQuery {
                 attachment: &parent_att,
                 point: q.point,
                 framework: q.framework,
-                arity_hint: None,
+                arity_hint: ladder.arity(q),
                 receiver: q.receiver.clone(),
                 args: q.args.clone(),
                 context: q.context,
@@ -1543,10 +1215,90 @@ impl ReducerRegistry {
         None
     }
 
-    /// The cross-file primary hop of the `PackageSymbol` ladder: every file
-    /// declaring `package`, asked in ladder order, first answer wins,
-    /// with the consult pre-filter (`sweep_candidate_may_answer`) skipping
-    /// candidates the rows prove silent.
+    /// Hop (3) of `class_fallback`: callable entities other files' plugin
+    /// namespaces bridged to the class.
+    fn class_bridges(ctx: &BagContext, ladder: &ClassLadder) -> Option<ReducedValue> {
+        let callable = ladder.callable?;
+        let Some(idx) = ctx.module_index else {
+            // NOT a poison and NOT a residual. A bridge target is a per-file
+            // `SymbolId` that no portable key can name, so it would poison
+            // every chase — 99.96% of them, measured. The consult-side guard
+            // (`class_is_bridged_to`) now covers exactly the forms this arm
+            // could contradict, so the bake no longer has to reason about it.
+            super::note_bake_exit("bridge", false);
+            return None;
+        };
+        let package = ladder.owner;
+        // LIVE-mode denominator for the bake's `residual.site.bridge` count:
+        // how often would that consult have yielded anything at all? A
+        // would-be consult that returns nothing is not a dependence, and
+        // counting it as one makes the poison rate look total when it may be
+        // negligible.
+        let mut bridge_seen = false;
+        idx.for_each_entity_bridged_to(package, &mut |_m, _c, _s| {
+            bridge_seen = true;
+            std::ops::ControlFlow::Break(())
+        });
+        crate::util::ghost_stats::count(if bridge_seen {
+            "bridge.live_yields"
+        } else {
+            "bridge.live_empty"
+        });
+        // Per-CLASS, because the guard is per-class while the 98.3%-vacuous
+        // figure is per-call. `enabled()` first: `format!` allocates before
+        // `count` can decline.
+        if bridge_seen && crate::util::ghost_stats::enabled() {
+            crate::util::ghost_stats::count(&format!("bridgecls.{package}"));
+        }
+        let mut found: Option<InferredType> = None;
+        idx.for_each_entity_bridged_to_named(package, callable, &mut |_mod, cached, sym| {
+            use std::ops::ControlFlow;
+            if !matches!(
+                sym.kind,
+                crate::model::file_analysis::SymKind::Sub
+                    | crate::model::file_analysis::SymKind::Method
+            ) {
+                return ControlFlow::Continue(());
+            }
+            if sym.name != callable {
+                return ControlFlow::Continue(());
+            }
+            // Bridged Method's return lives in the bridging file's bag —
+            // rehydrate it if evicted before querying.
+            crate::util::ghost_stats::count("moc.provider_fetched");
+            crate::util::ghost_stats::count("mocsite.bridged");
+            let full = idx.bag_present(cached);
+            if let Some(t) = full.symbol_return_type_via_bag(sym.id, None) {
+                found = Some(t);
+                return ControlFlow::Break(());
+            }
+            // Fallback-on-miss (R4): the bridged Method's return may chain
+            // through the bridging file's OWN imports — baked only into the
+            // enriched overlay. `symbol_return_type_via_bag` owns its answer
+            // (private registry + QueryState), so no `state.pins` push is
+            // needed. Kept index-less by design: a ctx-ful leaf query would
+            // spawn a fresh cycle guard per bridged hop, so mutual bridges
+            // recurse unbounded; the ENRICHING-guarded bake is the safe route
+            // to the same transitive answer.
+            crate::util::ghost_stats::count("consult.bridged");
+            if idx.serves_enriched() {
+                let enriched = idx.enriched_present(cached);
+                if !std::sync::Arc::ptr_eq(&enriched, &full) {
+                    if let Some(t) = enriched.symbol_return_type_via_bag(sym.id, None) {
+                        found = Some(t);
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        });
+        found.map(ReducedValue::Type)
+    }
+
+    /// Hop (1) of `class_fallback`: every file declaring the class, asked in
+    /// ladder order, first answer wins, with the consult pre-filter
+    /// (`sweep_candidate_may_answer`) skipping candidates the rows prove
+    /// silent.
     ///
     /// Out of line, and `#[inline(never)]`, because of the STACK. This block's
     /// locals — two capture-heavy `attempt` closures, the conclusion-outcome
@@ -1556,15 +1308,16 @@ impl ReducerRegistry {
     /// (a bake, a hand-built FA) never enters here at all, so keeping it inline
     /// charged every one of those hops for a block it does not run.
     #[inline(never)]
-    fn moc_cross_file_primary(
+    fn class_candidates(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
         ctx: &BagContext,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
-        package: &str,
+        ladder: &ClassLadder,
     ) -> Option<ReducedValue> {
+        let package = ladder.owner;
         // The memo spelling of this query: point-free, because the answers
         // below are computed point-free (cross-file sub-queries normalize the
         // consumer's point out) and a point-carrying key made every call site
@@ -1573,7 +1326,7 @@ impl ReducerRegistry {
             attachment: q.attachment,
             point: None,
             framework: q.framework,
-            arity_hint: q.arity_hint,
+            arity_hint: ladder.arity(q),
             receiver: q.receiver.clone(),
             args: q.args.clone(),
             context: None,
@@ -1581,10 +1334,6 @@ impl ReducerRegistry {
         // The sweep-tier spelling of the same key — shared across files and
         // workers where a batch sweep opened the store (SweepAnswerGuard).
         let verdict_key = super::ConsultVerdictKey::of(&memo_q);
-        let att_name = match q.attachment {
-            WitnessAttachment::PackageSymbol { name, .. } => name.as_str(),
-            _ => return None,
-        };
         for cached in super::session::visible_def_candidates(idx, package).iter() {
             // Rehydrate the target file's bag if its resident copy
             // was Slice-2-evicted; the cross-file chase reads its
@@ -1598,6 +1347,7 @@ impl ReducerRegistry {
                         module_index: Some(idx),
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
+                        lattice: crate::model::conventions::lattice_for(&full.language),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -1610,7 +1360,7 @@ impl ReducerRegistry {
                         // misses per candidate.
                         point: None,
                         framework: q.framework,
-                        arity_hint: q.arity_hint,
+                        arity_hint: ladder.arity(q),
                         receiver: q.receiver.clone(),
                         args: q.args.clone(),
                         context: Some(&cached_ctx),
@@ -1645,8 +1395,9 @@ impl ReducerRegistry {
             // claims, so each (candidate, key) pair is probed once and
             // memo-hits thereafter — the same first-encounter floor as the
             // chase it replaces, at a row probe instead of a decode.
-            let prefilter_denied =
-                !sweep_candidate_may_answer(idx, cached, package, att_name, true);
+            let prefilter_denied = ladder.rows_member.is_some_and(|(member, attributed)| {
+                !sweep_candidate_may_answer(idx, cached, package, member, attributed)
+            });
             if prefilter_denied {
                 crate::util::ghost_stats::count("consult.prefilter_skip");
                 if !consult_prefilter_equiv() {
@@ -1980,12 +1731,13 @@ impl ReducerRegistry {
                         module_index: None,
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
+                        lattice: crate::model::conventions::lattice_for(&full.language),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
                         point: q.point,
                         framework: q.framework,
-                        arity_hint: q.arity_hint,
+                        arity_hint: ladder.arity(q),
                         receiver: q.receiver.clone(),
                         args: q.args.clone(),
                         context: Some(&local_ctx),
@@ -2028,7 +1780,7 @@ impl ReducerRegistry {
                 continue;
             }
             crate::util::ghost_stats::count("moc.provider_fetched");
-                        crate::util::ghost_stats::count("mocsite.primary");
+            crate::util::ghost_stats::count(ladder.fetch_tag);
             // Attribution twin of `mocpkg.*`: which class family drives the
             // FETCHES (each one a decode on LRU miss), not just the queries.
             crate::util::ghost_stats::count(if package == "main" {
@@ -2098,7 +1850,9 @@ impl ReducerRegistry {
                 // return may chain through ITS OWN imports —
                 // invisible to the raw bag, present in the
                 // enriched overlay.
-                crate::util::ghost_stats::count("consult.moc_primary");
+                if crate::util::ghost_stats::enabled() {
+                    crate::util::ghost_stats::count(&format!("consult.{}", ladder.site));
+                }
                 // `serves_enriched` first: when the overlay is off (one-shot
                 // CLI) the fetch below returns the bag it already has, so the
                 // retry is a guaranteed no-op paid per escalation.
@@ -2216,6 +1970,16 @@ impl ReducerRegistry {
         None
     }
 
+    /// Resolve every Edge witness on `q.attachment` to an `InferredType`
+    /// witness via recursive query; non-edge witnesses pass through. The
+    /// returned list is fresh-owned so reducers can borrow into it.
+    ///
+    /// `Edge(Variable{...})` targets are special-cased — variable
+    /// resolution needs a scope-chain walk + the scope's framework. With
+    /// a `BagContext`, this delegates to `query_variable_with_visited` so
+    /// the recursion shares the caller's cycle guard (calling the public
+    /// `query_variable_type` would reset visited and reopen mutual
+    /// `Edge(Variable)` loops).
     fn materialize(
         &self,
         bag: &WitnessBag,
@@ -2371,129 +2135,133 @@ impl ReducerRegistry {
                             }
                         }
                     });
-                    if let Some(t) = base_t {
-                        let projected = match step {
-                            ProjectionStep::HashKey(k) => {
-                                t.key_value_type(k).flatten().cloned().or_else(|| {
-                                    // Class-typed base: the structural
-                                    // literal can't answer, but a typed
-                                    // slot WRITE can — `SlotType{class,
-                                    // key}`, local or (via the arm in
-                                    // query_rec_body) cross-file and up
-                                    // the ancestry. The read drills
-                                    // through the registry, never a
-                                    // baked value.
-                                    let class = t.class_name()?.to_string();
-                                    let att = WitnessAttachment::SlotType {
-                                        class,
-                                        key: k.clone(),
-                                    };
-                                    let sub_q = ReducerQuery {
-                                        attachment: &att,
-                                        point: q.point,
-                                        framework: q.framework,
-                                        arity_hint: None,
-                                        receiver: q.receiver.clone(),
-                                        args: q.args.clone(),
-                                        context: q.context,
-                                    };
-                                    state.in_opaque_frame(|state| {
-                                        match &*self.query_rec(bag, &sub_q, state) {
-                                            ReducedValue::Type(t) => Some(t.clone()),
-                                            ReducedValue::FactMap(_)
-                                            | ReducedValue::None => None,
-                                        }
+                    if let Some(base_ty) = base_t {
+                        let project = |t: &InferredType, state: &mut QueryState| -> Option<InferredType> {
+                            match step {
+                                ProjectionStep::HashKey(k) => {
+                                    t.key_value_type(k).flatten().cloned().or_else(|| {
+                                        // Class-typed base: the structural
+                                        // literal can't answer, but a typed
+                                        // slot WRITE can — `Field{class,
+                                        // key}`, local or (via the arm in
+                                        // query_rec_body) cross-file and up
+                                        // the ancestry. The read drills
+                                        // through the registry, never a
+                                        // baked value.
+                                        let owner = t.class_name()?.to_string();
+                                        let att = WitnessAttachment::Field {
+                                            owner,
+                                            name: k.clone(),
+                                        };
+                                        let sub_q = ReducerQuery {
+                                            attachment: &att,
+                                            point: q.point,
+                                            framework: q.framework,
+                                            arity_hint: None,
+                                            receiver: q.receiver.clone(),
+                                            args: q.args.clone(),
+                                            context: q.context,
+                                        };
+                                        state.in_opaque_frame(|state| {
+                                            match &*self.query_rec(bag, &sub_q, state) {
+                                                ReducedValue::Type(t) => Some(t.clone()),
+                                                ReducedValue::FactMap(_)
+                                                | ReducedValue::None => None,
+                                            }
+                                        })
                                     })
-                                })
-                            }
-                            ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
-                            ProjectionStep::Element => match &t {
-                                crate::model::file_analysis::InferredType::Sequence(elems) => {
-                                    let mut it = elems.iter();
-                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
                                 }
-                                // A parametric container's TRAILING argument is
-                                // its element by the same positional convention
-                                // `ParamOf` projects (`array<K, V>` → V,
-                                // `vector<T>` → T) — no base-name branch.
-                                crate::model::file_analysis::InferredType::Parametric(
-                                    crate::model::file_analysis::ParametricType::Instance {
-                                        args, ..
-                                    },
-                                ) => args.last().cloned(),
-                                _ => None,
-                            },
-                            ProjectionStep::Key => match &t {
-                                // A sequence's keys ARE its positions.
-                                crate::model::file_analysis::InferredType::Sequence(_) => {
-                                    Some(crate::model::file_analysis::InferredType::Numeric)
+                                ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                                ProjectionStep::Element => match t {
+                                    // An element is any of the sequence's values.
+                                    crate::model::file_analysis::InferredType::Sequence(elems) => {
+                                        crate::model::file_analysis::join_all(elems, class_order(q))
+                                    }
+                                    // A parametric container's TRAILING argument is
+                                    // its element by the same positional convention
+                                    // `ParamOf` projects (`array<K, V>` → V,
+                                    // `vector<T>` → T) — no base-name branch.
+                                    crate::model::file_analysis::InferredType::Parametric(
+                                        crate::model::file_analysis::ParametricType::Instance {
+                                            args, ..
+                                        },
+                                    ) => args.last().cloned(),
+                                    _ => None,
+                                },
+                                ProjectionStep::Key => match t {
+                                    // A sequence's keys ARE its positions.
+                                    crate::model::file_analysis::InferredType::Sequence(_) => {
+                                        Some(crate::model::file_analysis::InferredType::Numeric)
+                                    }
+                                    // A two-argument instance keys by its first
+                                    // argument (`array<string, V>` → string).
+                                    crate::model::file_analysis::InferredType::Parametric(
+                                        crate::model::file_analysis::ParametricType::Instance {
+                                            args, ..
+                                        },
+                                    ) if args.len() == 2 => args.first().cloned(),
+                                    _ => None,
+                                },
+                                ProjectionStep::ParamOf { member, index } => {
+                                    // The dispatch class picks the callee; the
+                                    // callee's bag says whether the position
+                                    // aliases (`Param` fallback below).
+                                    t.class_name().map(str::to_string).and_then(|class| {
+                                        let att = WitnessAttachment::Param {
+                                            package: class,
+                                            name: member.clone(),
+                                            index: *index,
+                                        };
+                                        let sub_q = ReducerQuery {
+                                            attachment: &att,
+                                            point: q.point,
+                                            framework: q.framework,
+                                            arity_hint: None,
+                                            receiver: Some(t.clone()),
+                                            args: q.args.clone(),
+                                            context: q.context,
+                                        };
+                                        state.in_opaque_frame(|state| {
+                                            match &*self.query_rec(bag, &sub_q, state) {
+                                                ReducedValue::Type(t) => Some(t.clone()),
+                                                ReducedValue::FactMap(_)
+                                                | ReducedValue::None => None,
+                                            }
+                                        })
+                                    })
                                 }
-                                // A two-argument instance keys by its first
-                                // argument (`array<string, V>` → string).
-                                crate::model::file_analysis::InferredType::Parametric(
-                                    crate::model::file_analysis::ParametricType::Instance {
-                                        args, ..
-                                    },
-                                ) if args.len() == 2 => args.first().cloned(),
-                                _ => None,
-                            },
-                            ProjectionStep::ParamOf { member, index } => {
-                                // The dispatch class picks the callee; the
-                                // callee's bag says whether the position
-                                // aliases (`Param` fallback below).
-                                t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::Param {
-                                        package: class,
-                                        name: member.clone(),
-                                        index: *index,
-                                    };
-                                    let sub_q = ReducerQuery {
-                                        attachment: &att,
-                                        point: q.point,
-                                        framework: q.framework,
-                                        arity_hint: None,
-                                        receiver: Some(t.clone()),
-                                        args: q.args.clone(),
-                                        context: q.context,
-                                    };
-                                    state.in_opaque_frame(|state| {
-                                        match &*self.query_rec(bag, &sub_q, state) {
-                                            ReducedValue::Type(t) => Some(t.clone()),
-                                            ReducedValue::FactMap(_)
-                                            | ReducedValue::None => None,
-                                        }
+                                ProjectionStep::ValueHop { member } => {
+                                    // A value read chases `Field{class, member}`,
+                                    // the slot's own subject, so a same-named
+                                    // callable's return never answers it (a call
+                                    // is an `Invoke`). The base type IS the
+                                    // receiver, so a slot typed by the class's
+                                    // template parameters substitutes the base's
+                                    // arguments.
+                                    t.class_name().map(str::to_string).and_then(|class| {
+                                        let att = WitnessAttachment::Field { owner: class, name: member.clone() };
+                                        let sub_q = ReducerQuery {
+                                            attachment: &att,
+                                            point: q.point,
+                                            framework: q.framework,
+                                            arity_hint: None,
+                                            receiver: Some(t.clone()),
+                                            args: q.args.clone(),
+                                            context: q.context,
+                                        };
+                                        state.in_opaque_frame(|state| {
+                                            match &*self.query_rec(bag, &sub_q, state) {
+                                                ReducedValue::Type(t) => Some(t.clone()),
+                                                ReducedValue::FactMap(_)
+                                                | ReducedValue::None => None,
+                                            }
+                                        })
                                     })
-                                })
-                            }
-                            ProjectionStep::ValueHop { member } => {
-                                // A value read chases `Field{class, member}`,
-                                // the slot's own subject, so a same-named
-                                // callable's return never answers it (a call
-                                // is an `Invoke`). The base type IS the
-                                // receiver, so a slot typed by the class's
-                                // template parameters substitutes the base's
-                                // arguments.
-                                t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::Field { owner: class, name: member.clone() };
-                                    let sub_q = ReducerQuery {
-                                        attachment: &att,
-                                        point: q.point,
-                                        framework: q.framework,
-                                        arity_hint: None,
-                                        receiver: Some(t.clone()),
-                                        args: q.args.clone(),
-                                        context: q.context,
-                                    };
-                                    state.in_opaque_frame(|state| {
-                                        match &*self.query_rec(bag, &sub_q, state) {
-                                            ReducedValue::Type(t) => Some(t.clone()),
-                                            ReducedValue::FactMap(_)
-                                            | ReducedValue::None => None,
-                                        }
-                                    })
-                                })
+                                }
                             }
                         };
+                        // The base projects on each value it may be.
+                        let projected = base_ty.join_over_arms(class_order(q), |t| project(t, state));
                         if let Some(t) = projected {
                             out.push(Witness {
                                 attachment: w.attachment.clone(),
@@ -2616,7 +2384,7 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
-        let mut recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -2658,6 +2426,30 @@ impl ReducerRegistry {
                 return member;
             }
         }
+        // A receiver lookup dispatches on each value the receiver may be,
+        // with that arm as the receiver its method sees.
+        match (callee, recv) {
+            (Callee::Method { lookup: Lookup::Receiver, .. }, Some(t)) => t
+                .join_over_arms(class_order(q), |arm| {
+                    self.dispatch_invoke(bag, q, state, callee, Some(arm.clone()), arg_types.clone(), exact)
+                }),
+            (_, recv) => self.dispatch_invoke(bag, q, state, callee, recv, arg_types, exact),
+        }
+    }
+
+    /// An `Invoke` on one materialized receiver: pick the lookup attachment
+    /// and query it with the receiver and argument types substituted.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_invoke(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        callee: &Callee,
+        mut recv: Option<InferredType>,
+        mut arg_types: Vec<InferredType>,
+        exact: bool,
+    ) -> Option<InferredType> {
         let lookups: Vec<WitnessAttachment> = match callee {
             Callee::Method { name, lookup, .. } => {
                 let classes: Vec<String> = match lookup {
@@ -2687,7 +2479,7 @@ impl ReducerRegistry {
                     .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
                     .collect()
             }
-            Callee::Function { name, local: None, .. } => {
+            Callee::Function { name, local: None, constructs, .. } => {
                 let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
                     // The definition is in another file, and no conclusion
                     // key names a free function, so a bake can't link it.
@@ -2696,7 +2488,7 @@ impl ReducerRegistry {
                     return None;
                 };
                 let arity = exact.then_some(arg_types.len() as u32);
-                return self.free_function_cross_file(ctx, name, arity, recv, &arg_types, state);
+                return self.free_function_cross_file(ctx, name, constructs.as_deref(), arity, recv, &arg_types, state);
             }
             Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
@@ -2742,11 +2534,49 @@ impl ReducerRegistry {
     /// for both entries — `query_sub_return_type`'s cross-file half and an
     /// unresolved `Callee::Function` — and the chase shares `state`, so a
     /// call that crosses back into a file already on the path stops at the
-    /// cycle guard instead of recursing through a fresh query.
+    /// cycle guard instead of recursing through a fresh query. `class` is
+    /// the identity the call constructs if it names a class
+    /// (`Callee::Function::constructs`): a class declared under it is a
+    /// callee too, whose value is an instance of itself.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn free_function_cross_file(
         &self,
         ctx: &BagContext,
         name: &str,
+        class: Option<&str>,
+        arity_hint: Option<u32>,
+        receiver: Option<InferredType>,
+        args: &[InferredType],
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        let idx = ctx.module_index?;
+        if !super::session::budget_available(idx) {
+            return None;
+        }
+        let key = (
+            FanOut::Free { name: name.to_string(), class: class.map(str::to_string) },
+            receiver_key(&receiver),
+            arity_hint,
+        );
+        let v = state.fan_out_node(key, |state| {
+            self.free_function_fan_out(idx, name, class, arity_hint, receiver, args, state)
+                .map(ReducedValue::Type)
+        });
+        match v {
+            Some(ReducedValue::Type(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// The walk behind `free_function_cross_file`'s fan-out node. Each file
+    /// it decodes spends the session's consult budget, as the class ladder's
+    /// candidates do.
+    #[allow(clippy::too_many_arguments)]
+    fn free_function_fan_out(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        name: &str,
+        class: Option<&str>,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
         args: &[InferredType],
@@ -2754,12 +2584,9 @@ impl ReducerRegistry {
     ) -> Option<InferredType> {
         use crate::model::file_analysis::{FileAnalysis, SymKind};
         use std::sync::Arc;
-        let idx = ctx.module_index?;
-        if !super::session::budget_available(idx) {
-            return None;
-        }
         let is_callable = |s: &crate::model::file_analysis::Symbol| {
-            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+            (s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method))
+                || (class == Some(s.name.as_str()) && s.kind == SymKind::Class)
         };
         // The callable's answer in its own file, under the caller's arity,
         // receiver and arguments. The copy is pinned: the memo keys on its
@@ -2772,6 +2599,7 @@ impl ReducerRegistry {
                 module_index: Some(idx),
                 package_parents: &full.packages,
                 app_surface_consumers: &full.plugin.app_surface_consumers,
+                lattice: crate::model::conventions::lattice_for(&full.language),
             };
             let att = WitnessAttachment::Symbol(sym);
             let q = ReducerQuery {
@@ -2798,6 +2626,9 @@ impl ReducerRegistry {
             // Every candidate file registered under the exporter's name — a
             // split exporter's sub lives in whichever file defines it.
             for cached in idx.visible_def_candidates(&module_name) {
+                if !super::session::spend_consult(idx) {
+                    return None;
+                }
                 let full = idx.bag_present(&cached);
                 let Some(sym) = full.symbols().iter().find(|s| is_callable(s)).map(|s| s.id) else {
                     continue;
@@ -2812,6 +2643,9 @@ impl ReducerRegistry {
             crate::util::ghost_stats::count("consult.imported_sub_return");
             if !idx.serves_enriched() {
                 break;
+            }
+            if !super::session::spend_consult(idx) {
+                return None;
             }
             let full = idx.bag_present(&cached);
             let enriched = idx.enriched_present(&cached);
@@ -2840,7 +2674,13 @@ impl ReducerRegistry {
             return None;
         }
         let mut answer: Option<InferredType> = None;
-        for cached in idx.def_candidates(name) {
+        let mut candidates = idx.def_candidates(name);
+        for cached in class.filter(|c| *c != name).map(|c| idx.def_candidates(c)).unwrap_or_default() {
+            if !candidates.iter().any(|c| c.path == cached.path) {
+                candidates.push(cached);
+            }
+        }
+        for cached in candidates {
             let p = cached.path.to_string_lossy();
             // Reachability reads pinned fields (path + include_closure), so
             // gate BEFORE rehydrating: an unreachable candidate never pays a
@@ -2854,6 +2694,9 @@ impl ReducerRegistry {
             };
             if !reachable {
                 continue;
+            }
+            if !super::session::spend_consult(idx) {
+                return None;
             }
             let full = idx.bag_present(&cached);
             let Some(sym) = full
@@ -2888,9 +2731,9 @@ impl ReducerRegistry {
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
-        let chain = crate::model::file_analysis::scope_chain_of(ctx.scopes, scope);
+        let chain = crate::model::file_analysis::lookup_chain(ctx.scopes, scope);
         let framework = chain
-            .iter()
+            .scopes()
             .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
             .and_then(|pkg| ctx.package_framework.framework_of(pkg))
             .unwrap_or(FrameworkFact::Plain);
@@ -2906,7 +2749,7 @@ impl ReducerRegistry {
         // (`my $x = {}`) still wins. Defer the weak answer until the chain
         // is exhausted.
         let mut weak: Option<InferredType> = None;
-        for sid in chain {
+        for sid in chain.scopes() {
             let att = WitnessAttachment::Variable {
                 name: var.to_string(),
                 scope: sid,
@@ -2953,6 +2796,23 @@ impl ReducerRegistry {
 /// observations are the weak case.
 fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
     binds_variable_where(bag, var, scope, |w| w.span.start <= point)
+}
+
+/// The scope a read of `var` from `scope` at `point` takes its value from:
+/// the first scope out the chain that binds it, with its index on the
+/// chain (0 = `scope` itself). A write through the variable lands its
+/// shape there, so every read that binds the same value sees it.
+pub(crate) fn variable_binding_scope(
+    bag: &WitnessBag,
+    scopes: &[Scope],
+    var: &str,
+    scope: ScopeId,
+    point: Point,
+) -> Option<(usize, ScopeId)> {
+    crate::model::file_analysis::lookup_chain(scopes, scope)
+        .scopes()
+        .enumerate()
+        .find(|&(_, sid)| scope_binds_variable(bag, var, sid, point))
 }
 
 fn binds_variable_where(
@@ -3057,12 +2917,10 @@ fn follow_one(
         std::collections::HashSet::new();
 
     for _ in 0..super::MAX_FOLLOW_HOPS {
-        let super::ConclusionKey::MethodOnClass { class, .. } = &key else {
-            // Only class-keyed hops can be resolved to a candidate FILE; the
-            // other key shapes have no such relation to walk.
-            return None;
-        };
-        let candidates = resolve(class);
+        // A hop resolves to candidate FILES only through a class ladder —
+        // the ladder that baked the `Link` names whose files they are.
+        let att = key.to_attachment()?;
+        let candidates = resolve(ClassLadder::of(&att)?.owner);
         let mut next: Option<(super::ConclusionKey, Option<InferredType>, Option<u32>)> = None;
         for (path, map) in candidates.into_iter() {
             let ident = (path, key.clone(), format!("{recv:?}"), ar);

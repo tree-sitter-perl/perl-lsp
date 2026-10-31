@@ -109,7 +109,7 @@ lookups at 99.99% hit with zero capacity evictions. **Perl-only**, so
 
 **Storage and startup hold.** Warm ready is scale-free, post-ready RSS is
 flat, the bulk walk is near-linear, and per-file db cost *fell* at 39× the
-corpus. The FileStore / row-store / eviction architecture does exactly what
+corpus. The OpenDocs / row-store / eviction architecture does exactly what
 it was designed for. This is the tier that makes the target market possible.
 
 **Query paths break**, each for its own reason, and the CLI's one-shot
@@ -297,7 +297,7 @@ Full-depth stacks of the live server (`eu-stack` under an `LD_PRELOAD`
 `prctl(PR_SET_PTRACER_ANY)` shim, since `gdb -p` is blocked by
 `ptrace_scope=1`) put the request's `spawn_blocking` thread at ~100% CPU for
 its whole life, rooted in `references → refs_to → collect_from_analysis →
-method_call_invocant_class → ReducerRegistry::query → query_rec` — recursion
+method_call_invocant_classes → ReducerRegistry::query → query_rec` — recursion
 regularly past 600 frames — `→ enriched_present → enriched_snapshot →
 stamp_method_call_targets → resolve_method_in_ancestors → rehydrate`. The
 phase log is the clean proof: `refs.resolve` 0.02 ms, `refs.aliases` 33 ms,
@@ -466,6 +466,10 @@ against Perl's ~1 ms, because header expansion (`cpp.transform`) is expensive.
 never consults pack data; the XS `.c` beside a `.pm` is not what `--definition`
 on a Perl symbol resolves through. The server defers workspace indexing to the
 first `didOpen`; the CLI eagerly indexes *every* language it serves.
+
+> Superseded: a process now serves one language (`--lang`,
+> `docs/prompt-multi-language.md`), so `LanguageScope` and the
+> unattached-sub-index routing below are gone. The measurements stand.
 
 **Fixed by scoping the startup, not by deferring it.** `LanguageScope` is
 declared by the VERB and read by the indexer, which never asks what kind of

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tree_sitter::{Parser, Point, Tree};
 
 use crate::model::file_analysis::ParametricType;
-use crate::index::file_store::{FileKey, FileStore};
+use crate::index::open_docs::{FileKey, OpenDocs};
 use crate::index::module_index::ModuleIndex;
 use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
 
@@ -269,7 +269,7 @@ $rs->SUPER::search({{ name => 'X' }});
         .iter()
         .find(|r| r.target_name == "SUPER::search")
         .expect("SUPER::search MethodCall ref");
-    assert_eq!(fa.method_call_invocant_class(super_ref, None), None);
+    assert_eq!(fa.receiver_classes(super_ref, None, ReceiverPolicy::Navigate).single().map(str::to_string), None);
 }
 
 /// (e) **Receiver dispatch unchanged**. `$rs->all()` and
@@ -359,9 +359,9 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let store = FileStore::new();
-    store.insert_workspace(producer_path.clone(), parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(producer_path.clone(), parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -441,7 +441,7 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
 /// resolve through a REAL stamped `resolved_method_target` edge — not
 /// the deleted same-name fallback. The receiver of `->name` is the
 /// `find` method call (a chained method return, not a variable);
-/// `method_call_invocant_class` resolves it via `expr_type_at_span`
+/// `resolve_receiver` resolves it via `expr_type_at_span`
 /// (RowOf projection over the parametric `find` receiver) and freezes a
 /// `Local` edge to the Row accessor. Pins that the edge is present so
 /// the fallback's removal is provably safe; goto-def + references both
@@ -481,11 +481,12 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
 
     // References for the Row's `name` method must include the chained
     // call site — it resolves through the same frozen edge as goto-def.
-    let store = FileStore::new();
-    store.insert_workspace(PathBuf::from("/tmp/nav_chained_return.pm"), fa);
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/nav_chained_return.pm"), fa);
     let refs = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "name".to_string(),
@@ -802,9 +803,9 @@ sub action {
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let store = FileStore::new();
-    store.insert_workspace(producer_path.clone(), parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(producer_path.clone(), parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -873,9 +874,9 @@ sub action {
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let store = FileStore::new();
-    store.insert_workspace(producer_path.clone(), parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(producer_path.clone(), parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -1111,7 +1112,7 @@ my $x = $schema->resultset('Artist')->first->cds;
         .iter()
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "cds")
         .expect("->cds ref");
-    let cn = consumer.method_call_invocant_class(cds_ref, Some(&idx));
+    let cn = consumer.receiver_classes(cds_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(
         cn.as_deref(),
         Some("MyApp::Schema::Result::Artist"),
@@ -1152,7 +1153,7 @@ my $x = $schema->resultset('SourceNameArtists')->first->cds;
         .iter()
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "cds")
         .expect("->cds ref");
-    let cn = consumer.method_call_invocant_class(cds_ref, Some(&idx));
+    let cn = consumer.receiver_classes(cds_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(
         cn.as_deref(),
         Some("MyApp::Schema::Result::ArtistSourceName"),

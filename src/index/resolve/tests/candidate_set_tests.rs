@@ -8,32 +8,39 @@ use super::*;
 /// Two workspace files, cursor on the producer's `sub foo` decl. The set's
 /// projections must agree with each other: rename is the references image
 /// (minus policy-excluded sites), never an independent walk.
-fn candidate_fixture() -> (FileStore, std::sync::Arc<FileAnalysis>, PathBuf, PathBuf) {
-    let store = FileStore::new();
+fn candidate_fixture() -> (
+    OpenDocs,
+    crate::index::module_index::ModuleIndex,
+    std::sync::Arc<FileAnalysis>,
+    PathBuf,
+    PathBuf,
+) {
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/cs_test_a.pm");
     let path_b = PathBuf::from("/tmp/cs_test_b.pm");
     let fa_a = std::sync::Arc::new(parse(
         "package A;\nour @EXPORT_OK = qw/foo/;\nsub foo { 42 }\n1;\nuse My::Dep qw/imported_fn/;\n",
     ));
-    store.insert_workspace_arc(path_a.clone(), fa_a.clone());
+    idx.insert_workspace_arc_for_test(path_a.clone(), fa_a.clone());
     let fa_b = parse("package B;\nuse A qw/foo/;\nsub bar { foo(); }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
-    (store, fa_a, path_a, path_b)
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
+    (store, idx, fa_a, path_a, path_b)
 }
 
 #[test]
 fn candidate_set_rename_is_subset_of_references() {
-    let (store, fa_a, path_a, path_b) = candidate_fixture();
+    let (store, idx, fa_a, path_a, path_b) = candidate_fixture();
     // Cursor on `foo` in `sub foo` (row 2, col 4).
     let cs = resolve(
         &store,
         &fa_a,
         FileKey::Path(path_a.clone()),
         tree_sitter::Point { row: 2, column: 4 },
-        None,
+        Some(&idx),
         OverrideScope::default(),
     );
-    assert!(cs.renameable(), "a package sub is a cross-file renameable");
+    assert_eq!(cs.renameable(), Ok(true), "a package sub is a cross-file renameable");
 
     let refs = cs.references();
     assert!(
@@ -69,15 +76,14 @@ fn candidate_set_rename_is_subset_of_references() {
 /// axis to forget — completion's candidate gathering included.
 #[test]
 fn candidate_set_visibility_axis_flows_to_every_projection() {
-    use crate::index::module_index::{CachedModule, ModuleIndex};
+    use crate::index::module_index::CachedModule;
     use std::sync::Arc;
 
-    let (store, fa_a, path_a, path_b) = candidate_fixture();
+    let (store, idx, fa_a, path_a, path_b) = candidate_fixture();
     let point = tree_sitter::Point { row: 2, column: 4 };
 
     // A dependency-tier module universe: one module A imports from (with a
     // remaining export surface), one it doesn't (auto-import candidate).
-    let idx = ModuleIndex::new_for_test();
     let insert = |name: &str, src: &str| {
         idx.insert_cache(
             name,
@@ -166,14 +172,14 @@ fn candidate_set_visibility_axis_flows_to_every_projection() {
 /// machinery — handlers no longer branch on resolution shape themselves.
 #[test]
 fn candidate_set_local_projections() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let src = "my $count = 0;\n$count++;\nprint $count;\n";
     let fa = parse(src);
     let key = FileKey::Path(PathBuf::from("/tmp/cs_local.pl"));
     // Cursor on `$count` decl (row 0, col 3).
     let cs = resolve(&store, &fa, key, tree_sitter::Point { row: 0, column: 3 }, None, OverrideScope::default());
     assert!(matches!(cs.resolution(), Some(ResolvedTarget::Local)));
-    assert!(cs.renameable());
+    assert_eq!(cs.renameable(), Ok(true));
     let refs = cs.references();
     assert_eq!(refs.len(), 3, "decl + two uses: {refs:?}");
     let edits = cs.rename_edits("$total").expect("perl rename never refuses");
@@ -190,7 +196,7 @@ fn candidate_set_local_projections() {
 /// corrupt the affix, exactly as rename re-derives rather than bare-writes.
 #[test]
 fn candidate_set_highlights_and_linked_editing_at_field_group_cursor() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let src = "\
 package Widget;
 use Moo;
@@ -253,7 +259,7 @@ print $w->size;
 /// definitions() lands on the decl in the origin file.
 #[test]
 fn candidate_set_definitions_local() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let src = "sub greet { 1 }\ngreet();\n";
     let fa = parse(src);
     let key = FileKey::Path(PathBuf::from("/tmp/cs_defs.pl"));
@@ -275,7 +281,7 @@ fn candidate_set_definitions_local() {
 #[cfg(feature = "cpp")]
 #[test]
 fn complete_qualified_path_pack_gathers_owner_members_only() {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let src = "namespace fmtx {\n\
                void format_to(int v);\n\
@@ -288,7 +294,7 @@ fn complete_qualified_path_pack_gathers_owner_members_only() {
                    fmtx::f\n\
                }\n";
     let fa = driver.analyze_with_path(src, Some(std::path::Path::new("/fake/use.cpp")));
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let cs = resolve(
         &store,
@@ -368,10 +374,11 @@ fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
         def_paths: Vec::new(),
         bare_constant: false, member_kind: None,
     };
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/resolve_test_scope_hardening.pm");
-    store.insert_workspace(path.clone(), fa);
-    let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+    idx.insert_workspace_for_test(path.clone(), fa);
+    let results = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     assert!(
         results.iter().any(|r| r.access == AccessKind::Declaration),
         "expected declaration, got {results:?}"
@@ -394,7 +401,7 @@ fn goto_def_agrees_with_references_on_inherited_slot() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let widget = PathBuf::from("/tmp/cs_inh_widget.pm");
     let gadget = PathBuf::from("/tmp/cs_inh_gadget.pm");
     let widget_src = "package Widget;\nuse Moo;\nhas size => (is => 'ro');\nhas color => (is => 'ro');\n1;\n";
@@ -402,10 +409,10 @@ fn goto_def_agrees_with_references_on_inherited_slot() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(widget.clone(), Arc::new(parse(widget_src)));
     idx.register_workspace_module(gadget.clone(), Arc::new(parse(gadget_src)));
-    store.insert_workspace(widget.clone(), parse(widget_src));
-    store.insert_workspace(gadget.clone(), parse(gadget_src));
+    idx.insert_workspace_for_test(widget.clone(), parse(widget_src));
+    idx.insert_workspace_for_test(gadget.clone(), parse(gadget_src));
 
-    let gadget_fa = store.workspace_raw().get(&gadget).unwrap().value().clone();
+    let gadget_fa = idx.workspace_file_for_test(&gadget).unwrap();
     let col = gadget_src.lines().nth(3).unwrap().find("{size}").unwrap() + 1;
     let cs = resolve(
         &store,
@@ -448,7 +455,7 @@ fn goto_def_agrees_with_references_on_template_method() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let base = PathBuf::from("/tmp/cs_tmpl_base.pm");
     let child = PathBuf::from("/tmp/cs_tmpl_child.pm");
     let base_src = "package Base;\nsub run {\n    my $self = shift;\n    return $self->step_one() + 1;\n}\n1;\n";
@@ -456,10 +463,10 @@ fn goto_def_agrees_with_references_on_template_method() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(base.clone(), Arc::new(parse(base_src)));
     idx.register_workspace_module(child.clone(), Arc::new(parse(child_src)));
-    store.insert_workspace(base.clone(), parse(base_src));
-    store.insert_workspace(child.clone(), parse(child_src));
+    idx.insert_workspace_for_test(base.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child.clone(), parse(child_src));
 
-    let base_fa = store.workspace_raw().get(&base).unwrap().value().clone();
+    let base_fa = idx.workspace_file_for_test(&base).unwrap();
     let col = base_src.lines().nth(3).unwrap().find("step_one").unwrap();
     let cs = resolve(
         &store,

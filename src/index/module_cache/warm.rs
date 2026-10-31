@@ -20,10 +20,7 @@ pub fn warm_cache_streaming(
     source: &str,
     each: &mut dyn FnMut(String, PathBuf, FileAnalysis),
 ) -> (usize, Vec<String>, Vec<PathBuf>) {
-    let mut stmt = match conn.prepare(
-        "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp \
-         FROM modules WHERE source = ?1",
-    ) {
+    let mut stmt = match conn.prepare(sql::WARM_MODULES_BY_SOURCE.registered()) {
         Ok(s) => s,
         Err(_) => return (0, Vec::new(), Vec::new()),
     };
@@ -193,23 +190,21 @@ pub enum WarmDirective {
 /// metadata read, and the caller records them inside the predicate.
 /// Closure-stamp validation runs on whichever struct is in hand (stub
 /// skeleton or full analysis); both carry the pinned `include_closure`.
+/// So does `inputs_current`, the driver's word on what the analysis read
+/// from its path (the module it was filed under); a row it rejects is
+/// skipped like a stamp-stale one.
 pub fn warm_pack_stream_with_stubs(
     conn: &Connection,
     use_stubs: bool,
     admit: &mut dyn FnMut(&std::path::Path) -> bool,
+    inputs_current: &mut dyn FnMut(&std::path::Path, &FileAnalysis) -> bool,
     each: &mut dyn FnMut(PathBuf, WarmPayload) -> WarmDirective,
 ) -> usize {
-    // Cheap integer/text columns first; the stub BLOB is column 6 and is
-    // only accessed AFTER the stamp/version checks pass (lazy row access —
-    // rejected rows never pull the blob's pages). `length(m.analysis)`
-    // reads the record header, not the blob: a stub must never register
-    // when its full blob can't rehydrate it (NULL/empty ⇒ wrong-empty
-    // answers instead of a fresh re-analysis).
-    let mut stmt = match conn.prepare(
-        "SELECT m.module_name, m.path, m.mtime_secs, m.file_size, m.extract_version, \
-                m.deps_stamp, s.stub, length(m.analysis) \
-         FROM modules m LEFT JOIN stubs s ON s.path = m.path",
-    ) {
+    // The stub BLOB is only accessed AFTER the stamp/version checks pass
+    // (lazy row access — rejected rows never pull the blob's pages). A stub
+    // must never register when its full blob can't rehydrate it (NULL/empty
+    // ⇒ wrong-empty answers instead of a fresh re-analysis).
+    let mut stmt = match conn.prepare(sql::WARM_PACK_WITH_STUBS.registered()) {
         Ok(s) => s,
         Err(_) => return 0,
     };
@@ -256,6 +251,7 @@ pub fn warm_pack_stream_with_stubs(
             if let Some(stub) = stub_blob.as_deref().and_then(decode_stub) {
                 if closure_stamp(&stub.skeleton.pack.include_closure, &mut stat_memo)
                     != row_deps_stamp
+                    || !inputs_current(&path, &stub.skeleton)
                 {
                     continue;
                 }
@@ -269,7 +265,9 @@ pub fn warm_pack_stream_with_stubs(
         }
         let module_name = row.get::<_, String>(0).unwrap_or_default();
         let Some(fa) = load_one(conn, &path_str) else { continue };
-        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
+        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp
+            || !inputs_current(&path, &fa)
+        {
             continue;
         }
         count += 1;
@@ -314,9 +312,7 @@ pub fn warm_cache(
     // here would pollute the module cache with path-string keys. The tag is
     // the keying scheme, never the writer: every name-keyed producer shares
     // `NAME_KEYED_SOURCE` so a new writer cannot strand its rows unread.
-    let mut stmt = match conn.prepare(
-        "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp FROM modules WHERE source = ?1",
-    ) {
+    let mut stmt = match conn.prepare(sql::WARM_MODULES_BY_SOURCE.registered()) {
         Ok(s) => s,
         Err(_) => return (0, Vec::new()),
     };

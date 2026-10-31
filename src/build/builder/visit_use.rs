@@ -16,7 +16,13 @@ impl<'a> Builder<'a> {
         let Some(module_node) = node.child_by_field_name("module") else { return };
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
-        let (imports, _qw_close) = self.extract_use_import_list(node);
+        let (words, _qw_close) = self.extract_use_import_list(node);
+        let negated = crate::cst::is_negated_use(node);
+        let imports: Vec<String> = words.iter().map(|(text, _)| text.clone()).collect();
+        let import_words: Vec<plugin::ImportWord> = words
+            .into_iter()
+            .map(|(text, span)| plugin::ImportWord { text, span })
+            .collect();
 
         // `use lib` is not an import — it prepends search-path roots to the
         // asker's @INC, which is what decides WHICH file a module name means
@@ -45,6 +51,8 @@ impl<'a> Builder<'a> {
                         source_module.clone(),
                         raw_args,
                         names.to_vec(),
+                        import_words[1..].to_vec(),
+                        negated,
                         node_to_span(node),
                         node_to_span(module_node),
                         Some(node),
@@ -59,6 +67,8 @@ impl<'a> Builder<'a> {
             module_name.to_string(),
             raw_args,
             imports,
+            import_words,
+            negated,
             node_to_span(node),
             node_to_span(module_node),
             Some(node),
@@ -140,6 +150,26 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A package global of the current package declared at `span`, as
+    /// `our` declares one (`EmitAction::PackageVariable`). A qualified or
+    /// sigil-less name declares nothing.
+    pub(super) fn declare_package_variable(&mut self, name: String, span: Span) {
+        let Some(sigil) = name.chars().next() else { return };
+        if !crate::model::conventions::PERL_SPELLINGS.is_sigil(sigil)
+            || crate::model::conventions::split_qualified_var(&name, &crate::model::conventions::PERL_SPELLINGS).is_some()
+        {
+            return;
+        }
+        self.add_symbol(
+            name.clone(),
+            SymKind::Variable,
+            span,
+            span,
+            SymbolDetail::Variable { sigil, decl_kind: DeclKind::Our },
+        );
+        self.add_ref(RefKind::Variable, span, name, AccessKind::Declaration);
+    }
+
     /// Walk a `use Class::Tiny ...` node's args for attribute names, handling
     /// the qw-list, hashref, and combined (`qw(a), { b => ... }`) shapes. The
     /// combined form nests both arg shapes under a `list_expression`, so recurse.
@@ -217,11 +247,14 @@ impl<'a> Builder<'a> {
     /// span still re-runs (distinct source statements are distinct work);
     /// a SyntheticUse cycle (kit plugin reacting to its own emission,
     /// re-firing with the SAME propagated span) short-circuits here.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn process_use(
         &mut self,
         module_name: String,
         raw_args: Vec<String>,
         imports: Vec<String>,
+        import_words: Vec<plugin::ImportWord>,
+        negated: bool,
         span: Span,
         module_name_span: Span,
         node: Option<Node<'a>>,
@@ -370,9 +403,12 @@ impl<'a> Builder<'a> {
                     // entry, not a sub — they must not earn a FunctionCall ref
                     // (rule #7: a ref only on a real call target), or the
                     // unresolved-function diagnostic flags the selector itself.
+                    // A sigiled word names a variable, not a sub, for the
+                    // same reason.
                     let sym_set: std::collections::HashSet<&str> = imports
                         .iter()
                         .filter(|s| !s.starts_with(':') && !s.starts_with('-'))
+                        .filter(|s| !s.starts_with(|c| crate::model::conventions::PERL_SPELLINGS.is_sigil(c)))
                         .map(|s| s.as_str())
                         .collect();
                     self.emit_refs_for_strings(
@@ -459,6 +495,8 @@ impl<'a> Builder<'a> {
                 module_name,
                 imports,
                 raw_args,
+                import_words,
+                negated,
                 current_package: self.current_package.clone(),
                 span,
             };
@@ -1055,15 +1093,14 @@ impl<'a> Builder<'a> {
         alias
     }
 
-    /// Extract the import list from a use statement.
-    /// Returns (imported_symbols, qw_close_paren_position).
-    pub(super) fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<String>, Option<Point>) {
-        let qw_close = self.find_qw_close_position(node);
-        let names = self.extract_string_names(node);
-        if !names.is_empty() {
-            return (names, qw_close);
+    /// Extract the import list from a use statement: each word with its
+    /// span, and the qw close-paren position.
+    pub(super) fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<(String, Span)>, Option<Point>) {
+        let words = self.extract_string_list(node);
+        if words.is_empty() {
+            return (vec![], None);
         }
-        (vec![], None)
+        (words, self.find_qw_close_position(node))
     }
 
     /// Classify an assignment LHS as an export package-variable, tolerating a
@@ -1478,7 +1515,7 @@ impl<'a> Builder<'a> {
         }
         // `$obj->{k} = <rhs>` slot-type seed. Record key-span →
         // rhs-span so `populate_witness_bag` can mint
-        // `SlotType{owner_class, k} → Edge(Expr(rhs_span))`
+        // `Field{owner_class, k} → Edge(Expr(rhs_span))`
         // keyed off the matching HashKeyAccess Write ref (whose
         // span is this key node's span). `emit_expr_witness(right)`
         // already published the RHS's `Expr(rhs_span)`; a compound write
@@ -1494,7 +1531,7 @@ impl<'a> Builder<'a> {
             left.kind(),
             "hash_element_expression" | "array_element_expression"
         ) {
-            self.record_key_write(left, Some(stored));
+            self.record_key_write(left, Some(stored), None, self.current_scope());
         }
         // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
         // `@$h{…}`) land several keys at once — record an
@@ -1530,6 +1567,7 @@ impl<'a> Builder<'a> {
                     self.key_writes.push(crate::model::file_analysis::KeyWrite {
                         var_text,
                         key: crate::model::file_analysis::WriteKey::Unknown,
+                        path: Vec::new(),
                         scope: self
                             .scope_stack
                             .last()
@@ -1537,6 +1575,7 @@ impl<'a> Builder<'a> {
                             .unwrap_or(crate::model::file_analysis::ScopeId(0)),
                         span,
                         rhs_span: None,
+                        rhs_slot: None,
                         conditional: true,
                     });
                 }
@@ -1563,6 +1602,32 @@ impl<'a> Builder<'a> {
                     && qualifier_admits_local_sub(qualifier, s.package.as_deref())
             })
             .map(|s| s.id)
+    }
+
+    /// Whether Perl has seen a sub named `name` (as written) by `at`. A parse
+    /// decision Perl makes while compiling reads this view: a sub declared
+    /// further down does not count yet.
+    ///
+    /// An unqualified name is looked up in the package in force at `at`, as
+    /// Perl does: `sub Foo` in another package of the file does not count,
+    /// and a sub imported by name into this package does.
+    pub(super) fn sub_declared_before(&self, name: &str, at: Point) -> bool {
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
+        let here = self.package_at_pos(at);
+        let qualifier = qualifier.or(Some(here.unwrap_or("main")));
+        let declared = self.symbols.iter().any(|s| {
+            s.span.start < at
+                && s.name == bare
+                && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && qualifier_admits_local_sub(qualifier, s.package.as_deref())
+        });
+        declared
+            || (name == bare
+                && self.imports.iter().any(|i| {
+                    i.span.start < at
+                        && i.imported_symbols.iter().any(|s| s.local_name == bare)
+                        && self.package_at_pos(i.span.start) == here
+                }))
     }
 
     /// The bare name to look a call up by, for callers that resolve through a

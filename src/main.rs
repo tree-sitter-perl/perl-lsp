@@ -32,6 +32,11 @@ async fn main() {
     // door, so a capped run still reports what it managed to measure.
     util::watchdog::arm();
 
+    // One language per process, chosen before anything reads it — the
+    // server and every CLI mode alike. Stripped here so the positional
+    // dispatch below never sees it.
+    let args = take_lang_flag(args);
+
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         return;
@@ -145,8 +150,8 @@ async fn main() {
             cli_clear_cache(args.get(2).map(|s| s.as_str()));
             return;
         }
-        Some("--parse") if args.len() >= 3 => {
-            cli_parse(&args[2], args.get(3).map(|s| s.as_str()));
+        Some("--parse") if args.len() == 3 => {
+            cli_parse(&args[2]);
             return;
         }
         Some("--languages") => {

@@ -23,12 +23,11 @@ pub(super) fn group_from_projections(
         // `p.class` and its descendants, never upward at a framework ancestor
         // that defines a real same-named `sub` (e.g. an `id` column colliding
         // with `DBIx::Class::PK::id`).
-        let target = if p.field_backed {
+        let mut target = if p.private {
             TargetRef::method(
                 p.bare.clone(),
                 p.class.clone(),
-                // a reader is called, whatever backs it
-                Some(MemberKind::Callable),
+                Some(p.reader_kind),
                 class_analysis,
                 module_index,
                 OverrideScope::Dispatch,
@@ -37,10 +36,12 @@ pub(super) fn group_from_projections(
             TargetRef::owned_accessor(
                 p.bare.clone(),
                 p.class.clone(),
+                p.reader_kind,
                 class_analysis,
                 module_index,
             )
         };
+        target.def_paths = pack_class_def_paths(&target, class_analysis, module_index);
         members.push(GroupMember {
             target,
             rename: MemberRename::Bare,
@@ -90,6 +91,7 @@ pub(super) fn group_from_projections(
             target: TargetRef::owned_accessor(
                 m.method.clone(),
                 p.class.clone(),
+                MemberKind::Callable,
                 class_analysis,
                 module_index,
             ),
@@ -132,7 +134,7 @@ pub(super) fn group_from_projections(
 /// deduped like `refs_to`, and every span covers a bare name token, so a
 /// rename caller can write one replacement text at every location.
 pub fn group_refs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
@@ -142,21 +144,9 @@ pub fn group_refs(
 ) -> Vec<RefLocation> {
     let mut out: Vec<RefLocation> = local_spans
         .iter()
-        .map(|span| RefLocation {
-            key: origin.clone(),
-            span: *span,
-            access: AccessKind::Read,
-            rewritable: true,
-            label: None
-        })
+        .map(|span| RefLocation::at(origin.clone(), *span, AccessKind::Read))
         .collect();
-    out.extend(pinned_spans.iter().map(|(path, span)| RefLocation {
-        key: FileKey::Path(path.clone()),
-        span: *span,
-        access: AccessKind::Read,
-        rewritable: true,
-        label: None
-    }));
+    out.extend(pinned_spans.iter().map(|(path, span)| RefLocation::at(FileKey::Path(path.clone()), *span, AccessKind::Read)));
     for m in members {
         let mask = mask_override
             .unwrap_or_else(|| references_mask_for(files, module_index, &m.target));
@@ -201,7 +191,7 @@ pub(super) enum WalkScope<'a> {
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
 pub(super) fn refs_to_in_file(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     key: &FileKey,
@@ -227,7 +217,7 @@ pub fn is_valid_rename_name(new_name: &str) -> bool {
 /// accessor's decl token IS the group decl the bare edit covers.
 #[allow(clippy::too_many_arguments)]
 pub fn group_rename_edits(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
@@ -235,25 +225,19 @@ pub fn group_rename_edits(
     members: &[GroupMember],
     bare_new: &str,
     mask: RoleMask,
-) -> Vec<(RefLocation, String)> {
+) -> Result<Vec<(RefLocation, String)>, String> {
     let mut out: Vec<(RefLocation, String)> = local_spans
         .iter()
         .map(|span| {
             (
-                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true, label: None},
+                RefLocation::at(origin.clone(), *span, AccessKind::Read),
                 bare_new.to_string(),
             )
         })
         .collect();
     out.extend(pinned_spans.iter().map(|(path, span)| {
         (
-            RefLocation {
-                key: FileKey::Path(path.clone()),
-                span: *span,
-                access: AccessKind::Read,
-                rewritable: true,
-                label: None
-            },
+            RefLocation::at(FileKey::Path(path.clone()), *span, AccessKind::Read),
             bare_new.to_string(),
         )
     }));
@@ -274,9 +258,74 @@ pub fn group_rename_edits(
             out.push((loc, text.clone()));
         }
     }
+    // A union site appears in the image of each member it dispatches to; it
+    // is safe only when every class it names is one of them, so what no
+    // member's image covers is what its `also_on` lists share. A covered
+    // site rewrites; an uncovered one keeps the classes left over.
+    let mut uncovered: std::collections::HashMap<(PathBuf, Span), Vec<String>> =
+        std::collections::HashMap::new();
+    for (loc, _) in &out {
+        let at = (key_for_sort(&loc.key), loc.span);
+        match uncovered.get_mut(&at) {
+            Some(left) => left.retain(|c| loc.rewrite.also_on().contains(c)),
+            None => {
+                uncovered.insert(at, loc.rewrite.also_on().to_vec());
+            }
+        }
+    }
+    for (loc, _) in &mut out {
+        if let SiteRewrite::Shared { also_on } = &mut loc.rewrite {
+            *also_on = uncovered[&(key_for_sort(&loc.key), loc.span)].clone();
+            if also_on.is_empty() {
+                loc.rewrite = SiteRewrite::Yes;
+            }
+        }
+    }
+    let name = members.first().map_or(bare_new, |m| m.target.name.as_str());
+    let mut out = settle_rename_sites(name, out, |(loc, _)| loc)?;
     let mut seen = std::collections::HashSet::new();
     out.retain(|(loc, _)| seen.insert((key_for_sort(&loc.key), loc.span)));
-    out
+    Ok(out)
+}
+
+/// The rename policy every rename path applies to its image: any site whose
+/// `SiteRewrite` refuses refuses the whole rename (a partial edit would
+/// silently break code there); otherwise the edits are the sites that
+/// rewrite.
+pub(crate) fn settle_rename_sites<T>(
+    name: &str,
+    sites: Vec<T>,
+    loc: impl Fn(&T) -> &RefLocation,
+) -> Result<Vec<T>, String> {
+    if let Some(why) = sites.iter().find_map(|s| site_refusal(name, loc(s))) {
+        return Err(why);
+    }
+    Ok(sites.into_iter().filter(|s| loc(s).rewrite.rewrites()).collect())
+}
+
+/// Why renaming `name` refuses at `loc`, when it does.
+fn site_refusal(name: &str, loc: &RefLocation) -> Option<String> {
+    match &loc.rewrite {
+        SiteRewrite::Yes | SiteRewrite::Skip => None,
+        SiteRewrite::ThroughMacro => Some(format!(
+            "rename of `{name}` would leave sites spelled through a delegating macro \
+             unchanged (the macro body is not rewritten) — refusing rather than \
+             emitting a partial edit"
+        )),
+        SiteRewrite::Shared { also_on } => {
+            let at = match &loc.key {
+                FileKey::Path(p) => p.display().to_string(),
+                FileKey::Url(u) => u.to_string(),
+            };
+            Some(format!(
+                "`{}` at {}:{} may also be {}'s; rename from there to rename them together",
+                name,
+                at,
+                loc.span.start.row + 1,
+                also_on.join(" or "),
+            ))
+        }
+    }
 }
 
 /// Per-process override for the relational retrieval switch — the parity
@@ -514,7 +563,7 @@ pub(super) fn matcher_view(
 /// - `files`   — open + workspace store
 /// - `module_index` — dep cache (consulted only if mask includes Dependency)
 pub fn refs_to(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -528,7 +577,7 @@ pub fn refs_to(
 /// the scope enumerates (see `WalkScope` for the origin scope's two
 /// stated asymmetries).
 fn walk_refs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -605,7 +654,7 @@ fn walk_refs(
     let mut rows_indexed: std::sync::Arc<std::collections::HashSet<PathBuf>> = Default::default();
     let mut candidate_set: std::collections::HashSet<PathBuf> = Default::default();
 
-    // Open files (canonical — workspace entries for open paths are skipped).
+    // Open docs (canonical — their index entries are skipped).
     let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if mask.contains(RoleMask::OPEN) {
         files.for_each_open(|url, doc| {
@@ -672,36 +721,14 @@ fn walk_refs(
                 if covered_paths.contains(path) {
                     continue;
                 }
-                // Tier attribution: a FileStore workspace entry rides the
-                // WORKSPACE role (Perl project files); everything else the
-                // rows name lives in a module-index tier (DEPENDENCY —
-                // @INC and the pack caches). The mask must admit the
-                // candidate's OWN tier, or an EDITABLE rename would walk
+                // Tier attribution: a front-door registration rides
+                // WORKSPACE, the rest (@INC) DEPENDENCY. The mask must admit
+                // the candidate's OWN tier, or an EDITABLE rename would walk
                 // read-only deps (and vice versa).
-                let ws_arc = files
-                    .workspace_raw()
-                    .get(path)
-                    .map(|e| std::sync::Arc::clone(e.value()));
-                let cached = match ws_arc {
-                    Some(arc) => {
-                        if !mask.contains(RoleMask::WORKSPACE) {
-                            continue;
-                        }
-                        std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                            path.clone(),
-                            arc,
-                        ))
-                    }
-                    None => {
-                        if !mask.contains(RoleMask::DEPENDENCY) {
-                            continue;
-                        }
-                        match idx.cached_by_path(path) {
-                            Some(cm) => cm,
-                            None => continue,
-                        }
-                    }
-                };
+                if !mask.contains(index_role(idx, path)) {
+                    continue;
+                }
+                let Some(cached) = idx.cached_by_path(path) else { continue };
                 covered_paths.insert(path.clone());
                 let key = FileKey::Path(cached.path.clone());
                 let file_str = canonical_file_str(&key);
@@ -719,55 +746,21 @@ fn walk_refs(
         }
     }
 
-    // Workspace files.
-    if mask.contains(RoleMask::WORKSPACE) {
-        let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.workspace");
-        for entry in files.workspace_raw().iter() {
-            if covered_paths.contains(entry.key()) {
-                continue;
-            }
-            // Shredded AND not a candidate → holds no matching row; skip
-            // the whole-view rehydration. Candidates always fall through
-            // (the relational block may have failed to resolve them).
-            if rows_indexed.contains(entry.key()) && !candidate_set.contains(entry.key()) {
-                continue;
-            }
-            covered_paths.insert(entry.key().clone());
-            let key = FileKey::Path(entry.key().clone());
-            let file_str = canonical_file_str(&key);
-            if !gate(entry.value(), &file_str) {
-                continue;
-            }
-            // Same rows-axes routing as the sibling sweeps: a workspace
-            // copy with rows persisted is refs+symbols-STRIPPED, and the
-            // matcher reading it raw silently drops the file's matches.
-            let full = match module_index {
-                Some(idx) => {
-                    let cached = std::sync::Arc::new(
-                        crate::model::file_analysis::CachedModule::new(
-                            entry.key().clone(),
-                            std::sync::Arc::clone(entry.value()),
-                        ),
-                    );
-                    matcher_view(idx, &cached, target)
-                }
-                None => std::sync::Arc::clone(entry.value()),
-            };
-            collect_from_analysis(&key, &full, target, module_index, &memo, &mut out);
-        }
-    }
-
-    // Dependencies (read-only modules from @INC / the pack-language cache).
-    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
-    // repeats files and HIDES a file that lost every name tie. Skip paths an
-    // open/workspace copy already covered — those are fresher.
-    if mask.contains(RoleMask::DEPENDENCY) {
+    // The index's files, each admitted by its OWN tier (`index_role`): the
+    // project's front-door registrations and the @INC dependencies. Per-FILE
+    // sweep (`for_each_cached_file`): the name-keyed view both repeats files
+    // and HIDES a file that lost every name tie. Skip paths an open doc
+    // already covered — it is fresher.
+    if mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY) {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
             let mut visit = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
-                // Same row-narrowing skip as the workspace sweep: shredded
-                // but not a candidate ⇒ provably matchless; candidates
-                // always fall through.
+                if !mask.contains(index_role(idx, &cached.path)) {
+                    return;
+                }
+                // Shredded but not a candidate ⇒ provably matchless; skip the
+                // rehydration. Candidates always fall through (the relational
+                // block may have failed to resolve them).
                 if rows_indexed.contains(&cached.path) && !candidate_set.contains(&cached.path) {
                     return;
                 }
@@ -810,6 +803,16 @@ fn walk_refs(
     }
 
     sorted_deduped(out)
+}
+
+/// The tier an index-held file rides: WORKSPACE for a front-door
+/// registration, DEPENDENCY otherwise.
+pub(super) fn index_role(idx: &dyn CrossFileLookup, path: &std::path::Path) -> RoleMask {
+    if idx.is_dependency_path(path) {
+        RoleMask::DEPENDENCY
+    } else {
+        RoleMask::WORKSPACE
+    }
 }
 
 /// Stable output order + (path, span) dedup — the one spelling both walk
@@ -877,13 +880,7 @@ pub fn implementations_of(
                     let whole = idx.symbols_present(&cached);
                     for s in whole.symbols() {
                         if &s.name == pkg && matches!(s.kind, SymKind::Class) {
-                            out.push(RefLocation {
-                                key: FileKey::Path(cached.path.clone()),
-                                span: s.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: false,
-                                label: None,
-                            });
+                            out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip));
                         }
                     }
                 }
@@ -982,13 +979,7 @@ pub fn implementations_of(
                     && matches!(s.kind, SymKind::Sub | SymKind::Method)
                     && s.package.as_deref() == Some(pkg.as_str())
                 {
-                    out.push(RefLocation {
-                        key: FileKey::Path(cached.path.clone()),
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: true,
-                        label: None
-                    });
+                    out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration));
                 }
             }
         }
@@ -1041,13 +1032,7 @@ pub(super) fn specialization_family(
             let whole = idx.symbols_present(&cached);
             for s in whole.symbols() {
                 if &s.name == spec && matches!(s.kind, SymKind::Class) {
-                    out.push(RefLocation {
-                        key: FileKey::Path(cached.path.clone()),
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: false,
-                        label: None
-                    });
+                    out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip));
                 }
             }
         }

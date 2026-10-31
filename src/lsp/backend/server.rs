@@ -181,11 +181,12 @@ impl LanguageServer for Backend {
                 // --linked-editing.
                 linked_editing_range_provider: None,
                 completion_provider: Some(CompletionOptions {
-                    // Union of every served language's trigger chars — Perl
-                    // sigils/`->`/`{`, plus a pack language's `.`/`::` etc.
-                    // A perl-only build is byte-identical to the old list.
                     trigger_characters: Some(
-                        crate::build::language_driver::LanguageRegistry::with_enabled().trigger_chars(),
+                        crate::build::language_driver::LanguageRegistry::served()
+                            .trigger_chars()
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect(),
                     ),
                     ..Default::default()
                 }),
@@ -231,7 +232,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        // Pre-warm each pack language's skeleton-query compilation OFF the
+        // Pre-warm a pack language's skeleton-query compilation OFF the
         // message loop, FIRST — before any `.await` that depends on the client
         // answering (register_capability), so the warm-up starts even if the
         // client is slow to respond. `Query::new` is a ~180ms one-time cost
@@ -243,10 +244,10 @@ impl LanguageServer for Backend {
         // into the driver's `OnceLock`; Perl's query warms on its normal first
         // build. Correctness-inert: it only populates the cache earlier.
         tokio::task::spawn_blocking(|| {
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-            // Only pack-served drivers compile a query engine worth warming
-            // (the reference driver warms on its normal first build).
-            for driver in reg.pack_drivers() {
+            let driver = crate::build::language_driver::LanguageRegistry::served();
+            // Only a pack driver compiles a query engine worth warming (Perl
+            // warms on its normal first build).
+            if driver.lang_pack().is_some() {
                 // A non-trivial snippet so `parser.parse` yields a tree and
                 // the analyze reaches `query_extract::extract` (which is
                 // where `Query::new` fires); empty source can parse to
@@ -259,21 +260,18 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "perl-lsp initialized")
             .await;
 
-        // Register file watchers for workspace indexing — every served
-        // language's extensions (Perl + pack languages), so out-of-editor
-        // changes to a header/pack file reach the invalidation path too.
-        let watchers: Vec<FileSystemWatcher> = {
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-            reg.languages()
-                .into_iter()
-                .filter_map(|id| reg.for_id(id))
-                .flat_map(|d| d.extensions().iter())
+        // Register file watchers for workspace indexing — the served
+        // language's extensions, so out-of-editor changes reach the
+        // re-index / invalidation path too.
+        let watchers: Vec<FileSystemWatcher> =
+            crate::build::language_driver::LanguageRegistry::served()
+                .extensions()
+                .iter()
                 .map(|ext| FileSystemWatcher {
                     glob_pattern: GlobPattern::String(format!("**/*.{ext}")),
                     kind: None,
                 })
-                .collect()
-        };
+                .collect();
         let mut registrations = vec![Registration {
             id: "perl-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
@@ -296,10 +294,8 @@ impl LanguageServer for Backend {
         }
         let _ = self.client.register_capability(registrations).await;
 
-        // Workspace indexing is LAZY + per-language — the first `did_open` of a
-        // family triggers `ensure_workspace_indexed`, so a C++ session in a
-        // mixed tree never eagerly scans the 4000+ `.pm` files it can't use
-        // (that eager perl scan was the multi-minute first-open stall).
+        // Workspace indexing is LAZY — the first `did_open` triggers
+        // `ensure_workspace_indexed`.
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -312,7 +308,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        // Build the document OFF the message loop. `FileStore::open` runs the
+        // Build the document OFF the message loop. `OpenDocs::open` runs the
         // whole pack pipeline (macro transform + extraction) synchronously — for
         // a 16k-line macro-heavy C file that is ~1.3 s even cached-only, and
         // running it here would head-of-line block every request the client
@@ -326,12 +322,12 @@ impl LanguageServer for Backend {
         // blocking closure so it applies exactly to this build's thread.
         let gate = Arc::new(ReadyGate::default());
         self.opening.insert(uri.clone(), Arc::clone(&gate));
-        let files = Arc::clone(&self.files);
+        let open_docs = Arc::clone(&self.open_docs);
         let uri_build = uri.clone();
         let build_started = std::time::Instant::now();
         let opened = tokio::task::spawn_blocking(move || {
             crate::build::cpp_reparse::set_gather_cached_only(true);
-            let opened = files.open(uri_build, text);
+            let opened = open_docs.open(uri_build, text);
             crate::build::cpp_reparse::set_gather_cached_only(false);
             opened
         })
@@ -356,10 +352,9 @@ impl LanguageServer for Backend {
         }
         let mut needs_gather_refresh = false;
         if opened {
-            if let Some(doc) = self.files.get_open(&uri) {
-                // Lazily index this file's language family (once) so a C++
-                // open doesn't wait on the perl tree.
-                self.ensure_workspace_indexed(&doc.language);
+            if let Some(doc) = self.open_docs.get_open(&uri) {
+                // Lazily index the workspace (once).
+                self.ensure_workspace_indexed();
                 // A gather-dependent file's first analyze was cached-only;
                 // warm the gather and re-analyze in the background so full
                 // cross-file macros land. The language declares whether a
@@ -388,7 +383,7 @@ impl LanguageServer for Backend {
         // future inside one task, so awaiting it here head-of-line blocked
         // every other verb (the post-cold-index availability hole).
         if opened {
-            if let (Ok(path), Some(doc)) = (uri.to_file_path(), self.files.get_open(&uri)) {
+            if let (Ok(path), Some(doc)) = (uri.to_file_path(), self.open_docs.get_open(&uri)) {
                 // Hub-integrated languages record @INC residency here; pack
                 // freshness is the invalidator's disk-side gate.
                 if crate::build::language_driver::LanguageRegistry::caps(doc.language)
@@ -434,7 +429,7 @@ impl LanguageServer for Backend {
             // first change's heal coalesces into THIS gather instead of
             // spawning a redundant second one.
             let heal_ctx = self.pack_heal_ctx();
-            let language = self.files.get_open(&uri).map(|d| d.language);
+            let language = self.open_docs.get_open(&uri).map(|d| d.language);
             if let Some(language) = language {
                 heal_ctx.begin_progress(&uri, language).await;
             }
@@ -447,7 +442,7 @@ impl LanguageServer for Backend {
         let Some(change) = params.content_changes.into_iter().next() else {
             return;
         };
-        let language = match self.files.get_open(&uri) {
+        let language = match self.open_docs.get_open(&uri) {
             Some(doc) => doc.language,
             None => return,
         };
@@ -456,7 +451,7 @@ impl LanguageServer for Backend {
         // position features stay live, and DEBOUNCE the analysis so a burst
         // of keystrokes pays one rebuild after typing settles, not one each.
         if crate::build::language_driver::LanguageRegistry::caps(language).synchronous_rebuild {
-            if let Some(mut doc) = self.files.get_open_mut(&uri) {
+            if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
                 doc.update(change.text);
                 for imp in &doc.analysis.imports {
                     self.module_index.request_resolve(&imp.module_name);
@@ -474,7 +469,7 @@ impl LanguageServer for Backend {
             self.schedule_diag_refresh(uri);
             return;
         }
-        if let Some(mut doc) = self.files.get_open_mut(&uri) {
+        if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
             doc.update_text_only(change.text);
         }
         self.spawn_debounced_rebuild(uri);
@@ -485,7 +480,7 @@ impl LanguageServer for Backend {
         // A save of an invalidator-owned language forwards to the
         // invalidation seam below; hub languages take the direct path.
         let pack_path = self
-            .files
+            .open_docs
             .get_open(&uri)
             .filter(|doc| {
                 crate::build::language_driver::LanguageRegistry::caps(doc.language)
@@ -493,7 +488,7 @@ impl LanguageServer for Backend {
             })
             .and_then(|_| uri.to_file_path().ok());
         if let Some(text) = params.text {
-            if let Some(mut doc) = self.files.get_open_mut(&uri) {
+            if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
                 doc.update(text);
             }
             self.schedule_diag_refresh(uri.clone());
@@ -525,7 +520,7 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
-        self.files.close(&uri);
+        self.open_docs.close(&uri);
         // Wake any degraded-window waiter — the doc is gone, there is
         // nothing to wait for.
         if let Some((_, g)) = self.degraded_open.remove(&uri) {
@@ -561,7 +556,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -576,17 +571,15 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits: first the file's own initial build (may still
-        // be in flight — `did_open` runs it off the loop), then its family index
+        // be in flight — `did_open` runs it off the loop), then the workspace index
         // — so the query resolves warm instead of returning the one degraded
         // answer the user never re-triggers. Guards dropped before each await;
         // analysis snapshotted AFTER so any heal is picked up.
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Interactive).await;
-        }
+        self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, text, language) = match self.files.get_open(uri) {
+        let (analysis, text, language) = match self.open_docs.get_open(uri) {
             Some(doc) => (Arc::clone(&doc.analysis), doc.text.clone(), doc.language),
             None => return self.not_ready_or_null(uri),
         };
@@ -604,11 +597,7 @@ impl LanguageServer for Backend {
                     return Some(GotoDefinitionResponse::Scalar(loc));
                 }
             }
-            // cpp/pack functions live in the per-language sub-index; route
-            // there so cross-file function goto-def resolves (Perl uses the
-            // hub).
-            let routed = cx.routed(language);
-            let base_idx = routed.as_lookup();
+            let base_idx = cx.lookup();
             // Forward projection of the set. The source text unlocks the macro
             // variant lane (ranked, never pruned, see-through delegate) for pack
             // routing; labels ride the candidates and the editor adapter drops
@@ -670,15 +659,13 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits, mirroring goto-def: the value's type may
-        // resolve through imports, so the family index matters here too.
+        // resolve through imports, so the workspace index matters here too.
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Interactive).await;
-        }
+        self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
         let uri = uri.clone();
@@ -686,9 +673,8 @@ impl LanguageServer for Backend {
             // The type axis of the same set goto-def projects: value type →
             // dispatch class → class definition(s). Honest miss when the
             // type doesn't infer — no name-only fallback.
-            let routed = cx.routed(language);
             let cs = cx.set(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 &uri,
                 symbols::position_to_point(pos),
@@ -706,18 +692,15 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
-        let (analysis, language) = match self.files.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        self.await_index_ready(WaitPolicy::Complete).await;
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
         let uri = uri.clone();
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
             let cs = cx.set(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 &uri,
                 symbols::position_to_point(pos),
@@ -739,10 +722,9 @@ impl LanguageServer for Backend {
         self.run_query(move |cx| {
             // Re-anchor at the item's own declaration file — the analysis
             // that carries the class's local parent edges.
-            let (analysis, key, language) = cx.item_anchor(&item.uri)?;
-            let routed = cx.routed(&language);
+            let (analysis, key) = cx.item_anchor(&item.uri)?;
             let cs = cx.set_at(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 key,
                 symbols::position_to_point(item.selection_range.start),
@@ -764,10 +746,9 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
         let item = params.item;
         self.run_query(move |cx| {
-            let (analysis, key, language) = cx.item_anchor(&item.uri)?;
-            let routed = cx.routed(&language);
+            let (analysis, key) = cx.item_anchor(&item.uri)?;
             let cs = cx.set_at(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 key,
                 symbols::position_to_point(item.selection_range.start),
@@ -790,18 +771,15 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
-        let (analysis, language) = match self.files.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        self.await_index_ready(WaitPolicy::Complete).await;
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
         let uri = uri.clone();
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
             let cs = cx.set(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 &uri,
                 symbols::position_to_point(pos),
@@ -822,13 +800,12 @@ impl LanguageServer for Backend {
         let item = params.item;
         let scope = self.override_scope();
         self.run_query(move |cx| {
-            let (analysis, key, language) = cx.item_anchor(&item.uri)?;
-            let routed = cx.routed(&language);
+            let (analysis, key) = cx.item_anchor(&item.uri)?;
             // The set minted at the DECLARATION — incoming is its
             // `references()` image (the same projection heatmap fan-in
             // counts), grouped by each site's enclosing callable.
             let cs = cx.set_at(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 key,
                 symbols::position_to_point(item.selection_range.start),
@@ -855,10 +832,9 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
         let item = params.item;
         self.run_query(move |cx| {
-            let (analysis, key, language) = cx.item_anchor(&item.uri)?;
-            let routed = cx.routed(&language);
+            let (analysis, key) = cx.item_anchor(&item.uri)?;
             let cs = cx.set_at(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 key,
                 symbols::position_to_point(item.selection_range.start),
@@ -888,8 +864,8 @@ impl LanguageServer for Backend {
         // no resolution kicks — one text scan over the stored buffer plus
         // registered-only map lookups. An unknown module yields no link and
         // appears once registration lands.
-        let (text, language) = match self.files.get_open(uri) {
-            Some(doc) => (doc.text.clone(), doc.language),
+        let text = match self.open_docs.get_open(uri) {
+            Some(doc) => doc.text.clone(),
             None => return self.not_ready_or_null(uri),
         };
         let self_dir = uri
@@ -902,12 +878,11 @@ impl LanguageServer for Backend {
             .and_then(|r| Url::parse(&r).ok())
             .and_then(|u| u.to_file_path().ok());
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
             let links: Vec<DocumentLink> = symbols::document_links(
                 &text,
                 self_dir.as_deref(),
                 root.as_deref(),
-                Some(routed.as_lookup()),
+                Some(cx.lookup()),
             )
             .into_iter()
             .filter_map(|l| {
@@ -931,18 +906,16 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits (see `await_open_ready` / `await_index_ready`):
-        // the file's own initial build, then an in-flight family index.
+        // the file's own initial build, then an in-flight workspace index.
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot the open doc (cheap `Arc` clone) and DROP the store guard
         // before `resolve()` — it re-locks the open shards via `for_each_open`,
         // and holding the guard across that reentrant read deadlocks against a
         // concurrently queued writer. See `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
 
@@ -951,9 +924,8 @@ impl LanguageServer for Backend {
         // the resolved target can't diverge across the three verbs.
         let uri = uri.clone();
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
             let cs = cx.set(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 &uri,
                 symbols::position_to_point(pos),
@@ -968,17 +940,15 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         // Cold-open bounded waits (see `await_open_ready` / `await_index_ready`):
-        // the file's own initial build, then an in-flight family index so
+        // the file's own initial build, then an in-flight workspace index so
         // cross-file references resolve warm (the in-window `op_free` 1 → 118
         // heal) instead of returning def-only.
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(uri) {
+        let (analysis, language) = match self.open_docs.get_open(uri) {
             Some(doc) => (Arc::clone(&doc.analysis), doc.language),
             None => return self.not_ready_or_null(uri),
         };
@@ -989,12 +959,7 @@ impl LanguageServer for Backend {
         let degraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let degraded_flag = Arc::clone(&degraded);
         let out = self.run_query(move |cx| {
-            // Pack languages resolve + collect through their sub-index
-            // (mirrors goto-def and the CLI) — the hub only knows Perl
-            // modules, so a cpp query against it silently misses every
-            // cross-file use.
-            let routed = cx.routed(language);
-            let base_idx = routed.as_lookup();
+            let base_idx = cx.lookup();
             let self_path = uri.to_file_path().ok();
             // `#include` reverse — "who includes this header" — owns the path
             // token exclusively (the backward mirror of include goto-def). The
@@ -1070,8 +1035,8 @@ impl LanguageServer for Backend {
         self.await_open_ready(&params.text_document.uri, WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(&params.text_document.uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        let analysis = match self.open_docs.get_open(&params.text_document.uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(&params.text_document.uri),
         };
         let point = symbols::position_to_point(params.position);
@@ -1080,7 +1045,6 @@ impl LanguageServer for Backend {
         self.run_query(move |cx| {
             // Same store routing as the rename handler, so this gate probes
             // the target rename would actually act on.
-            let routed = cx.routed(language);
             // The rename box's range + placeholder.
             let box_at = analysis
                 .symbol_at(point)
@@ -1090,20 +1054,19 @@ impl LanguageServer for Backend {
             // edits. Accepting on any `symbol_at`/`ref_at` hit is a UX trap:
             // positions like `@_` or an ownerless constructor key resolve to
             // nothing renameable, so the user gets a box that silently no-ops.
-            // `renameable()` mirrors `rename_edits`' arms on the same set
-            // (incl. the pack probe: a rename the set would refuse or no-op on
-            // offers no box), so this gate tracks new renameable kinds
-            // automatically, with no change here.
-            let cs = cx.set(routed.as_lookup(), &analysis, &uri, point, scope);
-            if !cs.renameable() {
-                return None;
+            // `renameable()` IS the rename probed on the same set, so this
+            // gate tracks new renameable kinds automatically, and a rename
+            // that would refuse says why here, before a name is typed.
+            let cs = cx.set(cx.lookup(), &analysis, &uri, point, scope);
+            if !cs.renameable().map_err(tower_lsp::jsonrpc::Error::invalid_params)? {
+                return Ok(None);
             }
-            box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
+            Ok(box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
                 range: symbols::span_to_range(span),
                 placeholder,
-            })
+            }))
         })
-        .await
+        .await?
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -1118,14 +1081,12 @@ impl LanguageServer for Backend {
         self.await_open_ready(uri, WaitPolicy::Complete).await;
         // Cross-file rename edits are act-on-able: a cold-index rename that
         // silently missed files would corrupt the workspace. Wait Complete.
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
 
@@ -1133,15 +1094,13 @@ impl LanguageServer for Backend {
         // Rename is the references image + policy, projected from the same
         // set: cross-file walk for workspace-stable targets, per-member texts
         // for groups, the origin file's rename machinery for lexicals. Pack
-        // routing is a construction fact on the set: it widens the walk to
-        // the per-language cache and REFUSES on alias-spelled sites instead
-        // of emitting a partial edit.
+        // routing is a construction fact on the set: it REFUSES on
+        // alias-spelled sites instead of emitting a partial edit.
         let uri = uri.clone();
         let new_name = new_name.clone();
         let scope = self.override_scope();
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
-            let cs = cx.set(routed.as_lookup(), &analysis, &uri, point, scope);
+            let cs = cx.set(cx.lookup(), &analysis, &uri, point, scope);
             cs.rename_edits(&new_name)
                 .map(edit_pairs_to_workspace_edit)
                 .map_err(tower_lsp::jsonrpc::Error::invalid_params)
@@ -1153,15 +1112,13 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits (see `await_open_ready` / `await_index_ready`):
-        // the file's own initial build, then an in-flight family index so hover
+        // the file's own initial build, then an in-flight workspace index so hover
         // resolves warm.
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Interactive).await;
-        }
+        self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, text, language) = match self.files.get_open(uri) {
+        let (analysis, text, language) = match self.open_docs.get_open(uri) {
             Some(doc) => (Arc::clone(&doc.analysis), doc.text.clone(), doc.language),
             None => return self.not_ready_or_null(uri),
         };
@@ -1172,8 +1129,7 @@ impl LanguageServer for Backend {
         // model primitives + the set's call-binding accessor.
         let uri = uri.clone();
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
-            let base_idx = routed.as_lookup();
+            let base_idx = cx.lookup();
             let cs = cx
                 .set(
                     base_idx,
@@ -1233,7 +1189,7 @@ impl LanguageServer for Backend {
         // which re-locks the open shards via `for_each_open`); see
         // `Document::analysis`. `tree` clones O(1) (tree-sitter refcount).
         let (analysis, text, tree, language, path, package_lines) =
-            match self.files.get_open(uri) {
+            match self.open_docs.get_open(uri) {
                 Some(doc) => (
                     Arc::clone(&doc.analysis),
                     doc.text.clone(),
@@ -1253,7 +1209,7 @@ impl LanguageServer for Backend {
             let (items, is_incomplete) = self
                 .run_query(move |cx| {
                     pack_completion(
-                        cx.files(),
+                        cx.open_docs(),
                         &analysis,
                         &text,
                         &tree,
@@ -1283,7 +1239,7 @@ impl LanguageServer for Backend {
         let (items, capped) = self
             .run_query(move |cx| {
                 symbols::completion_items(
-                    cx.files(),
+                    cx.open_docs(),
                     &key,
                     &analysis,
                     &tree,
@@ -1346,7 +1302,7 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1365,8 +1321,8 @@ impl LanguageServer for Backend {
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(uri) {
-            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
+        let analysis = match self.open_docs.get_open(uri) {
+            Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
         // Same construction as references — highlights is its origin-narrowed
@@ -1374,9 +1330,8 @@ impl LanguageServer for Backend {
         let uri = uri.clone();
         let scope = self.override_scope();
         self.run_query(move |cx| {
-            let routed = cx.routed(language);
             let cs = cx.set(
-                routed.as_lookup(),
+                cx.lookup(),
                 &analysis,
                 &uri,
                 symbols::position_to_point(pos),
@@ -1394,7 +1349,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<SelectionRange>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1415,7 +1370,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<FoldingRange>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1435,7 +1390,7 @@ impl LanguageServer for Backend {
         // Copy the source out and release the DashMap guard before awaiting
         // perltidy: holding a shard read lock across the await deadlocks any
         // concurrent didChange (which needs the write lock) on the same file.
-        let source = match self.files.get_open(uri) {
+        let source = match self.open_docs.get_open(uri) {
             Some(doc) => doc.text.clone(),
             None => return self.not_ready_or_null(uri),
         };
@@ -1490,7 +1445,7 @@ impl LanguageServer for Backend {
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1508,7 +1463,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1522,7 +1477,7 @@ impl LanguageServer for Backend {
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1550,14 +1505,13 @@ impl LanguageServer for Backend {
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
 
-            cx.files().for_each_analysis(|key, analysis| {
-                let uri = match key {
-                    FileKey::Url(u) => u,
-                    FileKey::Path(p) => Url::from_file_path(&p).unwrap_or_else(|_| {
-                        Url::parse(&format!("file://{}", p.display()))
-                            .unwrap()
-                    }),
-                };
+            // Open docs first — the fresher text — then every index copy
+            // they don't shadow.
+            let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
+                std::collections::HashSet::new();
+            let mut visit = |uri: Url,
+                             analysis: &crate::model::file_analysis::FileAnalysis,
+                             gated: &[crate::model::file_analysis::Symbol]| {
                 if !analysis.symbols_are_evicted() {
                     if let Ok(p) = uri.to_file_path() {
                         // Claim the canonical spelling too: rows are keyed
@@ -1569,7 +1523,7 @@ impl LanguageServer for Backend {
                         covered.insert(p);
                     }
                 }
-                for sym in analysis.symbols() {
+                for sym in analysis.symbols().iter().chain(gated) {
                     if sym.name.to_lowercase().contains(&query) {
                         if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
                             results.push(info);
@@ -1585,30 +1539,27 @@ impl LanguageServer for Backend {
                         results.push(symbols::plugin_namespace_to_workspace_info(ns, uri.clone()));
                     }
                 }
-            });
-
-            // Pack-language (C/C++/…) symbols live in per-language
-            // sub-indexes, not the FileStore — sweep them so a C typedef/
-            // class/free function shows in workspace search alongside Perl
-            // packages.
-            cx.index().for_each_pack_registered_file(&mut |path, analysis| {
-                if !analysis.symbols_are_evicted() {
-                    covered.insert(path.to_path_buf());
+            };
+            cx.open_docs().for_each_open(|url, doc| {
+                if let Ok(p) = url.to_file_path() {
+                    open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
                 }
-                let uri = Url::from_file_path(path).unwrap_or_else(|_| {
-                    Url::parse(&format!("file://{}", path.display())).unwrap()
+                visit(url.clone(), &doc.analysis, &[]);
+            });
+            cx.index().for_each_registered_file(&mut |cached| {
+                if open_paths.contains(&cached.path) {
+                    return;
+                }
+                let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
+                    Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                for sym in analysis.symbols() {
-                    if sym.name.to_lowercase().contains(&query) {
-                        if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
-                            results.push(info);
-                        }
-                    }
-                }
+                // The stored copy holds no gated content, and neither do
+                // its rows; the gates that fire now add theirs.
+                visit(uri, &cached.analysis, &cx.index().shown_gated_symbols(cached, &query));
             });
 
-            // Rows pass: symbol-evicted copies (Perl workspace + @INC + every
-            // pack tier) answer from the relational store — the resident sweep
+            // Rows pass: symbol-evicted copies (the served language's
+            // workspace, plus @INC for Perl) answer from the relational store — the resident sweep
             // above saw empty vecs for them. Same containment test, same
             // kind/visibility filters as `symbol_to_workspace_info`.
             for hit in cx.sym_rows(&query) {
@@ -1628,24 +1579,20 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        // Route by the driver's declared invalidation owner: an
+        // Route by the served driver's declared invalidation owner: an
         // invalidator-owned language goes through the invalidation seam
-        // (re-register + reverse-closure eviction); the rest take the hub's
+        // (re-register + reverse-closure eviction); otherwise the hub's
         // direct re-index.
+        let invalidator_owned = crate::build::language_driver::LanguageRegistry::served()
+            .caps()
+            .pack_invalidation;
         let mut perl_changes: Vec<(PathBuf, FileChangeType)> = Vec::new();
-        {
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-            for change in params.changes {
-                let Ok(path) = change.uri.to_file_path() else { continue };
-                match reg.for_path(&path) {
-                    Some(d) if d.caps().pack_invalidation => {
-                        self.schedule_pack_invalidate(
-                            path,
-                            change.typ == FileChangeType::DELETED,
-                        );
-                    }
-                    _ => perl_changes.push((path, change.typ)),
-                }
+        for change in params.changes {
+            let Ok(path) = change.uri.to_file_path() else { continue };
+            if invalidator_owned {
+                self.schedule_pack_invalidate(path, change.typ == FileChangeType::DELETED);
+            } else {
+                perl_changes.push((path, change.typ));
             }
         }
         self.reindex_saved_perl(perl_changes).await;
@@ -1659,7 +1606,7 @@ impl LanguageServer for Backend {
         // Copy the source out and release the DashMap guard before awaiting
         // perltidy — see `formatting` for why holding it across the await
         // deadlocks concurrent didChange on the same file.
-        let source = match self.files.get_open(uri) {
+        let source = match self.open_docs.get_open(uri) {
             Some(doc) => doc.text.clone(),
             None => return self.not_ready_or_null(uri),
         };

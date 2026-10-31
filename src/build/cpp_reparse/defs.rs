@@ -163,50 +163,6 @@ pub(super) fn walk_macro_defs(
     }
 }
 
-/// A cheap structural signature over a file's first ~1KB, for routing a file
-/// whose extension no driver claims (`commands.def`, a 12.7k
-/// line C dispatch table with an unowned extension, went entirely dark under
-/// the Perl fallback). NOT an extension list — `.def` is ambiguous across
-/// ecosystems (a Windows module-definition file is `LIBRARY`/`EXPORTS`
-/// stanzas, not C) so the extension alone can't decide; this reads content.
-/// Scores C-preprocessor directives and brace/semicolon statement shape
-/// against Perl's sigils/keywords, over full lines only (a truncated last
-/// line contributes nothing either way).
-pub fn looks_like_c_family(prefix: &str) -> bool {
-    let mut c_score = 0i32;
-    let mut perl_score = 0i32;
-    for raw in prefix.lines() {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('#')
-            && (line[1..].trim_start().starts_with("include")
-                || line[1..].trim_start().starts_with("define")
-                || line[1..].trim_start().starts_with("ifndef")
-                || line[1..].trim_start().starts_with("ifdef")
-                || line[1..].trim_start().starts_with("if ")
-                || line[1..].trim_start().starts_with("endif")
-                || line[1..].trim_start().starts_with("pragma"))
-        {
-            c_score += 3;
-        } else if line.starts_with("package ")
-            || line.starts_with("use strict")
-            || line.starts_with("use warnings")
-            || line.starts_with("sub ")
-            || line.starts_with('$')
-            || line.starts_with('@')
-            || line.starts_with('%')
-        {
-            perl_score += 3;
-        } else if line.ends_with(';') || line.ends_with('{') || line == "}" || line.ends_with("};")
-        {
-            c_score += 1;
-        }
-    }
-    c_score > 0 && c_score > perl_score
-}
-
 pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
     let mut out: BTreeMap<String, Macro> = BTreeMap::new();
     walk_macro_defs(tree, src, |n, mut m, _span| {

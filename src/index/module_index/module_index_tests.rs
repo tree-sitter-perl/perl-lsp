@@ -1,5 +1,31 @@
 use super::*;
 
+// Test-only registration helpers live here, not in a production part, so the
+// layering allowlist's whole-copy counts stay about production sites.
+impl ModuleIndex {
+    /// Register `fa` as a project file through its language's front door
+    /// (whole copy, every name feed).
+    pub(crate) fn insert_workspace_for_test(&self, path: PathBuf, fa: FileAnalysis) -> Arc<FileAnalysis> {
+        let arc = Arc::new(fa);
+        self.insert_workspace_arc_for_test(path, Arc::clone(&arc));
+        arc
+    }
+
+    pub(crate) fn insert_workspace_arc_for_test(&self, path: PathBuf, fa: Arc<FileAnalysis>) {
+        if crate::build::language_driver::LanguageRegistry::is_pack_language(&fa.language) {
+            self.register_symbols(path, fa);
+        } else {
+            self.register_workspace_module(path, fa);
+        }
+    }
+
+    /// The registered copy at `path`.
+    pub(crate) fn workspace_file_for_test(&self, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
+    }
+}
+
 fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> {
     use tree_sitter::Parser;
     let mut parser = Parser::new();
@@ -464,7 +490,7 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
 #[test]
 fn get_cached_scoped_prefers_reachable_same_name_class() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let a = Arc::new(driver.analyze_with_path(
         "class Box { public: void a_only(); };\n",
@@ -501,7 +527,7 @@ fn get_cached_scoped_prefers_reachable_same_name_class() {
 #[test]
 fn visible_defs_with_prefix_gates_on_closure() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let header = Arc::new(driver.analyze_with_path(
         "enum opcode { OP_NULL, OP_SCOPE };\nint op_name(int t);\n",
@@ -540,7 +566,7 @@ fn visible_defs_with_prefix_gates_on_closure() {
 #[test]
 fn unregister_file_removes_defs_and_repicks_winner() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let a = Arc::new(driver.analyze_with_path(
         "class Box { public: void a_only(); };\n",
@@ -578,7 +604,7 @@ fn unregister_file_removes_defs_and_repicks_winner() {
 #[cfg(feature = "cpp")]
 #[test]
 fn edit_swap_drops_names_the_new_version_lost() {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let v1 = Arc::new(driver.analyze_with_path(
         "class Box { public: int w; };\nint helper();\n",
@@ -1008,10 +1034,10 @@ fn idx_find_method_return(
         .find_method_return_type(class, method, Some(idx), None)
 }
 
-/// Seam (b), primary (hop 1): the cross-file `SlotType{class, key}` primary —
+/// Seam (b), primary (hop 1): the cross-file `Field{owner, name}` primary —
 /// a typed slot WRITE in the class's OWN file, read from a consumer, resolves
 /// through the extracted `attempt` closure. (The enriched-retry twin of this
-/// hop is dormant today: SlotType seeds are build-gated on a resolvable RHS,
+/// hop is dormant today: Perl slot seeds are build-gated on a resolvable RHS,
 /// so a seed that exists already answers on the raw bag. The retry is wired
 /// for symmetry with the PackageSymbol primary; this test guards the refactor
 /// that extracted its `attempt` closure.)
@@ -1030,7 +1056,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     let tree = parser.parse(app_src, None).unwrap();
     let fa = crate::build::builder::build(&tree, app_src.as_bytes());
 
-    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `SlotType{Store, conn}`
+    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `Field{Store, conn}`
     // into Store's own file (hop 1) and found the `Conn->new` slot write.
     let t = fa.inferred_type_via_bag_ctx(
         "$c",
@@ -1040,7 +1066,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     assert_eq!(
         t.as_ref().and_then(|t| t.class_name().map(|s| s.to_string())).as_deref(),
         Some("Conn"),
-        "read narrows via Store's own slot write (cross-file SlotType primary): {t:?}"
+        "read narrows via Store's own slot write (cross-file Field primary): {t:?}"
     );
 }
 
@@ -1138,64 +1164,6 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     assert!(
         crate::index::module_index::rehydration_miss_count() > before,
         "the miss must be counted — silent absence is the flake signature"
-    );
-}
-
-/// The foreign-route half of rehydration: a sweep minting `CachedModule`s
-/// from FileStore entries asks whatever index the query routed to — a cpp
-/// query's workspace sweep hands PERL paths to the cpp sub-index, whose own
-/// loader can never serve them (first caught live by the strict-residency
-/// tripwire: cross-TU cpp references silently dropped every Perl workspace
-/// file's matches). The sub-index must route a hub-owned path to the hub's
-/// rehydration cell instead of degrading to the stripped resident.
-#[test]
-fn foreign_path_rehydrates_through_the_owning_sibling() {
-    let hub = ModuleIndex::new_for_test();
-
-    // A whole analysis the "hub blob store" can serve, and its stripped twin
-    // the sweep would otherwise read empty.
-    let src = "package Ghost;\nsub boo { return 1 }\n1;\n";
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .unwrap();
-    let tree = parser.parse(src, None).unwrap();
-    let whole = crate::build::builder::build(&tree, src.as_bytes());
-    let whole_arc = Arc::new(whole);
-    let mut stripped = (*whole_arc).clone();
-    stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
-    let path = PathBuf::from("/fake/hub/Ghost.pm");
-
-    // Install the hub's rehydration cell with a loader that serves the
-    // whole copy (stands in for the modules.db blob load).
-    let served = Arc::clone(&whole_arc);
-    hub.set_bag_cache(Arc::new(crate::index::pack_bag_cache::PackBagCache::new(
-        128 * 1024 * 1024,
-        move |p: &std::path::Path, _want_bag: bool| {
-            if p == std::path::Path::new("/fake/hub/Ghost.pm") {
-                Ok((*served).clone())
-            } else {
-                Err(crate::index::module_cache::RehydrateMiss::NoRow)
-            }
-        },
-    )));
-
-    // Attach a pack sub-index (its own bag cache can never serve the path).
-    let sub = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", Arc::clone(&sub));
-
-    // The misrouted ask: the sub-index handed a hub-owned stripped copy.
-    let cm = Arc::new(CachedModule::new(path, Arc::new(stripped)));
-    let before = crate::index::module_index::rehydration_miss_count();
-    let full = crate::model::file_analysis::CrossFileLookup::whole_present(sub.as_ref(), &cm);
-    assert!(
-        full.symbols().iter().any(|s| s.name == "boo"),
-        "foreign route must serve the owner's WHOLE copy, not the stripped resident"
-    );
-    assert_eq!(
-        crate::index::module_index::rehydration_miss_count(),
-        before,
-        "a foreign-routed answer is a hit, not a residency miss"
     );
 }
 
@@ -2584,79 +2552,6 @@ fn a_walk_reads_valid_rows_across_generations() {
 }
 
 
-/// The profile lattice's whole guarantee: never serve a partial copy to a
-/// fuller request, and always serve a full copy to a partial one.
-///
-/// Getting the direction backwards is silent. A `full` verb handed a
-/// `diagnostics` copy finds `method_target()` empty on every `MethodCall` and
-/// reports it as "no definition" — a missing ANSWER, not an error, and
-/// indistinguishable from a file that genuinely has none.
-///
-/// The profile rides the entry as a FIELD rather than the key, so the fuller
-/// build REPLACES the partial one; keying on it would keep two copies of one
-/// file's analysis for a distinction only one of them needs.
-#[test]
-fn the_overlay_never_serves_a_partial_copy_to_a_fuller_request() {
-    use crate::model::file_analysis::EnrichmentProfile;
-    use crate::model::witnesses::ResolutionSession;
-
-    if std::env::var_os("PERL_LSP_FULL_ENRICHMENT").is_some() {
-        // The A/B control forces `full()` everywhere, which is exactly what
-        // this test needs NOT to be in force.
-        return;
-    }
-
-    let idx = ModuleIndex::new_for_test();
-    let lib = parse_source_to_cached(
-        "package Lib;\nour @EXPORT_OK = ('make');\nsub make { my %h = (id => 1); return \\%h }\n1;\n",
-        "Lib",
-    );
-    let consumer = parse_source_to_cached(
-        "package App;\nuse Lib 'make';\nsub go { my $x = make(); return $x }\n1;\n",
-        "App",
-    );
-    idx.register_workspace_module(lib.path.to_path_buf(), Arc::clone(&lib.analysis));
-    idx.register_workspace_module(consumer.path.to_path_buf(), Arc::clone(&consumer.analysis));
-
-    // A diagnostics walk builds and caches a partial copy.
-    let partial = {
-        let _walk = ResolutionSession::enter(Some(&idx as &dyn CrossFileLookup));
-        ResolutionSession::declare_profile(EnrichmentProfile::diagnostics());
-        let a = idx.enriched_snapshot(&consumer).expect("diagnostics snapshot");
-        let b = idx.enriched_snapshot(&consumer).expect("diagnostics snapshot again");
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "a request at the SAME profile must hit — otherwise the lattice \
-             just disabled the overlay"
-        );
-        a
-    };
-
-    // A full walk must NOT be handed it.
-    let full = {
-        let _walk = ResolutionSession::enter(Some(&idx as &dyn CrossFileLookup));
-        ResolutionSession::declare_profile(EnrichmentProfile::full());
-        idx.enriched_snapshot(&consumer).expect("full snapshot")
-    };
-    assert!(
-        !Arc::ptr_eq(&partial, &full),
-        "a copy enriched for diagnostics was served to a request that reads \
-         the dispatch-target edge it never filled"
-    );
-
-    // ...and the fuller copy now serves the partial verb, in place.
-    let partial_again = {
-        let _walk = ResolutionSession::enter(Some(&idx as &dyn CrossFileLookup));
-        ResolutionSession::declare_profile(EnrichmentProfile::diagnostics());
-        idx.enriched_snapshot(&consumer).expect("diagnostics snapshot after full")
-    };
-    assert!(
-        Arc::ptr_eq(&full, &partial_again),
-        "the full copy contains everything diagnostics reads — refusing it \
-         makes the two verbs evict each other on every alternation"
-    );
-}
-
 /// The witness seams' retry gate: a one-shot process's `enriched_present` is
 /// `bag_present` — never a distinct view — so `serves_enriched` must say no,
 /// or every R4 escalation pays a fetch to learn nothing (measured: 706k
@@ -2861,4 +2756,77 @@ fn sweep_probe_memo_is_stamp_keyed_and_keeps_only_proven_verdicts() {
     assert_eq!(probe(&idx, sym(), Some(None)), Some(None));
     assert_eq!(probe(&idx, sym(), None), None);
     assert_eq!(runs.get(), 5);
+}
+
+/// A stripped copy replays its recorded feed, handler-owner bridges
+/// included: owning a handler bridges it, and the owner is read from the
+/// symbols the strip drops.
+#[test]
+fn a_stripped_copy_keeps_its_handler_owner_bridges() {
+    use crate::index::module_index::ModuleEdgeIndexes;
+    let mut fa = build_fa(
+        "package My::Emitter;\nuse parent 'Mojo::EventEmitter';\n\
+         sub register { my $self = shift; $self->on('ready', sub { 1 }); }\n",
+    );
+    // Only ownership may carry the bridge here.
+    fa.plugin.namespaces.clear();
+    assert!(
+        fa.symbols().iter().any(|s| s.kind == crate::model::file_analysis::SymKind::Handler),
+        "the fixture must emit a handler"
+    );
+    let bridges = |edges: &ModuleEdgeIndexes| -> Vec<String> {
+        edges
+            .snapshot()
+            .into_iter()
+            .filter(|(map, _, _)| *map == "bridges")
+            .map(|(_, key, _)| key)
+            .collect()
+    };
+    let path = PathBuf::from("/fake/emitter.pm");
+    let edges = ModuleEdgeIndexes::new();
+    edges.feed("My::Emitter", &path, &fa);
+    let whole = bridges(&edges);
+    assert!(!whole.is_empty(), "the owned handler bridges its owner");
+
+    fa.evict_symbols();
+    edges.purge_module("My::Emitter");
+    edges.feed("My::Emitter", &path, &fa);
+    assert_eq!(bridges(&edges), whole, "the stripped replay lost a bridge");
+}
+
+/// The server's shape of a gated file: a STRIPPED registered copy that
+/// rehydrates on demand. Its views still hand out the applied copy, and a
+/// consumer resolves the gated accessor through it.
+#[test]
+fn a_stripped_gated_copy_rehydrates_into_its_applied_view() {
+    use crate::index::pack_bag_cache::PackBagCache;
+    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    let mid = parse_source_to_cached("package Mid;\nuse parent 'DBIx::Class::Core';\n1;\n", "Mid");
+    let leaf = parse_source_to_cached(
+        "package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n",
+        "Leaf",
+    );
+    assert!(!leaf.analysis.plugin.gated_emissions.is_empty(), "fixture: gate is cross-file");
+    let whole = leaf.analysis.clone();
+    let cache = Arc::new(PackBagCache::new(8 * 1024 * 1024, move |_p: &std::path::Path, _want_bag: bool| {
+        Ok((*whole).clone())
+    }));
+    let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
+    idx.insert_cache("Mid", Some(mid));
+    let mut stripped = (*leaf.analysis).clone();
+    stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
+    assert!(stripped.symbols_are_evicted(), "fixture must model the workspace strip");
+    let stripped = Arc::new(CachedModule::new(leaf.path.clone(), Arc::new(stripped)));
+    idx.insert_cache("Leaf", Some(stripped.clone()));
+
+    let view = idx.symbols_present(&stripped);
+    assert!(
+        view.symbols().iter().any(|s| s.name == "name" && s.kind == SymKind::Method),
+        "the rehydrated view carries the gated accessor"
+    );
+    let consumer = parse_source_to_cached("package Use;\nsub f { 1 }\n1;\n", "Use");
+    assert!(matches!(
+        consumer.analysis.resolve_method_in_ancestors("Leaf", "name", Some(&idx)),
+        Some(MethodResolution::CrossFile { .. })
+    ));
 }

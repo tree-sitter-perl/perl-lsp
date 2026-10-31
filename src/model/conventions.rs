@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, MemberNamespace, NameSpellings};
+use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
@@ -25,7 +25,64 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     root_package: Some(std::borrow::Cow::Borrowed("main")),
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
+    imports: NameSpellings::NONE.imports,
+    // `Foo()` calls a sub; construction is `Foo->new`.
+    class_call: crate::model::file_analysis::ClassCall::FunctionCall,
+    // A package is both the namespace and the class its code belongs to.
+    enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
+    // `$obj->{key}` reaches a slot; `$obj->key` never does.
+    instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
 };
+
+/// Perl's language id: the native builder's, and `FileAnalysis::language`'s
+/// default for blobs that predate the field.
+pub const PERL_LANGUAGE: &str = "perl";
+
+/// Perl's subsumption rules: an object is a blessed hash, and truth is a
+/// number (`1` / `''`).
+pub static PERL_LATTICE: LatticeRules =
+    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
+
+/// Each pack language's subsumption rules, by `FileAnalysis::language`. The
+/// model cannot see the packs that declare them, so the build layer registers
+/// each served language's set (`docs/adr/union-types.md`); Perl's are
+/// declared here, beside its other conventions, and never registered. Append-only slots, not a
+/// locked map: every bag query reads this, and a shared lock's reader count is
+/// one contended cache line across a sweep's workers.
+static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+    [const { std::sync::OnceLock::new() }; 16];
+
+/// Register `language`'s rules once; later calls are no-ops, so `rules` is
+/// built only on the first.
+pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
+    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's rules are declared, not registered");
+    let mut rules = Some(rules);
+    for slot in &LANGUAGE_LATTICES {
+        // A racing registration of another language can take this slot
+        // between the check and the init; the loop then moves on.
+        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        if *id == language {
+            return;
+        }
+    }
+    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
+}
+
+/// The subsumption rules of the language an analysis was built in. A
+/// language nobody registered holds no rules: it never borrows another's.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    static NO_RULES: LatticeRules = LatticeRules::new(&[]);
+    if language == PERL_LANGUAGE {
+        return &PERL_LATTICE;
+    }
+    let registered = LANGUAGE_LATTICES
+        .iter()
+        .map_while(|slot| slot.get())
+        .find(|(id, _)| *id == language)
+        .map(|(_, rules)| rules);
+    debug_assert!(registered.is_some(), "no lattice registered for language {language:?}");
+    registered.unwrap_or(&NO_RULES)
+}
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
 ///
@@ -50,6 +107,18 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     match names.sep().and_then(|sep| name.rsplit_once(sep)) {
         Some((pkg, base)) => (Some(pkg), base),
         None => (None, name),
+    }
+}
+
+/// `split_qualified`'s inverse: a namespace and a leaf as one qualified
+/// name. The global namespace (an empty `namespace`) yields the bare leaf,
+/// never a dangling separator, so a caller need not ask first whether the
+/// name has a namespace.
+pub fn join_qualified(namespace: &str, leaf: &str, sep: &str) -> String {
+    if namespace.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{namespace}{sep}{leaf}")
     }
 }
 
@@ -87,6 +156,12 @@ pub fn split_qualified_var<'a>(name: &'a str, names: &'a NameSpellings) -> Optio
     pkg.map(|p| (names.qualifier_package(p), format!("{sigil}{base}")))
 }
 
+/// The qualified spelling of a variable: `('$', "Foo", "x")` → `$Foo::x`.
+/// The inverse of `split_qualified_var`.
+pub fn qualify_var(sigil: char, package: &str, base: &str, names: &NameSpellings) -> String {
+    format!("{sigil}{package}{}{base}", names.sep().unwrap_or_default())
+}
+
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
 /// friends. Accepts the bare identifier or the `$`-sigiled spelling so both
 /// param names (`"$self"`) and canonical varnames (`"self"`) route here.
@@ -110,6 +185,61 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
 /// their typed names pass through bare.
 pub fn strip_variable_sigils(name: &str) -> &str {
     name.trim_start_matches(['$', '@', '%'])
+}
+
+/// A variable Perl itself defines (perlvar): punctuation (`$_`, `$@`, `@_`),
+/// digit (`$0`, `$1`), caret (`${^W}`) and the identifiers Perl forces into
+/// `main` (`%ENV`, `@ARGV`, `%SIG`, ...). Such a name never needs a
+/// declaration and never names user state, so an undeclared use of one is
+/// not an implicit global. `name` is sigil-led, as a variable ref spells it.
+pub fn is_special_variable(name: &str) -> bool {
+    let base = name.get(1..).unwrap_or("");
+    let base = base.strip_prefix('{').and_then(|b| b.strip_suffix('}')).unwrap_or(base);
+    match base.chars().next() {
+        None => true,
+        Some(c) if !(c.is_alphabetic() || c == '_') => true,
+        _ => matches!(
+            base,
+            "_" | "ENV" | "INC" | "ARGV" | "ARGVOUT" | "SIG" | "STDIN" | "STDOUT" | "STDERR"
+        ),
+    }
+}
+
+/// Whether `use VERSION` turns `strict` on: every version from 5.11 does.
+/// Reads both spellings, the v-string (`v5.36`, `5.36.0`) and the decimal
+/// (`5.012`, `5.010_001`, whose minor is the first three fraction digits).
+pub fn version_enables_strict(version: &str) -> bool {
+    let text = version.replace('_', "");
+    let (vstring, text) = match text.strip_prefix('v') {
+        Some(rest) => (true, rest.to_string()),
+        None => (text.matches('.').count() > 1, text.clone()),
+    };
+    let mut parts = text.split('.');
+    let Some(Ok(major)) = parts.next().map(str::parse::<u32>) else { return false };
+    let minor = match parts.next() {
+        None => 0,
+        Some(m) if vstring => m.parse::<u32>().unwrap_or(0),
+        Some(m) => format!("{m:0<3}").get(..3).and_then(|d| d.parse::<u32>().ok()).unwrap_or(0),
+    };
+    (major, minor) >= (5, 11)
+}
+
+/// `use strict 'vars'` exempts these from declaration on top of the special
+/// variables: `$a`/`$b` are `sort`'s comparator globals.
+pub fn is_strict_vars_exempt(name: &str) -> bool {
+    is_special_variable(name) || matches!(name, "$a" | "$b")
+}
+
+/// A name spelled as a variable or a glob (`$x`, `@x`, `*x`) rather than a
+/// sub — an import list carries both.
+pub fn is_variable_or_glob_spelling(name: &str) -> bool {
+    name.starts_with('*') || name.chars().next().is_some_and(|c| PERL_SPELLINGS.is_sigil(c))
+}
+
+/// The typeglob holding a variable's slot (`$x` → `*x`). Exporting the
+/// glob exports every sigil's variable of that name.
+pub fn glob_of_variable(name: &str) -> String {
+    format!("*{}", name.get(1..).unwrap_or(""))
 }
 
 /// Conventional constructor method name. Perl has no `new` keyword — this is
@@ -160,6 +290,28 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
     })
 }
 
+/// A Perl sigil: what kind of thing a name, or a deref, denotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sigil {
+    Scalar,
+    Array,
+    Hash,
+    Code,
+    Glob,
+}
+
+impl Sigil {
+    pub fn char(self) -> char {
+        match self {
+            Sigil::Scalar => '$',
+            Sigil::Array => '@',
+            Sigil::Hash => '%',
+            Sigil::Code => '&',
+            Sigil::Glob => '*',
+        }
+    }
+}
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
 /// own word: a pack mints the class its receiver names, never this token
 /// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).
@@ -168,6 +320,13 @@ pub const CURRENT_PACKAGE_TOKEN: &str = "__PACKAGE__";
 /// Whether `text` is `CURRENT_PACKAGE_TOKEN`.
 pub fn is_current_package_token(text: &str) -> bool {
     text == CURRENT_PACKAGE_TOKEN
+}
+
+/// Whether `name` is the `ref` builtin, which reports what a reference is.
+/// The library functions that do the same are plugin-declared
+/// (`ref_tag_functions()`).
+pub fn is_ref_builtin(name: &str) -> bool {
+    name == "ref"
 }
 
 /// A name that can be written as a method / sub call — a syntactically valid
@@ -254,6 +413,10 @@ impl std::fmt::Display for InvocantName {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Invocant {
     Name(InvocantName),
+    /// A receiver EXPRESSION (a pack's `recv.m`, `obj->m`): its value is
+    /// whatever the bag types at its span, and its text is never a class
+    /// spelling, however much it looks like one (`self.x`).
+    Expr(InvocantName),
     Bridged { plugin: String, token: String, match_mode: BridgedMatch },
 }
 
@@ -279,6 +442,11 @@ impl Invocant {
         Invocant::Name(InvocantName::assume_canonical(s))
     }
 
+    /// A receiver expression, typed only by the bag at its span.
+    pub fn expr(s: impl Into<String>) -> Self {
+        Invocant::Expr(InvocantName::assume_canonical(s))
+    }
+
     /// A plugin-routed token: `plugin` names the emitting plugin (provenance),
     /// `token` is the class key it already transformed (e.g. a camelized Mojo
     /// controller name), and `match_mode` says how core matches it to a class.
@@ -295,7 +463,7 @@ impl Invocant {
     /// `Class->`) bind through this and skip bridged tokens.
     pub fn as_name(&self) -> Option<&InvocantName> {
         match self {
-            Invocant::Name(n) => Some(n),
+            Invocant::Name(n) | Invocant::Expr(n) => Some(n),
             Invocant::Bridged { .. } => None,
         }
     }
@@ -310,7 +478,7 @@ impl Invocant {
     /// callers match the variant instead.
     pub fn text(&self) -> &str {
         match self {
-            Invocant::Name(n) => n,
+            Invocant::Name(n) | Invocant::Expr(n) => n,
             Invocant::Bridged { token, .. } => token,
         }
     }
@@ -463,6 +631,10 @@ mod tests {
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
+            imports: NameSpellings::NONE.imports,
+            class_call: NameSpellings::NONE.class_call,
+            enclosing_class: NameSpellings::NONE.enclosing_class,
+            instance_slots: NameSpellings::NONE.instance_slots,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

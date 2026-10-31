@@ -127,8 +127,52 @@ impl<'a> Builder<'a> {
             .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
     }
 
+    /// What a call to `name` reports about a reference: the `ref` builtin,
+    /// or a plugin-declared `ref_tag_functions()` entry this file imported
+    /// (by its local name) or names fully qualified.
+    pub(super) fn ref_tag_fn(&self, name: &str) -> Option<crate::model::file_analysis::RefTagFn> {
+        use crate::model::conventions::{is_ref_builtin, split_qualified, PERL_SPELLINGS};
+        use crate::model::file_analysis::RefTagFn;
+        if is_ref_builtin(name) {
+            return Some(RefTagFn::Ref);
+        }
+        let (module, leaf) = split_qualified(name, &PERL_SPELLINGS);
+        self.ref_tag_functions.iter().find_map(|f| {
+            let hit = match module {
+                Some(m) => m == f.module && leaf == f.name,
+                None => self.imports.iter().any(|i| {
+                    i.module_name == f.module
+                        && i.imported_symbols.iter().any(|sym| {
+                            sym.local_name == name
+                                && sym.remote_name.as_deref().unwrap_or(&sym.local_name) == f.name
+                        })
+                }),
+            };
+            hit.then_some(f.tag)
+        })
+    }
+
+    /// [`crate::cst::ref_tag_call`] with this file's ref-tag functions.
+    pub(super) fn ref_tag_call(
+        &self,
+        node: Node<'a>,
+    ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n))
+    }
+
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
+        // What a reference is, named for the variable it was asked of: a
+        // comparison of it to a literal guards that variable.
+        if let Some((via, subject)) = self.ref_tag_call(node)
+            .and_then(|(via, operand)| Some((via, crate::cst::canonical_var_name(operand, self.source)?)))
+        {
+            return Some(WitnessPayload::InferredType(InferredType::RefTagOf {
+                subject,
+                site: node_to_span(node),
+                via,
+            }));
+        }
         match node.kind() {
             // Closed-under-syntax — bake.
             "string_literal" | "interpolated_string_literal" => {
@@ -202,7 +246,18 @@ impl<'a> Builder<'a> {
                 }
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
-            "anonymous_subroutine_expression" | "refgen_expression" => {
+            // `\%h` / `\@a` take a container's reference; only `\&name` is
+            // code. A `\$x` or `\(...)` is a scalar ref nothing models.
+            "refgen_expression" => match crate::cst::refgen_operand(node) {
+                Some(crate::cst::RefgenOperand::Code) => {
+                    let return_edge = self.coderef_return_edge_for(node);
+                    Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
+                }
+                Some(crate::cst::RefgenOperand::Hash) => Some(WitnessPayload::InferredType(InferredType::HashRef)),
+                Some(crate::cst::RefgenOperand::Array) => Some(WitnessPayload::InferredType(InferredType::ArrayRef)),
+                _ => None,
+            },
+            "anonymous_subroutine_expression" => {
                 // Pre-create the (anon) Symbol so
                 // `coderef_return_edge_for`'s anon-sub arm resolves
                 // to `Symbol(sym_id)` instead of falling back to
@@ -213,10 +268,8 @@ impl<'a> Builder<'a> {
                 // the bound variable carries the stale Expr-span
                 // edge and `ReturnExprReducer` never sees the call
                 // site through Symbol-attached witnesses.
-                if node.kind() == "anonymous_subroutine_expression" {
-                    let params = self.extract_params(node);
-                    self.ensure_anon_sub_symbol(node, &params);
-                }
+                let params = self.extract_params(node);
+                self.ensure_anon_sub_symbol(node, &params);
                 let return_edge = self.coderef_return_edge_for(node);
                 Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
             }
@@ -313,6 +366,19 @@ impl<'a> Builder<'a> {
             // variable to promote; the variable form is additionally
             // promoted via `visit_bless_call`'s TC. Honest-miss (fall
             // through) when the class isn't determinable.
+            // `new Foo(...)` read as `Foo->new(...)`: a constructor bakes
+            // like `Foo->new`; any other method is the call's `Invoke`.
+            "ambiguous_function_call_expression" if self.indirect_method_call(node).is_some() => {
+                let io = self.indirect_method_call(node)?;
+                let method = io.method.utf8_text(self.source).ok()?;
+                if crate::model::conventions::is_constructor_name(method) {
+                    let class = io.class.utf8_text(self.source).ok()?;
+                    return Some(WitnessPayload::InferredType(InferredType::ClassName(class.to_string())));
+                }
+                let &[idx] = self.method_call_refs.get(&node.id())?.as_slice() else { return None };
+                Some(WitnessPayload::Edge(WitnessAttachment::Expression(RefIdx(idx as u32))))
+            }
+
             "function_call_expression" | "ambiguous_function_call_expression"
                 if self.is_bless_call(node) =>
             {
@@ -403,9 +469,8 @@ impl<'a> Builder<'a> {
             // as a short-circuit. `=` / `&&=` produce the RHS, unless
             // the target is an aggregate: a list assignment in scalar context
             // is a count, and the list type is `@flow`'s business.
-            // TODO(union-join): `&&=` is the false old value ⊔ the RHS; it
-            // types as the RHS until the lattice can join them
-            // (docs/open-forks.md "Union types in the lattice").
+            // TODO(falsy-part): `&&=` is the false old value ⊔ the RHS; it
+            // types as the RHS until a value's false part has a type.
             "assignment_expression" => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
                     let left = node.child_by_field_name("left")?;
@@ -437,7 +502,7 @@ impl<'a> Builder<'a> {
                 crate::cst::AssignOp::Bitwise => {
                     let is_string = |b: &mut Self, n: Node<'a>| {
                         b.emit_expr_witness(n);
-                        b.bag_query_expr_span(node_to_span(n)) == Some(InferredType::String)
+                        b.bag_query_expr_span(node_to_span(n)).is_some_and(|t| t.is_string())
                     };
                     let left = node.child_by_field_name("left")?;
                     let right = node.child_by_field_name("right")?;
@@ -499,33 +564,35 @@ impl<'a> Builder<'a> {
     /// to one class string reads as that class whatever the variable holds,
     /// so its class lands last.
     pub(super) fn emit_invocant_witness(&mut self, inv: Node<'a>) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let span = node_to_span(inv);
         let text = inv.utf8_text(self.source).unwrap_or("");
-        let push_class = |b: &mut Self, class: String| {
-            let w = Witness {
-                attachment: WitnessAttachment::Expr(span),
-                source: WitnessSource::Builder("invocant_class".into()),
-                payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
-                span,
-            };
-            if !b.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
-                b.bag.push(w);
-            }
-        };
         match inv.kind() {
             "bareword" | "package" => {
-                push_class(self, text.to_string());
+                self.push_invocant_class(span, text.to_string());
                 self.emit_expr_witness(inv);
             }
             "scalar" => {
                 self.emit_expr_witness(inv);
                 let key = crate::cst::canonical_var_name(inv, self.source);
                 if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), inv).as_deref() {
-                    push_class(self, class.clone());
+                    self.push_invocant_class(span, class.clone());
                 }
             }
             _ => self.emit_expr_witness(inv),
+        }
+    }
+
+    /// The receiver at `span` is the class `class` itself.
+    pub(super) fn push_invocant_class(&mut self, span: Span, class: String) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let w = Witness {
+            attachment: WitnessAttachment::Expr(span),
+            source: WitnessSource::Builder("invocant_class".into()),
+            payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
+            span,
+        };
+        if !self.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
+            self.bag.push(w);
         }
     }
 
@@ -685,7 +752,16 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
-        
+        // A written element and the levels on a write's path are the write,
+        // not drills: their keys extend the shape
+        // (`emit_mutation_extension_witnesses`) instead of being read out of
+        // it — unless the write reads the element first (`ElementWrite`).
+        if matches!(node.kind(), "hash_element_expression" | "array_element_expression")
+            && (self.on_write_path(node)
+                || self.element_write_kind(node).is_some_and(|w| !w.reads_element()))
+        {
+            return;
+        }
         if self.expr_type_depth >= Self::MAX_EXPR_TYPE_DEPTH {
             return;
         }
@@ -828,8 +904,8 @@ impl<'a> Builder<'a> {
     /// whenever the env var is unset), so it rides a distinct `fallback_arm`
     /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
     /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
-    /// for "this expression's value is one of these arms." The arms' union
-    /// would be built in `BranchArmFold` (its `TODO(union-join)`).
+    /// for "this expression's value is one of these arms"; `BranchArmFold`
+    /// joins them.
     fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
         use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let arm_att = WitnessAttachment::BranchArm(span);
@@ -883,7 +959,7 @@ impl<'a> Builder<'a> {
     ) -> crate::model::witnesses::WitnessPayload {
         let args = self.extract_call_args(node);
         crate::model::witnesses::WitnessPayload::Invoke {
-            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None },
+            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None, constructs: None },
             receiver: None,
             args: Some(self.call_operands(&args)),
         }
@@ -896,6 +972,7 @@ impl<'a> Builder<'a> {
     fn imported_call_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
             || self.is_bless_call(node)
+            || self.indirect_method_call(node).is_some()
         {
             return None;
         }
@@ -960,8 +1037,7 @@ impl<'a> Builder<'a> {
     ///   recursively with per-arm `branch_arm` Edges for ternary.
     /// - `SymbolReturnArm(sub_id)` gets one `Edge(Expr(body_span))`
     ///   witness per arm. `SymbolReturnArmFold` claims this
-    ///   attachment and folds arms via `resolve_return_type`
-    ///   (agreement / disagreement / single-arm).
+    ///   attachment and joins the arms (`join_return_arms`).
     /// - `Symbol(sub_id)` carries one `Edge(SymbolReturnArm(sub_id))`
     ///   per sub (`link_return_arms`) so consumers querying the
     ///   symbol's return walk through to the arm-fold.
@@ -1118,28 +1194,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Infer a type on the first named child (the operand) of a dereference expression.
+    /// An arrow deref (`$x->{k}`, `$x->[0]`, `$x->()`, `$x->@*`) observes
+    /// its operand's representation.
     pub(super) fn infer_deref_type(&mut self, node: Node<'a>, rep: TypeObservation) {
         if let Some(operand) = node.named_child(0) {
-            self.push_rep_observation(operand, node, rep);
+            self.observe(operand, node, rep);
         }
-    }
-
-    /// A deref reveals the operand's REPRESENTATION, not its value: an
-    /// observation the reducer's rep axis projects only when no value
-    /// answers, so `my $r = maybe(); $r->[0]` keeps the `Optional` its
-    /// writer's edge carries.
-    pub(super) fn push_rep_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, rep: TypeObservation) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        if operand.kind() != "scalar" {
-            return;
-        }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
-            source: WitnessSource::Builder("deref_access".into()),
-            payload: WitnessPayload::Observation(rep),
-            span: node_to_span(context_node),
-        });
     }
 
     /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
@@ -1170,7 +1230,7 @@ impl<'a> Builder<'a> {
             Some("+" | "-" | "*" | "/" | "%" | "**") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::Numeric);
+                        self.observe(child, node, TypeObservation::NumericUse);
                     }
                 }
             }
@@ -1178,17 +1238,17 @@ impl<'a> Builder<'a> {
             Some("." | "x") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::String);
+                        self.observe(child, node, TypeObservation::StringUse);
                     }
                 }
             }
             // Regex match: LHS is String, RHS is Regexp
             Some("=~" | "!~") => {
                 if let Some(lhs) = crate::cst::nth_element(node, 0) {
-                    self.push_var_type_constraint(lhs, node, InferredType::String);
+                    self.observe(lhs, node, TypeObservation::StringUse);
                 }
                 if let Some(rhs) = crate::cst::nth_element(node, 1) {
-                    self.push_var_type_constraint(rhs, node, InferredType::Regexp);
+                    self.observe(rhs, node, TypeObservation::RegexpUse);
                 }
             }
             _ => {}
@@ -1198,17 +1258,15 @@ impl<'a> Builder<'a> {
     /// Infer types from comparison operators (equality_expression, relational_expression).
     pub(super) fn infer_comparison_type(&mut self, node: Node<'a>) {
         let op = self.get_operator_text(node);
-        let inferred = match op.as_deref() {
-            // Numeric comparisons
-            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(InferredType::Numeric),
-            // String comparisons
-            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(InferredType::String),
+        let observed = match op.as_deref() {
+            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(TypeObservation::NumericUse),
+            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(TypeObservation::StringUse),
             _ => None,
         };
-        if let Some(it) = inferred {
+        if let Some(obs) = observed {
             for i in 0..node.named_child_count() {
                 if let Some(child) = node.named_child(i) {
-                    self.push_var_type_constraint(child, node, it.clone());
+                    self.observe(child, node, obs.clone());
                 }
             }
         }

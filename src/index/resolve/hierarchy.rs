@@ -40,7 +40,7 @@ pub struct CallEdge {
 /// an item's own file (LSP hierarchy requests hand back an item, not a
 /// cursor in an open document).
 pub fn analysis_for_key(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     key: &FileKey,
 ) -> Option<Arc<FileAnalysis>> {
@@ -59,18 +59,10 @@ pub fn analysis_for_key(
         }
         FileKey::Path(p) => p.clone(),
     };
-    // Workspace copies are symbols-evicted after persist; the enclosing-
-    // caller lookup reads symbols, so an evicted copy must rehydrate through
-    // the index (`whole_present`) rather than answer absence-as-answer.
-    let resident = files.workspace_raw().get(&path).map(|e| Arc::clone(e.value()));
-    if let Some(a) = &resident {
-        if !a.symbols_are_evicted() {
-            return resident;
-        }
-    }
-    module_index
-        .and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)))
-        .or(resident)
+    // Index copies are symbols-evicted after persist; the enclosing-caller
+    // lookup reads symbols, so rehydrate (`whole_present`) rather than answer
+    // absence-as-answer.
+    module_index.and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)))
 }
 
 impl<'a> CandidateSet<'a> {
@@ -149,13 +141,7 @@ impl<'a> CandidateSet<'a> {
                     .iter()
                     .filter(|s| s.name == class && wanted(&s.kind))
                 {
-                    out.push(RefLocation {
-                        key: FileKey::Path(cached.path.clone()),
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: true,
-                        label: None,
-                    });
+                    out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration));
                 }
             }
             if out.is_empty() {
@@ -164,16 +150,7 @@ impl<'a> CandidateSet<'a> {
                 // the candidates table doesn't carry): the file top is the
                 // honest goto-def parity answer.
                 if let Some(path) = idx.module_path_cached(class) {
-                    out.push(RefLocation {
-                        key: FileKey::Path(path),
-                        span: Span {
-                            start: tree_sitter::Point::new(0, 0),
-                            end: tree_sitter::Point::new(0, 0),
-                        },
-                        access: AccessKind::Declaration,
-                        rewritable: false,
-                        label: None,
-                    });
+                    out.push(RefLocation::at(FileKey::Path(path), Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0), }, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip));
                 }
             }
         }
@@ -320,13 +297,7 @@ impl<'a> CandidateSet<'a> {
                     name: s.name.clone(),
                     kind: s.kind,
                     detail: s.package.clone(),
-                    location: RefLocation {
-                        key: location.key,
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: false,
-                        label: None,
-                    },
+                    location: RefLocation::at(location.key, s.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip),
                 });
             }
         }
@@ -379,13 +350,7 @@ impl<'a> CandidateSet<'a> {
                             name: caller.name.clone(),
                             kind: caller.kind,
                             detail: caller.package.clone(),
-                            location: RefLocation {
-                                key: loc.key.clone(),
-                                span: caller.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: false,
-                                label: None,
-                            },
+                            location: RefLocation::at(loc.key.clone(), caller.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip),
                         },
                         sites: vec![loc.span],
                     });

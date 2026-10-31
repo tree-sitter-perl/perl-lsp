@@ -63,6 +63,12 @@ pub(crate) struct IndexCore {
     /// Shared: the resolver thread adopts @INC providers here, the async
     /// side adopts workspace candidates.
     pub(crate) all_defs: DashMap<String, Vec<Arc<CachedModule>>>,
+    /// The files declaring a use-map class, keyed by the class's LEAF —
+    /// the widening relation (`CrossFileLookup::leaf_def_candidates`). Its
+    /// own table, never `all_defs`: a leaf key there would join every
+    /// bare-name lookup and compete for the name-slot winner, so the leaf
+    /// answers only where nothing indexed declares the identity.
+    pub(crate) leaf_defs: DashMap<String, Vec<Arc<CachedModule>>>,
     /// The `@INC` roots this process resolves from, canonical, most-
     /// preferred first. Recorded ONCE by the resolver thread (discovery
     /// shells out to `perl`, so no query path may re-derive it) and read by
@@ -120,16 +126,13 @@ pub(crate) struct IndexCore {
     /// one-shot invocation reuses. (`--check`/`--dump-package` consume
     /// `enriched_snapshot` directly and are unaffected by this gate.)
     pub(crate) long_lived: std::sync::atomic::AtomicBool,
-    /// Slice-2 rehydration store CELL. Pack sub-indexes get theirs at
-    /// construction (keyed to `modules-{lang}.db`); the Perl hub gets its
-    /// own in `set_workspace_root` (keyed to `modules.db`). A type query
-    /// reaching into an evicted file rehydrates the exact persisted bag
-    /// through this LRU (`bag_present`). Kept behind its own `Arc` because
-    /// `attach_pack_index` shares the cell itself (not its contents) into
-    /// sub-indexes' `foreign_bag_cache`, so a later `set_workspace_root`
-    /// install stays visible to them. See `docs/adr/memory-slice-2-lru.md`.
+    /// Slice-2 rehydration store, keyed to the served language's DB
+    /// (`modules.db` installed by `set_workspace_root`, `modules-{lang}.db`
+    /// by the pack indexer). A type query reaching into an evicted file
+    /// rehydrates the exact persisted bag through this LRU (`bag_present`).
+    /// See `docs/adr/memory-slice-2-lru.md`.
     pub(crate) bag_cache:
-        Arc<std::sync::RwLock<Option<Arc<crate::index::pack_bag_cache::PackBagCache>>>>,
+        std::sync::RwLock<Option<Arc<crate::index::pack_bag_cache::PackBagCache>>>,
     /// Resident baked conclusions, byte-bounded. Installed alongside the bag
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
@@ -148,6 +151,7 @@ impl IndexCore {
             builtins: DashMap::new(),
             available_modules: DashMap::new(),
             all_defs: DashMap::new(),
+            leaf_defs: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
@@ -169,7 +173,7 @@ impl IndexCore {
             flush_epoch: std::sync::atomic::AtomicU64::new(0),
             provider_diff_gen: DashMap::new(),
             long_lived: std::sync::atomic::AtomicBool::new(false),
-            bag_cache: Arc::new(std::sync::RwLock::new(None)),
+            bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
         }
     }

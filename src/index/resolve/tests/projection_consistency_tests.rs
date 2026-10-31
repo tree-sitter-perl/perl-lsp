@@ -60,7 +60,7 @@ const CURSORS_PER_FILE: usize = 250;
 /// instance (a drifted copy of the drift-detector would be the joke that
 /// writes itself). Returns the violations found at this cursor.
 fn check_cursor_contracts(
-    store: &FileStore,
+    store: &OpenDocs,
     fa: &std::sync::Arc<FileAnalysis>,
     path: &std::path::Path,
     r: &crate::model::file_analysis::Ref,
@@ -115,7 +115,7 @@ fn check_cursor_contracts(
     // a variable rename edits the bare name inside the sigil'd reference
     // span, so the edit is a sub-span of its reference site — outside ANY
     // reference span is the violation.
-    if cs.renameable() {
+    if cs.renameable() == Ok(true) {
         if let Ok(edits) = cs.rename_edits("zzz_consistency_probe") {
             for (loc, _text) in &edits {
                 let in_refs = refs_img.iter().any(|l| {
@@ -188,8 +188,8 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
     let files = corpus_files();
     assert!(files.len() >= 20, "corpus went missing: {} files", files.len());
 
-    let store = FileStore::new();
-    // Production wiring: the workspace bulk index feeds both the FileStore
+    let store = OpenDocs::new();
+    // Production wiring: the workspace bulk index feeds both the OpenDocs
     // AND the module index, so the forward lanes (method resolution,
     // package->file) see the same universe the backward walk does. A
     // store-only harness flags gd-empty asymmetries production never has.
@@ -198,7 +198,7 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
     for p in &files {
         let src = std::fs::read_to_string(p).unwrap();
         let fa = std::sync::Arc::new(parse(&src));
-        store.insert_workspace_arc(p.clone(), fa.clone());
+        idx.insert_workspace_arc_for_test(p.clone(), fa.clone());
         idx.register_workspace_module(p.clone(), fa.clone());
         analyses.push((p.clone(), fa));
     }
@@ -241,19 +241,13 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
 /// The pack instance of the same net — #141 and #142 (goto-def vs
 /// references vs implementations disagreeing) both lived in this lane.
 /// Corpus: the real cpp fixture trees, analyzed with their real paths so
-/// include closures gather from disk; analyses register into a cpp
-/// sub-index attached to a hub, the production topology (`lookup_for`
-/// routes pack asks to the sub-index — pack symbols never live in the
-/// Perl FileStore workspace map). The queried origin is staged in the
-/// workspace store for its cursors, exactly as the CLI's
-/// `ScopedWorkspaceEntry` / the LSP's open doc does — without it the
-/// backward walk cannot see the queried file and every cursor flags a
-/// false I1.
+/// include closures gather from disk; analyses register into the index, the
+/// production topology — the index is the one home for project files, so
+/// the backward walk sees every queried origin there.
 #[cfg(feature = "cpp")]
 #[test]
 fn projection_contracts_hold_at_every_pack_cursor() {
-    use std::sync::Arc;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
 
     let mut files: Vec<PathBuf> = Vec::new();
@@ -272,9 +266,8 @@ fn projection_contracts_hold_at_every_pack_cursor() {
     files.sort();
     assert!(files.len() >= 40, "cpp corpus went missing: {} files", files.len());
 
-    let store = FileStore::new();
-    let hub = crate::index::module_index::ModuleIndex::new_for_test();
-    let sub = Arc::new(crate::index::module_index::ModuleIndex::new_for_test());
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut analyses: Vec<(PathBuf, std::sync::Arc<FileAnalysis>)> = Vec::new();
     for p in &files {
         let Ok(src) = std::fs::read_to_string(p) else { continue };
@@ -288,24 +281,21 @@ fn projection_contracts_hold_at_every_pack_cursor() {
             crate::model::file_analysis::Residency::Whole,
         );
         let arc = std::sync::Arc::clone(parts.arc());
-        sub.register_symbols_inner(p.clone(), parts);
+        idx.register_symbols_inner(p.clone(), parts);
         analyses.push((p.clone(), arc));
     }
-    hub.attach_pack_index("cpp", Arc::clone(&sub));
 
     let mut violations: Vec<String> = Vec::new();
     let mut cursors = 0usize;
     let mut dropped = 0usize;
     for (path, fa) in &analyses {
-        store.insert_workspace_arc(path.clone(), fa.clone());
         let refs = fa.refs();
         let stride = refs.len().div_ceil(CURSORS_PER_FILE).max(1);
         dropped += refs.len() - refs.len().div_ceil(stride);
         for r in refs.iter().step_by(stride) {
             cursors += 1;
-            violations.extend(check_cursor_contracts(&store, fa, path, r, &hub));
+            violations.extend(check_cursor_contracts(&store, fa, path, r, &idx));
         }
-        store.remove_workspace(path);
     }
 
     let (provisional, violations): (Vec<String>, Vec<String>) =
@@ -372,7 +362,7 @@ fn projection_contracts_broad_corpus() {
     let fstride = total_files.div_ceil(FILE_CAP).max(1);
     let files: Vec<PathBuf> = files.into_iter().step_by(fstride).collect();
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut analyses: Vec<(PathBuf, std::sync::Arc<FileAnalysis>)> = Vec::new();
     for p in &files {
@@ -381,7 +371,7 @@ fn projection_contracts_broad_corpus() {
             continue; // the walk's own 1MB cap
         }
         let fa = std::sync::Arc::new(parse(&src));
-        store.insert_workspace_arc(p.clone(), fa.clone());
+        idx.insert_workspace_arc_for_test(p.clone(), fa.clone());
         idx.register_workspace_module(p.clone(), fa.clone());
         analyses.push((p.clone(), fa));
     }
@@ -486,14 +476,14 @@ fn projection_contracts_broad_corpus() {
 #[test]
 fn requires_round_trip_holds_on_the_contract_fixtures() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_files/lib/Contract");
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut by_path: Vec<(PathBuf, std::sync::Arc<FileAnalysis>, String)> = Vec::new();
     for name in ["Role.pm", "SubRole.pm", "Composer.pm", "Deep.pm", "Broken.pm"] {
         let p = root.join(name);
         let src = std::fs::read_to_string(&p).unwrap();
         let fa = std::sync::Arc::new(parse(&src));
-        store.insert_workspace_arc(p.clone(), fa.clone());
+        idx.insert_workspace_arc_for_test(p.clone(), fa.clone());
         idx.register_workspace_module(p.clone(), fa.clone());
         by_path.push((p, fa, src));
     }

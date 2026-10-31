@@ -522,7 +522,7 @@ fn shred_ref_rows_roundtrip() {
     assert!(!has_ref_rows(&conn, &path_str));
     let seeds: Vec<_> = cached.analysis.ref_row_seeds();
     assert!(!seeds.is_empty(), "call sites must produce row seeds");
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert!(has_ref_rows(&conn, &path_str));
 
     // Retrieval by the match key finds the file; an unknown key finds nothing.
@@ -538,12 +538,12 @@ fn shred_ref_rows_roundtrip() {
     );
 
     // Re-shred replaces: same seeds again must not double the rows.
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(ref_candidate_file_count(&conn, "helper"), 1);
 
     // A zero-ref shred still marks the file as shredded (the backfill marker).
     let other = dir.join("TestModule_shred_empty.pm");
-    shred_derived_rows(&conn, &other.to_string_lossy(), "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, &other.to_string_lossy(), "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, &other.to_string_lossy()));
 
     delete_ref_rows(&conn, &path_str);
@@ -572,7 +572,7 @@ fn shred_sym_rows_same_generation() {
         "sub symbols must project into row seeds; got {:?}",
         sym_seeds.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
     let count = |conn: &Connection| -> i64 {
         conn.query_row("SELECT COUNT(*) FROM syms", [], |r| r.get(0)).unwrap()
     };
@@ -580,7 +580,7 @@ fn shred_sym_rows_same_generation() {
     assert!(n >= 2, "expected sym rows for S's subs, got {n}");
 
     // Re-shred replaces.
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
     assert_eq!(count(&conn), n);
 
     // Deletion takes both families.
@@ -611,7 +611,7 @@ fn sym_member_probe_is_three_valued() {
         "never shredded: the store cannot speak for the file"
     );
 
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -655,7 +655,7 @@ fn row_probes_match_the_match_key_spelling() {
     std::fs::write(&pm, source).unwrap();
     let cached = parse_source_to_cached(source, &pm);
     let path_str = pm.to_string_lossy().to_string();
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -706,7 +706,7 @@ fn row_probes_plan_as_index_point_lookups() {
     std::fs::write(&pm, source).unwrap();
     let cached = parse_source_to_cached(source, &pm);
     let path_str = pm.to_string_lossy().to_string();
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -723,9 +723,9 @@ fn row_probes_plan_as_index_point_lookups() {
             .collect()
     };
     let probes: [(&str, &str, Vec<Box<dyn rusqlite::ToSql>>); 3] = [
-        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render"), Box::new("My::Base")]),
-        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render")]),
-        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("cache"), Box::new(Option::<String>::None)]),
+        ("sym_member", super::sql::SYM_MEMBER_PROBE.registered(), vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render"), Box::new("My::Base")]),
+        ("sym_name", super::sql::SYM_NAME_PROBE.registered(), vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render")]),
+        ("name", super::sql::NAME_PROBE.registered(), vec![Box::new(path_str.clone()), Box::new("cache"), Box::new(Option::<String>::None)]),
     ];
     for (label, sql, args) in &probes {
         let args: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
@@ -763,17 +763,8 @@ fn row_probes_plan_as_index_point_lookups() {
                 "{label}: the refs half must probe both key columns — {l} — plan: {lines:?}"
             );
         }
-        // No ephemeral btree per execution: each create/destroy takes SQLite's
-        // process-global page-cache mutex, which 20 sweep workers contend on
-        // (an `IN` list builds one, even over bound literals).
-        let mut stmt = conn.prepare(&format!("EXPLAIN {sql}")).unwrap();
-        let ephemeral: Vec<String> = stmt
-            .query_map(args.as_slice(), |row| row.get::<_, String>(1))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .filter(|op| op == "OpenEphemeral" || op == "OpenAutoindex")
-            .collect();
-        assert!(ephemeral.is_empty(), "{label}: builds a temp btree per call — {ephemeral:?}");
+        // No scratch b-tree per execution is asserted for every registered
+        // statement by `registered_statements_plan_without_scratch`.
         // One statement per probe: string ids resolve inside it, through the
         // UNIQUE index on `s`, never as separate reads.
         assert!(
@@ -782,13 +773,80 @@ fn row_probes_plan_as_index_point_lookups() {
         );
     }
     // The id resolution the probes are fed from rides the UNIQUE index on `s`.
-    let lines = plan("SELECT str_id FROM strings WHERE s = ?1", &[&"render"]);
+    let lines = plan(super::sql::STRINGS_LOOKUP.registered(), &[&"render"]);
     assert!(
         lines.iter().any(|l| l.contains("INDEX") && l.contains("(s=?)")),
         "the strings lookup is off the UNIQUE index — plan: {lines:?}"
     );
 
     let _ = std::fs::remove_file(&pm);
+}
+
+/// Opcodes that build a per-execution scratch structure. `OpenEphemeral`
+/// (an `IN` list, `UNION`, most `DISTINCT`s) and `OpenAutoindex` create and
+/// destroy a temp b-tree, taking SQLite's process-global page-cache mutex each
+/// time; `SorterOpen` (an `ORDER BY` no index serves) is the same per-call
+/// allocation and spills to a temp b-tree past its memory budget.
+const SCRATCH_OPCODES: &[&str] = &["OpenEphemeral", "OpenAutoindex", "SorterOpen"];
+
+/// Every statement the module cache runs is registered in `sql.rs`, and every
+/// one on a per-request, per-file or per-key path must compile without a
+/// scratch structure: sweep workers run them in parallel and serialize on the
+/// mutex a scratch b-tree takes. Exempt entries carry their reason in the
+/// registry; a `Scratch` exemption must still build one, so a statement that
+/// no longer needs its exemption cannot keep it.
+#[test]
+fn registered_statements_plan_without_scratch() {
+    use super::sql::{Plan, REGISTRY};
+    let conn = test_db();
+    let opcodes = |sql: &str| -> Result<Vec<String>, String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN {sql}")).map_err(|e| e.to_string())?;
+        // Plans do not depend on bound values; bind NULL to every slot.
+        let nulls = std::iter::repeat(rusqlite::types::Null).take(stmt.parameter_count());
+        let ops = stmt
+            .query_map(rusqlite::params_from_iter(nulls), |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(ops.into_iter().filter(|op| SCRATCH_OPCODES.contains(&op.as_str())).collect())
+    };
+
+    let mut failures = Vec::new();
+    let mut seen_sql = std::collections::HashMap::new();
+    for entry in REGISTRY {
+        let sql = entry.sql.registered();
+        if let Some(other) = seen_sql.insert(sql, entry.name) {
+            failures.push(format!("{} and {other} register the same SQL — keep one", entry.name));
+        }
+        match entry.plan {
+            Plan::NoScratch => match opcodes(sql) {
+                Ok(ops) if ops.is_empty() => {}
+                Ok(ops) => failures.push(format!(
+                    "{} builds a scratch structure per execution ({ops:?}) — reshape it, \
+                     or exempt it with the reason it never runs per request, file or key",
+                    entry.name
+                )),
+                Err(e) => failures.push(format!("{} does not compile: {e}", entry.name)),
+            },
+            Plan::Scratch("") => {
+                failures.push(format!("{} is exempted without a reason", entry.name))
+            }
+            Plan::Scratch(reason) => match opcodes(sql) {
+                Ok(ops) if !ops.is_empty() => {}
+                Ok(_) => failures.push(format!(
+                    "{} is exempted ({reason}) but plans without a scratch structure — \
+                     make it NoScratch",
+                    entry.name
+                )),
+                Err(e) => failures.push(format!("{} does not compile: {e}", entry.name)),
+            },
+            Plan::Unplanned(reason) if reason.is_empty() => {
+                failures.push(format!("{} is exempt from the plan check without a reason", entry.name))
+            }
+            Plan::Unplanned(_) => {}
+        }
+    }
+    assert!(failures.is_empty(), "registered SQL:\n{}", failures.join("\n"));
 }
 
 /// `FLAG_EXPORTED` is minted from the real `@EXPORT`/`@EXPORT_OK` surface
@@ -846,7 +904,7 @@ fn unused_exports_view() {
     let prod_path = prod.to_string_lossy().to_string();
     let prod_refs: Vec<_> = prod_cached.analysis.ref_row_seeds();
     let prod_syms = prod_cached.analysis.sym_row_seeds();
-    shred_derived_rows(&conn, &prod_path, "workspace", &prod_refs, &prod_syms).unwrap();
+    shred_rows(&conn, &prod_path, "workspace", &prod_refs, &prod_syms).unwrap();
 
     // Consumer in ANOTHER file references `used`.
     let cons = dir.join("UE_Consumer.pm");
@@ -858,7 +916,7 @@ fn unused_exports_view() {
     let cons_path = cons.to_string_lossy().to_string();
     let cons_refs: Vec<_> = cons_cached.analysis.ref_row_seeds();
     let cons_syms = cons_cached.analysis.sym_row_seeds();
-    shred_derived_rows(&conn, &cons_path, "workspace", &cons_refs, &cons_syms).unwrap();
+    shred_rows(&conn, &cons_path, "workspace", &cons_refs, &cons_syms).unwrap();
 
     let dead: std::collections::HashSet<String> =
         unused_exported_syms(&conn).into_iter().map(|d| d.name).collect();
@@ -898,7 +956,7 @@ fn unused_exports_view_cross_file_candidate_suppresses() {
     let prod_path = prod.to_string_lossy().to_string();
     let prod_syms = prod_cached.analysis.sym_row_seeds();
     // Producer has no ref rows of its own.
-    shred_derived_rows(&conn, &prod_path, "workspace", &[], &prod_syms).unwrap();
+    shred_rows(&conn, &prod_path, "workspace", &[], &prod_syms).unwrap();
 
     // Before any consumer: dead.
     let dead0: std::collections::HashSet<String> =
@@ -916,7 +974,7 @@ fn unused_exports_view_cross_file_candidate_suppresses() {
         cons_refs.iter().any(|s| s.key == "widget"),
         "consumer must produce a `widget` candidate row"
     );
-    shred_derived_rows(&conn, &cons_path, "workspace", &cons_refs, &[]).unwrap();
+    shred_rows(&conn, &cons_path, "workspace", &cons_refs, &[]).unwrap();
 
     let dead1: std::collections::HashSet<String> =
         unused_exported_syms(&conn).into_iter().map(|d| d.name).collect();
@@ -938,7 +996,7 @@ fn names_with_ref_rows_is_the_distinct_key_set() {
     std::fs::write(&pm, src).unwrap();
     let cached = parse_source_to_cached(src, &pm);
     let refs: Vec<_> = cached.analysis.ref_row_seeds();
-    shred_derived_rows(&conn, &pm.to_string_lossy(), "workspace", &refs, &[]).unwrap();
+    shred_rows(&conn, &pm.to_string_lossy(), "workspace", &refs, &[]).unwrap();
 
     let names = names_with_ref_rows(&conn);
     assert!(names.contains("helper"), "called name has a ref row: {names:?}");
@@ -990,7 +1048,7 @@ fn hard_clear_wipes_derived_rows() {
         qual: None,
         arg_count: None,
     }];
-    shred_derived_rows(&conn, "/some/file.pm", "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, "/some/file.pm", "workspace", &seeds, &[]).unwrap();
     assert!(has_ref_rows(&conn, "/some/file.pm"));
     validate_plugin_fingerprint(&conn, "fingerprint-a").unwrap();
     validate_plugin_fingerprint(&conn, "fingerprint-b").unwrap();
@@ -1018,7 +1076,7 @@ fn ref_rows_version_bump_recreates_old_shape_tables() {
     .unwrap();
     init_schema(&conn).unwrap();
     // The v2 shape must accept a tier-tagged shred.
-    shred_derived_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, "/migrated.pm"));
 }
 
@@ -1039,7 +1097,7 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
     ))
     .unwrap();
     init_schema(&conn).unwrap();
-    shred_derived_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, "/migrated.pm"));
 }
 
@@ -1050,8 +1108,8 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
 fn inc_clear_is_import_tier_scoped() {
     let conn = test_db();
     validate_inc_paths(&conn, &[PathBuf::from("/lib/a")]).unwrap();
-    shred_derived_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
-    shred_derived_rows(&conn, "/inc/Dep.pm", "import", &[], &[]).unwrap();
+    shred_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, "/inc/Dep.pm", "import", &[], &[]).unwrap();
 
     validate_inc_paths(&conn, &[PathBuf::from("/lib/CHANGED")]).unwrap();
     assert!(
@@ -1107,6 +1165,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
             conn,
             true,
             &mut |_p| true,
+            &mut |_p, _fa| true,
             &mut |_p, payload| match payload {
                 WarmPayload::Stub(_) => {
                     stubs += 1;
@@ -1126,7 +1185,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     assert_eq!(run(&conn, false), (1, 1));
     // use_stubs=false (NO_EVICT): straight to the full lane.
     let (mut stubs, mut fulls) = (0usize, 0usize);
-    warm_pack_stream_with_stubs(&conn, false, &mut |_p| true, &mut |_p, payload| {
+    warm_pack_stream_with_stubs(&conn, false, &mut |_p| true, &mut |_p, _fa| true, &mut |_p, payload| {
         match payload {
             WarmPayload::Stub(_) => stubs += 1,
             WarmPayload::Full(..) => fulls += 1,
@@ -1363,14 +1422,14 @@ fn ref_rows_dedup_per_file_and_not_across_files() {
     );
     let (b_path, b_seeds) = mk("dedup_b.pm", "package B;\nsub go { helper(); }\n1;\n");
 
-    shred_derived_rows(&conn, &a_path, "workspace", &a_seeds, &[]).unwrap();
+    shred_rows(&conn, &a_path, "workspace", &a_seeds, &[]).unwrap();
     assert_eq!(
         ref_candidate_file_count(&conn, "helper"),
         1,
         "four call sites in one file must be one row",
     );
 
-    shred_derived_rows(&conn, &b_path, "workspace", &b_seeds, &[]).unwrap();
+    shred_rows(&conn, &b_path, "workspace", &b_seeds, &[]).unwrap();
     assert_eq!(
         ref_candidate_file_count(&conn, "helper"),
         2,
@@ -1400,7 +1459,7 @@ fn wiping_the_strings_table_does_not_leave_dangling_name_ids() {
     let path_str = p.to_string_lossy().to_string();
     let seeds = parse_source_to_cached(src, &p).analysis.ref_row_seeds();
 
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(ref_candidate_files(&conn, &["helper".to_string()]), vec![path_str.clone()]);
 
     // The wipe every hard-clear performs, on the SAME connection and thread
@@ -1408,7 +1467,7 @@ fn wiping_the_strings_table_does_not_leave_dangling_name_ids() {
     clear_derived_rows(&conn).unwrap();
     assert!(ref_candidate_files(&conn, &["helper".to_string()]).is_empty());
 
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(
         ref_candidate_files(&conn, &["helper".to_string()]),
         vec![path_str],
@@ -1439,7 +1498,7 @@ fn the_intern_memo_stays_bounded_and_correct_past_its_cap() {
         std::fs::write(&p, &src).unwrap();
         let path_str = p.to_string_lossy().to_string();
         let cached = parse_source_to_cached(&src, &p);
-        shred_derived_rows(
+        shred_rows(
             &conn,
             &path_str,
             "workspace",
@@ -1475,7 +1534,7 @@ fn a_qualified_symbols_declaring_file_is_a_ref_candidate() {
     std::fs::write(&p, src).unwrap();
     let path_str = p.to_string_lossy().to_string();
     let cached = parse_source_to_cached(src, &p);
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -1528,7 +1587,7 @@ fn probe_strings_orphan_rate() {
         let Some(tree) = parser.parse(&src, None) else { continue };
         let fa = crate::build::builder::build(&tree, src.as_bytes());
         let ps = f.to_string_lossy().to_string();
-        shred_derived_rows(&conn, &ps, "workspace", &fa.ref_row_seeds(), &fa.sym_row_seeds()).unwrap();
+        shred_rows(&conn, &ps, "workspace", &fa.ref_row_seeds(), &fa.sym_row_seeds()).unwrap();
         paths.push(ps);
     }
     let count = |sql: &str| -> i64 {
@@ -1567,7 +1626,7 @@ fn gc_reclaims_orphaned_strings_and_keeps_live_ones() {
         std::fs::write(&p, src).unwrap();
         let ps = p.to_string_lossy().to_string();
         let cached = parse_source_to_cached(src, &p);
-        shred_derived_rows(
+        shred_rows(
             &conn, &ps, "workspace",
             &cached.analysis.ref_row_seeds(),
             &cached.analysis.sym_row_seeds(),
@@ -1613,7 +1672,7 @@ fn a_gc_invalidates_the_writer_intern_memo() {
         std::fs::write(&p, src).unwrap();
         let ps = p.to_string_lossy().to_string();
         let cached = parse_source_to_cached(src, &p);
-        shred_derived_rows(
+        shred_rows(
             &conn, &ps, "workspace",
             &cached.analysis.ref_row_seeds(),
             &cached.analysis.sym_row_seeds(),
@@ -1650,7 +1709,7 @@ fn a_deleted_files_rows_are_collectable() {
     std::fs::write(&p, src).unwrap();
     let path_str = p.to_string_lossy().to_string();
     let cached = parse_source_to_cached(src, &p);
-    shred_derived_rows(
+    shred_rows(
         &conn, &path_str, "workspace",
         &cached.analysis.ref_row_seeds(),
         &cached.analysis.sym_row_seeds(),
@@ -2146,7 +2205,7 @@ fn a_cleared_conclusion_row_is_re_baked_to_the_same_map() {
 /// `invalidate_generation` is the "this path's persisted derivation is void"
 /// eraser — it takes the modules row, the stub and the ref rows. The
 /// conclusion map is a derivation of that same blob, and leaving it behind
-/// risks a wrong answer rather than a slow one: `moc_cross_file_primary`
+/// risks a wrong answer rather than a slow one: `class_candidates`
 /// consults the map before it decodes anything, and `Outcome::Answer`
 /// short-circuits the chase.
 ///
@@ -2377,4 +2436,51 @@ fn a_surface_does_not_outlive_its_blob() {
         load_surface(&conn, "/erase/App.pm").is_none(),
         "a hard clear left the surfaces table behind"
     );
+}
+
+/// `shred_derived_rows` over loose ref and symbol seeds, with no held names.
+fn shred_rows(
+    conn: &rusqlite::Connection,
+    path: &str,
+    source: &str,
+    refs: &[crate::model::file_analysis::RefRowSeed],
+    syms: &[crate::model::file_analysis::SymRowSeed],
+) -> rusqlite::Result<()> {
+    shred_derived_rows(
+        conn,
+        path,
+        source,
+        &crate::model::file_analysis::RowSeeds { refs: refs.to_vec(), syms: syms.to_vec(), held: Vec::new() },
+    )
+}
+
+/// A gated emission's names land in `held` only: retrieval, the per-file
+/// probes and the dead-export view find the file through them, and the
+/// `refs`/`syms` rows every view shows never claim them.
+#[test]
+fn held_names_are_candidates_of_their_own() {
+    let conn = test_db();
+    let seeds = crate::model::file_analysis::RowSeeds {
+        refs: Vec::new(),
+        syms: Vec::new(),
+        held: vec!["accessor".to_string()],
+    };
+    shred_derived_rows(&conn, "/ws/Held.pm", "workspace", &seeds).unwrap();
+    assert_eq!(ref_candidate_files(&conn, &["accessor".to_string()]), vec!["/ws/Held.pm".to_string()]);
+    let names = crate::model::conventions::PERL_SPELLINGS;
+    assert_eq!(sym_name_row_exists(&conn, "/ws/Held.pm", &names, "accessor"), Some(true));
+    assert_eq!(name_row_exists(&conn, "/ws/Held.pm", &names, "accessor"), Some(true));
+    assert!(names_with_ref_rows(&conn).contains("accessor"));
+    let in_rows: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM refs) + (SELECT COUNT(*) FROM syms)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(in_rows, 0, "a held name is no base row");
+    // Re-shredding without it drops it, as it drops the file's other rows.
+    shred_rows(&conn, "/ws/Held.pm", "workspace", &[], &[]).unwrap();
+    assert!(ref_candidate_files(&conn, &["accessor".to_string()]).is_empty());
+    assert_eq!(sym_name_row_exists(&conn, "/ws/Held.pm", &names, "accessor"), Some(false));
 }

@@ -14,7 +14,7 @@ use super::*;
 /// Field reads go through the named borrows. The `analysis` handle exists
 /// ONLY for the derived queries whose conclusions land in projected values
 /// (`symbol_return_type_via_bag`, `is_linkage_visible`,
-/// `symbol_is_class_content`) — never for direct field access, which would
+/// `symbol_is_class_content`, `gated_candidates`, `bridge_classes`) — never for direct field access, which would
 /// bypass the classification gate.
 pub struct SurfaceFeed<'a> {
     pub symbols: &'a [Symbol],
@@ -75,7 +75,7 @@ impl FileAnalysis {
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
-                    use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
+                    use_rows: _use_rows,                   // this file's OWN spelling table: what its spellings mean, never what another file sees
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     names: _names,                   // language-wide convention, identical across the language's files
                     template_params: _template_params, // instantiation substitution reads the provider live
@@ -85,6 +85,7 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
+                    file_module: _file_module,       // the namespace this file's classes join: projected through their identities
                 },
             plugin:
                 PluginFacts {
@@ -92,7 +93,7 @@ impl FileAnalysis {
                     loads: plugin_loads,
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
-                    gated_emissions: _gated_emissions, // re-fired by this file's OWN enrichment
+                    gated_emissions: _gated_emissions, // projected as candidates through the derived-query handle (`gated_candidates`), the mint the rows read
                     meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 
@@ -110,13 +111,13 @@ impl FileAnalysis {
             // Surface edge for them.
             refs: _refs,                         // the whole reference axis — use-sites, their indices, their baseline and eviction flag
             fold_ranges: _fold_ranges,
-            package_ranges: _package_ranges,
+            namespace_ranges: _namespace_ranges, // where this file's own code and spellings sit; its classes' identities already carry the namespace
             call_bindings: _call_bindings,       // this file's call sites — the CONSUMER half of the edge; the provider names ride `imports`
             method_call_bindings: _method_call_bindings, // same consumer half, method form
             guard_sites: _guard_sites,           // own-file narrowing diagnostics
             arrow_deref_sites: _arrow_deref_sites, // own-file deref diagnostics
             key_writes: _key_writes,             // own-file mutation-extension input; resulting shapes surface via `ret`
-            reassigned_scalars: _reassigned_scalars, // own-file shape trust gate
+            reassigned_vars: _reassigned_vars, // own-file shape trust gate
             flow_edges: _flow_edges,             // own-file value provenance
             unrowed_attachment_names: _unrowed_attachment_names, // derived residency digest for the consult pre-filter; changes only when the bag/tables it derives from change, so it carries no Surface edge of its own
 
@@ -128,7 +129,6 @@ impl FileAnalysis {
             loader_config_params: _loader_config_params, // callee markers joined by this file's OWN enrichment
             framework_imports: _framework_imports, // local diagnostic suppression set
             type_provenance: _type_provenance,   // read-only debugging aid (`--dump-package`)
-            contract_symbols: _contract_symbols, // SymbolIds (banned from the Surface); the markers they tag project as methods
             column_keyed_verbs: _column_keyed_verbs, // baked from the plugin registry, not this file's source; the plugin fingerprint owns invalidation
             language: _language,                 // the origin's serving-language identity; `resolve()` reads it live per query, never baked into a consumer's cached state
             lib_roots: _lib_roots,               // `use lib` changes what THIS file sees of @INC, never what a consumer sees of this file
@@ -141,6 +141,7 @@ impl FileAnalysis {
             use_map_pins: _use_map_pins, // sessional memo of a projection over the tables above
             base_witness_count: _base_witness_count,
             stamped_at: _stamped_at, // sessional re-stamp bookkeeping; a consumer's view of this file does not change when we last stamped it
+            instance: _instance, // sessional copy identity, not content
 
             // ---- Derived indices, rebuilt from the tables above.
             scope_starts: _scope_starts,

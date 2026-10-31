@@ -28,90 +28,35 @@ pub fn pack_hover_markdown(
         .and_then(|r| Some((r, crate::model::file_analysis::MemberKind::of_ref(&r.kind)?)))
     {
         if let Some(midx) = module_index {
-            if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
-                let field = r.unqualified_target_name(analysis.names());
-                // The receiver's full VALUE (not just its dispatch class):
-                // a template instance's args refine a param-shaped member
-                // type (`T get()` on a `Box<int>` receiver → `int`) — shown
-                // only when the substitution actually changed the answer,
-                // so non-template hovers stay byte-identical.
-                let recv_ty = r
-                    .member_site()
-                    .and_then(|m| m.invocant_span)
-                    .and_then(|sp| analysis.expr_type_at_span(sp, Some(midx)));
-                // The ref's family picks the rung: a value read never answers
-                // through a method's return.
-                let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
-                    let sub = recv_ty.as_ref().and_then(|t| match want {
-                        crate::model::file_analysis::MemberKind::Value => {
-                            analysis.field_value_type(t, field, Some(midx))
-                        }
-                        crate::model::file_analysis::MemberKind::Callable => {
-                            analysis.member_value_type(t, field, Some(midx), None)
-                        }
-                    })?;
-                    (raw.as_ref() != Some(&sub)).then_some(sub)
-                };
-                if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_member_in_ancestors(&cn, field, Some(midx), want)
-                {
-                    let sym = analysis.symbol(sym_id);
-                    if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
-                        let mut text = render_symbol_hover(
-                            sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx),
-                        );
-                        if let Some(rt) = substituted(
-                            analysis.find_method_return_type(&cn, field, Some(midx), None),
-                        ) {
-                            text.push_str(&format!(
-                                "\n\n*returns: {}*",
-                                crate::model::file_analysis::format_inferred_type(&rt)
-                            ));
-                        }
-                        return Some(text);
-                    }
+            let field = r.unqualified_target_name(analysis.names());
+            // The receiver's full VALUE (not just its dispatch class): a
+            // template instance's args refine a param-shaped member type
+            // (`T get()` on a `Box<int>` receiver → `int`) — shown only when
+            // the substitution actually changed the answer, so non-template
+            // hovers stay byte-identical. Each class reads the arm it came
+            // from; one section per class the receiver may be.
+            let recv_ty = r
+                .member_site()
+                .and_then(|m| m.invocant_span)
+                .and_then(|sp| analysis.expr_type_at_span(sp, Some(midx)));
+            let arm_for = |cn: &str| {
+                let arms = recv_ty.as_ref().map_or(&[][..], InferredType::receiver_arms);
+                match arms {
+                    [one] => Some(one),
+                    arms => arms
+                        .iter()
+                        .find(|a| analysis.dispatch_class_of(a, Some(midx)).as_deref() == Some(cn)),
                 }
-                // A param-typed member substitutes the same way (`T v_;` on
-                // `Box<int>` reads `v_: int`; a cross-file method's return
-                // lands here too, so the label stays kind-agnostic).
-                if let Some(sub) =
-                    substituted(analysis.field_type_on_class(&cn, field, Some(midx)))
-                {
-                    return Some(format!(
-                        "```{}\n{}: {}\n```\n\n*member*",
-                        language,
-                        field,
-                        crate::model::file_analysis::format_inferred_type(&sub)
-                    ));
-                }
-                // The member's declared type may be a config-variant macro whose
-                // flow type is the join abstraction (`Numeric`); display the
-                // concrete leaf from the config-active variant's alias chain.
-                let storage_leaf = analysis
-                    .member_type_spelling(&cn, field, Some(midx))
-                    .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx));
-                // Domain typing: the slot's storage type (`uint16_t`) discards
-                // its DOMAIN (`opcode`), recoverable from usage. When the
-                // usage-fold recovers one, it headlines with the storage leaf
-                // as a drill-down: `op_type: opcode (stored as uint16_t)`. The
-                // domain never overrides storage for correctness — a human
-                // surface only.
-                if let Some(dom) = analysis.field_domain(&cn, field, Some(midx)) {
-                    let stored = storage_leaf
-                        .clone()
-                        .map(|s| format!(" *(stored as `{}`)*", s))
-                        .unwrap_or_default();
-                    return Some(format!(
-                        "```{}\n{}: {}\n```\n\n*field*{}",
-                        language, field, dom.domain, stored
-                    ));
-                }
-                if let Some(leaf) = storage_leaf {
-                    return Some(format!("```{}\n{}: {}\n```\n\n*field*", language, field, leaf));
-                }
-                if let Some(h) = analysis.member_hover(&cn, field, Some(midx)) {
-                    return Some(format!("```{}\n{}\n```\n\n*field*", language, h));
-                }
+            };
+            let sections: Vec<String> = analysis
+                .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
+                .iter()
+                .filter_map(|cn| {
+                    member_hover_on(analysis, cn, field, want, arm_for(cn), source, language, midx)
+                })
+                .collect();
+            if !sections.is_empty() {
+                return Some(sections.join("\n\n---\n\n"));
             }
         }
     }
@@ -409,4 +354,93 @@ fn perl_hover_named(
             Some(parts.join("\n\n"))
         }
     }
+}
+
+/// One class's member hover: `field` on `cn`, `recv` the receiver value
+/// that dispatches there (its template args refine a param-shaped member).
+#[allow(clippy::too_many_arguments)]
+fn member_hover_on(
+    analysis: &crate::model::file_analysis::FileAnalysis,
+    cn: &str,
+    field: &str,
+    want: crate::model::file_analysis::MemberKind,
+    recv: Option<&InferredType>,
+    source: &str,
+    language: &str,
+    midx: &dyn crate::model::file_analysis::CrossFileLookup,
+) -> Option<String> {
+    // The ref's family picks the rung: a value read never answers
+    // through a method's return.
+    let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
+        let sub = recv.and_then(|t| match want {
+            crate::model::file_analysis::MemberKind::Value => {
+                analysis.field_value_type(t, field, Some(midx))
+            }
+            crate::model::file_analysis::MemberKind::Callable => {
+                analysis.member_value_type(t, field, Some(midx), None)
+            }
+        })?;
+        (raw.as_ref() != Some(&sub)).then_some(sub)
+    };
+    if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
+        analysis.resolve_member_in_ancestors(cn, field, Some(midx), want)
+    {
+        let sym = analysis.symbol(sym_id);
+        if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
+            let mut text = render_symbol_hover(
+                sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx),
+            );
+            if let Some(rt) = substituted(
+                analysis.find_method_return_type(cn, field, Some(midx), None),
+            ) {
+                text.push_str(&format!(
+                    "\n\n*returns: {}*",
+                    crate::model::file_analysis::format_inferred_type(&rt)
+                ));
+            }
+            return Some(text);
+        }
+    }
+    // A param-typed member substitutes the same way (`T v_;` on
+    // `Box<int>` reads `v_: int`; a cross-file method's return
+    // lands here too, so the label stays kind-agnostic).
+    if let Some(sub) =
+        substituted(analysis.field_type_on_class(cn, field, Some(midx)))
+    {
+        return Some(format!(
+            "```{}\n{}: {}\n```\n\n*member*",
+            language,
+            field,
+            crate::model::file_analysis::format_inferred_type(&sub)
+        ));
+    }
+    // The member's declared type may be a config-variant macro whose
+    // flow type is the join abstraction (`Numeric`); display the
+    // concrete leaf from the config-active variant's alias chain.
+    let storage_leaf = analysis
+        .member_type_spelling(cn, field, Some(midx))
+        .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx));
+    // Domain typing: the slot's storage type (`uint16_t`) discards
+    // its DOMAIN (`opcode`), recoverable from usage. When the
+    // usage-fold recovers one, it headlines with the storage leaf
+    // as a drill-down: `op_type: opcode (stored as uint16_t)`. The
+    // domain never overrides storage for correctness — a human
+    // surface only.
+    if let Some(dom) = analysis.field_domain(cn, field, Some(midx)) {
+        let stored = storage_leaf
+            .clone()
+            .map(|s| format!(" *(stored as `{}`)*", s))
+            .unwrap_or_default();
+        return Some(format!(
+            "```{}\n{}: {}\n```\n\n*field*{}",
+            language, field, dom.domain, stored
+        ));
+    }
+    if let Some(leaf) = storage_leaf {
+        return Some(format!("```{}\n{}: {}\n```\n\n*field*", language, field, leaf));
+    }
+    if let Some(h) = analysis.member_hover(cn, field, Some(midx)) {
+        return Some(format!("```{}\n{}\n```\n\n*field*", language, h));
+    }
+    None
 }

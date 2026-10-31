@@ -1,4 +1,4 @@
-//! Unified query surface across FileStore + ModuleIndex.
+//! Unified query surface across OpenDocs + ModuleIndex.
 //!
 //! `resolve(cursor) → CandidateSet` is the one resolution entry point:
 //! identity (`resolve_symbol_scoped`'s Target/Group/Local verdict),
@@ -20,9 +20,9 @@ use tower_lsp::lsp_types::Url;
 
 use crate::model::file_analysis::{
     AccessKind, CompletionCandidate, CrossFileLookup, FileAnalysis, HandlerOwner, MemberKind,
-    RefKind, Span, SymKind,
+    ReceiverPolicy, RefKind, Span, SymKind,
 };
-use crate::index::file_store::{FileKey, FileStore};
+use crate::index::open_docs::{FileKey, OpenDocs};
 
 bitflags::bitflags! {
     /// Which file roles a query should search. Handlers pick the mask that
@@ -66,15 +66,14 @@ pub use collect::*;
 /// See `docs/adr/resolution-candidate-set.md`.
 ///
 /// Borrow discipline: the set only ever READS the stores (projections walk
-/// via `FileStore::for_each_open`), so an LSP handler may hold its open-doc
+/// via `OpenDocs::for_each_open`), so an LSP handler may hold its open-doc
 /// read guard for the set's whole lifetime.
 pub struct CandidateSet<'a> {
-    files: &'a FileStore,
+    files: &'a OpenDocs,
     origin: &'a FileAnalysis,
     origin_key: FileKey,
     point: tree_sitter::Point,
-    /// The routed base index (the Perl hub, or a per-language pack
-    /// sub-index). Backward walks (`refs_to`, group walks) take THIS —
+    /// The process's base index. Backward walks (`refs_to`, group walks) take THIS —
     /// `collect_from_analysis` re-scopes per scanned file.
     module_index: Option<&'a dyn CrossFileLookup>,
     /// The origin's include-closure scope over `module_index`, built once at
@@ -84,12 +83,10 @@ pub struct CandidateSet<'a> {
     /// root shape). Transparent for Perl (empty closure).
     scoped: Option<crate::model::file_analysis::ScopedLookup<'a>>,
     /// The origin is pack-served — derived at construction from the
-    /// stamped `FileAnalysis.language`, never declared by a caller. Two
-    /// policy consequences, applied at the set level so every projection
-    /// agrees: visibility widens to VISIBLE (pack workspace files ride
-    /// the DEPENDENCY role — a storage artifact of the per-language
-    /// cache, which registers only workspace-walk files), and rename
-    /// REFUSES on alias-spelled sites instead of silently skipping.
+    /// stamped `FileAnalysis.language`, never declared by a caller. It
+    /// selects the language's name-supply model (closure-keyed identity and
+    /// completion) and makes rename REFUSE on alias-spelled sites instead
+    /// of silently skipping, at the set level so every projection agrees.
     pack: bool,
     /// The origin document's raw text, when the caller has it. Feeds the
     /// raw-word candidate lanes (macro variants): a macro use can vanish
@@ -117,7 +114,7 @@ pub struct CandidateSet<'a> {
 /// CLI mirrors construct the set once and project; none of them re-derive
 /// identity, visibility, or per-site policy on their own.
 pub fn resolve<'a>(
-    files: &'a FileStore,
+    files: &'a OpenDocs,
     origin: &'a FileAnalysis,
     origin_key: FileKey,
     point: tree_sitter::Point,
@@ -132,8 +129,9 @@ pub fn resolve<'a>(
         FileKey::Url(u) => u.to_file_path().ok(),
     };
     // The routing fact names the scope's AXIS, and `for_origin` owns the
-    // derivation — pack scopes by include closure, Perl by the asker's own
-    // search path (`use lib` roots ahead of the process @INC).
+    // derivation — a use-map pack scopes by its use-map, another pack by
+    // its include closure, Perl by the asker's own search path (`use lib`
+    // roots ahead of the process @INC).
     let pack =
         crate::build::language_driver::LanguageRegistry::is_pack_language(&origin.language);
     let scoped = module_index.map(|idx| {
@@ -141,11 +139,7 @@ pub fn resolve<'a>(
             origin,
             self_path.as_deref(),
             idx,
-            if pack {
-                crate::model::file_analysis::PackVisibility::IncludePaths
-            } else {
-                crate::model::file_analysis::PackVisibility::Host
-            },
+            crate::build::language_driver::LanguageRegistry::pack_visibility(&origin.language),
         );
         crate::model::file_analysis::ScopedLookup::new(
             idx,

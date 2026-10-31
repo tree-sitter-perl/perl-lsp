@@ -74,7 +74,7 @@ fn register_pair(
     }
 }
 
-#[cfg(feature = "cpp")]
+#[cfg(any(feature = "cpp", feature = "python"))]
 fn arc_of(pack: &ModuleIndex, path: &Path) -> usize {
     let mut found = None;
     pack.for_each_registered_file(&mut |cm| {
@@ -103,17 +103,15 @@ fn surface_gate_covers_registered_and_open_consumers() {
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
     std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
     let canon_tu = std::fs::canonicalize(&tu).unwrap();
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
 
     // The TU is also OPEN — the outcome must answer the open half too.
-    let files = FileStore::new();
+    let files = OpenDocs::serving(driver);
     let tu_url = Url::from_file_path(&canon_tu).unwrap();
     let hdr_url = Url::from_file_path(&canon_hdr).unwrap();
     assert!(files.open(tu_url.clone(), std::fs::read_to_string(&tu).unwrap()));
@@ -122,11 +120,11 @@ fn surface_gate_covers_registered_and_open_consumers() {
     let tu_before = arc_of(&pack, &canon_tu);
     let hdr_before = arc_of(&pack, &canon_hdr);
 
-    let inv = PackInvalidator::default();
+    let inv = PackInvalidator::serving(driver);
 
     // Body-only edit: return value changes, surface identical.
     std::fs::write(&hdr, "class Box { public: int width() { return 2; } };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &files, &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
     assert!(!outcome.deferred);
     assert_ne!(arc_of(&pack, &canon_hdr), hdr_before, "changed file re-registered");
     assert_eq!(
@@ -147,7 +145,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
         "class Box { public: int width() { return 2; } int height() { return 3; } };\n",
     )
     .unwrap();
-    let outcome = inv.file_changed(None, &hub, &files, &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
     assert_ne!(
         arc_of(&pack, &canon_tu),
         tu_before,
@@ -162,7 +160,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
     // The changed file's OWN open doc refreshes regardless of verdict.
     assert!(files.open(hdr_url.clone(), std::fs::read_to_string(&hdr).unwrap()));
     std::fs::write(&hdr, "class Box { public: int width() { return 3; } int height() { return 3; } };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &files, &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
     assert!(
         outcome.refresh_open.contains(&hdr_url),
         "the edited file's own open doc always refreshes"
@@ -185,18 +183,16 @@ fn pack_swap_skips_stale_generation() {
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
     std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
     let canon_tu = std::fs::canonicalize(&tu).unwrap();
     let hdr_before = arc_of(&pack, &canon_hdr);
     let tu_before = arc_of(&pack, &canon_tu);
 
-    let inv = PackInvalidator::default();
+    let inv = PackInvalidator::serving(driver);
     // A fresher writer already claimed the maximum generation for both paths.
     assert!(inv.claim_source_gen(&canon_hdr, i64::MAX));
     assert!(inv.claim_source_gen(&canon_tu, i64::MAX));
@@ -208,7 +204,7 @@ fn pack_swap_skips_stale_generation() {
         "class Box { public: int width() { return 2; } int height() { return 3; } };\n",
     )
     .unwrap();
-    inv.file_changed(None, &hub, &FileStore::new(), &hdr, false);
+    inv.file_changed(None, &pack, &OpenDocs::serving(driver), &hdr, false);
     assert_eq!(arc_of(&pack, &canon_hdr), hdr_before, "stale header re-register skipped");
     assert_eq!(arc_of(&pack, &canon_tu), tu_before, "stale consumer re-register skipped");
     let _ = std::fs::remove_dir_all(&dir);
@@ -227,24 +223,22 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
     let hdr = dir.join("box.h");
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr]);
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
     let before = arc_of(&pack, &canon_hdr);
 
-    let inv = PackInvalidator::default();
+    let inv = PackInvalidator::serving(driver);
     inv.begin_bulk_index();
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } int h(); };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &FileStore::new(), &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &OpenDocs::serving(driver), &hdr, false);
     assert!(outcome.deferred, "mid-index change defers");
     assert!(outcome.refresh_open.is_empty());
     assert_eq!(arc_of(&pack, &canon_hdr), before, "deferred: no swap yet");
 
-    inv.finish_bulk_index(None, &hub);
+    inv.finish_bulk_index(None, &pack);
     assert_ne!(arc_of(&pack, &canon_hdr), before, "reconcile lands the deferred change");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -263,10 +257,9 @@ struct SwapFixture {
     dir: PathBuf,
     hdr: PathBuf,
     tu: PathBuf,
-    hub: ModuleIndex,
     pack: Arc<ModuleIndex>,
     inv: PackInvalidator,
-    files: FileStore,
+    files: OpenDocs,
 }
 
 #[cfg(feature = "cpp")]
@@ -279,14 +272,12 @@ fn swap_fixture(tag: &str) -> SwapFixture {
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
     std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
 
-    SwapFixture { dir, hdr, tu, hub, pack, inv: PackInvalidator::default(), files: FileStore::new() }
+    SwapFixture { dir, hdr, tu, pack, inv: PackInvalidator::serving(driver), files: OpenDocs::serving(driver) }
 }
 
 /// The registered analysis for `path` — the residency question these tests
@@ -315,7 +306,7 @@ fn a_landed_persist_licenses_the_strip() {
     let f = swap_fixture("ok");
     std::fs::write(&f.hdr, "class Box { public: int width() { return 2; } int h() { return 3; } };\n").unwrap();
     module_cache::with_test_cache_dir(&f.dir, TEST_BUSY, || {
-        f.inv.file_changed(None, &f.hub, &f.files, &f.hdr, false);
+        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
     assert!(
         registered(&f.pack, &f.hdr).symbols_are_evicted(),
@@ -344,7 +335,7 @@ fn a_rolled_back_transaction_leaves_every_copy_whole() {
             )
             .unwrap();
         }
-        f.inv.file_changed(None, &f.hub, &f.files, &f.hdr, false);
+        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
     for p in [&f.hdr, &f.tu] {
         let a = registered(&f.pack, p);
@@ -379,7 +370,7 @@ fn a_file_whose_blob_did_not_land_is_not_stripped() {
             ))
             .unwrap();
         }
-        f.inv.file_changed(None, &f.hub, &f.files, &f.hdr, false);
+        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
     assert!(
         !registered(&f.pack, &f.hdr).symbols_are_evicted(),
@@ -390,4 +381,73 @@ fn a_file_whose_blob_did_not_land_is_not_stripped() {
         "a sibling whose blob DID land must still strip — the licence is per path"
     );
     let _ = std::fs::remove_dir_all(&f.dir);
+}
+
+#[cfg(feature = "python")]
+fn class_names(pack: &ModuleIndex, path: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    pack.for_each_registered_file(&mut |cm| {
+        if cm.path == path {
+            names = cm
+                .analysis
+                .symbols()
+                .iter()
+                .filter(|s| s.kind == crate::model::file_analysis::SymKind::Class)
+                .map(|s| s.name.clone())
+                .collect();
+        }
+    });
+    names
+}
+
+/// A package marker created through the watcher path re-files the modules
+/// under its directory — registered copies and open docs alike, though the
+/// marker's own surface says nothing about them — and deleting it un-files
+/// them. A save of a marker that already exists re-files nothing.
+#[cfg(feature = "python")]
+#[test]
+fn a_package_marker_from_the_watcher_refiles_the_modules_under_it() {
+    let dir = std::env::temp_dir().join(format!("pack-refile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/pkg")).unwrap();
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let module = dir.join("src/pkg/mod.py");
+    let outside = dir.join("src/other.py");
+    let init = dir.join("src/pkg/__init__.py");
+    std::fs::write(&module, "class Widget:\n    pass\n").unwrap();
+    std::fs::write(&outside, "class Other:\n    pass\n").unwrap();
+    crate::build::walk_markers::record_walk("__init__.py", &dir, &[module.clone(), outside.clone()]);
+
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let driver = reg.for_id("python").expect("python driver");
+    let pack = Arc::new(ModuleIndex::new_for_test());
+    for p in [&module, &outside] {
+        let src = std::fs::read_to_string(p).unwrap();
+        pack.register_symbols(p.to_path_buf(), Arc::new(driver.analyze_with_path(&src, Some(p))));
+    }
+    assert_eq!(class_names(&pack, &module), ["src.pkg.mod.Widget"]);
+    let files = OpenDocs::serving(driver);
+    let module_url = Url::from_file_path(&module).unwrap();
+    assert!(files.open(module_url.clone(), std::fs::read_to_string(&module).unwrap()));
+    let outside_before = arc_of(&pack, &outside);
+    let inv = PackInvalidator::serving(driver);
+
+    std::fs::write(&init, "").unwrap();
+    let outcome = inv.file_changed(None, &pack, &files, &init, false);
+    assert_eq!(class_names(&pack, &module), ["pkg.mod.Widget"], "pkg.mod appears");
+    assert_eq!(outcome.refresh_open, vec![module_url.clone()], "the open module re-files too");
+    assert_eq!(arc_of(&pack, &outside), outside_before, "a file outside the package is untouched");
+
+    // Editing the marker it already holds: no flip, nothing under it moves.
+    let module_before = arc_of(&pack, &module);
+    std::fs::write(&init, "VERSION = 1\n").unwrap();
+    let outcome = inv.file_changed(None, &pack, &files, &init, false);
+    assert_eq!(arc_of(&pack, &module), module_before, "no re-file on a marker save");
+    assert!(outcome.refresh_open.is_empty(), "{:?}", outcome.refresh_open);
+
+    std::fs::remove_file(&init).unwrap();
+    let outcome = inv.file_changed(None, &pack, &files, &init, true);
+    assert_eq!(class_names(&pack, &module), ["src.pkg.mod.Widget"], "un-filed");
+    assert_eq!(outcome.refresh_open, vec![module_url]);
+    let _ = std::fs::remove_dir_all(&dir);
 }

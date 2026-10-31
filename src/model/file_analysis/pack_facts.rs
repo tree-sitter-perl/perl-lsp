@@ -76,17 +76,19 @@ pub struct PackFacts {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
-    /// `#include "x.h"` / `<x.h>` directives: (path-token span, raw path text).
-    /// Goto-def on the path token resolves the header like `use` resolves a
-    /// module.
+    /// `#include "x.h"` / `<x.h>` directives and import paths as written:
+    /// (path-token span, raw path text). Goto-def on the path token
+    /// resolves the header like `use` resolves a module. A use-map
+    /// language's `use` rows are `use_rows` instead.
     #[serde(default)]
     pub include_directives: Vec<(Span, String)>,
 
-    /// `use A\B as C` rows: (alias, namespace, real leaf). The use-map
-    /// pins the ALIAS spelling to the namespace and leaves the real leaf
+    /// A use-map language's `use` rows, as the (namespace, leaf, alias)
+    /// parts the extractor read them in — the table `UseMap` resolves
+    /// through. An aliased row binds its ALIAS and leaves the real leaf
     /// free for the file's own or same-namespace class.
     #[serde(default)]
-    pub use_aliases: Vec<(String, String, String)>,
+    pub use_rows: Vec<UseRow>,
 
     /// Class spellings written with a qualifier: (leaf, written prefix —
     /// absolute when it starts with `\`, else relative to the file's
@@ -108,6 +110,7 @@ pub struct PackFacts {
     /// which language a given name belongs to. A few bytes per blob.
     #[serde(default)]
     pub names: NameSpellings,
+
 
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
@@ -154,18 +157,51 @@ pub struct PackFacts {
     /// the member exists; the undefined-member lanes stay silent there.
     #[serde(default)]
     pub probe_regions: Vec<Span>,
+    /// The module this file was filed under, for a language that names
+    /// modules by path — the one input the analysis read from outside its
+    /// source. Per file and not a witness: the warm scan compares it with
+    /// the module the path names NOW (`LanguageDriver::path_inputs_current`),
+    /// so a blob built before a package marker appeared re-analyzes
+    /// instead of serving classes under the old name.
+    #[serde(default)]
+    pub file_module: Option<FileModule>,
+}
+
+/// The module a file is, for a language whose module names come from the
+/// file's place on disk (python's `pkg/models.py` is `pkg.models`): its
+/// path segments, and whether the file is its package's own module
+/// (`pkg/__init__.py` is `pkg`, and relative imports start from `pkg`
+/// itself rather than its parent). Derived by the driver, which has the
+/// path; the extractor only reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileModule {
+    pub segments: Vec<String>,
+    pub is_package: bool,
+}
+
+impl FileModule {
+    /// The package relative imports resolve from.
+    pub fn package(&self) -> &[String] {
+        match self.is_package {
+            true => &self.segments,
+            false => &self.segments[..self.segments.len().saturating_sub(1)],
+        }
+    }
 }
 
 impl PackFacts {
-    /// The import row (`use` / `#include` path token) whose span covers
-    /// `span`, if any. The one speller for "is this token inside an import
-    /// row": the row's leaf carries its own ref; every other segment is a
-    /// namespace no by-name lookup should answer for.
-    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
-        self.include_directives.iter().find(|(row, _)| {
-            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
-                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
-        })
+    /// Is `span` inside an import row (a `use` row's name or an
+    /// `#include` path token)? The one speller for that question: the
+    /// row's leaf carries its own ref; every other segment is a namespace
+    /// no by-name lookup should answer for.
+    pub fn in_import_row(&self, span: &Span) -> bool {
+        self.use_row_covering(span).is_some()
+            || self.include_directives.iter().any(|(row, _)| span_within(span, row))
+    }
+
+    /// The `use` row whose name token covers `span`, if any.
+    pub fn use_row_covering(&self, span: &Span) -> Option<&UseRow> {
+        self.use_rows.iter().find(|row| span_within(span, &row.span))
     }
 
     /// The line an import quick-fix inserts at: right after the last import
@@ -193,7 +229,7 @@ impl PackFacts {
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
-            + vcap(&self.use_aliases)
+            + vcap(&self.use_rows)
             + vcap(&self.qualified_spellings)
             + vcap(&self.domain_sites)
             + vcap(&self.moved_from)
@@ -208,6 +244,12 @@ impl PackFacts {
             + vcap(&self.native_type_spellings)
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
-            + vcap(&self.type_display);
+            + vcap(&self.type_display)
+            + self.file_module.as_ref().map_or(0, |m| vcap(&m.segments) + m.segments.iter().map(String::capacity).sum::<usize>());
     }
+}
+
+fn span_within(inner: &Span, outer: &Span) -> bool {
+    (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
+        && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
 }

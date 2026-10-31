@@ -93,14 +93,12 @@ fn save_one_provider(
     }
     if let Some(m) = result {
         if !m.analysis.degraded {
-            let seeds: Vec<_> = m.analysis.ref_row_seeds();
-            let sym_seeds = m.analysis.sym_row_seeds();
+            let seeds = m.analysis.row_seeds();
             if let Err(e) = module_cache::shred_derived_rows(
                 conn,
                 &m.path.to_string_lossy(),
                 module_cache::NAME_KEYED_SOURCE,
                 &seeds,
-                &sym_seeds,
             ) {
                 log::warn!("Failed to shred derived rows for '{}': {}", module_name, e);
             }
@@ -199,7 +197,7 @@ const QUEUE_STALL_WARN: std::time::Duration = std::time::Duration::from_secs(30)
 /// holds NO index or store guard at its call to this function — the
 /// registration tokens (`prepare_*_parts`) and surfaces are fully owned
 /// values by then, and the writer's lanes touch only `ModuleIndex` /
-/// `FileStore` / bag-cache maps that no producer holds across a send. That
+/// `OpenDocs` / bag-cache maps that no producer holds across a send. That
 /// property is what makes the bound safe; it is not incidental, and a new
 /// send site has to preserve it — `filestore-guard-discipline`, the family
 /// that has already produced two deadlocks here.
@@ -269,13 +267,14 @@ pub(crate) fn run_persist_writer<E>(
         }
         let n = batch.len();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let txn_open = conn.execute_batch("BEGIN IMMEDIATE").is_ok();
+            let txn_open =
+                conn.execute_batch(module_cache::sql::TXN_BEGIN_IMMEDIATE.registered()).is_ok();
             write_batch(conn, batch);
             let committed = txn_open
-                && match conn.execute_batch("COMMIT") {
+                && match conn.execute_batch(module_cache::sql::TXN_COMMIT.registered()) {
                     Ok(()) => true,
                     Err(err) => {
-                        let _ = conn.execute_batch("ROLLBACK");
+                        let _ = conn.execute_batch(module_cache::sql::TXN_ROLLBACK.registered());
                         log::error!(
                             "{label}: commit failed ({n} files, registering whole copies): {err}"
                         );
@@ -295,7 +294,7 @@ pub(crate) fn run_persist_writer<E>(
         if r.is_err() {
             // A panic can leave the txn open; roll back defensively so the
             // NEXT chunk's BEGIN isn't poisoned.
-            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch(module_cache::sql::TXN_ROLLBACK.registered());
             log::error!("{label}: chunk panicked ({n} files) — registering whole copies");
             for e in batch.drain(..) {
                 on_fallback(e);

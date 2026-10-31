@@ -1,6 +1,7 @@
 //! data-printer plugin intelligence, witness-bag chain typing, chain completion,
 //! and cross-file helper/goto resolution.
 
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 // ---- data-printer plugin: full intelligence ----
@@ -147,7 +148,7 @@ fn data_printer_use_line_options_completion() {
 /// (a) `$r` at line 71 resolves to a known class.
 /// (b) `->to` on line 71 is a MethodCall ref.
 /// (c) `->to`'s invocant resolves to a class via
-///     `FileAnalysis::method_call_invocant_class` (the bag-routed
+///     `FileAnalysis::resolve_receiver` (the bag-routed
 ///     resolver every reader — hover, gd, gr, rename — funnels
 ///     through).
 ///
@@ -169,11 +170,9 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Index the project's test_files/ as the workspace.
     let idx = ModuleIndex::new_for_test();
     idx.set_workspace_root(Some(root.to_str().unwrap()));
-    let files = crate::index::file_store::FileStore::new();
     let _indexed = crate::index::module_resolver::index_workspace_with_index(
         &root.join("test_files"),
-        &files,
-        Some(&idx),
+        &idx,
         None,
         None,
     );
@@ -212,7 +211,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Cross-file enrichment — same step the backend runs on open.
     // Re-runs the MCB→bag bridge so `my $r = $app->routes;` carries a
     // `Variable → Edge(PackageSymbol)` witness the registry chases with
-    // the index. Without this, `FileStore::enrich_open` hasn't fired
+    // the index. Without this, `OpenDocs::enrich_open` hasn't fired
     // yet and the whole chain is un-typed.
     analysis.enrich_imported_types_with_keys(Some(&idx));
 
@@ -286,7 +285,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     assert_eq!(get_ref.target_name, "get");
     if matches!(get_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
         let _ = (&tree, demo_source.as_bytes(), &idx, get_col);
-        let klass = analysis.method_call_invocant_class(get_ref, Some(&idx));
+        let klass = analysis.receiver_classes(get_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
         assert!(
             klass.is_some(),
             "`->get`'s invocant (= $r) should resolve to SOME class; got {:?}",
@@ -316,7 +315,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     );
     if matches!(to_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
         let _ = (&tree, demo_source.as_bytes(), &idx, to_col);
-        let klass = analysis.method_call_invocant_class(to_ref, Some(&idx));
+        let klass = analysis.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
         eprintln!(
             "DIAG: ->to invocant class (real Mojo): {:?} \
                  (None expected until deep chain through \
@@ -578,11 +577,9 @@ fn test_demo_chain_empirical_truth_table() {
 
     let idx = ModuleIndex::new_for_test();
     idx.set_workspace_root(Some(root.to_str().unwrap()));
-    let files = crate::index::file_store::FileStore::new();
     let _ = crate::index::module_resolver::index_workspace_with_index(
         &root.join("test_files"),
-        &files,
-        Some(&idx),
+        &idx,
         None,
         None,
     );
@@ -639,7 +636,7 @@ fn test_demo_chain_empirical_truth_table() {
     // --- Link 2: ->get's invocant class (= $r's class) ---
     let get_ref = analysis.ref_at(pt(get_col)).expect("ref at ->get");
     let get_invocant_class = if matches!(get_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
-        analysis.method_call_invocant_class(get_ref, Some(&idx))
+        analysis.receiver_classes(get_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string)
     } else {
         None
     };
@@ -672,7 +669,7 @@ fn test_demo_chain_empirical_truth_table() {
     // --- Link 4: ->to's invocant class (= ->get's return class) ---
     let to_ref = analysis.ref_at(pt(to_col)).expect("ref at ->to");
     let to_invocant_class = if matches!(to_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
-        analysis.method_call_invocant_class(to_ref, Some(&idx))
+        analysis.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string)
     } else {
         None
     };
@@ -904,7 +901,7 @@ sub action ($c) {\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
 
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
@@ -964,7 +961,7 @@ sub action ($c) {\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
@@ -1033,7 +1030,7 @@ sub day_of_week {\n\
     };
 
     let uri = Url::parse("file:///datetime.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
@@ -1083,7 +1080,7 @@ my @s = @My::Vars::servers;\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def for FQ var, got {other:?}"),
@@ -1115,7 +1112,7 @@ fn fq_variable_read_unknown_package_is_honest_miss() {
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     assert!(resp.is_none(), "unknown package must be an honest miss, got {resp:?}");
 }
 
@@ -1530,7 +1527,7 @@ sub startup {
         line: pre.matches('\n').count() as u32,
         character: (list_at - pre.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &fa, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &fa, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),

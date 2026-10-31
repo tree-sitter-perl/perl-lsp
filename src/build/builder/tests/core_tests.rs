@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 #[test]
@@ -882,7 +883,7 @@ fn test_hash_element_extracted_to_scalar_is_not_container_class() {
 }
 
 /// A4 end-to-end (Step 3 consume join): a typed write into a slot, extracted
-/// to a scalar, types the scalar via `SlotType` — so a method call on it
+/// to a scalar, types the scalar via `Field` — so a method call on it
 /// resolves. Helper is defined here so resolution can complete (contrast the
 /// honest-miss pin above, where it isn't).
 #[test]
@@ -899,7 +900,7 @@ fn slot_type_write_then_extract_resolves_method() {
     assert_eq!(
         ty.as_ref().and_then(|t| t.class_name()),
         Some("Helper"),
-        "$h must type as Helper via the consumed SlotType; got {:?}",
+        "$h must type as Helper via the consumed slot value; got {:?}",
         ty
     );
 
@@ -1290,7 +1291,7 @@ fn stamp_pass_sharing_matches_lone_resolutions() {
                 let fa = build_fa(&src);
                 let mut checked = 0;
                 for r in fa.refs().iter().filter(|r| r.member_site().is_some()) {
-                    let lone = fa.method_call_invocant_class(r, None);
+                    let lone = fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string);
                     let stamped = r.method_target().map(|t| t.invocant_class().to_string());
                     assert_eq!(stamped, lone, "ref at {:?}", r.span);
                     checked += 1;
@@ -1301,4 +1302,226 @@ fn stamp_pass_sharing_matches_lone_resolutions() {
             .join()
             .unwrap();
     }
+}
+
+fn implicit_globals(fa: &FileAnalysis) -> Vec<(String, Option<String>, usize)> {
+    fa.symbols()
+        .iter()
+        .filter(|s| matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. }))
+        .map(|s| (s.name.clone(), s.package.clone(), s.selection_span.start.row))
+        .collect()
+}
+
+/// #116: an undeclared variable is a package global. One symbol per
+/// `(package, name)`, anchored at the first use, with every use — bare and
+/// qualified — bound to it; special variables never mint one.
+#[test]
+fn undeclared_variable_mints_one_implicit_global_per_package() {
+    let src = "$a = 1;\n$a = 2;\n$abel = 3;\nprint \"$a $_ $0 $ENV{X} $main::abel\";\npackage Foo;\n$abel = 4;\n";
+    let fa = build_fa(src);
+    let mut globals = implicit_globals(&fa);
+    globals.sort();
+    assert_eq!(
+        globals,
+        vec![
+            ("$a".to_string(), Some("main".to_string()), 0),
+            ("$abel".to_string(), Some("Foo".to_string()), 5),
+            ("$abel".to_string(), Some("main".to_string()), 2),
+        ],
+    );
+    let main_abel = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "$abel" && s.package.as_deref() == Some("main"))
+        .unwrap()
+        .id;
+    let bound_rows: Vec<usize> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.resolved_symbol() == Some(main_abel))
+        .map(|r| r.span.start.row)
+        .collect();
+    assert_eq!(bound_rows, vec![2, 3], "the bare use and `$main::abel`");
+    let a_uses = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "$a" && r.resolved_symbol().is_some())
+        .count();
+    assert_eq!(a_uses, 3);
+}
+
+/// `${name}` is `$name` — in code and in a string — so it binds the same
+/// global, and rename rewrites inside the braces (a lexical's too).
+#[test]
+fn braced_spelling_is_the_same_variable() {
+    let src = "$abel = 1;\nprint \"${abel}s\", ${abel};\nmy $x = 2;\nprint \"${x}y\";\n";
+    let fa = build_fa(src);
+    assert_eq!(implicit_globals(&fa), vec![("$abel".to_string(), Some("main".to_string()), 0)]);
+    let abel = fa.symbols().iter().find(|s| s.name == "$abel").unwrap().id;
+    let bound = fa.refs().iter().filter(|r| r.resolved_symbol() == Some(abel)).count();
+    assert_eq!(bound, 3, "the bare use and both braced spellings");
+
+    let edits = fa.rename_at(Point::new(2, 4), "$why").unwrap();
+    let mut cols: Vec<(usize, usize, usize)> =
+        edits.iter().map(|(s, _)| (s.start.row, s.start.column, s.end.column)).collect();
+    cols.sort();
+    assert_eq!(cols, vec![(2, 4, 5), (3, 9, 10)], "only the name token; braces survive");
+    assert!(edits.iter().all(|(_, t)| t == "why"));
+}
+
+/// A symbolic reference to a constant name is the package variable it
+/// names: a literal (`${"abel"}`) or a single-literal fold (`${$n}`), in
+/// the package in force. It never reaches a lexical of the same name, and a
+/// computed name binds nothing.
+#[test]
+fn symbolic_reference_to_a_constant_name_is_the_global() {
+    let src = "$abel = 1;\nmy $n = 'abel';\n{ my $abel = 2; print ${\"abel\"}, ${$n}, ${\"ab$n\"}; }\nfor my $v ('abel', 'cain') { print ${$v} }\npackage Foo;\nour @q;\nprint @{\"q\"}, @{\"main::abel\"};\n";
+    let fa = build_fa(src);
+    let bound_to = |name: &str, pkg: &str| {
+        let id = fa
+            .symbols()
+            .iter()
+            .find(|s| {
+                s.name == name
+                    && s.package.as_deref() == Some(pkg)
+                    && matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
+            })
+            .unwrap_or_else(|| panic!("{name} in {pkg}"))
+            .id;
+        let mut sites: Vec<(usize, usize)> = fa
+            .refs()
+            .iter()
+            .filter(|r| r.resolved_symbol() == Some(id))
+            .map(|r| (r.span.start.row, r.span.start.column))
+            .collect();
+        sites.sort();
+        sites
+    };
+    assert_eq!(
+        bound_to("$abel", "main"),
+        vec![(0, 0), (2, 25), (2, 35), (3, 37)],
+        "literal, fold and loop fold — not the lexical",
+    );
+    assert_eq!(bound_to("@q", "Foo"), vec![(5, 4), (6, 9)]);
+    let folded_from = |at: Point, target: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.span.start == at && r.target_name == target)
+            .unwrap()
+            .folded_from
+            .map(|s| (s.start.row, s.start.column))
+    };
+    assert_eq!(folded_from(Point::new(2, 35), "$main::abel"), Some((1, 9)), "rename source is the literal");
+    // A fold with several values names each one, with no single rename source.
+    assert_eq!(folded_from(Point::new(3, 37), "$main::cain"), None);
+}
+
+/// A deref's element/slice/`$#` access visits its operand: the variable
+/// and the call inside get their refs (rename reaches them), the access
+/// itself names no variable, and a constant name is the package aggregate.
+#[test]
+fn deref_container_access_visits_its_operand() {
+    let src = "our @abel;\nmy $x = [];\nprint $$x[0], ${$x}[0], @$x[1], @{$x}{a}, %$x{a}, $$x{k}, $#$x, $#{$x};\nprint ${Foo->bar}[0], $#{Foo->bar}, ${\"abel\"}[0], $#{\"abel\"};\n";
+    let fa = build_fa(src);
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+    let x = fa.symbols().iter().find(|s| s.name == "$x").unwrap().id;
+    let x_uses = fa.refs().iter().filter(|r| r.resolved_symbol() == Some(x) && r.span.start.row == 2).count();
+    assert_eq!(x_uses, 8, "every deref of `$x`");
+    let bars = fa.refs().iter().filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "bar").count();
+    assert_eq!(bars, 2, "the call inside each braced deref");
+    let abel = fa.symbols().iter().find(|s| s.name == "@abel").unwrap().id;
+    let abel_cols: Vec<usize> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.resolved_symbol() == Some(abel) && r.span.start.row == 3)
+        .map(|r| r.span.start.column)
+        .collect();
+    assert_eq!(abel_cols, vec![39, 54], "each literal names `@main::abel`");
+}
+
+/// A declared variable never mints a global, and `use vars` declares.
+#[test]
+fn declared_variables_mint_no_implicit_global() {
+    let src = "my $x = 1;\nour $y = 2;\nuse vars qw($v @w);\nfor my $i (1) { print $i }\nprint $x, $y, $v, @w;\n";
+    let fa = build_fa(src);
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+    let v = fa.symbols().iter().find(|s| s.name == "$v").expect("use vars declares $v");
+    assert!(matches!(v.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. }));
+    assert_eq!(v.selection_span.start, tree_sitter::Point::new(2, 12));
+}
+
+/// The outline shows an undeclared global (it used to come back empty).
+#[test]
+fn outline_lists_undeclared_global() {
+    let fa = build_fa("$a = 1;\n$a = 2;\nprint \"$a\";\n");
+    let outline = fa.document_symbols();
+    assert_eq!(outline.len(), 1);
+    assert_eq!(outline[0].name, "$a");
+    assert_eq!(outline[0].detail.as_deref(), Some("global"));
+}
+
+/// `our` is lexically scoped: a bare use after `package main;` still names
+/// the earlier `our $v` of `package Foo;`, so it is no implicit global.
+#[test]
+fn our_from_an_earlier_package_is_not_an_implicit_global() {
+    let fa = build_fa("package Foo;\nour $version = 1;\npackage main;\nprint $version;\n");
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+}
+
+/// Perl names its constructor by convention; the builder reads the
+/// convention where it mints the callable, and a `requires` marker is a
+/// contract, so consumers ask the symbol for both.
+#[test]
+fn a_perl_constructor_and_a_requires_marker_are_flags() {
+    use crate::model::file_analysis::SymbolFlags;
+    let fa = build_fa("package R; use Moo::Role; requires 'fetch';\npackage C; sub new { bless {}, shift } sub newer {}\n");
+    let flags = |name: &str| fa.symbols().iter().find(|s| s.name == name).unwrap().flags;
+    assert!(fa.symbols().iter().find(|s| s.name == "new").unwrap().is_constructor());
+    assert!(!flags("newer").contains(SymbolFlags::CONSTRUCTOR));
+    assert!(flags("fetch").contains(SymbolFlags::CONTRACT));
+}
+
+fn param_names(fa: &FileAnalysis, sub: &str) -> Vec<String> {
+    let sym = fa.symbols().iter().find(|s| s.name == sub).expect("sub");
+    match &sym.detail {
+        SymbolDetail::Sub { params, .. } => params.iter().map(|p| p.name.clone()).collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A statement that leaves `@_` alone consumes no argument, so the
+/// unpack after it still binds the next one (Moo's `import`:
+/// `my $target = caller; my $class = shift;`). One that reads or hands on
+/// `@_` ends the preamble.
+#[test]
+fn args_untouched_statements_do_not_end_the_unpack() {
+    let fa = build_fa(
+        "package Moo;\n\
+         sub import { my $target = caller; my $class = shift; $class->make_class($target); }\n\
+         sub make_class { 1 }\n\
+         sub counted { my $n = scalar(@_); my $x = shift; }\n\
+         sub handed { &other; my $x = shift; }\n\
+         sub guarded { return unless defined $_[0]; my $x = shift; }\n",
+    );
+    assert_eq!(param_names(&fa, "import"), ["$class"]);
+    assert!(fa.is_receiver_at("$class", Point::new(1, 60)), "the conventional invocant name settles it as the receiver");
+    assert!(param_names(&fa, "counted").is_empty(), "`@_` read: the preamble ends");
+    assert!(param_names(&fa, "handed").is_empty(), "`&other;` hands `@_` on");
+    assert!(param_names(&fa, "guarded").is_empty(), "`$_[0]` read");
+}
+
+/// A special variable binds like any global, but Perl owns its name: its
+/// uses are one identity, and rename declines it.
+#[test]
+fn special_variables_bind_but_never_rename() {
+    let fa = build_fa("sub f { my $x = shift; print @_, $_[0]; for (@_) { print $_ } }\n");
+    let at = |needle: &str, nth: usize| {
+        let src = "sub f { my $x = shift; print @_, $_[0]; for (@_) { print $_ } }\n";
+        let col = src.match_indices(needle).nth(nth).unwrap().0 + 1;
+        tree_sitter::Point::new(0, col)
+    };
+    assert!(fa.rename_at(at("@_", 0), "args").is_none());
+    assert!(fa.rename_at(at("$_ ", 0), "it").is_none());
+    assert_eq!(fa.find_references(at("@_", 0), None).len(), 3, "both `@_` and `$_[0]` name `@_`");
+    assert!(implicit_globals(&fa).is_empty(), "a special variable is a mention, not this file's global");
 }

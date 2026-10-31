@@ -13,7 +13,7 @@ use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
-/// snippet re-parse) shares. Lives in the builder layer: the resolver
+/// replacement parse) shares. Lives in the builder layer: the resolver
 /// calling down is fine, the builder reaching up was not.
 pub fn create_parser() -> tree_sitter::Parser {
     let mut parser = tree_sitter::Parser::new();
@@ -216,6 +216,16 @@ struct DeferredVarType {
     plugin_id: String,
 }
 
+/// A named sub of a package that may be a class, whose first parameter is
+/// its invocant if it is a method rather than a plain helper; decided by
+/// `mark_method_invocants`.
+struct MethodOrHelperSub {
+    sub_id: SymbolId,
+    scope: ScopeId,
+    span: Span,
+    package: String,
+}
+
 /// Plugin-emitted `NamedSubParamType` request, resolved at end-of-build.
 /// Keyed by sub name + positional index rather than a span: a `\&name`
 /// registration arg carries no callback body span, and the named sub may
@@ -251,6 +261,13 @@ pub(super) enum TailArm {
 
 struct Builder<'a> {
     source: &'a [u8],
+    /// The code of each `s///e` replacement, by the replacement's start
+    /// byte — see `parse_eval_replacements`.
+    // TODO(injected-trees): only the walk sees these. Post-walk passes that
+    // traverse from the main root (pattern dispatch, flow query, the chain
+    // typing index) miss replacement code; the fix is a file tree type that
+    // yields injected trees transparently, not a roots list each pass loops.
+    eval_injections: std::collections::HashMap<usize, Node<'a>>,
 
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,
@@ -267,6 +284,14 @@ struct Builder<'a> {
     /// resolved by sub name + index at end-of-build alongside
     /// `deferred_var_types`.
     deferred_named_sub_param_types: Vec<DeferredNamedSubParamType>,
+    method_or_helper_subs: Vec<MethodOrHelperSub>,
+    /// Each straight-line or conditional `shift` of `@_` the walk saw, in
+    /// source order: `(sub scope, point after it, conditional)`, replayed
+    /// by `seed_arg_window`.
+    arg_head_consumes: Vec<(ScopeId, Point, bool)>,
+    /// `(package, name)` of each sub the file calls as a plain function
+    /// (`name(...)`; a `\&name` reference is not a call).
+    plain_called_subs: std::collections::HashSet<(String, String)>,
     fold_ranges: Vec<FoldRange>,
     imports: Vec<Import>,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
@@ -287,7 +312,7 @@ struct Builder<'a> {
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
-    /// reads it to seed `SlotType{class, key} → Edge(Expr(rhs_span))`
+    /// reads it to seed `Field{class, key} → Edge(Expr(rhs_span))`
     /// alongside the untyped mutation Fact. Hash-element LHS only; plain
     /// variable assignments never enter it.
     slot_write_rhs_span: std::collections::HashMap<Span, Span>,
@@ -348,7 +373,7 @@ struct Builder<'a> {
     /// keyed by what each name resolves to (`consts.rs`).
     consts: consts::ConstTable,
     /// Variable/field declarations by `(scope, sigiled name)`, in walk
-    /// order — the walk-time half of variable visibility, for `const_key`.
+    /// order — the walk-time half of variable visibility, for `binding_key_in`.
     var_decls: std::collections::HashMap<(ScopeId, String), Vec<SymbolId>>,
     /// Names declared via `use constant` (NAME and block forms), per the
     /// enclosing package. A standalone bareword whose text is in this set is
@@ -431,17 +456,14 @@ struct Builder<'a> {
     next_scope_id: u32,
     next_symbol_id: u32,
 
-    /// Flat record of `package`/`class` declarations and the byte
-    /// ranges they govern. Independent of the lexical scope tree —
-    /// `package Foo;` is not a lexical boundary in Perl. For
-    /// statement-form declarations the end is initially seeded with
-    /// the file end and gets trimmed when a same-level successor
-    /// appears.
-    package_ranges: Vec<crate::model::file_analysis::PackageRange>,
-    /// Index in `package_ranges` of the currently-open statement-form
-    /// declaration (the one a successor `package X;` / `class X;`
-    /// would supplant), if any.
-    open_statement_package: Option<usize>,
+    /// The namespace lane (`FileAnalysis::namespace_ranges`) as the walk
+    /// writes it.
+    namespace_ranges: Vec<crate::model::file_analysis::NamespaceRange>,
+    /// The statement-form `package X;` / `class X;` sections still running.
+    open_sections: crate::model::file_analysis::OpenSections,
+    /// The end of each `{ … }` block enclosing the walk: the regions a
+    /// statement-form package is bounded by.
+    package_regions: Vec<Point>,
 
     /// Framework plugin registry. Shared Arc so multiple builders in one
     /// process avoid re-compiling the same Rhai scripts.
@@ -456,6 +478,8 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `ref_tag_functions()` manifest union, flattened once.
+    ref_tag_functions: Vec<plugin::RefTagFunction>,
     /// Plugin `meta_methods()` manifest union, flattened once at build.
     meta_methods: Vec<String>,
 
@@ -510,7 +534,7 @@ struct Builder<'a> {
     /// fixed-point movement counter) read it.
     ///
     /// **Build-only.** Never copied into `FileAnalysis`. The reader-
-    /// side counterpart is `FileAnalysis::method_call_invocant_class`,
+    /// side counterpart is `FileAnalysis::resolve_receiver`,
     /// which queries the bag at read time and so picks up cross-file
     /// enrichment automatically.
     method_call_invocant: std::collections::HashMap<usize, String>,
@@ -519,16 +543,18 @@ struct Builder<'a> {
     /// `FileAnalysis.attr_accessors`.
     attr_projections: Vec<crate::model::file_analysis::AttrProjection>,
 
-    /// Vars whose first escape site is already recorded as an
+    /// Variables whose first escape site is already recorded as an
     /// open-switching `KeyWrite` (walk-local dedup — one escape write
-    /// per var is enough: it widens the shape from that point on, and
+    /// per variable is enough: it widens the shape from that point on, and
     /// the mutation-extension pass charges one bag query per record).
-    escape_recorded: std::collections::HashSet<String>,
+    /// Keyed by binding: two subs' `my $p` are two variables.
+    escape_recorded: std::collections::HashSet<consts::BindingKey>,
 
-    /// Scalars reassigned after declaration (`$v = …` targeting the
-    /// variable itself; element writes go to `key_writes` instead).
-    /// Flushed into `FileAnalysis.reassigned_scalars`.
-    reassigned_scalars: std::collections::HashSet<String>,
+    /// The `Variable` refs that reassign their variable (`$v = …` targeting
+    /// the variable itself; element writes go to `key_writes` instead).
+    /// Resolved to their symbols into `FileAnalysis.reassigned_vars` once
+    /// `resolve_variable_refs` has bound them.
+    reassigning_refs: Vec<usize>,
 
     /// `$var->{key} = …` writes in walk order — input to the
     /// mutation-extension pass (shape extension / open-widening).
@@ -538,10 +564,6 @@ struct Builder<'a> {
     /// Per-role `requires` lists. Flushed into
     /// `FileAnalysis.role_requires`.
     role_requires: std::collections::HashMap<String, Vec<String>>,
-
-    /// SymbolIds of `requires`-synthesized contract markers. Flushed
-    /// into `FileAnalysis.contract_symbols`.
-    contract_symbols: std::collections::HashSet<crate::model::file_analysis::SymbolId>,
 
     /// Packages with at least one parent edge we could not fold to a
     /// literal name (runtime-generated roles). Flushed into
@@ -605,6 +627,13 @@ struct Builder<'a> {
     /// **Build-only**.
     method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
 
+    /// Indirect-object calls (`new Foo(ARGS)`): `(call, class, args)`. The
+    /// chain-typing index finds a call's receiver and arguments by
+    /// `method_call_expression` node, and only the walk knows a
+    /// function-call node is one of these, so the walk hands them over.
+    /// **Build-only**.
+    indirect_method_calls: Vec<(Node<'a>, Node<'a>, Option<Node<'a>>)>,
+
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading
@@ -625,6 +654,9 @@ struct Builder<'a> {
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).
     defined_narrowings: Vec<narrowing::DefinedNarrowing>,
+    /// Recorded tag guards (`$ref eq 'ARRAY'`), re-derived each fold
+    /// iteration (`emit_tag_narrowing_witnesses`).
+    tag_narrowings: Vec<narrowing::TagNarrowing>,
     /// Recognized narrowings whose region cutoff resolves post-walk against the
     /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
     /// truncation that replaced the `cst::rebinds_scalar` grammar scan.

@@ -529,7 +529,7 @@ pub trait CrossFileLookup {
     /// a key being absent from a returned map means, and conflating the two
     /// turns an unbaked file into a file that concludes nothing.
     ///
-    /// Defaulted so an index with no store (tests, pack sub-indexes) is
+    /// Defaulted so an index with no store (tests, pack languages) is
     /// unaffected and simply keeps decoding.
     fn conclusions_for(
         &self,
@@ -556,6 +556,14 @@ pub trait CrossFileLookup {
     /// the winner alone.
     fn def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.get_cached(name).into_iter().collect()
+    }
+    /// The files declaring a use-map class whose LEAF is `leaf`, under any
+    /// namespace — the widening relation, read only where nothing indexed
+    /// declares an identity (`ScopedLookup::use_map_candidates`). Kept apart
+    /// from `def_candidates` so a leaf never answers a name lookup or wins
+    /// a name slot. Path-ordered. Default: none, so nothing widens.
+    fn leaf_def_candidates(&self, _leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        Vec::new()
     }
     /// `def_candidates` AS SEEN from the querying scope — the forward-
     /// resolution face of the candidate table. Raw indexes pass the full
@@ -621,7 +629,7 @@ pub trait CrossFileLookup {
     }
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
-    /// query that reads a foreign file's bag (the `PackageSymbol` / `SlotType`
+    /// query that reads a foreign file's bag (the `PackageSymbol` / `Field`
     /// / `TypeName` cross-file chases, `def_candidates` return-type folds,
     /// cross-file field types) routes through here so the exact persisted bag
     /// rehydrates on demand. Default (Perl hub, tests, non-pack impls): a cheap
@@ -739,7 +747,7 @@ pub trait CrossFileLookup {
     }
     /// The registry-sweep sibling of `candidate_may_declare`: can `cached`'s
     /// BAG hold any witness for a class-keyed attachment named `name`
-    /// (`PackageSymbol{class, name}` when `attributed`, `SlotType{.., key}`
+    /// (`PackageSymbol{class, name}` when `attributed`, `Field{.., name}`
     /// otherwise)? Rows half only — the chase-shape gates (declared
     /// parents, dynamic parents, app-surface membership, the unrowed
     /// residue) live at the call site, which owns the chase semantics.
@@ -843,12 +851,9 @@ pub trait CrossFileLookup {
     }
     /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
     /// attribution for the masked backward walk: a dependency site is
-    /// visible to references but never rewritten by rename. The Perl hub's
-    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
-    /// in the FileStore, so anything here came from `@INC`) — hence the
-    /// default. A pack sub-index holds the workspace's own files too, so it
-    /// overrides with membership in its registered dependency-root set
-    /// (composer's vendor packages).
+    /// visible to references but never rewritten by rename; every other
+    /// file the lookup holds is WORKSPACE. The default (no front door, so
+    /// everything held came from elsewhere) is the conservative answer.
     fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
         true
     }
@@ -862,6 +867,13 @@ pub trait CrossFileLookup {
     /// Default `None` for impls without a path map.
     fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
         None
+    }
+    /// Whether this lookup is bound to one asker's visibility
+    /// (`ScopedLookup`). What a query sees depends on it, so a receiver
+    /// frozen through one view answers only readers holding the same view
+    /// (`ReceiverView`).
+    fn is_scoped(&self) -> bool {
+        false
     }
     /// The querying file's visibility scope when this lookup is bound to one
     /// (`ScopedLookup`): its own canonical path + the visible set (self path ∪
@@ -900,6 +912,9 @@ pub trait CrossFileLookup {
             }
         });
     }
+    /// The WORKSPACE-tier subset of `for_each_cached_file`: exactly the
+    /// files `is_dependency_path` answers false for. Default: none.
+    fn for_each_workspace_file(&self, _f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {}
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
@@ -1262,7 +1277,7 @@ impl<'a> ScopedLookup<'a> {
             }
             let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
             let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
-            for c in self.inner.def_candidates(leaf) {
+            for c in self.inner.leaf_def_candidates(leaf) {
                 match self.inner.symbols_present(&c).declared_class_namespace(leaf) {
                     Some(d) if d == ns => agree.push(c),
                     _ => rest.push(c),
@@ -1356,6 +1371,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // definition-ness themselves, and a definition legitimately lives
         // OUTSIDE the querying file's closure (a `.c` body nobody includes).
         self.inner.def_candidates(name)
+    }
+    fn leaf_def_candidates(&self, leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        self.inner.leaf_def_candidates(leaf)
     }
     fn visible_def_candidates_widening(
         &self,
@@ -1549,11 +1567,17 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn flat_scope(&self) -> bool {
         self.axis.name_keyed()
     }
+    fn is_scoped(&self) -> bool {
+        true
+    }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)
     }
     fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached_file(f)
+    }
+    fn for_each_workspace_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
+        self.inner.for_each_workspace_file(f)
     }
     fn for_each_reexport_module(
         &self,
@@ -1608,3 +1632,44 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
 }
 
+/// A class reference answered by widening: the identity the file names,
+/// which nothing indexed declares, and the same-leaf class that stood in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidenedClassRef {
+    pub span: Span,
+    pub named: String,
+    pub resolved: String,
+}
+
+/// A same-leaf class standing in for `identity` in a file `index` holds.
+#[derive(Debug, Clone)]
+pub struct WidenedStandIn {
+    pub path: std::path::PathBuf,
+    pub span: Span,
+    pub class: String,
+}
+
+/// The classes that stand in for `identity` when `index` widens it — the
+/// same-leaf declarations of other namespaces, in candidate order — and
+/// none when anything indexed declares the identity or the scope does not
+/// widen. One reader of the widening verdict for every class-shaped
+/// projection (goto-def's last lane, the diagnostic).
+pub fn widened_class_stand_ins(
+    index: &dyn CrossFileLookup,
+    identity: &str,
+    names: &NameSpellings,
+) -> Vec<WidenedStandIn> {
+    let (cands, widened) = index.visible_def_candidates_widening(identity);
+    if !widened {
+        return Vec::new();
+    }
+    let leaf = name_match_key(identity, names);
+    cands
+        .iter()
+        .filter_map(|c| {
+            let fa = index.symbols_present(c);
+            let sym = fa.declared_class_with_leaf(&leaf)?;
+            Some(WidenedStandIn { path: c.path.clone(), span: sym.selection_span, class: sym.name.clone() })
+        })
+        .collect()
+}

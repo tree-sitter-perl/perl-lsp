@@ -8,6 +8,7 @@ impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
     pub(super) fn visit_node(&mut self, node: Node<'a>) {
+        self.observe_deref(node);
         match node.kind() {
             "package_statement" => self.visit_package(node),
             "class_statement" => self.visit_class(node),
@@ -18,6 +19,13 @@ impl<'a> Builder<'a> {
             "for_statement" => self.visit_for(node),
             "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
+            "use_version_statement" => {
+                if let Some(version) = node.child_by_field_name("version").and_then(|v| v.utf8_text(self.source).ok()) {
+                    if crate::model::conventions::version_enables_strict(version) {
+                        self.switch_declaration_rule(node_to_span(node), true);
+                    }
+                }
+            }
             "require_expression" => self.visit_require(node),
             "assignment_expression" => self.visit_assignment(node),
 
@@ -57,23 +65,35 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Flow-sensitive narrowing: a block guard refines the then-block;
-            // a statement-level exit guard refines the rest of the block.
+            // Flow-sensitive narrowing: a guard refines each arm it decides
+            // (a block, a modified statement, a ternary branch, a logical
+            // operator's right side); a statement-level exit guard refines
+            // the rest of the block.
             "conditional_statement" => {
                 self.narrow_block_guard(node);
                 self.queue_children(node);
             }
-            "postfix_conditional_expression" => {
-                self.narrow_postfix_exit(node);
+            "postfix_conditional_expression" | "postfix_loop_expression" => {
+                self.narrow_postfix(node);
+                self.queue_children(node);
+            }
+            "loop_statement" | "cstyle_for_statement" => {
+                self.narrow_loop(node);
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {
+                self.narrow_logical_rhs(node);
                 self.narrow_logical_exit(node);
                 self.queue_children(node);
             }
+            "conditional_expression" => {
+                self.narrow_ternary(node);
+                self.queue_children(node);
+            }
 
-            // Variable references
-            "scalar" | "array" | "hash" => self.visit_var_ref(node),
+            // Variable references. The `scalar` keyword token of
+            // `scalar @items` shares the kind but is anonymous.
+            "scalar" | "array" | "hash" if node.is_named() => self.visit_var_ref(node),
             "container_variable" | "slice_container_variable" | "keyval_container_variable" => {
                 self.visit_container_ref(node);
             }
@@ -107,6 +127,9 @@ impl<'a> Builder<'a> {
             // Dereference expressions → rep observations on the operand
             "array_element_expression" => {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
+                if self.element_written_in_place(node) {
+                    self.record_in_place_write(node);
+                }
                 // Only the arrow form `$x->[i]` has a scalar-ref receiver; the
                 // direct `$arr[i]` indexes the named array.
                 if crate::cst::element_arrow_deref(node, self.source) {
@@ -125,9 +148,6 @@ impl<'a> Builder<'a> {
             // (the EXPR inside the block) is a coderef. Narrow it, then visit
             // children so the inner scalar still gets its read ref.
             "code_deref_expression" => {
-                if let Some(operand) = code_deref_operand(node) {
-                    self.push_rep_observation(operand, node, TypeObservation::CodeRefInvocation);
-                }
                 self.queue_children(node);
             }
             "array_deref_expression" => {
@@ -141,6 +161,7 @@ impl<'a> Builder<'a> {
 
             // Binary operators → type constraints on variable operands
             "binary_expression" => {
+                self.narrow_logical_rhs(node);
                 self.infer_binary_op_type(node);
                 self.queue_children(node);
             }
@@ -153,7 +174,7 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => {
                 // $x++ / $x-- / ++$x / --$x → Numeric
                 if let Some(operand) = node.named_child(0) {
-                    self.push_var_type_constraint(operand, node, InferredType::Numeric);
+                    self.observe(operand, node, TypeObservation::NumericUse);
                 }
                 self.queue_children(node);
             }
@@ -217,21 +238,30 @@ impl<'a> Builder<'a> {
             "quoted_regexp" | "match_regexp" => {
                 self.queue_children(node);
             }
-            "substitution_regexp" => {
-                // `s///e`: the replacement is Perl *code*, but the grammar
-                // emits it as a plain `replacement` node (not parsed as code).
-                // Re-parse it so calls/vars inside resolve (rule #7), mapping
-                // spans back to the file. Same idea as the __END__/ISA re-parses.
-                let repl = self.subst_replacement_is_eval(node).then(|| {
-                    (0..node.named_child_count())
-                        .filter_map(|i| node.named_child(i))
-                        .find(|c| c.kind() == "replacement")
-                }).flatten();
-                if let Some(repl) = repl {
-                    self.emit_refs_in_eval_replacement(repl);
+            // The grammar reads an `/e` replacement as an interpolated
+            // string: its own children are the string view (`$h{k}` as a `$h`
+            // scalar). The code is the replacement's own parse, walked in a
+            // block scope of its own.
+            "substitution_regexp" => match crate::cst::eval_replacement(node, self.source) {
+                Some(repl) => {
+                    let code = self.eval_injections.get(&repl.start_byte()).copied();
+                    let mut steps: Vec<Box<dyn FnOnce(&mut Builder<'a>) + 'a>> = Vec::new();
+                    for c in crate::cst::NodeExt::elements(&node) {
+                        if c != repl {
+                            steps.push(Box::new(move |b: &mut Builder<'a>| b.queue_node(c)));
+                        } else if let Some(root) = code {
+                            steps.push(Box::new(move |b: &mut Builder<'a>| {
+                                b.push_scope(ScopeKind::Block, node_to_span(repl), None);
+                                b.queue_children_then(root, |b| {
+                                    b.pop_scope();
+                                });
+                            }));
+                        }
+                    }
+                    self.queue_sequence(steps);
                 }
-                self.queue_children(node);
-            }
+                None => self.queue_children(node),
+            },
 
             // ERROR nodes: recover structural declarations (the file's skeleton)
             // but skip expressions/refs which are unreliable inside broken regions
@@ -396,9 +426,9 @@ impl<'a> Builder<'a> {
     /// Walk a `{ ... }` block's children, reverting package context at block
     /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
     /// hard boundary: `{ package Inner; }` must not leak Inner to the
-    /// statements that follow. Saves the walk-time package name and the open
-    /// statement-range cursor, restores both on exit, and repairs the
-    /// `package_ranges` spans so `package_at` reverts past the block too.
+    /// statements that follow. The block is a region of the namespace lane,
+    /// so a statement-form package inside it ends at its close; the
+    /// walk-time package name is restored on exit.
     pub(super) fn walk_block_package_scoped(&mut self, node: Node<'a>) {
         self.walk_block_package_scoped_then(node, |_| {});
     }
@@ -411,27 +441,9 @@ impl<'a> Builder<'a> {
         work: impl FnOnce(&mut Builder<'a>) + 'a,
     ) {
         let saved_pkg = self.current_package.clone();
-        let saved_stmt_range = self.open_statement_package;
+        self.package_regions.push(node.end_position());
         self.queue_children_then(node, move |b| {
-            if b.open_statement_package != saved_stmt_range {
-                // A `package Inner;` inside the block opened a range to file-end;
-                // trim it to block close so it doesn't shadow the enclosing pkg.
-                if let Some(idx) = b.open_statement_package {
-                    b.package_ranges[idx].span.end = node.end_position();
-                }
-                // The enclosing `package Outer;` range (if any) was truncated to
-                // Inner's start when Inner opened — resume it to file-end so
-                // Outer covers the post-block tail.
-                if let Some(idx) = saved_stmt_range {
-                    let file_end = b
-                        .scope_stack
-                        .first()
-                        .map(|id| b.scopes[id.0 as usize].span.end)
-                        .unwrap_or_else(|| node.end_position());
-                    b.package_ranges[idx].span.end = file_end;
-                }
-                b.open_statement_package = saved_stmt_range;
-            }
+            b.package_regions.pop();
             b.current_package = saved_pkg;
             work(b);
         });
@@ -479,7 +491,7 @@ impl<'a> Builder<'a> {
         } else {
             // `package Foo;` — package context flows to the next
             // sibling `package X;` / `class X;` or end of file.
-            // `package_ranges` carries that for `package_at`; the
+            // `namespace_ranges` carries that for `package_at`; the
             // walk-time `current_package` drives synthesised
             // sub/method packages. No lexical scope is pushed —
             // `package Foo;` is not a lexical boundary in Perl.
@@ -567,7 +579,7 @@ impl<'a> Builder<'a> {
         } else {
             // Flat `class Foo;` — same semantics as non-block
             // `package Foo;`: package context flows in
-            // `package_ranges`; no lexical scope is pushed. The
+            // `namespace_ranges`; no lexical scope is pushed. The
             // Class SYMBOL was already emitted above.
             self.current_package = Some(name.clone());
             self.open_statement_package_range(name, node.start_position());
@@ -658,20 +670,24 @@ impl<'a> Builder<'a> {
         //     positional is the invocant.
         //   * Regular `sub` bodies use two Perl-native signals:
         //       - first positional named `$self`/`$class`/`$this`/`$proto`
-        //       - or the enclosing package declares inheritance (a sub
-        //         in a subclass is, by Perl OO convention, a method)
+        //       - or the enclosing package is a class (a sub in a class is,
+        //         by Perl OO convention, a method)
         //     Either triggers invocant marking; name stays free so the
         //     user can call it `$c`/`$ctx`/whatever.
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
+        // The class convention alone is decided post-walk
+        // (`mark_method_invocants`): whether the package is a class
+        // (a later `bless` or `use parent` decides it), and whether the
+        // sub is a plain helper, called only as a function.
+        let mut method_or_helper = false;
         if let Some(first) = params.first_mut() {
             let name_says_invocant =
                 crate::model::conventions::is_conventional_invocant_name(&first.name);
-            let pkg_is_subclass = self.current_package
-                .as_ref()
-                .map_or(false, |p| self.package_parents.contains_key(p));
-            if is_method || name_says_invocant || pkg_is_subclass {
+            if is_method || name_says_invocant {
                 first.is_invocant = true;
+            } else if first.name.starts_with('$') {
+                method_or_helper = true;
             }
         }
 
@@ -740,6 +756,14 @@ impl<'a> Builder<'a> {
 
         // Detect first-param-is-self pattern
         self.detect_first_param_type(&params, node);
+        if let (true, Some(package)) = (method_or_helper, self.current_package.clone()) {
+            self.method_or_helper_subs.push(MethodOrHelperSub {
+                sub_id,
+                scope: self.current_scope(),
+                span: node_to_span(node),
+                package,
+            });
+        }
 
         // Role-contract param typing: a plugin `param_types()` rule may type
         // a named param (e.g. `$app` in a `GenericCo::Upgrade::OneTime` doer's
@@ -962,7 +986,10 @@ impl<'a> Builder<'a> {
                 };
                 let assign = match assign {
                     Some(a) => a,
-                    None => break, // stop at first non-assignment statement
+                    // A statement that leaves `@_` alone consumes no argument,
+                    // so the next `shift` still binds the same position.
+                    None if !self.touches_args(stmt) => continue,
+                    None => break,
                 };
 
                 if let Some(right) = assign.child_by_field_name("right") {
@@ -1041,8 +1068,11 @@ impl<'a> Builder<'a> {
                     }
                 }
 
-                // Not a recognized param pattern — stop collecting
-                break;
+                // Not a param pattern: one that leaves `@_` alone (`my $target
+                // = caller`) consumes no argument; any other ends the preamble.
+                if self.touches_args(assign) {
+                    break;
+                }
             }
 
             if !shift_params.is_empty() {
@@ -1104,18 +1134,48 @@ impl<'a> Builder<'a> {
 
     /// Check if a node is a `shift` call (bare or with parens).
     pub(super) fn is_shift_call(&self, node: Node<'a>) -> bool {
+        self.is_bare_call_of(node, "shift")
+    }
+
+    /// A call of `op` written with no argument (`shift`, `pop`, `shift()`).
+    fn is_bare_call_of(&self, node: Node<'a>, op: &str) -> bool {
         match node.kind() {
-            "bareword" => node.utf8_text(self.source).ok() == Some("shift"),
+            "bareword" => node.utf8_text(self.source).ok() == Some(op),
             "func1op_call_expression" => {
                 crate::cst::nth_element(node, 0).is_none()
-                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("shift")
+                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some(op)
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
                 use crate::cst::NodeExt;
-                node.field_text("function", self.source) == Some("shift")
+                node.field_text("function", self.source) == Some(op)
             }
             _ => false,
         }
+    }
+
+    /// Whether `node` reads or hands on the sub's argument array: `@_` or
+    /// `$_[N]` by name, a bare `shift` / `pop` (which default to it), and
+    /// `&f;` / `goto &f` (which pass it on). Perl has no other way to.
+    fn touches_args(&self, node: Node<'a>) -> bool {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            let hit = match n.kind() {
+                "array" | "container_variable" => {
+                    crate::cst::varname_child(n).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
+                }
+                "goto_expression" => true,
+                "function_call_expression" => {
+                    n.child_by_field_name("arguments").is_none()
+                        && n.utf8_text(self.source).is_ok_and(|t| t.starts_with('&') && !t.ends_with(')'))
+                }
+                _ => self.is_bare_call_of(n, "shift") || self.is_bare_call_of(n, "pop"),
+            };
+            if hit {
+                return true;
+            }
+            stack.extend(crate::cst::NodeExt::elements(&n));
+        }
+        false
     }
 
     pub(super) fn extract_signature_params(&self, sig: Node<'a>) -> Vec<ParamInfo> {
@@ -1307,33 +1367,105 @@ impl<'a> Builder<'a> {
             .iter()
             .find(|p| p.is_invocant && p.name.starts_with('$'));
         let invocant = match invocant {
-            Some(p) => p,
+            Some(p) => p.clone(),
             None => return,
         };
 
         if let Some(pkg) = self.current_package.clone() {
             let (scope, span) = (self.current_scope(), node_to_span(node));
-            let head = InferredType::FirstParam { package: pkg };
-            // Anchored at the invocant's binding token: the declaration's
-            // own write marker retires only what lies strictly before it.
-            let at = invocant
-                .binding_site
-                .map(|p| Span { start: p, end: p })
-                .unwrap_or(span);
-            self.push_type_constraint(TypeConstraint {
-                variable: invocant.name.clone(),
-                scope,
-                constraint_span: at,
-                inferred_type: head.clone(),
-            });
-            // `@_`'s argument window for this scope, headed by the same
-            // invocant (`seed_arg_windows` covers the scopes without one).
-            self.push_type_constraint(TypeConstraint {
-                variable: "@_".into(),
-                scope,
-                constraint_span: span,
-                inferred_type: InferredType::Sequence(vec![head]),
-            });
+            self.push_invocant_type(&invocant, pkg, scope, span);
+        }
+    }
+
+    /// Type `invocant` (and the head of `@_`'s window) as the class the sub
+    /// at `span` is called on.
+    pub(super) fn push_invocant_type(&mut self, invocant: &ParamInfo, pkg: String, scope: ScopeId, span: Span) {
+        let head = InferredType::FirstParam { package: pkg };
+        // Anchored at the invocant's binding token: the declaration's
+        // own write marker retires only what lies strictly before it.
+        let at = invocant
+            .binding_site
+            .map(|p| Span { start: p, end: p })
+            .unwrap_or(span);
+        self.push_type_constraint(TypeConstraint {
+            variable: invocant.name.clone(),
+            scope,
+            constraint_span: at,
+            inferred_type: head.clone(),
+        });
+        // `@_`'s argument window for this scope, headed by the same
+        // invocant (`seed_arg_windows` covers the scopes without one).
+        self.seed_arg_window(scope, span, vec![head]);
+    }
+
+    /// Whether the file calls `pkg`'s sub `name` as a plain function and
+    /// never as a method, which is what decides that its first argument is
+    /// not an invocant when only the package convention says it is.
+    pub(super) fn is_plain_helper(&self, pkg: &str, name: &str, method_names: &std::collections::HashSet<&str>) -> bool {
+        self.plain_called_subs.contains(&(pkg.to_string(), name.to_string())) && !method_names.contains(name)
+    }
+
+    /// The names this file calls as methods.
+    pub(super) fn method_call_names(&self) -> std::collections::HashSet<&str> {
+        self.refs
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
+            .map(|r| crate::model::conventions::MethodToken::parse(&r.target_name).name())
+            .collect()
+    }
+
+    /// Post-walk: a sub whose first parameter only the package convention
+    /// calls the invocant is a method when its package is a class
+    /// (`PackageFacts::is_class`, the rule `@_`'s head uses) and it is not
+    /// a plain helper.
+    pub(super) fn mark_method_invocants(&mut self) {
+        let pending = std::mem::take(&mut self.method_or_helper_subs);
+        let mut settled = Vec::new();
+        {
+            let facts = self.package_facts();
+            let method_names = self.method_call_names();
+            for c in pending {
+                let name = &self.symbols[c.sub_id.0 as usize].name;
+                let class_pkg = facts.get(&c.package).is_some_and(PackageFacts::is_class);
+                if class_pkg && !self.is_plain_helper(&c.package, name, &method_names) {
+                    settled.push(c);
+                }
+            }
+        }
+        for c in settled {
+            let SymbolDetail::Sub { params, .. } = &mut self.symbols[c.sub_id.0 as usize].detail else {
+                continue;
+            };
+            let Some(first) = params.first_mut() else { continue };
+            first.is_invocant = true;
+            let invocant = first.clone();
+            self.push_invocant_type(&invocant, c.package, c.scope, c.span);
+        }
+    }
+
+    /// Every callable's invocant, settled, is a `RECEIVER` symbol: the
+    /// variable its binding site declares. Consumers ask the flag, never
+    /// the name (`$self` is Perl's convention, decided here once).
+    pub(super) fn flag_receiver_symbols(&mut self) {
+        let receivers: Vec<(String, Point)> = self
+            .symbols
+            .iter()
+            .filter_map(|s| match &s.detail {
+                SymbolDetail::Sub { params, .. } => params.first(),
+                _ => None,
+            })
+            .filter(|p| p.is_invocant)
+            .filter_map(|p| Some((p.name.clone(), p.binding_site?)))
+            .collect();
+        for (name, at) in receivers {
+            if let Some(sym) = self.symbols.iter_mut().find(|s| {
+                matches!(s.kind, SymKind::Variable)
+                    && s.name == name
+                    && s.span.start <= at
+                    && at <= s.span.end
+            }) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+            }
         }
     }
 

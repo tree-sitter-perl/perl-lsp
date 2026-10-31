@@ -306,6 +306,11 @@ fn whole_copy_registration_sites_are_allowlisted() {
         // register_workspace_module: TEST-ONLY today (fixtures build whole
         // copies directly). Its first production caller lands here.
         ("register_workspace_module", vec![]),
+        // `insert_cache` stores a WHOLE copy by construction (`persisted:
+        // false` — nothing was written, so the strip has no licence): CLI and
+        // test fixtures only. A production caller pins whole copies without
+        // tripping any other gate, so it lands here first.
+        ("insert_cache", vec![]),
         (
             "register_workspace_resident",
             vec![
@@ -320,29 +325,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ("module_index", 1, "register_workspace_stripping's residency half"),
                 ("module_resolver", 2, "deferred writer halves — stripped arcs only"),
             ],
-        ),
-        // `insert_cache` stores a WHOLE copy by construction (`persisted:
-        // false` — nothing was written, so the strip has no licence). Its one
-        // production reach is through `register_materialized_whole`, already
-        // bounded by that site's entry; a NEW caller would pin whole copies
-        // without tripping any other gate.
-        (
-            "insert_cache",
-            vec![(
-                "module_index",
-                1,
-                "register_materialized_whole’s cache-slot half",
-            )],
-        ),
-        (
-            "register_materialized_whole",
-            vec![(
-                "module_index",
-                1,
-                "gated-emission CLI/batch materialization — plugin-triggered \
-                 files only (sparse by construction), one-shot startup, whole \
-                 copy deliberate so whole_present sees the emissions",
-            )],
         ),
     ];
     let mut violations: Vec<String> = Vec::new();
@@ -402,38 +384,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
         }
     }
     assert!(violations.is_empty(), "whole-copy registration drift:\n{}", violations.join("\n"));
-}
-
-/// Verb-routing store selection has ONE speller: `ModuleIndex::lookup_for`.
-/// An LSP-layer call to `pack_index()` re-derives "which store serves this
-/// origin" per handler — the C1 disease: a verb that picks the store itself
-/// can pick it wrong (or forget), and the CandidateSet's construction-derived
-/// pack policy silently pairs with the wrong store. Whole-sub-index SWEEPS
-/// (`for_each_pack_index`) are a different question and stay allowed.
-#[test]
-fn pack_store_selection_stays_in_lookup_for() {
-    let mut violations = Vec::new();
-    for (path, layer, _stem) in source_files() {
-        if layer != Layer::Lsp {
-            continue;
-        }
-        let text = fs::read_to_string(&path).unwrap();
-        for (i, line) in text.lines().enumerate() {
-            let t = line.trim_start();
-            if t.starts_with("//") {
-                continue;
-            }
-            if t.contains(".pack_index(") {
-                violations.push(format!("{}:{}: {}", path.display(), i + 1, t));
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "LSP-layer store selection must route through ModuleIndex::lookup_for \
-         (the one speller), never pick a pack sub-index per handler:\n{}",
-        violations.join("\n")
-    );
 }
 
 /// `FileAnalysis::inferred_type` is raw-seed-state introspection for tests
@@ -579,8 +529,8 @@ fn slot_detection_dispatches_on_driver_caps_not_language_names() {
         .join("src/lsp/cursor_slot.rs");
     let text = fs::read_to_string(&path).unwrap();
     // Every id the registry can hand this file, whatever features are on.
-    let ids = crate::build::language_driver::LanguageRegistry::with_enabled()
-        .ids()
+    let ids = crate::build::language_driver::LanguageRegistry::compiled()
+        .languages()
         .into_iter()
         .collect::<Vec<_>>();
     let mut violations = Vec::new();
@@ -619,9 +569,8 @@ fn query_verbs_route_through_run_query() {
     let text = fs::read_to_string(&path).unwrap();
     let forbidden = [
         "index::resolve::resolve(", // set construction → QueryCx::set
-        "sym_row_search",           // relational rows → QueryCx::sym_rows
+        ".sym_search(",             // relational rows → QueryCx::sym_rows
         ".whole_present(",          // rehydration reader → QueryCx lanes
-        ".lookup_for(",             // routing binds inside the hop → QueryCx::routed
     ];
     let mut violations = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -967,7 +916,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
 /// because parking is only safe while holding no lock the writer needs.
 ///
 /// `run_persist_writer`'s committed and fallback lanes take `ModuleIndex`,
-/// `FileStore` and bag-cache guards. A producer that blocked on a full queue
+/// `OpenDocs` and bag-cache guards. A producer that blocked on a full queue
 /// while holding one of those could never be woken — the writer cannot drain
 /// to free a slot. Today every site hands over fully-owned values
 /// (`prepare_*_parts` tokens, encoded blobs) with no guard live, which is the
@@ -983,7 +932,7 @@ fn persist_queue_producers_are_allowlisted() {
     let allow: Vec<(&str, usize, &str)> = vec![(
         "module_resolver",
         4,
-        "index_perl's deferred + whole lanes (parts/blob owned; the FileStore write \
+        "index_perl's deferred + whole lanes (parts/blob owned; the OpenDocs write \
          happens AFTER the send) and index_pack's two (register_symbols completes \
          BEFORE the send)",
     )];
@@ -1425,11 +1374,12 @@ fn language_spellings_have_one_home() {
         l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'")
     });
     let allow: &[(&str, usize, &str)] = &[
-        ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
+        ("index/module_cache/rows.rs", 1, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
+        ("index/module_cache/sql.rs", 1, "the LIKE statement's `ESCAPE` clause — SQL syntax, not a language spelling"),
+        ("model/conventions.rs", 9, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
+        ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
@@ -1452,11 +1402,10 @@ fn language_spellings_have_one_home() {
         ("build/language_driver.rs", 2, "the driver mints two pack attributes (`include_guard`, `non_public`): the minting side"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
-        ("build/query_extract/vocab.rs", 10, "the closed capture vocabulary: capture suffixes, and the attribute each def kind marks"),
+        ("build/query_extract/vocab.rs", 13, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
-        ("model/file_analysis/core_types.rs", 15, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto"),
-        ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
-        ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
+        ("model/file_analysis/core_types.rs", 17, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
+        ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub: display text (the fact itself is read as a flag)"),
     ];
@@ -1569,12 +1518,11 @@ fn rendered_strings_are_not_reparsed() {
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
-        ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
+        ("model/conventions.rs", 4, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and a `use VERSION` number"),
         ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
-        ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+        ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),
         ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
         ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
@@ -1664,15 +1612,15 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/emit.rs", 13, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/extract.rs", 7, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/narrowing.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/narrowing.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/pipeline.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_calls.rs", 45, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_decl.rs", 19, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_calls.rs", 41, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_decl.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
@@ -1681,11 +1629,47 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
         ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
-        ("cst.rs", 26, "the typed view: `elements()` itself, and reads inside nodes that hold no extra"),
+        ("cst.rs", 27, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
         ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
     ];
     let drift = allowlist_drift("positional reads (NodeExt::elements)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A name lookup walks `lookup_chain` — the `LookupChain` a scope's
+/// bindings are listed through, which carries every language's scoping
+/// rule (`Scope::direct`, …). A raw climb up `Scope::parent` sees every
+/// enclosing scope's names, so a lookup written as one silently ignores
+/// those rules (a Python method offered its class body's names). The raw
+/// climbs that remain answer CONTAINMENT — what a scope is inside — and
+/// each is listed with that reason; a new one fails until it is either
+/// moved onto the lookup chain or justified here. The walkers themselves
+/// live in `model/file_analysis/dispatch.rs`.
+#[test]
+fn raw_scope_climbs_are_containment_only() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| rel != "model/file_analysis/dispatch.rs")
+            .collect();
+    let seen = count_lines(&files, &|l| {
+        let t = l.trim();
+        let chain_call = (t.contains("scope_chain(") || t.contains("scope_chain_of(")) && !t.contains("fn scope_chain");
+        let parent_step = t.ends_with(".parent;") && t.contains(" = ");
+        chain_call || parent_step || t.contains("scope_parent") || (t.contains("successors(") && t.contains(".parent"))
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
+        ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
+        ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of, and a receiver belongs to"),
+        ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
+        ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
+        ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
+        ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
+        ("model/file_analysis/queries.rs", 4, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable, is the read in the move's subtree; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
+    ];
+    let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
@@ -1714,7 +1698,7 @@ fn packs_with_grammars() -> Vec<(&'static str, crate::build::query_extract::Lang
         crate::build::packs::perl_pack(),
         (*perl_parser.language().expect("the perl grammar")).clone(),
     )];
-    let registry = LanguageRegistry::with_enabled();
+    let registry = LanguageRegistry::compiled();
     for id in registry.languages() {
         let Some(driver) = registry.for_id(id) else { continue };
         let Some(pack) = driver.lang_pack() else { continue };
@@ -1781,7 +1765,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 21;
+    const RATCHET: usize = 22;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \
@@ -1793,4 +1777,237 @@ fn pack_facts_fields_are_ratcheted() {
         fields == RATCHET,
         "PackFacts shrank to {fields} fields — lower the ratchet ({RATCHET}) so it keeps biting"
     );
+}
+
+/// `src` with every comment and every string/char literal's CONTENTS blanked
+/// to spaces (delimiters and newlines kept), so byte offsets and line numbers
+/// still match the original and a scan over it sees only code.
+fn code_only(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for c in &mut out[from..to.min(b.len())] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+    };
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while i < b.len() {
+        if src[i..].starts_with("//") {
+            let end = src[i..].find('\n').map_or(b.len(), |n| i + n);
+            blank(&mut out, i, end);
+            i = end;
+        } else if src[i..].starts_with("/*") {
+            let (mut j, mut depth) = (i + 2, 1usize);
+            while j < b.len() && depth > 0 {
+                if src[j..].starts_with("/*") {
+                    depth += 1;
+                    j += 2;
+                } else if src[j..].starts_with("*/") {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            blank(&mut out, i, j);
+            i = j;
+        } else if b[i] == b'"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'"' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            blank(&mut out, i + 1, j);
+            i = j + 1;
+        } else if (b[i] == b'r' || (b[i] == b'b' && b.get(i + 1) == Some(&b'r')))
+            && (i == 0 || !ident(b[i - 1]))
+        {
+            let start = if b[i] == b'b' { i + 2 } else { i + 1 };
+            let hashes = b[start..].iter().take_while(|&&c| c == b'#').count();
+            if b.get(start + hashes) == Some(&b'"') {
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = start + hashes + 1;
+                let end = src[body..].find(&close).map_or(b.len(), |n| body + n);
+                blank(&mut out, body, end);
+                i = end + close.len();
+            } else {
+                i += 1;
+            }
+        } else if b[i] == b'\'' {
+            // A char literal is skipped; `'a` alone is a lifetime.
+            let len = if b.get(i + 1) == Some(&b'\\') {
+                // Past the backslash AND the escaped char, which may be `'`.
+                src.get(i + 3..).and_then(|r| r.find('\'')).map(|n| n + 4)
+            } else {
+                src[i + 1..].chars().next().and_then(|c| {
+                    let w = c.len_utf8();
+                    (b.get(i + 1 + w) == Some(&b'\'')).then_some(w + 2)
+                })
+            };
+            match len {
+                Some(n) => {
+                    blank(&mut out, i + 1, i + n - 1);
+                    i += n;
+                }
+                None => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking keeps UTF-8")
+}
+
+/// `code` (from `code_only`) with every `#[cfg(test)]` module body blanked —
+/// a test module inside a production file is test code.
+fn without_test_modules(code: &str) -> String {
+    let mut out = code.to_string();
+    let mut from = 0;
+    while let Some(at) = code[from..].find("#[cfg(test)]").map(|n| from + n) {
+        from = at + 1;
+        let mut rest = code[at + "#[cfg(test)]".len()..].trim_start();
+        while rest.starts_with("#[") {
+            let skip = rest.find(']').map_or(rest.len(), |n| n + 1);
+            rest = rest[skip..].trim_start();
+        }
+        let rest = rest.strip_prefix("pub(crate) ").or_else(|| rest.strip_prefix("pub ")).unwrap_or(rest);
+        let Some(after_mod) = rest.strip_prefix("mod ") else { continue };
+        let name_len = after_mod.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(0);
+        if !after_mod[name_len..].trim_start().starts_with('{') {
+            continue;
+        }
+        let open = code.len() - after_mod.len() + name_len + after_mod[name_len..].find('{').unwrap();
+        let end = balanced_from(code, open, b'{', b'}');
+        out.replace_range(at..end, &" ".repeat(end - at));
+    }
+    out
+}
+
+/// The top-level arguments of the call whose `(` is at `open` in `code`.
+/// `::<…>` counts as nesting, so a turbofish's comma splits nothing.
+fn call_args(code: &str, open: usize) -> Vec<String> {
+    let b = code.as_bytes();
+    let (mut depth, mut angle, mut start, mut i) = (0usize, 0usize, open + 1, open);
+    let mut args = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    args.push(code[start..i].trim().to_string());
+                    break;
+                }
+            }
+            b'<' if code[..i].ends_with("::") => angle += 1,
+            b'>' if angle > 0 => angle -= 1,
+            b',' if depth == 1 && angle == 0 => {
+                args.push(code[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if args.last().is_some_and(|a| a.is_empty()) {
+        args.pop();
+    }
+    args
+}
+
+/// Every SQL statement runs from the module cache's registry
+/// (`index/module_cache/sql.rs`), where `registered_statements_plan_without_
+/// scratch` EXPLAINs it: a statement that builds a scratch b-tree per call
+/// serializes parallel sweep workers on SQLite's process-global page-cache
+/// mutex, and nothing at the call site shows the shape. So a rusqlite call
+/// that takes SQL must take it as `<Sql>.registered()` — and `Sql` can only be
+/// minted by the registry. A `Connection` call is told from the `Statement`
+/// method of the same name by its arity. The rusqlite helpers that compose
+/// their own SQL (pragma, transaction, savepoint) are refused outright.
+#[test]
+fn sql_runs_only_registered_statements() {
+    // method → the argument count of the `Connection` form (None: any).
+    const SQL_CALLS: &[(&str, Option<usize>)] = &[
+        ("prepare", None),
+        ("prepare_cached", None),
+        ("execute_batch", None),
+        ("execute", Some(2)),
+        ("query_row", Some(3)),
+        ("query_row_and_then", Some(3)),
+    ];
+    const SELF_COMPOSING: &[&str] = &[
+        "pragma",
+        "pragma_query",
+        "pragma_query_value",
+        "pragma_update",
+        "pragma_update_and_check",
+        "transaction",
+        "transaction_with_behavior",
+        "unchecked_transaction",
+        "savepoint",
+        "savepoint_with_name",
+    ];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let registry_file = PathBuf::from("index/module_cache/sql.rs");
+    let is_registered = |arg: &str| {
+        arg.strip_suffix(".registered()").is_some_and(|recv| {
+            !recv.is_empty() && recv.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+        })
+    };
+    let mut violations = Vec::new();
+    for (path, _, _) in source_files() {
+        let rel = path.strip_prefix(&src).expect("under src/").to_path_buf();
+        let text = fs::read_to_string(&path).expect("read source");
+        let code = without_test_modules(&code_only(&text));
+        let site = |at: usize| {
+            let line = code[..at].matches('\n').count() + 1;
+            let shown = text.lines().nth(line - 1).unwrap_or_default().trim();
+            format!("{}:{line}: `{shown}`", rel.display())
+        };
+        if rel == registry_file {
+            // The tuple constructor appears once in the struct and once in
+            // the `registry!` arm; anything else mints `Sql` off the books.
+            let mints = code.matches("Sql(").count();
+            if mints != 2 {
+                violations.push(format!(
+                    "{}: `Sql(` appears {mints} times — only the `registry!` macro may build one",
+                    rel.display()
+                ));
+            }
+            continue;
+        }
+        if code.contains("fn registered(") {
+            violations.push(format!("{}: defines `registered()` outside the registry", rel.display()));
+        }
+        for (method, conn_arity) in SQL_CALLS {
+            let needle = format!(".{method}(");
+            for (at, _) in code.match_indices(&needle) {
+                let args = call_args(&code, at + needle.len() - 1);
+                if conn_arity.is_some_and(|n| args.len() != n) {
+                    continue;
+                }
+                let sql = args.first().map(String::as_str).unwrap_or("");
+                if !is_registered(sql) {
+                    violations.push(format!(
+                        "{} — .{method}() is handed SQL that is not registered: add it to \
+                         index/module_cache/sql.rs and pass `sql::NAME.registered()`",
+                        site(at)
+                    ));
+                }
+            }
+        }
+        for method in SELF_COMPOSING {
+            let needle = format!(".{method}(");
+            for (at, _) in code.match_indices(&needle) {
+                violations.push(format!(
+                    "{} — .{method}() runs SQL rusqlite composes, which the registry cannot \
+                     check; spell it as a registered statement",
+                    site(at)
+                ));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "unregistered SQL:\n{}", violations.join("\n"));
 }

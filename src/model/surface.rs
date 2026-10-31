@@ -81,6 +81,15 @@ pub struct ValueSurface {
     pub kind: u8,
 }
 
+/// One member a [`GatedEmission`](crate::model::file_analysis::GatedEmission)
+/// would add (`FileAnalysis::gated_candidates`), span-free, under the package
+/// it lands in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatedSurface {
+    pub package: Option<String>,
+    pub member: MethodSurface,
+}
+
 /// One `#define`'s cross-file-visible contract. Under textual inclusion
 /// the BODY is semantics for every consumer (an expansion change with an
 /// unchanged name would silently under-invalidate without it), and the
@@ -138,6 +147,10 @@ pub struct Surface {
     pub reexports: Vec<String>,
     /// Classes plugin namespaces in THIS file bridge content onto.
     pub plugin_bridges: Vec<String>,
+    /// What plugin emissions deferred on a cross-file `ClassIsa` gate would
+    /// add. Whether a gate fires is the reader's question; what the emission
+    /// adds is this file's to state.
+    pub gated: Vec<GatedSurface>,
     /// Manifest-declared app-surface consumer classes.
     pub app_surface_consumers: Vec<String>,
     /// DBIC `source_name` override — the registered source moniker when it
@@ -269,11 +282,11 @@ impl Surface {
                         }
                     }
                 }
-                SymKind::Variable | SymKind::Field | SymKind::Enumerator => {
+                SymKind::Variable | SymKind::Field | SymKind::Enumerator | SymKind::HashKeyDef => {
                     // Cross-file-visible values: the C-linkage file-scope
-                    // gate OR class content (fields / named-enum constants
-                    // reachable via member access).
-                    if !(feed.analysis.is_linkage_visible(sym)
+                    // gate OR class content (fields / named-enum constants /
+                    // instance slots reachable via member access).
+                    if !((sym.kind != SymKind::HashKeyDef && feed.analysis.is_linkage_visible(sym))
                         || feed.analysis.symbol_is_class_content(sym))
                     {
                         continue;
@@ -348,18 +361,34 @@ impl Surface {
             v.dedup();
             v
         };
-        let mut plugin_bridges: Vec<String> = feed
-            .plugin_namespaces
+        let plugin_bridges = fa.bridge_classes();
+        // The same mint the rows and the index feeds read: candidates, each
+        // keyed to the package it would land in.
+        let mint = fa.gated_candidates();
+        let mut gated: Vec<GatedSurface> = mint
+            .symbols
             .iter()
-            .flat_map(|ns| {
-                ns.bridges.iter().map(|b| {
-                    let crate::model::file_analysis::Bridge::Class(c) = b;
-                    c.clone()
-                })
+            .map(|sym| GatedSurface {
+                package: sym.package.clone(),
+                member: MethodSurface {
+                    name: sym.name.clone(),
+                    kind: crate::model::file_analysis::sym_kind_code(&sym.kind),
+                    arity: None,
+                    ret: mint.witnesses.iter().find_map(|w| match (&w.attachment, &w.payload) {
+                        (
+                            crate::model::witnesses::WitnessAttachment::Symbol(id),
+                            crate::model::witnesses::WitnessPayload::InferredType(t),
+                        ) if *id == sym.id => Some(despan(t)),
+                        _ => None,
+                    }),
+                    hash_keys: Vec::new(),
+                },
             })
             .collect();
-        plugin_bridges.sort_unstable();
-        plugin_bridges.dedup();
+        gated.sort_by(|a, b| {
+            (&a.package, &a.member.name, a.member.kind).cmp(&(&b.package, &b.member.name, b.member.kind))
+        });
+        gated.dedup();
         let mut macros: Vec<MacroSurface> = feed
             .macro_defs
             .iter()
@@ -395,6 +424,7 @@ impl Surface {
             export_tags,
             reexports: sorted(feed.reexport_modules),
             plugin_bridges,
+            gated,
             app_surface_consumers: sorted(feed.app_surface_consumers),
             dbic_source_name: feed.dbic_source_name.clone(),
         }
@@ -423,6 +453,7 @@ fn despan(t: &InferredType) -> InferredType {
             InferredType::TypeConstraintOf(inner.as_deref().map(|i| Box::new(despan(i))))
         }
         InferredType::Optional(inner) => InferredType::Optional(Box::new(despan(inner))),
+        InferredType::Union(arms) => arms.map(despan),
         InferredType::Branded { base, marks } => {
             InferredType::Branded { base: Box::new(despan(base)), marks: marks.clone() }
         }
@@ -440,6 +471,7 @@ fn despan(t: &InferredType) -> InferredType {
                 args: args.iter().map(despan).collect(),
             },
         }),
+        InferredType::RefTagOf { .. } => InferredType::String,
         other => other.clone(),
     }
 }

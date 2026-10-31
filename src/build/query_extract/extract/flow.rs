@@ -12,6 +12,11 @@ pub(super) struct State {
     /// flow.assign joins: match_id → (target name+scope, source span)
     flow_targets: HashMap<usize, (String, ScopeId, Point)>,
     flow_sources: HashMap<usize, Span>,
+    /// Writes to a place: match_id → the place's span.
+    flow_places: HashMap<usize, Span>,
+    /// Member reads by byte range → (receiver span, member): what a
+    /// place's own read projects, so a write lands where the read looks.
+    member_reads: HashMap<(usize, usize), (Span, String)>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
@@ -32,6 +37,14 @@ pub(super) struct State {
     /// the empty sentinel: it stays a SITE (counter-evidence in the coherence
     /// vote's denominator) without persisting arbitrary expression text.
     domain_value_by_match: HashMap<usize, String>,
+    /// `@arm` spans not yet known closed, in start order. Events arrive by
+    /// start, so every arm around an observation is here when it arrives,
+    /// and an arm that ends before an event's start holds nothing later.
+    open_arms: Vec<Span>,
+    /// Usage-site evidence awaiting the rebind cutoff, which reads the
+    /// finished flow edges (`narrowing::finish`): the observed name, its
+    /// scope, the observation, and its region before the cutoff.
+    pub(super) observations: Vec<(String, ScopeId, crate::model::witnesses::TypeObservation, Span)>,
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -54,6 +67,7 @@ fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: Witnes
 pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     let pack = st.pack;
     let cur_scope = st.cur_scope;
+    let bind_scope = st.bind_scope();
     let f = &mut st.flow;
     let out = &mut st.out;
     match e.cap {
@@ -85,6 +99,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 span,
             ));
         }
+        Capture::Receiver => {
+            out.receivers.push((cur_scope, e.span()));
+        }
         Capture::Expr(ExprCap::ReturnValue) => {
             // The returned expression's own general-rule witness (literal
             // / var-read / member / call — whichever matched this same
@@ -94,13 +111,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(FlowCap::Target) => {
-            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), cur_scope, e.start));
+            // a target a def's header declares (an annotated parameter)
+            // binds in the def's own scope
+            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), bind_scope, e.start));
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk); the type-annot
             // half was pre-collected (it precedes the declarator in source).
             if let Some(annot) = f.annots.get(&e.match_id) {
-                st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), cur_scope), annot.clone());
+                st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), bind_scope), annot.clone());
             }
         }
         Capture::Flow(FlowCap::Rebind) => {
@@ -108,6 +127,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         }
         Capture::Flow(FlowCap::Source) => {
             f.flow_sources.insert(e.match_id, e.span());
+        }
+        Capture::Flow(FlowCap::Place) => {
+            f.flow_places.insert(e.match_id, e.span());
         }
         Capture::AnonAggMember => {
             // A field typed by an anonymous aggregate: its members are
@@ -145,15 +167,35 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 f.shape_keys.push((range.0, range.1, e.text.clone()));
             }
         }
+        Capture::Arm => f.open_arms.push(e.span()),
         Capture::Obs(obs) => {
             // Usage-site evidence: a mono-typed operator observes
             // its operand. Same Observation payloads the Perl
-            // walker emits; the fold is the production one.
-            out.witnesses.push(skeleton_witness(
-                WitnessAttachment::Variable { name: (pack.shape_name)(&e.text), scope: cur_scope },
-                "skeleton-obs",
-                WitnessPayload::Observation(obs.observation()),
-                e.span(),
+            // walker emits; the fold is the production one. It holds from
+            // the site to the end of the innermost `@arm` around it inside
+            // its scope, else to the end of the scope, cut at the next
+            // rebind like a guard's narrowing.
+            let site = e.span();
+            let scope = out.scopes[cur_scope.0 as usize].span;
+            let before = |a: Point, b: Point| (a.row, a.column) < (b.row, b.column);
+            while f.open_arms.last().is_some_and(|a| before(a.end, site.start)) {
+                f.open_arms.pop();
+            }
+            // Arms nest, so the innermost around the site is the last one
+            // holding it; an arm that opens outside the scope holds the
+            // whole scope, and so does every arm beneath it.
+            let end = f
+                .open_arms
+                .iter()
+                .rev()
+                .find(|a| !before(site.start, a.start) && !before(a.end, site.end))
+                .filter(|a| !before(a.start, scope.start))
+                .map_or(scope.end, |a| a.end);
+            f.observations.push((
+                (pack.shape_name)(&e.text),
+                cur_scope,
+                obs.observation(),
+                Span { start: site.start, end },
             ));
         }
         Capture::Expr(ExprCap::Call) => {
@@ -193,15 +235,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 (in_match(Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
             {
                 let span = e.span();
+                let member = (pack.shape_name)(&name.text);
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
+                f.member_reads.insert((e.start_byte, e.end_byte), (recv.span(), member.clone()));
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
                     WitnessPayload::Projected {
                         base: WitnessAttachment::Expr(recv.span()),
-                        step: crate::model::witnesses::ProjectionStep::ValueHop {
-                            member: (pack.shape_name)(&name.text),
-                        },
+                        step: crate::model::witnesses::ProjectionStep::ValueHop { member },
                     },
                     span,
                 ));
@@ -285,7 +327,8 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let annot_type = (st.pack.annot_type)(annot);
+            let annot_type =
+                (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start));
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }
@@ -303,18 +346,7 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
                 });
             }
         }
-        if let Some(src_span) = f.flow_sources.get(mid) {
-            // Narrow onto the outermost literal the rhs wraps, when the
-            // rhs node itself carries no witness (paren wrappers).
-            let src_bytes = byte_range_of(events, *mid, Capture::Flow(FlowCap::Source));
-            let target_span = f
-                .lit_spans
-                .iter()
-                .filter(|&&(s, en, _)| src_bytes.is_some_and(|(ss, se)| s >= ss && en <= se))
-                .max_by_key(|&&(s, en, _)| en - s)
-                .map(|&(_, _, sp)| sp)
-                .filter(|sp| sp != src_span)
-                .unwrap_or(*src_span);
+        if let Some(target_span) = source_value_span(f, events, *mid) {
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
@@ -325,6 +357,23 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
                 reassigns: false,
+            });
+        }
+    }
+    // A place is whatever its own read projects. A member read's target is
+    // decided by its receiver's type, which only the assembled analysis
+    // answers (`skeleton::settle_member_writes`). A name's place is its
+    // binding, which `@flow.target` writes and rebinds; a place no read
+    // projects (a call, a literal) takes nothing.
+    let mut place_mids: Vec<&usize> = f.flow_places.keys().collect();
+    place_mids.sort_unstable();
+    for mid in place_mids {
+        let read = byte_range_of(events, *mid, Capture::Flow(FlowCap::Place)).and_then(|r| f.member_reads.get(&r));
+        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(f, events, *mid)) {
+            out.member_writes.push(crate::build::query_extract::MemberWrite {
+                receiver: *receiver,
+                member: member.clone(),
+                value,
             });
         }
     }
@@ -347,6 +396,23 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             out.witnesses.push(w);
         }
     }
+}
+
+/// The span whose witness is match `mid`'s inflowing value: its
+/// `@flow.source`, narrowed onto the outermost literal the source wraps
+/// when the source node itself carries no witness (paren wrappers).
+fn source_value_span(f: &State, events: &[Event], mid: usize) -> Option<Span> {
+    let src_span = f.flow_sources.get(&mid)?;
+    let src_bytes = byte_range_of(events, mid, Capture::Flow(FlowCap::Source));
+    Some(
+        f.lit_spans
+            .iter()
+            .filter(|&&(s, en, _)| src_bytes.is_some_and(|(ss, se)| s >= ss && en <= se))
+            .max_by_key(|&&(s, en, _)| en - s)
+            .map(|&(_, _, sp)| sp)
+            .filter(|sp| sp != src_span)
+            .unwrap_or(*src_span),
+    )
 }
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.

@@ -1,0 +1,130 @@
+; PHP language pack. Grammar: tree-sitter-php's `php` flavor, which keeps
+; the `<?php` tag and any interleaved HTML as inert nodes.
+
+; ---- namespaces ----
+; `namespace A\B;` holds until the next one; the braced form holds for its
+; body. Classes declared under either join it to mint their identity, and
+; either is the section its `use` rows bind in.
+(namespace_definition
+  name: (namespace_name) @def.package.name @context.namespace
+  !body) @def.package
+(namespace_definition
+  name: (namespace_name) @def.package.name @context.namespace
+  body: (compound_statement) @scope) @def.package
+; The global namespace's braced form opens a scope too, so the rows it
+; imports bind in its body alone.
+(namespace_definition
+  !name
+  body: (compound_statement) @scope)
+
+; ---- classes, interfaces, traits ----
+; One model kind; the body's members file under the class's identity. The
+; keyword or modifier that says which flavour of class it is rides
+; @sym.attr, whose spelling is the flag it mints.
+(class_declaration
+  (abstract_modifier)? @sym.attr
+  name: (name) @def.class.name @context.class) @def.class @scope
+(interface_declaration
+  "interface" @sym.attr
+  name: (name) @def.class.name @context.class) @def.class @scope
+(trait_declaration
+  "trait" @sym.attr
+  name: (name) @def.class.name @context.class) @def.class @scope
+
+; ---- callables ----
+(function_definition name: (name) @def.sub.name) @def.sub
+(method_declaration name: (name) @def.method.name) @def.method
+; Parameters and locals are body content, not members.
+(function_definition) @scope.sub
+(method_declaration) @scope.sub
+
+; ---- what a declaration is, stated on its name ----
+; Modifiers come in any order, so each fact is a pattern of its own.
+(method_declaration
+  (visibility_modifier) @_visibility
+  name: (name) @mark.non_public
+  (#any-of? @_visibility "private" "protected"))
+(method_declaration (static_modifier) name: (name) @mark.static)
+(method_declaration (abstract_modifier) name: (name) @mark.abstract)
+; A method declared without a body (an interface's, an abstract one) is
+; a contract the composing class must provide.
+(method_declaration name: (name) @mark.contract !body)
+; The one method `new Foo(...)` invokes; its name belongs to the language.
+((method_declaration name: (name) @mark.constructor)
+ (#eq? @mark.constructor "__construct"))
+; A class declaring one of these answers ANY member name at runtime, so it
+; has no closed member surface to check a name against.
+((class_declaration
+  name: (name) @mark.dynamic_members
+  body: (declaration_list (method_declaration name: (name) @_catch_all)))
+ (#any-of? @_catch_all "__call" "__callStatic" "__get"))
+((trait_declaration
+  name: (name) @mark.dynamic_members
+  body: (declaration_list (method_declaration name: (name) @_catch_all)))
+ (#any-of? @_catch_all "__call" "__callStatic" "__get"))
+
+; ---- parents ----
+; `extends`, `implements` and a trait `use` are all parents for member
+; lookup. The whole written spelling is the capture: it resolves through
+; the file's use-map to the parent's identity. The same name is a class
+; reference — goto-def, references and rename reach it — and a qualified
+; spelling references by the whole spelling while rewriting only its leaf.
+(class_declaration
+  name: (name) @def.class.name
+  (base_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+(class_declaration
+  name: (name) @def.class.name
+  (class_interface_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+(interface_declaration
+  name: (name) @def.class.name
+  (base_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+(class_declaration
+  name: (name) @def.class.name
+  body: (declaration_list
+    (use_declaration
+      [(name) @parent @ref.type
+       (qualified_name (name) @ref.type) @parent @ref.spelled])))
+(trait_declaration
+  name: (name) @def.class.name
+  body: (declaration_list
+    (use_declaration
+      [(name) @parent @ref.type
+       (qualified_name (name) @ref.type) @parent @ref.spelled])))
+
+; ---- the use-map ----
+; A row binds a class unless its keyword says it binds a function or a
+; constant; those rows name no class, so they never enter the map. The
+; keyword is an anonymous token, so the row's own text excludes it. The
+; `.` anchor pins the name to the clause's first child, so the alias node
+; never matches as a second name. An imported class's leaf references the
+; class the row names, so a rename of the class rewrites the `use` line
+; too; the ref is the leaf alone, since the row it sits in already names
+; the class in full (`spelled_identity`).
+((namespace_use_declaration
+  (namespace_use_clause
+    . [(name) @import.name @ref.type
+       (qualified_name (name) @ref.type) @import.name]
+    alias: (name)? @import.alias) @_clause)
+ (#not-match? @_clause "^(function|const)\\s"))
+; `use A\B\{C, D as E}`: each clause hangs off the shared prefix. A group
+; may carry the keyword for all its clauses or each clause its own.
+((namespace_use_declaration
+  (namespace_name) @import.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      . (name) @import.name @ref.type
+      alias: (name)? @import.alias) @_clause)) @_group
+ (#not-match? @_group "^use\\s+(function|const)\\s")
+ (#not-match? @_clause "^(function|const)\\s"))
+
+; ---- the receiver ----
+; `$this` is the receiver of the method around it: an object of that
+; method's class.
+((variable_name (name) @_this) @receiver
+ (#eq? @_this "this"))

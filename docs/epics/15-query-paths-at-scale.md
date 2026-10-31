@@ -129,12 +129,9 @@ FHEM shape, with the arithmetic:
 ### Phase C — the CLI one-shot, and diagnostics-after-edit
 
 1. **CLI one-shot** (Tier 1 #5 residual + #6). PR #125 made it finite —
-   350 s at 138k with a real answer. The root cause of the remaining
-   pack share is understood: `LanguageScope` lets a verb declare the
-   families its answer can consult, measured at **−52% CPU** on a
-   synthetic Perl query with the pack phase falling 936 ms → 0.11 ms.
-   **That is ROOT-CAUSED but unconfirmed at 138k** — confirm it, then
-   audit every verb's scope choice (Epic 10 adds more).
+   350 s at 138k with a real answer. The remaining pack share is gone
+   by construction: a Perl process indexes no pack files (one language
+   per process). **Unconfirmed at 138k** — confirm it.
 2. **Diagnostics after edit: never, at 60 s** on CPAN-5k. This is the
    most user-visible row on the board — it is the thing an editor does
    after every keystroke pause. Attribute it: it is the enriched
@@ -221,13 +218,12 @@ So:
 2. **But the shared machinery is shared, and every fix here must be
    proven not to hurt the pack side.** The row store, the conclusion
    layer, the closedness certificate, the eviction/residency discipline,
-   `LanguageScope` and the warm-stub path all serve both. Every phase
+   and the warm-stub path all serve both. Every phase
    runs `cargo test --features cpp` and the gold suite with
    `lang-skip 0`.
-3. **Phase C's `LanguageScope` work is explicitly cross-language** —
-   the whole row exists because pack indexing dominated startup on a
-   *Perl* corpus. Every verb's scope choice is a language decision, and
-   Epic 10 adds more verbs that need auditing.
+3. **Phase C's startup row is settled by one language per process** —
+   it existed because pack indexing dominated startup on a *Perl*
+   corpus, and a Perl process now indexes no pack files at all.
 4. **Phase D's `PackBagCache` re-soak is the pack side's row on this
    board**, and it is owed. Do not close the validation section without
    it.

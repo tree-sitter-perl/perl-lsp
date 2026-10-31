@@ -17,7 +17,8 @@ impl FileAnalysis {
 
     /// Find the symbol whose selection_span contains the point.
     pub fn symbol_at(&self, point: Point) -> Option<&Symbol> {
-        self.symbols.iter().find(|s| contains_point(&s.selection_span, point))
+        // A mention is anchored on a use, which declares nothing.
+        self.symbols.iter().find(|s| contains_point(&s.selection_span, point) && !s.is_mention())
     }
 
     /// The innermost callable (Sub/Method) whose body span contains the
@@ -67,8 +68,10 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable => {
-                    if let Some(sym_id) = r.resolved_symbol() {
-                        return Some(self.symbol(sym_id).selection_span);
+                    // A `Mention` is no definition: the global is declared
+                    // elsewhere, if anywhere (the adapter's cross-file arm).
+                    if let Some(sym) = r.resolved_symbol().map(|id| self.symbol(id)).filter(|s| !s.is_mention()) {
+                        return Some(sym.selection_span);
                     }
                 }
                 RefKind::FunctionCall => {
@@ -99,7 +102,7 @@ impl FileAnalysis {
                     // $x->m`) returns None: honest miss. There is NO
                     // same-name fallback — a typed OR chained-method-return
                     // receiver now carries a real edge
-                    // (`method_call_invocant_class` resolves chain
+                    // (`resolve_receiver` resolves chain
                     // receivers via `expr_type_at_span`), so jumping to an
                     // arbitrary same-named sub when the class can't infer is
                     // never right (the `->new` / `'Users#create'` flood, the
@@ -327,20 +330,18 @@ impl FileAnalysis {
                             // `$obj->foo(...)` expression so we use
                             // `method_name_span` to highlight just
                             // the identifier.
-                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
-                                (Some(cn), Some(pkg)) if cn == *pkg => {
-                                    results.push((*method_name_span, r.access));
-                                }
-                                _ => {}
+                            if sym_package.as_deref().is_some_and(|pkg| {
+                                self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(pkg)
+                            }) {
+                                results.push((*method_name_span, r.access));
                             }
                         }
                         (RefKind::FieldAccess { member_name_span, .. },
                          SymKind::Field | SymKind::Variable) if r.unqualified_target_name(self.names()) == sym.name => {
-                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
-                                (Some(cn), Some(pkg)) if cn == *pkg => {
-                                    results.push((*member_name_span, r.access));
-                                }
-                                _ => {}
+                            if sym_package.as_deref().is_some_and(|pkg| {
+                                self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(pkg)
+                            }) {
+                                results.push((*member_name_span, r.access));
                             }
                         }
                         (RefKind::PackageRef, SymKind::Package | SymKind::Class | SymKind::Module)
@@ -396,28 +397,38 @@ impl FileAnalysis {
         if let Some(group) = self.field_group_at(point) {
             return Some(self.rename_field_group(&group, new_name));
         }
+        // Perl owns a special variable's name (`@_`, `$_`, `%ENV`): it has
+        // occurrences, but no rename.
+        if self.ref_at(point).is_some_and(|r| {
+            matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                && crate::model::conventions::is_special_variable(&r.target_name)
+        }) {
+            return None;
+        }
         let refs = self.find_references(point, None);
         if refs.is_empty() {
             return None;
         }
 
-        // Determine if this is a variable (sigil handling needed)
-        let is_variable = self.ref_at(point)
-            .map(|r| matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess))
-            .or_else(|| self.symbol_at(point).map(|s| matches!(s.kind, SymKind::Variable | SymKind::Field)))
-            .unwrap_or(false);
+        // A variable's name: rename rewrites only its trailing name token,
+        // anchored at the span end, since a ref span may carry the sigil
+        // (`$x`) or already be the bare token (`${x}`).
+        let variable_name = self
+            .ref_at(point)
+            .filter(|r| matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess))
+            .map(|r| r.target_name.as_str())
+            .or_else(|| {
+                self.symbol_at(point)
+                    .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
+                    .map(|s| s.name.as_str())
+            });
 
-        let edits: Vec<(Span, String)> = if is_variable {
-            // Strip sigil from new_name if present
-            let bare_name = if new_name.starts_with('$') || new_name.starts_with('@') || new_name.starts_with('%') {
-                &new_name[1..]
-            } else {
-                new_name
-            };
+        let edits: Vec<(Span, String)> = if let Some(old) = variable_name {
+            let bare_name = crate::model::conventions::strip_variable_sigils(new_name);
+            let base_len = crate::model::conventions::strip_variable_sigils(old).len();
             refs.into_iter().map(|span| {
-                // Each ref span includes the sigil; replace only the name part (after sigil)
                 let name_span = Span {
-                    start: Point::new(span.start.row, span.start.column + 1),
+                    start: Point::new(span.end.row, span.end.column.saturating_sub(base_len)),
                     end: span.end,
                 };
                 (name_span, bare_name.to_string())
@@ -449,43 +460,31 @@ impl FileAnalysis {
                 }
             }
         }
-        // Cursor on the field decl, or on a field-variable use in a body.
+        // Cursor on the field decl, or on a use of its variable spelling.
         let field_sym = self
             .symbol_at(point)
-            .filter(|s| matches!(s.kind, SymKind::Field))
+            .and_then(|s| self.field_spelled_by(s))
             .or_else(|| {
                 self.ref_at(point).and_then(|r| {
                     if !matches!(r.kind, RefKind::Variable) {
                         return None;
                     }
-                    r.resolved_symbol()
-                        .map(|id| self.symbol(id))
-                        .filter(|s| matches!(s.kind, SymKind::Field))
+                    self.field_spelled_by(self.symbol(r.resolved_symbol()?))
                 })
             });
         if let Some(sym) = field_sym {
             return self.field_group_of(sym);
         }
-        // Cursor on a reader call: `$p->x` where the dispatch class has
-        // `field $x :reader` in THIS file.
+        // Cursor on a reader: `$p->x` where the dispatch class has
+        // `field $x :reader` in THIS file, or `obj.count` on a member that is
+        // itself the field.
         if let Some(r) = self.ref_at(point) {
-            if matches!(r.kind, RefKind::MethodCall { .. }) {
+            if r.member_site().is_some() {
                 let bare = r.unqualified_target_name(self.names());
-                let cls = r
-                    .method_target()
-                    .map(|t| t.invocant_class().to_string())
-                    .or_else(|| self.method_call_invocant_class(r, None));
-                if let Some(class) = cls {
-                    let field_name = format!("${}", bare);
-                    if let Some(sym) = self.symbols.iter().find(|s| {
-                        matches!(s.kind, SymKind::Field)
-                            && s.name == field_name
-                            && s.package.as_deref() == Some(class.as_str())
-                    }) {
-                        if let Some(g) = self.field_group_of(sym) {
-                            if g.has_reader {
-                                return Some(g);
-                            }
+                for class in self.receiver_classes(r, None, ReceiverPolicy::Edge) {
+                    if let Some(g) = self.field_group_named(bare, &class) {
+                        if g.has_reader {
+                            return Some(g);
                         }
                     }
                     // Moo accessor call → its attr pair (only when the
@@ -582,15 +581,26 @@ impl FileAnalysis {
     /// spelling (decl, ctor key, internal slot, reader, mapped accessor)
     /// resolves to the same group.
     fn attr_group_for(&self, attr: &str, class: &str) -> Option<FieldGroup> {
-        let field_name = format!("${}", attr);
-        if let Some(sym) = self.symbols.iter().find(|s| {
-            matches!(s.kind, SymKind::Field)
-                && s.name == field_name
-                && s.package.as_deref() == Some(class)
-        }) {
-            return self.field_group_of(sym);
+        self.field_group_named(attr, class).or_else(|| self.attr_pair_group(attr, class))
+    }
+
+    /// The group of the field `class` declares for `attr`, however the
+    /// field's own name spells it.
+    fn field_group_named(&self, attr: &str, class: &str) -> Option<FieldGroup> {
+        self.symbols
+            .iter()
+            .filter(|s| s.kind == SymKind::Field && s.package.as_deref() == Some(class))
+            .find_map(|s| self.field_group_of(s).filter(|g| g.bare == attr))
+    }
+
+    /// The field `sym` spells: itself, or the member a bare name was
+    /// declared with from one token (python's class-body binding).
+    fn field_spelled_by<'s>(&'s self, sym: &'s Symbol) -> Option<&'s Symbol> {
+        match sym.kind {
+            SymKind::Field => Some(sym),
+            SymKind::Variable => sym.declared_with.map(|id| self.symbol(id)).filter(|f| f.kind == SymKind::Field),
+            _ => None,
         }
-        self.attr_pair_group(attr, class)
     }
 
     /// A synthesized attr pair: accessor Method + HashKeyDef minted from
@@ -617,12 +627,14 @@ impl FileAnalysis {
                 .map(|id| self.symbol(id))
                 .filter(|s| matches!(s.kind, SymKind::Method));
             return Some(FieldGroup {
-                field_sym: None,
+                spelling_sym: None,
+                private: false,
                 decl_span: Some(key_def.selection_span),
                 class: class.to_string(),
                 bare: bare.to_string(),
                 has_param: true,
                 has_reader: accessor.is_some(),
+                reader_kind: MemberKind::Callable,
             });
         }
         // (2) Class-key pairing (DBIC `add_columns`, Class::Accessor): an
@@ -645,16 +657,33 @@ impl FileAnalysis {
             return None;
         }
         Some(FieldGroup {
-            field_sym: None,
+            spelling_sym: None,
+            private: false,
             decl_span: Some(accessor.selection_span),
             class: class.to_string(),
             bare: bare.to_string(),
             has_param: false,
             has_reader: true,
+            reader_kind: MemberKind::Callable,
         })
     }
 
     fn field_group_of(&self, sym: &Symbol) -> Option<FieldGroup> {
+        // A member declared with a bare name from one token is the field
+        // itself: read through the class, shared down the hierarchy like
+        // any member, its bare name's uses the variable spellings.
+        if let Some(twin) = sym.declared_with.map(|id| self.symbol(id)).filter(|t| t.kind == SymKind::Variable) {
+            return Some(FieldGroup {
+                spelling_sym: Some(twin.id),
+                private: false,
+                decl_span: None,
+                class: sym.package.clone()?,
+                bare: sym.name.clone(),
+                has_param: false,
+                has_reader: true,
+                reader_kind: MemberKind::of_sym(sym.kind),
+            });
+        }
         let SymbolDetail::Field { .. } = sym.detail else {
             return None;
         };
@@ -662,13 +691,22 @@ impl FileAnalysis {
             return None;
         }
         Some(FieldGroup {
-            field_sym: Some(sym.id),
+            spelling_sym: Some(sym.id),
+            private: true,
             decl_span: None,
             class: sym.package.clone()?,
             bare: sym.name[1..].to_string(),
             has_param: sym.flags.contains(SymbolFlags::PARAM),
             has_reader: sym.flags.contains(SymbolFlags::READER),
+            reader_kind: MemberKind::Callable,
         })
+    }
+
+    /// The variable spelling's span narrowed to the bare name: a Corinna
+    /// field's `$` survives a rename.
+    fn bare_spelling(&self, g: &FieldGroup, sym: SymbolId, span: Span) -> Span {
+        let sigil = self.symbol(sym).name.len().saturating_sub(g.bare.len());
+        Span { start: Point::new(span.start.row, span.start.column + sigil), end: span.end }
     }
 
     /// Union of edits for every spelling in a field group, all written as
@@ -722,11 +760,7 @@ impl FileAnalysis {
                 if r.unqualified_target_name(self.names()) != method {
                     continue;
                 }
-                let cls = r
-                    .method_target()
-                    .map(|t| t.invocant_class().to_string())
-                    .or_else(|| self.method_call_invocant_class(r, None));
-                if cls.as_deref() == Some(g.class.as_str()) {
+                if self.receiver_classes(r, None, ReceiverPolicy::Edge).contains(&g.class) {
                     spans.push(*method_name_span);
                 }
             }
@@ -770,12 +804,9 @@ impl FileAnalysis {
         let mut spans: Vec<Span> = Vec::new();
         // The field variable: decl + every body use. Moo attrs have no
         // variable side; their decl token contributes directly.
-        if let Some(field_sym) = g.field_sym {
-            for (span, _access) in self.collect_refs_for_target(field_sym, true, None) {
-                spans.push(Span {
-                    start: Point::new(span.start.row, span.start.column + 1),
-                    end: span.end,
-                });
+        if let Some(sym) = g.spelling_sym {
+            for (span, _access) in self.collect_refs_for_target(sym, true, None) {
+                spans.push(self.bare_spelling(g, sym, span));
             }
         }
         if let Some(decl) = g.decl_span {
@@ -795,19 +826,16 @@ impl FileAnalysis {
                 }
             }
         }
-        // Reader calls (`$p->x`) dispatching to this class.
+        // Reader calls (`$p->x`) and reads (`obj.count`) dispatching to
+        // this class.
         if g.has_reader {
             for r in self.refs() {
-                if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
+                if let Some(site) = r.member_site() {
                     if r.unqualified_target_name(self.names()) != g.bare {
                         continue;
                     }
-                    let cls = r
-                        .method_target()
-                        .map(|t| t.invocant_class().to_string())
-                        .or_else(|| self.method_call_invocant_class(r, None));
-                    if cls.as_deref() == Some(g.class.as_str()) {
-                        spans.push(*method_name_span);
+                    if self.receiver_classes(r, None, ReceiverPolicy::Edge).contains(&g.class) {
+                        spans.push(site.name_span);
                     }
                 }
             }
@@ -870,11 +898,7 @@ impl FileAnalysis {
         if let (Some(enclosing), Some(idx)) = (enclosing_call, module_index) {
             let verb = enclosing.unqualified_target_name(self.names());
             if self.is_column_keyed_verb(verb) {
-                if let Some(class) = enclosing
-                    .method_target()
-                    .map(|t| t.invocant_class().to_string())
-                    .or_else(|| self.method_call_invocant_class(enclosing, module_index))
-                {
+                for class in self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge) {
                     // The class's files as a SET: a shadow in ANY candidate
                     // overrides DBIC's verb (same gate as the builder's
                     // `user_shadows_verb`); the column may be minted by any.
@@ -907,10 +931,10 @@ impl FileAnalysis {
         // Inline method-chain receiver: `$obj->method->{key}` — the key
         // belongs to `method`'s return value, owned `Sub{invocant_class, method}`.
         if let Some(enclosing) = enclosing_call {
-            if let Some(class) = enclosing
-                .method_target()
-                .map(|t| t.invocant_class().to_string())
-                .or_else(|| self.method_call_invocant_class(enclosing, module_index))
+            // An owner is ONE producer: a union receiver's call has a
+            // return per arm, and no single `Sub` owns the key.
+            if let Some(class) =
+                self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
             {
                 return Some(HashKeyOwner::Sub {
                     package: Some(class),
@@ -984,59 +1008,6 @@ impl FileAnalysis {
         None
     }
 
-    /// The Field twin of a promoted-constructor-property PARAM token: php's
-    /// `__construct(public readonly Level $level)` declares BOTH the ctor
-    /// param (a `$level` Variable, body uses) and the class Field (`level`,
-    /// member accesses) with ONE source token, and the extractor links the
-    /// two through `declared_with`. A cursor there lands on the Variable
-    /// (emitted first); resolution wants the member identity.
-    pub fn promoted_field_twin(&self, sym: &Symbol) -> Option<&Symbol> {
-        if !matches!(sym.kind, SymKind::Variable) {
-            return None;
-        }
-        sym.declared_with
-            .map(|id| self.symbol(id))
-            .filter(|f| matches!(f.kind, SymKind::Field))
-    }
-
-    /// The promoted param's (field decl span, variable USE spans) —
-    /// sigil-narrowed to the bare name — `Some` only when `member` on
-    /// `class` is a promoted constructor property here. The member's
-    /// identity group folds the uses in so rename rewrites every spelling
-    /// of the one name: the decl token, the member accesses (the walked
-    /// member target), AND the `$level` body uses that would otherwise be
-    /// left referencing a parameter that no longer exists.
-    pub fn promoted_param_use_spans(&self, member: &str, class: &str) -> Option<(Span, Vec<Span>)> {
-        let field = self
-            .symbols_named(member)
-            .iter()
-            .map(|&sid| self.symbol(sid))
-            .find(|f| {
-                matches!(f.kind, SymKind::Field)
-                    && f.package.as_deref() == Some(class)
-                    && self.symbol_is_class_content(f)
-            })?;
-        let var = field
-            .declared_with
-            .map(|id| self.symbol(id))
-            .filter(|v| matches!(v.kind, SymKind::Variable))?;
-        // A use span covers the sigiled variable; the group writes the bare
-        // member name, so each use narrows past the variable's OWN sigil.
-        let sigil_len = match &var.detail {
-            SymbolDetail::Variable { sigil, .. } => sigil.len_utf8(),
-            _ => 0,
-        };
-        let uses = self
-            .collect_refs_for_target(var.id, false, None)
-            .into_iter()
-            .map(|(span, _)| Span {
-                start: Point::new(span.start.row, span.start.column + sigil_len),
-                end: span.end,
-            })
-            .collect();
-        Some((field.selection_span, uses))
-    }
-
     /// The cross-file-facing view of the field group at `point`: the
     /// class + bare name + which projections exist, plus the origin-file
     /// variable spellings (fields are lexical to the class block, so the
@@ -1068,29 +1039,20 @@ impl FileAnalysis {
 
     fn projections_of(&self, g: FieldGroup) -> FieldProjections {
         let mut variable_spans: Vec<Span> = g
-            .field_sym
-            .map(|fs| {
-                self.collect_refs_for_target(fs, true, None)
+            .spelling_sym
+            .map(|vs| {
+                self.collect_refs_for_target(vs, true, None)
                     .into_iter()
-                    .map(|(span, _)| Span {
-                        start: Point::new(span.start.row, span.start.column + 1),
-                        end: span.end,
-                    })
+                    .map(|(span, _)| self.bare_spelling(&g, vs, span))
                     .collect()
             })
             .unwrap_or_default();
         // A `has`/column group's decl token IS its only spelling here; a
-        // field-backed group's decl is the field symbol's own token (the
+        // field-backed group's decl is the variable spelling's own token (the
         // rest of `variable_spans` are body uses), sigil-skipped like them.
         let mut decl_spans: Vec<Span> = g
-            .field_sym
-            .map(|fs| {
-                let sel = self.symbol(fs).selection_span;
-                vec![Span {
-                    start: Point::new(sel.start.row, sel.start.column + 1),
-                    end: sel.end,
-                }]
-            })
+            .spelling_sym
+            .map(|vs| vec![self.bare_spelling(&g, vs, self.symbol(vs).selection_span)])
             .unwrap_or_default();
         if let Some(decl) = g.decl_span {
             variable_spans.push(decl);
@@ -1131,9 +1093,10 @@ impl FileAnalysis {
             bare: g.bare,
             has_param: g.has_param,
             has_reader: g.has_reader,
+            reader_kind: g.reader_kind,
             has_internal,
             has_class_key,
-            field_backed: g.field_sym.is_some(),
+            private: g.private,
             variable_spans,
             decl_spans,
             mapped,
@@ -1148,6 +1111,26 @@ impl FileAnalysis {
     /// falls through to symbol-at resolution; if that also has no
     /// class context (orphan Sub), returns `None` — the cursor isn't
     /// on something we can safely rename.
+    /// The member access whose member TOKEN the cursor is on. `ref_at` can
+    /// return a `MethodCall` for a cursor anywhere in the call (its span
+    /// covers the args), but only the member token names the member: a hash
+    /// key in the args (`$rs->search({ order_by => 1 })`) must not hijack
+    /// `search`. The token is the QUALIFIED one (`SUPER::|new`,
+    /// `Foo::Bar::|m`): the user sees it as one word, while the renamable
+    /// identifier stays the bare tail.
+    pub fn member_token_at(&self, point: Point) -> Option<&Ref> {
+        let r = self.ref_at(point)?;
+        let (RefKind::MethodCall { method_name_span: span, .. }
+        | RefKind::FieldAccess { member_name_span: span, .. }) = &r.kind
+        else {
+            return None;
+        };
+        let mut token = *span;
+        let qual = r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
+        token.start.column = token.start.column.saturating_sub(qual);
+        contains_point(&token, point).then_some(r)
+    }
+
     pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -1161,6 +1144,9 @@ impl FileAnalysis {
                     // call site.
                     if r.resolved_package() == Some("CORE") {
                         return None;
+                    }
+                    if let Some(class) = self.class_named_by_call(r, module_index) {
+                        return Some(RenameKind::Package(class));
                     }
                     // A qualified call (`Foo::baz()`) carries the whole path
                     // in `target_name`; the renamable identifier is the bare
@@ -1178,29 +1164,13 @@ impl FileAnalysis {
                         package,
                     });
                 }
-                RefKind::MethodCall { method_name_span, .. }
-                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
-                    // `ref_at` can return a MethodCall ref for a cursor anywhere
-                    // in the call — its span covers the args. But only the
-                    // method-name token renames the method: a hash key in the
-                    // args (`$rs->search({ order_by => 1 })`) that didn't resolve
-                    // to a column must NOT hijack `search`. Gate on the name span
-                    // — widened to the QUALIFIED token: `method_name_span`
-                    // covers the bare tail only, so a cursor on the qualifier
-                    // segment (`SUPER::|new`, `Foo::Bar::|m`) minted no identity
-                    // — goto-def (span-generous) answered while references /
-                    // rename / highlights came back empty. The renamable
-                    // identifier stays the bare tail; only cursor ACCEPTANCE
-                    // covers the token the user sees as one word.
-                    let token_span = {
-                        let mut s = *method_name_span;
-                        let qual =
-                            r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
-                        s.start.column = s.start.column.saturating_sub(qual);
-                        s
-                    };
-                    if contains_point(&token_span, point) {
-                        if let Some(class) = self.method_call_invocant_class(r, module_index) {
+                RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
+                    if self.member_token_at(point).is_some() {
+                        // One class names one kind; a union member's arms are
+                        // grouped by the CandidateSet, which asks per arm.
+                        if let Some(class) =
+                            self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).single().map(str::to_string)
+                        {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
                             return Some(RenameKind::Method {
@@ -1214,10 +1184,11 @@ impl FileAnalysis {
                     // fallback below; if that also has no class, bail rather
                     // than return a class-less Method rename.
                 }
-                // the written spelling names an identity (a namespaced
-                // pack resolves it through the file's use-map)
+                // the class the token names as its file spells it: an
+                // aliased import's own leaf is the imported class, not
+                // whatever the leaf would resolve to elsewhere in the file
                 RefKind::PackageRef => {
-                    return Some(RenameKind::Package(self.class_spelling_identity(&r.target_name)))
+                    return Some(RenameKind::Package(self.spelled_identity(r)))
                 }
                 RefKind::HashKeyAccess { .. } => return Some(RenameKind::HashKey(r.target_name.clone())),
                 RefKind::DispatchCall { .. } if r.handler_owner().is_some() => {
@@ -1307,14 +1278,14 @@ impl FileAnalysis {
                     .map(|id| self.symbol(id))
                     .or_else(|| self.resolve_variable(&r.target_name, point));
                 if let Some(s) = sym {
-                    if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
+                    if matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
                         return Some((s.package.clone()?, s.name.clone()));
                     }
                 }
             }
         }
         if let Some(s) = self.symbol_at(point) {
-            if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
+            if matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
                 return Some((s.package.clone()?, s.name.clone()));
             }
         }
@@ -1368,12 +1339,10 @@ impl FileAnalysis {
                 | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
                     // Member refs target a class — `None` scope
                     // doesn't reach members.
-                    if let (Some(cls), Some(wanted)) =
-                        (self.method_call_invocant_class(r, module_index), scope.as_ref())
-                    {
-                        if &cls == wanted {
-                            edits.push((*method_name_span, new_name.to_string()));
-                        }
+                    if scope.as_deref().is_some_and(|wanted| {
+                        self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(wanted)
+                    }) {
+                        edits.push((*method_name_span, new_name.to_string()));
                     }
                 }
                 _ => {}

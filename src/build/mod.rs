@@ -9,7 +9,7 @@ pub mod cpp_macro_model;
 // Compiled unconditionally (symbols.rs consumes the macro-model surface in
 // every build); the driver registration is feature-gated, so a perl-only
 // build leaves most of the module unreferenced — silence dead-code there
-// while keeping the all-langs build strict.
+// while keeping the cpp build strict.
 #[cfg_attr(not(feature = "cpp"), allow(dead_code))]
 pub mod cpp_reparse;
 // zero-config toolchain probe: shell out to cc for stdlib
@@ -30,3 +30,7 @@ pub mod query_extract;
 // pre-extraction reparse seam (whose production form is cpp_reparse).
 #[allow(dead_code)]
 pub mod reparse;
+// package-marker directories a workspace walk saw (python's `__init__.py`);
+// only a path-named language reads them
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub mod walk_markers;

@@ -8,7 +8,7 @@ use super::*;
 /// package. `None` for `my` / `state` / `field`, which are pure lexicals.
 pub(super) fn our_gate(sym: &Symbol) -> Option<&str> {
     match &sym.detail {
-        SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } => sym.package.as_deref(),
+        SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => sym.package.as_deref(),
         _ => None,
     }
 }
@@ -52,56 +52,91 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // A declared package global (`our`, `use vars`) is the global its
+        // `(package, name)` names, wherever the use is spelled.
+        let mut globals: std::collections::HashMap<(String, String), SymbolId> =
+            std::collections::HashMap::new();
+        for sym in &self.symbols {
+            if matches!(sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
+                let pkg = sym.package.clone().unwrap_or_else(|| "main".to_string());
+                globals.entry((pkg, sym.name.clone())).or_insert(sym.id);
+            }
+        }
+
+        // A global nothing declares is the one Perl creates on first
+        // mention: one minted symbol per `(package, name)`,
+        // anchored at its earliest use, minted once every use is read.
+        let mut undeclared: Vec<(usize, (String, String))> = Vec::new();
         for idx in 0..self.refs.len() {
             if !matches!(self.refs[idx].kind, RefKind::Variable | RefKind::ContainerAccess) {
                 continue;
             }
-            let ref_span_start = self.refs[idx].span.start;
-            let ref_target = self.refs[idx].target_name.clone();
-            let ref_scope = self.refs[idx].scope;
-
-            // Fully-qualified read (`$Foo::Bar::x`): resolve by
-            // `(package, sigil+basename)` against the declaring symbol, not
-            // by lexical scope — the qualifier names the package directly,
-            // so the lexical chain is irrelevant (same seam as FQ calls).
-            // Cross-package goto-def for non-local packages happens at query
-            // time via `qualified_var_target()` + module_index.
-            if let Some((pkg, name)) = self.refs[idx]
-                .qualified_var_target(&crate::model::conventions::PERL_SPELLINGS)
-                .map(|(p, n)| (p.to_string(), n))
-            {
-                if let Some(sym) = self.symbols.iter().find(|s| {
-                    matches!(s.kind, SymKind::Variable | SymKind::Field)
-                        && s.name == name
-                        && s.package.as_deref() == Some(pkg.as_str())
-                }) {
-                    self.refs[idx].bind_symbol(sym.id);
-                }
-                continue;
-            }
-
-            let use_pkg = self.package_at_pos(ref_span_start).map(|s| s.to_string());
-
-            // Walk scope chain to find the innermost matching declaration
-            let mut current = Some(ref_scope);
-            while let Some(scope_id) = current {
-                if let Some(symbols) = scope_symbols.get(&scope_id) {
-                    // Find the best match: declared before this ref, matching name,
-                    // and (for `our`) sharing the use's enclosing package.
-                    if let Some((_, sym_id, _, _)) = symbols.iter()
-                        .filter(|(name, _, decl_point, gating_package)| {
-                            if name != &ref_target { return false; }
-                            if *decl_point > ref_span_start { return false; }
-                            our_gate_admits(gating_package.as_deref(), use_pkg.as_deref())
-                        })
-                        .last()
-                    {
-                        self.refs[idx].bind_symbol(*sym_id);
-                        break;
+            let r = &self.refs[idx];
+            let use_pkg = self.package_at_pos(r.span.start);
+            let chain = crate::model::file_analysis::lookup_chain(&self.scopes, r.scope);
+            let outcome = crate::model::file_analysis::variable_use(
+                &r.target_name,
+                r.span.start,
+                chain,
+                use_pkg,
+                &crate::model::conventions::PERL_SPELLINGS,
+                |scope| {
+                    scope_symbols.get(&scope).into_iter().flatten().filter_map(|(name, id, at, gate)| {
+                        (name == &r.target_name).then_some((*id, *at, gate.as_deref()))
+                    })
+                },
+            );
+            match outcome {
+                crate::model::file_analysis::VariableUse::Declared(id) => self.refs[idx].bind_symbol(id),
+                crate::model::file_analysis::VariableUse::Global { package, name } => {
+                    match globals.get(&(package.clone(), name.clone())) {
+                        Some(&id) => self.refs[idx].bind_symbol(id),
+                        None => undeclared.push((idx, (package, name))),
                     }
                 }
-                current = self.scopes[scope_id.0 as usize].parent;
+                crate::model::file_analysis::VariableUse::GatedOur => {}
             }
+        }
+
+        // Only a bare spelling of an ordinary name makes the global this
+        // file's own; one named only qualified, or a special variable, is a
+        // `Mention`.
+        let mut owned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        for (idx, key) in &undeclared {
+            if self.refs[*idx].target_name == key.1 && !crate::model::conventions::is_special_variable(&key.1) {
+                owned.insert(key.clone());
+            }
+        }
+        for (idx, key) in undeclared {
+            let span = self.refs[idx].span;
+            let id = match globals.get(&key) {
+                Some(&id) => {
+                    let sym = &mut self.symbols[id.0 as usize];
+                    if span.start < sym.span.start {
+                        sym.span = span;
+                        sym.selection_span = span;
+                    }
+                    id
+                }
+                None => {
+                    let sigil = key.1.chars().next().unwrap_or('$');
+                    let decl_kind = if owned.contains(&key) { DeclKind::Implicit } else { DeclKind::Mention };
+                    // File scope: a global is visible wherever its package is.
+                    let id = self.add_symbol_in_scope(
+                        ScopeId(0),
+                        key.1.clone(),
+                        SymKind::Variable,
+                        span,
+                        span,
+                        SymbolDetail::Variable { sigil, decl_kind },
+                        Namespace::Language,
+                        Some(key.0.clone()),
+                    );
+                    globals.insert(key, id);
+                    id
+                }
+            };
+            self.refs[idx].bind_symbol(id);
         }
     }
 
@@ -236,6 +271,7 @@ impl<'a> Builder<'a> {
                     module_index: None,
                     package_parents: &self.package_parents,
                     app_surface_consumers: &self.app_surface_consumers,
+                    lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
                 };
                 crate::model::witnesses::emit_mutation_extension_witnesses(
                     &mut self.bag,
@@ -347,15 +383,15 @@ impl<'a> Builder<'a> {
     /// fallback. After the live walk, `current_package` is stale
     /// (= last package opened in the file). To make the typer
     /// package-correct at every assignment site, we query
-    /// `package_ranges` for the package at the assignment's
+    /// `namespace_ranges` for the package at the assignment's
     /// position and override `current_package` for the call.
     ///
-    /// Why `package_ranges` and not "track package_statement
+    /// Why `namespace_ranges` and not "track package_statement
     /// nodes": `package X;` is a SIBLING of the subs that follow
     /// it in the AST, not a parent — its scope extends forward
     /// through siblings until the next `package`. Walking the
     /// AST and saving/restoring on package_statement entry/exit
-    /// doesn't model that. `package_ranges` is the flat record
+    /// doesn't model that. `namespace_ranges` is the flat record
     /// populated at walk time and trimmed by successor decls;
     /// a point-query gives the right answer at any byte.
     pub(super) fn apply_chain_typing_assignments(&mut self, idx: &ChainTypingIndex<'a>) {
@@ -487,7 +523,7 @@ impl<'a> Builder<'a> {
             // the write has not produced yet. Block-relative on purpose: inside
             // the block, the block has run; whether it ran at all is the
             // binding-scope question below.
-            let conditional = is_rebind && crate::cst::is_conditionally_executed_in_block(node);
+            let conditional = is_rebind && crate::cst::conditional_arm(node, crate::cst::ArmBound::Block).is_some();
             // Innermost scope containing this assignment.
             let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
             let scope_idx = self
@@ -893,6 +929,7 @@ impl<'a> Builder<'a> {
         timed("fold::arity", || self.emit_arity_return_witnesses());
         timed("fold::mc_edges", || self.emit_method_call_return_edges());
         timed("fold::narrowing", || self.emit_defined_narrowing_witnesses());
+        timed("fold::tag_narrowing", || self.emit_tag_narrowing_witnesses());
         let (return_types, return_provenance) =
             timed("fold::seed", || self.seed_return_types_from_bag(reg, method_sym_by_name));
         timed("fold::writeback", || self.write_back_sub_return_types(&return_provenance));
@@ -1057,6 +1094,7 @@ impl<'a> Builder<'a> {
             module_index: None,
             package_parents: &self.package_parents,
             app_surface_consumers: &self.app_surface_consumers,
+            lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
         }
     }
 
@@ -1296,7 +1334,7 @@ impl<'a> Builder<'a> {
             // Object-subsumes-HashRef dominance — that's a merge, not agreement.
             // An arm that doesn't type yet can't be shown to agree, so it
             // keeps the union authoritative too.
-            if known_arm_types.len() < arms.len() || arms_genuinely_agree(&known_arm_types).is_none() {
+            if known_arm_types.len() < arms.len() || arms_genuinely_agree(&known_arm_types, &self.bag_context()).is_none() {
                 authoritative_syms.push(sym_id);
             }
             let return_expr = ReturnExpr::UnionOnArgs { branches: sorted };
@@ -2027,8 +2065,7 @@ impl<'a> Builder<'a> {
                 // Fall back to variable identity
                 if let Some(defs) = var_defs.get(&vt) {
                     // Find the innermost declaration before this ref
-                    let mut scope = Some(r.scope);
-                    while let Some(sid) = scope {
+                    for sid in crate::model::file_analysis::lookup_chain(&self.scopes, r.scope).scopes() {
                         if let Some((def_scope, _sym_id)) = defs.iter().find(|(s, _)| *s == sid) {
                             r.bind_hash_key_owner(HashKeyOwner::Variable {
                                 name: vt.clone(),
@@ -2036,7 +2073,6 @@ impl<'a> Builder<'a> {
                             });
                             break;
                         }
-                        scope = self.scopes[sid.0 as usize].parent;
                     }
                 }
 

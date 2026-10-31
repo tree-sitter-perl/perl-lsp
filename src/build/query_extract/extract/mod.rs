@@ -71,6 +71,7 @@ fn family(cap: Capture) -> Family {
     match cap {
         C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
+        | C::DefPair
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget
@@ -81,16 +82,18 @@ fn family(cap: Capture) -> Family {
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::ParamReceiver => Family::Defs,
-        C::Ref(_) => Family::Refs,
+        | C::Mark(_) => Family::Defs,
+        C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)
+        | C::Arm
         | C::Domain(_)
         | C::Shape(_)
         | C::TypeAnnot
-        | C::AnonAggMember => Family::Flow,
+        | C::AnonAggMember
+        | C::Receiver => Family::Flow,
         C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing
         }
@@ -109,20 +112,80 @@ struct ExtractState<'p> {
     /// (end_byte, ScopeId) — real Scope rows are minted as we go so the
     /// resulting FileAnalysis carries a genuine lexical tree.
     scope_stack: Vec<(usize, ScopeId)>,
-    /// (registered_at_depth, value) — a context set inside a scope pops
-    /// with it (Python class blocks); one set at file depth is sticky
+    /// (registered_at_depth, kind, value) — a context set inside a scope
+    /// pops with it (Python class blocks); one set at file depth is sticky
     /// (Perl's flat `package Foo;`).
-    context_stack: Vec<(usize, String)>,
+    context_stack: Vec<(usize, ContextKind, String)>,
     /// The innermost scope and sticky context at the current event.
     cur_scope: ScopeId,
     package: Option<String>,
     scopes: scopes::State,
     defs: defs::State,
+    refs: refs::State,
     members: members::State,
     flow: flow::State,
     narrowing: narrowing::State,
     commands: commands::State,
     imports: imports::State,
+    /// The module the file IS, when its language names it by path and the
+    /// driver had one: its dotted name is the section every declaration
+    /// without a namespace of its own joins.
+    file_module: Option<&'p FileModule>,
+}
+
+pub use crate::model::file_analysis::FileModule;
+
+impl ExtractState<'_> {
+    /// The section of the namespace lane in force at `at`, as written so
+    /// far. Every section that holds `at` is in by then — a section opens
+    /// at or before the code it covers, and a statement form is cut short
+    /// only where its successor starts.
+    fn namespace_at(&self, at: Point) -> Option<&str> {
+        crate::model::file_analysis::namespace_range_at(&self.out.namespace_ranges, at)
+            .map(|r| r.namespace.as_str())
+            .filter(|ns| !ns.is_empty())
+    }
+
+    /// The scope a class member declared at the current event belongs to:
+    /// the innermost scope that is not a callable's body.
+    fn member_scope(&self) -> ScopeId {
+        self.scope_stack
+            .iter()
+            .rev()
+            .map(|&(_, id)| id)
+            .find(|id| !matches!(self.out.scopes[id.0 as usize].kind, ScopeKind::Sub { .. }))
+            .unwrap_or(self.cur_scope)
+    }
+
+    /// The identity a class named `leaf`, declared in `from` at `at`, is
+    /// filed under. Under a use-map it is the leaf joined to its home
+    /// (`scopes::home_of`) — the class it is written in, else the
+    /// namespace in force — so every spelling of the class resolves to the
+    /// key it is filed under. Otherwise the spelling is the identity.
+    /// The scope a def at the current event binds in: the innermost one,
+    /// or for a def written in a header (a parameter), the def scope the
+    /// header belongs to.
+    fn bind_scope(&self) -> ScopeId {
+        self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
+    }
+
+    fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
+        match self.pack.names.use_map_sep() {
+            Some(sep) => crate::model::conventions::join_qualified(scopes::home_of(self, from, at).unwrap_or(""), leaf, sep),
+            None => leaf.to_string(),
+        }
+    }
+}
+
+/// A written type as the identities it names at `site`: under a use-map
+/// every class spelling it carries resolves through the rows that reach
+/// the site and the namespace in force there. Runs once every row,
+/// section and class is in.
+fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, &out.scopes, names, site, &out.symbols) {
+        Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
+        None => t,
+    }
 }
 
 /// Run the document over `root`. Links and `@deref` marks are recorded
@@ -187,7 +250,21 @@ impl<'t> DeclaratorPeel<'t> {
     }
 }
 
+/// `extract_in` for a file that is no module of its own.
+#[cfg(test)]
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
+    extract_in(tree, source, pack, None)
+}
+
+/// Run the pack's document over a parsed file. `file_module` is the module
+/// the file is, for a language that names modules by path; its classes
+/// join that namespace.
+pub fn extract_in(
+    tree: &Tree,
+    source: &[u8],
+    pack: &LangPack,
+    file_module: Option<&FileModule>,
+) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let compiled = cached_query(&language, pack.query_source)?;
 
@@ -202,6 +279,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         package: None,
         owner: None,
         implicit_receiver: false,
+        direct: false,
+        declaration_rules: Vec::new(),
     });
     let mut st = ExtractState {
         pack,
@@ -212,12 +291,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         package: None,
         scopes: Default::default(),
         defs: Default::default(),
+        refs: Default::default(),
         members: Default::default(),
         flow: Default::default(),
         narrowing: Default::default(),
         commands: Default::default(),
         imports: Default::default(),
+        file_module,
     };
+    // A module named by its path is one section, the whole file.
+    if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
+        let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
+        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
+            namespace: ns,
+            span: st.out.scopes[0].span,
+            kind: crate::model::file_analysis::SectionKind::Statement,
+        });
+    }
 
     // ---- flatten matches into ordered events ----
     let (links, captured) = record_matches(compiled, root, source);
@@ -231,8 +321,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Capture::NestedTarget => {
                 defs::flatten_nested(&mut st.defs, node, &links, source, match_id, &mut events)
             }
-            Capture::Member(MemberCap::Recv) => {
-                members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
+            Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
+                members::flatten_recv(&mut st.members, node, cap, pack, source, match_id, &mut events)
             }
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
@@ -245,13 +335,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the
     // symbol attributes to its ENCLOSING scope, not its own body — hence scope
-    // sorts last among identical-span ties.
-    let is_scope = |e: &Event| matches!(e.cap, Capture::Scope(_));
+    // sorts last among identical-span ties. A header holds no def of its own
+    // node, and a token can be the whole of one (`-> T`), so it opens first.
+    let tie_rank = |e: &Event| match e.cap {
+        Capture::Scope(ScopeCap::Header) => 0,
+        Capture::Scope(_) => 2,
+        _ => 1,
+    };
     events.sort_by(|a, b| {
         a.start_byte
             .cmp(&b.start_byte)
             .then(b.end_byte.cmp(&a.end_byte))
-            .then(is_scope(a).cmp(&is_scope(b)))
+            .then(tie_rank(a).cmp(&tie_rank(b)))
     });
 
     // ---- pre-collect the per-match joins a handler reads before the
@@ -263,7 +358,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Members => members::collect(&mut st, e),
-            Family::Refs | Family::Commands | Family::Imports | Family::Links => {}
+            Family::Imports => imports::collect(&mut st, e),
+            Family::Refs => refs::collect(&mut st, e),
+            Family::Commands | Family::Links => {}
         }
     }
 
@@ -273,12 +370,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             && st.scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
         {
             st.scope_stack.pop();
-            while st.context_stack.last().is_some_and(|&(d, _)| d > st.scope_stack.len()) {
+            while st.context_stack.last().is_some_and(|&(d, ..)| d > st.scope_stack.len()) {
                 st.context_stack.pop();
             }
         }
         st.cur_scope = st.scope_stack.last().unwrap().1;
-        st.package = st.context_stack.last().map(|(_, p)| p.clone());
+        st.package = st.context_stack.last().map(|(.., p)| p.clone());
         match family(e.cap) {
             Family::Scopes => scopes::handle(&mut st, e),
             Family::Defs => defs::handle(&mut st, e),
@@ -297,11 +394,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     defs::tag_inline_namespaces(&mut st);
     flow::emit_keyed_shapes(&mut st);
     imports::finish(&mut st);
+    imports::bind_reach(&mut st);
+    // A parent may be written above the import that names it, so it
+    // resolves once every row is in.
+    scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.
     flow::finish(&mut st, &events);
+    st.out.class_scopes = scopes::class_scope_rows(&st);
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);

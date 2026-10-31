@@ -20,9 +20,21 @@ minted it.
 
 A flag that states a structural role rather than a declared attribute is
 minted from a capture, with no spelling in the table: `RECEIVER` is the
-symbol a document's `@param.receiver` names (python's leading `self` /
-`cls`), so the outline and the class-member lane ask the symbol instead
-of comparing its name against a per-language list.
+symbol a document's `@receiver` names when the receiver is declared
+(python's leading `self` / `cls`), so the outline and the class-member lane ask the symbol instead
+of comparing its name against a per-language list. `CONSTRUCTOR`,
+`CONTRACT` and `DYNAMIC_MEMBERS` are the same kind of fact, stated by a
+`@mark.<flag>` on the declaration's name token: php's document marks
+`__construct`, every method declared without a body, and a class whose
+body declares a catch-all. Perl mints the first two where it mints the
+symbol, from its `new` convention and from a role's `requires`.
+
+A `@mark` also states a declared attribute whose token is not the
+canonical spelling (`private` and `protected` both mean `non_public`) or
+whose modifiers come in any order, which one def pattern cannot list. A
+mark joins its symbol by the name token's span, since it is a pattern of
+its own; a mark spelled like an attribute mints that attribute's flag
+(`vocab_tests`).
 
 ## Why closed
 

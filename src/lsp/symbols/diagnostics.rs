@@ -16,13 +16,48 @@ pub mod codes {
     pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
     pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
+    pub const MISSING_DECLARATION: &str = "missing-declaration";
+    pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
+}
+
+/// `resolved-by-widening`: a class reference whose identity nothing indexed
+/// declares, answered by a same-leaf class of another namespace
+/// (`FileAnalysis::widened_class_references`). Always on, because the
+/// widened answer is a guess every class-shaped verb now acts on; the
+/// lookup is the file's own scope, so only a use-map language reaches it.
+pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{CrossFileLookup, PackVisibility, ScopedLookup, VisibilityAxis};
+    let visibility = LanguageRegistry::pack_visibility(&analysis.language);
+    if visibility != PackVisibility::NameKeyed {
+        return Vec::new();
+    }
+    let base: &dyn CrossFileLookup = module_index;
+    let axis = VisibilityAxis::for_origin(analysis, None, base, visibility);
+    let scoped = ScopedLookup::new(base, &analysis.pack.include_closure, None, axis);
+    analysis
+        .widened_class_references(&scoped)
+        .into_iter()
+        .map(|w| Diagnostic {
+            range: span_to_range(w.span),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(NumberOrString::String(codes::RESOLVED_BY_WIDENING.into())),
+            source: Some("perl-lsp".into()),
+            message: format!(
+                "nothing indexed declares `{}`; resolved by its leaf to `{}`",
+                w.named, w.resolved
+            ),
+            ..Default::default()
+        })
+        .collect()
 }
 
 // ---- Diagnostics ----
 
-/// Opt-in diagnostic toggles. Defaults are all-off for the QA/plugin-author
-/// channels (noise for end users); the always-on hints (`unresolved-function`
-/// / `unresolved-method`) ignore this.
+/// Diagnostic toggles. Defaults are all-off: the opt-in QA/plugin-author
+/// channels (noise for end users) and the opt-out of the default-on
+/// `missing-declaration`; the always-on hints (`unresolved-function` /
+/// `unresolved-method`) ignore this.
 ///
 /// **The struct is the schema.** `rename_all = "camelCase"` makes each field
 /// its own LSP key under `initializationOptions.diagnostics`, so `backend.rs`
@@ -73,6 +108,10 @@ pub struct DiagnosticOptions {
     /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
     /// mismatch. Off by default.
     pub deref_shape: bool,
+    /// Turn OFF `missing-declaration` (an undeclared variable, what `use
+    /// strict 'vars'` rejects), which is on by default. Spelled as an
+    /// opt-out so every field keeps the all-off default.
+    pub disable_missing_declaration: bool,
 }
 
 impl DiagnosticOptions {
@@ -89,6 +128,7 @@ impl DiagnosticOptions {
             optional_deref: has("--optional-deref"),
             redundant_guard: has("--redundant-guard"),
             deref_shape: has("--deref-shape"),
+            disable_missing_declaration: has("--disable-missing-declaration"),
         }
     }
 }
@@ -99,6 +139,9 @@ pub fn collect_diagnostics(
     options: DiagnosticOptions,
 ) -> Vec<Diagnostic> {
     crate::util::ghost_stats::count("collect_diagnostics");
+    // Two lints read every member access's receiver; one resolution serves
+    // both. Rides the caller's session when it opened one.
+    let _session = crate::model::witnesses::ResolutionSession::enter_with_receivers(module_index);
     let mut diagnostics = Vec::new();
 
     // Plugin-emitted diagnostics (pattern lints) — already decided at
@@ -315,6 +358,37 @@ pub fn collect_diagnostics(
     }
 
     drop(_g_fn);
+
+    // Undeclared variables — what `use strict 'vars'` rejects. On by default:
+    // a global nobody declared is the typo-shaped bug strict exists to catch.
+    // A name an import binds is declared by its exporter. A bare or `:tag`
+    // import whose producer isn't cached yet may bind any variable, so the
+    // file stays silent until it resolves (resolution re-publishes).
+    let surface_unknown = import_bindings.iter().any(|b| {
+        b.exported.is_none()
+            && !b.import.empty_import
+            && (b.import.imported_symbols.is_empty()
+                || b.import.imported_symbols.iter().any(|s| {
+                    s.local_name.starts_with(':') || s.local_name.starts_with('-')
+                }))
+    });
+    if !surface_unknown && !options.disable_missing_declaration {
+        for r in analysis.undeclared_variable_uses() {
+            let glob = crate::model::conventions::glob_of_variable(&r.target_name);
+            let brought = |n: &str| matches!(resolve_name(n), Some((_, ImportResolution::Brought)));
+            if brought(&r.target_name) || brought(&glob) {
+                continue;
+            }
+            diagnostics.push(Diagnostic {
+                range: span_to_range(r.span),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String(codes::MISSING_DECLARATION.into())),
+                source: Some("perl-lsp".into()),
+                message: format!("'{}' is not declared (add `my` or `our`)", r.target_name),
+                ..Default::default()
+            });
+        }
+    }
     // 5e: Unresolved method diagnostics for locally-defined classes.
     //
     // Core owns ONLY the true `UNIVERSAL::` surface — the methods every Perl
@@ -335,6 +409,56 @@ pub fn collect_diagnostics(
             .into_iter()
             .chain(analysis.plugin.meta_methods.iter().map(|s| s.as_str()))
             .collect();
+    // True only when `class_name` is a class we can fully see and nothing in
+    // its MRO answers `method_name`.
+    let class_lacks_method = |class_name: &str, method_name: &str| -> bool {
+        // Fire for classes we can fully see. Always-on: classes defined in
+        // THIS file (high precision — you wrote it, the walker sees its
+        // methods). Opt-in (D8): also cross-file-resolvable classes, so a
+        // narrowed or cross-file-typed receiver is checked. A class that is
+        // neither local nor cached is external/uninstalled — stay silent, we
+        // can't enumerate its methods. The complete-ancestry valve below is
+        // the shared honest-silent guard for both.
+        let is_local_class = analysis.symbols().iter().any(|s| {
+            matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == class_name
+        });
+        let is_cached_class =
+            options.unresolved_method_cross_file && module_index.get_cached(class_name).is_some();
+        if !is_local_class && !is_cached_class {
+            return false;
+        }
+
+        // A local class must define ≥1 method we can see (else it's likely a
+        // forward decl / external alias re-opened here). A cached cross-file
+        // class is already a real module — its methods live in its analysis,
+        // which `resolve_method_in_ancestors` consults below.
+        let has_methods = is_cached_class
+            || analysis.symbols().iter().any(|s| {
+                matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+                    && analysis.symbol_in_class(s.id, class_name)
+            });
+        if !has_methods {
+            return false;
+        }
+
+        if analysis.resolve_method_in_ancestors(class_name, method_name, Some(module_index)).is_some() {
+            return false;
+        }
+
+        // A class with `AUTOLOAD` anywhere in its MRO answers ANY method name at
+        // runtime, so the static `sub` set isn't its real surface — stay silent
+        // (the role-contracts diagnostic uses the same skip, file_analysis.rs).
+        if analysis.resolve_method_in_ancestors(class_name, "AUTOLOAD", Some(module_index)).is_some() {
+            return false;
+        }
+
+        // Honest-silent on an incomplete ISA chain: if `class_name` (or any
+        // resolvable ancestor) names a parent we can't resolve in the
+        // workspace or @INC, the method might be inherited from there. One
+        // predicate gates EVERY invocant-typing path (`$self`/FirstParam and
+        // direct `Pkg->m` alike), so they can't drift (rule #10).
+        !analysis.class_has_unresolved_ancestor(class_name, Some(module_index))
+    };
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
     for r in analysis.refs() {
         let (invocant, _invocant_span) = match &r.kind {
@@ -363,79 +487,35 @@ pub fn collect_diagnostics(
             continue;
         }
 
-        // Resolve invocant to class name. Diagnostics stays bag-only for
-        // scalars — no enclosing-class fallback, which would manufacture
-        // warnings on untyped invocants — and skips everything else.
-        let class_name = match invocant.classify() {
-            InvocantText::Bareword(b) => Some(b.to_string()),
-            InvocantText::Scalar(_) => analysis.inferred_type_via_bag(invocant, r.span.start)
-                .and_then(|ty| ty.class_name().map(|s| s.to_string())),
-            _ => None,
+        // A bareword or scalar receiver is one the code names, so its
+        // classes are checked; and only the classes its value states
+        // (`ReceiverPolicy::Stated`) — an enclosing-class guess would
+        // manufacture warnings on untyped invocants.
+        if !matches!(invocant.classify(), InvocantText::Bareword(_) | InvocantText::Scalar(_)) {
+            continue;
+        }
+        let classes = analysis.receiver_classes(r, Some(module_index), ReceiverPolicy::Stated);
+
+        // Each arm is checked on its own, so a union receiver warns for the
+        // arms that lack the method even when another arm answers it — the
+        // call dies at runtime for exactly those values.
+        let missing: Vec<&str> = classes.iter().filter(|cn| class_lacks_method(cn, method_name)).collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let in_classes = missing.join(" or ");
+        let message = if classes.single().is_none() {
+            format!("'{}' is not defined in {}, which {} may be", method_name, in_classes, invocant)
+        } else {
+            format!("'{}' is not defined in {}", method_name, in_classes)
         };
-        let class_name = match class_name {
-            Some(cn) => cn,
-            None => continue,
-        };
-
-        // Fire for classes we can fully see. Always-on: classes defined in
-        // THIS file (high precision — you wrote it, the walker sees its
-        // methods). Opt-in (D8): also cross-file-resolvable classes, so a
-        // narrowed or cross-file-typed receiver is checked. A class that is
-        // neither local nor cached is external/uninstalled — stay silent, we
-        // can't enumerate its methods. The complete-ancestry valve below is
-        // the shared honest-silent guard for both.
-        let is_local_class = analysis.symbols().iter().any(|s| {
-            matches!(s.kind, FaSymKind::Class | FaSymKind::Package) && s.name == class_name
-        });
-        let is_cached_class =
-            options.unresolved_method_cross_file && module_index.get_cached(&class_name).is_some();
-        if !is_local_class && !is_cached_class {
-            continue;
-        }
-
-        // A local class must define ≥1 method we can see (else it's likely a
-        // forward decl / external alias re-opened here). A cached cross-file
-        // class is already a real module — its methods live in its analysis,
-        // which `resolve_method_in_ancestors` consults below.
-        let has_methods = is_cached_class
-            || analysis.symbols().iter().any(|s| {
-                matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
-                    && analysis.symbol_in_class(s.id, &class_name)
-            });
-        if !has_methods {
-            continue;
-        }
-
-        // Check if the method exists in the class (walks inheritance chain)
-        if analysis.resolve_method_in_ancestors(&class_name, method_name, Some(module_index)).is_some() {
-            continue;
-        }
-
-        // A class with `AUTOLOAD` anywhere in its MRO answers ANY method name at
-        // runtime, so the static `sub` set isn't its real surface — stay silent
-        // (the role-contracts diagnostic uses the same skip, file_analysis.rs).
-        if analysis.resolve_method_in_ancestors(&class_name, "AUTOLOAD", Some(module_index)).is_some() {
-            continue;
-        }
-
-        // Honest-silent on an incomplete ISA chain: if `class_name` (or any
-        // resolvable ancestor) names a parent we can't resolve in the
-        // workspace or @INC, the method might be inherited from there. One
-        // predicate gates EVERY invocant-typing path (`$self`/FirstParam and
-        // direct `Pkg->m` alike), so they can't drift (rule #10).
-        if analysis.class_has_unresolved_ancestor(&class_name, Some(module_index)) {
-            continue;
-        }
 
         diagnostics.push(Diagnostic {
             range: span_to_range(r.span),
             severity: Some(DiagnosticSeverity::HINT),
             code: Some(NumberOrString::String(codes::UNRESOLVED_METHOD.into())),
             source: Some("perl-lsp".into()),
-            message: format!(
-                "'{}' is not defined in {}",
-                method_name, class_name,
-            ),
+            message,
             ..Default::default()
         });
     }
@@ -547,14 +627,15 @@ pub fn collect_diagnostics(
     // check (docs/adr/role-contracts.md). WARNING, not HINT: Perl
     // dies at composition time for this. Anchored to the `with 'Role'`
     // PackageRef inside the composing package; the package decl is the
-    // fallback (e.g. the parent edge came from a raw `@ISA` push).
+    // fallback (e.g. the parent edge came from a raw `@ISA` push). The
+    // parent edge carries the identity, so the ref's spelling resolves first.
     for u in analysis.unfulfilled_role_requires(Some(module_index)) {
         let span = analysis
             .refs()
             .iter()
             .find(|r| {
                 matches!(r.kind, RefKind::PackageRef)
-                    && r.target_name == u.via_parent
+                    && analysis.spelled_identity(r) == u.via_parent
                     && analysis.package_at(r.span.start) == Some(u.package.as_str())
             })
             .map(|r| r.span)
@@ -604,22 +685,20 @@ pub fn collect_diagnostics(
             if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
                 continue;
             }
-            let class_name = match invocant.classify() {
-                InvocantText::Bareword(b) => Some(b.to_string()),
-                InvocantText::Scalar(_) => analysis
-                    .inferred_type_via_bag(invocant, r.span.start)
-                    .and_then(|ty| ty.class_name().map(|s| s.to_string())),
-                _ => None,
-            };
-            let Some(class_name) = class_name else { continue };
-            if !seen.insert((class_name.clone(), method_name.clone())) {
-                // one hint per (class, helper) per file — the fix is
-                // one `plugin` line, not one per call site
+            // The same receivers the unresolved-method lint checks.
+            if !matches!(invocant.classify(), InvocantText::Bareword(_) | InvocantText::Scalar(_)) {
                 continue;
             }
-            let Some(provider) =
-                analysis.bridged_helper_provider(&class_name, method_name, Some(module_index))
-            else {
+            let classes = analysis.receiver_classes(r, Some(module_index), ReceiverPolicy::Stated);
+            // The helper's provider on whichever class the receiver may be
+            // bridges it.
+            // One hint per (class, helper) per file — the fix is one
+            // `plugin` line, not one per call site.
+            let fresh: Vec<&str> =
+                classes.iter().filter(|c| seen.insert((c.to_string(), method_name.clone()))).collect();
+            let Some(provider) = fresh.iter().find_map(|class_name| {
+                analysis.bridged_helper_provider(class_name, method_name, Some(module_index))
+            }) else {
                 continue;
             };
             if !module_index.is_workspace_module(&provider) {
@@ -716,18 +795,15 @@ pub fn collect_diagnostics(
 fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> String {
     use crate::model::file_analysis::GuardPredicate;
     let subject = &g.subject;
-    match (&g.verdict, &g.predicate) {
-        (GuardVerdict::AlwaysTrue, GuardPredicate::Defined) => {
-            format!("'{subject}' is always defined here; this guard is redundant")
-        }
-        (GuardVerdict::AlwaysFalse, GuardPredicate::Defined) => {
-            format!("'{subject}' is undef here; this guard can never pass")
-        }
-        (GuardVerdict::AlwaysTrue, GuardPredicate::IsType(t)) => {
-            format!("'{subject}' is already {}; this guard is redundant", format_inferred_type(t))
-        }
-        (GuardVerdict::AlwaysFalse, GuardPredicate::IsType(t)) => {
-            format!("'{subject}' is not {} here; this guard can never pass", format_inferred_type(t))
-        }
-    }
+    let fact = match (g.satisfied, &g.predicate) {
+        (true, GuardPredicate::Defined) => format!("'{subject}' is always defined here"),
+        (false, GuardPredicate::Defined) => format!("'{subject}' is undef here"),
+        (true, GuardPredicate::IsType(t)) => format!("'{subject}' is already {}", format_inferred_type(t)),
+        (false, GuardPredicate::IsType(t)) => format!("'{subject}' is not {} here", format_inferred_type(t)),
+    };
+    let consequence = match g.verdict {
+        GuardVerdict::AlwaysTrue => "this guard is redundant",
+        GuardVerdict::AlwaysFalse => "this guard can never pass",
+    };
+    format!("{fact}; {consequence}")
 }

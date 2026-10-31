@@ -321,7 +321,7 @@ fn classic_perl_filehandle_fps_suppressed() {
     let module_index = crate::index::module_index::ModuleIndex::new_for_test();
     for src in [
         "print STDERR \"hi\";\n",
-        "printf STDERR \"%s\", $x;\n",
+        "my $x; printf STDERR \"%s\", $x;\n",
         "say STDOUT \"hi\";\n",
         "print DATA;\n",
         "STDOUT->autoflush(1);\n",
@@ -507,7 +507,7 @@ my $v = helper_fn(21);\n";
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected a single-hop Scalar to the module sub, got {other:?}"),
@@ -549,7 +549,7 @@ Foo->bar();\n";
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32 + 1,
     };
     let uri = Url::parse("file:///test.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def on class invocant, got {other:?}"),
@@ -583,7 +583,7 @@ Foo->bar();\n";
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///test.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def on method token, got {other:?}"),
@@ -641,7 +641,7 @@ fn gd_resolves(source: &str, name: &str, idx: &crate::index::module_index::Modul
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let loc = match find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, idx) {
+    let loc = match find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, idx) {
         Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
         _ => None,
@@ -853,7 +853,7 @@ fn gd_resolves_to(
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let loc = match find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, idx) {
+    let loc = match find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, idx) {
         Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
         _ => None,
@@ -1053,7 +1053,7 @@ class Point {
     let uri = Url::parse("file:///tmp/sym_defer_consumer.pl").unwrap();
     // Cursor on `x` (row 1, col 19).
     let resp = find_definition(
-        &crate::index::file_store::FileStore::new(),
+        &crate::index::open_docs::OpenDocs::new(),
         &analysis,
         Position { line: 1, character: 19 },
         &uri,
@@ -1163,6 +1163,56 @@ my $silent = $taken{anything};
     assert_eq!(keys.len(), 1, "only the %config typo: {:?}", keys);
     assert!(keys[0].contains("'typo'"), "{:?}", keys);
     assert!(keys[0].contains("%config"), "names the hash variable: {:?}", keys);
+}
+
+/// A slot's shape can live only in a PARENT's file, written through the
+/// grandparent's spelling (`my $self = Grand->new; $self->{_area} = {..}`):
+/// the parent file states `Field{Grand, _area}`, never `Field{Base, _area}`.
+/// The child's `Field{Base, _area}` reaches it through `Base.pm`'s own bag
+/// re-keyed to the grandparent — a hop the candidate fan-out's on-path skip
+/// must not take with it.
+#[test]
+fn test_unknown_key_diagnostic_through_parent_file_ancestry() {
+    let module = |name: &str, src: &str| {
+        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(format!("/fake/{name}.pm")),
+            std::sync::Arc::new(parse_analysis(src)),
+        )))
+    };
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.set_workspace_root(None);
+    idx.insert_cache(
+        "Grand",
+        module("Grand", "package Grand;\nsub new { my $class = shift; return bless {}, $class }\n1;\n"),
+    );
+    idx.insert_cache(
+        "Base",
+        module(
+            "Base",
+            "\
+package Base;
+our @ISA = qw(Grand);
+sub new { my $class = shift; my $self = Grand->new(); $self->{_area} = { _layout => 1 }; bless $self, $class; return $self }
+1;
+",
+        ),
+    );
+    let analysis = parse_analysis(
+        "\
+package Kid;
+our @ISA = qw(Base);
+sub draw { my $self = shift; return $self->{_area}->{_typo} }
+1;
+",
+    );
+    let diags = collect_diagnostics(&analysis, &idx, DiagnosticOptions::default());
+    let keys: Vec<&str> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unknown-hash-key"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(keys.len(), 1, "the typo against Base's slot shape: {:?}", keys);
+    assert!(keys[0].contains("'_typo'") && keys[0].contains("_layout"), "{:?}", keys);
 }
 
 /// Expression-base spelling: `cfg()->{kye}` hints off the producer's

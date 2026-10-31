@@ -305,13 +305,7 @@ pub(super) fn pack_symbol_def_location(
             key_for_sort(origin_key),
             sym.selection_span.start.row,
             sym.selection_span.start.column,
-            RefLocation {
-                key: origin_key.clone(),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-            },
+            RefLocation::at(origin_key.clone(), sym.selection_span, AccessKind::Declaration),
         ));
     }
     // The FULL candidate table for `name` — a definition legitimately lives
@@ -331,13 +325,7 @@ pub(super) fn pack_symbol_def_location(
                 cached.path.clone(),
                 sym.selection_span.start.row,
                 sym.selection_span.start.column,
-                RefLocation {
-                    key: FileKey::Path(cached.path.clone()),
-                    span: sym.selection_span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                },
+                RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration),
             ));
         }
     }
@@ -447,20 +435,28 @@ pub(super) fn pack_def_paths(
     if origin_defines {
         out.push(self_str.clone());
     }
+    let mut macro_out_of_sight = false;
     for c in idx.def_candidates(name) {
         let p = c.path.to_string_lossy().into_owned();
+        let connected = visible.contains(&p) || c.analysis.pack.include_closure.contains(&self_str);
         // A `#define` of the name anywhere joins unconditionally — config
         // variants of one conceptual macro live in disjoint headers (win32.h
         // vs the unix header) and the forward lane's never-prune rule keeps
         // them one identity. Non-macro values (globals, statics) stay
         // closure-strict: two unrelated `static int counter` TUs are two
         // targets.
-        if c.analysis.names_macro_def(name, None)
-            || visible.contains(&p)
-            || c.analysis.pack.include_closure.contains(&self_str)
-        {
+        if c.analysis.names_macro_def(name, None) {
+            macro_out_of_sight |= !connected;
+            out.push(p);
+        } else if connected {
             out.push(p);
         }
+    }
+    // Only out-of-closure defines joined: the origin's closure gate would
+    // then refuse the origin's OWN uses — the very sites the identity was
+    // minted from (highlights would see them, references not).
+    if macro_out_of_sight && !out.iter().any(|p| *p == self_str || visible.contains(p)) {
+        out.push(self_str);
     }
     out.sort();
     out.dedup();
@@ -537,7 +533,7 @@ pub(super) fn symbol_defines_target(
     target: &TargetRef,
     analysis: &FileAnalysis,
 ) -> bool {
-    use crate::model::file_analysis::{DeclKind, HashKeyOwner, SymbolDetail};
+    use crate::model::file_analysis::{HashKeyOwner, SymbolDetail};
     if sym.name != target.name {
         return false;
     }
@@ -551,7 +547,7 @@ pub(super) fn symbol_defines_target(
         // sigil-bearing name is already matched by the `sym.name == target.name`
         // gate above; `collect_package_var` owns the (sigil-narrowed) span.
         TargetKind::PackageVar { package } => {
-            matches!(&sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+            matches!(&sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
                 && sym.package.as_deref() == Some(package.as_str())
         }
         TargetKind::Sub { package } => {
@@ -647,13 +643,48 @@ pub(super) fn symbol_defines_target(
     }
 }
 
+/// Does any WORKSPACE-tier index copy satisfy `pred`? Copies may be
+/// symbol-evicted (an empty vec is "on disk", not "declares nothing"): the
+/// resident scan covers whole copies, evicted ones are checked through the
+/// row-store candidates for `keys` (a couple of rehydrations, never a
+/// whole-tree decode).
+fn editable_copy_satisfies(
+    module_index: Option<&dyn CrossFileLookup>,
+    keys: &[String],
+    pred: &dyn Fn(&FileAnalysis) -> bool,
+) -> bool {
+    let Some(idx) = module_index else { return false };
+    let mut found = false;
+    idx.for_each_workspace_file(&mut |cached| {
+        if !found && !cached.analysis.symbols_are_evicted() {
+            found = pred(&cached.analysis);
+        }
+    });
+    if found {
+        return true;
+    }
+    for path in idx.ref_candidate_paths(keys) {
+        if idx.is_dependency_path(&path) {
+            continue;
+        }
+        let Some(cm) = idx.cached_by_path(&path) else { continue };
+        if !cm.analysis.symbols_are_evicted() {
+            continue; // the resident scan already judged it
+        }
+        if pred(&idx.whole_present(&cm)) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pick the role mask for a *references* query: scope to editable space
 /// (OPEN + WORKSPACE) when the target is declared in a file we can edit,
 /// else widen to VISIBLE so refs into a dependency-defined symbol still
 /// surface. "Find references" on a project symbol must not scan CPAN —
 /// see the file-store ADR's RoleMask discipline.
 pub fn references_mask_for(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
 ) -> RoleMask {
@@ -663,92 +694,28 @@ pub fn references_mask_for(
             found_in_editable = true;
         }
     });
-    // Workspace copies may be symbol-evicted (an empty vec here is "on
-    // disk", not "declares nothing") — the resident scan covers whole
-    // copies; evicted ones are checked via the row-store candidate filter
-    // below (a couple of rehydrations, never a whole-tree decode).
     if !found_in_editable {
-        for entry in files.workspace_raw().iter() {
-            if entry.value().symbols_are_evicted() {
-                continue;
-            }
-            if entry.value().symbols().iter().any(|s| symbol_defines_target(s, target, entry.value())) {
-                found_in_editable = true;
-                break;
-            }
-        }
-    }
-    if !found_in_editable {
-        if let Some(idx) = module_index {
-            let keys = retrieval_keys(target);
-            for path in idx.ref_candidate_paths(&keys) {
-                let Some(arc) = files
-                    .workspace_raw()
-                    .get(&path)
-                    .map(|e| std::sync::Arc::clone(e.value()))
-                else {
-                    continue;
-                };
-                if !arc.symbols_are_evicted() {
-                    continue; // the resident scan already judged it
-                }
-                let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                    path.clone(),
-                    arc,
-                ));
-                let whole = idx.whole_present(&cm);
-                if whole.symbols().iter().any(|s| symbol_defines_target(s, target, &whole)) {
-                    found_in_editable = true;
-                    break;
-                }
-            }
-        }
+        found_in_editable = editable_copy_satisfies(
+            module_index,
+            &retrieval_keys(target),
+            &|fa: &FileAnalysis| fa.symbols().iter().any(|s| symbol_defines_target(s, target, fa)),
+        );
     }
     // A class-keyed Method target whose decl we can't see in editable
     // space (cross-file synthesized accessor, parent in @INC) still wins
     // EDITABLE if the *class* is a workspace package — the callers we
-    // care about are project files. Fall back to the module index only
-    // when nothing project-side claims it.
+    // care about are project files.
     if !found_in_editable {
-        if let (TargetKind::Method { class }, Some(idx)) = (&target.kind, module_index) {
-            let declares_class = |fa: &FileAnalysis| {
-                fa.symbols().iter().any(|s| {
-                    matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == *class
-                })
-            };
-            let mut declared_in_workspace = false;
-            for entry in files.workspace_raw().iter() {
-                if !entry.value().symbols_are_evicted() && declares_class(entry.value()) {
-                    declared_in_workspace = true;
-                    break;
-                }
-            }
-            if !declared_in_workspace {
-                let keys = vec![crate::model::file_analysis::name_match_key(class, &target.names)];
-                for path in idx.ref_candidate_paths(&keys) {
-                    let Some(arc) = files
-                        .workspace_raw()
-                        .get(&path)
-                        .map(|e| std::sync::Arc::clone(e.value()))
-                    else {
-                        continue;
-                    };
-                    if !arc.symbols_are_evicted() {
-                        continue;
-                    }
-                    let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                        path.clone(),
-                        arc,
-                    ));
-                    if declares_class(&idx.whole_present(&cm)) {
-                        declared_in_workspace = true;
-                        break;
-                    }
-                }
-            }
-            if declared_in_workspace {
-                found_in_editable = true;
-            }
+        if let TargetKind::Method { class } = &target.kind {
+            found_in_editable = editable_copy_satisfies(
+                module_index,
+                &[crate::model::file_analysis::name_match_key(class, &target.names)],
+                &|fa: &FileAnalysis| {
+                    fa.symbols().iter().any(|s| {
+                        matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == *class
+                    })
+                },
+            );
         }
     }
     if found_in_editable {
@@ -770,7 +737,7 @@ pub(super) fn collect_package_var(
     name: &str,
     out: &mut Vec<RefLocation>,
 ) {
-    use crate::model::file_analysis::{DeclKind, RefKind, SymbolDetail};
+    use crate::model::file_analysis::{RefKind, SymbolDetail};
     // Rewrite only the trailing name token, anchored at the span *end* so the
     // sigil and any `Pkg::` qualifier survive — regardless of whether the ref
     // span is the whole `$Pkg::name` (container/element/slice reads span
@@ -784,22 +751,16 @@ pub(super) fn collect_package_var(
     };
     let is_our_decl = |id: crate::model::file_analysis::SymbolId| {
         let s = analysis.symbol(id);
-        matches!(&s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+        matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
             && s.package.as_deref() == Some(package)
             && s.name == name
     };
     for sym in analysis.symbols() {
-        if matches!(&sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+        if matches!(&sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
             && sym.package.as_deref() == Some(package)
             && sym.name == name
         {
-            out.push(RefLocation {
-                key: key.clone(),
-                span: tail(sym.selection_span),
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None
-            });
+            out.push(RefLocation::at(key.clone(), tail(sym.selection_span), AccessKind::Declaration));
         }
     }
     for r in analysis.refs() {
@@ -810,23 +771,19 @@ pub(super) fn collect_package_var(
             // Qualified `$Pkg::var` (the sigil is canonicalized to the declared
             // one, so `@arr` element reads `$Pkg::arr[0]` still match `@arr`).
             if qpkg == package && qname == name {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: tail(r.span),
-                    access: r.access,
-                    rewritable: true,
-                    label: None
-                });
+                // A symbolic ref folded through a variable (`${$n}`) sits on
+                // the `$n` token, which rename must not rewrite; a
+                // single-literal fold's rewrite lands on that literal
+                // (rule #9), as for a const-folded method call.
+                let folded = span_is_folded_name(analysis, r.span, false, &r.target_name);
+                out.push(RefLocation::at(key.clone(), if folded { r.span } else { tail(r.span) }, r.access).with_rewrite(SiteRewrite::literal_if(!folded)));
+                if let Some(src) = r.folded_from {
+                    out.push(RefLocation::at(key.clone(), src, r.access));
+                }
             }
         } else if r.target_name == name && r.resolved_symbol().is_some_and(is_our_decl) {
             // Unqualified — only this package's `our` var (resolved in-file).
-            out.push(RefLocation {
-                key: key.clone(),
-                span: tail(r.span),
-                access: r.access,
-                rewritable: true,
-                label: None
-            });
+            out.push(RefLocation::at(key.clone(), tail(r.span), r.access));
         }
     }
 }
@@ -994,13 +951,7 @@ pub(super) fn collect_from_analysis(
     for &sid in analysis.symbols_named(&target.name) {
         let sym = analysis.symbol(sid);
         if symbol_defines_target(sym, target, analysis) {
-            out.push(RefLocation {
-                key: key.clone(),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: rewritable_at(sym.selection_span),
-                label: None
-            });
+            out.push(RefLocation::at(key.clone(), sym.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::literal_if(rewritable_at(sym.selection_span))));
         }
     }
 
@@ -1028,7 +979,17 @@ pub(super) fn collect_from_analysis(
         // dispatch-class checks in the call arms below still pin the right
         // package/class). A member value read matches on the same tail;
         // every other ref kind matches by exact name.
-        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
+        // Where calling a class constructs it, a call-shaped token can name
+        // a class too (`class_named_by_call`), so a class target reads it
+        // as one.
+        let call_names_class = matches!(r.kind, RefKind::FunctionCall)
+            && matches!(target.kind, TargetKind::Package)
+            && analysis.pack.names.class_call_sep().is_some();
+        let name_matches = if matches!(r.kind, RefKind::PackageRef) || call_names_class {
+            // A class token names the class its file's use-map says it
+            // does; the target is that identity.
+            analysis.spelled_identity(r) == target.name
+        } else if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1050,6 +1011,7 @@ pub(super) fn collect_from_analysis(
         // Sub + Method both match any call into that scope — function
         // or method shape — per the "same callable, two shapes"
         // invariant. Filter is a single scope comparison.
+        let mut also_on: Vec<String> = Vec::new();
         let matches_kind = alias_matched || match (&target.kind, &r.kind) {
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
              RefKind::FunctionCall) => {
@@ -1143,64 +1105,66 @@ pub(super) fn collect_from_analysis(
                 }
                 let method = r.unqualified_target_name(analysis.names());
                 {
-                    let resolved_class = match r.method_target() {
-                        // The frozen edge can carry an UNRESOLVED DBIC source
-                        // moniker (`Artist`) when it was stamped at build with
-                        // no index (a closed call-site file — enrichment
-                        // re-stamps OPEN docs only). Map it to the FQ result
-                        // class here, index in hand, so `$row->cds` sites match
-                        // the same target goto-def reaches. No-op for a class
-                        // that already resolves.
-                        Some(edge) => Some(analysis.resolve_dbic_source_moniker(
-                            edge.invocant_class().to_string(),
-                            None,
-                            module_index,
-                        )),
-                        None => analysis.method_call_invocant_class(r, module_index),
-                    };
-                    match (resolved_class, scope) {
-                        (Some(cn), Some(pkg)) => {
-                            if target.scope == OverrideScope::Hierarchy {
-                                // The override family is precomputed; a call
-                                // matches iff its invocant is in it — so
-                                // `$child->m` and `$base->m` rename together.
-                                // (Every family member is a descendant of the
-                                // root, so inheriting-without-override calls are
-                                // covered by membership.) The family walk runs
-                                // INVERSE edges from the origin file, which can
-                                // miss aliases declared elsewhere (perl5's
-                                // `typedef struct op OP` lives in perl.h, so
-                                // `OP` isn't in `op`'s computed family) — the
-                                // UPWARD chain from the invocant's class needs
-                                // no inverse index, so admit a class whose
-                                // chain reaches the family.
-                                target.method_classes.iter().any(|c| c == &cn)
-                                    || rename_chain_cache
+                    // A union receiver dispatches on every arm, so the
+                    // site references each arm's member.
+                    let resolved_classes = analysis.receiver_classes(r, module_index, ReceiverPolicy::Edge);
+                    let mut unmatched: Vec<String> = Vec::new();
+                    let matched = match scope {
+                        Some(pkg) => resolved_classes.into_iter().fold(false, |any, cn| {
+                            let hit = {
+                                if target.scope == OverrideScope::Hierarchy {
+                                    // The override family is precomputed; a call
+                                    // matches iff its invocant is in it — so
+                                    // `$child->m` and `$base->m` rename together.
+                                    // (Every family member is a descendant of the
+                                    // root, so inheriting-without-override calls are
+                                    // covered by membership.) The family walk runs
+                                    // INVERSE edges from the origin file, which can
+                                    // miss aliases declared elsewhere (perl5's
+                                    // `typedef struct op OP` lives in perl.h, so
+                                    // `OP` isn't in `op`'s computed family) — the
+                                    // UPWARD chain from the invocant's class needs
+                                    // no inverse index, so admit a class whose
+                                    // chain reaches the family.
+                                    target.method_classes.iter().any(|c| c == &cn)
+                                        || rename_chain_cache
+                                            .entry(cn.clone())
+                                            .or_insert_with(|| {
+                                                analysis.member_rename_chain(&cn, method, chain_want, module_index)
+                                            })
+                                            .iter()
+                                            .any(|c| target.method_classes.iter().any(|f| f == c))
+                                } else {
+                                    // Dispatch: the call matches only if it
+                                    // dispatches to THIS def — `$child->m` reaches an
+                                    // ancestor target via the per-invocant chain,
+                                    // unrelated same-named methods stay out.
+                                    cn == *pkg || rename_chain_cache
                                         .entry(cn.clone())
                                         .or_insert_with(|| {
                                             analysis.member_rename_chain(&cn, method, chain_want, module_index)
                                         })
                                         .iter()
-                                        .any(|c| target.method_classes.iter().any(|f| f == c))
-                            } else {
-                                // Dispatch: the call matches only if it
-                                // dispatches to THIS def — `$child->m` reaches an
-                                // ancestor target via the per-invocant chain,
-                                // unrelated same-named methods stay out.
-                                cn == *pkg || rename_chain_cache
-                                    .entry(cn.clone())
-                                    .or_insert_with(|| {
-                                        analysis.member_rename_chain(&cn, method, chain_want, module_index)
-                                    })
-                                    .iter()
-                                    .any(|c| c == pkg)
+                                        .any(|c| c == pkg)
+                                }
+                            };
+                            // A class the site may be and the target is not:
+                            // only a matched site (some other class hit) keeps it.
+                            if !hit {
+                                unmatched.push(cn);
                             }
-                        }
-                        _ => false,
+                            any || hit
+                        }),
+                        None => false,
+                    };
+                    if matched {
+                        also_on = unmatched;
                     }
+                    matched
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
+            (TargetKind::Package, RefKind::FunctionCall) => call_names_class,
             // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
@@ -1328,24 +1292,19 @@ pub(super) fn collect_from_analysis(
             // (rename, highlight) want just the member-name token so they
             // can replace or underline exactly the right characters.
             let span = r.member_site().map_or(r.span, |m| m.name_span);
-            out.push(RefLocation {
-                key: key.clone(),
-                span,
-                access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
-                label: None
-            });
+            let rewrite = if alias_matched {
+                SiteRewrite::ThroughMacro
+            } else if !also_on.is_empty() {
+                SiteRewrite::Shared { also_on: std::mem::take(&mut also_on) }
+            } else {
+                SiteRewrite::literal_if(rewritable_at(span))
+            };
+            out.push(RefLocation::at(key.clone(), span, r.access).with_rewrite(rewrite));
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)
             // has a non-rewritable name token above; the rewrite belongs on the
             // source string literal the fold came from (rule #9).
             if let Some(src) = r.folded_from {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: src,
-                    access: r.access,
-                    rewritable: rewritable_at(src),
-                    label: None
-                });
+                out.push(RefLocation::at(key.clone(), src, r.access).with_rewrite(SiteRewrite::literal_if(rewritable_at(src))));
             }
         }
     }
@@ -1360,13 +1319,7 @@ pub(super) fn collect_from_analysis(
     if let TargetKind::Handler { owner, name: hname } = &target.kind {
         for applied in analysis.applicable_dispatches(module_index) {
             if &applied.name == hname && &applied.owner == owner {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: applied.span,
-                    access: AccessKind::Read,
-                    rewritable: rewritable_at(applied.span),
-                    label: None
-                });
+                out.push(RefLocation::at(key.clone(), applied.span, AccessKind::Read).with_rewrite(SiteRewrite::literal_if(rewritable_at(applied.span))));
             }
         }
     }

@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 /// Cross-file helper chain completion: Users.pm inherits from
@@ -465,7 +466,7 @@ sub _generate_route {
         .expect("MethodCall ref for `_generate_route`");
 
     if matches!(gr_ref.kind, RefKind::MethodCall { .. }) {
-        let invocant_class = fa.method_call_invocant_class(gr_ref, None);
+        let invocant_class = fa.receiver_classes(gr_ref, None, ReceiverPolicy::Navigate).single().map(str::to_string);
         assert_eq!(
             invocant_class.as_deref(),
             Some("Mojolicious::Routes::Route"),
@@ -504,7 +505,7 @@ sub inline {
         .expect("MethodCall ref for `inline`");
 
     if matches!(inline_ref.kind, RefKind::MethodCall { .. }) {
-        let invocant_class = fa.method_call_invocant_class(inline_ref, None);
+        let invocant_class = fa.receiver_classes(inline_ref, None, ReceiverPolicy::Navigate).single().map(str::to_string);
         assert_eq!(
             invocant_class.as_deref(),
             Some("Mojolicious::Routes::Route"),
@@ -692,7 +693,7 @@ sub to { my $self = shift; return $self; }
         Arc::new(build_fa(route_pm)),
     );
 
-    // Cross-file enrichment — mirrors `FileStore::enrich_open`.
+    // Cross-file enrichment — mirrors `OpenDocs::enrich_open`.
     // Without this pass, MethodCallBindings whose resolution needs
     // a cross-file return type (e.g. `$r = app->routes` needs real
     // Mojolicious.pm's `routes` accessor) don't land in
@@ -808,7 +809,7 @@ sub to { my $self = shift; return $self; }
     // This is the single most important observable — without it,
     // every `$r->...` downstream loses intelligence (precisely
     // the user's report). `inferred_type` is the same query
-    // resolve_invocant_class uses for method resolution, so if
+    // invocant_classes_in_scope uses for method resolution, so if
     // this says None, nothing on line 71 can work.
     let r_point = probe(row_r_get_to, col_of(line_r_get_to, "$r"));
     let r_type = fa.inferred_type_via_bag("$r", r_point);

@@ -37,6 +37,10 @@ pub(super) fn import_candidates(
             if !origin.symbols_named(local).is_empty() {
                 continue;
             }
+            // An imported variable is no sub to call.
+            if crate::model::conventions::is_variable_or_glob_spelling(local) {
+                continue;
+            }
             if !mask.contains(RoleMask::OPEN) {
                 continue;
             }
@@ -80,7 +84,9 @@ pub(super) fn import_candidates(
                 if !seen.insert(name.clone()) {
                     continue;
                 }
-                if !origin.symbols_named(name).is_empty() {
+                if !origin.symbols_named(name).is_empty()
+                    || crate::model::conventions::is_variable_or_glob_spelling(name)
+                {
                     continue;
                 }
 
@@ -223,13 +229,7 @@ pub(super) fn dispatch_handler_locations(
                 }
                 if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
                     if o == owner {
-                        locs.push(RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span: sym.selection_span,
-                            access: AccessKind::Declaration,
-                            rewritable: true,
-                            label: None
-                        });
+                        locs.push(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration));
                     }
                 }
             }

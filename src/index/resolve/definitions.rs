@@ -26,13 +26,7 @@ impl<'a> CandidateSet<'a> {
         let idx = self.idx()?;
         let loc_of = |cached: &crate::model::file_analysis::CachedModule, span: Span| {
             Url::from_file_path(&cached.path).ok()?;
-            Some(RefLocation {
-                key: FileKey::Path(cached.path.clone()),
-                span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-            })
+            Some(RefLocation::at(FileKey::Path(cached.path.clone()), span, AccessKind::Declaration))
         };
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
@@ -86,13 +80,7 @@ impl<'a> CandidateSet<'a> {
                 }
             }
         });
-        hit.map(|(p, span)| RefLocation {
-            key: FileKey::Path(PathBuf::from(p)),
-            span,
-            access: AccessKind::Declaration,
-            rewritable: true,
-            label: None,
-        })
+        hit.map(|(p, span)| RefLocation::at(FileKey::Path(PathBuf::from(p)), span, AccessKind::Declaration))
     }
 
     /// Decl→def preference (pack routing): when a resolved location is a
@@ -168,13 +156,7 @@ impl<'a> CandidateSet<'a> {
             if defs.iter().any(|l| file_key_eq(&l.key, key) && l.span == span) {
                 return;
             }
-            defs.push(RefLocation {
-                key: key.clone(),
-                span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-            });
+            defs.push(RefLocation::at(key.clone(), span, AccessKind::Declaration));
         };
         // The decl's own file first (a static's forward decl and body).
         for s in decl_fa.symbols().iter().filter(|s| cand_is_def(decl_fa, s)) {
@@ -243,13 +225,7 @@ impl<'a> CandidateSet<'a> {
                             }
                             hits.push((
                                 cached.path.to_string_lossy().into_owned(),
-                                RefLocation {
-                                    key: key.clone(),
-                                    span: s.selection_span,
-                                    access: AccessKind::Declaration,
-                                    rewritable: true,
-                                    label: None,
-                                },
+                                RefLocation::at(key.clone(), s.selection_span, AccessKind::Declaration),
                             ));
                         }
                     });
@@ -317,7 +293,11 @@ impl<'a> CandidateSet<'a> {
         // siblings gather in the right class/namespace without re-deriving C++
         // name lookup here.
         let pkg: Option<String> = match &r.kind {
-            RefKind::MethodCall { .. } => Some(analysis.method_call_invocant_class(r, Some(idx))?),
+            // An overload set is one class's; a union receiver falls through
+            // to the member lane, which offers every arm's definition.
+            RefKind::MethodCall { .. } => {
+                Some(analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate).single()?.to_string())
+            }
             RefKind::FunctionCall => r.resolved_package().map(str::to_string).or_else(|| {
                 analysis.find_definition(self.point, Some(idx)).and_then(|sp| {
                     analysis
@@ -373,13 +353,7 @@ impl<'a> CandidateSet<'a> {
                 key_for_sort(key),
                 span.start.row,
                 span.start.column,
-                RefLocation {
-                    key: key.clone(),
-                    span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                },
+                RefLocation::at(key.clone(), span, AccessKind::Declaration),
             ));
         };
         for s in analysis.symbols().iter().filter(|s| {
@@ -456,13 +430,7 @@ impl<'a> CandidateSet<'a> {
 
     /// A declaration site in the origin file.
     pub(super) fn origin_decl(&self, span: Span) -> RefLocation {
-        RefLocation {
-            key: self.origin_key.clone(),
-            span,
-            access: AccessKind::Declaration,
-            rewritable: true,
-            label: None
-        }
+        RefLocation::at(self.origin_key.clone(), span, AccessKind::Declaration)
     }
 
     /// Forward projection: goto-definition. Returns the winning path's
@@ -520,13 +488,7 @@ impl<'a> CandidateSet<'a> {
                     if !ranked.is_empty() {
                         let mut out: Vec<RefLocation> = ranked
                             .iter()
-                            .map(|(m, key, r)| RefLocation {
-                                key: key.clone(),
-                                span: m.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: true,
-                                label: r.label(),
-                            })
+                            .map(|(m, key, r)| RefLocation::at(key.clone(), m.selection_span, AccessKind::Declaration).with_label(r.label()))
                             .collect();
                         // See-through: a direct-delegation wrapper
                         // (`#define F(x) G(x)`) also offers the delegate `G`,
@@ -668,13 +630,7 @@ impl<'a> CandidateSet<'a> {
         };
         let line_loc = |path: PathBuf, line: u32| -> RefLocation {
             let p = tree_sitter::Point::new(line as usize, 0);
-            RefLocation {
-                key: FileKey::Path(path),
-                span: Span { start: p, end: p },
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None
-            }
+            RefLocation::at(FileKey::Path(path), Span { start: p, end: p }, AccessKind::Declaration)
         };
 
         // Cross-file hash-key defs. Two shapes share the lookup:
@@ -707,13 +663,7 @@ impl<'a> CandidateSet<'a> {
                             .into_iter()
                             .find(|d| d.name == r.target_name)
                         {
-                            return vec![RefLocation {
-                                key: FileKey::Path(cached.path.clone()),
-                                span: def.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: true,
-                                label: None
-                            }];
+                            return vec![RefLocation::at(FileKey::Path(cached.path.clone()), def.selection_span, AccessKind::Declaration)];
                         }
                     }
                 }
@@ -839,7 +789,17 @@ impl<'a> CandidateSet<'a> {
             // `module_path_cached`'s file with a separately-scoped
             // `get_cached`'s range splices two candidates when the name is
             // defined in more than one file.
-            if matches!(r.kind, RefKind::PackageRef) {
+            //
+            // The name is the class the token names as its file spells it
+            // (`\Lib\Clock` is `Lib\Clock`). A widened answer is a stand-in,
+            // not a declaration of it: the labeled widening lane lands those.
+            let named_class = matches!(r.kind, RefKind::PackageRef)
+                .then(|| analysis.spelled_identity(r))
+                .and_then(|name| match idx.visible_def_candidates_widening(&name) {
+                    (_, true) => None,
+                    (cands, false) => Some((name, cands)),
+                });
+            if let Some((name, cands)) = named_class {
                 // EVERY file declaring the package is a legitimate landing —
                 // a reopened package surfaces as a multi-location picker.
                 // Two tiers: files whose symbol lives in TYPE space
@@ -848,18 +808,12 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
-                for cached in idx.visible_def_candidates(&r.target_name) {
+                for cached in cands {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
-                        let loc = |span| RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span,
-                            access: AccessKind::Declaration,
-                            rewritable: true,
-                            label: None,
-                        };
+                        let loc = |span| RefLocation::at(FileKey::Path(cached.path.clone()), span, AccessKind::Declaration);
                         if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            s.name == name
                                 && matches!(
                                     s.kind,
                                     SymKind::Package | SymKind::Class | SymKind::Module
@@ -873,7 +827,7 @@ impl<'a> CandidateSet<'a> {
                         // file top. Pack-only structural gates; Perl module
                         // lookups keep the file-top fallback.
                         } else if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            s.name == name
                                 && (whole.symbol_is_class_content(s)
                                     || whole.symbol_is_file_scope_value(s))
                         }) {
@@ -892,7 +846,7 @@ impl<'a> CandidateSet<'a> {
                 }
                 // No analysis cached: the path map alone still beats no
                 // answer — land at the top of the file.
-                if let Some(path) = idx.module_path_cached(&r.target_name) {
+                if let Some(path) = idx.module_path_cached(&name) {
                     if Url::from_file_path(&path).is_ok() {
                         return vec![line_loc(path, 0)];
                     }
@@ -916,111 +870,112 @@ impl<'a> CandidateSet<'a> {
                 let namespace = analysis.names().member_namespace;
                 // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
                 let method = r.unqualified_target_name(analysis.names());
-                if let Some(cn) = analysis.method_call_invocant_class(r, Some(idx)) {
-                    // The invocant resolved (e.g. a plugin-bridged route token
-                    // → controller class) but the controller lives in THIS
-                    // file: jump to the local method symbol. The build-time
-                    // freeze normally serves same-file dispatch, but a bridged
-                    // invocant is never frozen (its class needs the index), so
-                    // re-resolve here.
-                    let resolution = analysis.resolve_member_in_ancestors(&cn, method, Some(idx), want);
-                    if let Some(MethodResolution::Local { sym_id, .. }) = resolution {
-                        if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
-                            return vec![self.origin_decl(sym.selection_span)];
-                        }
-                    }
-                    if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
-                        resolution
-                    {
-                        // One path for both: a real inherited method lives in
-                        // `class`'s own module; a plugin-bridged helper lives
-                        // in `def_module` (the bridging file). Same lookup
-                        // either way.
-                        let module = def_module.as_deref().unwrap_or(class);
-                        // The class's package may span files (Perl reopens
-                        // packages anywhere) — pick the candidate that
-                        // declares `method` under `class`, then a name-level
-                        // match (bridged/materialized copies attribute
-                        // synthesized methods loosely), smallest path among
-                        // several definers; the name-slot winner only as the
-                        // last resort (data-member reads below).
-                        let chosen = idx
-                            .candidate_defining_sub_in_package(module, class, method)
-                            .or_else(|| idx.get_cached(module));
-                        if let Some(cached) = chosen {
-                            // A cross-file DBIC accessor is a deferred emission
-                            // MATERIALIZED into the whole cached copy at index
-                            // completion (`materialize_gated_emissions`), so the
-                            // whole view carries it — no per-query enrichment.
-                            let whole = idx.whole_present(&cached);
-                            // A stored member of the class: a data field or
-                            // an enum constant, not a sub.
-                            let stored_member = || {
-                                whole.symbols().iter().find(|s| {
-                                    MemberKind::of_sym(s.kind) == MemberKind::Value
-                                        && s.name == method
-                                        && s.package.as_deref() == Some(class.as_str())
-                                        && whole.symbol_is_class_content(s)
-                                })
-                            };
-                            let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
-                                Url::from_file_path(&cached.path).is_ok().then(|| RefLocation {
-                                    key: FileKey::Path(cached.path.clone()),
-                                    span: sym.selection_span,
-                                    access: AccessKind::Declaration,
-                                    rewritable: true,
-                                    label: None,
-                                })
-                            };
-                            // A value read lands on the stored member first.
-                            if want == MemberKind::Value {
-                                if let Some(loc) = stored_member().and_then(stored_loc) {
-                                    return vec![loc];
-                                }
+                // A union receiver dispatches on every arm: each arm's
+                // definition is offered.
+                let mut found: Vec<RefLocation> = Vec::new();
+                for cn in analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate) {
+                    let on_class = |cn: String| -> Vec<RefLocation> {
+                        // The invocant resolved (e.g. a plugin-bridged route token
+                        // → controller class) but the controller lives in THIS
+                        // file: jump to the local method symbol. The build-time
+                        // freeze normally serves same-file dispatch, but a bridged
+                        // invocant is never frozen (its class needs the index), so
+                        // re-resolve here.
+                        let resolution = analysis.resolve_member_in_ancestors(&cn, method, Some(idx), want);
+                        if let Some(MethodResolution::Local { sym_id, .. }) = resolution {
+                            if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
+                                return vec![self.origin_decl(sym.selection_span)];
                             }
-                            let callable = want.admits_decl(SymKind::Sub, namespace)
-                                .then(|| whole.sub_info_view(method))
-                                .flatten();
-                            if let Some(sub_info) = callable {
-                                if Url::from_file_path(&cached.path).is_ok() {
-                                    // A pack member call lands on the class
-                                    // module's DECLARATION; hop to the
-                                    // out-of-line body (decl→def axis) like the
-                                    // free-function tail. The decl's own symbol
-                                    // span (not just `def_line`) is what the
-                                    // axis matches on. Perl subs keep the
-                                    // `def_line` jump (`prefer_member_defs` is a
-                                    // no-op off-pack anyway).
-                                    if self.pack {
-                                        if let Some(sym) = whole.symbols().iter().find(|s| {
-                                            s.name == method
-                                                && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                                                && pkg_agrees(true, s.package.as_deref(), Some(class))
-                                        }) {
-                                            return self.prefer_member_defs(RefLocation {
-                                                key: FileKey::Path(cached.path.clone()),
-                                                span: sym.selection_span,
-                                                access: AccessKind::Declaration,
-                                                rewritable: true,
-                                                label: None,
-                                            });
-                                        }
+                        }
+                        if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
+                            resolution
+                        {
+                            // One path for both: a real inherited method lives in
+                            // `class`'s own module; a plugin-bridged helper lives
+                            // in `def_module` (the bridging file). Same lookup
+                            // either way.
+                            let module = def_module.as_deref().unwrap_or(class);
+                            // The class's package may span files (Perl reopens
+                            // packages anywhere) — pick the candidate that
+                            // declares `method` under `class`, then a name-level
+                            // match (bridged/materialized copies attribute
+                            // synthesized methods loosely), smallest path among
+                            // several definers; the name-slot winner only as the
+                            // last resort (data-member reads below).
+                            let chosen = idx
+                                .candidate_defining_sub_in_package(module, class, method)
+                                .or_else(|| idx.get_cached(module));
+                            if let Some(cached) = chosen {
+                                // A cross-file DBIC accessor is a deferred emission
+                                // (`GatedEmission`) the view applies, so the whole
+                                // view carries it — no per-query enrichment.
+                                let whole = idx.whole_present(&cached);
+                                // A stored member of the class: a data field or
+                                // an enum constant, not a sub.
+                                let stored_member = || {
+                                    whole.symbols().iter().find(|s| {
+                                        MemberKind::of_sym(s.kind) == MemberKind::Value
+                                            && s.name == method
+                                            && s.package.as_deref() == Some(class.as_str())
+                                            && whole.symbol_is_class_content(s)
+                                    })
+                                };
+                                let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
+                                    Url::from_file_path(&cached.path).is_ok().then(|| RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration))
+                                };
+                                // A value read lands on the stored member first.
+                                if want == MemberKind::Value {
+                                    if let Some(loc) = stored_member().and_then(stored_loc) {
+                                        return vec![loc];
                                     }
-                                    return vec![line_loc(
-                                        cached.path.clone(),
-                                        sub_info.def_line(),
-                                    )];
                                 }
-                            }
-                            // A call reaches a stored member where the
-                            // language keeps one member namespace.
-                            if want.admits_decl(SymKind::Field, namespace) {
-                                if let Some(loc) = stored_member().and_then(stored_loc) {
-                                    return vec![loc];
+                                let callable = want.admits_decl(SymKind::Sub, namespace)
+                                    .then(|| whole.sub_info_view(method))
+                                    .flatten();
+                                if let Some(sub_info) = callable {
+                                    if Url::from_file_path(&cached.path).is_ok() {
+                                        // A pack member call lands on the class
+                                        // module's DECLARATION; hop to the
+                                        // out-of-line body (decl→def axis) like the
+                                        // free-function tail. The decl's own symbol
+                                        // span (not just `def_line`) is what the
+                                        // axis matches on. Perl subs keep the
+                                        // `def_line` jump (`prefer_member_defs` is a
+                                        // no-op off-pack anyway).
+                                        if self.pack {
+                                            if let Some(sym) = whole.symbols().iter().find(|s| {
+                                                s.name == method
+                                                    && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                                                    && pkg_agrees(true, s.package.as_deref(), Some(class))
+                                            }) {
+                                                return self.prefer_member_defs(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration));
+                                            }
+                                        }
+                                        return vec![line_loc(
+                                            cached.path.clone(),
+                                            sub_info.def_line(),
+                                        )];
+                                    }
+                                }
+                                // A call reaches a stored member where the
+                                // language keeps one member namespace.
+                                if want.admits_decl(SymKind::Field, namespace) {
+                                    if let Some(loc) = stored_member().and_then(stored_loc) {
+                                        return vec![loc];
+                                    }
                                 }
                             }
                         }
+                        Vec::new()
+                    };
+                    for loc in on_class(cn) {
+                        if !found.iter().any(|l| file_key_eq(&l.key, &loc.key) && l.span == loc.span) {
+                            found.push(loc);
+                        }
                     }
+                }
+                if !found.is_empty() {
+                    return found;
                 }
             }
         }
@@ -1051,13 +1006,7 @@ impl<'a> CandidateSet<'a> {
                             // A call resolving to a header PROTOTYPE offers
                             // the bodied definition first (decl→def ranking).
                             return self.preferred_definitions(
-                                RefLocation {
-                                    key: FileKey::Path(cached.path.clone()),
-                                    span: sym.selection_span,
-                                    access: AccessKind::Declaration,
-                                    rewritable: true,
-                                    label: None,
-                                },
+                                RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration),
                                 &whole,
                             );
                         }
@@ -1078,13 +1027,7 @@ impl<'a> CandidateSet<'a> {
             let out: Vec<RefLocation> = decl_spans
                 .iter()
                 .filter(|(path, _)| path.as_ref().is_none_or(|p| Url::from_file_path(p).is_ok()))
-                .map(|(path, span)| RefLocation {
-                    key: path.clone().map_or_else(|| self.origin_key.clone(), FileKey::Path),
-                    span: *span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                })
+                .map(|(path, span)| RefLocation::at(path.clone().map_or_else(|| self.origin_key.clone(), FileKey::Path), *span, AccessKind::Declaration))
                 .collect();
             if !out.is_empty() {
                 return out;
@@ -1113,6 +1056,24 @@ impl<'a> CandidateSet<'a> {
                 .collect();
             if !decls.is_empty() {
                 return decls;
+            }
+        }
+
+        // A class identity nothing indexed declares lands on the same-leaf
+        // classes that stand in for it where the scope widens — after every
+        // exact lane, so a stranger never competes with the identity's own
+        // declaration, and labeled with the class it actually is.
+        if let Some(ResolvedTarget::Target(t)) = self.resolution() {
+            if matches!(t.kind, TargetKind::Package) {
+                let out: Vec<RefLocation> =
+                    crate::model::file_analysis::widened_class_stand_ins(idx, &t.name, &t.names)
+                        .into_iter()
+                        .filter(|w| Url::from_file_path(&w.path).is_ok())
+                        .map(|w| RefLocation::at(FileKey::Path(w.path), w.span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip).with_label(Some(format!("widened: `{}` stands in for `{}`", w.class, t.name))))
+                        .collect();
+                if !out.is_empty() {
+                    return out;
+                }
             }
         }
 
