@@ -82,7 +82,8 @@ impl<'a> Builder<'a> {
         // `use Class::Tiny qw/a b/` / `use Class::Tiny { a => ..., b => ... }`
         // declares rw accessors at the use site (no `has` keyword), so
         // synthesis hangs off the `use` node rather than a framework-mode
-        // `has` dispatch. Recognized by the import shape, not a name list.
+        // `has` dispatch. The module is matched by name, like Sub::Exporter
+        // above; the import shape decides which words are attributes.
         if module_name == "Class::Tiny" {
             self.visit_class_tiny_use(node);
         }
