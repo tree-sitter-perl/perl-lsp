@@ -40,6 +40,7 @@ mod assignment_ops_tests;
 mod paren_spelling_tests;
 mod comment_trivia_tests;
 mod const_fold_tests;
+mod union_tests;
 
 #[path = "../narrowing_tests.rs"]
 mod narrowing;

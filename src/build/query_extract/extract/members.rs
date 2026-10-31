@@ -2,6 +2,7 @@
 //! the argument / parameter counts of calls and callables.
 
 use super::*;
+use crate::model::conventions::Invocant;
 use crate::model::file_analysis::{MemberOp, ParamArity};
 
 /// The call's arguments in order (the `@arity.arg`s of its match's
@@ -31,17 +32,24 @@ pub(super) fn op_of(ad: &Adorned, match_id: usize) -> Option<(MemberOp, Span)> {
     Some((which.last()?, op.span()))
 }
 
-/// `@member.recv`: a member access receiver. Peel transparent wrappers
-/// (`(*p)`, `(&o)`, `(p)`) to the typed inner where the node is live, so the
-/// minted MethodCall ref's invocant_span lands on the inner expression
-/// `expr_type_at_span` already types. op-DX applies only to a bare-variable
-/// immediate receiver (its deref_stack resolves by name), so whether the
-/// un-peeled node was one rides on the event.
-pub(super) fn flatten_recv(node: tree_sitter::Node<'_>, pack: &LangPack, source: &[u8], match_id: usize) -> Event {
-    let simple = pack.simple_var_kinds.contains(&node.kind());
-    let inner = peel_receiver(node, pack.recv_peel);
+/// `@member.recv.name` / `@member.recv`: a member access receiver, which
+/// the document states is a written name or an expression. An expression
+/// peels its transparent wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner,
+/// so the minted MethodCall ref's invocant_span lands on the inner expression
+/// `expr_type_at_span` already types.
+pub(super) fn flatten_recv(
+    node: tree_sitter::Node<'_>,
+    cap: MemberCap,
+    pack: &LangPack,
+    source: &[u8],
+    match_id: usize,
+) -> Event {
+    let named = cap == MemberCap::RecvName;
+    let inner = if named { node } else { peel_receiver(node, pack.recv_peel) };
     let text = inner.utf8_text(source).unwrap_or("").to_string();
-    Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id).with(Payload::SimpleRecv(simple))
+    // A written name (`w`, `Widget`) may spell a class; an expression never does.
+    let invocant = if named { Invocant::assume_canonical(text.clone()) } else { Invocant::expr(text.clone()) };
+    Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id).with(Payload::Recv(invocant))
 }
 
 /// A signature's arity: the parameters tagged in its list.

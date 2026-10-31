@@ -38,9 +38,8 @@ enum Payload {
     /// A `@nested.target`'s declarator chain, peeled: its deref stack,
     /// on the def it mints.
     Deref(Vec<crate::model::file_analysis::DerefStep>),
-    /// Whether a `@member.recv` was a simple variable before its wrappers
-    /// were peeled.
-    SimpleRecv(bool),
+    /// A `@member.recv`'s invocant: a written name, or an expression.
+    Recv(crate::model::conventions::Invocant),
 }
 
 impl Event {
@@ -176,6 +175,9 @@ struct Minted {
     declares: bool,
     /// The identity a class def filed itself under.
     class: Option<Box<str>>,
+    /// A member read's (receiver span, member): what a place written here
+    /// projects, so a write lands where the read looks.
+    projects: Option<Box<(Span, String)>>,
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`
@@ -210,17 +212,18 @@ fn family(cap: Capture) -> Family {
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::ParamReceiver
         | C::Mark(_) => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)
+        | C::Arm
         | C::Domain(_)
         | C::Shape(_)
         | C::TypeAnnot
-        | C::AnonAggMember => Family::Flow,
+        | C::AnonAggMember
+        | C::Receiver => Family::Flow,
         C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing
         }
@@ -437,7 +440,9 @@ pub fn extract_in(
         match cap {
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
             Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut events),
-            Capture::Member(MemberCap::Recv) => events.push(members::flatten_recv(node, pack, source, match_id)),
+            Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
+                events.push(members::flatten_recv(node, cap, pack, source, match_id))
+            }
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
@@ -532,7 +537,6 @@ pub fn extract_in(
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
-    defs::emit_receiver_types(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

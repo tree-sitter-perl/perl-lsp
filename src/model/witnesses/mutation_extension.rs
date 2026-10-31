@@ -40,24 +40,17 @@ pub(crate) fn emit_mutation_extension_witnesses(
     let mut writes: Vec<&crate::model::file_analysis::KeyWrite> = key_writes.iter().collect();
     writes.sort_by_key(|w| (&w.var_text, w.span.start));
     for w in writes {
-        // Attach where the variable's existing witnesses live; note
-        // whether getting there crosses a scope boundary (nested block
-        // or closure — the write may not have executed by read time).
-        // First scope on the write's lookup chain whose Variable attachment has
-        // witnesses; `crossed` = we climbed past the start scope (index
-        // > 0) to find it.
-        let mut attach: Option<(ScopeId, bool)> = None;
-        for (i, sid) in crate::model::file_analysis::lookup_chain(ctx.scopes, w.scope)
-            .scopes()
-            .enumerate()
-        {
-            let att = WitnessAttachment::Variable { name: w.var_text.clone(), scope: sid };
-            if !bag.for_attachment(&att).is_empty() {
-                attach = Some((sid, i > 0));
-                break;
-            }
-        }
-        let Some((attach_sid, scope_crossed)) = attach else { continue };
+        // Attach where the value the write extends is bound — the scope a
+        // read takes it from — never where the write merely uses it (a
+        // block's own `$v->{k}` access would hide the shape from every read
+        // after the block). Climbing past the write's own scope means the
+        // write may not have run by read time.
+        let Some((depth, attach_sid)) =
+            variable_binding_scope(bag, ctx.scopes, &w.var_text, w.scope, w.span.start)
+        else {
+            continue;
+        };
+        let scope_crossed = depth > 0;
         let Some(base) = query_variable_type(bag, ctx, &w.var_text, w.scope, w.span.start)
         else {
             continue;
@@ -96,9 +89,9 @@ pub(crate) fn emit_mutation_extension_witnesses(
             // lands in the slot's value, which every method shares.
             ref obj if !w.path.is_empty() && obj.class_name().is_some() => {
                 let crate::model::file_analysis::WriteKey::Hash(ref slot) = w.key else { continue };
-                let att = WitnessAttachment::SlotType {
-                    class: obj.class_name().unwrap_or_default().to_string(),
-                    key: slot.clone(),
+                let att = WitnessAttachment::Field {
+                    owner: obj.class_name().unwrap_or_default().to_string(),
+                    name: slot.clone(),
                 };
                 let reg = ReducerRegistry::with_defaults();
                 let q = ReducerQuery {

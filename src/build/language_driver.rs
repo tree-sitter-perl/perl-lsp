@@ -201,7 +201,7 @@ impl LanguageDriver for PerlDriver {
         Maturity::Stable
     }
     fn id(&self) -> &'static str {
-        "perl"
+        crate::model::conventions::PERL_LANGUAGE
     }
     fn extensions(&self) -> &[&'static str] {
         &["pm", "pl", "t"]
@@ -377,6 +377,7 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
+        crate::model::conventions::register_lattice(self.id, || (self.pack)().lattice);
         // Every exit stamps the driver id (degraded stand-ins included — a
         // failed cpp parse is still a cpp file): `resolve()` derives pack
         // routing from this origin-identity fact at construction.
@@ -1075,11 +1076,13 @@ fn remap_spans(
         // name/scope-keyed — no spans to fix.
         field_types: _,
         return_sites,
+        receivers,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         names: _,
         slot_writes,
+        member_writes,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1150,8 +1153,15 @@ fn remap_spans(
             *arg = rspan(*arg);
         }
     }
-    for (_, span) in return_sites.iter_mut() {
+    for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
         *span = rspan(*span);
+    }
+    // Member writes settle through `expr_type_at_span` on the receiver and an
+    // edge to the value's `Expr`, both of which speak original coords.
+    for w in member_writes.iter_mut() {
+        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        *receiver = rspan(*receiver);
+        *value = rspan(*value);
     }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
@@ -1186,7 +1196,6 @@ fn remap_spans(
         | WitnessAttachment::HashKey { .. }
         | WitnessAttachment::PackageSymbol { .. }
         | WitnessAttachment::SymbolReturnArm(_)
-        | WitnessAttachment::SlotType { .. }
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
         | WitnessAttachment::Param { .. } => {}
@@ -1397,6 +1406,13 @@ impl LanguageRegistry {
             drivers.push(Box::new(cmake_driver()));
             #[cfg(feature = "php")]
             drivers.push(Box::new(php_driver()));
+            // Registered here too, not only on analysis, because a warm start
+            // answers from cached analyses no driver has built this process.
+            for d in &drivers {
+                if let Some(pack) = d.lang_pack() {
+                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                }
+            }
             LanguageRegistry { drivers }
         })
     }

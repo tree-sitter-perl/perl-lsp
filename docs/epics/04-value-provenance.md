@@ -66,7 +66,7 @@ move on to Phases C/D. Do not leave it dormant for a third time.
 | --- | --- | --- |
 | Class-keyed mutated-key union (read API) | `model/file_analysis/queries.rs` | `grep -rn 'fn mutated_keys_on_class' src/` |
 | Mutation Facts + slot-type seeds | `build/builder/pipeline.rs` | `grep -rn 'FACT_MUTATION\|slot_writes' src/build/builder/` (in `populate_witness_bag`) |
-| `SlotTypeFold` | `model/witnesses/reducers.rs` | `grep -rn 'SlotTypeFold' src/model/witnesses/` |
+| `FieldValueReducer` | `model/witnesses/reducers.rs` | `grep -rn 'FieldValueReducer' src/model/witnesses/` |
 | Completion sources | `index/resolve/completion.rs` | completion SOURCES go through the CandidateSet's `complete()`; cursor-context slot detection stays put (`adr/resolution-candidate-set.md`'s honest boundary) |
 | Moo `is => 'ro'` knowledge | `frameworks/moo.rhai` | the plugin owns the vocabulary; core sees classified pairs |
 | Hash-literal shape builder | `build/builder/` | `grep -rn 'fn visit_anon_hash\|hash_literal' src/build/builder/` |

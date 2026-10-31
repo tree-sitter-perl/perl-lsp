@@ -127,8 +127,52 @@ impl<'a> Builder<'a> {
             .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
     }
 
+    /// What a call to `name` reports about a reference: the `ref` builtin,
+    /// or a plugin-declared `ref_tag_functions()` entry this file imported
+    /// (by its local name) or names fully qualified.
+    pub(super) fn ref_tag_fn(&self, name: &str) -> Option<crate::model::file_analysis::RefTagFn> {
+        use crate::model::conventions::{is_ref_builtin, split_qualified, PERL_SPELLINGS};
+        use crate::model::file_analysis::RefTagFn;
+        if is_ref_builtin(name) {
+            return Some(RefTagFn::Ref);
+        }
+        let (module, leaf) = split_qualified(name, &PERL_SPELLINGS);
+        self.ref_tag_functions.iter().find_map(|f| {
+            let hit = match module {
+                Some(m) => m == f.module && leaf == f.name,
+                None => self.imports.iter().any(|i| {
+                    i.module_name == f.module
+                        && i.imported_symbols.iter().any(|sym| {
+                            sym.local_name == name
+                                && sym.remote_name.as_deref().unwrap_or(&sym.local_name) == f.name
+                        })
+                }),
+            };
+            hit.then_some(f.tag)
+        })
+    }
+
+    /// [`crate::cst::ref_tag_call`] with this file's ref-tag functions.
+    pub(super) fn ref_tag_call(
+        &self,
+        node: Node<'a>,
+    ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n))
+    }
+
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
+        // What a reference is, named for the variable it was asked of: a
+        // comparison of it to a literal guards that variable.
+        if let Some((via, subject)) = self.ref_tag_call(node)
+            .and_then(|(via, operand)| Some((via, crate::cst::canonical_var_name(operand, self.source)?)))
+        {
+            return Some(WitnessPayload::InferredType(InferredType::RefTagOf {
+                subject,
+                site: node_to_span(node),
+                via,
+            }));
+        }
         match node.kind() {
             // Closed-under-syntax — bake.
             "string_literal" | "interpolated_string_literal" => {
@@ -425,9 +469,8 @@ impl<'a> Builder<'a> {
             // as a short-circuit. `=` / `&&=` produce the RHS, unless
             // the target is an aggregate: a list assignment in scalar context
             // is a count, and the list type is `@flow`'s business.
-            // TODO(union-join): `&&=` is the false old value ⊔ the RHS; it
-            // types as the RHS until the lattice can join them
-            // (docs/open-forks.md "Union types in the lattice").
+            // TODO(falsy-part): `&&=` is the false old value ⊔ the RHS; it
+            // types as the RHS until a value's false part has a type.
             "assignment_expression" => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
                     let left = node.child_by_field_name("left")?;
@@ -459,7 +502,7 @@ impl<'a> Builder<'a> {
                 crate::cst::AssignOp::Bitwise => {
                     let is_string = |b: &mut Self, n: Node<'a>| {
                         b.emit_expr_witness(n);
-                        b.bag_query_expr_span(node_to_span(n)) == Some(InferredType::String)
+                        b.bag_query_expr_span(node_to_span(n)).is_some_and(|t| t.is_string())
                     };
                     let left = node.child_by_field_name("left")?;
                     let right = node.child_by_field_name("right")?;
@@ -709,11 +752,13 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
-        // A written element and the levels on its path are the write, not
-        // drills: their keys extend the shape (`emit_mutation_extension_witnesses`)
-        // instead of being read out of it.
+        // A written element and the levels on a write's path are the write,
+        // not drills: their keys extend the shape
+        // (`emit_mutation_extension_witnesses`) instead of being read out of
+        // it — unless the write reads the element first (`ElementWrite`).
         if matches!(node.kind(), "hash_element_expression" | "array_element_expression")
-            && (self.is_written_element(node) || self.on_write_path(node))
+            && (self.on_write_path(node)
+                || self.element_write_kind(node).is_some_and(|w| !w.reads_element()))
         {
             return;
         }
@@ -859,8 +904,8 @@ impl<'a> Builder<'a> {
     /// whenever the env var is unset), so it rides a distinct `fallback_arm`
     /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
     /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
-    /// for "this expression's value is one of these arms." The arms' union
-    /// would be built in `BranchArmFold` (its `TODO(union-join)`).
+    /// for "this expression's value is one of these arms"; `BranchArmFold`
+    /// joins them.
     fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
         use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let arm_att = WitnessAttachment::BranchArm(span);
@@ -914,7 +959,7 @@ impl<'a> Builder<'a> {
     ) -> crate::model::witnesses::WitnessPayload {
         let args = self.extract_call_args(node);
         crate::model::witnesses::WitnessPayload::Invoke {
-            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None },
+            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None, constructs: None },
             receiver: None,
             args: Some(self.call_operands(&args)),
         }
@@ -992,8 +1037,7 @@ impl<'a> Builder<'a> {
     ///   recursively with per-arm `branch_arm` Edges for ternary.
     /// - `SymbolReturnArm(sub_id)` gets one `Edge(Expr(body_span))`
     ///   witness per arm. `SymbolReturnArmFold` claims this
-    ///   attachment and folds arms via `resolve_return_type`
-    ///   (agreement / disagreement / single-arm).
+    ///   attachment and joins the arms (`join_return_arms`).
     /// - `Symbol(sub_id)` carries one `Edge(SymbolReturnArm(sub_id))`
     ///   per sub (`link_return_arms`) so consumers querying the
     ///   symbol's return walk through to the arm-fold.
@@ -1150,28 +1194,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Infer a type on the first named child (the operand) of a dereference expression.
+    /// An arrow deref (`$x->{k}`, `$x->[0]`, `$x->()`, `$x->@*`) observes
+    /// its operand's representation.
     pub(super) fn infer_deref_type(&mut self, node: Node<'a>, rep: TypeObservation) {
         if let Some(operand) = node.named_child(0) {
-            self.push_rep_observation(operand, node, rep);
+            self.observe(operand, node, rep);
         }
-    }
-
-    /// A deref reveals the operand's REPRESENTATION, not its value: an
-    /// observation the reducer's rep axis projects only when no value
-    /// answers, so `my $r = maybe(); $r->[0]` keeps the `Optional` its
-    /// writer's edge carries.
-    pub(super) fn push_rep_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, rep: TypeObservation) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        if operand.kind() != "scalar" {
-            return;
-        }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
-            source: WitnessSource::Builder("deref_access".into()),
-            payload: WitnessPayload::Observation(rep),
-            span: node_to_span(context_node),
-        });
     }
 
     /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
@@ -1202,7 +1230,7 @@ impl<'a> Builder<'a> {
             Some("+" | "-" | "*" | "/" | "%" | "**") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::Numeric);
+                        self.observe(child, node, TypeObservation::NumericUse);
                     }
                 }
             }
@@ -1210,17 +1238,17 @@ impl<'a> Builder<'a> {
             Some("." | "x") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::String);
+                        self.observe(child, node, TypeObservation::StringUse);
                     }
                 }
             }
             // Regex match: LHS is String, RHS is Regexp
             Some("=~" | "!~") => {
                 if let Some(lhs) = crate::cst::nth_element(node, 0) {
-                    self.push_var_type_constraint(lhs, node, InferredType::String);
+                    self.observe(lhs, node, TypeObservation::StringUse);
                 }
                 if let Some(rhs) = crate::cst::nth_element(node, 1) {
-                    self.push_var_type_constraint(rhs, node, InferredType::Regexp);
+                    self.observe(rhs, node, TypeObservation::RegexpUse);
                 }
             }
             _ => {}
@@ -1230,17 +1258,15 @@ impl<'a> Builder<'a> {
     /// Infer types from comparison operators (equality_expression, relational_expression).
     pub(super) fn infer_comparison_type(&mut self, node: Node<'a>) {
         let op = self.get_operator_text(node);
-        let inferred = match op.as_deref() {
-            // Numeric comparisons
-            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(InferredType::Numeric),
-            // String comparisons
-            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(InferredType::String),
+        let observed = match op.as_deref() {
+            Some("==" | "!=" | "<=>" | "<" | ">" | "<=" | ">=") => Some(TypeObservation::NumericUse),
+            Some("eq" | "ne" | "lt" | "gt" | "le" | "ge" | "cmp") => Some(TypeObservation::StringUse),
             _ => None,
         };
-        if let Some(it) = inferred {
+        if let Some(obs) = observed {
             for i in 0..node.named_child_count() {
                 if let Some(child) = node.named_child(i) {
-                    self.push_var_type_constraint(child, node, it.clone());
+                    self.observe(child, node, obs.clone());
                 }
             }
         }

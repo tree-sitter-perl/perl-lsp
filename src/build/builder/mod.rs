@@ -312,7 +312,7 @@ struct Builder<'a> {
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
-    /// reads it to seed `SlotType{class, key} → Edge(Expr(rhs_span))`
+    /// reads it to seed `Field{class, key} → Edge(Expr(rhs_span))`
     /// alongside the untyped mutation Fact. Hash-element LHS only; plain
     /// variable assignments never enter it.
     slot_write_rhs_span: std::collections::HashMap<Span, Span>,
@@ -373,7 +373,7 @@ struct Builder<'a> {
     /// keyed by what each name resolves to (`consts.rs`).
     consts: consts::ConstTable,
     /// Variable/field declarations by `(scope, sigiled name)`, in walk
-    /// order — the walk-time half of variable visibility, for `const_key`.
+    /// order — the walk-time half of variable visibility, for `binding_key_in`.
     var_decls: std::collections::HashMap<(ScopeId, String), Vec<SymbolId>>,
     /// Names declared via `use constant` (NAME and block forms), per the
     /// enclosing package. A standalone bareword whose text is in this set is
@@ -478,6 +478,8 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `ref_tag_functions()` manifest union, flattened once.
+    ref_tag_functions: Vec<plugin::RefTagFunction>,
     /// Plugin `meta_methods()` manifest union, flattened once at build.
     meta_methods: Vec<String>,
 
@@ -532,7 +534,7 @@ struct Builder<'a> {
     /// fixed-point movement counter) read it.
     ///
     /// **Build-only.** Never copied into `FileAnalysis`. The reader-
-    /// side counterpart is `FileAnalysis::method_call_invocant_class`,
+    /// side counterpart is `FileAnalysis::resolve_receiver`,
     /// which queries the bag at read time and so picks up cross-file
     /// enrichment automatically.
     method_call_invocant: std::collections::HashMap<usize, String>,
@@ -541,16 +543,18 @@ struct Builder<'a> {
     /// `FileAnalysis.attr_accessors`.
     attr_projections: Vec<crate::model::file_analysis::AttrProjection>,
 
-    /// Vars whose first escape site is already recorded as an
+    /// Variables whose first escape site is already recorded as an
     /// open-switching `KeyWrite` (walk-local dedup — one escape write
-    /// per var is enough: it widens the shape from that point on, and
+    /// per variable is enough: it widens the shape from that point on, and
     /// the mutation-extension pass charges one bag query per record).
-    escape_recorded: std::collections::HashSet<String>,
+    /// Keyed by binding: two subs' `my $p` are two variables.
+    escape_recorded: std::collections::HashSet<consts::BindingKey>,
 
-    /// Scalars reassigned after declaration (`$v = …` targeting the
-    /// variable itself; element writes go to `key_writes` instead).
-    /// Flushed into `FileAnalysis.reassigned_scalars`.
-    reassigned_scalars: std::collections::HashSet<String>,
+    /// The `Variable` refs that reassign their variable (`$v = …` targeting
+    /// the variable itself; element writes go to `key_writes` instead).
+    /// Resolved to their symbols into `FileAnalysis.reassigned_vars` once
+    /// `resolve_variable_refs` has bound them.
+    reassigning_refs: Vec<usize>,
 
     /// `$var->{key} = …` writes in walk order — input to the
     /// mutation-extension pass (shape extension / open-widening).
@@ -650,6 +654,9 @@ struct Builder<'a> {
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).
     defined_narrowings: Vec<narrowing::DefinedNarrowing>,
+    /// Recorded tag guards (`$ref eq 'ARRAY'`), re-derived each fold
+    /// iteration (`emit_tag_narrowing_witnesses`).
+    tag_narrowings: Vec<narrowing::TagNarrowing>,
     /// Recognized narrowings whose region cutoff resolves post-walk against the
     /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
     /// truncation that replaced the `cst::rebinds_scalar` grammar scan.

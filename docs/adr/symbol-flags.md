@@ -20,8 +20,8 @@ minted it.
 
 A flag that states a structural role rather than a declared attribute is
 minted from a capture, with no spelling in the table: `RECEIVER` is the
-symbol a document's `@param.receiver` names (python's leading `self` /
-`cls`), so the outline and the class-member lane ask the symbol instead
+symbol a document's `@receiver` names when the receiver is declared
+(python's leading `self` / `cls`), so the outline and the class-member lane ask the symbol instead
 of comparing its name against a per-language list. `CONSTRUCTOR`,
 `CONTRACT` and `DYNAMIC_MEMBERS` are the same kind of fact, stated by a
 `@mark.<flag>` on the declaration's name token: php's document marks

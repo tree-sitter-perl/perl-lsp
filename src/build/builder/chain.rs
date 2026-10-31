@@ -310,6 +310,8 @@ impl<'a> Builder<'a> {
             "hash_element_expression" => {
                 // A hash element's VALUE type is independent of the
                 // container's class — never `$self`'s class.
+                // TODO(union-chain-walker): a union base answers nothing
+                // here; the registry's `Projected` drill joins its arms.
                 let base = node.named_child(0)?;
                 let base_ty = self.invocant_type_at_node(base)?;
                 let key_node = node.child_by_field_name("key")?;
@@ -325,13 +327,13 @@ impl<'a> Builder<'a> {
                     return v.cloned();
                 }
                 // Class-typed base: a typed write to this slot
-                // (`SlotType{class,key}`, seeded at the write site, agreed
-                // by `SlotTypeFold`) is the honest answer; otherwise
+                // (`Field{class, key}`, seeded at the write site, agreed
+                // by `FieldValueReducer`) is the honest answer; otherwise
                 // untyped.
                 let class = base_ty.class_name()?.to_string();
-                self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::SlotType {
-                    class,
-                    key,
+                self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::Field {
+                    owner: class,
+                    name: key,
                 })
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {

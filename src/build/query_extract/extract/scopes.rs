@@ -126,9 +126,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, text));
             }
-            if scope_cap != ScopeCap::Header {
-                narrowing::on_scope_push(st, e, id);
-            }
         }
         Capture::Context(kind) => {
             // Shape the context like a def name (cpp canonicalizes a

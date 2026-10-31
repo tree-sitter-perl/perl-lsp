@@ -21,7 +21,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     }
     let ad = st.adorned;
     let recv = ad.in_match(e.match_id, Capture::Member(MemberCap::Recv));
-    let simple = recv.is_some_and(|r| matches!(r.payload.as_deref(), Some(Payload::SimpleRecv(true))));
+    let invocant = recv.and_then(|r| match r.payload.as_deref() {
+        Some(Payload::Recv(i)) => Some((r.span(), i.clone())),
+        _ => None,
+    });
+    // op-DX applies only to a written-name receiver (its deref_stack
+    // resolves by name); a wrapper/chain doesn't.
+    let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_))));
     let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
     let arg_count = super::members::call_args(ad, e.match_id).map(|a| a.len());
     st.out.refs.push(SkelRef {
@@ -32,7 +38,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         start: e.start,
         end: e.end,
         scope: st.cur_scope,
-        invocant: recv.map(|r| (r.span(), r.text.clone())),
+        invocant,
         member_op,
         arg_count,
     });

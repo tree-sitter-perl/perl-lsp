@@ -30,8 +30,10 @@
     [(identifier) @parent @ref.type
      (attribute attribute: (identifier) @ref.type) @parent @ref.spelled]))
 
+; A def's `-> T` is its declared return; without one, what it returns is.
 (function_definition
-  name: (identifier) @def.sub.name) @def.sub
+  name: (identifier) @def.sub.name
+  return_type: (type)? @rettype) @def.sub
 
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
@@ -68,6 +70,11 @@
     object: (identifier) @def.slot.receiver
     attribute: (identifier) @def.slot.name) @def.slot)
 
+; An assignment writes the place its left side denotes, whatever that is.
+(assignment
+  left: (_) @flow.place
+  right: (_) @flow.source) @flow.assign
+
 (parameters
   (identifier) @def.var.name @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
@@ -84,10 +91,22 @@
 (type (identifier) @ref.type)
 (type (attribute attribute: (identifier) @ref.type) @ref.spelled)
 
-; a method's leading `self` / `cls` is its receiver: the object, not a member
-; of the class it is declared in.
-((parameters . (identifier) @param.receiver)
-  (#match? @param.receiver "^(self|cls)$"))
+; A method's receiver is its first parameter, whatever it is called: the
+; object (the class, for a classmethod), not a member of the class. A method
+; is a `def` written directly in a class body; a `@staticmethod` has none.
+(class_definition
+  body: (block
+    (function_definition
+      parameters: (parameters
+        . [(identifier) @receiver (typed_parameter . (identifier) @receiver)]))))
+((class_definition
+  body: (block
+    (decorated_definition
+      (decorator)+ @_decorators
+      definition: (function_definition
+        parameters: (parameters
+          . [(identifier) @receiver (typed_parameter . (identifier) @receiver)])))))
+ (#not-match? @_decorators "^@staticmethod$"))
 
 ; ---- imports: the module a statement loads, and the names it binds ----
 (import_statement
@@ -161,16 +180,29 @@
 ; MethodCall ref core resolves for Perl `$obj->m`. The document states the
 ; kind: an attribute that is a call's callee is a member call, any other is a
 ; value read. The read's value is the receiver's slot (@expr.member); the
-; call's is an Invoke of the member on the receiver (@expr.call). ----
+; call's is an Invoke of the member on the receiver (@expr.call). A receiver
+; written as a bare name is @member.recv.name (it may spell a class); any
+; other is an expression, @member.recv. ----
+((attribute
+  object: (identifier) @member.recv.name
+  attribute: (identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call))
 ((attribute
   object: (_) @member.recv
   attribute: (identifier) @ref.member.value) @expr.member
- (#not-has-parent? @expr.member call))
+ (#not-has-parent? @expr.member call)
+ (#not-is-kind? @member.recv identifier))
 (call
+  function: (attribute
+    object: (identifier) @member.recv.name
+    attribute: (identifier) @ref.member.call)
+  arguments: [(argument_list) @arity.args (generator_expression)]) @expr.call
+((call
   function: (attribute
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
   arguments: [(argument_list) @arity.args (generator_expression)]) @expr.call
+ (#not-is-kind? @member.recv identifier))
 ; A bare name read. An attribute's name (`count` in `o.count`) is the member
 ; read above, never a bare name; its receiver is.
 ((identifier) @expr.read.var
@@ -183,11 +215,36 @@
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
 
-; Guard narrowing: `if isinstance(x, Foo): <body>` refines x to Foo
-; inside the block. The pack's narrow_guard predicate maps the guard
-; (isinstance) + type token to the refinement; core scopes it to @scope.
+; Guard narrowing: `isinstance(x, Foo)` refines x to Foo over the arm it
+; enters, tagged `@narrow.arm` — an `if`/`elif` body, the value a conditional
+; expression yields when the test holds, the right of `and`. The pack's
+; narrow_guard maps the guard + type token to the refinement; core attaches
+; it in the guard's scope over the arm (an `if` body is no scope in Python).
 (if_statement
   condition: (call
     function: (identifier) @narrow.guard
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
-  consequence: (block) @scope)
+  consequence: (block) @narrow.arm)
+(elif_clause
+  condition: (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+  consequence: (block) @narrow.arm)
+(conditional_expression
+  (_) @narrow.arm
+  .
+  "if"
+  .
+  (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type)))
+(boolean_operator
+  left: (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+  operator: "and"
+  right: (_) @narrow.arm)
+
+; `return EXPR` — the returned expression carries its own witness; this marks
+; the site, an arm of the enclosing def's return when the def declares none.
+(return_statement (_) @expr.return.value)

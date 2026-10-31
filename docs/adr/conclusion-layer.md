@@ -21,7 +21,7 @@ map cannot answer.
 pub enum ConclusionKey {
     MethodOnClass { class: String, name: String },
     SubByName(String),
-    SlotType { class: String, key: String },
+    Field { owner: String, name: String },
     TypeName(String),
 }
 
@@ -77,7 +77,7 @@ the enumeration misses turns "the bag would answer" into a silent `None`.
 ### Keys: `ConclusionKey` vs. internal ids
 
 The four variants are exactly the four cross-file consult shapes the chase
-uses: `MethodOnClass` (the overwhelming majority of consults), `SlotType`,
+uses: `MethodOnClass` (the overwhelming majority of consults), `Field`,
 bridged plugin-namespace lookups, and imported-sub-return lookups. Every
 variant is strings-only: mintable by an asker holding nothing but names,
 stable across any edit of the provider.
@@ -85,7 +85,7 @@ stable across any edit of the provider.
 The internal ids — `SymbolId`, `ScopeId`, `RefIdx`, `Span` — are
 per-`FileAnalysis` and shift on unrelated edits. They never appear in a
 key. Every cross-file entry lands on a strings-only attachment
-(`MethodOnClass`, `SlotType`, `TypeName`) or resolves a name to a local
+(`MethodOnClass`, `Field`, `TypeName`) or resolves a name to a local
 `Symbol(sid)` on the provider's side (`SubByName` is that lookup given a
 key spelling). The one exception is the bridged hop, which enters at
 `Symbol(sym.id)` because per-FA `SymbolId`s can't be portably edge-encoded;
@@ -213,8 +213,8 @@ arity: Some(0), receiver: Dispatch("My::Worker") }, step: HashKey("dbh") }`.
 
 **Evaluation.** Evaluate `base`, then narrow: a `Value(HashWithKeys{...})`
 base answers `key_value_type("dbh")` directly; a class-typed base mints a
-follow-on `SlotType{class, "dbh"}` lookup up that class's ancestry —
-exactly the `SlotType` fallback ladder the live chase uses. `ArrayIndex(i)`
+follow-on `Field{class, "dbh"}` lookup up that class's ancestry —
+exactly the `Field` fallback ladder the live chase uses. `ArrayIndex(i)`
 uses `element_at(i)`.
 
 **Where it breaks.** A base with no structure axis (bare `HashRef`,
@@ -521,14 +521,9 @@ because the repair is a re-bake and a re-bake wants the blob.
   let the exit poison only when it could really find something. Small
   and well-sized (recovers on the order of 2,000 consults concentrated
   in a handful of classes) but not built.
-- **Verb-declared partial enrichment** (`EnrichmentProfile`, e.g.
-  `--check`'s profile omitting the `MethodCall` dispatch-target
-  re-stamp) is landed for the CLI, where one process serves exactly one
-  verb and the overlay is resident, not persisted, so a partial copy
-  cannot outlive the process. Extending it to a server verb needs the
-  profile folded into the shared `enriched_snapshot` cache key — a
-  profile-blind key would let a partial copy leak to a fuller-reading
-  verb as a silently missing answer. Not built; the reason is recorded
-  so its absence doesn't read as an oversight. `PERL_LSP_FULL_ENRICHMENT`
-  forces the full profile back everywhere, and is the load-bearing
-  control for measuring the partial profile at all.
+- **No verb-declared partial enrichment.** Enrichment always re-stamps
+  member-access receivers: diagnostics, navigation and hover all read the
+  frozen receiver (`receiver_classes`), so no verb has a product it can
+  skip. A future partial profile would need its own consumer audit, and
+  its profile folded into the `enriched_snapshot` key so a partial copy
+  never reaches a fuller-reading verb as a silently missing answer.

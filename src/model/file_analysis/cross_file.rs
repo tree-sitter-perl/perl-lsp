@@ -629,7 +629,7 @@ pub trait CrossFileLookup {
     }
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
-    /// query that reads a foreign file's bag (the `PackageSymbol` / `SlotType`
+    /// query that reads a foreign file's bag (the `PackageSymbol` / `Field`
     /// / `TypeName` cross-file chases, `def_candidates` return-type folds,
     /// cross-file field types) routes through here so the exact persisted bag
     /// rehydrates on demand. Default (Perl hub, tests, non-pack impls): a cheap
@@ -747,7 +747,7 @@ pub trait CrossFileLookup {
     }
     /// The registry-sweep sibling of `candidate_may_declare`: can `cached`'s
     /// BAG hold any witness for a class-keyed attachment named `name`
-    /// (`PackageSymbol{class, name}` when `attributed`, `SlotType{.., key}`
+    /// (`PackageSymbol{class, name}` when `attributed`, `Field{.., name}`
     /// otherwise)? Rows half only — the chase-shape gates (declared
     /// parents, dynamic parents, app-surface membership, the unrowed
     /// residue) live at the call site, which owns the chase semantics.
@@ -867,6 +867,13 @@ pub trait CrossFileLookup {
     /// Default `None` for impls without a path map.
     fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
         None
+    }
+    /// Whether this lookup is bound to one asker's visibility
+    /// (`ScopedLookup`). What a query sees depends on it, so a receiver
+    /// frozen through one view answers only readers holding the same view
+    /// (`ReceiverView`).
+    fn is_scoped(&self) -> bool {
+        false
     }
     /// The querying file's visibility scope when this lookup is bound to one
     /// (`ScopedLookup`): its own canonical path + the visible set (self path ∪
@@ -1559,6 +1566,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn flat_scope(&self) -> bool {
         self.axis.name_keyed()
+    }
+    fn is_scoped(&self) -> bool {
+        true
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)

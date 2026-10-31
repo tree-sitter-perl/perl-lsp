@@ -77,8 +77,9 @@ the fields the pack lane carries per file.
   constructors and imports, CMake's command families, cpp's rebinding
   resets (`@flow.rebind` on the receiver of `x.clear()`), the member
   operators (`@member.op.arrow` / `@member.op.dot`) and the receiver
-  parameter (`@param.receiver`, minting `SymbolFlags::RECEIVER`) already
-  live in their documents.
+  (`@receiver`: python's `self` parameter, flagged `SymbolFlags::RECEIVER`,
+  and C++'s `this`, both typed as the class of the method around them)
+  already live in their documents.
 - A capability the document already states is read off the compiled
   document, never kept as a pack bool beside it: `#include`-style path
   tokens are the document minting `@import.path`, a preprocessor is it

@@ -2,6 +2,7 @@
 //! it drives (`src/builder/narrowing.rs`). A child of the `tests`
 //! module so it shares `build_fa`.
 
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 use crate::model::file_analysis::{FileAnalysis, InferredType, TypeProvenance};
 use tree_sitter::Point;
@@ -76,7 +77,7 @@ fn narrow_observed_through_method_dispatch() {
         .find(|r| r.target_name == "paint" && matches!(r.kind, RefKind::MethodCall { .. }))
         .expect("paint method-call ref");
     assert_eq!(
-        fa.method_call_invocant_class(r, None).as_deref(),
+        fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Foo"),
         "narrowed invocant dispatches on Foo",
     );
@@ -133,7 +134,7 @@ fn narrow_truncated_at_reassignment() {
 // Truncation must recognize EVERY way Perl rebinds a scalar, not just
 // `$x = …` / `my $x` — else a stale narrowing leaks past the rebind (an
 // always-on false `undef-deref` for the `defined`-guard flavor). One test
-// per binding shape; the cutoff (`first_subject_write_via_edges`) reads the
+// per binding shape; the cutoff (`RebindIndex`) reads the
 // FlowEdge set, so each shape must mint a `@flow` edge targeting the subject.
 
 #[test]
@@ -222,7 +223,7 @@ fn optional_defined_narrows_to_inner() {
 #[test]
 fn optional_blessed_narrows_to_inner() {
     let fa = build_fa(
-        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless blessed $r;\n    $r->go;\n}",
+        "package P; use Scalar::Util qw(blessed);\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless blessed $r;\n    $r->go;\n}",
     );
     assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }
@@ -253,7 +254,7 @@ fn optional_dispatches_leniently_without_guard() {
 fn optional_receiver_goto_def_resolves() {
     // The motivating case: goto-def on a method called on an unguarded
     // Optional<Foo> lands on Foo's method, via the stamped nav edge that
-    // `method_call_invocant_class` now resolves leniently.
+    // `resolve_receiver` now resolves leniently.
     let fa = build_fa(
         "package Foo;\nsub go { my ($self) = @_; }\npackage P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    $r->go;\n}",
     );
@@ -314,15 +315,19 @@ fn optional_ternary_then_defined_narrows() {
 }
 
 #[test]
-fn optional_ternary_conflict_stays_none() {
-    // Two distinct concrete arms (no undef) still disagree → None.
+fn optional_ternary_conflict_is_a_union() {
+    // Two distinct concrete arms (no undef) are a union, not Optional.
     let fa = build_fa(
         "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : Bar->new;\n    $x;\n}",
     );
     assert_eq!(
         fa.inferred_type_via_bag("$x", Point::new(4, 4)),
-        None,
-        "Foo vs Bar is genuine disagreement, not Optional",
+        Some(crate::model::file_analysis::join(
+            &InferredType::ClassName("Foo".into()),
+            &InferredType::ClassName("Bar".into()),
+            &crate::model::file_analysis::Unordered,
+        )),
+        "Foo vs Bar is a union, not Optional",
     );
 }
 
@@ -431,7 +436,7 @@ fn invocant_class_of(fa: &FileAnalysis, method: &str) -> Option<String> {
         .iter()
         .find(|r| r.target_name == method && matches!(r.kind, RefKind::MethodCall { .. }))
         .unwrap_or_else(|| panic!("no method-call ref for {method}"));
-    fa.method_call_invocant_class(r, None)
+    fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)
 }
 
 #[test]
@@ -893,4 +898,86 @@ fn a_parameter_assertion_survives_its_own_declaration() {
             "{src}"
         );
     }
+}
+
+#[test]
+fn a_guard_narrows_every_arm_it_decides() {
+    // A ternary's branches and a logical operator's right side are arms
+    // like any block: each narrows by its guard at the polarity it runs on.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    my $a = $x->isa('Foo') ? $x->go : $x->stop;\n    my $b = defined $y ? $y : $y;\n    my $c = $x->isa('Foo') && $x->go;\n    my $d = defined $y || $y;\n    $x->isa('Foo') and $x->go;\n    $x->go;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    let at_y = |row, column| fa.inferred_type_via_bag("$y", Point::new(row, column));
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_eq!(at(3, 29), foo, "the branch a ternary takes when the guard holds");
+    assert_eq!(at(3, 38), None, "isa has no complement: the other branch stays wide");
+    assert_eq!(at_y(4, 31), Some(InferredType::Undef), "the branch taken when `defined` fails");
+    assert_eq!(at(5, 30), foo, "the right of `&&`");
+    assert_eq!(at_y(6, 26), Some(InferredType::Undef), "the right of `||` runs where the guard fails");
+    assert_eq!(at(7, 24), foo, "the right of `and`");
+    assert_eq!(at(8, 4), None, "nothing after");
+}
+
+#[test]
+fn a_loop_guard_narrows_its_body() {
+    // A loop tests its condition before every run of its body, so the body
+    // is an arm of the guard; `do BLOCK while G` runs once untested.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    while ($x->isa('Foo')) { $x->go; }\n    until (defined $y) { my $u = $y; }\n    $x->go while $x->isa('Foo');\n    do { $x->go } while $x->isa('Foo');\n    for (my $i = 0; $x->isa('Foo'); $i++) { $x->go; }\n    $x->go;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_eq!(at(3, 29), foo, "a while body");
+    assert_eq!(
+        fa.inferred_type_via_bag("$y", Point::new(4, 34)),
+        Some(InferredType::Undef),
+        "an until body runs where the guard fails",
+    );
+    assert_eq!(at(5, 4), foo, "a statement a while modifier repeats");
+    assert_eq!(at(6, 9), None, "a do block runs before its first test");
+    assert_eq!(at(7, 46), foo, "a C-style for body");
+    assert_eq!(at(8, 4), None, "nothing after: `last` leaves with the guard unchanged");
+}
+
+#[test]
+fn a_failed_conjunction_proves_nothing_about_either_side() {
+    // `!(A && B)` is `!A || !B`: neither side alone is known false, so no
+    // region where a conjunction fails narrows its conjuncts.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    if (defined($x) && $y) { 1 } else { my $e = $x; }\n    my $t = (defined($x) && $y) ? 1 : $x;\n    (defined($x) && $y) || print $x;\n    unless (defined($x) and $y) { my $u = $x; }\n    if (!(defined($x) && $y)) { my $n = $x; }\n    return if (defined($x) && $y eq 'f');\n    my $after = $x;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    assert_eq!(at(3, 50), None, "the else of a conjunction");
+    assert_eq!(at(4, 38), None, "the false arm of a ternary on a conjunction");
+    assert_eq!(at(5, 33), None, "the right of `||` after a conjunction");
+    assert_eq!(at(6, 43), None, "the body of `unless` on an `and`");
+    assert_eq!(at(7, 41), None, "a negated conjunction");
+    assert_eq!(at(9, 16), None, "after `return if (defined($x) && ...)`");
+}
+
+#[test]
+fn a_failed_disjunction_proves_both_sides_false() {
+    // `!(A || B)` is `!A && !B`, so where a disjunction fails each side
+    // narrows at its own false polarity; where it holds, neither does.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    if (defined($x) || defined($y)) { my $o = $x; } else { my $e = $x; my $f = $y; }\n    return if !defined($x) or !defined $y;\n    my $after = $x;\n}",
+    );
+    let at = |var, row, column| fa.inferred_type_via_bag(var, Point::new(row, column));
+    assert_eq!(at("$x", 3, 47), None, "a disjunction that holds proves no side");
+    assert_eq!(at("$x", 3, 67), Some(InferredType::Undef), "the else of `||`: $x undef");
+    assert_eq!(at("$y", 3, 78), Some(InferredType::Undef), "the else of `||`: $y undef");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None, "untyped param: strip leaves it wide");
+}
+
+#[test]
+fn a_low_precedence_not_and_and_narrow_like_their_symbols() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    if (not defined $x) { my $u = $x; }\n    if ($x->isa('Foo') and $y) { $x->go; }\n    return if not $x->isa('Foo');\n    $x->go;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_eq!(at(3, 34), Some(InferredType::Undef), "`not defined`");
+    assert_eq!(at(4, 33), foo, "an `and` condition");
+    assert_eq!(at(6, 4), foo, "`return if not` narrows the remainder");
 }

@@ -106,11 +106,10 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(&primary.text)));
     }
     // Flags another pattern states about the def's name token
-    // (`@mark.<flag>`, `@param.receiver`, `@ns.inline`).
+    // (`@mark.<flag>`, `@ns.inline`).
     let on_name: Vec<&Event> = name_tok.map(|n| ad.on_range(n.range()).collect()).unwrap_or_default();
     let flags = on_name.iter().fold(crate::model::file_analysis::SymbolFlags::default(), |f, t| match t.cap {
         Capture::Mark(m) => f | m.flag(),
-        Capture::ParamReceiver => f | crate::model::file_analysis::SymbolFlags::RECEIVER,
         _ => f,
     });
     let symbol = SkelSymbol {
@@ -125,7 +124,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         // inside a callable.
         scope: if matches!(kind, DefCap::Field | DefCap::Slot) { st.member_scope() } else { st.bind_scope() },
         pair: mine(Capture::DefPair).map(|_| e.match_id),
-        return_type: mine(Capture::RetType).and_then(|t| (pack.annot_type)(&t.text)),
+        // A def's header is code of the scope around it: its return type
+        // is spelled there.
+        return_type: mine(Capture::RetType)
+            .and_then(|t| (pack.annot_type)(&t.text))
+            .map(|t| written_type_at(&st.out, &pack.names, t, e.start)),
         deref_stack: ad
             .of_match(e.match_id)
             .find_map(|t| match t.payload.as_deref() {
@@ -158,31 +161,6 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
         None => st.out.symbols.push(symbol),
     }
-}
-
-/// A method's receiver parameter (`@param.receiver`) holds an instance of
-/// the class the method is declared in: its value, stated at its binding
-/// site, so a member written or read through it dispatches on that class.
-pub(super) fn emit_receiver_types(st: &mut ExtractState) {
-    use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-    let typed: Vec<Witness> = st
-        .out
-        .symbols
-        .iter()
-        .filter(|s| s.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER))
-        .filter_map(|s| {
-            let class = s.package.clone()?;
-            Some(Witness {
-                attachment: WitnessAttachment::Variable { name: s.name.clone(), scope: s.scope },
-                source: WitnessSource::Builder("receiver".into()),
-                payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
-                // zero-width at the binding: a local's value holds from
-                // its binding on, as every flow-typed local's does
-                span: Span { start: s.name_start, end: s.name_start },
-            })
-        })
-        .collect();
-    st.out.witnesses.extend(typed);
 }
 
 /// Template params joined to their owner class — the owner shaped like a

@@ -1226,3 +1226,280 @@ def f(o):
     reads.sort();
     assert_eq!(reads, [(2, true), (4, true), (5, true), (8, true)]);
 }
+
+/// A write through `self` states the slot's value: a read of the slot,
+/// in a method above the write, through a subclass in another file, or
+/// on an annotated instance in a third, has the written value's type.
+#[cfg(feature = "python")]
+#[test]
+fn a_slot_write_states_the_slots_value() {
+    let holder = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Holder:
+    def early(self):
+        return self.made.spin()
+    def __init__(self):
+        self.made = Widget()
+";
+    let child = "\
+from pkg.holder import Holder
+
+class Child(Holder):
+    def go(self):
+        return self.made.spin()
+";
+    let main = "\
+from pkg.holder import Holder
+
+def f(h: Holder):
+    return h.made.spin()
+";
+    let (t, idx) = indexed("pyslotvalue", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/holder.py", holder),
+        ("pkg/child.py", child),
+        ("pkg/main.py", main),
+    ]);
+    for (file, at) in [("pkg/holder.py", Point::new(6, 25)), ("pkg/child.py", Point::new(4, 25)), ("pkg/main.py", Point::new(3, 18))] {
+        let (defs, _, _) = landing(&idx, &t.0.join(file), at);
+        assert_eq!(defs, [("holder.py".to_string(), 1)], "goto-def on spin in {file}");
+    }
+}
+
+/// A write to a member is an assignment to it, through any receiver: a
+/// declared attribute keeps its annotation over what is written to it,
+/// and an undeclared one whose writes disagree on the class is either.
+#[cfg(feature = "python")]
+#[test]
+fn a_member_write_is_an_assignment_to_the_member() {
+    let src = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Gadget:
+    def spin(self):
+        return 2
+
+class Holder:
+    made: Widget
+    def __init__(self):
+        self.made = Gadget()
+        self.either = Widget()
+    def swap(self):
+        self.either = Gadget()
+    def go(self):
+        return self.made.spin()
+    def maybe(self):
+        return self.either.spin()
+
+def fill(h: Holder):
+    h.kept = Gadget()
+
+def use(h: Holder):
+    return h.kept.spin()
+
+class Outer:
+    def __init__(self):
+        self.inner = Holder()
+    def fill(self):
+        self.inner.deep = Gadget()
+    def go(self):
+        return self.inner.deep.spin()
+";
+    let (t, idx) = indexed("pymemberwrite", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+    let path = t.0.join("pkg/mod.py");
+    let (defs, _, _) = landing(&idx, &path, Point::new(16, 25));
+    assert_eq!(defs, [("mod.py".to_string(), 1)], "the annotation governs `made`");
+    let (defs, _, _) = landing(&idx, &path, Point::new(18, 27));
+    assert_eq!(
+        defs,
+        [("mod.py".to_string(), 5), ("mod.py".to_string(), 1)],
+        "`either` is written a Widget and a Gadget, so it dispatches on both",
+    );
+    let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
+    assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
+    let (defs, _, _) = landing(&idx, &path, Point::new(32, 32));
+    assert_eq!(defs, [("mod.py".to_string(), 5)], "a nested write states the value");
+}
+
+/// A call is typed by what its callee returns: the `-> T` it declares,
+/// spelled through the def's own imports, else every `return` agreeing,
+/// in the defining file and from another one.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_is_typed_by_its_callees_return() {
+    let lib = "\
+from pkg.widgets import Widget
+
+class Gadget:
+    def spin(self):
+        return 2
+
+def make():
+    return Gadget()
+
+def declared() -> Widget:
+    return build()
+
+def nothing() -> None:
+    pass
+
+g = make()
+g.spin()
+";
+    let widgets = "\
+class Widget:
+    def spin(self):
+        return 1
+";
+    let main = "\
+from pkg.lib import make, declared
+
+def f():
+    make().spin()
+    declared().spin()
+";
+    let (t, idx) = indexed("pyreturns", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/widgets.py", widgets),
+        ("pkg/lib.py", lib),
+        ("pkg/main.py", main),
+    ]);
+    for (file, at, home) in [
+        ("pkg/lib.py", Point::new(16, 2), ("lib.py", 3)),
+        ("pkg/main.py", Point::new(3, 11), ("lib.py", 3)),
+        ("pkg/main.py", Point::new(4, 15), ("widgets.py", 1)),
+    ] {
+        let (defs, _, _) = landing(&idx, &t.0.join(file), at);
+        assert_eq!(defs, [(home.0.to_string(), home.1)], "goto-def on spin in {file} at {at:?}");
+    }
+    let fa = idx.workspace_file_for_test(&t.0.join("pkg/lib.py")).unwrap();
+    assert_eq!(fa.sub_return_type_at_arity("nothing", Some(0)), None, "`-> None` names no class");
+}
+
+/// Calling a class another file declares constructs it: the call is an
+/// instance of the class its spelling names through the file's imports,
+/// whether the call is assigned, chained, or returned by a def.
+#[cfg(feature = "python")]
+#[test]
+fn calling_a_class_from_another_file_constructs_it() {
+    let widgets = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Holder:
+    def __init__(self):
+        self.made = Widget()
+";
+    let main = "\
+from pkg.widgets import Widget, Holder
+
+w = Widget()
+w.spin()
+Widget().spin()
+Holder().made.spin()
+
+def make():
+    return Widget()
+
+make().spin()
+";
+    let (t, idx) = indexed("pyclasscall", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/widgets.py", widgets),
+        ("pkg/main.py", main),
+    ]);
+    let path = t.0.join("pkg/main.py");
+    for at in [Point::new(3, 2), Point::new(4, 9), Point::new(5, 14), Point::new(10, 7)] {
+        let (defs, _, _) = landing(&idx, &path, at);
+        assert_eq!(defs, [("widgets.py".to_string(), 1)], "goto-def on spin at {at:?}");
+    }
+}
+
+/// A receiver expression is typed by its value, never read as a class
+/// spelling: `self.either` (written two classes) is either class,
+/// `self.unknown` (never written) types nothing, and a class name read
+/// still types the class.
+#[cfg(feature = "python")]
+#[test]
+fn an_attribute_receiver_is_no_class_spelling() {
+    let src = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Gadget:
+    def spin(self):
+        return 2
+
+class Holder:
+    def __init__(self):
+        self.either = Widget()
+    def swap(self):
+        self.either = Gadget()
+    def maybe(self):
+        return self.either.spin()
+    def gone(self):
+        return self.unknown.spin()
+
+def make():
+    return Widget.spin(Widget())
+";
+    let (t, idx) = indexed("pyattrrecv", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let recv = |at: Point| fa.method_call_invocant_type(fa.ref_at(at).unwrap(), Some(&idx));
+    let either = recv(Point::new(14, 27)).expect("a slot written two classes");
+    let mut classes: Vec<String> =
+        either.receiver_arms().iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    classes.sort();
+    assert_eq!(classes, ["pkg.mod.Gadget", "pkg.mod.Widget"], "a slot written two classes is either");
+    assert_eq!(recv(Point::new(16, 28)), None, "a slot never written");
+    assert_eq!(
+        recv(Point::new(19, 18)).and_then(|t| t.class_name().map(str::to_string)).as_deref(),
+        Some("pkg.mod.Widget"),
+        "a class name read",
+    );
+}
+
+/// A method's receiver is its first parameter, whatever it is called; a
+/// `@staticmethod` and a free function have none, whatever theirs is.
+#[cfg(feature = "python")]
+#[test]
+fn a_receiver_is_a_methods_first_parameter_by_position() {
+    let src = "\
+class A:
+    def m(this, y):
+        return this
+    @staticmethod
+    def s(self):
+        return self
+    @classmethod
+    def c(klass: \"A\"):
+        return klass
+
+def f(self):
+    return self
+";
+    let fa = py_in(src, None);
+    let receiver = |name: &str, row: usize| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.selection_span.start.row == row)
+            .unwrap_or_else(|| panic!("{name} at {row}"))
+            .flags
+            .contains(crate::model::file_analysis::SymbolFlags::RECEIVER)
+    };
+    assert!(receiver("this", 1));
+    assert!(!receiver("y", 1));
+    assert!(!receiver("self", 4), "a staticmethod has no receiver");
+    assert!(receiver("klass", 7));
+    assert!(!receiver("self", 10), "a free function has no receiver");
+    assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
+    assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
+}
