@@ -1025,7 +1025,7 @@ impl FileAnalysis {
                 // An owner is ONE producer: a union receiver's call has a
                 // return per arm, so it keeps the name-only fallback.
                 let package = self
-                    .method_call_invocant_classes(call, None)
+                    .receiver_classes(call, None, ReceiverPolicy::Navigate)
                     .single()
                     .and_then(|cn| {
                         match self.resolve_method_in_ancestors(cn, method_name, None) {

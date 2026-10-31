@@ -49,7 +49,7 @@ pub fn pack_hover_markdown(
                 }
             };
             let sections: Vec<String> = analysis
-                .method_call_invocant_classes(r, Some(midx))
+                .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
                 .iter()
                 .filter_map(|cn| {
                     member_hover_on(analysis, cn, field, want, arm_for(cn), source, language, midx)

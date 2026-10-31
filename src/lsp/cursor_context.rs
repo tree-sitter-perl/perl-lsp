@@ -249,7 +249,7 @@ module_index: Option<&dyn CrossFileLookup>,
     // Tree-free first: the builder recorded the type of every
     // meaningful expression at its span (`Expr(span)` + the
     // `Expression(refidx)` call axis). Read it back by span — the
-    // same chase `method_call_invocant_classes` uses. The node-kind
+    // same chase `resolve_receiver` uses. The node-kind
     // walk below is the degradation path for the raw-cursor /
     // incomplete-ERROR case completion hits where no witness was
     // recorded (a node that never existed at build time).

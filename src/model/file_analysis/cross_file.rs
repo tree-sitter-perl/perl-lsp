@@ -868,6 +868,13 @@ pub trait CrossFileLookup {
     fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
         None
     }
+    /// Whether this lookup is bound to one asker's visibility
+    /// (`ScopedLookup`). What a query sees depends on it, so a receiver
+    /// frozen through one view answers only readers holding the same view
+    /// (`ReceiverView`).
+    fn is_scoped(&self) -> bool {
+        false
+    }
     /// The querying file's visibility scope when this lookup is bound to one
     /// (`ScopedLookup`): its own canonical path + the visible set (self path ∪
     /// include closure, canonical strings). `None` for unscoped indexes.
@@ -1559,6 +1566,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn flat_scope(&self) -> bool {
         self.axis.name_keyed()
+    }
+    fn is_scoped(&self) -> bool {
+        true
     }
     fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached(f)

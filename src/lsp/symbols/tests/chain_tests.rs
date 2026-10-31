@@ -1,6 +1,7 @@
 //! data-printer plugin intelligence, witness-bag chain typing, chain completion,
 //! and cross-file helper/goto resolution.
 
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 // ---- data-printer plugin: full intelligence ----
@@ -147,7 +148,7 @@ fn data_printer_use_line_options_completion() {
 /// (a) `$r` at line 71 resolves to a known class.
 /// (b) `->to` on line 71 is a MethodCall ref.
 /// (c) `->to`'s invocant resolves to a class via
-///     `FileAnalysis::method_call_invocant_classes` (the bag-routed
+///     `FileAnalysis::resolve_receiver` (the bag-routed
 ///     resolver every reader — hover, gd, gr, rename — funnels
 ///     through).
 ///
@@ -284,7 +285,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     assert_eq!(get_ref.target_name, "get");
     if matches!(get_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
         let _ = (&tree, demo_source.as_bytes(), &idx, get_col);
-        let klass = analysis.method_call_invocant_classes(get_ref, Some(&idx)).single().map(str::to_string);
+        let klass = analysis.receiver_classes(get_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
         assert!(
             klass.is_some(),
             "`->get`'s invocant (= $r) should resolve to SOME class; got {:?}",
@@ -314,7 +315,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     );
     if matches!(to_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
         let _ = (&tree, demo_source.as_bytes(), &idx, to_col);
-        let klass = analysis.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
+        let klass = analysis.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
         eprintln!(
             "DIAG: ->to invocant class (real Mojo): {:?} \
                  (None expected until deep chain through \
@@ -635,7 +636,7 @@ fn test_demo_chain_empirical_truth_table() {
     // --- Link 2: ->get's invocant class (= $r's class) ---
     let get_ref = analysis.ref_at(pt(get_col)).expect("ref at ->get");
     let get_invocant_class = if matches!(get_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
-        analysis.method_call_invocant_classes(get_ref, Some(&idx)).single().map(str::to_string)
+        analysis.receiver_classes(get_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string)
     } else {
         None
     };
@@ -668,7 +669,7 @@ fn test_demo_chain_empirical_truth_table() {
     // --- Link 4: ->to's invocant class (= ->get's return class) ---
     let to_ref = analysis.ref_at(pt(to_col)).expect("ref at ->to");
     let to_invocant_class = if matches!(to_ref.kind, crate::model::file_analysis::RefKind::MethodCall { .. }) {
-        analysis.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string)
+        analysis.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string)
     } else {
         None
     };

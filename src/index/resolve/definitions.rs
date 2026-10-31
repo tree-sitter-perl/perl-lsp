@@ -296,7 +296,7 @@ impl<'a> CandidateSet<'a> {
             // An overload set is one class's; a union receiver falls through
             // to the member lane, which offers every arm's definition.
             RefKind::MethodCall { .. } => {
-                Some(analysis.method_call_invocant_classes(r, Some(idx)).single()?.to_string())
+                Some(analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate).single()?.to_string())
             }
             RefKind::FunctionCall => r.resolved_package().map(str::to_string).or_else(|| {
                 analysis.find_definition(self.point, Some(idx)).and_then(|sp| {
@@ -873,7 +873,7 @@ impl<'a> CandidateSet<'a> {
                 // A union receiver dispatches on every arm: each arm's
                 // definition is offered.
                 let mut found: Vec<RefLocation> = Vec::new();
-                for cn in analysis.method_call_invocant_classes(r, Some(idx)) {
+                for cn in analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate) {
                     let on_class = |cn: String| -> Vec<RefLocation> {
                         // The invocant resolved (e.g. a plugin-bridged route token
                         // → controller class) but the controller lives in THIS

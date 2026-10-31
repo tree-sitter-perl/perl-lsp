@@ -569,7 +569,7 @@ impl FileAnalysis {
 
     /// The type of the expression occupying `span`, resolved tree-free
     /// from the bag. This is the single query-time entry that
-    /// `method_call_invocant_classes` and `resolve_expression_type` both
+    /// `resolve_receiver` and `resolve_expression_type` both
     /// route through: structure was discovered once in the builder
     /// (recorded as `Expr(span)` witnesses + the `Expression(refidx)`
     /// call axis), and every consumer reads it back by span.
@@ -670,18 +670,15 @@ impl FileAnalysis {
         // type with params substituted.
         if let Some((inv, r)) = self
             .refs
+            .member_hops_at(span.start)
             .iter()
+            .map(|&i| &self.refs[i])
             .filter_map(|r| {
                 let site = r.member_site()?;
                 let inv = site.invocant_span?;
                 let name_span = site.name_span;
-                if r.span != name_span
-                    || inv.start != span.start
-                    || (name_span.end.row, name_span.end.column)
-                        > (span.end.row, span.end.column)
-                    || (inv.end.row, inv.end.column)
-                        >= (name_span.start.row, name_span.start.column)
-                {
+                // The index holds member-token refs opening at `span.start`.
+                if name_span.end > span.end || inv.end >= name_span.start {
                     return None;
                 }
                 Some((inv, r, name_span.start))
@@ -713,16 +710,16 @@ impl FileAnalysis {
         // only spans the callee token — same start, narrower end. Feeds the
         // call's own return into the chain exactly like a variable's type
         // does.
-        if let Some((recv_idx, kind)) = self.refs.iter().enumerate().find_map(|(i, r)| {
-            if r.span.start == span.start
-                && (r.span.end.row, r.span.end.column) <= (span.end.row, span.end.column)
-                && matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. })
-            {
-                Some((i, &r.kind))
-            } else {
-                None
-            }
-        }) {
+        if let Some((recv_idx, kind)) = self
+            .refs
+            .calls_starting_at(span.start)
+            .iter()
+            .copied()
+            .filter(|&i| self.refs[i].span.end <= span.end)
+            // The lowest index: the first such call in ref order.
+            .min()
+            .map(|i| (i, &self.refs[i].kind))
+        {
             match kind {
                 RefKind::MethodCall { .. } => {
                     if let Some(t) =

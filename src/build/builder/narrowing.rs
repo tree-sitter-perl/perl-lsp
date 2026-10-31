@@ -10,6 +10,8 @@
 //! Decisions (engine-is-emission, truncation soundness, polarity +
 //! the `Undef` negative lattice): `docs/adr/flow-narrowing.md`.
 
+use std::collections::HashMap;
+
 use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::node_to_span;
@@ -25,7 +27,7 @@ use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Bui
 #[derive(Clone)]
 pub(super) enum NarrowSubject {
     Variable(String),
-    Place { key: String, root: String, key_vars: Vec<String> },
+    Place { key: String, root: String, key_vars: Vec<String>, prefixes: Vec<String> },
     /// A variable holding a `ref`/`reftype`/`blessed` result (`$ref` in
     /// `$ref eq 'ARRAY'`): the guard is on whatever that tag names, which
     /// only the bag can say once `$ref`'s value has folded.
@@ -39,8 +41,8 @@ fn narrow_subject_of(node: Node, src: &[u8]) -> Option<NarrowSubject> {
         return Some(NarrowSubject::Variable(v));
     }
     let (key, root) = crate::cst::canonical_place_path(node, src)?;
-    let key_vars = crate::cst::place_dynamic_key_vars(node, src);
-    Some(NarrowSubject::Place { key, root, key_vars })
+    let crate::cst::PlaceDeps { key_vars, prefixes } = crate::cst::place_deps(node, src);
+    Some(NarrowSubject::Place { key, root, key_vars, prefixes })
 }
 
 /// What a guard does to the subject's type where it holds.
@@ -124,19 +126,103 @@ pub(super) enum RegionFact {
     Observe(crate::model::witnesses::TypeObservation),
 }
 
-/// A recognized narrowing whose region cutoff is computed AFTER the walk —
-/// once `mint_flow_edges_via_query` has run, so the scalar-rebind truncation
-/// reads FlowEdges (`apply_narrowing_cutoffs`) instead of a CST scan. The
-/// PLACE-container invalidation IS a CST mutation scan, so it's pre-computed
-/// inline (`place_cut`) where the node is in hand; the scalar cutoffs (subject
-/// / dynamic-key vars) defer. `scope` is captured at recognition time (the
-/// walk's `current_scope`), invisible post-walk.
+/// A recognized narrowing whose region cutoff is computed AFTER the walk
+/// (`apply_narrowing_cutoffs`), against indexes built once per file: the
+/// scalar rebinds from the FlowEdges, the place disturbances from one tree
+/// pass. A cutoff searched per fact is a scan per use, and every use
+/// observes. `scope` is captured at recognition time (the walk's
+/// `current_scope`), invisible post-walk.
 pub(super) struct PendingNarrow {
     subject: NarrowSubject,
     fact: RegionFact,
     region: Span,
     scope: ScopeId,
-    place_cut: Option<Point>,
+}
+
+/// Every site that could disturb a place, sorted per key — the place
+/// sibling of `RebindIndex`, built in one pass over the file's trees. A
+/// place is disturbed by a write to its slot, or by an opaque use (a write,
+/// a method call, an argument — anything but the base of a longer access)
+/// of its root or of a proper prefix. Conservative: it under-narrows.
+struct PlaceDisturbanceIndex {
+    /// `$self->{a}{b} = …`, by the written slot's key.
+    slot_writes: HashMap<String, Vec<Point>>,
+    /// The root of a place used whole: `$self`, `%h` (`keys %h`, `\@h`),
+    /// or any slice of the named container (it can write several slots).
+    root_uses: HashMap<String, Vec<Point>>,
+    /// An element used opaquely, by its own key (`$self->{a}` passed on
+    /// disturbs `$self->{a}{b}`).
+    prefix_uses: HashMap<String, Vec<Point>>,
+}
+
+impl PlaceDisturbanceIndex {
+    fn new<'t>(roots: impl IntoIterator<Item = Node<'t>>, src: &[u8]) -> Self {
+        fn push(map: &mut HashMap<String, Vec<Point>>, key: String, at: Point) {
+            map.entry(key).or_default().push(at);
+        }
+        // A prefix that is the base of a longer access is read, not used.
+        fn is_access_base(node: Node) -> bool {
+            node.parent().is_some_and(|p| {
+                matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+                    && p.named_child(0) == Some(node)
+            })
+        }
+        let mut idx = PlaceDisturbanceIndex {
+            slot_writes: HashMap::new(),
+            root_uses: HashMap::new(),
+            prefix_uses: HashMap::new(),
+        };
+        for root in roots {
+            super::pipeline::survey(root, |node| {
+                let at = node.start_position();
+                if node.kind() == "assignment_expression" {
+                    if let Some((key, _)) =
+                        node.child_by_field_name("left").and_then(|l| crate::cst::canonical_place_path(l, src))
+                    {
+                        push(&mut idx.slot_writes, key, at);
+                    }
+                }
+                match node.kind() {
+                    // A slice's appearance is never a read of one slot.
+                    "slice_container_variable" | "keyval_container_variable" => {
+                        if let Some(name) = crate::cst::canonical_container_name(node, src) {
+                            push(&mut idx.root_uses, name, at);
+                        }
+                    }
+                    "scalar" | "hash" | "array" if !is_access_base(node) => {
+                        if let Some(name) = crate::cst::canonical_var_name(node, src) {
+                            push(&mut idx.root_uses, name, at);
+                        }
+                    }
+                    "hash_element_expression" | "array_element_expression" if !is_access_base(node) => {
+                        if let Some((key, _)) = crate::cst::canonical_place_path(node, src) {
+                            push(&mut idx.prefix_uses, key, at);
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+        for sites in idx.slot_writes.values_mut().chain(idx.root_uses.values_mut()).chain(idx.prefix_uses.values_mut()) {
+            sites.sort_unstable_by_key(|p| (p.row, p.column));
+        }
+        idx
+    }
+
+    /// The earliest disturbance of the place within `region` (start
+    /// inclusive, end exclusive).
+    fn earliest_in(&self, key: &str, root: &str, prefixes: &[String], region: Span) -> Option<Point> {
+        let first = |map: &HashMap<String, Vec<Point>>, k: &str| {
+            let sites = map.get(k)?;
+            let i = sites.partition_point(|p| point_lt(*p, region.start));
+            sites.get(i).copied().filter(|p| point_lt(*p, region.end))
+        };
+        let mut best = earliest_point(first(&self.slot_writes, key), first(&self.root_uses, root));
+        for p in prefixes {
+            best = earliest_point(best, first(&self.prefix_uses, p));
+        }
+        best
+    }
 }
 
 /// Map a `ref(...) eq STRING` right-hand string to the type it proves.
@@ -456,7 +542,7 @@ impl<'a> Builder<'a> {
                 self.record_guard_sites(c);
                 for (subject, op) in facts_for_region(self, c, enter) {
                     covered.push(subject_key(&subject));
-                    self.emit_narrowing_fact(&subject, op, region, blk);
+                    self.emit_narrowing_fact(&subject, op, region);
                 }
             }
             for &(prior_cond, _, prior_enter) in &arms[..k] {
@@ -469,7 +555,7 @@ impl<'a> Builder<'a> {
                         continue;
                     }
                     covered.push(key);
-                    self.emit_narrowing_fact(&subject, op, region, blk);
+                    self.emit_narrowing_fact(&subject, op, region);
                 }
             }
         }
@@ -582,7 +668,7 @@ impl<'a> Builder<'a> {
     fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) {
         let region = node_to_span(arm);
         for (subject, op) in facts_for_region(self, condition, holds) {
-            self.emit_narrowing_fact(&subject, op, region, arm);
+            self.emit_narrowing_fact(&subject, op, region);
         }
     }
 
@@ -620,7 +706,7 @@ impl<'a> Builder<'a> {
         let region = Span { start: stmt.end_position(), end: block.end_position() };
         self.record_guard_sites(condition);
         for (subject, op) in facts_for_region(self, condition, holds_when_true) {
-            self.emit_narrowing_fact(&subject, op, region, block);
+            self.emit_narrowing_fact(&subject, op, region);
         }
     }
 
@@ -666,51 +752,23 @@ impl<'a> Builder<'a> {
             .or_else(|| crate::cst::enclosing_block(context));
         let Some(extent) = extent else { return };
         let region = Span { start: context.start_position(), end: extent.end_position() };
-        self.emit_region_fact(&subject, RegionFact::Observe(obs), region, extent);
+        self.emit_region_fact(&subject, RegionFact::Observe(obs), region);
     }
 
-    /// Push the span-extent narrowing witness on the subject's home scope,
-    /// truncating the region at the first reassignment of the subject.
     /// Emit a guard's narrowing into `region`. `op` is the polarity-
     /// resolved operation (`GuardFact::op_for_region`); the subject is
     /// keyed and the region truncated at the first disturbance, exactly
     /// as for a positive narrowing.
-    fn emit_narrowing_fact(
-        &mut self,
-        subject: &NarrowSubject,
-        op: NarrowOp,
-        region: Span,
-        container: Node<'a>,
-    ) {
-        self.emit_region_fact(subject, RegionFact::Guard(op), region, container);
+    fn emit_narrowing_fact(&mut self, subject: &NarrowSubject, op: NarrowOp, region: Span) {
+        self.emit_region_fact(subject, RegionFact::Guard(op), region);
     }
 
-    fn emit_region_fact(
-        &mut self,
-        subject: &NarrowSubject,
-        fact: RegionFact,
-        region: Span,
-        container: Node<'a>,
-    ) {
-        // The PLACE-container invalidation is a CST mutation scan (a place is
-        // disturbed by a write to its container/prefix, not by a scalar
-        // rebind) — compute it now, while `container` is in hand. The
-        // SCALAR-rebind cutoff (the subject, or a place's dynamic-key vars)
-        // defers to `apply_narrowing_cutoffs`, which reads the post-walk
-        // FlowEdges: a rebind is "an edge targeting the subject", not a grammar
-        // scan. `scope` is captured here (the walk's live `current_scope`).
-        let place_cut = match subject {
-            NarrowSubject::Place { key, root, .. } => {
-                self.first_place_invalidation(key, root, region, container)
-            }
-            NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
-        };
+    fn emit_region_fact(&mut self, subject: &NarrowSubject, fact: RegionFact, region: Span) {
         self.pending_narrowings.push(PendingNarrow {
             subject: subject.clone(),
             fact,
             region,
             scope: self.current_scope(),
-            place_cut,
         });
     }
 
@@ -795,104 +853,20 @@ impl<'a> Builder<'a> {
             .map(|s| s.id)
     }
 
-    /// Point of the first operation in `container` (at or after
-    /// `region.start`) that could disturb place `key` rooted at `root`: a
-    /// write to the slot, or an opaque use of any **proper prefix** of the
-    /// place — the root scalar or an intermediate element (`$self->{a}`
-    /// for `$self->{a}{b}`). A prefix is "guarded" (a read, not a
-    /// disturbance) when it is the base of a longer access; otherwise it is
-    /// a write, a method call on the prefix, or the prefix passed as an
-    /// argument. Conservative — it under-narrows.
-    fn first_place_invalidation(
-        &self,
-        key: &str,
-        root: &str,
-        region: Span,
-        container: Node<'a>,
-    ) -> Option<Point> {
-        fn consider(node: Node, after: Point, best: &mut Option<Point>) {
-            let p = node.start_position();
-            if !point_lt(p, after) && best.map_or(true, |b| point_lt(p, b)) {
-                *best = Some(p);
-            }
-        }
-        // `prefix` is a proper prefix of `key` at an access boundary
-        // (`$self` / `$self->{a}` of `$self->{a}{b}`), not a coincidental
-        // string prefix (`$selfish`).
-        fn is_proper_prefix(prefix: &str, key: &str) -> bool {
-            key.len() > prefix.len()
-                && key.starts_with(prefix)
-                && matches!(key.as_bytes()[prefix.len()], b'-' | b'{' | b'[')
-        }
-        fn scan(node: Node, key: &str, root: &str, after: Point, src: &[u8], best: &mut Option<Point>) {
-            // Slot rewrite: `$self->{a}{b} = ...`.
-            if node.kind() == "assignment_expression" {
-                if let Some(left) = node.child_by_field_name("left") {
-                    if crate::cst::canonical_place_path(left, src).map(|(k, _)| k).as_deref()
-                        == Some(key)
-                    {
-                        consider(node, after, best);
-                    }
-                }
-            }
-            // Opaque use of a proper prefix: the root scalar, or an
-            // intermediate element (`$self->{a}` of `$self->{a}{b}`). The
-            // exact place is excluded — a read / method call on the slot
-            // value doesn't disturb the slot.
-            let is_prefix = match node.kind() {
-                // Arrow-form root scalar (`$self`), or the whole named
-                // container of a direct-form place (`%h` / `@h` used as a
-                // unit — `keys %h`, `%h = (...)`, `\@h`). A bare
-                // appearance of either is an opaque use; the slot reads
-                // `$h{...}` go through `container_variable`, which is NOT
-                // matched here, so they don't truncate.
-                "scalar" | "hash" | "array" => {
-                    crate::cst::canonical_var_name(node, src).as_deref() == Some(root)
-                }
-                // Slice of the named container (`@h{...}` / `@h[...]`) can
-                // write multiple slots — treat any appearance as a
-                // disturbance (sound; over-truncates a pure slice read).
-                "slice_container_variable" | "keyval_container_variable" => {
-                    crate::cst::canonical_container_name(node, src).as_deref() == Some(root)
-                }
-                "hash_element_expression" | "array_element_expression" => {
-                    crate::cst::canonical_place_path(node, src)
-                        .is_some_and(|(k, _)| is_proper_prefix(&k, key))
-                }
-                _ => false,
-            };
-            if is_prefix {
-                // Guarded = this prefix is the base of a longer access, i.e.
-                // a read; otherwise it is a write / method call / argument.
-                let guarded = node.parent().map_or(false, |p| {
-                    matches!(p.kind(), "hash_element_expression" | "array_element_expression")
-                        && p.named_child(0) == Some(node)
-                });
-                if !guarded {
-                    consider(node, after, best);
-                }
-            }
-            for i in 0..node.named_child_count() {
-                if let Some(c) = node.named_child(i) {
-                    scan(c, key, root, after, src, best);
-                }
-            }
-        }
-        let mut best = None;
-        scan(container, key, root, region.start, self.source, &mut best);
-        best
-    }
-
     /// Post-walk: resolve every recognized narrowing's region cutoff against
     /// the now-minted FlowEdges, then emit — `To` → a scoped `InferredType`
     /// witness; `StripOptional` → a `DefinedNarrowing` the fold re-derives.
-    /// Deferred from the walk precisely so the scalar-rebind truncation can
-    /// read edges (minted post-walk). The PLACE-container cutoff was already
-    /// pre-computed inline (`place_cut`) where its node was in hand.
-    pub(super) fn apply_narrowing_cutoffs(&mut self) {
+    /// Deferred from the walk so the scalar-rebind truncation can read edges
+    /// (minted post-walk). The place index walks the injected `s///e` trees
+    /// too: their code runs, so a write there disturbs a place.
+    pub(super) fn apply_narrowing_cutoffs(&mut self, tree: &'a Tree) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
         let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
+        let places = pending.iter().any(|pn| matches!(pn.subject, NarrowSubject::Place { .. })).then(|| {
+            let roots = std::iter::once(tree.root_node()).chain(self.eval_injections.values().copied());
+            PlaceDisturbanceIndex::new(roots, self.source)
+        });
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
@@ -910,8 +884,8 @@ impl<'a> Builder<'a> {
                 NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => {
                     (var.clone(), rebinds.earliest_in(var, pn.region))
                 }
-                NarrowSubject::Place { key, key_vars, .. } => {
-                    let mut end = pn.place_cut;
+                NarrowSubject::Place { key, root, key_vars, prefixes } => {
+                    let mut end = places.as_ref().and_then(|idx| idx.earliest_in(key, root, prefixes, pn.region));
                     for kv in key_vars {
                         end = earliest_point(end, rebinds.earliest_in(kv, pn.region));
                     }
