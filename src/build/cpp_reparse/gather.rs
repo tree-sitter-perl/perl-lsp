@@ -98,11 +98,11 @@ impl PreExpandedExternal {
         self.raw.keys().map(|k| k.as_str())
     }
 
-    /// Every callee a use of gathered macro `name` may forward to, across
-    /// its config variants in the whole closure — the delegation edges the
-    /// build mints onto this file's use sites (`macro_delegations`).
-    pub fn delegates_of(&self, name: &str) -> Vec<String> {
-        self.raw.get(name).map(|m| m.all_delegates().collect()).unwrap_or_default()
+    /// The gathered macro `name`, its config variants folded
+    /// (`Macro::all_delegates`) — the include closure's half of the
+    /// delegation lane (`macro_delegations`).
+    pub fn macro_named(&self, name: &str) -> Option<&Macro> {
+        self.raw.get(name)
     }
 }
 

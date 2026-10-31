@@ -123,20 +123,22 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   The backward half is minted at the use: the build resolves each used
   macro name's transitive delegate chain through the file's own `#define`s
   and its gathered include closure (every config variant counts —
-  `Macro::variant_delegates`) and stores it on the `RefTable`
-  (`delegations`). The use is indexed and row-shredded under each
-  delegate's key, so references on `Perl_SvREFCNT_inc` find `SvREFCNT_inc(x)`
-  through the ordinary key bucket, with no query-time macro scan and no
-  query-time visibility check — the file's own preprocessor view already
-  decided it. Freshness rides the Surface: macro bodies are on it, so a
-  header edit that changes a delegate re-analyzes its includers.
-  The chain is keyed by macro NAME per file rather than stamped on each ref
-  (rule #14's per-site shape): under one preprocessor view every use of the
-  name shares it, and one map entry per used name stays small where a
-  per-ref field would grow every `Ref` in every language. The cost is an
-  over-match the query-time scan had too: a use outside the `#define`'s live
-  range, or a plain identifier spelled like a function-like macro, lists as
-  a reference to the delegate.
+  `Macro::all_delegates`, read the same way from both tables) and stamps it
+  on each use site as a `RefTable` column (`RefDelegates`: a per-ref id
+  into chains interned per macro, so the table is empty outside C and no
+  `Ref` grows). The stamp runs over the final refs before the indices
+  build, so the use is indexed and row-shredded under each delegate's key
+  in the one index build: references on `Perl_SvREFCNT_inc` find
+  `SvREFCNT_inc(x)` through the ordinary key bucket, with no query-time
+  macro scan and no query-time visibility check — the file's own
+  preprocessor view already decided it. A site gets the chain only where
+  the preprocessor expands the name there: an object-like macro at any
+  call, read or type-position ref; a function-like one only at a call or
+  an expanded site (an erased use, a token inside a `#define` body), so a
+  same-named variable is not a reference to the delegate. Freshness rides
+  the Surface: macro bodies are on it, so a header edit that changes a
+  delegate re-analyzes its includers. Known over-match: a use outside the
+  `#define`'s live range (before it, or after an `#undef`) still lists.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 

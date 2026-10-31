@@ -165,14 +165,16 @@ pub(super) fn walk_macro_defs(
 
 pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
     let mut out: BTreeMap<String, Macro> = BTreeMap::new();
-    walk_macro_defs(tree, src, |n, mut m, _span| {
-        // Last definition wins the body; the shadowed one's delegate survives.
-        if let Some(prev) = out.remove(&n) {
-            m.absorb_variant(&prev);
-        }
-        out.insert(n, m);
-    });
+    walk_macro_defs(tree, src, |n, m, _span| insert_folded(&mut out, n, m));
     out
+}
+
+/// Last definition wins the body; the shadowed one's delegates survive.
+fn insert_folded(table: &mut BTreeMap<String, Macro>, name: String, mut m: Macro) {
+    if let Some(prev) = table.remove(&name) {
+        m.absorb_variant(&prev);
+    }
+    table.insert(name, m);
 }
 
 impl Macro {
@@ -214,20 +216,33 @@ pub fn collect_macro_defs(
     parser: &mut tree_sitter::Parser,
     source: &str,
 ) -> Vec<crate::model::file_analysis::MacroDef> {
+    collect_file_macros(parser, source).defs
+}
+
+/// One file's own `#define`s, from one parse and one walk: the per-variant
+/// identity lane AND the folded table (`collect_macros`' shape), so the
+/// delegation lane reads a variant's callees from the same `Macro` the
+/// gathered closure does.
+#[derive(Default)]
+pub struct FileMacros {
+    pub defs: Vec<crate::model::file_analysis::MacroDef>,
+    pub table: BTreeMap<String, Macro>,
+}
+
+pub fn collect_file_macros(parser: &mut tree_sitter::Parser, source: &str) -> FileMacros {
     use crate::model::file_analysis::{MacroDef, Span};
-    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
-    let src = source.as_bytes();
-    let mut out = Vec::new();
-    walk_macro_defs(&tree, src, |name, m, (start, end)| {
-        let delegate = m.delegate();
-        out.push(MacroDef {
-            name,
-            params: m.params,
-            body: m.body,
-            guards: m.guards,
+    let mut out = FileMacros::default();
+    let Some(tree) = parser.parse(source, None) else { return out };
+    walk_macro_defs(&tree, source.as_bytes(), |name, m, (start, end)| {
+        out.defs.push(MacroDef {
+            name: name.clone(),
+            params: m.params.clone(),
+            body: m.body.clone(),
+            guards: m.guards.clone(),
             selection_span: Span { start, end },
-            delegate,
+            delegate: m.delegate(),
         });
+        insert_folded(&mut out.table, name, m);
     });
     out
 }

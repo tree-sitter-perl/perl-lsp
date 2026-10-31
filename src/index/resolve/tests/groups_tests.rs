@@ -2168,6 +2168,21 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn function_like_delegation_skips_a_same_named_bare_read() {
+        // `WRAP` not followed by `(` is not a use of `#define WRAP(x)`: the
+        // preprocessor leaves it alone, so it is no reference to `real`.
+        let fa = cpp("int real(int x);\n#define WRAP(x) real(x)\nint g(int WRAP) { return WRAP(WRAP); }\n");
+        let at = |col: usize| {
+            fa.refs()
+                .iter()
+                .position(|r| r.target_name == "WRAP" && r.span.start == tree_sitter::Point::new(2, col))
+                .unwrap_or_else(|| panic!("WRAP ref at col {col}: {:?}", fa.refs()))
+        };
+        assert_eq!(fa.ref_delegates(at(25)), ["real".to_string()], "the call expands");
+        assert!(fa.ref_delegates(at(30)).is_empty(), "the bare argument read does not");
+    }
+
+    #[test]
     fn delegation_through_an_included_header_reaches_every_config_variant() {
         // The delegating `#define` lives in a header, in two config variants
         // forwarding to different callees. The using file's build sees both
