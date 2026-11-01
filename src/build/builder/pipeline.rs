@@ -115,7 +115,7 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
 
 /// Depth of the tree under `root`, calling `visit` on every node on the way
 /// — one iterative pass for every whole-tree screen the build needs.
-fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
+pub(super) fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
     let mut cursor = root.walk();
     let mut depth = 0usize;
     let mut max_depth = 0usize;
@@ -405,6 +405,7 @@ fn build_once(
         dispatch_manifest: std::collections::HashMap::new(),
         load_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
+        ref_tag_functions: Vec::new(),
         app_surface_consumers: Vec::new(),
         meta_methods: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
@@ -429,7 +430,7 @@ fn build_once(
         topic_group_spans: Vec::new(),
         plugin_diagnostics: Vec::new(),
         topic_dsls,
-        reassigned_scalars: std::collections::HashSet::new(),
+        reassigning_refs: Vec::new(),
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
         method_call_refs: std::collections::HashMap::new(),
@@ -437,6 +438,7 @@ fn build_once(
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
+        tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
@@ -469,6 +471,7 @@ fn build_once(
         .map(|s| s.to_string())
         .collect();
     b.meta_methods = b.plugins.meta_methods().map(|s| s.to_string()).collect();
+    b.ref_tag_functions = b.plugins.ref_tag_functions().cloned().collect();
     b.role_maker_modules
         .extend(b.plugins.role_makers().map(|s| s.to_string()));
     b.search_root_idioms = super::search_roots::SearchRootIdioms::from_makers(b.plugins.search_root_makers());
@@ -561,9 +564,12 @@ fn build_once(
     // ones.
     b.flush_deferred_named_sub_param_types();
     b.mark_method_invocants();
+    b.flag_receiver_symbols();
 
     // Post-pass 1: resolve variable refs -> Symbol bindings
     bphase!("resolve_variable_refs", b.resolve_variable_refs());
+    let reassigned_vars: std::collections::HashSet<SymbolId> =
+        b.reassigning_refs.iter().filter_map(|&i| b.refs[i].resolved_symbol()).collect();
 
     // Value-flow capture: run the declarative `@flow` query (the assignment
     // SHAPES) and mint FlowEdges with the builder's own scope. Provenance-only
@@ -574,7 +580,7 @@ fn build_once(
     // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
     // narrowed region at the first edge that rebinds its subject (the
     // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
-    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
+    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs(tree));
 
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
@@ -748,7 +754,7 @@ fn build_once(
         arrow_deref_sites: b.arrow_deref_sites,
         attr_projections: b.attr_projections,
         gated_param_types: b.gated_param_types,
-        reassigned_scalars: b.reassigned_scalars,
+        reassigned_vars,
         key_writes: b.key_writes,
         dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         dbic_source_name: b.dbic_source_name,
@@ -885,32 +891,9 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {
         use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
         self.seed_arg_windows();
-
-        // Rep observations from `$v->{k}` access. Method-call return
-        // edges on `Expression(refidx)` are emitted later — by the
-        // chain-typing PostFold pass once `invocant_class` is filled —
-        // as `Edge(PackageSymbol{package, method})`. Without a known
-        // class there's no class-keyed answer to chase to, so the
-        // emission is gated by chain-typing's own progress.
-        let mut hash_obs: Vec<(String, ScopeId, Span)> = Vec::new();
-        for r in self.refs.iter() {
-            if let RefKind::HashKeyAccess { var_text, .. } = &r.kind {
-                if var_text.starts_with('$') {
-                    hash_obs.push((var_text.clone(), r.scope, r.span));
-                }
-            }
-        }
-        for (var, scope, span) in hash_obs {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Variable { name: var, scope },
-                source: WitnessSource::Builder("hash_ref_access".into()),
-                payload: WitnessPayload::Observation(TypeObservation::HashRefAccess),
-                span,
-            });
-        }
 
         // Invocant mutations on hash keys.
         //

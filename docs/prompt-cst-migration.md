@@ -38,7 +38,7 @@ fine, it's str-level).
 
 3. **Three near-duplicate text→class resolvers.**
    `FileAnalysis::invocant_text_to_class`,
-   `FileAnalysis::resolve_invocant_class`, and cursor_context's
+   `FileAnalysis::invocant_classes_in_scope`, and cursor_context's
    `resolve_text_invocant` all dispatch on `InvocantText` and answer
    "class of this invocant text" with slightly different fallbacks
    (package_at vs scope-chain vs analysis-optional). Collapse to one

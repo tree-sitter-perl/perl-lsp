@@ -58,7 +58,12 @@ lives on the parent, which a negated field (`!arguments`) cannot test.
 
 `build/query_predicates.rs` evaluates Neovim's structural forms, with
 the same names and arguments: `#has-parent?`, `#not-has-parent?`,
-`#has-ancestor?`, `#not-has-ancestor?`, each `@capture kind ...`. Every
+`#has-ancestor?`, `#not-has-ancestor?`, each `@capture kind ...`, plus
+`#is-kind?` / `#not-is-kind?` on the captured node itself. A wildcard
+cannot exclude a kind, so a pattern that splits one slot by its kind (a
+member receiver written as a bare name is `@member.recv.name`, any other
+is `@member.recv`) states the name pattern with the kind and the other
+with `#not-is-kind?`, and each match carries its fact. Every
 node the capture holds must satisfy it. `check` runs when a query
 compiles and fails it on any other predicate name, a malformed argument
 list, or a kind the grammar lacks, because an unread predicate is a

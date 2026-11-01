@@ -157,7 +157,7 @@ and the second half is the part to protect.**
 and the lattice is explicitly cross-language. From the cpp arc's own
 record (`cpp-golive-map.md`, ARC 2 E): *"a narrowing is a SCOPED
 ASSERTION over a region, not a temporal value — must be explicitly
-region-bounded… cutoff is the shared `earliest_rebind_in`, edge-driven,
+region-bounded… cutoff is the shared `RebindIndex`, edge-driven,
 consumed by Perl AND the query engine (cross-language)."* C++ narrowing
 rides the same machinery; `instanceof`-shaped narrowing in any pack
 language would too.
@@ -174,7 +174,7 @@ Obligations:
    test.
 2. **Region-boundedness is not optional.** Phase A step 4 narrows "the
    rest of the block" after an `assert_X`. That must go through the
-   existing region machinery and the shared `earliest_rebind_in`
+   existing region machinery and the shared `RebindIndex`
    cutoff — a hand-rolled "until the end of the block" is exactly the
    temporal-value mistake the cpp arc already made and fixed.
 3. **A future pack language gets check-guards for free if the manifest

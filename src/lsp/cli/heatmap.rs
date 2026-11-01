@@ -245,14 +245,14 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
             .iter()
             .map(|l| {
                 format!(
-                    "{:?}:{}:{}-{}:{}:{:?}:{}",
+                    "{:?}:{}:{}-{}:{}:{:?}:{:?}",
                     l.key,
                     l.span.start.row,
                     l.span.start.column,
                     l.span.end.row,
                     l.span.end.column,
                     l.access,
-                    l.rewritable
+                    l.rewrite
                 )
             })
             .collect();

@@ -8,6 +8,7 @@ impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
     pub(super) fn visit_node(&mut self, node: Node<'a>) {
+        self.observe_deref(node);
         match node.kind() {
             "package_statement" => self.visit_package(node),
             "class_statement" => self.visit_class(node),
@@ -64,18 +65,29 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Flow-sensitive narrowing: a block guard refines the then-block;
-            // a statement-level exit guard refines the rest of the block.
+            // Flow-sensitive narrowing: a guard refines each arm it decides
+            // (a block, a modified statement, a ternary branch, a logical
+            // operator's right side); a statement-level exit guard refines
+            // the rest of the block.
             "conditional_statement" => {
                 self.narrow_block_guard(node);
                 self.queue_children(node);
             }
-            "postfix_conditional_expression" => {
-                self.narrow_postfix_exit(node);
+            "postfix_conditional_expression" | "postfix_loop_expression" => {
+                self.narrow_postfix(node);
+                self.queue_children(node);
+            }
+            "loop_statement" | "cstyle_for_statement" => {
+                self.narrow_loop(node);
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {
+                self.narrow_logical_rhs(node);
                 self.narrow_logical_exit(node);
+                self.queue_children(node);
+            }
+            "conditional_expression" => {
+                self.narrow_ternary(node);
                 self.queue_children(node);
             }
 
@@ -136,9 +148,6 @@ impl<'a> Builder<'a> {
             // (the EXPR inside the block) is a coderef. Narrow it, then visit
             // children so the inner scalar still gets its read ref.
             "code_deref_expression" => {
-                if let Some(operand) = code_deref_operand(node) {
-                    self.push_rep_observation(operand, node, TypeObservation::CodeRefInvocation);
-                }
                 self.queue_children(node);
             }
             "array_deref_expression" => {
@@ -152,6 +161,7 @@ impl<'a> Builder<'a> {
 
             // Binary operators → type constraints on variable operands
             "binary_expression" => {
+                self.narrow_logical_rhs(node);
                 self.infer_binary_op_type(node);
                 self.queue_children(node);
             }
@@ -164,7 +174,7 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => {
                 // $x++ / $x-- / ++$x / --$x → Numeric
                 if let Some(operand) = node.named_child(0) {
-                    self.push_var_type_constraint(operand, node, InferredType::Numeric);
+                    self.observe(operand, node, TypeObservation::NumericUse);
                 }
                 self.queue_children(node);
             }
@@ -976,7 +986,10 @@ impl<'a> Builder<'a> {
                 };
                 let assign = match assign {
                     Some(a) => a,
-                    None => break, // stop at first non-assignment statement
+                    // A statement that leaves `@_` alone consumes no argument,
+                    // so the next `shift` still binds the same position.
+                    None if !self.touches_args(stmt) => continue,
+                    None => break,
                 };
 
                 if let Some(right) = assign.child_by_field_name("right") {
@@ -1055,8 +1068,11 @@ impl<'a> Builder<'a> {
                     }
                 }
 
-                // Not a recognized param pattern — stop collecting
-                break;
+                // Not a param pattern: one that leaves `@_` alone (`my $target
+                // = caller`) consumes no argument; any other ends the preamble.
+                if self.touches_args(assign) {
+                    break;
+                }
             }
 
             if !shift_params.is_empty() {
@@ -1118,18 +1134,48 @@ impl<'a> Builder<'a> {
 
     /// Check if a node is a `shift` call (bare or with parens).
     pub(super) fn is_shift_call(&self, node: Node<'a>) -> bool {
+        self.is_bare_call_of(node, "shift")
+    }
+
+    /// A call of `op` written with no argument (`shift`, `pop`, `shift()`).
+    fn is_bare_call_of(&self, node: Node<'a>, op: &str) -> bool {
         match node.kind() {
-            "bareword" => node.utf8_text(self.source).ok() == Some("shift"),
+            "bareword" => node.utf8_text(self.source).ok() == Some(op),
             "func1op_call_expression" => {
                 crate::cst::nth_element(node, 0).is_none()
-                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("shift")
+                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some(op)
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
                 use crate::cst::NodeExt;
-                node.field_text("function", self.source) == Some("shift")
+                node.field_text("function", self.source) == Some(op)
             }
             _ => false,
         }
+    }
+
+    /// Whether `node` reads or hands on the sub's argument array: `@_` or
+    /// `$_[N]` by name, a bare `shift` / `pop` (which default to it), and
+    /// `&f;` / `goto &f` (which pass it on). Perl has no other way to.
+    fn touches_args(&self, node: Node<'a>) -> bool {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            let hit = match n.kind() {
+                "array" | "container_variable" => {
+                    crate::cst::varname_child(n).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
+                }
+                "goto_expression" => true,
+                "function_call_expression" => {
+                    n.child_by_field_name("arguments").is_none()
+                        && n.utf8_text(self.source).is_ok_and(|t| t.starts_with('&') && !t.ends_with(')'))
+                }
+                _ => self.is_bare_call_of(n, "shift") || self.is_bare_call_of(n, "pop"),
+            };
+            if hit {
+                return true;
+            }
+            stack.extend(crate::cst::NodeExt::elements(&n));
+        }
+        false
     }
 
     pub(super) fn extract_signature_params(&self, sig: Node<'a>) -> Vec<ParamInfo> {
@@ -1394,6 +1440,32 @@ impl<'a> Builder<'a> {
             first.is_invocant = true;
             let invocant = first.clone();
             self.push_invocant_type(&invocant, c.package, c.scope, c.span);
+        }
+    }
+
+    /// Every callable's invocant, settled, is a `RECEIVER` symbol: the
+    /// variable its binding site declares. Consumers ask the flag, never
+    /// the name (`$self` is Perl's convention, decided here once).
+    pub(super) fn flag_receiver_symbols(&mut self) {
+        let receivers: Vec<(String, Point)> = self
+            .symbols
+            .iter()
+            .filter_map(|s| match &s.detail {
+                SymbolDetail::Sub { params, .. } => params.first(),
+                _ => None,
+            })
+            .filter(|p| p.is_invocant)
+            .filter_map(|p| Some((p.name.clone(), p.binding_site?)))
+            .collect();
+        for (name, at) in receivers {
+            if let Some(sym) = self.symbols.iter_mut().find(|s| {
+                matches!(s.kind, SymKind::Variable)
+                    && s.name == name
+                    && s.span.start <= at
+                    && at <= s.span.end
+            }) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+            }
         }
     }
 

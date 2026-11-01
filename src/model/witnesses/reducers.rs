@@ -58,6 +58,34 @@ pub struct BagContext<'a> {
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
+    /// The bag's language's subsumption rules (`conventions::lattice_for`): which
+    /// cross-family types its joins fold into one another.
+    pub lattice: &'a crate::model::file_analysis::LatticeRules,
+}
+
+/// A bag's context is the order its joins read: its isa graph (local
+/// parents plus the cross-file graph) and its language's rules. Read in
+/// place, so a join asks it without building anything.
+impl crate::model::file_analysis::TypeOrder for BagContext<'_> {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        crate::model::file_analysis::class_isa(child, ancestor, self.package_parents, self.module_index)
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        crate::model::file_analysis::least_common_class(classes, self.package_parents, self.module_index)
+    }
+
+    fn holds(&self, rule: crate::model::file_analysis::Subsumption) -> bool {
+        self.lattice.holds(rule)
+    }
+}
+
+/// The class order a query's joins read: its context's, else none.
+pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> &'q dyn crate::model::file_analysis::TypeOrder {
+    match q.context {
+        Some(ctx) => ctx,
+        None => &crate::model::file_analysis::Unordered,
+    }
 }
 
 /// A reducer's answer.
@@ -296,10 +324,12 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             if !window.admits(w) {
                 continue;
             }
-            // Skip scoped InferredType witnesses that don't contain the
-            // query point — narrowing facts for a different slice of the
-            // variable's lifetime.
-            if let (Some(point), WitnessPayload::InferredType(_)) = (narrow_point, &w.payload) {
+            // Skip region witnesses that don't contain the query point —
+            // a narrowing or a use's observation for a different slice of
+            // the variable's lifetime (past the arm it was made in).
+            if let (Some(point), WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)) =
+                (narrow_point, &w.payload)
+            {
                 if !span_is_zero(&w.span) && !span_contains(&w.span, point) {
                     continue;
                 }
@@ -519,61 +549,45 @@ impl WitnessReducer for BranchArmFold {
             // the value is `X` minus its false part — an `Optional` peels,
             // and a plain `undef` never gets past the exit.
             if exits {
-                return match typed.into_iter().next() {
-                    Some(InferredType::Optional(inner)) => ReducedValue::Type(*inner),
-                    Some(t) if !t.is_undef() => ReducedValue::Type(t),
-                    _ => ReducedValue::None,
+                return match typed.first().and_then(InferredType::defined_part) {
+                    Some(t) => ReducedValue::Type(t.clone()),
+                    None => ReducedValue::None,
                 };
             }
             // Writing a fallback says the author expects it to run, so the
             // operator is a hint and both arms count, whatever the LHS's
-            // truthiness: two typed arms that agree answer, else the RHS
-            // floor. That floor is what lets `$ENV{X} || 10` type to
-            // `Numeric` when the LHS can't be resolved.
+            // truthiness: the value is `left ⊔ right`, the left minus its
+            // undef half. With no typed left the RHS floor stands in for an
+            // arm the join can't see: that is what lets `$ENV{X} || 10` type
+            // to `Numeric`, and why `$opts // {}` is an open hash, not an
+            // empty one. An untyped RHS answers nothing.
             // TODO(dead-fallback-lint): an LHS that can't be false (a
             // reference, an object without `bool` overloading) makes the
             // fallback dead; that belongs in a diagnostic, not in the type.
-            let all: Vec<&InferredType> = typed.iter().chain(fallback.iter()).collect();
-            if let Some((first, rest)) = all.split_first() {
-                if !typed.is_empty() && !rest.is_empty() && rest.iter().all(|t| *t == *first) {
-                    return ReducedValue::Type((*first).clone());
-                }
+            let defined = typed.iter().filter_map(InferredType::defined_part).cloned();
+            if fallback.is_empty() {
+                return ReducedValue::None;
             }
-            // TODO(union-join): the value is `left ⊔ right`, e.g.
-            // `Optional<Bar> || Baz` is `Bar | Baz`, but `InferredType` has
-            // no union beyond `Optional` (T ⊔ undef), so the floor stands in.
-            // The design is option B of docs/open-forks.md, "Union types in the
-            // lattice"; this arm and the ternary disagreement below answer
-            // through it once it lands.
-            if let Some(fb) = fallback.into_iter().next() {
-                return ReducedValue::Type(fb);
-            }
-            return ReducedValue::None;
+            let unseen_left = typed.is_empty() && undef_arms == 0;
+            let all: Vec<InferredType> = defined.chain(fallback).collect();
+            return match crate::model::file_analysis::join_all(&all, class_order(_q)) {
+                Some(t) if unseen_left => ReducedValue::Type(t.joined_with_unseen()),
+                Some(t) => ReducedValue::Type(t),
+                None => ReducedValue::None,
+            };
         }
         // Both arms must have contributed — the ≥2 rule guards a single
         // materialized arm from masquerading as agreement.
         if typed.len() + undef_arms < 2 {
             return ReducedValue::None;
         }
-        // Strict agreement among the typed arms (a ternary wants exact
-        // agreement, NOT the loose hash/object subsumption the return-arm
-        // join uses). An `undef` arm then lifts the agreed `T` to
-        // `Optional<T>`.
+        // The arms' join; an `undef` arm makes it `Optional`.
         // TODO(brand-join): arms compare whole types, marks included, so one
         // plugin's disagreeing mark costs every other plugin's agreeing ones.
         // Agree on the unbranded base, then keep each namespace's marks the
         // arms share (docs/adr/brands.md, "Joins and the fold").
-        let agreed = match typed.split_first() {
-            Some((first, rest)) if rest.iter().all(|t| t == first) => Some(first.clone()),
-            _ => None,
-        };
-        match agreed {
-            Some(t) if undef_arms > 0 && !matches!(t, InferredType::Optional(_)) => {
-                ReducedValue::Type(InferredType::Optional(Box::new(t)))
-            }
+        match crate::model::file_analysis::join_return_arms(&typed, undef_arms > 0, class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
-            // TODO(union-join): disagreeing arms are a union, not unknown
-            // (docs/open-forks.md, "Union types in the lattice").
             None => ReducedValue::None,
         }
     }
@@ -583,8 +597,7 @@ impl WitnessReducer for BranchArmFold {
 //
 // Claims `SymbolReturnArm(sub_id)` attachments carrying `InferredType`
 // payloads (Edges materialized into types). Each witness is one return
-// arm; `resolve_return_type` agrees them (1 arm → that type, agreeing →
-// that type, disagreeing → None, HashRef subsumed by Object).
+// arm; `join_return_arms` joins them under the query's class order.
 // `Symbol(sub_id)` carries an `Edge(SymbolReturnArm(sub_id))` chain so
 // consumers querying the symbol see the arm-fold answer via standard
 // edge materialization.
@@ -638,7 +651,14 @@ impl WitnessReducer for SymbolReturnArmFold {
         if arms.is_empty() && has_undef_arm && value_arms == 0 {
             return ReducedValue::Type(InferredType::Undef);
         }
-        match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm) {
+        // The same reading guards a typed arm that is itself undef
+        // (`return $self->_log(..)` where `_log` returns nothing): with a
+        // value arm left untyped, the sub may still return a value, and an
+        // `Undef` answer would claim every caller's deref dies.
+        if arms.len() < value_arms && arms.iter().all(|t| t.is_undef()) {
+            return ReducedValue::None;
+        }
+        match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm, class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
@@ -646,10 +666,9 @@ impl WitnessReducer for SymbolReturnArmFold {
 }
 
 /// One stored slot's value over its writes: each `InferredType` is an arm,
-/// agreed via `resolve_return_type`, except that two distinct class
-/// identities never agree — a slot can't be both `A` and `B`, and
-/// `class_name()` is the value's own "what class am I" answer (rule #10).
-fn agree_slot_arms(ws: &[&Witness]) -> ReducedValue {
+/// joined under the query's class order (two classes neither of which
+/// inherits from the other don't join: a slot can't be both `A` and `B`).
+fn agree_slot_arms(ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
     let arms: Vec<InferredType> = ws
         .iter()
         .filter_map(|w| match &w.payload {
@@ -657,17 +676,7 @@ fn agree_slot_arms(ws: &[&Witness]) -> ReducedValue {
             _ => None,
         })
         .collect();
-    let mut seen_class: Option<String> = None;
-    for t in &arms {
-        if let Some(cn) = t.class_name() {
-            match &seen_class {
-                None => seen_class = Some(cn.to_string()),
-                Some(prev) if prev != cn => return ReducedValue::None,
-                _ => {}
-            }
-        }
-    }
-    match crate::model::file_analysis::resolve_return_type(&arms) {
+    match crate::model::file_analysis::join_all(&arms, class_order(q)) {
         Some(t) => ReducedValue::Type(t),
         None => ReducedValue::None,
     }
@@ -817,9 +826,7 @@ impl WitnessReducer for TypeNameReducer {
 // declaration (`Edge(Variable{decl})`, whose own fold already ranked
 // annotation over assignment) and one per write to a slot nothing in the
 // writing file declares (`$obj->{k} = rhs`, `obj.k = rhs`). Each is an arm,
-// and the arms agree (`agree_slot_arms`): `resolve_return_type`'s agreement
-// was tuned for return arms, where one Object absorbs sibling HashRefs and
-// the last of two different classes wins, but `$self->{h} = A->new` in one
+// and the arms join (`agree_slot_arms`): `$self->{h} = A->new` in one
 // method and `= B->new` in another genuinely conflict.
 
 pub struct FieldValueReducer;
@@ -834,8 +841,8 @@ impl WitnessReducer for FieldValueReducer {
             && matches!(w.payload, WitnessPayload::InferredType(_))
     }
 
-    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        agree_slot_arms(ws)
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        agree_slot_arms(ws, q)
     }
 }
 

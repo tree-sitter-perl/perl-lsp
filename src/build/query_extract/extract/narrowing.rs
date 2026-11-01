@@ -1,30 +1,22 @@
-//! `@narrow.*`, `@move.*` and the region captures: guard narrowing scoped
-//! to its block, and `std::move` sites for the use-after-move check.
+//! `@narrow.*`, `@move.*` and the region captures: guard narrowing over
+//! the arm its guard enters, and `std::move` sites for the use-after-move check.
 
 use super::*;
 use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct State {
-    /// guard narrowing: match_id → (var, narrowed-type-text). A guard
-    /// (`isinstance(x, Foo)`, `ref $x eq 'Foo'`, `dynamic_cast<Foo>`) and
-    /// its guarded `@scope` share a match; when that scope is pushed we
-    /// emit a Variable witness scoped to the block — so the narrowed type
-    /// holds INSIDE the guard and nowhere else (scope = the refinement's
-    /// extent). The condition's captures precede the block in source, so
-    /// by the time the `@scope` event fires these are populated.
-    narrow_var: HashMap<usize, String>,
+    /// Guard narrowing, joined per match: a guard (`isinstance(x, Foo)`,
+    /// `dynamic_cast<Foo*>(b)`, `opt.has_value()`) and the `@narrow.arm` it
+    /// enters. The subject is recorded with the scope the guard sits in (the
+    /// narrowing attaches there, like the Perl walker's) and its declared
+    /// type text, resolved up the guard's own scope chain. The arm can
+    /// precede the guard in source (`a if isinstance(x, T) else b`), so the
+    /// join waits for `finish`.
+    narrow_var: HashMap<usize, (String, ScopeId, Option<String>)>,
     narrow_type: HashMap<usize, String>,
     narrow_guard: HashMap<usize, String>,
-    /// A guard narrowing tags its consequence block `@narrow.block` (NOT `@scope`)
-    /// so the block mints exactly one scope from the general arm-scope pattern;
-    /// this maps a block's start byte → the narrow match, so when that arm @scope
-    /// is pushed we recover the guard's var/type/token by block position.
-    narrow_block_start: HashMap<usize, usize>,
-    /// Recognized narrowings deferred to after flow-edge minting, so the region
-    /// cutoff can read the edges (`finish`) — (subject, refined type, FULL
-    /// guarded-block region, block scope).
-    pending_narrow: Vec<(String, InferredType, Span, ScopeId)>,
+    narrow_arm: HashMap<usize, Span>,
     /// (var name, declaring scope) → its declared-type text, joined per
     /// declaration match. Feeds the token-less optional-engagement narrowing
     /// (`if (opt)`): the guard names no type, so the refinement reads the
@@ -47,9 +39,6 @@ pub(super) struct State {
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
-        Capture::Narrow(NarrowCap::Block) => {
-            st.narrowing.narrow_block_start.entry(e.start_byte).or_insert(e.match_id);
-        }
         Capture::Unevaluated => st.narrowing.unevaluated.push((e.start_byte, e.end_byte)),
         // Control-flow construct spans: the use-after-move check reads these
         // to decide whether a move is straight-line in its scope.
@@ -62,10 +51,21 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 }
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
+    let subject = (st.pack.shape_name)(&e.text);
     let n = &mut st.narrowing;
     match e.cap {
         Capture::Narrow(NarrowCap::Var) => {
-            n.narrow_var.insert(e.match_id, e.text.clone());
+            // Innermost declaration first, so a same-named var in a sibling
+            // function never supplies the declared type.
+            let annot = st
+                .scope_stack
+                .iter()
+                .rev()
+                .find_map(|&(_, sid)| n.annot_text_by_var.get(&(subject.clone(), sid)).cloned());
+            n.narrow_var.insert(e.match_id, (subject, st.cur_scope, annot));
+        }
+        Capture::Narrow(NarrowCap::Arm) => {
+            n.narrow_arm.insert(e.match_id, e.span());
         }
         Capture::Narrow(NarrowCap::Type) => {
             n.narrow_type.insert(e.match_id, e.text.clone());
@@ -95,70 +95,59 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     }
 }
 
-/// A guard narrowing whose block is the scope `id` just pushed → the refined
-/// type holds within `id` (invisible outside it). Two join shapes: the narrow
-/// condition either shares this @scope's match (python: `consequence: (block)
-/// @scope`), or tagged the block by position (`@narrow.block`) so the
-/// refinement rides a general arm @scope without a fragile duplicate (cpp
-/// if/else arms).
-pub(super) fn on_scope_push(st: &mut ExtractState, e: &Event, id: ScopeId) {
-    let n = &mut st.narrowing;
-    let narrow_mid = n
-        .narrow_block_start
-        .get(&e.start_byte)
-        .copied()
-        .filter(|nmid| n.narrow_var.contains_key(nmid))
-        .or_else(|| n.narrow_var.contains_key(&e.match_id).then_some(e.match_id));
-    let Some((nmid, var)) = narrow_mid.and_then(|nmid| n.narrow_var.get(&nmid).map(|v| (nmid, v.clone())))
-    else {
-        return;
-    };
-    let subject = (st.pack.shape_name)(&var);
-    // Type text: the guard's own `@narrow.type` when it names one
-    // (`dynamic_cast<Derived*>`), else the subject's declared type
-    // (the optional-engagement form peels `T` from it). The guard
-    // token is absent for the bare `if (opt)` truthiness form.
-    // Resolve the subject's declared type up the guard's scope
-    // chain (innermost first), so a same-named var in a sibling
-    // function never supplies the inner type — the nearest
-    // enclosing declaration of `subject` wins.
-    let ty = n.narrow_type.get(&nmid).cloned().or_else(|| {
-        st.scope_stack
-            .iter()
-            .rev()
-            .find_map(|&(_, sid)| n.annot_text_by_var.get(&(subject.clone(), sid)).cloned())
-    });
-    let guard = n.narrow_guard.get(&nmid).map(String::as_str);
-    if let Some(refined) = ty.and_then(|t| (st.pack.narrow_guard)(guard, &t)) {
-        // Defer: the region cutoff (first rebind edge) needs the
-        // FlowEdges, minted after the walk. Carry the FULL
-        // guarded-block region [start, end]; `finish` truncates it at
-        // the earliest rebind.
-        n.pending_narrow.push((subject, refined, e.span(), id));
-    }
-}
-
 pub(super) fn finish(st: &mut ExtractState) {
     let n = &mut st.narrowing;
     let out = &mut st.out;
+    // A guard narrows the arm it enters. Its type text is the guard's own
+    // `@narrow.type` when it names one (`dynamic_cast<Derived*>`), else the
+    // subject's declared type (the optional-engagement form peels `T` from
+    // it); the guard token is absent for the bare `if (opt)` form.
+    // TODO(pack-exit-guard): no pack guard narrows a false test, so the
+    // early-exit fall-through (`if not isinstance(x, T): return`) waits on a
+    // pack-side negation.
+    let mut pending = Vec::new();
+    let mut arm_mids: Vec<usize> = n.narrow_arm.keys().copied().collect();
+    arm_mids.sort_unstable();
+    for mid in arm_mids {
+        let Some((subject, scope, annot)) = n.narrow_var.get(&mid) else { continue };
+        let Some(ty) = n.narrow_type.get(&mid).or(annot.as_ref()) else { continue };
+        let guard = n.narrow_guard.get(&mid).map(String::as_str);
+        if let Some(refined) = (st.pack.narrow_guard)(guard, ty) {
+            pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope));
+        }
+    }
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
     // at the first FlowEdge that rebinds the subject — the SAME edge-driven
-    // cutoff the Perl narrowing uses (`earliest_rebind_in`). Deferred to here so
+    // cutoff the Perl narrowing uses (`RebindIndex`). Deferred to here so
     // the edges exist. The witness gets a REAL region span [start, cutoff], so
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
-    for (name, refined, region, scope) in std::mem::take(&mut n.pending_narrow) {
-        let refined = written_type_at(out, &st.pack.names, refined, region.start);
-        let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
-            .unwrap_or(region.end);
+    let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
+    let mut narrowed = Vec::new();
+    for (name, refined, region, scope) in pending {
+        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
         if (region.start.row, region.start.column) >= (end.row, end.column) {
             continue; // rebound before the region even opens — nothing holds
         }
-        out.witnesses.push(crate::model::witnesses::Witness {
+        let refined = written_type_at(out, &st.pack.names, refined, region.start);
+        narrowed.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
             payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
+            span: Span { start: region.start, end },
+        });
+    }
+    out.witnesses.extend(narrowed);
+    for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
+        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
+        if (region.start.row, region.start.column) >= (end.row, end.column) {
+            continue;
+        }
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
+            payload: crate::model::witnesses::WitnessPayload::Observation(obs),
             span: Span { start: region.start, end },
         });
     }
