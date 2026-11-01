@@ -954,41 +954,51 @@ impl FileAnalysis {
         }
     }
 
+    /// What `use module` binds through an `import` it does not declare:
+    /// `use` calls the first `import` up `module`'s MRO, and an `import`
+    /// declared by another class exports what that class lists — Data::
+    /// Printer's for `use DDP`. Exporter's own `import` reads the lists of
+    /// the class it was called on, so a class inheriting it exports only
+    /// what it lists itself: Exporter lists nothing, and nothing is lent.
+    fn inherited_import_lists(
+        &self,
+        module: &str,
+        module_index: &dyn CrossFileLookup,
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        let (class, file) = match self.resolve_method_in_ancestors(module, "import", Some(module_index))? {
+            MethodResolution::Local { class, .. } if class == module => return None,
+            MethodResolution::Local { class, .. } => (class, None),
+            MethodResolution::CrossFile { class, .. } if class == module => return None,
+            MethodResolution::CrossFile { class, def_module, .. } => {
+                let file = module_index.get_cached(def_module.as_deref().unwrap_or(&class))?;
+                (class, Some(file))
+            }
+        };
+        let s = match &file {
+            Some(f) => f.analysis.export_surface_with_index(&class, module_index),
+            None => self.export_surface_with_index(&class, module_index),
+        };
+        (!s.default_set().is_empty() || !s.optional_set().is_empty())
+            .then(|| (s.default_set().to_vec(), s.optional_set().to_vec()))
+    }
+
     /// Like `export_surface`, but resolved through `module_index`: a module
-    /// exporting nothing answers with its first exporting parent's surface,
-    /// and every re-exported module's surface (default ∪ optional ∪ tags)
-    /// is merged in, walked cross-file via
+    /// exporting nothing answers with what the `import` it inherits exports
+    /// (`inherited_import_lists`), and every re-exported module's surface
+    /// (default ∪ optional ∪ tags) is merged in, walked cross-file via
     /// `ModuleIndex::for_each_reexport_module` (seen-set for cycles, fan-out
     /// cap). With neither, the result is `export_surface` (own-only, zero
     /// extra storage). `module` is the name the consumer `use`d — the
-    /// package whose `@ISA` the inherited `import` comes through. This is
-    /// the one closure site — the consumer evaluator (`imported_names`) is
-    /// untouched; it binds whatever the surface reports.
+    /// package whose MRO `use` finds `import` on. This is the one closure
+    /// site — the consumer evaluator (`imported_names`) is untouched; it
+    /// binds whatever the surface reports.
     pub fn export_surface_with_index(
         &self,
         module: &str,
         module_index: &dyn CrossFileLookup,
     ) -> ExportSurface<'_> {
-        self.export_surface_at_depth(module, module_index, 0)
-    }
-
-    fn export_surface_at_depth(
-        &self,
-        module: &str,
-        module_index: &dyn CrossFileLookup,
-        depth: usize,
-    ) -> ExportSurface<'_> {
-        // Perl's default MRO depth; also what bounds an `@ISA` cycle.
-        const MAX_INHERITED_DEPTH: usize = 20;
-        let inherited = if self.export.is_empty() && self.export_ok.is_empty() && depth < MAX_INHERITED_DEPTH {
-            // `use DDP` binds Data::Printer's `p`: DDP declares no exports
-            // but inherits Data::Printer's `import`, which exports its own.
-            self.declared_parents(module).iter().find_map(|parent| {
-                let pc = module_index.get_cached(parent)?;
-                let s = pc.analysis.export_surface_at_depth(parent, module_index, depth + 1);
-                (!s.default_set().is_empty() || !s.optional_set().is_empty())
-                    .then(|| (s.default_set().to_vec(), s.optional_set().to_vec()))
-            })
+        let inherited = if self.export.is_empty() && self.export_ok.is_empty() {
+            self.inherited_import_lists(module, module_index)
         } else {
             None
         };
