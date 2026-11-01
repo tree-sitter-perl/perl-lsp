@@ -63,14 +63,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is a long-lived session's
-    // prefetch, the Perl hub's only: a pack's wider descent waits on a
-    // measurement. A one-shot run asks what its own files use and descends
-    // as packs do, the same split as `Declared::Listed`: measured on FHEM
-    // (php-stack-release-gates-2026-11-01), the prefetch landed 1,173
-    // names instead of 303 and cost a cold `--check` 30 s; no diagnostic
-    // moved, only the exporter lists a hint names grew.
-    let prefetch = server.is_some() && hub;
     // Warm-copy strip is a long-lived-process behavior; one-shot CLI keeps
     // warm copies whole for wall (rehydration never amortizes), unless the
     // harness lane forces long-lived behavior on it.
@@ -129,7 +121,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     if *re {
                         return true;
                     }
-                    match acquire_warm(&core, s, name, db.as_ref(), prefetch, strip_warm) {
+                    match acquire_warm(&core, s, name, db.as_ref(), strip_warm) {
                         Some(landed) => {
                             answered.push((name.clone(), false, landed));
                             false
@@ -155,7 +147,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     log::info!("Resolving module '{}'", module_name);
                 }
                 let landed = match &snap {
-                    Some(snap) => acquire(&core, snap, &module_name, placed, db.as_ref(), prefetch),
+                    Some(snap) => acquire(&core, snap, &module_name, placed, db.as_ref()),
                     None => Ok(Landed::Miss),
                 };
                 Some((module_name, is_re_resolve, landed))
@@ -179,7 +171,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 // Remove from stale set after re-resolution (no-op otherwise).
                 core.stale_modules.remove(&module_name);
 
-                // Report the prefetch's progress.
+                // Report the declared dependencies' progress.
                 if let Some(srv) = &server {
                     if progress.total > 0 && progress.done < progress.total {
                         progress.done += 1;
@@ -235,7 +227,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
 /// analyses a batch holds between the two.
 const PARSE_CHUNK: usize = 32;
 
-/// How far a session's prefetch of the declared dependencies has got.
+/// How far a server's landing of the declared dependencies has got.
 #[derive(Default)]
 struct Progress {
     total: usize,
@@ -245,9 +237,7 @@ struct Progress {
 /// Adopt a new map: what was resolved under the old one may resolve
 /// differently now, so its record of tries clears, the store drops what the
 /// old map landed, the listing refreshes, and what the project declares is
-/// asked — every `Declared::Loaded` in every session, a `Declared::Listed`
-/// only where the session prefetches (a server; a one-shot run asks what
-/// its files use, which is everything it runs).
+/// asked, in every session alike (a server reports its progress).
 fn adopt_map(
     core: &IndexCore,
     db: Option<&rusqlite::Connection>,
@@ -272,18 +262,17 @@ fn adopt_map(
         *listed = core.list_available();
     }
     let mut loaded: Vec<String> = Vec::new();
-    let mut prefetched: Vec<String> = Vec::new();
+    let mut listed_names: Vec<String> = Vec::new();
     for d in snap.locator.declared_demand() {
         match d {
             Declared::Loaded(n) => loaded.push(n.clone()),
-            Declared::Listed(n) if server.is_some() => prefetched.push(n.clone()),
-            Declared::Listed(_) => {}
+            Declared::Listed(n) => listed_names.push(n.clone()),
         }
     }
-    prefetched.retain(|n| !core.cache.contains_key(n.as_str()));
-    if let (Some(srv), false) = (server, prefetched.is_empty()) {
-        log::info!("{} declared dependencies queued for indexing", prefetched.len());
-        *progress = Progress { total: prefetched.len(), done: 0 };
+    listed_names.retain(|n| !core.cache.contains_key(n.as_str()));
+    if let (Some(srv), false) = (server, listed_names.is_empty()) {
+        log::info!("{} declared dependencies queued for indexing", listed_names.len());
+        *progress = Progress { total: listed_names.len(), done: 0 };
         let token = NumberOrString::String("perl-lsp/indexing".to_string());
         let _ = srv.handle.block_on(srv.client.send_request::<request::WorkDoneProgressCreate>(
             WorkDoneProgressCreateParams { token: token.clone() },
@@ -298,7 +287,7 @@ fn adopt_map(
             })),
         }));
     }
-    loaded.extend(prefetched);
+    loaded.extend(listed_names);
     ask_unresolved(core, seen, loaded);
 }
 

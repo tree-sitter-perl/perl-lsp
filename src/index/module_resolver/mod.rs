@@ -23,8 +23,8 @@ pub type OnResolved = Box<dyn Fn() + Send + Sync>;
 /// The server-session half of the resolver: the LSP client for progress
 /// reporting plus the diagnostics-refresh callback, and the server-only
 /// warmup lanes keyed off its presence (builtins hydration, warm-copy
-/// strip, stale priority re-resolution, cpanfile pre-scan, prefetch
-/// descent). `None` ⇒ headless (one-shot CLI, tests): the SAME per-name
+/// strip, stale priority re-resolution, the declared dependencies'
+/// progress). `None` ⇒ headless (one-shot CLI, tests): the SAME per-name
 /// acquisition, none of the warmup.
 struct ServerSession {
     handle: tokio::runtime::Handle,

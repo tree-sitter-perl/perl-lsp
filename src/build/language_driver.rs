@@ -241,8 +241,8 @@ pub enum Declared {
     /// `files`), so every session asks for it: nothing that calls into it
     /// is a use the demand would see.
     Loaded(String),
-    /// The manifest lists it (a cpanfile's `requires`). What the project
-    /// runs it also uses, so only a session that prefetches asks for it.
+    /// The manifest lists it (a cpanfile's `requires`): asked in every
+    /// session, so a one-shot run and a server land the same set.
     Listed(String),
 }
 

@@ -1,8 +1,9 @@
 //! The one acquisition, for every served language: locate a name through
 //! the dependency map, parse what it places, persist where the process has
 //! a store, and land it. Only the resolver thread runs it; every asker —
-//! a didOpen's imports, the bulk indexer's demand, an invalidated save,
-//! descent from a landed file — reaches it through `request_resolve`.
+//! a didOpen, the bulk indexer, an invalidated save, a CLI query, each
+//! asking what a file uses (`used_identities`), and descent from a landed
+//! file — reaches it through `request_resolve`.
 
 use super::*;
 use crate::build::language_driver::{LanguageDriver, Located, LocatedBy};
@@ -77,11 +78,10 @@ pub(super) fn acquire_warm(
     snap: &MapSnapshot,
     name: &str,
     db: Option<&rusqlite::Connection>,
-    prefetch: bool,
     strip_warm: bool,
 ) -> Option<Result<Landed, MapMoved>> {
     let warm = db.and_then(|conn| module_cache::warm_module(conn, name))?;
-    Some(land_warm(core, snap, name, warm, prefetch, strip_warm))
+    Some(land_warm(core, snap, name, warm, strip_warm))
 }
 
 /// Resolve `name` from what `snap`'s map `placed` for it (located and
@@ -93,7 +93,6 @@ pub(super) fn acquire(
     name: &str,
     placed: Vec<Placed>,
     db: Option<&rusqlite::Connection>,
-    prefetch: bool,
 ) -> Result<Landed, MapMoved> {
     // Only the files that answer land: one that does not (an enclosing
     // package's file declaring other names) lands when its own name is
@@ -107,7 +106,7 @@ pub(super) fn acquire(
     // remembered miss would outlive the install that answers it, and
     // locating one again is a stat per search root.
     let persisted = !whole.is_empty() && db.is_some_and(|conn| save_module_generation(conn, name, &Some(whole.clone())));
-    let asks = descent(whole.iter().map(|m| &*m.analysis), prefetch);
+    let asks = descent(snap.driver, whole.iter().map(|m| &*m.analysis));
     core.land_dependency(name, &answers, snap.generation, whole.clone(), persisted, eviction_enabled())?;
     Ok(if whole.is_empty() { Landed::Miss } else { Landed::Hit { providers: whole.len(), asks } })
 }
@@ -121,10 +120,9 @@ fn land_warm(
     snap: &MapSnapshot,
     name: &str,
     warm: Vec<(PathBuf, crate::model::file_analysis::FileAnalysis)>,
-    prefetch: bool,
     strip: bool,
 ) -> Result<Landed, MapMoved> {
-    let asks = descent(warm.iter().map(|(_, fa)| fa), prefetch);
+    let asks = descent(snap.driver, warm.iter().map(|(_, fa)| fa));
     let n = warm.len();
     let providers: Providers = warm
         .into_iter()
@@ -141,14 +139,17 @@ fn land_warm(
     Ok(Landed::Hit { providers: n, asks })
 }
 
-/// What a landed file asks for next. Parents and re-exports always: the
-/// MRO and a module's export surface read them at query time. With
-/// `prefetch` (a server's, never a one-shot run's), everything it uses
-/// (`used_identities`) and the classes its subs return — the chain a
-/// session walks before anyone asks for it.
+/// What a landed file asks for next, in every session alike: its parents
+/// and re-exports (the MRO and a module's export surface read them at query
+/// time) and, for the Perl hub, the classes its subs return — `has routes
+/// => sub { Mojolicious::Routes->new }` is a class a chain walks through
+/// that nothing the project names would land. Never everything the file
+/// uses: on FHEM (2026-11-01) that closure landed 1,173 names where the
+/// project's own demand placed 303, and cost a cold `--check` 30 s.
+/// A pack's return-class descent waits on a measurement of its own.
 pub(super) fn descent<'a>(
+    driver: &dyn LanguageDriver,
     providers: impl IntoIterator<Item = &'a crate::model::file_analysis::FileAnalysis>,
-    prefetch: bool,
 ) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();
@@ -162,10 +163,9 @@ pub(super) fn descent<'a>(
         // producers' surfaces transitively, so those producers must land
         // even when no file `use`s them directly.
         asks.extend(fa.reexport_modules().cloned());
-        if !prefetch {
+        if !driver.caps().hub_enrichment {
             continue;
         }
-        asks.extend(fa.used_identities());
         // `has foo => sub { Bar->new }`, plugin-emitted typed subs, return
         // annotations: classes a chain walks through at query time.
         for sym in fa.symbols() {

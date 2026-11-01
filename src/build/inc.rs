@@ -69,7 +69,7 @@ pub fn locator(root: Option<&Path>, driver: &'static dyn LanguageDriver) -> Arc<
         inputs = vec![root.join("cpanfile.snapshot")];
     }
     // The cpanfile's `requires` are read once per map, not a map input:
-    // listing a module changes what a session prefetches, not where any
+    // listing a module changes what a session asks for, not where any
     // name is.
     let declared = root
         .map(crate::build::cpanfile::parse_cpanfile)

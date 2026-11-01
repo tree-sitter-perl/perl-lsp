@@ -332,20 +332,18 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         );
     }
 
-    // Every language's dependencies land on the resolver thread; a
-    // one-shot verb answers from the settled index, so it waits for what
-    // the project's own files name (and what those landings name in turn).
-    timings::phase("cli::resolve_dependencies", || {
-        module_index.request_dependency_demand();
-        module_index.wait_idle();
-    });
+    // Every language's dependencies land on the resolver thread, asked by
+    // the indexer as a server's are; a one-shot verb answers from the
+    // settled index, so it waits for what the project's own files name
+    // (and what those landings ask in turn).
+    timings::phase("cli::resolve_dependencies", || module_index.wait_idle());
     if !served.caps().hub_enrichment {
         return (ws, module_index);
     }
 
-    // `insert_cache` only indexes export/export_ok. Rebuild the full
-    // `func → modules` index from the cache so `find_exporters` answers
-    // identically on cold and warm runs (B6 export-attribution regression).
+    // Landings feed their own edges (`publish_resolved`); the rebuild
+    // re-picks each name's winner and re-feeds the candidates, so
+    // `find_exporters` answers identically on cold and warm runs.
     timings::phase("cli::rebuild_reverse_index", || {
         module_index.rebuild_reverse_index_from_cache()
     });

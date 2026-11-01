@@ -773,10 +773,9 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
     let dir = std::fs::canonicalize(&dir).unwrap();
     let idx = crate::index::module_index::ModuleIndex::new_for_cli();
     idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    // The indexer asks what the project uses, as the pack indexer does: no
+    // caller asks again.
     index_workspace_with_index(&dir, &idx, None, None);
-    assert!(idx.get_cached("Outer").is_none(), "indexing asks nothing for a Perl project");
-
-    idx.request_dependency_demand();
     idx.wait_idle();
     let outer = dir.join("local/lib/perl5/Outer.pm");
     assert_eq!(idx.get_cached("Outer").map(|c| c.path.clone()), Some(outer.clone()));
@@ -791,6 +790,37 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
         "the project's own `Mine` keeps the slot",
     );
     assert_eq!(idx.def_candidates("Mine").len(), 2, "the dependency's `Mine` is still a candidate");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A one-shot run descends as a server does: a landed file asks for the
+/// classes its subs return (a chain walks through them, and nothing the
+/// project names would land them), never for everything it uses.
+#[test]
+fn a_one_shot_run_lands_the_classes_a_landed_file_returns() {
+    let dir = std::env::temp_dir().join(format!("perl-returns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Outer;\n1;\n"),
+        (
+            "local/lib/perl5/Outer.pm",
+            "package Outer;\nuse Outer::Helper;\nsub routes { return Outer::Routes->new }\n1;\n",
+        ),
+        ("local/lib/perl5/Outer/Routes.pm", "package Outer::Routes;\nsub new { bless {}, shift }\nsub get { 1 }\n1;\n"),
+        ("local/lib/perl5/Outer/Helper.pm", "package Outer::Helper;\nsub help { 1 }\n1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    index_workspace_with_index(&dir, &idx, None, None);
+    idx.wait_idle();
+    assert!(idx.get_cached("Outer").is_some());
+    assert!(idx.get_cached("Outer::Routes").is_some(), "the returned class did not land");
+    assert!(idx.get_cached("Outer::Helper").is_none(), "a landed file's own `use` is not demand");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
