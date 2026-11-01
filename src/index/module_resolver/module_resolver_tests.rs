@@ -1,13 +1,20 @@
 use super::*;
+use crate::build::inc::discover_inc_paths;
+use crate::build::language_driver::{DependencyLocator, PerlDriver};
+use crate::build::search_path::SearchPathLocator;
 use crate::index::module_index::strip_import_copy_one;
+
+/// Perl's map over exactly `roots`, in that order.
+fn inc_over(roots: &[PathBuf]) -> SearchPathLocator {
+    SearchPathLocator::new(&PerlDriver, roots.to_vec(), Vec::new(), Vec::new())
+}
 
 #[test]
 fn test_resolve_module_list_util() {
-    let inc_paths = discover_inc_paths();
-    if inc_paths.is_empty() {
+    if discover_inc_paths().is_empty() {
         return;
     }
-    let path = resolve_module_path(&inc_paths, "List::Util");
+    let path = crate::build::inc::locator(None, &PerlDriver).locate("List::Util").into_iter().next().map(|l| l.path);
     assert!(path.is_some(), "List::Util should be resolvable");
     let p = path.unwrap();
     assert!(p.to_str().unwrap().contains("List/Util.pm"));
@@ -312,22 +319,17 @@ fn twin_roots(tag: &str) -> (PathBuf, PathBuf) {
 #[test]
 fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let (a, b) = twin_roots("paths");
-    let found = resolve_module_paths(&[a.clone(), b.clone()], "Twin");
+    let at = |inc: &[PathBuf]| inc_over(inc).locate("Twin").into_iter().map(|l| l.path).collect::<Vec<_>>();
+    let found = at(&[a.clone(), b.clone()]);
     assert_eq!(
         found,
         vec![a.join("Twin.pm"), b.join("Twin.pm")],
         "both roots provide Twin; the relation must hold both, @INC order first",
     );
     // The winner is still exactly what `require` would load.
-    assert_eq!(
-        resolve_module_path(&[a.clone(), b.clone()], "Twin"),
-        Some(a.join("Twin.pm")),
-    );
+    assert_eq!(at(&[a.clone(), b.clone()]).first(), Some(&a.join("Twin.pm")));
     // Reversing @INC reverses the winner, not the membership.
-    assert_eq!(
-        resolve_module_path(&[b.clone(), a.clone()], "Twin"),
-        Some(b.join("Twin.pm")),
-    );
+    assert_eq!(at(&[b.clone(), a.clone()]).first(), Some(&b.join("Twin.pm")));
 }
 
 #[test]
@@ -668,6 +670,72 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
         idx.restamp_owed(&canon_cons, Some(before)),
         "and a stamp predating the bulk is still owed"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Carton's install base is the dependency tier's, not the project's: the
+/// walk leaves `local/` out whether or not the project ignores it.
+#[test]
+fn the_workspace_walk_leaves_carton_local_out() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let dir = std::env::temp_dir().join(format!("perl-carton-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Dep;\n1;\n"),
+        ("local/lib/perl5/Dep.pm", "package Dep;\nsub hi { 1 }\n1;\n"),
+        ("local/bin/tool.pl", "1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    index_workspace_with_index(&dir, &idx, None, None);
+    let mut files = Vec::new();
+    idx.for_each_workspace_file(&mut |cm| files.push(cm.path.strip_prefix(&dir).unwrap().display().to_string()));
+    assert_eq!(files, ["lib/App.pm"]);
+    assert_eq!(idx.dependency_roots(), [dir.join("local")]);
+}
+
+/// Perl's dependency map is `@INC` with the project's libs ahead of it:
+/// carton's `local/lib/perl5`, then `lib/`, then the process `@INC`. Every
+/// root providing a name is a candidate, in that order, the first is the
+/// winner, and a name is its own module file: the module that declares it
+/// is never searched for it.
+#[test]
+fn perls_map_is_inc_with_the_project_libs_first() {
+    let dir = std::env::temp_dir().join(format!("perl-inc-map-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/Twin.pm", "package Twin;\nsub which { 'lib' }\n1;\n"),
+        ("local/lib/perl5/Twin.pm", "package Twin;\nsub which { 'local' }\n1;\n"),
+        ("local/lib/perl5/Outer.pm", "package Outer;\n1;\npackage Outer::Inner;\nsub hi { 1 }\n1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let inc = crate::build::inc::locator(Some(&dir), &PerlDriver);
+
+    let mut expected = vec![dir.join("local/lib/perl5"), dir.join("lib")];
+    expected.extend(discover_inc_paths());
+    assert_eq!(inc.search_roots(), expected.as_slice());
+    assert_eq!(inc.roots(), [dir.join("local")]);
+    assert_eq!(inc.inputs(), [dir.join("local/lib/perl5"), dir.join("cpanfile.snapshot")]);
+
+    let local = dir.join("local/lib/perl5/Twin.pm");
+    let lib = dir.join("lib/Twin.pm");
+    let at = |name: &str| inc.locate(name).into_iter().map(|l| l.path).collect::<Vec<_>>();
+    assert_eq!(at("Twin"), vec![local.clone(), lib.clone()]);
+    assert!(at("Outer::Inner").is_empty(), "no Outer/Inner.pm: Outer.pm is not searched for it");
+
+    // No project: the process @INC alone, and the map owns no directory.
+    let bare = crate::build::inc::locator(None, &PerlDriver);
+    assert_eq!(bare.search_roots(), discover_inc_paths().as_slice());
+    assert!(bare.roots().is_empty() && bare.inputs().is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

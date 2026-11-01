@@ -93,6 +93,16 @@ impl Backend {
                         _ => path.clone(),
                     }
                 });
+                // The dependency map's own events: a manifest is a new map
+                // (the next walk's skip), and a file under a tier root is
+                // never a workspace file.
+                if module_index.is_dependency_input(&canon) {
+                    module_index.refresh_dependency_map_again();
+                    continue;
+                }
+                if module_index.under_dependency_root(&canon) {
+                    continue;
+                }
                 if let Some(ref conn) = conn {
                     crate::index::module_cache::invalidate_generation(conn, &canon.to_string_lossy());
                     if canon != path {

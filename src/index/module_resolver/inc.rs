@@ -1,5 +1,6 @@
-//! The @INC tier: path discovery, module-file location, and the
-//! in-process parse with its parent-fallback memo.
+//! The @INC tier: module-file location over the search path Perl's
+//! dependency map (`build::inc`) assembles, and the in-process parse with
+//! its parent-fallback memo.
 
 use super::*;
 
@@ -28,35 +29,14 @@ pub(super) fn parse_module(
 /// `(name, inc-root)` relation's acquisition half. A name maps to a SET of
 /// files (XS/PP twins, a project `lib/` shadowing an installed copy,
 /// `t/lib` vs `lib` per entrypoint); stopping at the first hit is what made
-/// the tier answer from whichever root happened to win.
+/// the tier answer from whichever root happened to win. Perl's map over
+/// `inc_paths` locates them, canonical: the per-asker search-path rank
+/// prefix-matches a candidate against canonical roots with no query-time
+/// `canonicalize`, which is filesystem I/O on a request path.
 pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<PathBuf> {
-    let rel_path = module_name.replace("::", "/") + ".pm";
-    let mut out: Vec<PathBuf> = Vec::new();
-    for inc in inc_paths {
-        let full = inc.join(&rel_path);
-        if full.is_file() {
-            // Canonical, so the relation holds FILES: distinct roots can
-            // name the same file (a symlinked `lib`, a duplicated @INC
-            // entry) and must dedup to one candidate. It also lets the
-            // per-asker search-path rank prefix-match a candidate against
-            // canonical roots with no query-time `canonicalize` — that is
-            // filesystem I/O, and it would land on a request path.
-            let canon = std::fs::canonicalize(&full).unwrap_or(full);
-            if !out.contains(&canon) {
-                out.push(canon);
-            }
-        }
-    }
-    out
-}
-
-/// The `@INC`-order winner among `resolve_module_paths` — what a `require`
-/// would load. The relation's other providers stay reachable as candidates.
-/// Production resolves the whole set; this spelling is the winner alone,
-/// which only the test-side `ModuleIndex::resolve_module` still asks for.
-#[cfg(test)]
-pub fn resolve_module_path(inc_paths: &[PathBuf], module_name: &str) -> Option<PathBuf> {
-    resolve_module_paths(inc_paths, module_name).into_iter().next()
+    use crate::build::language_driver::{DependencyLocator, PerlDriver};
+    let inc = crate::build::search_path::SearchPathLocator::new(&PerlDriver, inc_paths.to_vec(), Vec::new(), Vec::new());
+    inc.locate(module_name).into_iter().map(|l| l.path).collect()
 }
 
 #[allow(dead_code)]
@@ -187,37 +167,6 @@ fn parse_one_provider(
         eprintln!("bench\t{}\t{}\t{}\t{}", module_name, start.elapsed().as_micros(), symbols, bytes);
     }
     Some(result)
-}
-
-// ---- @INC discovery ----
-
-pub fn discover_inc_paths() -> Vec<PathBuf> {
-    let output = std::process::Command::new("perl")
-        .args(["-e", r#"print join "\n", @INC"#])
-        .stdin(std::process::Stdio::null())
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .collect(),
-        _ => vec![],
-    }
-}
-
-/// Add project-local lib paths (lib/, local/lib/perl5/) to the front of @INC.
-/// Called by the resolver thread, test resolver, and CLI tools.
-pub fn add_project_lib_paths(inc_paths: &mut Vec<PathBuf>, workspace_root: &std::path::Path) {
-    for local_lib in &["lib", "local/lib/perl5"] {
-        let p = workspace_root.join(local_lib);
-        if p.is_dir() {
-            log::info!("Auto-discovered project lib: {:?}", p);
-            inc_paths.insert(0, p);
-        }
-    }
 }
 
 /// Scan @INC directories for .pm files, populating the available_modules map.

@@ -8,14 +8,14 @@ use super::*;
 /// protocol (memoization, persistence, strip, `insert_resolved`) has a
 /// single spelling and cannot drift between the two spawn fronts.
 pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>) {
-    let mut inc_paths = discover_inc_paths();
+    let mut inc_paths = crate::build::inc::discover_inc_paths();
 
     // Wait for workspace root from initialize() for per-project cache path.
     let ws_root = wait_for_workspace_root(&core.workspace_root);
 
     // Auto-discover project-local lib paths (lib/, local/lib/perl5/).
     if let Some(root_path) = ws_root.as_ref().and_then(|u| uri_to_path(u)) {
-        add_project_lib_paths(&mut inc_paths, &root_path);
+        crate::build::inc::add_project_lib_paths(&mut inc_paths, &root_path);
     }
 
     // Publish the resolved search path before anything can query: an

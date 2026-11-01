@@ -179,7 +179,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Use the ACTUAL Mojolicious library from @INC — the same
     // code nvim analyzes. If Mojo isn't installed, skip cleanly
     // so CI on bare systems doesn't break.
-    let inc_paths = crate::index::module_resolver::discover_inc_paths();
+    let inc_paths = crate::build::inc::discover_inc_paths();
     let insert_real = |name: &str| -> bool {
         let mut p = crate::index::module_resolver::create_parser();
         match crate::index::module_resolver::resolve_and_parse(&inc_paths, name, &mut p) {
@@ -363,7 +363,7 @@ fn data_printer_use_line_options_completion_for_data_printer_module() {
 fn test_route_pm_chain_decomposition() {
     use std::fs;
     use std::path::PathBuf;
-    let inc = crate::index::module_resolver::discover_inc_paths();
+    let inc = crate::build::inc::discover_inc_paths();
     let route_path = inc
         .iter()
         .map(|p| p.join("Mojolicious/Routes/Route.pm"))
@@ -583,7 +583,7 @@ fn test_demo_chain_empirical_truth_table() {
         None,
     );
 
-    let inc = crate::index::module_resolver::discover_inc_paths();
+    let inc = crate::build::inc::discover_inc_paths();
     let install = |name: &str| -> bool {
         let mut p = crate::index::module_resolver::create_parser();
         match crate::index::module_resolver::resolve_and_parse(&inc, name, &mut p) {

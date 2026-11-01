@@ -17,6 +17,8 @@ pub mod cpp_reparse;
 pub mod cpp_toolchain;
 // sentinel re-parse for member-access cursor context
 pub mod cursor_sentinel;
+// @INC: the perl dependency tier's map
+pub mod inc;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
 pub mod plugin;
@@ -30,6 +32,8 @@ pub mod query_extract;
 // pre-extraction reparse seam (whose production form is cpp_reparse).
 #[allow(dead_code)]
 pub mod reparse;
+// a dependency map over search roots, named by the pack's `module_paths`
+pub mod search_path;
 // the one source-file walk and guarded analyze the indexers share
 pub mod source_files;
 // package-marker directories a workspace walk saw (python's `__init__.py`);

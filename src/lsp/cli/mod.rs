@@ -337,8 +337,8 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         return (ws, module_index);
     }
 
-    let mut inc_paths = timings::phase("cli::discover_inc", module_resolver::discover_inc_paths);
-    module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
+    let mut inc_paths = timings::phase("cli::discover_inc", crate::build::inc::discover_inc_paths);
+    crate::build::inc::add_project_lib_paths(&mut inc_paths, &root_path);
 
     let db = module_cache::open_cache_db(Some(&root_uri), "perl");
     let mut stale_set: std::collections::HashSet<String> = std::collections::HashSet::new();

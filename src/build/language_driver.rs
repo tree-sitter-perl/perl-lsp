@@ -9,7 +9,7 @@
 //! (the layering test is the seam) until a second driver makes a cargo
 //! *workspace* earn its keep — see `docs/gold-roadmap.md`.
 
-use crate::model::file_analysis::FileAnalysis;
+use crate::model::file_analysis::{FileAnalysis, NameSpellings};
 use std::path::Path;
 
 /// Per-language behavioral capabilities — the properties core layers ask
@@ -156,6 +156,24 @@ pub trait LanguageDriver: Send + Sync {
     fn analysis_input_fingerprint(&self) -> u64 {
         0
     }
+    /// How this language spells a module as a file under a search root.
+    /// `None` = it names no module by path.
+    fn module_spelling(&self) -> Option<ModuleSpelling> {
+        self.lang_pack().map(|p| ModuleSpelling { names: p.names, module_paths: p.module_paths })
+    }
+    /// Where this project keeps the dependencies the workspace walk does
+    /// not own (perl: carton's `local/`), and which of their files
+    /// declares a name; `root` is `None` with no project open. `None` =
+    /// the walk is the whole story.
+    fn dependency_locator(&'static self, _root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        None
+    }
+    /// File names whose change can move `dependency_locator`'s answer —
+    /// the watcher subscribes to them; the locator's own `inputs` decide
+    /// which changes count.
+    fn dependency_manifests(&self) -> &[&'static str] {
+        &[]
+    }
     /// The file whose presence gives a directory meaning to this
     /// language's analyses (python's `__init__.py`). The index records
     /// where a walk saw it (`walk_markers`) and the pack invalidator notes
@@ -169,6 +187,51 @@ pub trait LanguageDriver: Send + Sync {
     fn path_inputs_current(&self, _path: &Path, _analysis: &FileAnalysis) -> bool {
         true
     }
+}
+
+/// A language's module spelling: its names (whose use-map separator, if
+/// any, splits an imported name from its module) and the files under a
+/// search root a module name may be, most-preferred first.
+#[derive(Clone)]
+pub struct ModuleSpelling {
+    pub names: NameSpellings,
+    pub module_paths: fn(&str) -> Vec<String>,
+}
+
+/// The dependency tier's map for one project: a name nothing in the
+/// workspace declares → the files that may declare it. The index asks it
+/// on demand and parses only what it lands; the locator only probes the
+/// filesystem. Implemented per language (perl: `build::inc`).
+pub trait DependencyLocator: Send + Sync {
+    /// Files that may declare `identity`, most-preferred first.
+    fn locate(&self, identity: &str) -> Vec<Located>;
+    /// Directories whose files belong to this tier, never to the walk.
+    fn roots(&self) -> &[std::path::PathBuf];
+    /// The manifests this map was read from: a change to any is a new map.
+    fn inputs(&self) -> &[std::path::PathBuf];
+    /// The directories a path-named language names a located file from
+    /// (python's `site-packages`), as it names a workspace file from the
+    /// walk root.
+    fn search_roots(&self) -> &[std::path::PathBuf] {
+        &[]
+    }
+}
+
+/// A file a dependency map places for a name, and how it got there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Located {
+    pub path: std::path::PathBuf,
+    pub by: LocatedBy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocatedBy {
+    /// The path spells the name: it is that module's file, the one a
+    /// `require` of the name loads, whatever it declares inside.
+    Exact,
+    /// The file of an enclosing module (`acme/__init__.py` for
+    /// `acme.models.Base`), which may or may not declare the name.
+    Enclosing,
 }
 
 /// How a language that names modules by path names one: the marker file
@@ -257,6 +320,18 @@ impl LanguageDriver for PerlDriver {
         // method/pkg/hash-key slots; `(`/`,` are signature-help adjacent.
         &["$", "@", "%", ">", ":", "{", "(", ","]
     }
+    fn module_spelling(&self) -> Option<ModuleSpelling> {
+        Some(ModuleSpelling {
+            names: crate::model::conventions::PERL_SPELLINGS,
+            module_paths: crate::model::conventions::perl_module_paths,
+        })
+    }
+    fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        Some(crate::build::inc::locator(root, self) as std::sync::Arc<dyn DependencyLocator>)
+    }
+    fn dependency_manifests(&self) -> &[&'static str] {
+        &["cpanfile.snapshot"]
+    }
 }
 
 /// A pack-language driver — the generic, query-driven path. One value
@@ -324,6 +399,20 @@ pub struct PackDriver {
     /// (python). Asks the walk's marker snapshot, else the disk, so it
     /// runs in the gather phase.
     file_module: Option<FileModuleRule>,
+    /// The project's dependency map. `None` = the workspace walk is the
+    /// whole story.
+    dependencies: Option<PackDependencies>,
+}
+
+/// A pack's dependency map: how to build it for a root, and the manifest
+/// file names the watcher must report.
+#[cfg(feature = "pack-langs")]
+#[derive(Clone, Copy)]
+struct PackDependencies {
+    /// Builds the map for a root; given the driver it serves, so the map
+    /// parses and spells names in that driver's language.
+    locator: fn(&Path, &'static dyn LanguageDriver) -> std::sync::Arc<dyn DependencyLocator>,
+    manifests: &'static [&'static str],
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -422,6 +511,13 @@ impl LanguageDriver for PackDriver {
     }
     fn analysis_input_fingerprint(&self) -> u64 {
         self.input_fingerprint.map(|f| f()).unwrap_or(0)
+    }
+    fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        let root = root?;
+        self.dependencies.map(|d| (d.locator)(root, self))
+    }
+    fn dependency_manifests(&self) -> &[&'static str] {
+        self.dependencies.map(|d| d.manifests).unwrap_or(&[])
     }
     fn module_marker(&self) -> Option<&'static str> {
         self.file_module.map(|r| r.marker)
@@ -697,6 +793,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
         file_module: None,
+        dependencies: None,
     }
 }
 
@@ -720,6 +817,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
+        dependencies: None,
     }
 }
 
@@ -746,6 +844,7 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependencies: None,
     }
 }
 
@@ -769,6 +868,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependencies: None,
     }
 }
 
@@ -793,6 +893,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependencies: None,
     }
 }
 

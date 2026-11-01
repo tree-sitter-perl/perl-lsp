@@ -81,13 +81,18 @@ pub fn index_workspace_with_index(
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // The hub serves the Perl driver: its dependency map (carton's
+    // `local/`) names the directories the walk leaves out, whether or not
+    // the project ignores them.
     static PERL: crate::build::language_driver::PerlDriver = crate::build::language_driver::PerlDriver;
+    idx.refresh_dependency_map(&PERL, Some(root));
+    let skip_roots = idx.dependency_roots_under(root);
     // Extensioned Perl, type-pruned at the walk level (cheap; never
     // descends into a JS tree's files). FHEM ships four files over the cap.
     let cap = PERL.caps().file_cap;
     let walked = source_files::walk(
         root,
-        &source_files::Walk { extensions: PERL.extensions(), cap, skip: &[], ignores: true },
+        &source_files::Walk { extensions: PERL.extensions(), cap, skip: &skip_roots, ignores: true },
     );
     source_files::report_oversize(&walked.oversize, cap);
     let mut paths = walked.files;
