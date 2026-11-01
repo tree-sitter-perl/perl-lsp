@@ -833,6 +833,8 @@ pub trait CrossFileLookup {
         out
     }
     fn modules_with_symbol(&self, name: &str) -> Vec<String>;
+    /// The homes of the files attributing a sub or method to `package`.
+    fn modules_providing_package(&self, package: &str) -> Vec<String>;
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
@@ -1477,6 +1479,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     // (pack closure narrowing) applies to the parent relation too.
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.inner.modules_with_symbol(name)
+    }
+    fn modules_providing_package(&self, package: &str) -> Vec<String> {
+        self.inner.modules_providing_package(package)
     }
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.inner.find_exporters(func_name)
