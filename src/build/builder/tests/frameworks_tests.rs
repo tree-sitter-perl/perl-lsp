@@ -1764,3 +1764,70 @@ my $chain = $obj->get_name->get_name;
         head
     );
 }
+
+// ---- Framework base classes (`framework_mode_makers` `base`) ----
+
+#[test]
+fn moo_class_inherits_moo_object() {
+    let fa = build_fa("package Foo;\nuse Moo;\nhas x => (is => 'ro');\n1;\n");
+    assert_eq!(fa.declared_parents("Foo"), ["Moo::Object".to_string()].as_slice());
+}
+
+#[test]
+fn moose_and_mouse_classes_inherit_their_object_base() {
+    let fa = build_fa("package A;\nuse Moose;\n1;\npackage B;\nuse Mouse;\n1;\n");
+    assert_eq!(fa.declared_parents("A"), ["Moose::Object".to_string()].as_slice());
+    assert_eq!(fa.declared_parents("B"), ["Mouse::Object".to_string()].as_slice());
+}
+
+#[test]
+fn moo_extends_replaces_the_base() {
+    let fa = build_fa("package Foo;\nuse Moo;\nextends 'Bar';\n1;\n");
+    assert_eq!(fa.declared_parents("Foo"), ["Bar".to_string()].as_slice());
+}
+
+#[test]
+fn moo_base_follows_the_roles() {
+    let fa = build_fa("package Foo;\nuse Moo;\nwith 'My::Role';\n1;\n");
+    assert_eq!(
+        fa.declared_parents("Foo"),
+        ["My::Role".to_string(), "Moo::Object".to_string()].as_slice(),
+        "the base is the MRO's last stop, behind the composed roles",
+    );
+}
+
+#[test]
+fn moo_role_names_no_base() {
+    let fa = build_fa("package My::Role;\nuse Moo::Role;\nsub r {}\n1;\n");
+    assert!(fa.declared_parents("My::Role").is_empty());
+}
+
+#[test]
+fn moo_new_resolves_through_the_base_or_stays_unresolved() {
+    use std::sync::Arc;
+    let fa = build_fa("package Foo;\nuse Moo;\nsub go {}\n1;\n");
+
+    // Base uninstalled: `new` has nowhere to resolve, and the chain is
+    // honestly incomplete.
+    let empty = crate::index::module_index::ModuleIndex::new_for_test();
+    assert!(fa.resolve_method_in_ancestors("Foo", "new", Some(&empty)).is_none());
+    assert!(fa.class_has_unresolved_ancestor("Foo", Some(&empty)));
+
+    // Base installed: `new` is the base's real constructor.
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let base_src = "package Moo::Object;\nsub new { bless {}, shift }\nsub BUILDARGS {}\n1;\n";
+    idx.insert_cache(
+        "Moo::Object",
+        Some(Arc::new(crate::model::file_analysis::CachedModule::new(
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/Moo/Object.pm")),
+            Arc::new(build_fa(base_src)),
+        ))),
+    );
+    match fa.resolve_method_in_ancestors("Foo", "new", Some(&idx)) {
+        Some(crate::model::file_analysis::MethodResolution::CrossFile { class, .. }) => {
+            assert_eq!(class, "Moo::Object")
+        }
+        other => panic!("Foo->new must resolve in Moo::Object, got {other:?}"),
+    }
+    assert!(!fa.class_has_unresolved_ancestor("Foo", Some(&idx)));
+}
