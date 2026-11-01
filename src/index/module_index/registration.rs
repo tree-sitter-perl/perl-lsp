@@ -1282,8 +1282,8 @@ impl ModuleIndex {
     /// set, so the cap follows the persisted source bytes). Monotone: never
     /// lowers the cap. Skipped when `PERL_LSP_BAG_CACHE_MB` pins it — that
     /// knob is the A/B lever and must win. Returns the cap in effect, in
-    /// bytes, when a cache is installed.
-    pub fn size_bag_cache_for_sweep(&self) -> Option<usize> {
+    /// bytes, when a cache is installed. Opened only by `CorpusSweep`.
+    pub(in crate::index) fn size_bag_cache_for_sweep(&self) -> Option<usize> {
         let cache = self.bag_cache_ref()?;
         if std::env::var_os("PERL_LSP_BAG_CACHE_MB").is_some() {
             return Some(cache.cap_bytes());
