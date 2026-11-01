@@ -36,7 +36,7 @@ fn at<'a>(f: &'a Fixture, fa: &'a FileAnalysis, path: &Path, row: usize, col: us
     resolve(
         &f.store,
         fa,
-        FileKey::Path(path.to_path_buf()),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.to_path_buf())),
         tree_sitter::Point { row, column: col },
         Some(&f.idx),
         OverrideScope::default(),
@@ -44,7 +44,7 @@ fn at<'a>(f: &'a Fixture, fa: &'a FileAnalysis, path: &Path, row: usize, col: us
 }
 
 fn in_file(locs: &[RefLocation], path: &Path, row: usize) -> bool {
-    locs.iter().any(|l| matches!(&l.key, FileKey::Path(p) if p == path) && l.span.start.row == row)
+    locs.iter().any(|l| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(path)) && l.span.start.row == row)
 }
 
 use std::path::Path;
@@ -175,7 +175,7 @@ fn rename_from_the_union_site_refuses_an_arm_it_does_not_cover() {
     let cs = resolve(
         &store,
         &fa,
-        FileKey::Path(zoo.clone()),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(zoo.clone())),
         tree_sitter::Point { row: 3, column: col },
         Some(&idx),
         OverrideScope::default(),

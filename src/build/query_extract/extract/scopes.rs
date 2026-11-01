@@ -10,9 +10,8 @@ pub(super) struct State {
     /// A context whose same-match `@scope` starts AFTER it (C++ namespace:
     /// `@context` is on the name, `@scope` on the body `{`) must be
     /// registered at the BODY depth, not the file depth — else it goes
-    /// sticky and leaks past the closing brace. Each match's scope start,
-    /// pre-indexed; such contexts defer to the scope push.
-    scope_start_by_match: HashMap<usize, usize>,
+    /// sticky and leaks past the closing brace; it waits here for the
+    /// scope push.
     pending_context: HashMap<usize, (ContextKind, String)>,
     /// Parent edges whose parent is still the written spelling: its index
     /// in `out.parents`, where it was written, and the scope it is written
@@ -71,12 +70,6 @@ pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
     rows
 }
 
-pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    if let Capture::Scope(_) = e.cap {
-        st.scopes.scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);
-    }
-}
-
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let pack = st.pack;
     match e.cap {
@@ -120,7 +113,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 direct: scope_cap == ScopeCap::Direct,
                 declaration_rules: Vec::new(),
             });
-            st.scope_stack.push((e.end_byte, id));
+            st.scope_stack.push((st.adorned.end_byte(e), id));
             st.out.scope_count += 1;
             // a context deferred to THIS scope (C++ namespace) →
             // register at the body depth so it pops with the block.
@@ -146,15 +139,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // A class body's members file under the class's identity, as
             // the class's def minted it.
             let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some()).then(|| {
-                st.defs
-                    .class_of_match(e.match_id)
+                super::defs::class_of_match(st, e.match_id)
                     .map(str::to_string)
                     .unwrap_or_else(|| st.class_identity(&text, st.cur_scope, e.start))
             });
             // If this match's `@scope` starts AFTER this context, the
             // context belongs to that (not-yet-pushed) body — defer it
             // so it registers at the body depth and pops with the block.
-            if st.scopes.scope_start_by_match.get(&e.match_id).is_some_and(|&s| s > e.start_byte) {
+            let own_scope = st.adorned.of_match(e.match_id).find(|t| matches!(t.cap, Capture::Scope(_)));
+            if own_scope.is_some_and(|s| st.adorned.start_byte(s) > st.adorned.start_byte(e)) {
                 st.scopes.pending_context.insert(e.match_id, (kind, identity.unwrap_or(text)));
             } else {
                 // Replace any context at the same depth; deeper ones
@@ -170,7 +163,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 // A scope opened by this same match is the container the
                 // context names (php's class node), so a point anywhere in
                 // it, header included, is in that package.
-                if st.scopes.scope_start_by_match.contains_key(&e.match_id) {
+                if own_scope.is_some() {
                     if let Some(&(_, id)) = st.scope_stack.last() {
                         st.out.scopes[id.0 as usize].package = Some(value.clone());
                         if kind == ContextKind::Class {
@@ -194,7 +187,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // class as its def minted it. The base is shaped like a def
             // name (cpp canonicalizes a template-spelled base) so the edge
             // joins the identity the target class was filed under.
-            if let Some(child) = st.defs.class_of_match(e.match_id).map(str::to_string) {
+            if let Some(child) = super::defs::class_of_match(st, e.match_id).map(str::to_string) {
                 if pack.names.use_map_sep().is_some() {
                     st.scopes.written_parents.push((st.out.parents.len(), e.span().start, st.cur_scope));
                 }

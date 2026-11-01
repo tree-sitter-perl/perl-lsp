@@ -268,13 +268,13 @@ pub enum ResolvedTarget {
         /// variable/decl spans when the group was minted remotely (the
         /// cursor sat in a consumer; the source decl lives with the
         /// class).
-        pinned_spans: Vec<(PathBuf, Span)>,
+        pinned_spans: Vec<(CanonicalPath, Span)>,
         /// Where the group is DECLARED — a subset of the spellings above,
         /// each carrying its file (`None` = the origin, matching
         /// `local_spans`). The declaration axis of the identity, so
         /// goto-def projects the same group references walks instead of
         /// re-deriving where an inherited attr was declared.
-        decl_spans: Vec<(Option<PathBuf>, Span)>,
+        decl_spans: Vec<(Option<CanonicalPath>, Span)>,
         members: Vec<GroupMember>,
     },
     /// Inherently file-local: lexical variables, and hash keys with no
@@ -442,7 +442,7 @@ impl RefLocation {
 
     pub fn to_url(&self) -> Option<Url> {
         match &self.key {
-            FileKey::Url(u) => Some(u.clone()),
+            FileKey::Url(u, _) => Some(u.clone()),
             FileKey::Path(p) => Url::from_file_path(p).ok(),
         }
     }
