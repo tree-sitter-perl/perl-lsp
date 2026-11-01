@@ -3,6 +3,7 @@
 //! its parent-fallback memo.
 
 use super::*;
+use crate::util::canonical_path::CanonicalPath;
 
 // ---- Module parsing ----
 
@@ -30,13 +31,21 @@ pub(super) fn parse_module(
 /// files (XS/PP twins, a project `lib/` shadowing an installed copy,
 /// `t/lib` vs `lib` per entrypoint); stopping at the first hit is what made
 /// the tier answer from whichever root happened to win. Perl's map over
-/// `inc_paths` locates them, canonical: the per-asker search-path rank
-/// prefix-matches a candidate against canonical roots with no query-time
-/// `canonicalize`, which is filesystem I/O on a request path.
-pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<PathBuf> {
+/// `inc_paths` locates them, canonical, deduped to one candidate per file
+/// (a symlinked `lib`, a duplicated @INC entry): the per-asker search-path
+/// rank prefix-matches a candidate against canonical roots with no
+/// query-time `canonicalize`, which is filesystem I/O on a request path.
+pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<CanonicalPath> {
     use crate::build::language_driver::{DependencyLocator, PerlDriver};
     let inc = crate::build::search_path::SearchPathLocator::new(&PerlDriver, inc_paths.to_vec(), Vec::new(), Vec::new());
-    inc.locate(module_name).into_iter().map(|l| l.path).collect()
+    let mut out: Vec<CanonicalPath> = Vec::new();
+    for l in inc.locate(module_name) {
+        let canon = CanonicalPath::resolve(l.path);
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+    out
 }
 
 #[allow(dead_code)]
@@ -112,7 +121,7 @@ fn resolve_and_parse_inner(
 fn parse_one_provider(
     inc_paths: &[PathBuf],
     module_name: &str,
-    path: PathBuf,
+    path: CanonicalPath,
     parser: &mut Parser,
     visiting: &mut std::collections::HashSet<String>,
     memo: &mut ParseMemo,

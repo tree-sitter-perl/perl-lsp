@@ -407,3 +407,21 @@ Original note from the 09-16 run — baselines (2026-08-30, ce16a564) were NOT r
 was not quiet (loadavg 6–16 during the run, though `cpu` rows show it was
 mostly self-load), and the RSS step wants a decision first — accept it as
 the price of the parallel sweep, or cap the pool / the sweep providers.
+
+## 2026-10-31 — the timed reps carried the ghost gate (main 1f1f3888 code)
+
+`measure.sh` ran every timed rep with `PERL_LSP_GHOST_STATS=1`. Same binary,
+BMO, 3 reps each, old script then new (cloud box, 4 cores; loadavg 3.5–4.1 is
+the sweep's own load, the same for both):
+
+| BMO | gate on (old) | gate off (new) | move |
+|---|---|---|---|
+| cold `--check` wall, median (spread) | 9,730 ms (380) | 8,230 ms (430) | −15% |
+| warm `--check` wall | 2,200 ms (150) | 1,980 ms (70) | −10% |
+| per-file build p50 / p99, cold | 7.03 / 102.0 ms | 5.76 / 91.0 ms | −18% / −11% |
+| peak RSS cold / warm | 636 / 620 MB | 630 / 622 MB | flat |
+
+So every checked-in wall and per-file-build baseline is 10–18% high on this
+corpus, and RSS was never affected. The counters now come from one separate
+rep-0 pass; its wall (9,400 / 2,160 ms) lands as `instrumented_timing`.
+Re-seed `baselines.jsonl` from a gate-off sweep before comparing against it.

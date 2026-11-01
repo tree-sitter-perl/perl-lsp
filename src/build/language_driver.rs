@@ -376,7 +376,7 @@ pub struct PackDriver {
     /// The macro identity/navigation lane collector (C preprocessor only):
     /// original source → every `#define` as a `MacroDef` (guard trail, def
     /// span, delegation callee). `None` for packs without a preprocessor.
-    collect_macro_defs: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::model::file_analysis::MacroDef>>,
+    collect_macro_defs: Option<fn(&mut tree_sitter::Parser, &str) -> crate::build::cpp_reparse::FileMacros>,
     /// Member-block macros as roles (C preprocessor only): classify a macro
     /// pasted standalone into a struct/class body, BLANK the use (so the base
     /// parses clean), and mint the synthetic base + parent edges. `None` for
@@ -488,7 +488,10 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
-        self.analyze_pipeline(source, path)
+        let fa = self.analyze_pipeline(source, path);
+        let module = fa.pack.file_module.as_ref().map(|m| serde_json::to_string(m).expect("module serializes"));
+        crate::build::equiv_dump::record(source.as_bytes(), module.as_deref(), &fa);
+        fa
     }
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
         Some((self.pack)())
@@ -558,9 +561,17 @@ impl PackDriver {
                 if pack.brace_scoped_members {
                     skel.reanchor_truncated_containers(source);
                 }
-                let macro_defs = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
-                let mut fa = skel.into_file_analysis();
-                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs);
+                let lane = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
+                let mut fa = if self.collect_macro_defs.is_some() {
+                    skel.into_file_analysis_with(|refs, names| {
+                        crate::util::timings::phase("cpp.macro_delegations", || {
+                            macro_delegations(refs, names, &lane, &ctx.external)
+                        })
+                    })
+                } else {
+                    skel.into_file_analysis()
+                };
+                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, lane.defs);
                 fa
             }
             Err(e) => {
@@ -632,8 +643,9 @@ impl PackDriver {
     }
 
     /// Phase 5: post-remap, pre-assembly skeleton enrichment. Returns the
-    /// macro-identity lane (`MacroDef`s) for phase 7 to stamp onto the built
-    /// `FileAnalysis` — the skeleton itself has no field for it.
+    /// macro lane: the identity `MacroDef`s for phase 7 to stamp onto the
+    /// built `FileAnalysis` (the skeleton has no field for them), and what
+    /// phase 6 needs to stamp each use site's delegation chain.
     fn enrich_skeleton(
         &self,
         skel: &mut crate::build::query_extract::SkeletonAnalysis,
@@ -642,7 +654,7 @@ impl PackDriver {
         src: &str,
         map: &crate::build::cpp_reparse::SpliceMap,
         ctx: &PackContext,
-    ) -> Vec<crate::model::file_analysis::MacroDef> {
+    ) -> MacroLane {
         // Type-alias `#define`s gathered from the include closure ride into
         // this file's bag as `TypeName` witnesses (span-less, so post-remap is
         // fine): the cross-file chase can't index a gitignored generated
@@ -663,10 +675,11 @@ impl PackDriver {
         // between-splice text diff — which catches the length-preserving
         // declarator-macro strip — know every site), so find-references on a
         // macro reaches uses the expansion erased (rule #7/#9).
-        mint_erased_macro_reads(skel, source, src, map, ctx.plan.as_ref());
+        let mut expanded_sites = mint_erased_macro_reads(skel, source, src, map, ctx.plan.as_ref());
         // Macro identity lane: collect every `#define` off the ORIGINAL
         // source (spans in user coordinates, no splice remap needed).
-        let macro_defs = self.collect_macro_defs.map(|collect| collect(parser, source)).unwrap_or_default();
+        let crate::build::cpp_reparse::FileMacros { defs: macro_defs, table: own_macros } =
+            self.collect_macro_defs.map(|collect| collect(parser, source)).unwrap_or_default();
         // Nested-macro-body references: a use of macro `A` inside `B`'s
         // `#define` body is preproc-excluded from the code parse (one opaque
         // `preproc_arg` token), so no query capture reaches it and gr on `A`
@@ -678,7 +691,10 @@ impl PackDriver {
                 macro_defs.iter().map(|m| m.name.clone()).collect();
             known.extend(ctx.external.macro_names().map(str::to_string));
             let body_refs = crate::build::cpp_reparse::macro_body_name_refs(parser, source, &known);
+            // A body token is expanded wherever its enclosing macro is, call
+            // parens or not (`#define X foo` then `X(a)`), so it is a site.
             for (name, span) in body_refs.name_refs {
+                expanded_sites.insert(span);
                 skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span));
             }
             // Field/member uses inside bodies (`->op_next`) — untyped here (the
@@ -721,7 +737,7 @@ impl PackDriver {
             skel.macro_call_arg_spans =
                 crate::build::cpp_reparse::macro_call_arg_spans(parser, source, &param_macro_names);
         }
-        macro_defs
+        MacroLane { defs: macro_defs, own: own_macros, expanded_sites }
     }
 
     /// Phase 7: post-assembly hooks — fields only fillable once the
@@ -788,7 +804,7 @@ fn cpp_driver() -> PackDriver {
         // carries the recovered spans back to the original coordinates.
         transform: Some(crate::build::cpp_reparse::preprocess_validated_with),
         gather_macros: Some(crate::build::cpp_reparse::included_macros_pre_expanded),
-        collect_macro_defs: Some(crate::build::cpp_reparse::collect_macro_defs),
+        collect_macro_defs: Some(crate::build::cpp_reparse::collect_file_macros),
         member_blocks: Some(crate::build::cpp_reparse::plan_member_blocks),
         include_closure: Some(crate::build::cpp_reparse::include_closure),
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
@@ -1371,6 +1387,69 @@ fn remap_spans(
     }
 }
 
+/// Phase 5's macro lane, handed across the skeleton → `FileAnalysis` seam.
+#[cfg(feature = "pack-langs")]
+#[derive(Default)]
+struct MacroLane {
+    defs: Vec<crate::model::file_analysis::MacroDef>,
+    /// This file's own `#define`s, config variants folded.
+    own: std::collections::BTreeMap<String, crate::build::cpp_reparse::Macro>,
+    /// Spans where the preprocessor expanded a macro: the transform's
+    /// erased uses and the tokens inside `#define` bodies.
+    expanded_sites: std::collections::HashSet<crate::model::file_analysis::Span>,
+}
+
+/// Each use site's macro delegation chain: the transitive callees
+/// (`#define A(x) B(x)`, `#define B(x) F(x)` gives `A → [B, F]`) through
+/// this file's OWN `#define`s and its include closure's gathered table —
+/// exactly the macros its preprocessor would expand, so the edge needs no
+/// query-time visibility check. Every config variant of a name contributes
+/// (`Macro::all_delegates`, one producer for both tables).
+///
+/// A ref gets the chain only where the preprocessor would expand the name
+/// there: an object-like macro at any spelling-capable ref, a function-like
+/// one only at a call or an expanded site — a same-named variable or type
+/// is not a use of `#define F(x)`.
+#[cfg(feature = "pack-langs")]
+fn macro_delegations(
+    refs: &[crate::model::file_analysis::Ref],
+    names: &crate::model::file_analysis::NameSpellings,
+    lane: &MacroLane,
+    external: &crate::build::cpp_reparse::PreExpandedExternal,
+) -> crate::model::file_analysis::RefDelegates {
+    use crate::build::cpp_reparse::Macro;
+    use crate::model::file_analysis::{RefDelegates, RefKind};
+    let defs_of = |name: &str| -> [Option<&Macro>; 2] { [lane.own.get(name), external.macro_named(name)] };
+    let direct = |name: &str| -> Vec<String> { defs_of(name).into_iter().flatten().flat_map(Macro::all_delegates).collect() };
+    let object_like = |name: &str| defs_of(name).into_iter().flatten().any(|m| m.params.is_none());
+    RefDelegates::stamp(
+        refs,
+        |r| {
+            if !r.can_spell_macro_use() {
+                return None;
+            }
+            let name = r.unqualified_target_name(names);
+            let expands_here = matches!(r.kind, RefKind::FunctionCall { .. })
+                || lane.expanded_sites.contains(&r.span)
+                || object_like(name);
+            expands_here.then_some(name)
+        },
+        |name| {
+            let mut chain: Vec<String> = Vec::new();
+            let mut frontier = direct(name);
+            while let Some(d) = frontier.pop() {
+                if d == name || chain.contains(&d) {
+                    continue;
+                }
+                frontier.extend(direct(&d));
+                chain.push(d);
+            }
+            chain.sort();
+            (!chain.is_empty()).then(|| chain.into_boxed_slice())
+        },
+    )
+}
+
 /// Re-mint a variable read at every macro use the transform ERASED from the
 /// parsed text — expansion splices (the map's edits, original coordinates)
 /// and member-block blanks (length-preserving, recovered by diffing the
@@ -1385,8 +1464,9 @@ fn mint_erased_macro_reads(
     transformed: &str,
     map: &crate::build::cpp_reparse::SpliceMap,
     plan: Option<&crate::build::cpp_reparse::MemberBlockPlan>,
-) {
+) -> std::collections::HashSet<crate::model::file_analysis::Span> {
     use crate::model::file_analysis::{ScopeId, Span};
+    let mut minted = std::collections::HashSet::new();
     let bytes = original.as_bytes();
     let is_id = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
     let mut sites: Vec<usize> = map.expansion_sites().map(|(os, _)| os).collect();
@@ -1442,7 +1522,7 @@ fn mint_erased_macro_reads(
         diff_segment(o_pos, bytes.len(), t_pos, &mut sites);
     }
     if sites.is_empty() {
-        return;
+        return minted;
     }
     sites.sort_unstable();
     sites.dedup();
@@ -1473,8 +1553,10 @@ fn mint_erased_macro_reads(
                 scope = sc.id;
             }
         }
+        minted.insert(span);
         skel.var_reads.push((name, scope, span));
     }
+    minted
 }
 
 /// Line-start byte offsets, for Point↔byte conversion (Point.column is a
