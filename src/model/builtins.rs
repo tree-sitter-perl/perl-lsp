@@ -332,6 +332,12 @@ pub fn modifies_its_array_argument(name: &str) -> bool {
     matches!(name, "pop" | "push" | "shift" | "splice" | "unshift")
 }
 
+/// The builtins that take the element they are handed out of its container
+/// (`delete $h{k}`), leaving the slot without a value.
+pub fn removes_its_element_argument(name: &str) -> bool {
+    name == "delete"
+}
+
 /// The BUILTIN resolution tier's completion source: callable builtins only
 /// (keywords would be noise in an identifier slot; filehandles are
 /// suppression-side membership, not completion candidates).

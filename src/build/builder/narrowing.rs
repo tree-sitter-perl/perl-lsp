@@ -982,7 +982,9 @@ impl<'a> Builder<'a> {
                 let Some(read) = crate::cst::read_place(node, self.source, &mut binder) else { return };
                 let access = match kind {
                     "hash_element_expression" | "array_element_expression" => {
-                        if self.element_write_kind(node).is_some() { Access::Write } else { Access::Opaque }
+                        let written = self.element_write_kind(node).is_some()
+                            || crate::cst::is_value_reset_target(node, self.source);
+                        if written { Access::Write } else { Access::Opaque }
                     }
                     // A slice can write every slot it names, read or not.
                     "slice_expression" | "keyval_expression" => Access::Write,

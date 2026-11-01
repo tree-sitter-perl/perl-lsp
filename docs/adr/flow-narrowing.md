@@ -193,7 +193,8 @@ answer nothing, so the ref keeps its plain receiver.
 Truncation is `Place::disturbed_by`: a **write** disturbs the place and
 everything under it — the place itself, a proper prefix, or an
 overlapping slice (a slice may write every slot it names, so it is a
-write wherever it appears); an **opaque use** (a call, an argument, a
+write wherever it appears; `delete`, `undef` and `local` on a slot are
+writes too, since each leaves it without the guarded value); an **opaque use** (a call, an argument, a
 whole-container op) disturbs only what lies strictly under it, so a
 method call on the slot's value leaves the slot narrowed. A read that
 steps further in is not an access. Two steps overlap when they can reach

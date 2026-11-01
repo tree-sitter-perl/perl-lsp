@@ -674,6 +674,22 @@ fn narrow_place_truncated_by_computed_key_write() {
     assert_ne!(invocant_class_of(&fa, "after").as_deref(), Some("Foo"));
 }
 
+#[test]
+fn narrow_place_ends_at_delete_undef_and_local() {
+    // Each leaves the slot without the guarded value; `exists` reads it.
+    for reset in ["delete $self->{x};", "undef $self->{x};", "undef($self->{x});", "local $self->{x};", "delete local $self->{x};"] {
+        let fa = build_fa(&format!(
+            "package P;\nsub f {{\n    my ($self) = @_;\n    return unless $self->{{x}}->isa('Foo');\n    $self->{{x}}->before;\n    {reset}\n    $self->{{x}}->after;\n}}",
+        ));
+        assert_eq!(invocant_class_of(&fa, "before").as_deref(), Some("Foo"), "{reset}");
+        assert_ne!(invocant_class_of(&fa, "after").as_deref(), Some("Foo"), "{reset}");
+    }
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{x}->isa('Foo');\n    exists $self->{x};\n    $self->{x}->after;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "after").as_deref(), Some("Foo"), "exists only reads");
+}
+
 // ── Place narrowing: direct element form (`$h{k}` / `$a[0]`) ──
 
 #[test]
