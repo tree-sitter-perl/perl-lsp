@@ -75,17 +75,17 @@ impl FileAnalysis {
 #[derive(Debug, Default)]
 pub struct RootRegistry {
     /// Each named root, with the files naming it, path-ordered.
-    pub named: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
+    pub named: std::collections::BTreeMap<PathBuf, Vec<crate::util::canonical_path::CanonicalPath>>,
     /// A file a root's namers use, transitively: per root, the fewest
     /// hops from a namer and the namer that took them.
-    pub reach: std::collections::HashMap<PathBuf, Vec<RootReach>>,
+    pub reach: std::collections::HashMap<crate::util::canonical_path::CanonicalPath, Vec<RootReach>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootReach {
     pub root: PathBuf,
     pub depth: u32,
-    pub namer: PathBuf,
+    pub namer: crate::util::canonical_path::CanonicalPath,
 }
 
 /// What a root of the process's search path holds.
@@ -158,13 +158,13 @@ pub struct RankedRoots {
 
 impl RankedRoots {
     /// The ranking for `origin` at `self_path`, read from `index`.
-    pub fn for_origin(origin: &FileAnalysis, self_path: Option<&Path>, index: &dyn CrossFileLookup) -> RankedRoots {
+    pub fn for_origin(origin: &FileAnalysis, self_path: Option<&crate::util::canonical_path::CanonicalPath>, index: &dyn CrossFileLookup) -> RankedRoots {
         let inc = index.inc_roots();
         let registry = index.root_registry();
         let mut ranked = RankedRoots::default();
         if !origin.search_roots.is_empty() {
             let ws = index.workspace_root_path();
-            for d in origin.search_root_dirs(self_path, ws.as_deref()) {
+            for d in origin.search_root_dirs(self_path.map(|p| p.as_path()), ws.as_deref()) {
                 ranked.push(d, RootTier::Own);
             }
         }
@@ -176,16 +176,15 @@ impl RankedRoots {
             // A root every asker searches anyway (`use lib 'lib'` naming the
             // project's own lib) is the process's, whoever else names it.
             let theirs = |root: &PathBuf| !inc.iter().any(|r| r.path == *root);
-            let me = self_path.map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
             let mut stack: Vec<&RootReach> =
-                me.as_ref().and_then(|p| registry.reach.get(p)).map(|v| v.iter().collect()).unwrap_or_default();
+                self_path.and_then(|p| registry.reach.get(p)).map(|v| v.iter().collect()).unwrap_or_default();
             stack.sort_by(|a, b| (a.depth, &a.root).cmp(&(b.depth, &b.root)));
             for r in stack.into_iter().filter(|r| theirs(&r.root)) {
-                ranked.push(r.root.clone(), RootTier::Stack { namer: r.namer.clone() });
+                ranked.push(r.root.clone(), RootTier::Stack { namer: r.namer.to_path_buf() });
             }
             for (root, namers) in registry.named.iter().filter(|(r, _)| theirs(r)) {
                 if let Some(namer) = namers.first() {
-                    ranked.push(root.clone(), RootTier::Registered { namer: namer.clone() });
+                    ranked.push(root.clone(), RootTier::Registered { namer: namer.to_path_buf() });
                 }
             }
         }
@@ -262,7 +261,7 @@ impl FileAnalysis {
     /// against.
     pub fn imports_supplied_by_other_roots(
         &self,
-        self_path: Option<&Path>,
+        self_path: Option<&crate::util::canonical_path::CanonicalPath>,
         index: &dyn CrossFileLookup,
         scoped: &dyn CrossFileLookup,
     ) -> Vec<SuppliedImport> {

@@ -1531,6 +1531,50 @@ fn packs_do_not_borrow_perls_current_package_token() {
     );
 }
 
+/// A query never asks the filesystem how a path is spelled. `realpath`
+/// costs one `readlink` per path component, and re-canonicalizing an
+/// already-registered path per candidate file per `references()` call was
+/// half of a heatmap sweep's kernel time. The canonical spelling is minted
+/// where a path enters (`CanonicalPath`, `util/canonical_path.rs`) and the
+/// query tiers read it; `from_stored` re-adopts a persisted spelling and
+/// stays with the cache that wrote it. Outside the query tiers the index
+/// and the server still resolve paths at their entry points, but only
+/// through `CanonicalPath::resolve`, the one owner of the spelling rule
+/// (a deleted file rejoins through its parent).
+#[test]
+fn query_paths_never_canonicalize() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Model, Layer::Index])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("model/") || rel.starts_with("index/resolve/"))
+        .collect();
+    let seen = count_lines(&files, &|l| {
+        l.contains("canonicalize(") || l.contains("CanonicalPath::resolve(")
+    });
+    let allow: &[(&str, usize, &str)] = &[(
+        "model/file_analysis/search_roots.rs",
+        1,
+        "`SearchRoot::resolve` resolves the directories a file's SOURCE names (`use lib`, \
+         `sys.path`) — not a registered path re-spelled; only an origin that names a root reaches it",
+    )];
+    let mut drift = allowlist_drift("query-time canonicalize", &seen, allow);
+
+    let files: Vec<(String, String)> = layer_files(&[Layer::Index, Layer::Lsp])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("index/") || rel.starts_with("lsp/backend/"))
+        .collect();
+    let seen = count_lines(&files, &|l| l.contains("canonicalize("));
+    drift.extend(allowlist_drift("raw canonicalize beside CanonicalPath::resolve", &seen, &[]));
+
+    let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_cache/warm.rs", 1, "the warm scan re-adopts the spelling its own writer persisted"),
+        ("index/module_index/lookup.rs", 2, "ref-row retrieval hands back the paths registration shredded the rows under"),
+    ];
+    drift.extend(allowlist_drift("CanonicalPath::from_stored", &seen, allow));
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,
@@ -1660,6 +1704,44 @@ fn positional_reads_skip_grammar_extras() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// Upward and sideways steps go through the core syntax tree
+/// (`cst::SyntaxForest`, `docs/adr/core-syntax-tree.md`). tree-sitter's
+/// `Node::parent` and its sibling steps rescan from the root on every call
+/// — linear in each level's width, so a climb on a flat 750-statement file
+/// costs hundreds of steps per hop, and per-use climbs are what made
+/// Webmin's build slower with every feature. The raw sites left run once per
+/// request, read a `Path`, or walk a tree no build forest holds yet; each says
+/// which. Shrink-only.
+#[test]
+fn tree_steps_go_through_the_syntax_tree() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Cst, Layer::Build, Layer::Lsp])
+        .into_iter()
+        .filter(|(rel, _)| rel != "cst/syntax.rs")
+        .collect();
+    let seen = count_lines(&files, &|l| {
+        [".parent()", ".prev_sibling()", ".next_sibling()", ".prev_named_sibling()", ".next_named_sibling()", "child_with_descendant("]
+            .iter()
+            .any(|p| l.contains(p))
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/cpp_includes.rs", 4, "std::path::Path, not a tree"),
+        ("build/cpp_reparse/defs.rs", 2, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cpp_reparse/expand.rs", 1, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cpp_reparse/synthetic.rs", 1, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cpp_reparse/validate.rs", 3, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cursor_sentinel.rs", 3, "cursor time: one climb per request over the sentinel reparse"),
+        ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
+        ("build/walk_markers.rs", 3, "std::path::Path, not a tree"),
+        ("lsp/backend/server.rs", 1, "std::path::Path, not a tree"),
+        ("lsp/cli/mod.rs", 1, "std::path::Path, not a tree"),
+        ("lsp/cli/query.rs", 1, "std::path::Path, not a tree"),
+        ("lsp/cursor_context.rs", 12, "the Perl cursor detector (rule #6): one climb per request"),
+        ("lsp/symbols/signature.rs", 3, "cursor time: one climb per signature-help request"),
+    ];
+    let drift = allowlist_drift("tree steps (cst::SyntaxForest)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A name lookup walks `lookup_chain` — the `LookupChain` a scope's
 /// bindings are listed through, which carries every language's scoping
 /// rule (`Scope::direct`, …). A raw climb up `Scope::parent` sees every
@@ -1684,6 +1766,7 @@ fn raw_scope_climbs_are_containment_only() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
+        ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
         ("build/query_extract/extract/mod.rs", 1, "def_scope: a hoisted def is filed in the scope around the one it is written in"),
         ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of"),
