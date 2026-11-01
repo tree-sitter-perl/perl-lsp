@@ -72,9 +72,10 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The member-access RECEIVER peel: transparent expression wrapper kinds
-    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped, through their first named
-    /// child, so the invocant types via the inner.
+    /// The cursor's receiver peel over the sentinel-reparsed tree:
+    /// transparent wrapper kinds (`(*p)`, `(&o)`, `(p)` → `p`) dropped,
+    /// through their first named child. Extraction reads the document's
+    /// `@expr.wrapper` edge instead and never consults this.
     pub recv_peel: &'static [&'static str],
     /// Simple-variable node kinds (`identifier`): the cursor sentinel's "is
     /// this receiver a bare variable" test, read off the raw node it climbs

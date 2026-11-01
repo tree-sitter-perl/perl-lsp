@@ -1259,7 +1259,7 @@ impl FileAnalysis {
                 continue;
             }
             match &r.kind {
-                RefKind::PackageRef | RefKind::FunctionCall => {
+                RefKind::PackageRef | RefKind::FunctionCall | RefKind::ImportedName => {
                     spelled.insert(r.unqualified_target_name(self.names()).to_string());
                 }
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {

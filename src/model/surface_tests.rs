@@ -342,6 +342,25 @@ fn cpp_free_functions_are_on_the_surface() {
     );
 }
 
+/// An anonymous class has no spelling another file could write, and the
+/// name the pack mints for it carries where it stands: neither it nor its
+/// members are on the surface, so an edit above it keeps the surface equal.
+#[cfg(feature = "php")]
+#[test]
+fn an_anonymous_class_is_off_the_surface() {
+    let build_php = |src: &str| {
+        crate::build::language_driver::LanguageRegistry::compiled()
+            .for_path(std::path::Path::new("/fake/anon.php"))
+            .expect("php driver")
+            .analyze_with_path(src, None)
+    };
+    let base = "<?php\nclass Base { public function m() {} }\nfunction f() {\n    return new class extends Base { public function hi() {} };\n}\n";
+    let s0 = Surface::project(&build_php(base));
+    assert!(s0.packages.iter().all(|p| !p.name.contains("anonymous")), "{:?}", s0.packages);
+    let shifted = base.replace("function f() {\n", "function f() {\n    $x = 1;\n");
+    assert_eq!(s0, Surface::project(&build_php(&shifted)), "a line above the class keeps the surface");
+}
+
 /// A RENAMED (or deleted) package's consumers are exactly the files its
 /// departure breaks — the dirty walk must seed from the names the
 /// re-record DROPPED, not just the new surface's names.

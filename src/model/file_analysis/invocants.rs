@@ -26,7 +26,7 @@ impl FileAnalysis {
                         return Some((sym.id, true));
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Qualified calls carry the full path in `target_name`;
                     // symbols are keyed by bare name + the `Function` binding.
                     if let Some(sid) = self
