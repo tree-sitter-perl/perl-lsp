@@ -53,11 +53,12 @@ or by being explicitly declined.
   pay the enrichment deep-copy (last insert wins). Bounded waste; revisit
   if profiling shows it.
 - **`gated_emissions` rides eviction unstriped.** The field is NOT an
-  eviction axis (deliberate — `materialize_gated_emissions` reads it off
-  the evicted resident copy to decide which files need re-materializing),
-  so it stays resident on every cached copy. Sparse by construction:
-  populated only for plugin-triggered files whose `ClassIsa` gate resolves
-  cross-file (DBIC result classes), and materialization is CLI/batch-only.
+  eviction axis (deliberate — `ModuleIndex::gated_view` reads it, and the
+  gate verdicts, off the evicted resident copy to decide whether a view needs
+  the applied copy), so it stays resident on every cached copy. Sparse by
+  construction: populated only for plugin-triggered files whose `ClassIsa`
+  gate resolves cross-file (DBIC result classes). The applied copies live in
+  a 64 MiB byte-capped store.
   It is serde-carried, so if it ever grows to non-sparse volume it can be
   added to the strip axes like any other — no format change needed.
 

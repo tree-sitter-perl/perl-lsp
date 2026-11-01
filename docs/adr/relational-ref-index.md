@@ -65,7 +65,7 @@ Three sub-decisions, each load-bearing:
 3. **The row-can't-decide fallback is single-file rehydration, and it is
    bounded by construction.** Any matcher arm that today consults analysis
    state beyond the ref itself (the bag-routed
-   `method_call_invocant_class` fallback for build-unresolved invocants, any
+   `method_call_invocant_classes` fallback for build-unresolved invocants, any
    future arm) rehydrates that one file's full blob through the Slice-2 LRU
    pattern and runs today's exact code on the real `Ref`. Crucially the
    fallback set is *files that contain a name-matching row* — the SQL
