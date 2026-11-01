@@ -17,7 +17,7 @@ pub struct Witness {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum WitnessAttachment {
     /// Variable-in-scope facts — what `TypeConstraint` / `CallBinding`
     /// index by.
@@ -155,7 +155,7 @@ pub enum WitnessAttachment {
 }
 
 /// Index into `FileAnalysis::refs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct RefIdx(pub u32);
 
 /// What a `WitnessSource::Annotation` was declared BY — a closed set, so
@@ -464,12 +464,11 @@ pub enum CallArg {
 pub enum ProjectionStep {
     HashKey(String),
     ArrayIndex(i32),
-    /// The UNIFORM element of a sequence — the foreach/iteration peel
+    /// An element of a sequence — the foreach/iteration peel
     /// (`foreach ($this->handlers as $handler)` types `$handler` as the
-    /// collection's element). Projects a `Sequence` all of whose elements
-    /// agree to that one type; a heterogeneous tuple or an untyped
-    /// `ArrayRef`/`HashRef` answers `None` (no index is in hand, so no
-    /// per-slot answer exists). Kept at the END for bincode variant-index
+    /// collection's element). Projects a `Sequence` to the join of its
+    /// elements (any of its values); an untyped `ArrayRef`/`HashRef`
+    /// answers `None`. Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
     /// A member VALUE read (`$this->prop`, `obj->field`): chases

@@ -142,11 +142,6 @@ impl OpenDocs {
         url: &Url,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
     ) -> Option<Arc<FileAnalysis>> {
-        // The heal runs the SAME cross-file cascade a verb does, on a
-        // background thread, and it is the other half of what made
-        // `references` never return at 138k files. It is a walk: give it
-        // the memo and the budget (`docs/adr/resolution-session.md`).
-        let _session = crate::model::witnesses::ResolutionSession::enter(Some(idx));
         let (base, language) = {
             let doc = self.open.get(url)?;
             (Arc::clone(&doc.analysis), doc.language)

@@ -253,7 +253,7 @@ spelled! {
 }
 
 spelled! {
-    pub enum NarrowCap { Var = "var", Type = "type", Guard = "guard", Block = "block" }
+    pub enum NarrowCap { Var = "var", Type = "type", Guard = "guard", Arm = "arm" }
 }
 
 spelled! {
@@ -261,7 +261,14 @@ spelled! {
 }
 
 spelled! {
-    pub enum MemberCap { Recv = "recv", Op = "op" }
+    pub enum MemberCap {
+        /// A receiver written as an expression (`self.x`, `f()`, `(*p)`).
+        Recv = "recv",
+        /// A receiver written as a bare name (`w`, `Widget`): it may spell
+        /// a class, and its operator can be checked by its name.
+        RecvName = "recv.name",
+        Op = "op",
+    }
 }
 
 spelled! {
@@ -457,6 +464,9 @@ pub enum Capture {
     Flow(FlowCap),
     Expr(ExprCap),
     Obs(ObsKind),
+    /// A conditionally-run arm (`@arm`): an observation made inside holds
+    /// only within it.
+    Arm,
     Narrow(NarrowCap),
     Move(MoveCap),
     /// A control-flow construct's span (`@guard.region`).
@@ -467,11 +477,12 @@ pub enum Capture {
     Member(MemberCap),
     /// The operator token a member access wrote, by which operator it is.
     MemberOp(MemberOpCap),
-    /// A method's receiver parameter (python `self`): the object, not a
-    /// member.
-    ParamReceiver,
+    /// A node that names the receiver of the method around it — declared
+    /// (python's `self` parameter) or not (C++ `this`): the object, never a
+    /// member and never a class spelling.
+    Receiver,
     /// A receiver token that names its class.
-    Receiver(ReceiverCap),
+    NamedReceiver(ReceiverCap),
     /// A fact the document states about the declaration at this name token.
     Mark(MarkCap),
     Arity(ArityCap),
@@ -536,7 +547,7 @@ impl Capture {
             Capture::Import(ImportCap::Name | ImportCap::Module | ImportCap::Prefix | ImportCap::Path | ImportCap::Arg) => {
                 Some(IdentitySpelling::Import)
             }
-            Capture::Ref(RefCap::Type) | Capture::Receiver(ReceiverCap::Class) | Capture::Parent | Capture::ParentSuper => {
+            Capture::Ref(RefCap::Type) | Capture::NamedReceiver(ReceiverCap::Class) | Capture::Parent | Capture::ParentSuper => {
                 Some(IdentitySpelling::Reference)
             }
             _ => None,
@@ -586,19 +597,17 @@ impl Capture {
             ["expr", "wrapper"] => C::Expr(ExprCap::Wrapper),
             ["expr", "wrapper", "inner"] => C::Expr(ExprCap::WrapperInner),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
+            ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
             ["guard", "region"] => C::GuardRegion,
             ["unevaluated"] => C::Unevaluated,
-            ["param", k] => match *k {
-                "region" => C::ParamRegion,
-                "receiver" => C::ParamReceiver,
-                _ => return None,
-            },
+            ["param", "region"] => C::ParamRegion,
+            ["receiver"] => C::Receiver,
             ["mark", k] => C::Mark(MarkCap::parse(k)?),
-            ["receiver", k] => C::Receiver(ReceiverCap::parse(k)?),
+            ["receiver", k] => C::NamedReceiver(ReceiverCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
-            ["member", k] => C::Member(MemberCap::parse(k)?),
+            ["member", rest @ ..] => C::Member(MemberCap::parse(&rest.join("."))?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
             ["domain", k] => C::Domain(DomainCap::parse(k)?),
             ["shape", k] => C::Shape(ShapeCap::parse(k)?),
@@ -664,6 +673,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Wrapper) => f.write_str("expr.wrapper"),
             C::Expr(ExprCap::WrapperInner) => f.write_str("expr.wrapper.inner"),
             C::Obs(k) => write!(f, "obs.{k}"),
+            C::Arm => f.write_str("arm"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Move(k) => write!(f, "move.{k}"),
             C::GuardRegion => f.write_str("guard.region"),
@@ -671,9 +681,9 @@ impl fmt::Display for Capture {
             C::ParamRegion => f.write_str("param.region"),
             C::Member(k) => write!(f, "member.{k}"),
             C::MemberOp(k) => write!(f, "member.op.{k}"),
-            C::ParamReceiver => f.write_str("param.receiver"),
+            C::Receiver => f.write_str("receiver"),
             C::Mark(k) => write!(f, "mark.{k}"),
-            C::Receiver(k) => write!(f, "receiver.{k}"),
+            C::NamedReceiver(k) => write!(f, "receiver.{k}"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),

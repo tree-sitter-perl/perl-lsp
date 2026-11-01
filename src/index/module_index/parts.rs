@@ -163,14 +163,15 @@ struct FedKeys {
     providers: ModuleBucket,
 }
 
-/// The symbols-derived halves of one FILE's feed, recorded together so a
-/// replay over a symbol-evicted copy can never carry one and miss the
-/// other. Both are read from `analysis.symbols()`, the only evictable axis
-/// `feed` touches.
+/// The symbols-derived parts of one FILE's feed, recorded together so a
+/// replay over a symbol-evicted copy can never carry one and miss another.
+/// All are read from `analysis.symbols()`, the only evictable axis `feed`
+/// touches (bridges through the handlers a file owns).
 #[derive(Default, Clone)]
 struct FedNames {
     names: Vec<String>,
     providers: Vec<String>,
+    bridges: Vec<String>,
 }
 
 impl FedKeys {
@@ -212,7 +213,7 @@ impl ModuleEdgeIndexes {
     /// candidate-set rebuilds (purge + one feed per candidate) and the
     /// warm rebuild can overlap without accumulation.
     pub fn feed(&self, module_name: &str, path: &std::path::Path, analysis: &FileAnalysis) {
-        let FedNames { names, providers } = if analysis.symbols_are_evicted() {
+        let FedNames { names, providers, bridges } = if analysis.symbols_are_evicted() {
             match self.name_records.get(path) {
                 Some(rec) => rec.clone(),
                 // No record (a stripped copy fed without ever being fed
@@ -237,7 +238,7 @@ impl ModuleEdgeIndexes {
         for name in names {
             push_unique(&self.names, name, &mut fed.names);
         }
-        for class in Self::bridge_classes(analysis) {
+        for class in bridges {
             push_unique(&self.bridges, class, &mut fed.bridges);
         }
         for parent in Self::parent_classes(analysis) {
@@ -394,6 +395,7 @@ impl ModuleEdgeIndexes {
         FedNames {
             names: Self::indexable_names(analysis),
             providers: analysis.provided_packages(),
+            bridges: analysis.bridge_classes(),
         }
     }
 
@@ -403,7 +405,8 @@ impl ModuleEdgeIndexes {
     /// across files.
     fn indexable_names(analysis: &FileAnalysis) -> Vec<String> {
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for sym in analysis.symbols() {
+        let gated = analysis.gated_candidates();
+        for sym in analysis.symbols().iter().chain(&gated.symbols) {
             if matches!(
                 sym.kind,
                 SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class
@@ -415,17 +418,6 @@ impl ModuleEdgeIndexes {
         names.extend(analysis.export.iter().cloned());
         names.extend(analysis.export_ok.iter().cloned());
         names.into_iter().collect()
-    }
-
-    /// The bridge classes an analysis' plugin namespaces declare, deduped.
-    fn bridge_classes(analysis: &FileAnalysis) -> Vec<String> {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for ns in &analysis.plugin.namespaces {
-            for crate::model::file_analysis::Bridge::Class(c) in &ns.bridges {
-                seen.insert(c.clone());
-            }
-        }
-        seen.into_iter().collect()
     }
 
     /// Every primary a specialization in the analysis names — the values of
