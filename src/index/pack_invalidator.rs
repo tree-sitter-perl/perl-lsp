@@ -49,6 +49,7 @@ use crate::index::open_docs::OpenDocs;
 use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
+use crate::build::source_files::analyze_file;
 
 /// One change, as the consumer rule reads it.
 struct Change<'a> {
@@ -431,14 +432,12 @@ impl PackInvalidator {
         let mut changed_fa: Option<Arc<FileAnalysis>> = None;
         if !deleted {
             crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.clone()).collect());
-            if let Ok(source) = std::fs::read_to_string(&canon) {
-                let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    driver.analyze_with_path(&source, Some(&canon))
-                }));
-                if let Ok(fa) = probe {
-                    changed_verdict = pack.record_surface(&canon, &fa);
-                    changed_fa = Some(Arc::new(fa));
-                }
+            // TODO(oversize-unregister): a file that grows past the cap keeps
+            // its last registration, as an unreadable one does, though the
+            // walk would not index it.
+            if let Some(fa) = analyze_file(driver, &canon, driver.caps().file_cap) {
+                changed_verdict = pack.record_surface(&canon, &fa);
+                changed_fa = Some(Arc::new(fa));
             }
         }
         let skip_consumers = matches!(changed_verdict, crate::model::surface::SurfaceVerdict::Unchanged);
@@ -470,16 +469,7 @@ impl PackInvalidator {
         targets.retain(|p| changed_fa.is_none() || *p != canon);
         let mut results: Vec<(PathBuf, Arc<FileAnalysis>)> = targets
             .par_iter()
-            .filter_map(|p| {
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let source = std::fs::read_to_string(p).ok()?;
-                    Some(driver.analyze_with_path(&source, Some(p)))
-                }));
-                match res {
-                    Ok(Some(analysis)) => Some((p.clone(), Arc::new(analysis))),
-                    _ => None,
-                }
-            })
+            .filter_map(|p| Some((p.clone(), Arc::new(analyze_file(driver, p, driver.caps().file_cap)?))))
             .collect();
         if let Some(fa) = changed_fa {
             results.push((canon.clone(), fa));

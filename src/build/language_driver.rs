@@ -26,7 +26,7 @@ use std::path::Path;
 /// `..`), so adding one is a compile error until every declared answer is
 /// reviewed — a capability added-and-silently-defaulted is how a caps
 /// struct decays back into the branching it replaced.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct DriverCaps {
     /// Analyses integrate with the Perl module hub's cross-file lane:
     /// import/export enrichment (`enrich_imported_types_with_keys`),
@@ -68,6 +68,27 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
+    /// Files at or over this many bytes are never analyzed — the walk
+    /// lists them, and a re-analysis refuses them.
+    pub file_cap: u64,
+}
+
+impl Default for DriverCaps {
+    fn default() -> Self {
+        DriverCaps {
+            hub_enrichment: false,
+            cursor_context: false,
+            hover_info: false,
+            signature_help: false,
+            selection_range: false,
+            synchronous_rebuild: false,
+            context_gather: false,
+            pack_invalidation: false,
+            cross_file_words: false,
+            entrypoint_symbols: &[],
+            file_cap: crate::build::source_files::PACK_FILE_CAP,
+        }
+    }
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -227,6 +248,7 @@ impl LanguageDriver for PerlDriver {
             signature_help: true,
             selection_range: true,
             synchronous_rebuild: true,
+            file_cap: 1_000_000,
             ..Default::default()
         }
     }
