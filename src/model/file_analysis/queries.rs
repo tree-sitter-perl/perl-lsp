@@ -212,20 +212,16 @@ impl FileAnalysis {
                 Binding::Receiver(_) => None,
                 Binding::Package(..) => continue,
             };
-            let scope_end = scope_span.end;
-            let region = Span { start: move_span.end, end: scope_end };
+            // The moved-from state holds over the rest of the move's scope, up
+            // to a rebind of its root or a reset of the moved place there.
+            let region = Span { start: move_span.end, end: scope_span.end };
             let reset = m.resets.iter().map(|s| s.start).filter(|p| key(p) > key(&move_span.end)).min_by_key(key);
-            // A reset past the move's scope (a write in a sibling arm) must
-            // not stretch the cutoff beyond it.
-            let cutoff = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset, Some(scope_end)]
-                .into_iter()
-                .flatten()
-                .min_by_key(key)
-                .unwrap_or(scope_end);
+            let cuts = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset];
+            let Some(held) = cut_region(region, cuts) else { continue };
             for read in &m.reads {
                 let p = read.start;
-                // strictly after the move, strictly before the reset cutoff
-                if key(&p) > key(&move_span.end) && key(&p) < key(&cutoff) {
+                // strictly after the move, strictly before the cutoff
+                if key(&p) > key(&move_span.end) && key(&p) < key(&held.end) {
                     out.push((m.spelling.clone(), *read));
                 }
             }

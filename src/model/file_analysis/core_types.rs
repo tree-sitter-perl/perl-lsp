@@ -1072,6 +1072,22 @@ impl<'e> RebindIndex<'e> {
     }
 }
 
+/// The part of `region` a region fact (a narrowing, a moved-from state)
+/// still holds over: from its start up to the earliest cut inside it — a
+/// rebind, a disturbance, a reset — or to its end. `None` when a cut lands
+/// at or before the start, so nothing holds. Every cutoff site in Perl and
+/// the packs goes through here; only where its cuts come from differs.
+pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -> Option<Span> {
+    let key = |p: &Point| (p.row, p.column);
+    let end = cuts
+        .into_iter()
+        .flatten()
+        .filter(|p| key(p) < key(&region.end))
+        .min_by_key(key)
+        .unwrap_or(region.end);
+    (key(&region.start) < key(&end)).then_some(Span { start: region.start, end })
+}
+
 impl Symbol {
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —

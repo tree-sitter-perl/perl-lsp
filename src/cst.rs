@@ -417,6 +417,25 @@ pub(crate) fn is_assignment_target(node: Node) -> bool {
     }) || list_assignment_target_of(node).is_some()
 }
 
+/// `undef X`, `local X` or `delete X` (through any parens): an operator
+/// that leaves what `node` holds without its value, without assigning one.
+pub(crate) fn is_value_reset_target(node: Node, source: &[u8]) -> bool {
+    let mut cur = node;
+    let mut parent = node.parent();
+    while let Some(p) = parent.filter(|p| is_list_literal(*p) && peel_groups(*p) == cur) {
+        cur = p;
+        parent = p.parent();
+    }
+    parent.is_some_and(|p| match p.kind() {
+        "undef_expression" | "localization_expression" => true,
+        "func1op_call_expression" => p
+            .child(0)
+            .and_then(|k| k.utf8_text(source).ok())
+            .is_some_and(crate::model::builtins::removes_its_element_argument),
+        _ => false,
+    })
+}
+
 /// `meth Class(ARGS)` / `meth Class ARGS` / `meth Class` — the spelling Perl
 /// may read as the indirect-object method call `Class->meth(ARGS)`. The
 /// grammar parses it as a call to `meth` whose argument is a call to (or a

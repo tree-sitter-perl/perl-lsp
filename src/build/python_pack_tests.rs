@@ -1550,6 +1550,30 @@ fn run_receivers(src: &str) -> Vec<(usize, Option<String>)> {
 }
 
 #[test]
+fn an_augmented_assignment_or_del_ends_a_member_narrowing() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.pet += 1
+            self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            del self.pet
+            self.pet.run()
+    def both(self):
+        if isinstance(self.pet, Foo):
+            del self.other, self.pet
+            self.pet.run()
+";
+    assert_eq!(run_receivers(src), vec![(6, Some("Foo".to_string())), (8, None), (12, None), (16, None)]);
+}
+
+#[test]
 fn isinstance_narrows_a_member_until_it_is_disturbed() {
     let src = "\
 class Foo:

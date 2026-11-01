@@ -119,17 +119,20 @@ pub(super) fn finish(st: &mut ExtractState) {
         let guard = n.narrow_guard.get(&mid).map(String::as_str);
         let Some(refined) = (st.pack.narrow_guard)(guard, ty) else { continue };
         // A member subject (`isinstance(self.x, T)`) narrows its place, which
-        // only the assembled analysis can root (`PackPlaces`).
-        match n.narrow_node.get(&mid) {
-            Some((bytes, span)) if st.flow.is_member_read(*bytes) => {
-                let refined = written_type_at(out, &st.pack.names, refined, n.narrow_arm[&mid].start);
-                out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
-                    subject: *span,
-                    refined,
-                    region: n.narrow_arm[&mid],
-                });
-            }
-            _ => pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope)),
+        // only the assembled analysis can root (`PackPlaces`). So may a bare
+        // name: only assembly knows whether it is a local or a member of an
+        // elided receiver, and it keeps the place only for the member.
+        let place_subject = n.narrow_node.get(&mid).map(|(bytes, span)| (st.flow.is_member_read(*bytes), *span));
+        if let Some((_, span)) = place_subject {
+            let refined = written_type_at(out, &st.pack.names, refined.clone(), n.narrow_arm[&mid].start);
+            out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+                subject: span,
+                refined,
+                region: n.narrow_arm[&mid],
+            });
+        }
+        if !matches!(place_subject, Some((true, _))) {
+            pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope));
         }
     }
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
@@ -142,29 +145,27 @@ pub(super) fn finish(st: &mut ExtractState) {
     let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
     let mut narrowed = Vec::new();
     for (name, refined, region, scope) in pending {
-        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
-        if (region.start.row, region.start.column) >= (end.row, end.column) {
+        let Some(held) = crate::model::file_analysis::cut_region(region, [rebinds.earliest_in(&name, region)]) else {
             continue; // rebound before the region even opens — nothing holds
-        }
+        };
         let refined = written_type_at(out, &st.pack.names, refined, region.start);
         narrowed.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
             payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
-            span: Span { start: region.start, end },
+            span: held,
         });
     }
     out.witnesses.extend(narrowed);
     for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
-        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
-        if (region.start.row, region.start.column) >= (end.row, end.column) {
+        let Some(held) = crate::model::file_analysis::cut_region(region, [rebinds.earliest_in(&name, region)]) else {
             continue;
-        }
+        };
         out.witnesses.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
             payload: crate::model::witnesses::WitnessPayload::Observation(obs),
-            span: Span { start: region.start, end },
+            span: held,
         });
     }
     // std::move sites → moved-from facts. The qualifier/name verify the

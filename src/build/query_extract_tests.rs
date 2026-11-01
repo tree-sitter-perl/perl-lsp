@@ -2017,6 +2017,65 @@ void f(Holder h) {
 }
 
 #[test]
+fn cpp_dynamic_cast_narrows_a_member_of_this() {
+    // `this->b` and a bare `b` in a member function are one place: either
+    // spelling's guard reaches the other's uses.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder {
+    Base* b;
+    void f();
+    void g();
+};
+void Holder::f() {
+    if (dynamic_cast<Derived*>(this->b)) {
+        this->b->run();
+        b->run();
+    }
+    this->b->run();
+}
+void Holder::g() {
+    if (dynamic_cast<Derived*>(b)) {
+        this->b->run();
+    }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    let derived = Some("Derived".to_string());
+    assert_eq!(
+        classes,
+        vec![(9, derived.clone()), (10, derived.clone()), (12, Some("Base".to_string())), (16, derived)]
+    );
+}
+
+#[test]
+fn cpp_move_through_this_is_the_members_move() {
+    let src = "\
+class C {
+  Name name_;
+  void f();
+};
+void C::f() {
+  sink(std::move(this->name_));
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].1, 6);
+}
+
+#[test]
 fn cpp_optional_engaged_guard_narrows_to_inner_type() {
     // Guard-testing a `std::optional<Widget>` as engaged proves it holds a
     // Widget inside the block, so `opt->` / `*opt` resolve on Widget there.
