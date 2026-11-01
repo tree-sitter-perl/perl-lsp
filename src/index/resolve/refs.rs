@@ -1,5 +1,6 @@
 //! The reference walks: `refs_to`, `group_refs` + group rename edits,
 //! `implementations_of`, and specialization families.
+use crate::util::canonical_path::CanonicalPath;
 use super::*;
 
 /// Group construction shared by the local arm (cursor in the class
@@ -10,7 +11,7 @@ use super::*;
 pub(super) fn group_from_projections(
     p: crate::model::file_analysis::FieldProjections,
     class_analysis: &FileAnalysis,
-    pinned_path: Option<PathBuf>,
+    pinned_path: Option<CanonicalPath>,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> ResolvedTarget {
     let mut members = Vec::new();
@@ -138,7 +139,7 @@ pub fn group_refs(
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
-    pinned_spans: &[(PathBuf, Span)],
+    pinned_spans: &[(CanonicalPath, Span)],
     members: &[GroupMember],
     mask_override: Option<RoleMask>,
 ) -> Vec<RefLocation> {
@@ -221,7 +222,7 @@ pub fn group_rename_edits(
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
-    pinned_spans: &[(PathBuf, Span)],
+    pinned_spans: &[(CanonicalPath, Span)],
     members: &[GroupMember],
     bare_new: &str,
     mask: RoleMask,
@@ -315,7 +316,7 @@ fn site_refusal(name: &str, loc: &RefLocation) -> Option<String> {
         SiteRewrite::Shared { also_on } => {
             let at = match &loc.key {
                 FileKey::Path(p) => p.display().to_string(),
-                FileKey::Url(u) => u.to_string(),
+                FileKey::Url(u, _) => u.to_string(),
             };
             Some(format!(
                 "`{}` at {}:{} may also be {}'s; rename from there to rename them together",
@@ -371,8 +372,8 @@ fn ref_rows_enabled() -> bool {
 /// so a shape mutation invalidates them like every other epoch memo.
 /// Closed (the default) ⇒ every walk queries the store, exactly as before.
 struct RetrievalMemo {
-    candidates: dashmap::DashMap<(usize, u64, Vec<String>), std::sync::Arc<Vec<PathBuf>>>,
-    indexed: dashmap::DashMap<(usize, u64), std::sync::Arc<std::collections::HashSet<PathBuf>>>,
+    candidates: dashmap::DashMap<(usize, u64, Vec<String>), std::sync::Arc<Vec<CanonicalPath>>>,
+    indexed: dashmap::DashMap<(usize, u64), std::sync::Arc<std::collections::HashSet<CanonicalPath>>>,
     /// The dependency sweep's file partition, per index: every walk visited
     /// every cached file only to skip the shredded non-candidates (networkx
     /// heatmap: 693 files × 8,287 walks, 20.6 s of a 51 s gather).
@@ -384,7 +385,7 @@ struct RetrievalMemo {
 /// up, never scanned for).
 struct DepFiles {
     unindexed: Vec<std::sync::Arc<crate::model::file_analysis::CachedModule>>,
-    by_path: std::collections::HashMap<PathBuf, std::sync::Arc<crate::model::file_analysis::CachedModule>>,
+    by_path: std::collections::HashMap<CanonicalPath, std::sync::Arc<crate::model::file_analysis::CachedModule>>,
 }
 
 static RETRIEVAL_MEMO: std::sync::RwLock<Option<RetrievalMemo>> = std::sync::RwLock::new(None);
@@ -425,7 +426,7 @@ fn index_identity(idx: &dyn CrossFileLookup) -> (usize, u64) {
 }
 
 /// `idx.ref_candidate_paths(keys)`, memoized while a sweep memo is open.
-fn retrieve_candidates(idx: &dyn CrossFileLookup, keys: &[String]) -> std::sync::Arc<Vec<PathBuf>> {
+fn retrieve_candidates(idx: &dyn CrossFileLookup, keys: &[String]) -> std::sync::Arc<Vec<CanonicalPath>> {
     if let Ok(slot) = RETRIEVAL_MEMO.read() {
         if let Some(memo) = slot.as_ref() {
             let (id, epoch) = index_identity(idx);
@@ -443,7 +444,7 @@ fn retrieve_candidates(idx: &dyn CrossFileLookup, keys: &[String]) -> std::sync:
 }
 
 /// `idx.ref_indexed_paths()`, memoized while a sweep memo is open.
-fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collections::HashSet<PathBuf>> {
+fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collections::HashSet<CanonicalPath>> {
     if let Ok(slot) = RETRIEVAL_MEMO.read() {
         if let Some(memo) = slot.as_ref() {
             let k = index_identity(idx);
@@ -463,7 +464,7 @@ fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collection
 /// from, so the two always describe the same index state.
 fn retrieve_dep_files(
     idx: &dyn CrossFileLookup,
-    rows_indexed: &std::collections::HashSet<PathBuf>,
+    rows_indexed: &std::collections::HashSet<CanonicalPath>,
 ) -> Option<std::sync::Arc<DepFiles>> {
     let slot = RETRIEVAL_MEMO.read().ok()?;
     let memo = slot.as_ref()?;
@@ -595,7 +596,11 @@ fn walk_refs(
     let memo = WalkMemo::default();
 
     if let WalkScope::Origin { key, analysis } = scope {
-        collect_from_analysis(key, analysis, target, module_index, &memo, &mut out);
+        let file = match key {
+            FileKey::Path(p) => p.clone(),
+            FileKey::Url(_, p) => p.clone(),
+        };
+        collect_from_analysis(key, analysis, target, module_index, &file, &memo, &mut out);
         return sorted_deduped(out);
     }
 
@@ -618,9 +623,10 @@ fn walk_refs(
             });
         }
     }
-    let gate = |analysis: &FileAnalysis, file_str: &str| {
-        file_sees_target_ids(target, &target_def_ids, analysis, file_str)
-            || seen_by_inclusion.contains(file_str)
+    let gate = |analysis: &FileAnalysis, file: &CanonicalPath| {
+        let file_str = file.to_string_lossy();
+        file_sees_target_ids(target, &target_def_ids, analysis, &file_str)
+            || seen_by_inclusion.contains(file_str.as_ref())
     };
 
     // Row-narrowing gate: when the relational store is live for a masked
@@ -651,44 +657,34 @@ fn walk_refs(
     // server-warm references 4 sites vs the sweep's 155) and an unresolved
     // candidate falls through to the whole-view sweeps for coverage.
     // Empty candidate retrieval leaves narrowing off entirely.
-    let mut rows_indexed: std::sync::Arc<std::collections::HashSet<PathBuf>> = Default::default();
-    let mut candidate_set: std::collections::HashSet<PathBuf> = Default::default();
+    let mut rows_indexed: std::sync::Arc<std::collections::HashSet<CanonicalPath>> = Default::default();
+    let mut candidate_set: std::collections::HashSet<CanonicalPath> = Default::default();
 
     // Open docs (canonical — their index entries are skipped).
-    let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut covered_paths: std::collections::HashSet<CanonicalPath> = std::collections::HashSet::new();
+    // An open doc reached through a symlinked root must shadow its own
+    // persisted generation, so it claims the spelling candidate rows carry.
+    let mut cover = |url: &Url, doc: &crate::index::document::Document| {
+        if url.to_file_path().is_ok() {
+            covered_paths.insert(doc.canonical_path.clone());
+        }
+    };
     if mask.contains(RoleMask::OPEN) {
         files.for_each_open(|url, doc| {
-            let url = url.clone();
-            if let Ok(p) = url.to_file_path() {
-                // Claim the canonical spelling too: candidate rows are keyed
-                // canonical, and an open doc reached through a symlinked
-                // root must shadow its own persisted generation.
-                if let Ok(canon) = std::fs::canonicalize(&p) {
-                    covered_paths.insert(canon);
-                }
-                covered_paths.insert(p);
-            }
+            cover(url, doc);
             // The walk applies visibility: role mask picked the tier, the
             // closure gate decides per file (`file_sees_target_ids`); the
             // matcher below only matches.
-            let key = FileKey::Url(url);
-            let file_str = canonical_file_str(&key);
-            if !gate(&doc.analysis, &file_str) {
+            if !gate(&doc.analysis, &doc.canonical_path) {
                 return;
             }
-            collect_from_analysis(&key, &doc.analysis, target, module_index, &memo, &mut out);
+            let key = FileKey::Url(url.clone(), doc.canonical_path.clone());
+            collect_from_analysis(&key, &doc.analysis, target, module_index, &doc.canonical_path, &memo, &mut out);
         });
     } else {
         // Even if open isn't in the mask, track the paths so a WORKSPACE walk
         // doesn't duplicate them (an open file's pre-close state isn't meaningful).
-        files.for_each_open(|url, _doc| {
-            if let Ok(p) = url.to_file_path() {
-                if let Ok(canon) = std::fs::canonicalize(&p) {
-                    covered_paths.insert(canon);
-                }
-                covered_paths.insert(p);
-            }
-        });
+        files.for_each_open(|url, doc| cover(url, doc));
     }
 
     // Relational retrieval (`docs/adr/relational-ref-index.md`): the files
@@ -730,17 +726,16 @@ fn walk_refs(
                 }
                 let Some(cached) = idx.cached_by_path(path) else { continue };
                 covered_paths.insert(path.clone());
-                let key = FileKey::Path(cached.path.clone());
-                let file_str = canonical_file_str(&key);
-                if !gate(&cached.analysis, &file_str) {
+                if !gate(&cached.analysis, &cached.path) {
                     continue;
                 }
+                let key = FileKey::Path(cached.path.clone());
                 // The matcher reads refs (usage sites) AND symbols
                 // (declaration sites) — the rows-axes view, upgraded to
                 // whole only when a matching ref needs the bag.
                 let full = crate::util::ghost_stats::timed("refs.cand.view", || matcher_view(idx, &cached, target));
                 crate::util::ghost_stats::timed("refs.cand.collect", || collect_from_analysis(
-                    &key, &full, target, module_index, &memo, &mut out,
+                    &key, &full, target, module_index, &cached.path, &memo, &mut out,
                 ));
             }
         }
@@ -767,16 +762,15 @@ fn walk_refs(
                 if !covered_paths.insert(cached.path.clone()) {
                     return;
                 }
-                let key = FileKey::Path(cached.path.clone());
-                let file_str = canonical_file_str(&key);
-                if !gate(&cached.analysis, &file_str) {
+                if !gate(&cached.analysis, &cached.path) {
                     return;
                 }
+                let key = FileKey::Path(cached.path.clone());
                 // Rows-off fallback sweep: copies here may still be
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
                 let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, module_index, &memo, &mut out);
+                collect_from_analysis(&key, &full, target, module_index, &cached.path, &memo, &mut out);
             };
             // Narrowed, a sweep visits exactly the unshredded files plus the
             // candidates — so a sweep memo enumerates those instead of
@@ -807,7 +801,7 @@ fn walk_refs(
 
 /// The tier an index-held file rides: WORKSPACE for a front-door
 /// registration, DEPENDENCY otherwise.
-pub(super) fn index_role(idx: &dyn CrossFileLookup, path: &std::path::Path) -> RoleMask {
+pub(super) fn index_role(idx: &dyn CrossFileLookup, path: &CanonicalPath) -> RoleMask {
     if idx.is_dependency_path(path) {
         RoleMask::DEPENDENCY
     } else {
@@ -1048,4 +1042,3 @@ pub(super) fn specialization_family(
     out.dedup_by(|a, b| file_key_eq(&a.key, &b.key) && a.span == b.span);
     out
 }
-
