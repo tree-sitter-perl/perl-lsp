@@ -1781,20 +1781,10 @@ enum ConstFold {
     Values(Option<Vec<String>>),
 }
 
-/// The kind ids a sub or method declaration carries. Every id the grammar
-/// names that way, so an aliased symbol can't slip past the kind scan.
+/// The kind ids a sub or method declaration carries.
 fn sub_declaration_kinds() -> &'static [u16] {
     static KINDS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
     KINDS.get_or_init(|| {
-        let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
-        (0..lang.node_kind_count() as u16)
-            .filter(|&id| {
-                lang.node_kind_is_named(id)
-                    && matches!(
-                        lang.node_kind_for_id(id),
-                        Some("subroutine_declaration_statement" | "method_declaration_statement")
-                    )
-            })
-            .collect()
+        perl_kind_ids(&["subroutine_declaration_statement", "method_declaration_statement"])
     })
 }

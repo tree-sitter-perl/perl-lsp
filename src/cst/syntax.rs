@@ -93,7 +93,7 @@ impl<'t> Structure<'t> {
         SyntaxNode { tree: self, id }
     }
 
-    fn root(&self) -> SyntaxNode<'_, 't> {
+    pub(crate) fn root(&self) -> SyntaxNode<'_, 't> {
         SyntaxNode { tree: self, id: NodeId(0) }
     }
 
@@ -164,6 +164,18 @@ impl<'t> SyntaxForest<'t> {
     pub(crate) fn ancestors(&self, node: Node<'t>) -> impl Iterator<Item = Node<'t>> + '_ {
         self.lift(node).into_iter().flat_map(|n| n.ancestors()).map(|n| n.ts())
     }
+}
+
+/// Every kind id `lang` gives any of `names` as a named node. A grammar can
+/// carry one name on several symbols (aliases), and a kind scan has to match
+/// them all.
+pub(crate) fn kind_ids(lang: &tree_sitter::Language, names: &[&str]) -> Vec<u16> {
+    (0..lang.node_kind_count() as u16)
+        .filter(|&id| {
+            lang.node_kind_is_named(id)
+                && lang.node_kind_for_id(id).is_some_and(|k| names.contains(&k))
+        })
+        .collect()
 }
 
 /// A node of a [`Structure`]: a borrowed tree plus an id.

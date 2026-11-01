@@ -78,60 +78,45 @@ mod fold;
 mod consts;
 mod docs;
 
-/// Single CST walk that powers the post-walk `ChainTypingReducer`.
-/// Indexes the node sets the reducer needs:
-///
-/// - `assignment_nodes` — every `assignment_expression`, used to type
-///   `my $X = <rhs>` (and bare `$X = …`) via `resolve_invocant_class_tree`.
-/// - `return_nodes` — every `return_expression`, indexed by span so
-///   the return-arm refresh can match it back to a `ReturnInfo`.
-/// - `invocant_nodes` — every `method_call_expression`'s invocant,
-///   indexed by span so the post-fold invocant-class refresh can
-///   find the right node for a `MethodCall` ref's `invocant_span`.
-/// - `method_call_args` — every `method_call_expression`'s args
-///   node, indexed by the call-expression span. Lets the post-walk
-///   keys-as-HashKeyAccess emission look up the args from a
-///   MethodCall ref instead of stashing them on the ref itself or
-///   running emit at walk time (where invocant_class is still
-///   getting refined).
-///
-/// Tree-sitter-perl `arguments` field shapes encountered in the
-/// wild (notes for parser-side adjustments — `args` is the value
-/// of `child_by_field_name("arguments")`):
-///
-/// | Call shape | `args.kind()`                 | Notes |
-/// | --- | --- | --- |
-/// | `f()`                | (no `arguments` field)        | empty arglist; field absent |
-/// | `f($x)`              | `scalar`                      | single non-literal arg, unwrapped |
-/// | `f('x')`             | `string_literal`              | single string, unwrapped |
-/// | `f('x', 'y')`        | `list_expression`             | flat positional list |
-/// | `f(k => v)`          | `list_expression`             | fat-comma is flat in this list |
-/// | `Foo->new(k => v)`   | `parenthesized_expression`    | constructor wraps in parens |
-/// | `f({k => v})`        | `anonymous_hash_expression`   | hashref-arg shape — DBIC's `search`/`find`. The hash's children are a `list_expression` of the k=>v pairs |
-/// | `qw(a b c)`          | `quoted_word_list`            | DBIC `add_columns(qw(...))` shape |
-///
-/// Recursive-into-wrapper rule: emitters typically walk one level
-/// past `parenthesized_expression` / `anonymous_hash_expression`
-/// to the enclosed `list_expression`. The k=>v iteration logic
-/// expects a flat positional list; nested wrappers want unwrapping
-/// at the call site, not in the arg-walker.
-///
-/// Built once per `build_with_plugins_inner` call and consumed by both
-/// `ChainPassMode::PreFold` and `ChainPassMode::PostFold` invocations
-/// of the reducer.
-struct ChainTypingIndex<'a> {
-    assignment_nodes: Vec<Node<'a>>,
-    return_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
-    invocant_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
-    method_call_args: std::collections::HashMap<(Point, Point), Node<'a>>,
-    /// `hash_element_expression` nodes whose container is itself a
-    /// method-call result (`$obj->get_config->{host}`). The container
-    /// type — and thus the key's owner class — is only knowable after
-    /// the fold resolves the method's return type, so the chained-key
-    /// HashKeyAccess emission (`emit_chained_hash_key_refs`) waits for
-    /// it. Plain `$var->{key}` keys are emitted during the walk
-    /// (`visit_hash_element`) and owner-resolved at phase 3.
-    chained_hash_elements: Vec<Node<'a>>,
+/// A `MethodCall` ref's call site, minted where the walk emits the ref: the
+/// receiver and argument nodes it had in hand, so a post-walk pass reads them
+/// instead of finding them again by span. Facts on the main tree's call node
+/// (`Builder::call_sites` until the walk ends).
+#[derive(Clone, Copy)]
+struct CallSite<'a> {
+    ref_idx: usize,
+    invocant: Option<Node<'a>>,
+    /// The call's `arguments` node.
+    ///
+    /// Tree-sitter-perl `arguments` field shapes encountered in the
+    /// wild (notes for parser-side adjustments — `args` is the value
+    /// of `child_by_field_name("arguments")`):
+    ///
+    /// | Call shape | `args.kind()`                 | Notes |
+    /// | --- | --- | --- |
+    /// | `f()`                | (no `arguments` field)        | empty arglist; field absent |
+    /// | `f($x)`              | `scalar`                      | single non-literal arg, unwrapped |
+    /// | `f('x')`             | `string_literal`              | single string, unwrapped |
+    /// | `f('x', 'y')`        | `list_expression`             | flat positional list |
+    /// | `f(k => v)`          | `list_expression`             | fat-comma is flat in this list |
+    /// | `Foo->new(k => v)`   | `parenthesized_expression`    | constructor wraps in parens |
+    /// | `f({k => v})`        | `anonymous_hash_expression`   | hashref-arg shape — DBIC's `search`/`find`. The hash's children are a `list_expression` of the k=>v pairs |
+    /// | `qw(a b c)`          | `quoted_word_list`            | DBIC `add_columns(qw(...))` shape |
+    ///
+    /// Recursive-into-wrapper rule: emitters typically walk one level
+    /// past `parenthesized_expression` / `anonymous_hash_expression`
+    /// to the enclosed `list_expression`. The k=>v iteration logic
+    /// expects a flat positional list; nested wrappers want unwrapping
+    /// at the call site, not in the arg-walker.
+    args: Option<Node<'a>>,
+}
+
+/// Every call site the walk minted, as facts on the main tree.
+type CallSites<'a> = crate::cst::NodeFacts<CallSite<'a>>;
+
+/// The Perl grammar's kind ids for `names`; callers cache them in a static.
+fn perl_kind_ids(names: &[&str]) -> Vec<u16> {
+    crate::cst::kind_ids(&ts_parser_perl::LANGUAGE.into(), names)
 }
 
 /// Which chain-typing tasks the reducer should apply on this call.
@@ -631,12 +616,9 @@ struct Builder<'a> {
     /// **Build-only**.
     method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
 
-    /// Indirect-object calls (`new Foo(ARGS)`): `(call, class, args)`. The
-    /// chain-typing index finds a call's receiver and arguments by
-    /// `method_call_expression` node, and only the walk knows a
-    /// function-call node is one of these, so the walk hands them over.
-    /// **Build-only**.
-    indirect_method_calls: Vec<(Node<'a>, Node<'a>, Option<Node<'a>>)>,
+    /// Each `MethodCall` ref's call site on the main tree, in mint order;
+    /// they become `NodeFacts` when the walk ends. **Build-only**.
+    call_sites: Vec<(crate::cst::NodeId, CallSite<'a>)>,
 
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`

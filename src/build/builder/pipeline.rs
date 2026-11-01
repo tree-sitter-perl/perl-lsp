@@ -4,82 +4,6 @@
 
 use super::*;
 
-/// Walk the tree once, indexing the three node kinds the chain-typing
-/// reducer cares about. Pure: reads only tree-sitter structural data,
-/// no Builder state. Same recursion shape (depth-first via
-/// `named_child(i)`) the three former independent walks all used.
-impl<'a> ChainTypingIndex<'a> {
-    /// Index the walk's indirect-object calls like `method_call_expression`s,
-    /// so every post-walk pass reads their receiver and arguments.
-    fn add_indirect_method_calls(&mut self, calls: &[(Node<'a>, Node<'a>, Option<Node<'a>>)]) {
-        for &(call, class, args) in calls {
-            self.invocant_nodes.insert((class.start_position(), class.end_position()), class);
-            if let Some(args) = args {
-                self.method_call_args.insert((call.start_position(), call.end_position()), args);
-            }
-        }
-    }
-}
-
-pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
-    let mut idx = ChainTypingIndex {
-        assignment_nodes: Vec::new(),
-        return_nodes: std::collections::HashMap::new(),
-        invocant_nodes: std::collections::HashMap::new(),
-        method_call_args: std::collections::HashMap::new(),
-        chained_hash_elements: Vec::new(),
-    };
-    // Explicit stack, like every other tree pass here: a recursive descent
-    // costs one frame per CST level, and a stack overflow is a fatal abort
-    // no `catch_unwind` can net.
-    fn walk<'t>(root: Node<'t>, idx: &mut ChainTypingIndex<'t>) {
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
-        match node.kind() {
-            "assignment_expression" => {
-                idx.assignment_nodes.push(node);
-            }
-            "return_expression" => {
-                idx.return_nodes
-                    .insert((node.start_position(), node.end_position()), node);
-            }
-            "method_call_expression" => {
-                if let Some(inv) = node.child_by_field_name("invocant") {
-                    idx.invocant_nodes
-                        .insert((inv.start_position(), inv.end_position()), inv);
-                }
-                if let Some(args) = node.child_by_field_name("arguments") {
-                    idx.method_call_args
-                        .insert((node.start_position(), node.end_position()), args);
-                }
-            }
-            "hash_element_expression" => {
-                // Container is the first named child; index only the
-                // chained shape where it's a method call — plain
-                // `$var->{key}` is handled by the walk.
-                if node
-                    .named_child(0)
-                    .map(|c| c.kind() == "method_call_expression")
-                    .unwrap_or(false)
-                {
-                    idx.chained_hash_elements.push(node);
-                }
-            }
-            _ => {}
-        }
-        // Reversed: popping from the end yields named child 0 first, so the
-        // ordered `Vec` fields keep document order.
-        for i in (0..node.named_child_count()).rev() {
-            if let Some(c) = node.named_child(i) {
-                stack.push(c);
-            }
-        }
-        }
-    }
-    walk(tree.root_node(), &mut idx);
-    idx
-}
-
 pub fn build(tree: &Tree, source: &[u8]) -> FileAnalysis {
     build_with_plugins(tree, source, default_plugin_registry())
 }
@@ -88,7 +12,7 @@ pub fn build(tree: &Tree, source: &[u8]) -> FileAnalysis {
 ///
 /// This is no longer what keeps the process alive. The walk, the chain-typing
 /// index and the expression-shape typing are all bounded independently of CST
-/// depth (`walk.rs`, `build_chain_typing_index`, `MAX_EXPR_TYPE_DEPTH`), so a
+/// depth (`walk.rs`, `MAX_EXPR_TYPE_DEPTH`), so a
 /// deep file is analyzed rather than refused. What remains is a bound on the
 /// absurd: past this point a file is not source anyone wrote, and analyzing it
 /// buys nothing while costing time and heap proportional to its depth.
@@ -436,7 +360,7 @@ fn build_once(
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
         method_call_refs: std::collections::HashMap::new(),
-        indirect_method_calls: Vec::new(),
+        call_sites: Vec::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
@@ -662,9 +586,8 @@ fn build_once(
     // Deeper chains take more iterations; `MAX_FOLD_ITERATIONS`
     // (debug-only) catches dependency-tracking bugs that would
     // otherwise spin forever.
-    let mut chain_idx = bphase!("build_chain_typing_index", build_chain_typing_index(tree));
-    chain_idx.add_indirect_method_calls(&b.indirect_method_calls);
-    bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&chain_idx));
+    let call_sites = crate::cst::NodeFacts::new(syntax.main().len(), std::mem::take(&mut b.call_sites));
+    bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&call_sites));
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
     // Expression(refidx) chases resolve through to
@@ -689,7 +612,7 @@ fn build_once(
     // a byte-identical FileAnalysis — including witness counts,
     // unlike the pre-Phase-6 pipeline.
     if extra_re_fold {
-        b.fold_to_fixed_point(&chain_idx);
+        b.fold_to_fixed_point(&call_sites);
     }
 
     // Post-pass: emit `HashKeyAccess` refs for even-position stringy
@@ -697,14 +620,13 @@ fn build_once(
     // helper-emitted controllers, etc.). Runs after `fold_to_fixed_point`
     // so `invocant_class` is canonical against the bag — was a walk-time
     // emission gated on the partially-resolved walk-time class, now it's
-    // a single post-walk pass that joins refs to args via the chain
-    // typing index.
-    bphase!("emit_mc_arg_keys", b.emit_method_call_arg_keys(&chain_idx));
+    // a single post-walk pass that reads each ref's call site.
+    bphase!("emit_mc_arg_keys", b.emit_method_call_arg_keys(&call_sites));
 
     // Post-pass: chained hashref-key accesses (`$obj->get_config->{host}`).
     // Runs post-fold so the method's return type is canonical — the
     // owner class is the chain receiver's type, unknowable until then.
-    bphase!("emit_chained_hk_refs", b.emit_chained_hash_key_refs(&chain_idx));
+    bphase!("emit_chained_hk_refs", b.emit_chained_hash_key_refs());
 
     // Post-pass: upgrade Variable-owned hash-key derefs whose variable's
     // type settled to a class DURING the fold (`my $row = $rs->find(1);

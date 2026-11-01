@@ -140,9 +140,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The post-walk **ChainTypingReducer**: one CST walk builds a
-    /// `ChainTypingIndex` (assignment, return-expression, and invocant
-    /// nodes by span); this drains it in two modes — `PreFold`
+    /// The post-walk **ChainTypingReducer**: reads assignments off the
+    /// syntax tree and receivers off each call's site, in two modes — `PreFold`
     /// (assignments + return arms feed the next `resolve_return_types`)
     /// and `PostFold` (invocants are query-time outputs, so they need
     /// every sub return type resolved first). The worklist driver
@@ -157,13 +156,13 @@ impl<'a> Builder<'a> {
     /// in `PostFold` mode types strictly the same set as one call.
     pub(super) fn run_chain_typing_reducer(
         &mut self,
-        idx: &ChainTypingIndex<'a>,
+        sites: &CallSites<'a>,
         mode: ChainPassMode,
     ) {
         match mode {
             ChainPassMode::PreFold => {
                 crate::util::ghost_stats::timed("chain::assignments", || {
-                    self.apply_chain_typing_assignments(idx)
+                    self.apply_chain_typing_assignments()
                 });
                 // Refresh `invocant_class` each iteration too.
                 // Variable invocants whose TC just landed in the
@@ -175,11 +174,11 @@ impl<'a> Builder<'a> {
                 // `apply_chain_typing_invocants` is idempotent (skips
                 // refs whose class is already pinned).
                 crate::util::ghost_stats::timed("chain::invocants", || {
-                    self.apply_chain_typing_invocants(idx)
+                    self.apply_chain_typing_invocants(sites)
                 });
             }
             ChainPassMode::PostFold => {
-                self.apply_chain_typing_invocants(idx);
+                self.apply_chain_typing_invocants(sites);
             }
         }
     }
@@ -226,7 +225,7 @@ impl<'a> Builder<'a> {
     /// invocant typing is a query-time write that doesn't feed back
     /// into the bag — a single pass against the now-final symbol
     /// table is sufficient.
-    pub(super) fn fold_to_fixed_point(&mut self, idx: &ChainTypingIndex<'a>) {
+    pub(super) fn fold_to_fixed_point(&mut self, sites: &CallSites<'a>) {
         use crate::model::witnesses::ReducerRegistry;
         const MAX_FOLD_ITERATIONS: usize = 64;
         let method_sym_by_name = self.build_method_sym_by_name();
@@ -257,7 +256,7 @@ impl<'a> Builder<'a> {
             }
             {
                 let _t = crate::util::ghost_stats::ScopedNs::start("fold::chain_pre");
-                self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
+                self.run_chain_typing_reducer(sites, ChainPassMode::PreFold);
             }
             self.resolve_return_types(&reg, &method_sym_by_name);
             // Mutation extension: fold key writes into variable shapes
@@ -290,7 +289,7 @@ impl<'a> Builder<'a> {
         }
         {
             let _t = crate::util::ghost_stats::ScopedNs::start("fold::chain_post");
-            self.run_chain_typing_reducer(idx, ChainPassMode::PostFold);
+            self.run_chain_typing_reducer(sites, ChainPassMode::PostFold);
         }
         // Totals, not a line per file: at corpus scale the per-file form is
         // 138k unreadable lines, and the average is what says whether the
@@ -375,8 +374,7 @@ impl<'a> Builder<'a> {
     /// `push_type_constraint`) so a future debug dump can answer "why
     /// does $X have this type?" without re-running the typer.
     ///
-    /// Reads from the shared `ChainTypingIndex.assignment_nodes` (built
-    /// by `build_chain_typing_index`); does not walk the tree itself.
+    /// Reads the main tree's assignments off its kind column.
     ///
     /// The recursive typer (`resolve_invocant_class_tree`) uses
     /// `self.current_package` for the `$self` / `shift` / `$_[0]`
@@ -394,12 +392,13 @@ impl<'a> Builder<'a> {
     /// doesn't model that. `namespace_ranges` is the flat record
     /// populated at walk time and trimmed by successor decls;
     /// a point-query gives the right answer at any byte.
-    pub(super) fn apply_chain_typing_assignments(&mut self, idx: &ChainTypingIndex<'a>) {
+    pub(super) fn apply_chain_typing_assignments(&mut self) {
+        static ASSIGNMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+        let kinds = ASSIGNMENT.get_or_init(|| perl_kind_ids(&["assignment_expression"]));
+        let assignments: Vec<Node<'a>> =
+            self.syntax.main().root().descendants_of_kind(kinds).map(|n| n.ts()).collect();
         let mut to_push: Vec<(String, ScopeId, Span, InferredType)> = Vec::new();
-        crate::util::ghost_stats::count_by(
-            "chain.assignment_nodes",
-            idx.assignment_nodes.len() as u64,
-        );
+        crate::util::ghost_stats::count_by("chain.assignment_nodes", assignments.len() as u64);
         // Snapshot of the bag's typed-Variable witnesses, keyed by
         // (name, span.start) — the idempotency checks below ask exactly this
         // question per assignment, and a full-bag scan per assignment is
@@ -434,7 +433,7 @@ impl<'a> Builder<'a> {
             .filter(|(_, r)| matches!(r.kind, RefKind::Variable) && r.access == AccessKind::Write)
             .map(|(i, r)| (r.span.start, i))
             .collect();
-        for &node in &idx.assignment_nodes {
+        for &node in &assignments {
             let (Some(left), Some(right)) = (
                 node.child_by_field_name("left"),
                 node.child_by_field_name("right"),
@@ -603,27 +602,17 @@ impl<'a> Builder<'a> {
     /// invocant's class can only be pinned after `get_foo`'s
     /// return_type is known.
     ///
-    /// Reads from the shared `ChainTypingIndex.invocant_nodes`. Refs
-    /// whose class was already pinned during the walk keep their value.
-    pub(super) fn apply_chain_typing_invocants(&mut self, idx: &ChainTypingIndex<'a>) {
-        // Collect ref indices + their invocant nodes first so we
-        // don't borrow `self.refs` mutably while also calling the
-        // bag-routed resolver (which reads `&self`).
-        let mut pending: Vec<(usize, Node<'a>)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
-            if let RefKind::MethodCall {
-                invocant_span: Some(sp),
-                ..
-            } = &r.kind
-            {
-                if self.method_call_invocant.contains_key(&i) {
-                    continue;
-                }
-                if let Some(n) = idx.invocant_nodes.get(&(sp.start, sp.end)).copied() {
-                    pending.push((i, n));
-                }
-            }
-        }
+    /// Reads each ref's receiver off its call site. Refs whose class was
+    /// already pinned during the walk keep their value.
+    pub(super) fn apply_chain_typing_invocants(&mut self, sites: &CallSites<'a>) {
+        // Ref order, so resolution runs in the order the refs were minted.
+        let mut pending: Vec<(usize, Node<'a>)> = sites
+            .all()
+            .iter()
+            .filter(|s| !self.method_call_invocant.contains_key(&s.ref_idx))
+            .filter_map(|s| Some((s.ref_idx, s.invocant?)))
+            .collect();
+        pending.sort_unstable_by_key(|&(i, _)| i);
         crate::util::ghost_stats::count_by("chain.invocants_pending", pending.len() as u64);
         let _t = crate::util::ghost_stats::ScopedNs::start("chain::invoc_resolve");
         for (i, node) in pending {
@@ -646,7 +635,7 @@ impl<'a> Builder<'a> {
     /// off the walk-time `invocant_class.is_some()` shortcut that
     /// previously forced syntactic walk-time class resolution to
     /// keep working.
-    pub(super) fn emit_method_call_arg_keys(&mut self, idx: &ChainTypingIndex<'a>) {
+    pub(super) fn emit_method_call_arg_keys(&mut self, sites: &CallSites<'a>) {
         // Snapshot first so we can `&mut self` the emit loop below.
         // `parametric` = true → Parametric receiver, the type is
         // the gate (cross-file producer's HashKeyDef isn't visible
@@ -689,24 +678,17 @@ impl<'a> Builder<'a> {
         let column_keyed: std::collections::HashSet<String> =
             self.plugins.column_keyed_verbs().map(|s| s.to_string()).collect();
         let mut pending: Vec<Path<'a>> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
-            if !matches!(r.kind, RefKind::MethodCall { .. }) {
+        // Ref order, so the keys this emits keep the order of their calls' refs.
+        let mut by_ref: Vec<&CallSite<'a>> = sites.all().iter().collect();
+        by_ref.sort_unstable_by_key(|s| s.ref_idx);
+        for site in by_ref {
+            let i = site.ref_idx;
+            let r = &self.refs[i];
+            if !matches!(r.kind, RefKind::MethodCall { invocant_span: Some(_), .. }) {
                 continue;
             }
-            let Some(args) = idx
-                .method_call_args
-                .get(&(r.span.start, r.span.end))
-                .copied()
-            else {
-                continue;
-            };
-            let invocant_node = idx
-                .invocant_nodes
-                .get(&match r.kind {
-                    RefKind::MethodCall { invocant_span: Some(s), .. } => (s.start, s.end),
-                    _ => continue,
-                })
-                .copied();
+            let Some(args) = site.args else { continue };
+            let invocant_node = site.invocant;
             let inv_ty = invocant_node.and_then(|n| self.invocant_type_at_node(n));
             if let Some(claimed) = inv_ty
                 .as_ref()
@@ -832,11 +814,22 @@ impl<'a> Builder<'a> {
 
     /// Runs post-fold (after `emit_method_call_arg_keys`) so
     /// `invocant_type_at_node` answers against the canonical bag.
-    pub(super) fn emit_chained_hash_key_refs(&mut self, idx: &ChainTypingIndex<'a>) {
+    pub(super) fn emit_chained_hash_key_refs(&mut self) {
+        static HASH_ELEMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+        let kinds = HASH_ELEMENT.get_or_init(|| perl_kind_ids(&["hash_element_expression"]));
+        // The chained shape only: a plain `$var->{key}` is the walk's.
+        let chained: Vec<Node<'a>> = self
+            .syntax
+            .main()
+            .root()
+            .descendants_of_kind(kinds)
+            .map(|n| n.ts())
+            .filter(|n| crate::cst::nth_element(*n, 0).is_some_and(|c| c.kind() == "method_call_expression"))
+            .collect();
         // Snapshot resolved (key_span, key_text, access, owner) first
         // so the emit loop can `&mut self`.
         let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner)> = Vec::new();
-        for &node in &idx.chained_hash_elements {
+        for &node in &chained {
             let Some(container) = node.named_child(0) else { continue };
             let Some(key_node) = node.child_by_field_name("key") else { continue };
             let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) else { continue };
