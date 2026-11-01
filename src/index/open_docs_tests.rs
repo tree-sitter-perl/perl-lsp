@@ -60,7 +60,7 @@ my $b = make_b();
 "#;
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(
-        PathBuf::from("/tmp/enrich_open_producer.pm"),
+        std::path::PathBuf::from("/tmp/enrich_open_producer.pm"),
         Arc::new(parse(producer_src)),
     );
 
