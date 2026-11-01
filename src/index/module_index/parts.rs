@@ -238,9 +238,10 @@ impl ModuleEdgeIndexes {
         for name in names {
             push_unique(&self.names, name, &mut fed.names);
         }
-        // An export list is its package's, so its names file under that
-        // package alone — never under every name the file registers.
-        if let Some(e) = analysis.package_exports(module_name) {
+        // Every package's list files under the file's home, the locator
+        // readers expand to the file's packages; which package exports a
+        // name is the list's own answer (`find_exporters`).
+        for (_, e) in analysis.exporting_packages() {
             for name in e.export.iter().chain(&e.export_ok) {
                 push_unique(&self.names, name.clone(), &mut fed.names);
             }
