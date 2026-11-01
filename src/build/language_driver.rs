@@ -590,6 +590,9 @@ impl PackDriver {
     /// The phase pipeline `analyze_with_path` documents; the trait method
     /// wraps it to stamp `FileAnalysis.language` on every exit.
     fn analyze_pipeline(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
+        // Not a phase: the roots are process data the analysis's readers
+        // ask, and a pack process may never otherwise load the registry.
+        crate::build::plugin::ensure_language_roots();
         let mut parser = (self.make_parser)();
         let ctx = self.gather_pack_context(&mut parser, source, path);
         let Some((tree, src, map, recovered)) = self.transform_and_parse(&mut parser, source, &ctx)

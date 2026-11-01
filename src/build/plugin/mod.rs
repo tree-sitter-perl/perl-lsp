@@ -73,9 +73,19 @@ pub fn default_plugin_registry() -> std::sync::Arc<PluginRegistry> {
             crate::build::builder::warm_flow_query,
         )
     });
+    crate::model::roots::install(reg.language_roots());
     let reg = Arc::new(reg);
     *cell = Some((key, reg.clone()));
     reg
+}
+
+/// Load the registry if nothing has installed the language roots yet. An
+/// analysis that never builds Perl (a pack-language CLI run, a test) still
+/// needs them: the root answers diagnostics, hover and goto-def read.
+pub fn ensure_language_roots() {
+    if !crate::model::roots::is_installed() {
+        let _ = default_plugin_registry();
+    }
 }
 
 // ---- Context snapshots passed to plugins ----
@@ -1168,6 +1178,14 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
+    /// Static language-root manifest — the members a language guarantees
+    /// every class (`crate::model::roots`). Read once at plugin load,
+    /// merged by language and installed process-wide when the registry
+    /// loads. The bundled documents are `frameworks/roots/*.rhai`.
+    fn language_root(&self) -> &[crate::model::roots::RootDocument] {
+        &[]
+    }
+
     /// Module-loading verbs — see `LoadVerb`. Default empty.
     fn load_verbs(&self) -> &[LoadVerb] {
         &[]
@@ -1649,6 +1667,14 @@ impl PluginRegistry {
     /// Trigger-independent, same rationale as `overrides`.
     pub fn dispatch_verbs<'a>(&'a self) -> impl Iterator<Item = &'a DispatchVerb> + 'a {
         self.plugins.iter().flat_map(|p| p.dispatch_verbs().iter())
+    }
+
+    /// Every language-root document, in registration order (bundled
+    /// first, then plugin dirs) — the order `LanguageRoots` merges in.
+    pub fn language_roots(&self) -> crate::model::roots::LanguageRoots {
+        crate::model::roots::LanguageRoots::from_documents(
+            self.plugins.iter().flat_map(|p| p.language_root().iter()),
+        )
     }
 
     /// Yield every attribute-macro declaration across the registry.

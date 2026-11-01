@@ -279,6 +279,7 @@ pub struct RhaiPlugin {
     dispatch_verbs: Vec<DispatchVerb>,
     #[cfg_attr(not(feature = "cpp"), allow(dead_code))]
     attribute_macros: Vec<AttributeMacro>,
+    language_root: Vec<crate::model::roots::RootDocument>,
     load_verbs: Vec<crate::build::plugin::LoadVerb>,
     param_types: Vec<ParamType>,
     type_constraint_names: Vec<String>,
@@ -341,6 +342,8 @@ impl RhaiPlugin {
             read_manifest_list(&engine, &ast, &signatures, &id, "dispatch_verbs");
         let attribute_macros: Vec<AttributeMacro> =
             read_manifest_list(&engine, &ast, &signatures, &id, "attribute_macros");
+        let language_root: Vec<crate::model::roots::RootDocument> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "language_root");
         let load_verbs: Vec<crate::build::plugin::LoadVerb> =
             read_manifest_list(&engine, &ast, &signatures, &id, "load_verbs");
         let param_types: Vec<ParamType> =
@@ -390,6 +393,7 @@ impl RhaiPlugin {
             overrides,
             dispatch_verbs,
             attribute_macros,
+            language_root,
             load_verbs,
             param_types,
             type_constraint_names,
@@ -489,6 +493,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn attribute_macros(&self) -> &[AttributeMacro] {
         &self.attribute_macros
+    }
+
+    fn language_root(&self) -> &[crate::model::roots::RootDocument] {
+        &self.language_root
     }
 
     fn load_verbs(&self) -> &[crate::build::plugin::LoadVerb] {
@@ -646,6 +654,9 @@ const BUNDLED: &[(&str, &str)] = &[
     ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),
     ("cpp-attributes", include_str!("../../../frameworks/cpp-attributes.rhai")),
     ("search-roots", include_str!("../../../frameworks/search-roots.rhai")),
+    ("roots-perl", include_str!("../../../frameworks/roots/perl.rhai")),
+    ("roots-php", include_str!("../../../frameworks/roots/php.rhai")),
+    ("roots-python", include_str!("../../../frameworks/roots/python.rhai")),
 ];
 
 /// One bundled plugin by id — for registries composed from a custom
@@ -1022,6 +1033,9 @@ mod tests {
             ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),
             ("cpp-attributes", include_str!("../../../frameworks/cpp-attributes.rhai")),
             ("search-roots", include_str!("../../../frameworks/search-roots.rhai")),
+            ("roots-perl", include_str!("../../../frameworks/roots/perl.rhai")),
+            ("roots-php", include_str!("../../../frameworks/roots/php.rhai")),
+            ("roots-python", include_str!("../../../frameworks/roots/python.rhai")),
         ] {
             RhaiPlugin::from_source(src, engine.clone())
                 .unwrap_or_else(|e| panic!("{}.rhai failed to compile: {e}", id));
@@ -1257,6 +1271,63 @@ mod tests {
             crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Foo".into()))
         );
         assert_eq!(ovs[0].reason, "test");
+    }
+
+    #[test]
+    fn bundled_language_roots_load_per_language() {
+        use crate::model::file_analysis::MemberKey;
+        use crate::model::roots::RootReach;
+        let mut reg = crate::build::plugin::PluginRegistry::new();
+        for p in load_bundled(Arc::new(make_engine())) {
+            reg.register(p);
+        }
+        let roots = reg.language_roots();
+
+        let perl = roots.surface("perl").expect("perl root");
+        assert_eq!(perl.class.as_deref(), Some("UNIVERSAL"));
+        for m in ["can", "isa", "DOES", "VERSION", "import", "unimport"] {
+            assert!(perl.member(MemberKey::Named(m)).is_some(), "UNIVERSAL::{m}");
+        }
+
+        let php = roots.surface("php").expect("php root");
+        assert_eq!(php.class, None, "php has no root class");
+        let ctor = php.member(MemberKey::Constructor).expect("implicit constructor");
+        assert_eq!((ctor.name.as_str(), ctor.reach), ("__construct", RootReach::Role));
+        assert!(ctor.params.is_empty());
+        assert!(php.member(MemberKey::Named("__construct")).is_none());
+
+        let python = roots.surface("python").expect("python root");
+        assert_eq!(python.class.as_deref(), Some("object"));
+        assert_eq!(python.member(MemberKey::Constructor).map(|m| m.name.as_str()), Some("__init__"));
+        for m in ["__init__", "__new__", "__repr__", "__eq__", "__hash__"] {
+            assert!(python.member(MemberKey::Named(m)).is_some(), "object.{m}");
+        }
+
+        assert!(roots.surface("cpp").is_none(), "C++ constructors are not inherited: no root");
+    }
+
+    #[test]
+    fn a_plugin_dir_manifest_adds_root_members() {
+        use crate::model::file_analysis::MemberKey;
+        // What a `$PERL_LSP_PLUGIN_DIR` file declares: matched by language,
+        // merged after the bundled document.
+        let extra = r#"
+            fn id() { "house-universal" }
+            fn triggers() { [] }
+            fn language_root() {
+                [ #{ language: "perl", members: [ #{ name: "house_dump", params: ["$depth"] } ] } ]
+            }
+        "#;
+        let engine = Arc::new(make_engine());
+        let mut reg = crate::build::plugin::PluginRegistry::new();
+        reg.register(load_bundled_plugin("roots-perl", engine.clone()).expect("bundled"));
+        reg.register(Box::new(RhaiPlugin::from_source(extra, engine).expect("compiles")));
+        let roots = reg.language_roots();
+        let perl = roots.surface("perl").unwrap();
+        assert_eq!(perl.class.as_deref(), Some("UNIVERSAL"), "the bundled class stands");
+        assert!(perl.member(MemberKey::Named("can")).is_some());
+        let added = perl.member(MemberKey::Named("house_dump")).expect("the plugin's member joins");
+        assert_eq!(added.params, vec!["$depth".to_string()]);
     }
 
     #[test]
