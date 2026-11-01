@@ -42,16 +42,13 @@ pub fn php_pack() -> LangPack {
     }
 }
 
-/// A declared type as written (`int`, `?Foo`, `\App\User`). A union has
-/// no single type in the lattice, and `self` / `parent` name a class by
-/// where they are written rather than by spelling, so each reads as no
-/// declared type; a class spelling resolves through the use-map at its
-/// site.
+/// A single declared type as written (`int`, `?Foo`, `\App\User`): the
+/// document captures no union or intersection. `self` / `parent` name a
+/// class by where they are written rather than by spelling, so each reads
+/// as no declared type; a class spelling resolves through the use-map at
+/// its site.
 fn declared_type(text: &str) -> Option<InferredType> {
     let t = text.trim().trim_start_matches('?');
-    if t.contains(['|', '&', '(']) {
-        return None;
-    }
     match t.to_ascii_lowercase().as_str() {
         "int" | "float" => Some(InferredType::Numeric),
         "string" => Some(InferredType::String),
