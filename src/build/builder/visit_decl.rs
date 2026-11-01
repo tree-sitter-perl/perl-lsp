@@ -561,6 +561,18 @@ impl<'a> Builder<'a> {
                 fields: field_details,
             },
         );
+        // Perl's `class` generates `new` for that class alone; the class
+        // declaration is where it is written.
+        let ctor = self.add_symbol_in_package(
+            "new".to_string(),
+            SymKind::Method,
+            node_to_span(node),
+            node_to_span(name_node),
+            SymbolDetail::Sub { params: Vec::new(), is_method: true, doc: None, opaque_return: false, is_constant: false, lexical: false },
+            Namespace::Language,
+            Some(name.clone()),
+        );
+        self.symbols[ctor.0 as usize].presentation.hide_in_outline = true;
 
         let has_block = node.child_by_field_name("body").is_some()
             || (0..node.child_count()).any(|i| node.child(i).map_or(false, |c| c.kind() == "block"));

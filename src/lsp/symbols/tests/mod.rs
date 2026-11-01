@@ -11,3 +11,4 @@ mod dispatch_tests;
 mod chain_tests;
 mod exports_tests;
 mod lint_tests;
+mod roots_tests;

@@ -827,28 +827,48 @@ impl FileAnalysis {
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<(String, String)> {
-        match self.resolve_constructor_in_ancestors(class_name, module_index)? {
-            MethodResolution::Local { class, sym_id } => Some((class, self.symbol(sym_id).name.clone())),
+        let resolution = self.resolve_constructor_in_ancestors(class_name, module_index)?;
+        // An implicit constructor is no member a reference can name.
+        if matches!(resolution, MethodResolution::Root { .. }) {
+            return None;
+        }
+        let name = self.resolved_member_name(&resolution, MemberKey::Constructor, module_index)?;
+        Some((resolution.class().to_string(), name))
+    }
+
+    /// The name of the member `resolution` found for an ask by `member`:
+    /// the asked name, or — for an ask by role — the declaration's own.
+    pub fn resolved_member_name(
+        &self,
+        resolution: &MethodResolution,
+        member: MemberKey<'_>,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
+        if let Some(n) = member.name() {
+            return Some(n.to_string());
+        }
+        match resolution {
+            MethodResolution::Local { sym_id, .. } => Some(self.symbol(*sym_id).name.clone()),
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
-                idx.visible_def_candidates(&class).iter().find_map(|cached| {
-                    let whole = idx.symbols_present(cached);
-                    let name = whole
+                idx.visible_def_candidates(class).iter().find_map(|cached| {
+                    idx.symbols_present(cached)
                         .symbols
                         .iter()
-                        .find(|s| s.is_constructor() && s.package.as_deref() == Some(class.as_str()))
-                        .map(|s| s.name.clone());
-                    name.map(|n| (class.clone(), n))
+                        .find(|s| member.admits(s) && s.package.as_deref() == Some(class.as_str()))
+                        .map(|s| s.name.clone())
                 })
             }
-            // An implicit constructor is no member a reference can name.
-            MethodResolution::Root { .. } => None,
+            MethodResolution::Root { member, .. } => Some(member.clone()),
         }
     }
 
     /// The member `r` calls on `class`: its token's name, or the name of
     /// the constructor a construction runs. `None` when a construction's
-    /// class declares no constructor anywhere in its MRO.
+    /// class declares no constructor anywhere in its MRO. The name is a
+    /// rename identity; a consumer that wants the member resolves
+    /// `r.member_key` instead, since a member reached only by role has no
+    /// name to resolve again.
     pub fn called_member<'r>(
         &self,
         r: &'r Ref,
@@ -1101,9 +1121,14 @@ impl FileAnalysis {
             if local {
                 return true;
             }
-            module_index
-                .map(|idx| idx.get_cached(name).is_some())
-                .unwrap_or(false)
+            if module_index.is_some_and(|idx| idx.get_cached(name).is_some()) {
+                return true;
+            }
+            // A use-map language spells an unbound `object` in the file's own
+            // namespace; the leaf widening every undeclared class gets
+            // (`ScopedLookup::use_map_candidates`) reaches the root.
+            self.names().use_map_sep().is_some()
+                && roots.is_root_class(&self.language, &name_match_key(name, self.names()))
         };
 
         let mut incomplete = false;
@@ -1161,7 +1186,7 @@ impl FileAnalysis {
 
     /// One class's own methods for `collect_ancestor_methods`: local,
     /// bridged plugin entities, and every cross-file file declaring it.
-    fn collect_class_methods(
+    pub(super) fn collect_class_methods(
         &self,
         original_class: &str,
         class_name: &str,

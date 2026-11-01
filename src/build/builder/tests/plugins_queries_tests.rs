@@ -117,8 +117,12 @@ sub session { my ($self, $key) = @_; }
         line: row,
         character: col,
     };
+    // The language root's members (UNIVERSAL's `can`, …) end every class's
+    // list; these assertions are about the classes' own.
+    let roots = crate::model::roots::installed();
+    let root_member = |l: &str| roots.surface("perl").is_some_and(|s| s.members.iter().any(|m| m.name == l));
     let call_label_set = |items: &[tower_lsp::lsp_types::CompletionItem]| -> Vec<String> {
-        items.iter().map(|it| it.label.clone()).collect()
+        items.iter().map(|it| it.label.clone()).filter(|l| !root_member(l)).collect()
     };
 
     let items = crate::lsp::symbols::completion_items_for_test(&fa, &tree, src, pos(7, 8), &idx, None);

@@ -501,10 +501,11 @@ fn test_field_reader_synthesizes_method() {
     let fa = build_fa(
         "use v5.38;\nclass Point {\n    field $x :param :reader;\n    field $y :param;\n}",
     );
+    // The class's generated `new` aside.
     let methods: Vec<_> = fa
         .symbols()
         .iter()
-        .filter(|s| s.kind == SymKind::Method)
+        .filter(|s| s.kind == SymKind::Method && s.name != "new")
         .collect();
     assert_eq!(
         methods.len(),

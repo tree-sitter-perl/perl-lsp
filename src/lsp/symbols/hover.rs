@@ -51,8 +51,17 @@ pub fn pack_hover_markdown(
                 .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
                 .iter()
                 .filter_map(|cn| {
-                    // A construction names each class's constructor.
-                    let field = analysis.called_member(r, cn, Some(midx))?;
+                    // A construction asks each class for its constructor, by
+                    // role: an implicit one has no name to ask again.
+                    let key = r.member_key(analysis.names());
+                    let resolution = analysis.resolve_member_key_in_ancestors(cn, key, Some(midx), want);
+                    let field = match &resolution {
+                        Some(crate::model::file_analysis::MethodResolution::Root { member, .. }) => {
+                            return analysis.root_member_hover(cn, member);
+                        }
+                        Some(res) => analysis.resolved_member_name(res, key, Some(midx))?,
+                        None => key.name()?.to_string(),
+                    };
                     member_hover_on(analysis, cn, &field, want, arm_for(cn), source, language, midx)
                 })
                 .collect();

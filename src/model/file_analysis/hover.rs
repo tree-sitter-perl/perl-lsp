@@ -55,12 +55,31 @@ impl FileAnalysis {
             .map(|(_, v)| v.clone())
     }
 
-    /// Hover for `mname` dispatched on `cn`; `via` names the dynamic method
+    /// Hover for a member the language guarantees `class` without a
+    /// declaration (`MethodResolution::Root`): its signature and doc.
+    pub fn root_member_hover(&self, class: &str, member: &str) -> Option<String> {
+        let roots = crate::model::roots::installed();
+        let surface = roots.surface(&self.language)?;
+        let m = surface.members.iter().find(|m| m.name == member)?;
+        let origin = match (m.constructor, surface.class.as_deref()) {
+            (true, _) if m.params.is_empty() => format!("implicit constructor of `{class}`, no parameters"),
+            (true, _) => format!("implicit constructor of `{class}`"),
+            (false, Some(root)) => format!("class {class} (from {root})"),
+            (false, None) => format!("class {class}"),
+        };
+        let mut text = format!("```{}\n{}({})\n```\n\n*{}*", self.language, m.name, m.params.join(", "), origin);
+        if let Some(doc) = &m.doc {
+            text.push_str(&format!("\n\n{doc}"));
+        }
+        Some(text)
+    }
+
+    /// Hover for `member` dispatched on `cn`; `via` names the dynamic method
     /// variable it was reached through (`$self->$via()`).
     fn method_hover_on(
         &self,
         cn: &str,
-        mname: &str,
+        member: MemberKey<'_>,
         via: Option<&str>,
         source: &str,
         module_index: Option<&dyn CrossFileLookup>,
@@ -72,8 +91,13 @@ impl FileAnalysis {
                 None => class,
             }
         };
-        match self.resolve_method_in_ancestors(cn, mname, module_index) {
-            Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
+        let resolution = self.resolve_member_key_in_ancestors(cn, member, module_index, MemberKind::Callable)?;
+        if let MethodResolution::Root { ref member, .. } = resolution {
+            return self.root_member_hover(cn, member);
+        }
+        let mname = &self.resolved_member_name(&resolution, member, module_index)?;
+        match resolution {
+            MethodResolution::Local { sym_id, class: ref defining_class, .. } => {
                 let sym = self.symbol(sym_id);
                 let line = source_line_at(source, sym.selection_span.start.row);
                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label(defining_class));
@@ -85,7 +109,7 @@ impl FileAnalysis {
                 }
                 Some(text)
             }
-            Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
+            MethodResolution::CrossFile { ref class, ref def_module, .. } => {
                 let idx = module_index?;
                 // Bridged helper lives in `def_module`; real inherited method
                 // in `class`'s own module. Either name maps to a SET of files —
@@ -104,7 +128,7 @@ impl FileAnalysis {
                 }
                 Some(text)
             }
-            Some(MethodResolution::Root { .. }) | None => None,
+            MethodResolution::Root { .. } => None,
         }
     }
 
@@ -135,8 +159,7 @@ impl FileAnalysis {
                                 .receiver_classes(mr, module_index, ReceiverPolicy::Edge)
                                 .iter()
                                 .filter_map(|cn| {
-                                    let mname = self.called_member(mr, cn, module_index)?;
-                                    self.method_hover_on(cn, &mname, Some(&r.target_name), source, module_index)
+                                    self.method_hover_on(cn, mr.member_key(self.names()), Some(&r.target_name), source, module_index)
                                 })
                                 .collect();
                             if !sections.is_empty() {
@@ -216,10 +239,7 @@ impl FileAnalysis {
                     let sections: Vec<String> = self
                         .receiver_classes(r, module_index, ReceiverPolicy::Edge)
                         .iter()
-                        .filter_map(|cn| {
-                            let method = self.called_member(r, cn, module_index)?;
-                            self.method_hover_on(cn, &method, None, source, module_index)
-                        })
+                        .filter_map(|cn| self.method_hover_on(cn, r.member_key(self.names()), None, source, module_index))
                         .collect();
                     if !sections.is_empty() {
                         return Some(sections.join("\n\n---\n\n"));

@@ -291,31 +291,50 @@ impl FileAnalysis {
         let mut candidates = Vec::new();
         let mut seen_names: HashSet<String> = HashSet::new();
 
-        // Check for class definition → implicit new
-        for sym in &self.symbols {
-            if matches!(sym.kind, SymKind::Class) && sym.name == class_name {
-                candidates.push(CompletionCandidate {
-                    label: "new".to_string(),
-                    kind: SymKind::Method,
-                    is_static: false,
-                    detail: Some(self.method_detail(class_name, "new", None, module_index)),
-                    insert_text: None,
-                    sort_priority: PRIORITY_LOCAL,
-                    additional_edits: vec![],
-                import_fact: None,
-                display_override: None,
-                });
-                seen_names.insert("new".to_string());
-                break;
-            }
-        }
-
         // Collect methods from this class and all ancestors. Perl has no
         // access-specifier concept, so no symbol here ever carries
         // "non_public" — `requesting_class: None` is a no-op gate.
         self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, None);
+        self.collect_root_methods(class_name, module_index, &mut candidates, &mut seen_names);
 
         candidates
+    }
+
+    /// The MRO's tail: what the language guarantees every class
+    /// (`crate::model::roots`), after every declared method shadowed it. A
+    /// real root class's own declarations come first; a member reached only
+    /// by role is no name to type.
+    fn collect_root_methods(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        candidates: &mut Vec<CompletionCandidate>,
+        seen_names: &mut HashSet<String>,
+    ) {
+        let roots = crate::model::roots::installed();
+        let Some(surface) = roots.surface(&self.language) else { return };
+        if let Some(root_class) = surface.class.as_deref() {
+            self.collect_class_methods(class_name, root_class, module_index, candidates, seen_names, None);
+        }
+        for m in surface.members.iter().filter(|m| m.named()) {
+            if !seen_names.insert(m.name.clone()) {
+                continue;
+            }
+            candidates.push(CompletionCandidate {
+                label: m.name.clone(),
+                kind: SymKind::Method,
+                is_static: false,
+                detail: Some(match surface.class.as_deref() {
+                    Some(root_class) => format!("{} (from {})", class_name, root_class),
+                    None => class_name.to_string(),
+                }),
+                insert_text: None,
+                sort_priority: PRIORITY_LESS_RELEVANT,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            });
+        }
     }
 
     /// Push a class's DATA fields (class-body `Variable`/`Field` members,

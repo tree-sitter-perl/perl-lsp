@@ -99,6 +99,9 @@ pub enum ResolvedSub<'a> {
         is_method: bool,
         hash_keys: Vec<String>,
     },
+    /// A member the language guarantees (`MethodResolution::Root`): its
+    /// document's parameters, no declaration behind them.
+    Root { params: Vec<ParamInfo> },
 }
 
 // ---- Completion types ----
@@ -798,6 +801,7 @@ impl FileAnalysis {
                     })
                     .collect()
             }
+            ResolvedSub::Root { .. } => Vec::new(),
         }
     }
 
@@ -882,10 +886,51 @@ impl FileAnalysis {
                     param_types: Some(param_types),
                 })
             }
+            ResolvedSub::Root { params } => Some(SignatureInfo {
+                name: name.to_string(),
+                param_types: Some(vec![None; params.len()]),
+                params,
+                is_method: true,
+                body_end: Point::new(0, 0),
+            }),
         }
     }
 
     // ---- Internal completion helpers ----
+
+    /// The signature a root member's document declares.
+    fn root_resolved_sub(&self, member: &str) -> Option<ResolvedSub<'static>> {
+        let roots = crate::model::roots::installed();
+        let m = roots.surface(&self.language)?.members.iter().find(|m| m.name == member)?;
+        let params = m
+            .params
+            .iter()
+            .map(|p| ParamInfo { name: p.clone(), default: None, is_slurpy: false, is_invocant: false, binding_site: None })
+            .collect();
+        Some(ResolvedSub::Root { params })
+    }
+
+    /// The signatures `member` has on `class`: what its MRO dispatches to,
+    /// else what the language guarantees. A construction asks by role.
+    pub fn member_signatures(
+        &self,
+        class: &str,
+        member: MemberKey<'_>,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<SignatureInfo> {
+        let resolution = self.resolve_member_key_in_ancestors(class, member, module_index, MemberKind::Callable)?;
+        let name = self.resolved_member_name(&resolution, member, module_index)?;
+        let resolved = match resolution {
+            MethodResolution::Local { sym_id, .. } => ResolvedSub::Local(self.symbol(sym_id)),
+            MethodResolution::CrossFile { ref class, .. } => {
+                let idx = module_index?;
+                let cached = idx.candidate_defining_sub(class, &name)?;
+                cross_file_resolved(&idx.bag_present(&cached).sub_info_view(&name)?)
+            }
+            MethodResolution::Root { ref member, .. } => self.root_resolved_sub(member)?,
+        };
+        self.signature_of(&name, true, resolved)
+    }
 
     /// Find a sub/method by name, optionally scoped to the classes its receiver
     /// may be: one per class that defines it, else the name fallbacks.
@@ -934,7 +979,7 @@ impl FileAnalysis {
                     let whole = idx.bag_present(&cached);
                     whole.sub_info_view(name).map(|sub_info| cross_file_resolved(&sub_info))
                 }
-                MethodResolution::Root { .. } => None,
+                MethodResolution::Root { ref member, .. } => self.root_resolved_sub(member),
             })
             .collect();
         if !per_class.is_empty() {

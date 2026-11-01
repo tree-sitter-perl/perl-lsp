@@ -302,9 +302,10 @@ pub fn collect_diagnostics(
 
         // Names the Perl language owns never resolve to user code: the
         // model's builtin surface (the same authority the BUILTIN
-        // resolution tier and builtin hover read) plus the indirect-object
-        // constructor convention (`new Foo(...)` parses as a call named
-        // `new`).
+        // resolution tier and builtin hover read). And `new Foo(...)` where
+        // `Foo` is a package this file never named parses as a call named
+        // `new` (indirect-object syntax the builder declines): an
+        // unresolved PACKAGE, which this function check cannot judge.
         if crate::model::builtins::is_builtin(name)
             || crate::model::conventions::is_constructor_name(name)
         {
@@ -437,13 +438,12 @@ pub fn collect_diagnostics(
     }
     // 5e: Unresolved method diagnostics for locally-defined classes.
     //
-    // Core owns ONLY the true `UNIVERSAL::` surface — the methods every Perl
-    // class answers regardless of framework. Everything framework-shaped
-    // (DBIC's `DBIx::Class::Core` inheritance, Moose's meta) is declared by
-    // the plugin that knows it, via the `meta_methods()` manifest, and
-    // arrives baked on the analysis. A per-framework name list here would be
-    // a partial enumeration that silently misses tomorrow's framework
-    // (rule #10).
+    // What every class of a language answers without declaring it (Perl's
+    // UNIVERSAL, PHP's implicit constructor) is the language root, which
+    // the MRO walk itself answers. What a framework adds (DBIC's
+    // `DBIx::Class::Core` inheritance, Moose's meta) is declared by the
+    // plugin that knows it, via the `meta_methods()` manifest, and arrives
+    // baked on the analysis.
     //
     // Built once as a set, not scanned per ref: the loop below runs per
     // method-call ref (it carries its own ghost-stats region for that
@@ -451,13 +451,13 @@ pub fn collect_diagnostics(
     // declare as many meta-methods as it likes, so a linear scan here
     // degrades with the plugin roster rather than staying bounded.
     let implicitly_answered: std::collections::HashSet<&str> =
-        ["new", "AUTOLOAD", "DESTROY", "can", "isa", "DOES", "VERSION"]
+        ["new"]
             .into_iter()
             .chain(analysis.plugin.meta_methods.iter().map(|s| s.as_str()))
             .collect();
     // True only when `class_name` is a class we can fully see and nothing in
     // its MRO answers `method_name`.
-    let class_lacks_method = |class_name: &str, method_name: &str| -> bool {
+    let class_lacks_method = |class_name: &str, member: crate::model::file_analysis::MemberKey<'_>| -> bool {
         // Fire for classes we can fully see. Always-on: classes defined in
         // THIS file (high precision — you wrote it, the walker sees its
         // methods). Opt-in (D8): also cross-file-resolvable classes, so a
@@ -487,7 +487,10 @@ pub fn collect_diagnostics(
             return false;
         }
 
-        if analysis.resolve_method_in_ancestors(class_name, method_name, Some(module_index)).is_some() {
+        if analysis
+            .resolve_member_key_in_ancestors(class_name, member, Some(module_index), crate::model::file_analysis::MemberKind::Callable)
+            .is_some()
+        {
             return false;
         }
 
@@ -517,11 +520,11 @@ pub fn collect_diagnostics(
             _ => continue,
         };
         let method_name = &r.target_name;
+        // A construction asks for its class's constructor; its token names
+        // the class, not a method.
+        let member = r.member_key(analysis.names());
 
-        // Skip methods every class of its kind answers without declaring. A
-        // construction is one: a class with no declared constructor still
-        // constructs, and its token names the class, not a method.
-        if r.constructs() || implicitly_answered.contains(method_name.as_str()) {
+        if member.name().is_some_and(|n| implicitly_answered.contains(n)) {
             continue;
         }
 
@@ -531,7 +534,7 @@ pub fn collect_diagnostics(
         // fails. Caller-side package dispatch (`Class::method`) is intentional
         // and not our job to validate here.
         use crate::model::conventions::{InvocantText, MethodToken};
-        if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
+        if member.name().is_some() && !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
             continue;
         }
 
@@ -547,7 +550,7 @@ pub fn collect_diagnostics(
         // Each arm is checked on its own, so a union receiver warns for the
         // arms that lack the method even when another arm answers it — the
         // call dies at runtime for exactly those values.
-        let missing: Vec<&str> = classes.iter().filter(|cn| class_lacks_method(cn, method_name)).collect();
+        let missing: Vec<&str> = classes.iter().filter(|cn| class_lacks_method(cn, member)).collect();
         if missing.is_empty() {
             continue;
         }
