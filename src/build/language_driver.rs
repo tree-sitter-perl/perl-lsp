@@ -287,6 +287,10 @@ impl Maturity {
 pub struct PerlDriver;
 
 impl LanguageDriver for PerlDriver {
+    /// The plugin set: a `.rhai` edit changes what every analysis emits.
+    fn analysis_input_fingerprint(&self) -> u64 {
+        crate::build::plugin::rhai_host::plugin_fingerprint()
+    }
     fn maturity(&self) -> Maturity {
         Maturity::Stable
     }

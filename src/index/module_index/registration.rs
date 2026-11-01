@@ -1981,13 +1981,10 @@ impl ModuleIndex {
         self.all_files.len()
     }
 
-    /// Rebuild the reverse index (`func → modules`) from the current cache.
-    /// `warm_cache` writes straight into `cache_raw()` and never touches the
-    /// reverse index, so a CLI/full-startup warm path that skips this leaves
-    /// `find_exporters` blind to cached modules — the warm run then degrades
-    /// "exported by X (not yet imported)" hints to a bare "not defined"
-    /// (the B6 cold/warm attribution regression). The resolver thread already
-    /// calls the equivalent rebuild after its own warm.
+    /// Rebuild the reverse index (`func → modules`) from the current cache,
+    /// so `find_exporters` answers identically on cold and warm runs — a
+    /// blind one degrades "exported by X (not yet imported)" hints to a bare
+    /// "not defined" (the B6 cold/warm attribution regression).
     pub fn rebuild_reverse_index_from_cache(&self) {
         self.core.rebuild_reverse_index();
         // The cache holds one WINNER per name; a same-name sibling file's

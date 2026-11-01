@@ -727,6 +727,7 @@ fn perls_map_is_inc_with_the_project_libs_first() {
         root: Some(dir.clone()),
         locator: inc.clone(),
         generation: 0,
+        fingerprint: 0,
     };
     let providers = files(locate_and_parse(&snap, "Twin"));
     let paths: Vec<PathBuf> = providers.iter().map(|p| p.path.clone()).collect();

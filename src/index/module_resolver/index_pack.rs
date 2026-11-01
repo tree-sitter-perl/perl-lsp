@@ -59,7 +59,9 @@ pub fn index_pack_language(
 
     let total = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
-    if !paths.is_empty() {
+    // The store's readers serve the resolver's landings as well as the walk's
+    // files, so they are installed whatever the walk found.
+    {
         // Slice-2 bag-rehydration LRU: a loader that opens THIS lang's SQLite
         // conn on demand (rusqlite `Connection` isn't `Sync`, so we open per
         // rehydration miss — rare, and SQLite handles concurrent readers) and
@@ -106,15 +108,15 @@ pub fn index_pack_language(
                 module_cache::open_cache_db_readonly(cache_key_owned.as_deref(), lang)
             }));
         }
+    }
+    if !paths.is_empty() {
+        let pack_index = index;
         let conn = module_cache::open_cache_db(cache_key, lang);
         // A generation built under different analysis inputs (toolchain
         // change — or its probe FAILURE, which empties the system include
-        // roots) must not be warmed: hard-clear, same as `validate_inc_paths`.
+        // roots) must not be warmed: hard-clear.
         if let Some(ref conn) = conn {
-            let _ = module_cache::validate_input_fingerprint(
-                conn,
-                driver.analysis_input_fingerprint(),
-            );
+            let _ = module_cache::validate_store(conn, driver);
         }
 
         // WARM: stream valid cached analyses (keyed by file path) one row

@@ -285,44 +285,28 @@ pub fn warm_pack_stream_with_stubs(
     count
 }
 
-/// None-over-Some, atomically: the workspace registrar may register this
-/// name concurrently, and a sentinel clobber answers "no such module" all
-/// session. The entry API holds the shard lock across check+insert.
-fn insert_sentinel_guarded(
-    cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    module_name: String,
-) {
-    match cache.entry(module_name) {
-        dashmap::mapref::entry::Entry::Occupied(mut o) => {
-            if o.get().is_none() {
-                o.insert(None);
-            }
-        }
-        dashmap::mapref::entry::Entry::Vacant(v) => {
-            v.insert(None);
-        }
-    }
-}
-
-/// The name-keyed (@INC) warm lane. `cache` takes the name-slot winner and
-/// `all_defs` the whole provider relation — the table holds one row per
-/// FILE, so a name with two providers warms as two rows and the winner is
-/// DERIVED (@INC order is unavailable here, so it is the smallest path —
-/// the same order-independent tie-break the workspace tier uses; the
-/// resolver's own insert corrects it to true @INC order once it runs).
+/// The name-keyed (import-tier) warm lane, for every language's store:
+/// each persisted landing, one NAME at a time, handed to `land` with the
+/// files that answered it — or with none, for a remembered miss. The table
+/// holds one row per FILE, so a name with two providers warms as both. The
+/// map's precedence order is not stored, so they arrive in path order (the
+/// order-independent tie-break the workspace tier uses), which repeats
+/// byte-identically across warms. `land` returning false stops the scan:
+/// the map moved under it, and what it would land is asked again. Returns
+/// the rows warmed and the names whose rows predate this extractor (landed
+/// all the same, and asked again).
 pub fn warm_cache(
     conn: &Connection,
-    cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
-    strip: bool,
+    land: &mut dyn FnMut(&str, Vec<Arc<CachedModule>>) -> bool,
 ) -> (usize, Vec<String>) {
-    // Name-keyed warm serves the @INC tier only; 'workspace' rows are
-    // path-keyed and stream through `warm_cache_streaming` — loading them
-    // here would pollute the module cache with path-string keys. The tag is
-    // the keying scheme, never the writer: every name-keyed producer shares
-    // `NAME_KEYED_SOURCE` so a new writer cannot strand its rows unread.
+    // 'workspace' rows are path-keyed and stream through
+    // `warm_cache_streaming`. The tag is the keying scheme, never the
+    // writer: every name-keyed producer shares `NAME_KEYED_SOURCE` so a new
+    // writer cannot strand its rows unread. The order is the primary key's,
+    // so the scan walks its index and a name's rows arrive together.
     let mut stmt = match conn.prepare(
-        "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp FROM modules WHERE source = ?1",
+        "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp \
+         FROM modules WHERE source = ?1 ORDER BY module_name, path",
     ) {
         Ok(s) => s,
         Err(_) => return (0, Vec::new()),
@@ -343,8 +327,24 @@ pub fn warm_cache(
         Err(_) => return (0, Vec::new()),
     };
 
+    /// One name's rows: the files that warmed, and whether a remembered
+    /// miss was among them.
+    struct Group {
+        name: String,
+        providers: Vec<Arc<CachedModule>>,
+        miss: bool,
+    }
+    fn flush(group: Option<Group>, land: &mut dyn FnMut(&str, Vec<Arc<CachedModule>>) -> bool) -> bool {
+        match group {
+            // A file outranks a remembered miss of the same name.
+            Some(g) if !g.providers.is_empty() || g.miss => land(&g.name, g.providers),
+            _ => true,
+        }
+    }
+
     let mut count = 0usize;
     let mut stale_names = Vec::new();
+    let mut group: Option<Group> = None;
     // Closure members overlap heavily across rows; stat each once per warm.
     let mut stat_memo: std::collections::HashMap<String, (i64, i64)> =
         std::collections::HashMap::new();
@@ -355,6 +355,13 @@ pub fn warm_cache(
         r
     }).flatten() {
         let (module_name, path_str, cached_mtime, cached_size, analysis_blob, row_extract_version, row_deps_stamp) = row;
+        if group.as_ref().is_none_or(|g| g.name != module_name) {
+            if !flush(group.take(), land) {
+                return (count, stale_names);
+            }
+            group = Some(Group { name: module_name.clone(), providers: Vec::new(), miss: false });
+        }
+        let g = group.as_mut().expect("opened above");
 
         let path = match classify_row_generation(
             &path_str,
@@ -363,11 +370,8 @@ pub fn warm_cache(
             row_extract_version,
         ) {
             // Negative sentinel: empty path + NULL blob — a remembered miss.
-            // Never over a Some: the workspace indexer may have registered
-            // this name concurrently (the insert_into_cache guard's warm
-            // twin — a clobber here answers "no such module" all session).
             RowGeneration::Sentinel => {
-                insert_sentinel_guarded(cache, module_name);
+                g.miss = true;
                 count += 1;
                 continue;
             }
@@ -378,8 +382,7 @@ pub fn warm_cache(
                 let _ = crate::index::module_cache::invalidate_generation(conn, &path_str);
                 continue;
             }
-            // @INC tier policy: stale entries still load, queued for
-            // priority re-resolve.
+            // Stale entries still load, queued for priority re-resolve.
             RowGeneration::VersionStale => {
                 stale_names.push(module_name.clone());
                 PathBuf::from(&path_str)
@@ -388,39 +391,28 @@ pub fn warm_cache(
         };
 
         match analysis_blob {
-            Some(blob) if !blob.is_empty() => {
-                match decode_analysis_parts(&blob, None, false) {
-                    Some(mut fa) => {
-                        // A pack file's analysis bakes its headers (splices,
-                        // witnesses, closure): the row is valid only while the
-                        // whole closure is unchanged, not just the file itself.
-                        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
-                            continue;
-                        }
-                        // Strip AT INSERT (long-lived processes): the blob
-                        // just decoded IS the recoverable generation, and
-                        // stripping here (not a post-hoc sweep) can never
-                        // touch a copy some OTHER path registered
-                        // whole-for-a-reason (writer fallback, watcher).
-                        if strip && !fa.degraded {
-                            fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
-                        }
-                        let cand = Arc::new(CachedModule::new(path, Arc::new(fa)));
-                        adopt_warm_provider(cache, all_defs, &module_name, cand);
-                        count += 1;
+            Some(blob) if !blob.is_empty() => match decode_analysis_parts(&blob, None, false) {
+                Some(fa) => {
+                    // A pack file's analysis bakes its headers (splices,
+                    // witnesses, closure): the row is valid only while the
+                    // whole closure is unchanged, not just the file itself.
+                    if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
+                        continue;
                     }
-                    None => {
-                        log::warn!("Failed to decode cached analysis for '{}', skipping", module_name);
-                    }
+                    g.providers.push(Arc::new(CachedModule::new(path, Arc::new(fa))));
+                    count += 1;
                 }
-            }
+                None => {
+                    log::warn!("Failed to decode cached analysis for '{}', skipping", module_name);
+                }
+            },
             _ => {
                 // Blob missing / empty on a NON-sentinel row (a legacy
                 // NULL-blob write): re-resolve rather than remember a miss —
                 // a sentinel here would be a terminal cross-session false
                 // negative for a real module.
                 if path_str.is_empty() {
-                    insert_sentinel_guarded(cache, module_name);
+                    g.miss = true;
                 } else {
                     stale_names.push(module_name);
                 }
@@ -428,29 +420,7 @@ pub fn warm_cache(
             }
         }
     }
+    flush(group.take(), land);
 
     (count, stale_names)
-}
-
-/// Adopt one warmed row as a provider of `module_name`: replace-by-path in
-/// the relation (a re-warm must not stack), then re-derive the name-slot
-/// winner from the SET. Row order out of SQLite is not @INC order and is
-/// not stable, so the winner cannot be "whichever row arrived last" —
-/// smallest path makes repeat warms byte-identical.
-fn adopt_warm_provider(
-    cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
-    module_name: &str,
-    cand: Arc<CachedModule>,
-) {
-    let mut v = all_defs.entry(module_name.to_string()).or_default();
-    match v.iter().position(|c| c.path == cand.path) {
-        Some(i) => v[i] = cand.clone(),
-        None => v.push(cand.clone()),
-    }
-    let winner = v.iter().min_by(|a, b| a.path.cmp(&b.path)).cloned();
-    drop(v);
-    if let Some(w) = winner {
-        cache.insert(module_name.to_string(), Some(w));
-    }
 }
