@@ -55,7 +55,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
         match sym.kind {
             FaSymKind::Variable => {
                 // Skip conventional invocants — always the enclosing class.
-                if crate::model::conventions::is_conventional_invocant_name(&sym.name) {
+                if sym.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER) {
                     continue;
                 }
                 // Skip variables whose type is written EXPLICITLY (`int c`,
@@ -73,7 +73,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 }
                 if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, sym.span.start) {
                     // Only show Object/HashRef/ArrayRef/CodeRef/Regexp — not Numeric/String
-                    if !ty.is_known() || matches!(ty, InferredType::Numeric | InferredType::String) {
+                    if !ty.is_known() || matches!(ty, InferredType::Numeric) || ty.is_string() {
                         continue;
                     }
                     hints.push(InlayHint {
@@ -102,7 +102,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 if matches!(sym.detail, SymbolDetail::Sub { .. }) {
                     if let Some(rt) = analysis.symbol_return_type_via_bag(sym.id, None) {
                         // Only show non-trivial return types
-                        if matches!(rt, InferredType::Numeric | InferredType::String) {
+                        if matches!(rt, InferredType::Numeric) || rt.is_string() {
                             continue;
                         }
                         hints.push(InlayHint {

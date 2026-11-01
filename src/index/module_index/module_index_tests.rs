@@ -2537,79 +2537,6 @@ fn a_walk_reads_valid_rows_across_generations() {
 }
 
 
-/// The profile lattice's whole guarantee: never serve a partial copy to a
-/// fuller request, and always serve a full copy to a partial one.
-///
-/// Getting the direction backwards is silent. A `full` verb handed a
-/// `diagnostics` copy finds `method_target()` empty on every `MethodCall` and
-/// reports it as "no definition" — a missing ANSWER, not an error, and
-/// indistinguishable from a file that genuinely has none.
-///
-/// The profile rides the entry as a FIELD rather than the key, so the fuller
-/// build REPLACES the partial one; keying on it would keep two copies of one
-/// file's analysis for a distinction only one of them needs.
-#[test]
-fn the_overlay_never_serves_a_partial_copy_to_a_fuller_request() {
-    use crate::model::file_analysis::EnrichmentProfile;
-    use crate::model::witnesses::ResolutionSession;
-
-    if std::env::var_os("PERL_LSP_FULL_ENRICHMENT").is_some() {
-        // The A/B control forces `full()` everywhere, which is exactly what
-        // this test needs NOT to be in force.
-        return;
-    }
-
-    let idx = ModuleIndex::new_for_test();
-    let lib = parse_source_to_cached(
-        "package Lib;\nour @EXPORT_OK = ('make');\nsub make { my %h = (id => 1); return \\%h }\n1;\n",
-        "Lib",
-    );
-    let consumer = parse_source_to_cached(
-        "package App;\nuse Lib 'make';\nsub go { my $x = make(); return $x }\n1;\n",
-        "App",
-    );
-    idx.register_workspace_module(lib.path.to_path_buf(), Arc::clone(&lib.analysis));
-    idx.register_workspace_module(consumer.path.to_path_buf(), Arc::clone(&consumer.analysis));
-
-    // A diagnostics walk builds and caches a partial copy.
-    let partial = {
-        let _walk = ResolutionSession::enter(Some(&idx as &dyn CrossFileLookup));
-        ResolutionSession::declare_profile(EnrichmentProfile::diagnostics());
-        let a = idx.enriched_snapshot(&consumer).expect("diagnostics snapshot");
-        let b = idx.enriched_snapshot(&consumer).expect("diagnostics snapshot again");
-        assert!(
-            Arc::ptr_eq(&a, &b),
-            "a request at the SAME profile must hit — otherwise the lattice \
-             just disabled the overlay"
-        );
-        a
-    };
-
-    // A full walk must NOT be handed it.
-    let full = {
-        let _walk = ResolutionSession::enter(Some(&idx as &dyn CrossFileLookup));
-        ResolutionSession::declare_profile(EnrichmentProfile::full());
-        idx.enriched_snapshot(&consumer).expect("full snapshot")
-    };
-    assert!(
-        !Arc::ptr_eq(&partial, &full),
-        "a copy enriched for diagnostics was served to a request that reads \
-         the dispatch-target edge it never filled"
-    );
-
-    // ...and the fuller copy now serves the partial verb, in place.
-    let partial_again = {
-        let _walk = ResolutionSession::enter(Some(&idx as &dyn CrossFileLookup));
-        ResolutionSession::declare_profile(EnrichmentProfile::diagnostics());
-        idx.enriched_snapshot(&consumer).expect("diagnostics snapshot after full")
-    };
-    assert!(
-        Arc::ptr_eq(&full, &partial_again),
-        "the full copy contains everything diagnostics reads — refusing it \
-         makes the two verbs evict each other on every alternation"
-    );
-}
-
 /// The witness seams' retry gate: a one-shot process's `enriched_present` is
 /// `bag_present` — never a distinct view — so `serves_enriched` must say no,
 /// or every R4 escalation pays a fetch to learn nothing (measured: 706k
@@ -2814,4 +2741,77 @@ fn sweep_probe_memo_is_stamp_keyed_and_keeps_only_proven_verdicts() {
     assert_eq!(probe(&idx, sym(), Some(None)), Some(None));
     assert_eq!(probe(&idx, sym(), None), None);
     assert_eq!(runs.get(), 5);
+}
+
+/// A stripped copy replays its recorded feed, handler-owner bridges
+/// included: owning a handler bridges it, and the owner is read from the
+/// symbols the strip drops.
+#[test]
+fn a_stripped_copy_keeps_its_handler_owner_bridges() {
+    use crate::index::module_index::ModuleEdgeIndexes;
+    let mut fa = build_fa(
+        "package My::Emitter;\nuse parent 'Mojo::EventEmitter';\n\
+         sub register { my $self = shift; $self->on('ready', sub { 1 }); }\n",
+    );
+    // Only ownership may carry the bridge here.
+    fa.plugin.namespaces.clear();
+    assert!(
+        fa.symbols().iter().any(|s| s.kind == crate::model::file_analysis::SymKind::Handler),
+        "the fixture must emit a handler"
+    );
+    let bridges = |edges: &ModuleEdgeIndexes| -> Vec<String> {
+        edges
+            .snapshot()
+            .into_iter()
+            .filter(|(map, _, _)| *map == "bridges")
+            .map(|(_, key, _)| key)
+            .collect()
+    };
+    let path = PathBuf::from("/fake/emitter.pm");
+    let edges = ModuleEdgeIndexes::new();
+    edges.feed("My::Emitter", &path, &fa);
+    let whole = bridges(&edges);
+    assert!(!whole.is_empty(), "the owned handler bridges its owner");
+
+    fa.evict_symbols();
+    edges.purge_module("My::Emitter");
+    edges.feed("My::Emitter", &path, &fa);
+    assert_eq!(bridges(&edges), whole, "the stripped replay lost a bridge");
+}
+
+/// The server's shape of a gated file: a STRIPPED registered copy that
+/// rehydrates on demand. Its views still hand out the applied copy, and a
+/// consumer resolves the gated accessor through it.
+#[test]
+fn a_stripped_gated_copy_rehydrates_into_its_applied_view() {
+    use crate::index::pack_bag_cache::PackBagCache;
+    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    let mid = parse_source_to_cached("package Mid;\nuse parent 'DBIx::Class::Core';\n1;\n", "Mid");
+    let leaf = parse_source_to_cached(
+        "package Leaf;\nuse base 'Mid';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n",
+        "Leaf",
+    );
+    assert!(!leaf.analysis.plugin.gated_emissions.is_empty(), "fixture: gate is cross-file");
+    let whole = leaf.analysis.clone();
+    let cache = Arc::new(PackBagCache::new(8 * 1024 * 1024, move |_p: &std::path::Path, _want_bag: bool| {
+        Ok((*whole).clone())
+    }));
+    let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
+    idx.insert_cache("Mid", Some(mid));
+    let mut stripped = (*leaf.analysis).clone();
+    stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
+    assert!(stripped.symbols_are_evicted(), "fixture must model the workspace strip");
+    let stripped = Arc::new(CachedModule::new(leaf.path.clone(), Arc::new(stripped)));
+    idx.insert_cache("Leaf", Some(stripped.clone()));
+
+    let view = idx.symbols_present(&stripped);
+    assert!(
+        view.symbols().iter().any(|s| s.name == "name" && s.kind == SymKind::Method),
+        "the rehydrated view carries the gated accessor"
+    );
+    let consumer = parse_source_to_cached("package Use;\nsub f { 1 }\n1;\n", "Use");
+    assert!(matches!(
+        consumer.analysis.resolve_method_in_ancestors("Leaf", "name", Some(&idx)),
+        Some(MethodResolution::CrossFile { .. })
+    ));
 }

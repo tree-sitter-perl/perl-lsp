@@ -155,18 +155,6 @@ pub fn resolve_symbol_scoped(
                     }
                 }
             }
-            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
-                let bare = r.unqualified_target_name(analysis.names()).to_string();
-                if let Some(class) = analysis.method_call_invocant_class(r, module_index) {
-                    // Only an accessor-bearing group may claim a member
-                    // cursor (`require_reader`).
-                    if let Some(g) =
-                        attr_group_via_ancestors(&class, &bare, analysis, idx, true, false, scope)
-                    {
-                        return Some(g);
-                    }
-                }
-            }
             _ => {}
         }
     }
@@ -187,7 +175,7 @@ pub fn resolve_symbol_scoped(
             collect_package_var(&FileKey::Path(PathBuf::new()), analysis, &package, &name, &mut locs);
             // A group's spans are all rewritten, so a site with no name
             // token of its own (`${$n}`) is represented by its literal.
-            let mut spans: Vec<Span> = locs.into_iter().filter(|l| l.rewritable).map(|l| l.span).collect();
+            let mut spans: Vec<Span> = locs.into_iter().filter(|l| l.rewrite.rewrites()).map(|l| l.span).collect();
             // The decl token is both a symbol and a self-ref; dedup so a span
             // isn't rewritten twice.
             spans.sort_by_key(|s| (s.start.row, s.start.column, s.end.row, s.end.column));
@@ -364,6 +352,13 @@ pub fn resolve_symbol_scoped(
             }
         }
     }
+    // A member access names the member on every class its receiver may be.
+    if let Some(r) = analysis.member_token_at(point) {
+        let classes = analysis.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
+        if let Some(t) = member_access_target(r, &classes, analysis, module_index, scope) {
+            return Some(t);
+        }
+    }
     Some(match analysis.rename_kind_at(point, module_index)? {
         RenameKind::Variable => ResolvedTarget::Local,
         RenameKind::HashKey(name) => match analysis.hash_key_owner_at(point) {
@@ -389,17 +384,7 @@ pub fn resolve_symbol_scoped(
             else {
                 return None;
             };
-            // A member-ACCESS cursor (`c->fd`) reaches here as a generic
-            // Method kind; when the member is pack class content the target
-            // is the same one its DEF site mints, so it carries the same
-            // visibility identity. Perl methods are Sub/Method symbols —
-            // never class content — and keep empty `def_paths` (no gate).
-            if let TargetKind::Method { class } = &t.kind {
-                if let Some(bare) = class_member_bare_constant(&t.name, class, analysis, module_index, None) {
-                    t.def_paths = pack_class_def_paths(&t, analysis, module_index);
-                    t.bare_constant = bare;
-                }
-            }
+            stamp_class_content(&mut t, analysis, module_index);
             ResolvedTarget::Target(t)
         }
     })
@@ -451,4 +436,64 @@ pub(super) fn class_member_bare_constant(
             })
         })
     })
+}
+
+/// A Method target on pack class content is the same one its DEF site
+/// mints, so it carries the same visibility identity. Perl methods are
+/// Sub/Method symbols — never class content — and keep empty `def_paths`
+/// (no gate).
+fn stamp_class_content(t: &mut TargetRef, analysis: &FileAnalysis, module_index: Option<&dyn CrossFileLookup>) {
+    if let TargetKind::Method { class } = &t.kind {
+        if let Some(bare) = class_member_bare_constant(&t.name, class, analysis, module_index, None) {
+            t.def_paths = pack_class_def_paths(t, analysis, module_index);
+            t.bare_constant = bare;
+        }
+    }
+}
+
+/// What a member access (`$o->m`, `obj.f`) resolves to: on each class its
+/// receiver may be, the accessor group an attribute mints (constructor keys
+/// and slots included — only an accessor-bearing group may claim a member
+/// cursor), else the member's target through the one `RenameKind::Method`
+/// pipeline. One class answers itself; several answer one group, so
+/// goto-def, references and rename reach every arm. `None` when nothing
+/// pins the receiver.
+fn member_access_target(
+    r: &crate::model::file_analysis::Ref,
+    classes: &crate::model::file_analysis::ReceiverClasses,
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+    scope: OverrideScope,
+) -> Option<ResolvedTarget> {
+    let bare = r.unqualified_target_name(analysis.names()).to_string();
+    let mut per_class = classes.iter().filter_map(|class| {
+        let attr = module_index
+            .and_then(|idx| attr_group_via_ancestors(class, &bare, analysis, idx, true, false, scope));
+        attr.or_else(|| {
+            let kind = crate::model::file_analysis::RenameKind::Method {
+                name: bare.clone(),
+                class: class.to_string(),
+                member: MemberKind::of_ref(&r.kind),
+            };
+            let mut t = TargetRef::from_rename_kind(kind, analysis, module_index, scope)?;
+            stamp_class_content(&mut t, analysis, module_index);
+            Some(ResolvedTarget::Target(t))
+        })
+    });
+    let first = per_class.next()?;
+    let Some(second) = per_class.next() else { return Some(first) };
+    let (mut local, mut pinned, mut decls, mut members) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for arm in [first, second].into_iter().chain(per_class) {
+        match arm {
+            ResolvedTarget::Group { local_spans, pinned_spans, decl_spans, members: m } => {
+                local.extend(local_spans);
+                pinned.extend(pinned_spans);
+                decls.extend(decl_spans);
+                members.extend(m);
+            }
+            ResolvedTarget::Target(target) => members.push(GroupMember { target, rename: MemberRename::Bare }),
+            ResolvedTarget::Local => {}
+        }
+    }
+    Some(ResolvedTarget::Group { local_spans: local, pinned_spans: pinned, decl_spans: decls, members })
 }

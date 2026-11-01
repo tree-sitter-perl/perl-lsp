@@ -22,13 +22,6 @@ pub(crate) fn cli_check(args: &[String]) {
     }
     timings::enable_from_env();
 
-    // Declared BEFORE startup, because startup enriches: the profile has to be
-    // in force by the time the first analysis is enriched, not by the time the
-    // first diagnostic is asked for.
-    //
-    // Sound because this is a one-shot CLI process serving exactly one verb —
-    // see `declare_enrichment_profile`. A server verb must not do this.
-    file_analysis::declare_enrichment_profile(file_analysis::EnrichmentProfile::diagnostics());
 
     let (_ws, module_index) = cli_full_startup(root);
 
@@ -876,7 +869,7 @@ fn run_one(
                 if !analysis.symbols_are_evicted() {
                     covered.insert(path.to_path_buf());
                 }
-                for sym in analysis.symbols() {
+                for sym in analysis.symbols().iter().chain(&idx.shown_gated_symbols(cached, &q)) {
                     if sym.hidden_in_outline() {
                         continue;
                     }
@@ -1167,6 +1160,8 @@ fn sweep_one_file(
     // large self-time here is the signal that something inside it is
     // uninstrumented.)
     let diags = {
+        // The overlay's stamp and the lints share receiver resolutions.
+        let _session = crate::model::witnesses::ResolutionSession::enter_with_receivers(idx);
         let _g_enrich =
             crate::util::ghost_stats::ScopedNs::start("diag.0_enriched_snapshot");
         match idx.enriched_snapshot(&cached) {
@@ -1686,6 +1681,41 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
             }
         }
 
+        // Widening the return-arm join took, re-derived from the arms (the
+        // join is a pure function of them), never read from storage.
+        let widening: Vec<serde_json::Value> = {
+            use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+            let arms: Vec<file_analysis::InferredType> = analysis
+                .witnesses
+                .for_attachment(&WitnessAttachment::SymbolReturnArm(sym.id))
+                .iter()
+                .filter_map(|w| match &w.payload {
+                    WitnessPayload::InferredType(t) => Some(t.clone()),
+                    WitnessPayload::Edge(WitnessAttachment::Expr(span)) => {
+                        analysis.expr_type_at_span(*span, Some(&module_index))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let order = analysis.type_order(Some(&module_index));
+            let fmt = |ms: &[file_analysis::InferredType]| {
+                ms.iter().map(file_analysis::format_inferred_type).collect::<Vec<_>>()
+            };
+            file_analysis::join_all_traced(&arms, &order)
+                .map(|(_, steps)| steps)
+                .unwrap_or_default()
+                .iter()
+                .map(|w| match w {
+                    file_analysis::Widening::CommonClass { members, to } => {
+                        serde_json::json!({ "kind": "CommonClass", "members": fmt(members), "to": to })
+                    }
+                    file_analysis::Widening::Top { members } => {
+                        serde_json::json!({ "kind": "Top", "members": fmt(members) })
+                    }
+                })
+                .collect()
+        };
+
         let mut entry = serde_json::json!({
             "name": sym.name,
             "kind": format!("{:?}", sym.kind),
@@ -1700,6 +1730,9 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
         });
         if let Some(prov) = provenance {
             entry["return_type_provenance"] = prov;
+        }
+        if !widening.is_empty() {
+            entry["return_type_widening"] = serde_json::json!(widening);
         }
         if let Some(d) = sym.presentation.display {
             entry["display"] = serde_json::json!(format!("{:?}", d));

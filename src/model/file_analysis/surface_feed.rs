@@ -14,7 +14,7 @@ use super::*;
 /// Field reads go through the named borrows. The `analysis` handle exists
 /// ONLY for the derived queries whose conclusions land in projected values
 /// (`symbol_return_type_via_bag`, `is_linkage_visible`,
-/// `symbol_is_class_content`) — never for direct field access, which would
+/// `symbol_is_class_content`, `gated_candidates`, `bridge_classes`) — never for direct field access, which would
 /// bypass the classification gate.
 pub struct SurfaceFeed<'a> {
     pub symbols: &'a [Symbol],
@@ -93,7 +93,7 @@ impl FileAnalysis {
                     loads: plugin_loads,
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
-                    gated_emissions: _gated_emissions, // re-fired by this file's OWN enrichment
+                    gated_emissions: _gated_emissions, // projected as candidates through the derived-query handle (`gated_candidates`), the mint the rows read
                     meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 
@@ -117,7 +117,7 @@ impl FileAnalysis {
             guard_sites: _guard_sites,           // own-file narrowing diagnostics
             arrow_deref_sites: _arrow_deref_sites, // own-file deref diagnostics
             key_writes: _key_writes,             // own-file mutation-extension input; resulting shapes surface via `ret`
-            reassigned_scalars: _reassigned_scalars, // own-file shape trust gate
+            reassigned_vars: _reassigned_vars, // own-file shape trust gate
             flow_edges: _flow_edges,             // own-file value provenance
             unrowed_attachment_names: _unrowed_attachment_names, // derived residency digest for the consult pre-filter; changes only when the bag/tables it derives from change, so it carries no Surface edge of its own
 
@@ -142,6 +142,7 @@ impl FileAnalysis {
             use_map_pins: _use_map_pins, // sessional memo of a projection over the tables above
             base_witness_count: _base_witness_count,
             stamped_at: _stamped_at, // sessional re-stamp bookkeeping; a consumer's view of this file does not change when we last stamped it
+            instance: _instance, // sessional copy identity, not content
 
             // ---- Derived indices, rebuilt from the tables above.
             scope_starts: _scope_starts,

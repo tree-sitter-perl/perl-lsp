@@ -183,25 +183,34 @@ pub(super) fn classify_relational_arity(
 
 /// Do the return arms agree in a way that is the sub's genuine return type —
 /// as opposed to the lossy Object-subsumes-HashRef *dominance* that
-/// `resolve_return_type` also accepts? Decides whether an arity-discriminated
+/// the lattice join (`types.rs::join`) also accepts? Decides whether an arity-discriminated
 /// sub keeps its non-arity `return_arm_chain` fallback (agree → the arm-join
 /// is the right answer at every arity and at a no-hint query) or retracts it
 /// (disagree → a gap arity must answer None, not the fluent-class leak).
-pub(super) fn arms_genuinely_agree(types: &[InferredType]) -> Option<InferredType> {
-    let first = types.first()?;
-    if types.iter().all(|t| t == first) {
-        return Some(first.clone());
+pub(super) fn arms_genuinely_agree(
+    types: &[InferredType],
+    order: &dyn crate::model::file_analysis::TypeOrder,
+) -> Option<InferredType> {
+    use crate::model::file_analysis::{Subsumption, TypeOrder};
+    /// `order`, less the merges that are not agreement: an object absorbing
+    /// a hash, and widening many classes to a common one.
+    struct Agreement<'a>(&'a dyn TypeOrder);
+    impl TypeOrder for Agreement<'_> {
+        fn isa(&self, child: &str, ancestor: &str) -> bool {
+            self.0.isa(child, ancestor)
+        }
+        fn common_class(&self, _: &[&str]) -> Option<String> {
+            None
+        }
+        fn holds(&self, rule: Subsumption) -> bool {
+            rule != Subsumption::ObjectAbsorbsHash && self.0.holds(rule)
+        }
     }
-    if types.iter().all(|t| t.is_hash_shaped()) {
-        return Some(InferredType::HashRef);
+    match crate::model::file_analysis::join_all(types, &Agreement(order))? {
+        // Several values, or a value only some arms return: no agreement.
+        InferredType::Union(_) | InferredType::Optional(_) | InferredType::Unknown => None,
+        t => Some(t),
     }
-    if types.iter().all(|t| t.is_array_shaped()) {
-        return Some(InferredType::ArrayRef);
-    }
-    if types.iter().all(|t| matches!(t, InferredType::Bool | InferredType::Numeric)) {
-        return Some(InferredType::Numeric);
-    }
-    None
 }
 
 /// True if `node` evaluates to the length of `@_` — either `@_`
