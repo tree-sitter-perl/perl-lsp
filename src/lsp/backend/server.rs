@@ -1054,20 +1054,19 @@ impl LanguageServer for Backend {
             // edits. Accepting on any `symbol_at`/`ref_at` hit is a UX trap:
             // positions like `@_` or an ownerless constructor key resolve to
             // nothing renameable, so the user gets a box that silently no-ops.
-            // `renameable()` mirrors `rename_edits`' arms on the same set
-            // (incl. the pack probe: a rename the set would refuse or no-op on
-            // offers no box), so this gate tracks new renameable kinds
-            // automatically, with no change here.
+            // `renameable()` IS the rename probed on the same set, so this
+            // gate tracks new renameable kinds automatically, and a rename
+            // that would refuse says why here, before a name is typed.
             let cs = cx.set(cx.lookup(), &analysis, &uri, point, scope);
-            if !cs.renameable() {
-                return None;
+            if !cs.renameable().map_err(tower_lsp::jsonrpc::Error::invalid_params)? {
+                return Ok(None);
             }
-            box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
+            Ok(box_at.map(|(span, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
                 range: symbols::span_to_range(span),
                 placeholder,
-            })
+            }))
         })
-        .await
+        .await?
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -1510,7 +1509,9 @@ impl LanguageServer for Backend {
             // they don't shadow.
             let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
-            let mut visit = |uri: Url, analysis: &crate::model::file_analysis::FileAnalysis| {
+            let mut visit = |uri: Url,
+                             analysis: &crate::model::file_analysis::FileAnalysis,
+                             gated: &[crate::model::file_analysis::Symbol]| {
                 if !analysis.symbols_are_evicted() {
                     if let Ok(p) = uri.to_file_path() {
                         // Claim the canonical spelling too: rows are keyed
@@ -1522,7 +1523,7 @@ impl LanguageServer for Backend {
                         covered.insert(p);
                     }
                 }
-                for sym in analysis.symbols() {
+                for sym in analysis.symbols().iter().chain(gated) {
                     if sym.name.to_lowercase().contains(&query) {
                         if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
                             results.push(info);
@@ -1543,7 +1544,7 @@ impl LanguageServer for Backend {
                 if let Ok(p) = url.to_file_path() {
                     open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
                 }
-                visit(url.clone(), &doc.analysis);
+                visit(url.clone(), &doc.analysis, &[]);
             });
             cx.index().for_each_registered_file(&mut |cached| {
                 if open_paths.contains(&cached.path) {
@@ -1552,7 +1553,9 @@ impl LanguageServer for Backend {
                 let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
                     Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                visit(uri, &cached.analysis);
+                // The stored copy holds no gated content, and neither do
+                // its rows; the gates that fire now add theirs.
+                visit(uri, &cached.analysis, &cx.index().shown_gated_symbols(cached, &query));
             });
 
             // Rows pass: symbol-evicted copies (the served language's

@@ -1251,7 +1251,7 @@ class Node {
         .refs()
         .iter()
         .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
-        .map(|r| fa.method_call_invocant_class(r, None))
+        .map(|r| fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string))
         .collect();
     let node = || Some("App\\Node".to_string());
     assert_eq!(receivers, [node(), node(), node(), node()]);
@@ -1269,7 +1269,7 @@ fn a_call_chain_types_through_declared_returns() {
         .refs()
         .iter()
         .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
-        .map(|r| (r.target_name.as_str(), fa.method_call_invocant_class(r, None)))
+        .map(|r| (r.target_name.as_str(), fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string)))
         .collect();
     let builder = || Some("App\\Builder".to_string());
     let clock = || Some("Lib\\Clock".to_string());
@@ -1354,7 +1354,7 @@ fn an_inherited_declared_return_types_the_chain_across_files() {
         .refs()
         .iter()
         .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
-        .map(|r| (r.target_name.as_str(), child.method_call_invocant_class(r, Some(&ws.idx))))
+        .map(|r| (r.target_name.as_str(), child.receiver_classes(r, Some(&ws.idx), crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string)))
         .collect();
     let s = |c: &str| Some(c.to_string());
     assert_eq!(
@@ -1657,4 +1657,14 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
     assert_eq!(defs, [("App/Sub/Model.php".to_string(), 2, None)]);
     assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
     assert!(php_widening(&idx, user.0).is_empty());
+}
+
+// `$this` is the receiver of the method around it, stated by the document:
+// an object of that method's class. A function has no receiver.
+#[test]
+fn this_is_the_receiver_of_its_method() {
+    let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\nfunction g() { return $this; }\n");
+    let at = |row, col| fa.expr_type_at_span(Span { start: Point::new(row, col), end: Point::new(row, col + 5) }, None);
+    assert_eq!(at(2, 24), Some(InferredType::ClassName("A".into())));
+    assert_eq!(at(4, 22), None);
 }

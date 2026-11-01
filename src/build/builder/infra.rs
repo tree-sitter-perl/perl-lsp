@@ -71,12 +71,12 @@ impl<'a> Builder<'a> {
 
     /// A bare `shift` consumes `@_`'s head: from the call's end the window
     /// is the tail, latest-wins like any rebind. Only a shift that certainly
-    /// ran keeps the window known (`cst::is_conditionally_executed` is the
+    /// ran keeps the window known (`cst::conditional_arm` is the
     /// syntactic stand-in for that until the CFG tier, `docs/epics/16-cfg-
     /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
-        let conditional = crate::cst::is_conditionally_executed(node);
+        let conditional = crate::cst::conditional_arm(node, crate::cst::ArmBound::Sub).is_some();
         let tail = match self.arg_window_at(node) {
             Some(InferredType::Sequence(v)) if !conditional => v.into_iter().skip(1).collect(),
             _ => Vec::new(),

@@ -171,16 +171,22 @@ impl<'a> Builder<'a> {
         }) {
             top = p;
         }
-        top != elem && self.is_written_element(top)
+        top != elem && self.element_write_kind(top).is_some()
     }
 
-    /// An element some write targets: an assignment's left side, or a
-    /// write in place (`element_written_in_place`).
-    pub(super) fn is_written_element(&self, elem: Node<'a>) -> bool {
-        let assigned = elem.parent().is_some_and(|p| {
+    /// How a write targets `elem`, if one does.
+    pub(super) fn element_write_kind(&self, elem: Node<'a>) -> Option<ElementWrite> {
+        if let Some(p) = elem.parent().filter(|p| {
             p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(elem)
-        });
-        assigned || self.element_written_in_place(elem)
+        }) {
+            // An operator `assign_op` doesn't know still writes; reading
+            // first is the safe side.
+            return Some(match crate::cst::assign_op(p) {
+                Some(crate::cst::AssignOp::Plain) => ElementWrite::Plain,
+                _ => ElementWrite::Compound,
+            });
+        }
+        self.element_written_in_place(elem).then_some(ElementWrite::InPlace)
     }
 
     /// An element written in place. A list-assignment target's write is the
@@ -261,7 +267,7 @@ impl<'a> Builder<'a> {
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
-            conditional: crate::cst::is_conditionally_executed(left),
+            conditional: crate::cst::conditional_arm(left, crate::cst::ArmBound::Sub).is_some(),
         });
     }
 
@@ -878,5 +884,26 @@ impl<'a> Builder<'a> {
         }
         // Check this is the block's last statement
         crate::cst::last_element(parent).is_some_and(|last| last.id() == node.id())
+    }
+}
+
+/// How a write targets an element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ElementWrite {
+    /// `$h{k} = …`.
+    Plain,
+    /// `$h{k} ||= …`, `$h{k} .= …`: the op reads the element before it
+    /// writes it.
+    Compound,
+    /// `$h{k}++`, a list-assignment target, an autovivified container
+    /// (`element_written_in_place`).
+    InPlace,
+}
+
+impl ElementWrite {
+    /// Whether the write reads the element's current value, so the element
+    /// is a drill into the shape as well as a write extending it.
+    pub(super) fn reads_element(self) -> bool {
+        matches!(self, ElementWrite::Compound)
     }
 }

@@ -106,6 +106,12 @@ impl FileAnalysis {
 
     /// Resolve a variable name to its declaration at a given point.
     /// Returns the innermost-scope match (Perl lexical scoping).
+    /// Whether `name` at `point` is a method's receiver: the variable it
+    /// resolves to is the one its producer flagged `RECEIVER`.
+    pub fn is_receiver_at(&self, name: &str, point: Point) -> bool {
+        self.resolve_variable(name, point).is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER))
+    }
+
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
         self.lookup_chain(scope)
@@ -124,7 +130,7 @@ impl FileAnalysis {
     /// Each READ of a variable that occurs after a `std::move` of it and
     /// before it is reassigned — a use-after-move bug. The moved-from region
     /// runs from the move call to the earliest FlowEdge rebinding the var (the
-    /// SAME edge-driven cutoff narrowing uses, `earliest_rebind_in`), or the
+    /// SAME edge-driven cutoff narrowing uses, `RebindIndex`), or the
     /// enclosing scope's end. Reads are matched on name + access AND filtered
     /// to the move's scope subtree, so a same-named var in another function
     /// never false-flags. Returns (var name, read span).
@@ -153,6 +159,7 @@ impl FileAnalysis {
             key(&outer.start) <= key(&inner.start) && key(&inner.end) <= key(&outer.end)
         };
         let mut out = Vec::new();
+        let rebinds = RebindIndex::new(&self.flow_edges);
         for (name, move_span, move_scope) in &self.pack.moved_from {
             let scope_span = self.scope(*move_scope).span;
             // GATE B (in-function): only a move that is lexically inside SOME
@@ -207,7 +214,7 @@ impl FileAnalysis {
             }
             let scope_end = scope_span.end;
             let region = Span { start: move_span.end, end: scope_end };
-            let cutoff = earliest_rebind_in(&self.flow_edges, name, region).unwrap_or(scope_end);
+            let cutoff = rebinds.earliest_in(name, region).unwrap_or(scope_end);
             for r in self.refs() {
                 if r.target_name != *name || r.access != AccessKind::Read {
                     continue;
@@ -334,6 +341,7 @@ impl FileAnalysis {
             module_index,
             package_parents: &self.packages,
             app_surface_consumers: &self.plugin.app_surface_consumers,
+            lattice: crate::model::conventions::lattice_for(&self.language),
         }
     }
 
@@ -561,7 +569,7 @@ impl FileAnalysis {
 
     /// The type of the expression occupying `span`, resolved tree-free
     /// from the bag. This is the single query-time entry that
-    /// `method_call_invocant_class` and `resolve_expression_type` both
+    /// `resolve_receiver` and `resolve_expression_type` both
     /// route through: structure was discovered once in the builder
     /// (recorded as `Expr(span)` witnesses + the `Expression(refidx)`
     /// call axis), and every consumer reads it back by span.
@@ -661,18 +669,15 @@ impl FileAnalysis {
         // type with params substituted.
         if let Some((inv, r)) = self
             .refs
+            .member_hops_at(span.start)
             .iter()
+            .map(|&i| &self.refs[i])
             .filter_map(|r| {
                 let site = r.member_site()?;
                 let inv = site.invocant_span?;
                 let name_span = site.name_span;
-                if r.span != name_span
-                    || inv.start != span.start
-                    || (name_span.end.row, name_span.end.column)
-                        > (span.end.row, span.end.column)
-                    || (inv.end.row, inv.end.column)
-                        >= (name_span.start.row, name_span.start.column)
-                {
+                // The index holds member-token refs opening at `span.start`.
+                if name_span.end > span.end || inv.end >= name_span.start {
                     return None;
                 }
                 Some((inv, r, name_span.start))
@@ -704,16 +709,16 @@ impl FileAnalysis {
         // only spans the callee token — same start, narrower end. Feeds the
         // call's own return into the chain exactly like a variable's type
         // does.
-        if let Some((recv_idx, kind)) = self.refs.iter().enumerate().find_map(|(i, r)| {
-            if r.span.start == span.start
-                && (r.span.end.row, r.span.end.column) <= (span.end.row, span.end.column)
-                && matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. })
-            {
-                Some((i, &r.kind))
-            } else {
-                None
-            }
-        }) {
+        if let Some((recv_idx, kind)) = self
+            .refs
+            .calls_starting_at(span.start)
+            .iter()
+            .copied()
+            .filter(|&i| self.refs[i].span.end <= span.end)
+            // The lowest index: the first such call in ref order.
+            .min()
+            .map(|i| (i, &self.refs[i].kind))
+        {
             match kind {
                 RefKind::MethodCall { .. } => {
                     if let Some(t) =
@@ -808,8 +813,9 @@ impl FileAnalysis {
         out
     }
 
-    /// True when a closed literal shape on `var_text` is the variable's
-    /// whole story in this file: the scalar is never reassigned. Key
+    /// True when a closed literal shape on the variable `var_text` names at
+    /// `at` is its whole story in this file: that variable (not every one
+    /// spelled the same) is never reassigned. Key
     /// writes AND escapes are not gate clauses — both are modeled on
     /// the shape itself by the mutation-extension pass (writes extend
     /// or open; an escape is an open-switching write at the escape
@@ -818,8 +824,50 @@ impl FileAnalysis {
     /// conditional-reassignment disagreement
     /// (docs/adr/structural-shapes.md); the unknown-hash-key
     /// diagnostic only fires behind it.
-    pub fn closed_shape_is_whole_story(&self, var_text: &str) -> bool {
-        !self.reassigned_scalars.contains(var_text)
+    pub fn closed_shape_is_whole_story(&self, var_text: &str, at: Point) -> bool {
+        self.variable_binding(var_text, at).is_none_or(|id| !self.reassigned_vars.contains(&id))
+    }
+
+    /// The variable a use of `name` written at `at` binds to — the
+    /// builder's binding rule (`variable_use`) asked by name, so it agrees
+    /// with the binding on every ref of that spelling there.
+    pub fn variable_binding(&self, name: &str, at: Point) -> Option<SymbolId> {
+        let scope = self.scope_at(at)?;
+        let outcome = variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
+            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(|s| {
+                // An implicit global is minted from uses, not declared: the
+                // `Global` arm reaches it by its package.
+                let declared = match &s.detail {
+                    SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => false,
+                    _ => matches!(s.kind, SymKind::Variable | SymKind::Field),
+                };
+                let gate = match &s.detail {
+                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
+                    _ => None,
+                };
+                (declared && s.name == name).then_some((s.id, s.span.start, gate))
+            })
+        });
+        match outcome {
+            VariableUse::Declared(id) => Some(id),
+            VariableUse::GatedOur => None,
+            VariableUse::Global { package, name } => {
+                // A declared global wins over the one minted from uses, as
+                // it does in the binder.
+                let global = |minted: bool| {
+                    self.symbols.iter().find(|s| {
+                        s.name == name
+                            && s.package.as_deref().unwrap_or("main") == package
+                            && match s.detail {
+                                SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } => !minted,
+                                SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => minted,
+                                _ => false,
+                            }
+                    })
+                };
+                global(false).or_else(|| global(true)).map(|s| s.id)
+            }
+        }
     }
 
     /// Closed-shape hash-key typo sites: a READ of `$config->{typo}` where
@@ -858,7 +906,7 @@ impl FileAnalysis {
                 continue;
             };
             let Some(known_keys) = t.closed_keys_lacking(&r.target_name) else { continue };
-            if !self.closed_shape_is_whole_story(var_text) {
+            if !self.closed_shape_is_whole_story(var_text, r.span.start) {
                 continue;
             }
             out.push(KeyTypoSite {

@@ -375,12 +375,9 @@ pub struct RefLocation {
     /// at the site. `highlights()` renders it as the LSP highlight kind;
     /// other projections carry it for symmetry (a reference IS its access).
     pub access: AccessKind,
-    /// Whether rename may rewrite this span. `false` for a site whose name has
-    /// no literal token to replace — a const-folded event name
-    /// (`my $e = 'ready'; $obj->on($e)`) whose dispatch span IS the variable.
-    /// References lists it (it's a real use); rename skips it (rewriting the
-    /// variable would corrupt it). True for every literal occurrence.
-    pub rewritable: bool,
+    /// What rename does at this site — the one rename-site policy every
+    /// rename-shaped projection reads.
+    pub rewrite: SiteRewrite,
     /// A per-candidate fact worth surfacing beside the location — a macro
     /// variant's reachability verdict, a delegation see-through note. LSP
     /// `Location` has no label slot so the editor adapter drops it (ordering
@@ -388,7 +385,61 @@ pub struct RefLocation {
     pub label: Option<String>,
 }
 
+/// What rename does at one site of the references image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SiteRewrite {
+    /// The site spells the name literally; rename rewrites it.
+    Yes,
+    /// A real use with no literal token of its own — a const-folded name
+    /// (`my $e = 'ready'; $obj->on($e)`) whose span IS the variable. Rename
+    /// leaves it; the rewrite lands on the literal the fold came from.
+    Skip,
+    /// A use spelled through a delegating macro (`IncRef(x)` for
+    /// `#define IncRef(sv) Perl_Inc(sv)`): the token spells the macro, whose
+    /// body is not a collected span, so renaming the target would leave the
+    /// chain pointing at the old name.
+    ThroughMacro,
+    /// A union receiver's member access (`$pet->sound`, `$pet` a Cat or a
+    /// Bird): renaming one class's member here breaks the call for the
+    /// classes listed, which the rename would not touch.
+    Shared { also_on: Vec<String> },
+}
+
+impl SiteRewrite {
+    /// `Skip` unless `literal` — the site's name token is its own.
+    pub fn literal_if(literal: bool) -> Self {
+        if literal { SiteRewrite::Yes } else { SiteRewrite::Skip }
+    }
+
+    pub fn rewrites(&self) -> bool {
+        matches!(self, SiteRewrite::Yes)
+    }
+
+    /// The classes a `Shared` site also dispatches to; empty otherwise.
+    pub fn also_on(&self) -> &[String] {
+        match self {
+            SiteRewrite::Shared { also_on } => also_on,
+            _ => &[],
+        }
+    }
+}
+
 impl RefLocation {
+    /// A literal site (`SiteRewrite::Yes`, no label).
+    pub fn at(key: FileKey, span: Span, access: AccessKind) -> Self {
+        RefLocation { key, span, access, rewrite: SiteRewrite::Yes, label: None }
+    }
+
+    pub fn with_rewrite(mut self, rewrite: SiteRewrite) -> Self {
+        self.rewrite = rewrite;
+        self
+    }
+
+    pub fn with_label(mut self, label: Option<String>) -> Self {
+        self.label = label;
+        self
+    }
+
     pub fn to_url(&self) -> Option<Url> {
         match &self.key {
             FileKey::Url(u) => Some(u.clone()),

@@ -177,6 +177,63 @@ pub fn class_isa(
     )
 }
 
+/// The one least class every class in `classes` is an instance of, through
+/// the same local+cross-file isa seam as [`class_isa`]. `None` when they
+/// share no ancestor, or when the least shared ancestors are several
+/// (multiple inheritance): the answer must not depend on which parent a
+/// walk happened to reach first, or two processes would join differently.
+pub fn least_common_class(
+    classes: &[&str],
+    local: &dyn LocalParents,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Option<String> {
+    let (first, rest) = classes.split_first()?;
+    let mut common: Vec<String> = Vec::new();
+    walk_ancestry(
+        first,
+        crate::model::graph::WalkBound::ISA,
+        |cur| isa_parents(cur, local, module_index),
+        |c| {
+            if !common.iter().any(|have| have == c) && rest.iter().all(|other| class_isa(other, c, local, module_index)) {
+                common.push(c.to_string());
+            }
+            WalkVerdict::Miss
+        },
+    );
+    let least: Vec<&String> = common
+        .iter()
+        .filter(|c| !common.iter().any(|d| d != *c && class_isa(d, c, local, module_index)))
+        .collect();
+    match least.as_slice() {
+        [one] => Some((*one).clone()),
+        _ => None,
+    }
+}
+
+/// The type order a join reads: the isa graph (local declared parents plus
+/// the cross-file graph, through [`class_isa`] / [`least_common_class`]) and
+/// the bag's language's subsumption rules.
+#[derive(Clone, Copy)]
+pub struct IsaOrder<'a> {
+    pub local: &'a dyn LocalParents,
+    pub module_index: Option<&'a dyn CrossFileLookup>,
+    pub rules: &'a LatticeRules,
+}
+
+impl TypeOrder for IsaOrder<'_> {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        class_isa(child, ancestor, self.local, self.module_index)
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        least_common_class(classes, self.local, self.module_index)
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        self.rules.holds(rule)
+    }
+}
+
 /// Does `class`, or any of its transitive ancestors (cross-file), satisfy
 /// a plugin `ClassIsa(prefix)` trigger? The trigger's PREFIX semantics —
 /// exact match OR a `prefix::`-namespaced descendant — mirror
@@ -211,6 +268,16 @@ pub fn class_isa_prefix(
 }
 
 impl FileAnalysis {
+    /// The order a query-time join over this file's values reads: its
+    /// packages' parents, the index's graph, its language's rules.
+    pub fn type_order<'a>(&'a self, module_index: Option<&'a dyn CrossFileLookup>) -> IsaOrder<'a> {
+        IsaOrder {
+            local: &self.packages,
+            module_index,
+            rules: crate::model::conventions::lattice_for(&self.language),
+        }
+    }
+
     /// Single-source-of-truth DFS ancestor walk for every per-class
     /// lookup on this file: walks `class_name` and every ancestor
     /// (local `PackageFacts::parents` ∪ cross-file `parents_cached`),
@@ -548,14 +615,17 @@ impl FileAnalysis {
             }
         }
         // (b) Local plugin-namespace entities bridged to `cls`.
-        for ns in self.plugin.namespaces.iter().filter(|_| reaches_callables) {
-            if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
-            for sym_id in &ns.entities {
-                let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                if sym.name == method_name {
-                    return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
+        if reaches_callables {
+            let mut hit = None;
+            let _ = self.for_each_entity_bridged_to(cls, |sym| {
+                if matches!(sym.kind, SymKind::Sub | SymKind::Method) && sym.name == method_name {
+                    hit = Some(sym.id);
+                    return std::ops::ControlFlow::Break(());
                 }
+                std::ops::ControlFlow::Continue(())
+            });
+            if let Some(sym_id) = hit {
+                return Some(MethodResolution::Local { class: cls.to_string(), sym_id });
             }
         }
         // (c) Cross-file: the cached module for `cls` itself (real
@@ -654,13 +724,11 @@ impl FileAnalysis {
                     return Some(MethodResolution::CrossFile { class: cand_cls, def_module: None, widened });
                 }
                 // A cross-file DBIC result class's column/relationship accessors
-                // are DEFERRED plugin emissions (`gated_emissions`) that the raw
-                // cached copy doesn't carry. They are MATERIALIZED into the whole
-                // cached copy at index completion
-                // (`ModuleIndex::materialize_gated_emissions`), so the
+                // are deferred plugin emissions (`GatedEmission`); the index's
+                // views hand out the copy with them applied, so the
                 // `has_member` check above already sees them — no per-query
                 // enrichment hop here (that nested a full enrichment per hop and
-                // overflowed the stack on deep dep graphs). See `GatedEmission`.
+                // overflowed the stack on deep dep graphs).
             }
             // Cross-package typeglob install: the method is attributed to `cls`
             // but lives in a differently-named module file (`*{'DateTime::'.
@@ -950,20 +1018,35 @@ impl FileAnalysis {
         incomplete
     }
 
-    /// Recursively collect methods from a class and its ancestors, deduping by name.
+    /// Collect methods from a class and its ancestors, deduping by name
+    /// (child shadows parent). The MRO is `for_each_ancestor_class`, so a
+    /// class reached by several paths (a diamond, components over one base)
+    /// is collected once.
     pub(super) fn collect_ancestor_methods(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        candidates: &mut Vec<CompletionCandidate>,
+        seen_names: &mut HashSet<String>,
+        requesting_class: Option<&str>,
+    ) {
+        self.for_each_ancestor_class(class_name, module_index, |c| {
+            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, requesting_class);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+
+    /// One class's own methods for `collect_ancestor_methods`: local,
+    /// bridged plugin entities, and every cross-file file declaring it.
+    fn collect_class_methods(
         &self,
         original_class: &str,
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
-        depth: usize,
         requesting_class: Option<&str>,
     ) {
-        if depth > 20 {
-            return;
-        }
         // Access-specifier gate: visible from outside
         // `class_name`'s own body only when NOT tagged non-public.
         // Callability gate on the same closure so every enumeration loop in
@@ -1006,43 +1089,35 @@ impl FileAnalysis {
             }
         }
 
-        // Local plugin-namespace entities bridged to this class. The
-        // same-file equivalent of `for_each_entity_bridged_to` — plugin
-        // namespaces in THIS FileAnalysis whose bridges include
-        // `class_name`. Namespace membership is the sole filter (per
-        // `for_each_entity_bridged_to` docs); entity packages can be
-        // different from `class_name` (e.g. a helper Method whose
-        // package is `Mojolicious::Controller` surfacing from a
-        // `Mojolicious` query when the namespace bridges both).
-        for ns in &self.plugin.namespaces {
-            let bridges_class = ns.bridges.iter().any(|b|
-                matches!(b, Bridge::Class(c) if c == class_name));
-            if !bridges_class { continue; }
-            for sym_id in &ns.entities {
-                let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
-                if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                if seen_names.contains(&sym.name) { continue; }
-                if !visible(sym) { continue; }
-                seen_names.insert(sym.name.clone());
-                let defining = if class_name != original_class { Some(class_name) } else { None };
-                let display_override = sym.presentation.display;
-                candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
-                    kind: sym.kind,
-                    is_static: sym.flags.contains(SymbolFlags::STATIC),
-                    detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
-                    insert_text: None,
-                    sort_priority: PRIORITY_LOCAL,
-                    additional_edits: vec![],
-                    import_fact: None,
-                    display_override,
-                });
+        // Local entities bridged to this class. Bridging is the sole
+        // filter; entity packages can differ from `class_name` (a helper
+        // Method whose package is `Mojolicious::Controller` surfacing from
+        // a `Mojolicious` query when the namespace bridges both).
+        let _ = self.for_each_entity_bridged_to(class_name, |sym| {
+            if !matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                || seen_names.contains(&sym.name)
+                || !visible(sym)
+            {
+                return std::ops::ControlFlow::Continue(());
             }
-        }
+            seen_names.insert(sym.name.clone());
+            let defining = if class_name != original_class { Some(class_name) } else { None };
+            let display_override = sym.presentation.display;
+            candidates.push(CompletionCandidate {
+                label: sym.name.clone(),
+                kind: sym.kind,
+                is_static: sym.flags.contains(SymbolFlags::STATIC),
+                detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
+                insert_text: None,
+                sort_priority: PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override,
+            });
+            std::ops::ControlFlow::Continue(())
+        });
 
-        // Cross-file entity + own-class method collection. Parent
-        // recursion (local ∪ cross-file ∪ synthetic app-surface edge)
-        // is the single `parents_of` walk at the end of the fn.
+        // Cross-file entity + own-class method collection.
         if let Some(idx) = module_index {
             // Two sources of candidates:
             //   (1) Plugin entities reached through bridges (helpers,
@@ -1098,8 +1173,8 @@ impl FileAnalysis {
             // file declaring the class (a reopened package's methods live
             // across the set; `seen_names` keeps child-shadows-parent).
             for cached in idx.visible_def_candidates(class_name) {
-                let whole = idx.whole_present(&cached);
-                for sym in &whole.symbols {
+                let present = idx.symbols_present(&cached);
+                for sym in present.symbols() {
                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                     if sym.package.as_deref() != Some(class_name) { continue; }
                     if seen_names.contains(&sym.name) { continue; }
@@ -1125,21 +1200,6 @@ impl FileAnalysis {
                 }
             }
 
-        }
-
-        // Walk parents: local ∪ cross-file ∪ synthetic app-surface edge,
-        // unioned + deduped by `parents_of` (the single edge-injection
-        // site). Name dedup across the recursion is the `seen_names` set.
-        for parent in parents_of(
-            class_name,
-            &self.packages,
-            module_index,
-            &self.plugin.app_surface_consumers,
-        ) {
-            self.collect_ancestor_methods(
-                original_class, &parent, module_index, candidates, seen_names, depth + 1,
-                requesting_class,
-            );
         }
     }
 

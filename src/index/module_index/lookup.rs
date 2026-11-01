@@ -196,23 +196,14 @@ impl ModuleIndex {
             // Namespaces ride the never-evicted plugin lane, so symbols are
             // the only evictable axis this read touches.
             let whole = self.symbols_present(&cached);
-            for ns in &whole.plugin.namespaces {
-                let bridges_class = ns.bridges.iter().any(|b|
-                    matches!(b, crate::model::file_analysis::Bridge::Class(c) if c == class_name));
-                if !bridges_class { continue; }
-                // Namespace membership IS the filter — if this namespace
-                // bridges to `class_name`, every entity it owns is
-                // visible from `class_name`. No `sym.package` gate: the
-                // plugin picks ONE canonical home package and the
-                // namespace's bridges control visibility, so no
-                // per-bridge Method fan-out is needed.
-                for sym_id in &ns.entities {
-                    let idx = sym_id.0 as usize;
-                    let Some(sym) = whole.symbols().get(idx) else { continue };
-                    if visit(&mod_name, &cached, sym).is_break() {
-                        return;
-                    }
-                }
+            // Bridging IS the filter: no `sym.package` gate, since the plugin
+            // picks ONE canonical home package and the bridges control
+            // visibility, so no per-bridge Method fan-out is needed.
+            if whole
+                .for_each_entity_bridged_to(class_name, |sym| visit(&mod_name, &cached, sym))
+                .is_break()
+            {
+                return;
             }
             }
         }
@@ -246,10 +237,7 @@ impl ModuleIndex {
                 })
             },
         );
-        member_prefilter_may_declare(
-            !cached.analysis.plugin.gated_emissions.is_empty(),
-            rows,
-        )
+        member_prefilter_may_declare(rows)
     }
 
     /// Block until `module_name` appears in the cache, or timeout.
@@ -304,6 +292,49 @@ impl ModuleIndex {
 /// the inherent methods (inherent wins name resolution on `self`, so no
 /// recursion); the generic inherent iterators accept the `&mut dyn FnMut`
 /// trampolines directly.
+
+impl ModuleIndex {
+    /// The one place a closed file's deferred plugin emissions
+    /// (`GatedEmission`) meet a reader: every view the index hands out
+    /// passes through here, and a file whose gates fire under the current
+    /// ancestry is handed the copy with them applied. A whole copy, whatever
+    /// axes the view promised: an applied copy is a superset of all of them.
+    fn gated_view(&self, cached: &Arc<CachedModule>, view: Arc<FileAnalysis>) -> Arc<FileAnalysis> {
+        if cached.analysis.plugin.gated_emissions.is_empty() {
+            return view;
+        }
+        let verdicts = cached.analysis.gate_verdicts(Some(self));
+        if !verdicts.contains(&true) {
+            return view;
+        }
+        let generation = self.registration_gen_of(&cached.path);
+        self.gated_views.applied(&cached.path, generation, &cached.analysis, verdicts, || {
+            if view.is_fully_resident() {
+                view
+            } else {
+                self.rehydrate_or_resident(cached)
+            }
+        })
+    }
+
+    /// The gated symbols a listing adds to `cached` now: those whose gate
+    /// fires, with no view built. `query` (lowercased) bounds the decide to
+    /// files where a gated name could match; the base symbols come from the
+    /// resident copy or the rows, which hold no gated content.
+    pub fn shown_gated_symbols(&self, cached: &Arc<CachedModule>, query: &str) -> Vec<crate::model::file_analysis::Symbol> {
+        let fa = &cached.analysis;
+        let could_match = fa
+            .plugin
+            .gated_emissions
+            .iter()
+            .any(|em| em.symbols.iter().any(|s| s.name.to_lowercase().contains(query)));
+        if !could_match {
+            return Vec::new();
+        }
+        fa.shown_gated_symbols(&fa.gate_verdicts(Some(self)))
+    }
+}
+
 impl CrossFileLookup for ModuleIndex {
     fn resolution_epoch(&self) -> u64 {
         // The same additive counter the enrichment-key memo validates
@@ -359,10 +390,12 @@ impl CrossFileLookup for ModuleIndex {
 
 
     fn whole_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
-        if cached.analysis.is_fully_resident() {
-            return cached.analysis.clone();
-        }
-        self.rehydrate_or_resident(cached)
+        let view = if cached.analysis.is_fully_resident() {
+            cached.analysis.clone()
+        } else {
+            self.rehydrate_or_resident(cached)
+        };
+        self.gated_view(cached, view)
     }
 
     fn symbols_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -371,10 +404,12 @@ impl CrossFileLookup for ModuleIndex {
         // symbol-evicted and rehydrate through the rows-axes lane —
         // bag-stripped LRU entries, so the ancestry storm's working set
         // fits the cap instead of cycling whole copies through it.
-        if !cached.analysis.symbols_are_evicted() {
-            return cached.analysis.clone();
-        }
-        self.rehydrate_rows_or_resident(cached)
+        let view = if !cached.analysis.symbols_are_evicted() {
+            cached.analysis.clone()
+        } else {
+            self.rehydrate_rows_or_resident(cached)
+        };
+        self.gated_view(cached, view)
     }
 
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -384,10 +419,12 @@ impl CrossFileLookup for ModuleIndex {
         // both row axes and rehydrates — never resident-or-empty, or an
         // evicted-empty ref table would read as "this file has no matching
         // refs" and `references` silently under-reports.
-        if !cached.analysis.refs_are_evicted() && !cached.analysis.symbols_are_evicted() {
-            return cached.analysis.clone();
-        }
-        self.rehydrate_rows_or_resident(cached)
+        let view = if !cached.analysis.refs_are_evicted() && !cached.analysis.symbols_are_evicted() {
+            cached.analysis.clone()
+        } else {
+            self.rehydrate_rows_or_resident(cached)
+        };
+        self.gated_view(cached, view)
     }
 
     fn sweep_consult_answer(
@@ -471,10 +508,7 @@ impl CrossFileLookup for ModuleIndex {
                 })
             },
         );
-        member_prefilter_may_declare(
-            !cached.analysis.plugin.gated_emissions.is_empty(),
-            rows,
-        )
+        member_prefilter_may_declare(rows)
     }
 
     fn candidate_bag_may_answer(
@@ -518,10 +552,7 @@ impl CrossFileLookup for ModuleIndex {
                 }
             })
         });
-        member_prefilter_may_declare(
-            !cached.analysis.plugin.gated_emissions.is_empty(),
-            rows,
-        )
+        member_prefilter_may_declare(rows)
     }
 
     fn ref_candidate_paths(&self, keys: &[String]) -> Vec<std::path::PathBuf> {
@@ -686,12 +717,14 @@ impl CrossFileLookup for ModuleIndex {
     fn bag_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         // Never-evicted copy (open docs, degraded files kept whole): a cheap
         // Arc bump, no I/O.
-        if !cached.analysis.bag_is_evicted() {
+        let view = if !cached.analysis.bag_is_evicted() {
             crate::util::ghost_stats::count("bagpresent.resident_whole");
-            return cached.analysis.clone();
-        }
-        crate::util::ghost_stats::count("bagpresent.rehydrate");
-        self.rehydrate_or_resident(cached)
+            cached.analysis.clone()
+        } else {
+            crate::util::ghost_stats::count("bagpresent.rehydrate");
+            self.rehydrate_or_resident(cached)
+        };
+        self.gated_view(cached, view)
     }
 
     // `parents_cached`: the trait default unions over `def_candidates`
@@ -915,23 +948,13 @@ impl ModuleIndex {
     }
 }
 
-/// The member pre-filter's verdict, separated from the store and the copy so
-/// the truth table is testable without either. `rows` is
-/// `sym_member_row_exists` behind `with_rows_conn`: outer `None` = no store,
-/// inner `None` = file never shredded.
-///
-/// The ONLY skip is (no post-shred emissions, store present, file covered,
-/// provably no matching row). Deferred plugin emissions materialize into the
-/// resident copy AFTER the shred (`materialize_gated_emissions`), so their
-/// symbols have no rows — a file carrying any must fail open or a DBIC result
-/// class's synthesized accessors silently stop resolving.
-pub(crate) fn member_prefilter_may_declare(
-    has_gated_emissions: bool,
-    rows: Option<Option<bool>>,
-) -> bool {
-    if has_gated_emissions {
-        return true;
-    }
+/// The member pre-filter's verdict, separated from the store so the truth
+/// table is testable without it. `rows` is `sym_member_row_exists` behind
+/// `with_rows_conn`: outer `None` = no store, inner `None` = file never
+/// shredded. The ONLY skip is (store present, file covered, provably no
+/// matching row); a gated emission's symbols shred as candidates, so a
+/// gated file's rows speak for it like any other's.
+pub(crate) fn member_prefilter_may_declare(rows: Option<Option<bool>>) -> bool {
     !matches!(rows, Some(Some(false)))
 }
 
@@ -945,29 +968,20 @@ mod member_prefilter_tests {
     #[test]
     fn only_proven_absence_skips() {
         assert!(
-            member_prefilter_may_declare(false, None),
+            member_prefilter_may_declare(None),
             "no row store: the filter cannot speak, decode"
         );
         assert!(
-            member_prefilter_may_declare(false, Some(None)),
+            member_prefilter_may_declare(Some(None)),
             "file never shredded: the store does not cover it, decode"
         );
         assert!(
-            member_prefilter_may_declare(false, Some(Some(true))),
+            member_prefilter_may_declare(Some(Some(true))),
             "a matching row: the decode is warranted"
         );
         assert!(
-            !member_prefilter_may_declare(false, Some(Some(false))),
+            !member_prefilter_may_declare(Some(Some(false))),
             "covered and provably absent: the one skip"
         );
-    }
-
-    /// Post-shred plugin emissions beat everything: their symbols exist only
-    /// on the materialized resident copy, so the rows' "provably absent" is
-    /// a lie for exactly these files.
-    #[test]
-    fn gated_emissions_fail_open_over_a_provably_absent_row() {
-        assert!(member_prefilter_may_declare(true, Some(Some(false))));
-        assert!(member_prefilter_may_declare(true, None));
     }
 }

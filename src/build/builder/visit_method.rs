@@ -32,9 +32,9 @@ impl<'a> Builder<'a> {
             }
         }
         // Push type constraint on the argument
-        if let Some(arg_type) = crate::model::builtins::builtin_first_arg_type(name) {
+        if let Some(obs) = crate::model::builtins::builtin_first_arg_use(name) {
             if let Some(arg) = node.named_child(0) {
-                self.push_var_type_constraint(arg, node, arg_type);
+                self.observe(arg, node, obs);
             }
         }
         self.queue_children(node);

@@ -701,18 +701,33 @@
 ; call_expression's only children are its callee and its argument_list, so a
 ; field_expression whose parent is a call is the callee. The read's value is
 ; the receiver's slot (@expr.member); the call's is an Invoke of the member
-; on the receiver (@expr.call).
+; on the receiver (@expr.call). A receiver written as a bare name is
+; @member.recv.name (it may spell a class, and op-DX checks its operator by
+; the name); any other is an expression, @member.recv.
+((field_expression
+  argument: (identifier) @member.recv.name
+  operator: _ @member.op
+  field: (field_identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call_expression))
 ((field_expression
   argument: (_) @member.recv
   operator: _ @member.op
   field: (field_identifier) @ref.member.value) @expr.member
- (#not-has-parent? @expr.member call_expression))
+ (#not-has-parent? @expr.member call_expression)
+ (#not-is-kind? @member.recv identifier))
 (call_expression
+  function: (field_expression
+    argument: (identifier) @member.recv.name
+    operator: _ @member.op
+    field: (field_identifier) @ref.member.call)
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
+((call_expression
   function: (field_expression
     argument: (_) @member.recv
     operator: _ @member.op
     field: (field_identifier) @ref.member.call)
   arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
+ (#not-is-kind? @member.recv identifier))
 
 ; `this` is the object the enclosing method runs on, an instance of the
 ; method's class (out-of-line bodies included).
@@ -837,6 +852,9 @@
 (binary_expression
   operator: ["==" "!=" "<" ">" "<=" ">=" "&&" "||"]) @expr.lit.bool
 (identifier) @expr.read.var
+; `this` is the receiver of the method around it: an object of that
+; method's class, never a name to spell a class.
+(this) @receiver
 
 ; `return EXPR;` — the returned expression's OWN span already carries
 ; whatever witness the general rules above minted for its shape (a literal,
@@ -920,10 +938,13 @@
 ; analysis this tier lacks, so parameter moves are not flagged (gate E).
 (parameter_list) @param.region
 
-; `if (dynamic_cast<Derived*>(b)) { b->... }` narrows b to Derived INSIDE the
-; block — the cpp analog of python `isinstance`. The pack's narrow_guard maps
-; `dynamic_cast` + the template type to the refinement; core scopes it to
-; @scope and the edge-driven cutoff ends it at any rebind of b.
+; A guard narrows the arm it enters, tagged `@narrow.arm`: an `if`'s
+; consequence, a ternary's consequence, the right of `&&`. The pack's
+; narrow_guard maps the guard to the refinement; core attaches it in the
+; guard's scope over the arm, and the edge-driven cutoff ends it at any rebind.
+;
+; `dynamic_cast<Derived*>(b)` narrows b to Derived — the cpp analog of python
+; `isinstance`.
 (if_statement
   condition: (condition_clause
     value: (call_expression
@@ -932,36 +953,70 @@
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list (identifier) @narrow.var)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (_) @narrow.arm)
+(conditional_expression
+  condition: (call_expression
+    function: (template_function
+      name: (identifier) @narrow.guard
+      arguments: (template_argument_list
+        (type_descriptor type: (type_identifier) @narrow.type)))
+    arguments: (argument_list (identifier) @narrow.var))
+  consequence: (_) @narrow.arm)
+(binary_expression
+  left: (call_expression
+    function: (template_function
+      name: (identifier) @narrow.guard
+      arguments: (template_argument_list
+        (type_descriptor type: (type_identifier) @narrow.type)))
+    arguments: (argument_list (identifier) @narrow.var))
+  operator: "&&"
+  right: (_) @narrow.arm)
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
-; engaged proves it HOLDS a T inside the block, so `opt->m` / `*opt` resolve on
+; engaged proves it HOLDS a T inside the arm, so `opt->m` / `*opt` resolve on
 ; T there. No type token rides these guards (unlike dynamic_cast) — the pack's
 ; narrow_guard reads the subject's DECLARED type (std::optional<T>) and peels T,
 ; so the refinement keys on the type being optional, not on the guard name (a
 ; bare `if (ptr)` over a non-optional declares no inner type → no narrowing).
-; Two clean engagement shapes: bare truthiness `if (opt)` (no @narrow.guard),
-; and `if (opt.has_value())` (guard token gates the method — an arbitrary
+; Two clean engagement shapes: bare truthiness `opt` (no @narrow.guard),
+; and `opt.has_value()` (guard token gates the method — an arbitrary
 ; `opt.foo()` won't narrow). `!= std::nullopt` needs both operator + operand
 ; checks the one-token hook can't express, so it's left out.
 (if_statement
   condition: (condition_clause value: (identifier) @narrow.var)
-  consequence: (compound_statement) @narrow.block)
+  consequence: (_) @narrow.arm)
+(conditional_expression
+  condition: (identifier) @narrow.var
+  consequence: (_) @narrow.arm)
+(binary_expression
+  left: (identifier) @narrow.var
+  operator: "&&"
+  right: (_) @narrow.arm)
 (if_statement
   condition: (condition_clause
     value: (call_expression
       function: (field_expression
         argument: (identifier) @narrow.var
         field: (field_identifier) @narrow.guard)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (_) @narrow.arm)
+(conditional_expression
+  condition: (call_expression
+    function: (field_expression
+      argument: (identifier) @narrow.var
+      field: (field_identifier) @narrow.guard))
+  consequence: (_) @narrow.arm)
+(binary_expression
+  left: (call_expression
+    function: (field_expression
+      argument: (identifier) @narrow.var
+      field: (field_identifier) @narrow.guard))
+  operator: "&&"
+  right: (_) @narrow.arm)
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its
 ; moved-from region to THAT arm — a read in a sibling arm (or after the if) is
-; in a different scope subtree and never false-flags. This is ALSO the scope a
-; guard narrowing above attaches to: extraction joins the @narrow.block (the
-; condition-tagged consequence) to the general arm @scope by block position, so
-; the block mints exactly ONE scope (no fragile duplicate). Switch cases are not
+; in a different scope subtree and never false-flags. Switch cases are not
 ; compound_statements, so a per-case region is a residual (a move+read across
 ; two `case:` labels still shares the switch-body scope).
 (if_statement consequence: (compound_statement) @scope)
