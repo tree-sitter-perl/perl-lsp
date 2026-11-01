@@ -26,7 +26,7 @@ pub(crate) fn locate_and_parse(snap: &MapSnapshot, name: &str) -> Vec<Placed> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut out: Vec<Placed> = Vec::new();
     for Located { path, by } in snap.locator.locate(name) {
-        let canon = std::fs::canonicalize(&path).unwrap_or(path);
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
         if !seen.insert(canon.clone()) || !snap.in_tier(&canon) {
             continue;
         }
