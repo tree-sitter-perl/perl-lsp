@@ -95,7 +95,7 @@ impl FileAnalysis {
         if let MethodResolution::Root { ref member, .. } = resolution {
             return self.root_member_hover(cn, member);
         }
-        let mname = &self.resolved_member_name(&resolution, member, module_index)?;
+        let mname = &self.resolved_member_name(&resolution, member);
         match resolution {
             MethodResolution::Local { sym_id, class: ref defining_class, .. } => {
                 let sym = self.symbol(sym_id);
@@ -176,7 +176,7 @@ impl FileAnalysis {
                         return Some(self.format_symbol_hover_at(sym, source, point, module_index));
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: hover shows the sub whose
                     // package matches what the ref resolved to. Qualified
                     // calls match on the bare tail (symbols are keyed by

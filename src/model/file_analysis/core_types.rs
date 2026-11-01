@@ -166,6 +166,13 @@ pub enum ScopeKind {
     ForLoop { var: String },
 }
 
+impl ScopeKind {
+    /// A callable's body: the boundary `callable_reach` ends at.
+    pub fn is_callable(&self) -> bool {
+        matches!(self, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+    }
+}
+
 // ---- Package context ----
 
 /// One plugin-emitted diagnostic — the payload of
@@ -385,8 +392,8 @@ pub enum FunctionLookup {
     #[default]
     Global,
     /// The namespace in force when it declares the function, else the
-    /// global namespace: PHP's fallback for an unqualified function, which
-    /// its `use` rows never name.
+    /// global namespace: PHP's fallback for an unqualified function. (A
+    /// `use function` row names one too; those rows are not read yet.)
     NamespaceThenGlobal,
 }
 
@@ -644,6 +651,11 @@ bitflags::bitflags! {
         /// `__call` / `__get`): it has no closed member surface to check a
         /// name against.
         const DYNAMIC_MEMBERS = 1 << 19;
+        /// A variable declared for its whole scope, wherever it is written
+        /// (a function-scoped variable its first write declares, php's
+        /// `$x = …`): a use above the write reaches it. Minted from a
+        /// capture (`@def.assigned`), never spelled as an attribute.
+        const SCOPE_WIDE = 1 << 20;
     }
 }
 
@@ -1101,6 +1113,28 @@ impl<'e> RebindIndex<'e> {
 }
 
 impl Symbol {
+    /// What the symbol declares for a variable use of its name to bind
+    /// (`variable_use`): a variable, or a field declared as one (Corinna's
+    /// `field $x`, in lexical view of its methods). A global minted from
+    /// its uses declares nothing (a use reaches it as a global), and a
+    /// member reached through a receiver is no variable.
+    pub fn variable_decl(&self) -> Option<VariableDecl<'_, SymbolId>> {
+        let declared = match (self.kind, &self.detail) {
+            (_, SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. }) => false,
+            (SymKind::Variable, _) | (SymKind::Field, SymbolDetail::Field { .. }) => true,
+            _ => false,
+        };
+        declared.then(|| VariableDecl {
+            id: self.id,
+            at: self.selection_span.start,
+            gate: match &self.detail {
+                SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => self.package.as_deref(),
+                _ => None,
+            },
+            scope_wide: self.flags.contains(SymbolFlags::SCOPE_WIDE),
+        })
+    }
+
     /// The name listing views (outline, hover) show the symbol by.
     pub fn listed_name(&self) -> &str {
         self.presentation.label.as_deref().unwrap_or(&self.name)
@@ -1508,12 +1542,6 @@ pub struct Ref {
     /// kinds).
     #[serde(default)]
     pub arg_count: Option<usize>,
-    /// A `FunctionCall` on a name an import binds from another module
-    /// (python's `from m import Foo`): it references the def the name
-    /// resolves to, so a rename rewrites the import line, but it calls
-    /// nothing, so it never runs a class's constructor.
-    #[serde(default)]
-    pub import_name: bool,
 }
 
 pub use crate::model::conventions::{name_match_key, split_qualified};
@@ -1739,9 +1767,10 @@ impl Ref {
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
+            RefKind::ImportedName => 8,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
-            RefKind::FunctionCall => {
+            RefKind::FunctionCall | RefKind::ImportedName => {
                 (1, self.resolved_package().map(str::to_string))
             }
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
@@ -2227,6 +2256,14 @@ pub enum RefKind {
         member_name_span: Span,
         member_op: Option<(MemberOp, Span)>,
     },
+    /// A name an import binds from another module (python's `from m import
+    /// Foo`): a reference to the def the name resolves to, pinned through
+    /// `Ref::binding` as a call to it is, so goto-def, references and
+    /// rename reach the import line. It calls nothing: no call hierarchy,
+    /// fan-out, arity or unresolved-call lane reads it, and it never runs a
+    /// class's constructor. Kept at the END for bincode variant-index
+    /// stability.
+    ImportedName,
 }
 
 /// The receiver half of a member access, whatever the member's kind — the

@@ -59,7 +59,7 @@ pub fn pack_hover_markdown(
                         Some(crate::model::file_analysis::MethodResolution::Root { member, .. }) => {
                             return analysis.root_member_hover(cn, member);
                         }
-                        Some(res) => analysis.resolved_member_name(res, key, Some(midx))?,
+                        Some(res) => analysis.resolved_member_name(res, key),
                         None => key.name()?.to_string(),
                     };
                     member_hover_on(analysis, cn, &field, want, arm_for(cn), source, language, midx)
@@ -301,7 +301,7 @@ fn perl_hover_named(
     }
 
     let r = analysis.ref_at(point)?;
-    if !matches!(r.kind, RefKind::FunctionCall { .. }) {
+    if !matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
         return None;
     }
     if crate::model::builtins::is_builtin(&r.target_name) {

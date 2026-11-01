@@ -696,7 +696,7 @@ impl FileAnalysis {
                 } else {
                     cls.to_string()
                 };
-                let has_member = whole.symbols.iter().any(|s| {
+                let found = whole.symbols.iter().find(|s| {
                     member.admits(s)
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
@@ -708,6 +708,7 @@ impl FileAnalysis {
                             // answers empty.
                             || whole.symbol_is_class_content(s))
                 });
+                let has_member = found.is_some();
                 crate::util::ghost_stats::count(if has_member {
                     "mroc.candidate_matched"
                 } else {
@@ -730,8 +731,8 @@ impl FileAnalysis {
                         );
                     }
                 }
-                if has_member {
-                    return Some(MethodResolution::CrossFile { class: cand_cls, def_module: None, widened });
+                if let Some(sym) = found {
+                    return Some(MethodResolution::CrossFile { class: cand_cls, member: sym.name.clone(), def_module: None, widened });
                 }
                 // A cross-file DBIC result class's column/relationship accessors
                 // are deferred plugin emissions (`GatedEmission`); the index's
@@ -748,7 +749,7 @@ impl FileAnalysis {
                 return None;
             };
             if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home), widened: false });
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: method_name.to_string(), def_module: Some(home), widened: false });
             }
             // Plugin-bridged method (a Mojo helper synthesized in another file,
             // bridged to `cls`). Record the registration module so the def
@@ -766,7 +767,7 @@ impl FileAnalysis {
                 ControlFlow::Continue(())
             });
             if bridged_module.is_some() {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: bridged_module, widened: false });
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: method_name.to_string(), def_module: bridged_module, widened: false });
             }
         }
         None
@@ -832,34 +833,19 @@ impl FileAnalysis {
         if matches!(resolution, MethodResolution::Root { .. }) {
             return None;
         }
-        let name = self.resolved_member_name(&resolution, MemberKey::Constructor, module_index)?;
+        let name = self.resolved_member_name(&resolution, MemberKey::Constructor);
         Some((resolution.class().to_string(), name))
     }
 
     /// The name of the member `resolution` found for an ask by `member`:
     /// the asked name, or — for an ask by role — the declaration's own.
-    pub fn resolved_member_name(
-        &self,
-        resolution: &MethodResolution,
-        member: MemberKey<'_>,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<String> {
+    pub fn resolved_member_name(&self, resolution: &MethodResolution, member: MemberKey<'_>) -> String {
         if let Some(n) = member.name() {
-            return Some(n.to_string());
+            return n.to_string();
         }
         match resolution {
-            MethodResolution::Local { sym_id, .. } => Some(self.symbol(*sym_id).name.clone()),
-            MethodResolution::CrossFile { class, .. } => {
-                let idx = module_index?;
-                idx.visible_def_candidates(class).iter().find_map(|cached| {
-                    idx.symbols_present(cached)
-                        .symbols
-                        .iter()
-                        .find(|s| member.admits(s) && s.package.as_deref() == Some(class.as_str()))
-                        .map(|s| s.name.clone())
-                })
-            }
-            MethodResolution::Root { member, .. } => Some(member.clone()),
+            MethodResolution::Local { sym_id, .. } => self.symbol(*sym_id).name.clone(),
+            MethodResolution::CrossFile { member, .. } | MethodResolution::Root { member, .. } => member.clone(),
         }
     }
 
@@ -995,7 +981,7 @@ impl FileAnalysis {
             }
             let whole = idx.symbols_present(&cached);
             if whole.symbols.iter().any(|s| s.name == name && whole.slot_class_of(s) == Some(cls)) {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None, widened: false });
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: name.to_string(), def_module: None, widened: false });
             }
         }
         None

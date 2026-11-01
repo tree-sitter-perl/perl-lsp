@@ -298,7 +298,7 @@ impl<'a> CandidateSet<'a> {
             RefKind::MethodCall { .. } => {
                 Some(analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate).single()?.to_string())
             }
-            RefKind::FunctionCall => r.resolved_package().map(str::to_string).or_else(|| {
+            RefKind::FunctionCall | RefKind::ImportedName => r.resolved_package().map(str::to_string).or_else(|| {
                 analysis.find_definition(self.point, Some(idx)).and_then(|sp| {
                     analysis
                         .symbols()
@@ -893,7 +893,7 @@ impl<'a> CandidateSet<'a> {
                         continue;
                     }
                     let Some(called) = (match &resolution {
-                        Some(res) => analysis.resolved_member_name(res, key, Some(idx)),
+                        Some(res) => Some(analysis.resolved_member_name(res, key)),
                         None => key.name().map(str::to_string),
                     }) else {
                         continue;
@@ -1012,7 +1012,7 @@ impl<'a> CandidateSet<'a> {
         // owner-anchored step (`qualifier_at_point` + `member_def_location`),
         // which fires unconditionally for pack routing before this tail.
         if let Some(r) = analysis.ref_at(point) {
-            if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::Variable) {
+            if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName | RefKind::Variable) {
                 let name = r.unqualified_target_name(analysis.names());
                 for cached in idx.visible_def_candidates(name) {
                     let whole = idx.whole_present(&cached);

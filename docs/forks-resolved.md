@@ -50,7 +50,7 @@ when, why), not the contract.
   the cursor through the companion tiebreak. Python's `Foo()` takes the
   same keys with no companion at all: the matcher asks the call's name
   for its class at query time, so the one ref there stays single-bound.
-- **What B would cost (sizes from `size_of` on the layer-8 head, 2026-10-28):** `Ref`
+- **What B would cost (sizes from `size_of::<Ref>()` and `size_of::<Option<RefBinding>>()` on the `claude/php-6-new` head, 2026-11-01):** `Ref`
   is 352 bytes and `Option<RefBinding>` 56. A `Vec<RefBinding>` is one
   heap allocation per bound ref, on every ref of every language. A
   one-slot inline small-vector avoids that but adds 8 bytes per ref
