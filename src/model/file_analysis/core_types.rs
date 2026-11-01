@@ -1577,6 +1577,13 @@ impl Ref {
         split_qualified(&self.target_name, names).1
     }
 
+    /// Whether this ref's token can be a macro use: a call left unexpanded,
+    /// a bare read (an erased expansion re-mints as one), or a type-position
+    /// name. The macro delegation lane applies only to these.
+    pub fn can_spell_macro_use(&self) -> bool {
+        matches!(self.kind, RefKind::FunctionCall { .. } | RefKind::Variable | RefKind::PackageRef)
+    }
+
     /// The name key this ref is retrievable under in the relational ref
     /// index (`docs/adr/relational-ref-index.md`). One function serves both
     /// sides: rows are keyed by `match_key(ref)`, queries probe

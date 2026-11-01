@@ -52,12 +52,21 @@ the arguments were not walked, so there is no arity and there are no
 argument types.
 
 A pack's document says what an argument list holds. `@arity.args` is the
-list and `@arity.arg` each argument in it, both captured in the same match as
-the callee: `(argument_list ((_) @arity.arg ","?)*)`. The separator has to be
-in the quantified group, because a bare `(_)*` stops at the first comma. A
-wildcard also matches the grammar's extras, and a predicate filters a whole
-match rather than one capture, so the extractor drops a captured comment.
-`@arity.spread` marks the children that spread (`*xs`, `**kw`, `args...`).
+list, captured in the same match as the callee, and `@arity.arg` each argument,
+its own pattern: `(argument_list (_) @arity.arg) @arity.args`. A callable's
+parameter list is `@arity.sig`, and each parameter in it is `@arity.required`,
+`@arity.optional` (it has a default) or `@arity.variadic` (it takes any number
+of values, and counts none). A list's items are the tags in its subtree, less
+those of a list of the same tag nested in it (a call in an argument, a
+callback's parameters); the argument pattern tags every list so a nested one
+always holds its own. `@arity.spread` marks the children that spread (`*xs`,
+`**kw`, `args...`).
+
+Items are separate patterns, not a quantified group in the list's match: a
+group's repetitions must be adjacent siblings, so every separator and comment
+between two items would have to be listed to keep it going. A wildcard item
+still matches the grammar's extras; the extractor drops any capture on an
+extra, whatever the pattern.
 
 ## Current state
 
