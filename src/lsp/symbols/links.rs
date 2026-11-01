@@ -146,12 +146,12 @@ fn registered_module_path(
 ) -> Option<PathBuf> {
     let idx = idx?;
     if let Some(p) = idx.module_path_cached(module) {
-        return Some(p);
+        return Some(p.into_path_buf());
     }
     idx.visible_def_candidates(module)
         .into_iter()
         .next()
-        .map(|c| c.path.clone())
+        .map(|c| c.path.to_path_buf())
 }
 
 /// Bare `http(s)://` URLs in `segment` (which starts at byte `col_base` of

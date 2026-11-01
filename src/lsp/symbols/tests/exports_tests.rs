@@ -392,7 +392,7 @@ fn require_bareword_not_flagged() {
 /// producers that `fake_cached` can't express).
 fn cached_from_source(path: &str, source: &str) -> std::sync::Arc<crate::index::module_index::CachedModule> {
     std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-        std::path::PathBuf::from(path),
+        crate::util::canonical_path::CanonicalPath::resolve(std::path::PathBuf::from(path)),
         std::sync::Arc::new(parse_analysis(source)),
     ))
 }
@@ -685,7 +685,7 @@ sub to_json { }\n\
     idx.insert_cache(
         "JSON::PP",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from("/usr/lib/perl5/JSON/PP.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/usr/lib/perl5/JSON/PP.pm")),
             std::sync::Arc::new(fa),
         ))),
     );
@@ -1043,7 +1043,7 @@ class Point {
     module_index.insert_cache(
         "Point",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from("/tmp/sym_defer_point.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/sym_defer_point.pm")),
             std::sync::Arc::new(parse_analysis(point_src)),
         ))),
     );
@@ -1175,7 +1175,7 @@ my $silent = $taken{anything};
 fn test_unknown_key_diagnostic_through_parent_file_ancestry() {
     let module = |name: &str, src: &str| {
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from(format!("/fake/{name}.pm")),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
             std::sync::Arc::new(parse_analysis(src)),
         )))
     };
