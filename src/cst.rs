@@ -102,11 +102,12 @@ pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
 /// No `::` → the node's own span. FQ identifiers are single-line tokens, so
 /// the tail column is `start.column + byte_offset_of_tail`.
 pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
-    match text.rfind("::") {
+    let sep = crate::model::conventions::PERL_SPELLINGS.sep().unwrap_or_default();
+    match text.rfind(sep).filter(|_| !sep.is_empty()) {
         Some(idx) => {
             let s = node.start_position();
             Span {
-                start: tree_sitter::Point { row: s.row, column: s.column + idx + 2 },
+                start: tree_sitter::Point { row: s.row, column: s.column + idx + sep.len() },
                 end: node.end_position(),
             }
         }
@@ -338,6 +339,16 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
     let mut flat = Vec::new();
     flatten_list(list, &mut flat);
     flat.into_iter().filter(|n| n.is_named()).collect()
+}
+
+/// A value's list elements: a grouping container's spliced elements, or
+/// the value itself when it is a single expression (`qw(...)`, a call).
+pub(crate) fn list_elements_or_self<'a>(node: Node<'a>) -> Vec<Node<'a>> {
+    if is_list_literal(node) {
+        list_elements(node)
+    } else {
+        vec![node]
+    }
 }
 
 /// Peel transparent grouping wrappers — a `parenthesized_expression` or a

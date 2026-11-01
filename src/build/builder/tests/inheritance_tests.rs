@@ -829,3 +829,105 @@ fn an_override_never_inherits_the_parents_return_type() {
         "a name the child does not override still inherits",
     );
 }
+
+fn parents_of(fa: &FileAnalysis, pkg: &str) -> Vec<String> {
+    fa.declared_parents(pkg).to_vec()
+}
+
+/// Every spelling of an `@ISA` write extends the parents through one path:
+/// `push`, `unshift`, `splice`, a self-referencing assignment, and the
+/// qualified `@Pkg::ISA` from another package.
+#[test]
+fn isa_edits_extend_the_parents_in_every_spelling() {
+    let fa = build_fa(
+        "
+            package P;
+            use parent 'Base';
+            push @ISA, 'Pushed';
+            unshift @ISA, qw(First);
+            @ISA = (@ISA, 'Last');
+            package Q;
+            our @ISA = ('A', 'B', 'C');
+            splice @ISA, 1, 1, 'X', 'Y';
+            package R;
+            push @P::ISA, 'FromR';
+            push(@R::ISA, \"Own\");
+        ",
+    );
+    assert_eq!(parents_of(&fa, "P"), ["First", "Base", "Pushed", "Last", "FromR"]);
+    assert_eq!(parents_of(&fa, "Q"), ["A", "X", "Y", "C"]);
+    assert_eq!(parents_of(&fa, "R"), ["Own"]);
+    for pkg in ["P", "Q", "R"] {
+        assert!(!fa.has_dynamic_parents(pkg), "{pkg}: every value folded");
+    }
+}
+
+/// A pushed value that names no class (`push @JSON::ISA, $module`, JSON's
+/// `_set_module`) leaves the ancestry incomplete: the package is marked
+/// dynamic so method checks stay silent.
+#[test]
+fn a_computed_isa_value_marks_the_parents_dynamic() {
+    let fa = build_fa(
+        "
+            package JSON;
+            sub _set_module { my $module = shift; push @JSON::ISA, $module; }
+            package K;
+            our @ISA = ('Known', compute());
+            package S;
+            our @ISA = ('A', 'B');
+            splice @ISA, $i, 1;
+            package F;
+            my $base = 'Folded';
+            push @ISA, $base;
+        ",
+    );
+    assert!(fa.has_dynamic_parents("JSON"));
+    assert!(parents_of(&fa, "JSON").is_empty());
+    assert!(fa.has_dynamic_parents("K"));
+    assert_eq!(parents_of(&fa, "K"), ["Known"], "a call's arguments are not parents");
+    assert!(fa.has_dynamic_parents("S"));
+    assert_eq!(parents_of(&fa, "S"), ["A", "B"]);
+    assert!(!fa.has_dynamic_parents("F"));
+    assert_eq!(parents_of(&fa, "F"), ["Folded"]);
+}
+
+/// Only a package's `@ISA` is a parent list: a lexical `my @ISA` and any
+/// other array leave the parents alone.
+#[test]
+fn only_the_package_isa_names_parents() {
+    let fa = build_fa(
+        "
+            package L;
+            my @ISA;
+            push @ISA, 'NotAParent';
+            push @LIST, 'Nor';
+        ",
+    );
+    assert!(parents_of(&fa, "L").is_empty());
+    assert!(!fa.has_dynamic_parents("L"));
+}
+
+/// `sub Foo::bar {}` declares `bar` in `Foo`, wherever it is written: the
+/// symbol's package is the qualifier, its name the leaf, its selection the
+/// leaf's token, and `Foo`'s method walk finds it.
+#[test]
+fn a_qualified_sub_belongs_to_the_package_its_name_spells() {
+    let src = "package Ext;\nsub Foo::bar { my ($self) = @_; return $self }\nsub UNIVERSAL::dump { 1 }\nsub ::top { 1 }\n";
+    let fa = build_fa(src);
+    let bar = fa.symbols_named("bar").iter().map(|&id| fa.symbol(id)).next().expect("bar is minted under its leaf");
+    assert_eq!(bar.package.as_deref(), Some("Foo"));
+    assert_eq!((bar.selection_span.start.column, bar.selection_span.end.column), (9, 12));
+    assert!(fa.symbols_named("Foo::bar").is_empty());
+    let dump = fa.symbols_named("dump").iter().map(|&id| fa.symbol(id)).next().expect("dump");
+    assert_eq!(dump.package.as_deref(), Some("UNIVERSAL"));
+    let top = fa.symbols_named("top").iter().map(|&id| fa.symbol(id)).next().expect("top");
+    assert_eq!(top.package.as_deref(), Some("main"));
+    assert!(matches!(
+        fa.resolve_method_in_ancestors("Foo", "bar", None),
+        Some(MethodResolution::Local { ref class, .. }) if class == "Foo"
+    ));
+    assert!(fa.resolve_method_in_ancestors("Ext", "bar", None).is_none());
+    // The body's invocant is the class the sub is declared in.
+    let at = Point { row: 1, column: 40 };
+    assert_eq!(fa.inferred_type_via_bag("$self", at).and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("Foo"));
+}
