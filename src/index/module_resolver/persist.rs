@@ -57,19 +57,26 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
 /// name maps to a set. `true` only when all of them landed: a partial write
 /// must not license the resident strip, or the un-persisted provider loses
 /// the axes it can no longer rehydrate.
+///
+/// One transaction for the name: a blob and its rows are one generation,
+/// and in autocommit every shredded row was its own commit (16.5 ms a
+/// landing on FHEM's dependencies, 1.3 ms in one).
 pub(super) fn save_module_generation(
     conn: &rusqlite::Connection,
     module_name: &str,
     result: &Option<Providers>,
 ) -> bool {
-    let Some(providers) = result else {
-        return save_one_provider(conn, module_name, &None);
-    };
-    let mut all = true;
-    for m in providers {
-        all &= save_one_provider(conn, module_name, &Some(m.clone()));
-    }
-    all
+    module_cache::in_immediate_txn(conn, || {
+        let Some(providers) = result else {
+            return Ok(save_one_provider(conn, module_name, &None));
+        };
+        let mut all = true;
+        for m in providers {
+            all &= save_one_provider(conn, module_name, &Some(m.clone()));
+        }
+        Ok(all)
+    })
+    .unwrap_or(false)
 }
 
 fn save_one_provider(

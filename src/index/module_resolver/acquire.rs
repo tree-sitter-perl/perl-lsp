@@ -60,18 +60,17 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
     Some(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::new(fa))))
 }
 
-/// Resolve `name` under the current map: locate and parse with no lock
-/// held, persist, then land. Returns the WHOLE providers (descent reads
-/// what a strip drops); `Err` when the map moved meanwhile.
+/// Resolve `name` from what `snap`'s map `placed` for it (located and
+/// parsed with no lock held, `locate_and_parse`): persist, then land.
+/// Returns the WHOLE providers (descent reads what a strip drops); `Err`
+/// when the map moved since `snap`.
 pub(super) fn acquire(
     core: &IndexCore,
+    snap: &MapSnapshot,
     name: &str,
+    placed: Vec<Placed>,
     db: Option<&rusqlite::Connection>,
 ) -> Result<Option<Providers>, MapMoved> {
-    let Some(snap) = core.map_snapshot() else {
-        return Ok(None);
-    };
-    let placed = locate_and_parse(&snap, name);
     let answers = answering(snap.driver, name, &placed);
     let whole: Providers = placed.into_iter().map(|p| p.file).collect();
     let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
@@ -84,8 +83,9 @@ pub(super) fn acquire(
 
 /// What a landed file asks for next. Parents and re-exports always: the
 /// MRO and a module's export surface read them at query time. With
-/// `prefetch`, everything it uses (`used_identities`) and the classes its
-/// subs return — the chain a session walks before anyone asks for it.
+/// `prefetch` (a server's, never a one-shot run's), everything it uses
+/// (`used_identities`) and the classes its subs return — the chain a
+/// session walks before anyone asks for it.
 pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();

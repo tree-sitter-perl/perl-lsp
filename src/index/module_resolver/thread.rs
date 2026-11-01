@@ -63,11 +63,14 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is the Perl hub's prefetch: a
-    // pack's wider descent waits on a measurement. A one-shot run takes it
-    // too: what it lands persists, so the next run warms it instead of
-    // parsing.
-    let prefetch = hub;
+    // Descent beyond parents and re-exports is a long-lived session's
+    // prefetch, the Perl hub's only: a pack's wider descent waits on a
+    // measurement. A one-shot run asks what its own files use and descends
+    // as packs do, the same split as `Declared::Listed`: measured on FHEM
+    // (php-stack-release-gates-2026-11-01), the prefetch landed 1,173
+    // names instead of 303 and cost a cold `--check` 30 s; no diagnostic
+    // moved, only the exporter lists a hint names grew.
+    let prefetch = server.is_some() && hub;
     let mut adopted = 0u64;
     let mut progress = Progress::default();
     // Adopted before the first wait as well as after each, so what the map
@@ -90,84 +93,108 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // always ends with a fire — diagnostics converge once the queue
         // drains.
         let mut resolved_any = false;
-        for module_name in batch {
-            let is_re_resolve = core.stale_modules.contains_key(&module_name);
-            // A warm load or a front door answered it since it was asked.
-            if !is_re_resolve && matches!(core.cache.get(&module_name).as_deref(), Some(Some(_))) {
-                continue;
-            }
-            // Allow re-resolution when extract version is outdated.
-            if let Some(&ver) = seen.get(&module_name) {
-                if ver >= module_cache::EXTRACT_VERSION {
+        // Parsed a chunk at a time, in parallel, then landed one by one in
+        // the order asked: the parse touches no shared state, the landing
+        // is the serial half. The chunk bounds the whole analyses held
+        // between the two.
+        for chunk in batch.chunks(PARSE_CHUNK) {
+            let mut todo: Vec<(String, bool)> = Vec::new();
+            for module_name in chunk {
+                let is_re_resolve = core.stale_modules.contains_key(module_name);
+                // A warm load or a front door answered it since it was asked.
+                if !is_re_resolve && matches!(core.cache.get(module_name).as_deref(), Some(Some(_))) {
                     continue;
                 }
-            }
-            seen.insert(module_name.clone(), module_cache::EXTRACT_VERSION);
-
-            if is_re_resolve {
-                log::info!("Re-resolving stale module '{}'", module_name);
-            } else {
-                log::info!("Resolving module '{}'", module_name);
-            }
-
-            crate::util::ghost_stats::count("resolver.module_resolved");
-            let whole = match acquire(&core, &module_name, db.as_ref()) {
-                Ok(whole) => whole,
-                Err(_moved) => {
-                    // Asked again once the loop adopts the new map.
-                    seen.remove(&module_name);
-                    core.queue.ask([module_name]);
-                    continue;
-                }
-            };
-            match &whole {
-                Some(providers) => log::info!("Resolved '{}': {} provider(s)", module_name, providers.len()),
-                None => log::info!("Nothing provides '{}'", module_name),
-            }
-            if let Some(providers) = &whole {
-                ask_unresolved(&core, &seen, descent(providers, prefetch));
-            }
-
-            // Remove from stale set after re-resolution (no-op otherwise).
-            core.stale_modules.remove(&module_name);
-
-            // Report the prefetch's progress.
-            if let Some(srv) = &server {
-                if progress.total > 0 && progress.done < progress.total {
-                    progress.done += 1;
-                    let pct = (progress.done * 100 / progress.total) as u32;
-                    let token = NumberOrString::String("perl-lsp/indexing".to_string());
-                    if progress.done < progress.total {
-                        srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
-                            ProgressParams {
-                                token,
-                                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                                    WorkDoneProgressReport {
-                                        cancellable: Some(false),
-                                        message: Some(format!("{} ({}/{})", module_name, progress.done, progress.total)),
-                                        percentage: Some(pct),
-                                    },
-                                )),
-                            },
-                        ));
-                    } else {
-                        srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
-                            ProgressParams {
-                                token,
-                                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                                    WorkDoneProgressEnd {
-                                        message: Some(format!("Indexed {} modules", progress.total)),
-                                    },
-                                )),
-                            },
-                        ));
+                // Allow re-resolution when extract version is outdated.
+                if let Some(&ver) = seen.get(module_name) {
+                    if ver >= module_cache::EXTRACT_VERSION {
+                        continue;
                     }
                 }
+                seen.insert(module_name.clone(), module_cache::EXTRACT_VERSION);
+                todo.push((module_name.clone(), is_re_resolve));
             }
+            let snap = core.map_snapshot();
+            let placed: Vec<Vec<Placed>> = {
+                use rayon::prelude::*;
+                todo.par_iter()
+                    .map(|(name, _)| snap.as_ref().map(|s| locate_and_parse(s, name)).unwrap_or_default())
+                    .collect()
+            };
+            for ((module_name, is_re_resolve), placed) in todo.into_iter().zip(placed) {
+                // A landing earlier in this chunk answered it as a by-product.
+                if !is_re_resolve && matches!(core.cache.get(&module_name).as_deref(), Some(Some(_))) {
+                    continue;
+                }
+                if is_re_resolve {
+                    log::info!("Re-resolving stale module '{}'", module_name);
+                } else {
+                    log::info!("Resolving module '{}'", module_name);
+                }
 
-            // Signal waiters (per module — bounded waits key on names).
-            notify_resolved(&core);
-            resolved_any = true;
+                crate::util::ghost_stats::count("resolver.module_resolved");
+                let landed = match &snap {
+                    Some(snap) => acquire(&core, snap, &module_name, placed, db.as_ref()),
+                    None => Ok(None),
+                };
+                let whole = match landed {
+                    Ok(whole) => whole,
+                    Err(_moved) => {
+                        // Asked again once the loop adopts the new map.
+                        seen.remove(&module_name);
+                        core.queue.ask([module_name]);
+                        continue;
+                    }
+                };
+                match &whole {
+                    Some(providers) => log::info!("Resolved '{}': {} provider(s)", module_name, providers.len()),
+                    None => log::info!("Nothing provides '{}'", module_name),
+                }
+                if let Some(providers) = &whole {
+                    ask_unresolved(&core, &seen, descent(providers, prefetch));
+                }
+
+                // Remove from stale set after re-resolution (no-op otherwise).
+                core.stale_modules.remove(&module_name);
+
+                // Report the prefetch's progress.
+                if let Some(srv) = &server {
+                    if progress.total > 0 && progress.done < progress.total {
+                        progress.done += 1;
+                        let pct = (progress.done * 100 / progress.total) as u32;
+                        let token = NumberOrString::String("perl-lsp/indexing".to_string());
+                        if progress.done < progress.total {
+                            srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
+                                ProgressParams {
+                                    token,
+                                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                                        WorkDoneProgressReport {
+                                            cancellable: Some(false),
+                                            message: Some(format!("{} ({}/{})", module_name, progress.done, progress.total)),
+                                            percentage: Some(pct),
+                                        },
+                                    )),
+                                },
+                            ));
+                        } else {
+                            srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
+                                ProgressParams {
+                                    token,
+                                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
+                                        WorkDoneProgressEnd {
+                                            message: Some(format!("Indexed {} modules", progress.total)),
+                                        },
+                                    )),
+                                },
+                            ));
+                        }
+                    }
+                }
+
+                // Signal waiters (per module — bounded waits key on names).
+                notify_resolved(&core);
+                resolved_any = true;
+            }
         }
         // After descent queued its asks, so "idle" never reads between the
         // batch and what it asked for.
@@ -181,6 +208,10 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         }
     }
 }
+
+/// Names parsed in parallel before their landings: bounds the whole
+/// analyses a batch holds between the two.
+const PARSE_CHUNK: usize = 32;
 
 /// How far a session's prefetch of the declared dependencies has got.
 #[derive(Default)]
