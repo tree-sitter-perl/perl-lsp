@@ -64,11 +64,14 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is the Perl hub's prefetch: a
-    // pack's wider descent waits on a measurement. A one-shot run takes it
-    // too: what it lands persists, so the next run warms it instead of
-    // parsing.
-    let prefetch = hub;
+    // Descent beyond parents and re-exports is a long-lived session's
+    // prefetch, the Perl hub's only: a pack's wider descent waits on a
+    // measurement. A one-shot run asks what its own files use and descends
+    // as packs do, the same split as `Declared::Listed`: measured on FHEM
+    // (php-stack-release-gates-2026-11-01), the prefetch landed 1,173
+    // names instead of 303 and cost a cold `--check` 30 s; no diagnostic
+    // moved, only the exporter lists a hint names grew.
+    let prefetch = server.is_some() && hub;
     let mut adopted = 0u64;
     let mut progress = Progress::default();
     let mut persists = DependencyPersists::default();
