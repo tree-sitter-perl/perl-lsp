@@ -1047,7 +1047,7 @@ fn this_is_an_instance_of_the_methods_class() {
         .refs()
         .iter()
         .filter(|r| r.target_name == "x" && r.member_site().is_some())
-        .map(|r| fa.method_call_invocant_class(r, None))
+        .map(|r| fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string))
         .collect();
     assert_eq!(classes, [Some("C".to_string()), Some("C".to_string())]);
 }

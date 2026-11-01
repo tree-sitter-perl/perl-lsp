@@ -144,21 +144,9 @@ pub fn group_refs(
 ) -> Vec<RefLocation> {
     let mut out: Vec<RefLocation> = local_spans
         .iter()
-        .map(|span| RefLocation {
-            key: origin.clone(),
-            span: *span,
-            access: AccessKind::Read,
-            rewritable: true,
-            label: None
-        })
+        .map(|span| RefLocation::at(origin.clone(), *span, AccessKind::Read))
         .collect();
-    out.extend(pinned_spans.iter().map(|(path, span)| RefLocation {
-        key: FileKey::Path(path.clone()),
-        span: *span,
-        access: AccessKind::Read,
-        rewritable: true,
-        label: None
-    }));
+    out.extend(pinned_spans.iter().map(|(path, span)| RefLocation::at(FileKey::Path(path.clone()), *span, AccessKind::Read)));
     for m in members {
         let mask = mask_override
             .unwrap_or_else(|| references_mask_for(files, module_index, &m.target));
@@ -237,25 +225,19 @@ pub fn group_rename_edits(
     members: &[GroupMember],
     bare_new: &str,
     mask: RoleMask,
-) -> Vec<(RefLocation, String)> {
+) -> Result<Vec<(RefLocation, String)>, String> {
     let mut out: Vec<(RefLocation, String)> = local_spans
         .iter()
         .map(|span| {
             (
-                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true, label: None},
+                RefLocation::at(origin.clone(), *span, AccessKind::Read),
                 bare_new.to_string(),
             )
         })
         .collect();
     out.extend(pinned_spans.iter().map(|(path, span)| {
         (
-            RefLocation {
-                key: FileKey::Path(path.clone()),
-                span: *span,
-                access: AccessKind::Read,
-                rewritable: true,
-                label: None
-            },
+            RefLocation::at(FileKey::Path(path.clone()), *span, AccessKind::Read),
             bare_new.to_string(),
         )
     }));
@@ -276,9 +258,78 @@ pub fn group_rename_edits(
             out.push((loc, text.clone()));
         }
     }
+    // A union site appears in the image of each member it dispatches to; it
+    // is safe only when every class it names is one of them, so what no
+    // member's image covers is what its `also_on` lists share. A covered
+    // site rewrites; an uncovered one keeps the classes left over.
+    let mut uncovered: std::collections::HashMap<(PathBuf, Span), Vec<String>> =
+        std::collections::HashMap::new();
+    for (loc, _) in &out {
+        let at = (key_for_sort(&loc.key), loc.span);
+        match uncovered.get_mut(&at) {
+            Some(left) => left.retain(|c| loc.rewrite.also_on().contains(c)),
+            None => {
+                uncovered.insert(at, loc.rewrite.also_on().to_vec());
+            }
+        }
+    }
+    for (loc, _) in &mut out {
+        if let SiteRewrite::Shared { also_on } = &mut loc.rewrite {
+            *also_on = uncovered[&(key_for_sort(&loc.key), loc.span)].clone();
+            if also_on.is_empty() {
+                loc.rewrite = SiteRewrite::Yes;
+            }
+        }
+    }
+    let name = members.first().map_or(bare_new, |m| m.target.name.as_str());
+    let mut out = settle_rename_sites(name, out, |(loc, _)| loc)?;
     let mut seen = std::collections::HashSet::new();
     out.retain(|(loc, _)| seen.insert((key_for_sort(&loc.key), loc.span)));
-    out
+    Ok(out)
+}
+
+/// The rename policy every rename path applies to its image: any site whose
+/// `SiteRewrite` refuses refuses the whole rename (a partial edit would
+/// silently break code there); otherwise the edits are the sites that
+/// rewrite.
+pub(crate) fn settle_rename_sites<T>(
+    name: &str,
+    sites: Vec<T>,
+    loc: impl Fn(&T) -> &RefLocation,
+) -> Result<Vec<T>, String> {
+    if let Some(why) = sites.iter().find_map(|s| site_refusal(name, loc(s))) {
+        return Err(why);
+    }
+    Ok(sites.into_iter().filter(|s| loc(s).rewrite.rewrites()).collect())
+}
+
+/// Why renaming `name` refuses at `loc`, when it does.
+fn site_refusal(name: &str, loc: &RefLocation) -> Option<String> {
+    match &loc.rewrite {
+        SiteRewrite::Yes | SiteRewrite::Skip => None,
+        SiteRewrite::ThroughMacro => Some(format!(
+            "rename of `{name}` would leave sites spelled through a delegating macro \
+             unchanged (the macro body is not rewritten) — refusing rather than \
+             emitting a partial edit"
+        )),
+        SiteRewrite::Construction => Some(format!(
+            "rename of `{name}` would leave its constructions unchanged (they spell the \
+             class, not the constructor) — refusing rather than emitting a partial edit"
+        )),
+        SiteRewrite::Shared { also_on } => {
+            let at = match &loc.key {
+                FileKey::Path(p) => p.display().to_string(),
+                FileKey::Url(u) => u.to_string(),
+            };
+            Some(format!(
+                "`{}` at {}:{} may also be {}'s; rename from there to rename them together",
+                name,
+                at,
+                loc.span.start.row + 1,
+                also_on.join(" or "),
+            ))
+        }
+    }
 }
 
 /// Per-process override for the relational retrieval switch — the parity
@@ -854,13 +905,7 @@ pub fn implementations_of(
                     let whole = idx.symbols_present(&cached);
                     for s in whole.symbols() {
                         if &s.name == pkg && matches!(s.kind, SymKind::Class) {
-                            out.push(RefLocation {
-                                key: FileKey::Path(cached.path.clone()),
-                                span: s.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: false,
-                                label: None,
-                            });
+                            out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip));
                         }
                     }
                 }
@@ -959,13 +1004,7 @@ pub fn implementations_of(
                     && matches!(s.kind, SymKind::Sub | SymKind::Method)
                     && s.package.as_deref() == Some(pkg.as_str())
                 {
-                    out.push(RefLocation {
-                        key: FileKey::Path(cached.path.clone()),
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: true,
-                        label: None
-                    });
+                    out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration));
                 }
             }
         }
@@ -1018,13 +1057,7 @@ pub(super) fn specialization_family(
             let whole = idx.symbols_present(&cached);
             for s in whole.symbols() {
                 if &s.name == spec && matches!(s.kind, SymKind::Class) {
-                    out.push(RefLocation {
-                        key: FileKey::Path(cached.path.clone()),
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: false,
-                        label: None
-                    });
+                    out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip));
                 }
             }
         }
