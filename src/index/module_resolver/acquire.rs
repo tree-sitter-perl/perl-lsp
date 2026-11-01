@@ -60,39 +60,88 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
     Some(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::new(fa))))
 }
 
-/// Resolve `name` under the current map: locate and parse with no lock
-/// held, persist, then land. Returns the WHOLE providers (descent reads
-/// what a strip drops); `Err` when the map moved meanwhile.
+/// What an acquisition landed: nothing, or the asked name's providers and
+/// what they ask for next (`descent`, read off the whole copies before any
+/// strip).
+pub(super) enum Landed {
+    Miss,
+    Hit { providers: usize, asks: Vec<String> },
+}
+
+/// Resolve `name` under the current map: from the store when it holds a
+/// current landing for the name, else located and parsed with no lock
+/// held, persisted, then landed. `Err` when the map moved meanwhile.
+/// `strip_warm` is how a warm copy is kept (`land_warm`).
 pub(super) fn acquire(
     core: &IndexCore,
     name: &str,
     db: Option<&rusqlite::Connection>,
-) -> Result<Option<Providers>, MapMoved> {
+    prefetch: bool,
+    strip_warm: bool,
+) -> Result<Landed, MapMoved> {
     let Some(snap) = core.map_snapshot() else {
-        return Ok(None);
+        return Ok(Landed::Miss);
     };
+    if let Some(warm) = db.and_then(|conn| module_cache::warm_module(conn, name)) {
+        return land_warm(core, &snap, name, warm, prefetch, strip_warm);
+    }
     let placed = locate_and_parse(&snap, name);
     let answers = answering(snap.driver, name, &placed);
     let whole: Providers = placed.into_iter().map(|p| p.file).collect();
     let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
     // Per FILE: each provider gets its own row, so a shadowed twin
-    // survives the warm start too.
-    let persisted = db.is_some_and(|conn| save_module_generation(conn, name, &(!rows.is_empty()).then_some(rows)));
+    // survives the warm start too. A miss is never persisted: no map's
+    // inputs see every install (a pip or cpanm into a search root), so a
+    // remembered miss would outlive the install that answers it, and
+    // locating one again is a stat per search root.
+    let persisted = !rows.is_empty() && db.is_some_and(|conn| save_module_generation(conn, name, &Some(rows)));
+    let asks = descent(whole.iter().map(|m| &*m.analysis), prefetch);
     core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), persisted, eviction_enabled())?;
-    Ok((!whole.is_empty()).then_some(whole))
+    Ok(if whole.is_empty() { Landed::Miss } else { Landed::Hit { providers: whole.len(), asks } })
+}
+
+/// Land the store's whole copies of `name` (`module_cache::warm_module`):
+/// descent reads them first, exactly as it reads a fresh parse, so a warm
+/// start asks for what a cold one does. Kept as the one-shot run keeps a
+/// warm copy — bag-evicted, rehydrated on demand — unless `strip`.
+fn land_warm(
+    core: &IndexCore,
+    snap: &MapSnapshot,
+    name: &str,
+    warm: Vec<(PathBuf, crate::model::file_analysis::FileAnalysis)>,
+    prefetch: bool,
+    strip: bool,
+) -> Result<Landed, MapMoved> {
+    let asks = descent(warm.iter().map(|(_, fa)| fa), prefetch);
+    let n = warm.len();
+    let providers: Providers = warm
+        .into_iter()
+        .map(|(path, mut fa)| {
+            if !strip {
+                fa.evict_witness_bag();
+            }
+            Arc::new(CachedModule::new(path, Arc::new(fa)))
+        })
+        .collect();
+    // Every persisted row answered the name it is filed under.
+    let answers: Vec<usize> = (0..n).collect();
+    core.land_dependency(Some((name, &answers)), snap.generation, providers, true, strip)?;
+    Ok(Landed::Hit { providers: n, asks })
 }
 
 /// What a landed file asks for next. Parents and re-exports always: the
 /// MRO and a module's export surface read them at query time. With
 /// `prefetch`, also its imports and the classes its subs return — the
 /// chain a long-lived session walks before anyone asks for it.
-pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<String> {
+pub(super) fn descent<'a>(
+    providers: impl IntoIterator<Item = &'a crate::model::file_analysis::FileAnalysis>,
+    prefetch: bool,
+) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();
     // Every provider's, not just the winner's: a shadowed twin has its own
     // `use` list and `@ISA`, and a class only it names must still resolve.
-    for m in providers {
-        let fa = &m.analysis;
+    for fa in providers {
         for (_pkg, parents) in fa.package_parent_edges() {
             asks.extend(parents.iter().cloned());
         }

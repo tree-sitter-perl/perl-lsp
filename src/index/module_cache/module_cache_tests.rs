@@ -201,18 +201,28 @@ fn test_db_plugin_namespaces_roundtrip() {
     let _ = std::fs::remove_file(&pm);
 }
 
+/// A row remembering a miss (an older store's) never warms: no map's
+/// inputs see every install, so a miss is located again when asked rather
+/// than remembered past the install that answers it.
 #[test]
-fn test_db_negative_result_roundtrip() {
+fn a_remembered_miss_is_not_warmed() {
     let conn = test_db();
     save_to_db(&conn, "Nonexistent::Module", &None, "import");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
     let (n, _) = warm_into(&conn, &cache, &all_defs);
-    assert_eq!(n, 1);
+    assert_eq!(n, 0);
+    assert!(!cache.contains_key("Nonexistent::Module"));
+}
 
-    let entry = cache.get("Nonexistent::Module").unwrap();
-    assert!(entry.is_none());
+/// A current landing of `name`, persisted as the resolver persists one.
+fn save_landing(conn: &Connection, name: &str) -> std::path::PathBuf {
+    let pm = std::env::temp_dir().join(format!("landing_{}_{}.pm", name.replace("::", "_"), std::process::id()));
+    let source = format!("package {name};\nsub f {{ 1 }}\n1;\n");
+    std::fs::write(&pm, &source).unwrap();
+    save_to_db(conn, name, &Some(parse_source_to_cached(&source, &pm)), NAME_KEYED_SOURCE);
+    pm
 }
 
 #[test]
@@ -252,7 +262,7 @@ fn dependency_fingerprint_change_clears_the_import_tier() {
     let conn = test_db();
 
     validate_dependency_fingerprint(&conn, 1).unwrap();
-    save_to_db(&conn, "Foo", &None, "import");
+    let pm = save_landing(&conn, "FingerprintFoo");
 
     validate_dependency_fingerprint(&conn, 1).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
@@ -265,6 +275,7 @@ fn dependency_fingerprint_change_clears_the_import_tier() {
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
     let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 0, "a moved map retires its landings' rows");
+    let _ = std::fs::remove_file(&pm);
 }
 
 #[test]
@@ -479,7 +490,7 @@ fn degraded_analysis_is_not_persisted() {
 fn input_fingerprint_change_clears_table() {
     let conn = test_db();
     validate_input_fingerprint(&conn, 0xA).unwrap();
-    save_to_db(&conn, "Foo", &None, "import");
+    let pm = save_landing(&conn, "InputsFoo");
 
     validate_input_fingerprint(&conn, 0xA).unwrap();
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
@@ -492,6 +503,7 @@ fn input_fingerprint_change_clears_table() {
     let all_defs: DashMap<String, Vec<Arc<CachedModule>>> = DashMap::new();
     let (n, _) = warm_into(&conn, &cache, &all_defs);
     assert_eq!(n, 0, "changed inputs: table cleared");
+    let _ = std::fs::remove_file(&pm);
 }
 
 /// Relational ref index: shred → candidate-file retrieval round-trip, the

@@ -291,3 +291,60 @@ fn a_warm_start_parses_no_dependency_file_and_a_map_move_drops_its_rows() {
     });
     assert_eq!(import_rows(&store, "%/acme/%"), 0, "the retired landings' rows went with their map");
 }
+
+/// A fresh store directory for a two-session test.
+fn store_dir(tag: &str) -> PathBuf {
+    let store = std::env::temp_dir().join(format!("php-deps-{tag}-store-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store);
+    std::fs::create_dir_all(&store).unwrap();
+    store
+}
+
+/// A cache never changes an answer: a warm start lands what its own demand
+/// asks, never every name an earlier session stored. `Legacy_Thing` was
+/// landed and persisted for `Old.php`; with that file gone nothing asks for
+/// it, so the next session leaves it unlanded, as a cold one would.
+#[test]
+fn a_warm_start_lands_only_what_its_demand_asks() {
+    let root = composer_project("warm-asked", COMPOSER);
+    let store = store_dir("warm-asked");
+    let busy = std::time::Duration::from_secs(5);
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(idx.get_cached("Legacy_Thing").is_some());
+    });
+    std::fs::remove_file(root.join("src/Old.php")).unwrap();
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(idx.get_cached("Acme\\Model\\Base").is_some(), "what is asked warms");
+        assert!(idx.get_cached("Legacy_Thing").is_none(), "stored, never asked, and landed anyway");
+    });
+}
+
+/// An install moves no map input (`installed.json` already listed the
+/// package), so a miss the store remembered would outlive it: the class
+/// would never land until the store was cleared. A miss is located again
+/// by every session instead.
+#[test]
+fn a_class_installed_after_a_miss_lands_in_the_next_session() {
+    let root = project(
+        "installed-later",
+        &[
+            ("composer.json", COMPOSER),
+            ("vendor/composer/installed.json", INSTALLED),
+            ("vendor/acme/model/src/Root.php", ROOT),
+            ("src/User.php", USER),
+        ],
+    );
+    let store = store_dir("installed-later");
+    let busy = std::time::Duration::from_secs(5);
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(idx.get_cached("Acme\\Model\\Base").is_none(), "not installed yet");
+    });
+    write(&root, "vendor/acme/model/src/Base.php", BASE);
+    crate::index::module_cache::with_test_cache_dir(&store, busy, || {
+        let idx = indexed(&root);
+        assert!(idx.get_cached("Acme\\Model\\Base").is_some(), "the install never landed");
+    });
+}
