@@ -593,7 +593,7 @@ impl<'a> Builder<'a> {
         // Declaration/name slots aren't value-position barewords either:
         // a sub's own `name`, a package/class/use statement's module —
         // their refs belong to their visitors.
-        if let Some(parent) = node.parent() {
+        if let Some(parent) = self.syntax.parent(node) {
             if matches!(
                 parent.kind(),
                 "function_call_expression" | "ambiguous_function_call_expression"
@@ -627,7 +627,7 @@ impl<'a> Builder<'a> {
         // already emits the PackageRef for the invocant). Without this guard,
         // references/rename on a sub `Bar` in package `Foo` wrongly matched the
         // `Foo::Bar->new` class invocant.
-        if let Some(parent) = node.parent() {
+        if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "method_call_expression"
                 && parent.child_by_field_name("invocant").map(|i| i.id()) == Some(node.id())
             {
@@ -841,10 +841,7 @@ impl<'a> Builder<'a> {
             return vec![];
         }
 
-        let mut root = call_node;
-        while let Some(p) = root.parent() {
-            root = p;
-        }
+        let Some(root) = self.syntax.root_of(call_node) else { return vec![] };
         let Some(body) = self.find_local_sub_body(root, name) else { return vec![] };
         self.literal_list_return_names(body)
     }
@@ -1621,7 +1618,7 @@ impl<'a> Builder<'a> {
                     Some(container) => {
                         crate::cst::varname_inner_scalar_text(container, self.source)
                             .or_else(|| {
-                                crate::cst::canonical_container_name(
+                                crate::cst::canonical_container_name(self.syntax, 
                                     container,
                                     self.source,
                                 )

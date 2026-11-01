@@ -29,10 +29,11 @@ fn indexed_perl(ws: &Path) -> ModuleIndex {
 /// Where `asker` sees `module`, and the supplier stamp on that answer.
 fn seen_by(idx: &ModuleIndex, asker: &Path, module: &str) -> (Option<PathBuf>, Vec<(String, PathBuf, bool)>) {
     let fa = idx.workspace_file_for_test(asker).unwrap();
+    let asker = &crate::util::canonical_path::CanonicalPath::resolve(asker);
     let base: &dyn CrossFileLookup = idx;
     let axis = VisibilityAxis::for_origin(&fa, Some(asker), base, PackVisibility::Host);
     let scoped = ScopedLookup::new(base, &fa.pack.include_closure, Some(asker), axis);
-    let winner = scoped.get_cached(module).map(|c| c.path.clone());
+    let winner = scoped.get_cached(module).map(|c| c.path.clone().into_path_buf());
     let supplied = fa
         .imports_supplied_by_other_roots(Some(asker), base, &scoped)
         .into_iter()
@@ -61,10 +62,10 @@ fn a_module_only_a_scripts_use_lib_reaches_resolves_with_its_supplier() {
     let dep = base.join("ext/lib/My/Dep.pm");
 
     assert!(
-        idx.def_candidates("My::Dep").iter().any(|c| c.path == dep),
+        idx.def_candidates("My::Dep").iter().any(|c| c.path.as_path() == dep),
         "the root bin/app.pl names is searched, so My::Dep lands",
     );
-    assert!(idx.is_dependency_path(&dep));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&dep)));
 
     let app = ws.join("lib/My/App.pm");
     let (winner, supplied) = seen_by(&idx, &app, "My::Dep");
@@ -72,7 +73,7 @@ fn a_module_only_a_scripts_use_lib_reaches_resolves_with_its_supplier() {
     assert_eq!(supplied, [("My::Dep".to_string(), ws.join("bin/app.pl"), true)]);
 
     let fa = idx.workspace_file_for_test(&app).unwrap();
-    let diags = crate::lsp::symbols::search_root_diagnostics(&fa, Some(&app), &idx);
+    let diags = crate::lsp::symbols::search_root_diagnostics(&fa, Some(&crate::util::canonical_path::CanonicalPath::resolve(&app)), &idx);
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0].range.start.line, 1, "on the `use My::Dep` line");
     assert!(diags[0].message.contains("added by bin/app.pl"), "{}", diags[0].message);
@@ -81,7 +82,7 @@ fn a_module_only_a_scripts_use_lib_reaches_resolves_with_its_supplier() {
     // The script's own root is its own: nothing to say there.
     let script = ws.join("bin/app.pl");
     let fa = idx.workspace_file_for_test(&script).unwrap();
-    assert!(crate::lsp::symbols::search_root_diagnostics(&fa, Some(&script), &idx).is_empty());
+    assert!(crate::lsp::symbols::search_root_diagnostics(&fa, Some(&crate::util::canonical_path::CanonicalPath::resolve(&script)), &idx).is_empty());
 }
 
 /// The root a file up the asker's stack names outranks one an unrelated
@@ -235,8 +236,8 @@ fn a_python_sys_path_root_lands_what_only_it_reaches() {
     super::index_pack_language(python, &ws, None, &idx, None, 0);
     idx.wait_idle();
     let ext = base.join("pyext/extmod.py");
-    assert!(idx.def_candidates("extmod.Ext").iter().any(|c| c.path == ext), "the script's root places extmod");
-    assert!(idx.is_dependency_path(&ext));
+    assert!(idx.def_candidates("extmod.Ext").iter().any(|c| c.path.as_path() == ext), "the script's root places extmod");
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&ext)));
 }
 
 /// The python forms that mint a root, and the computed ones that do not.

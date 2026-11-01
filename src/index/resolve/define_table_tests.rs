@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::model::file_analysis::{CondTest, FileAnalysis, MacroDef, Span, Symbol};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn defines(defs: &[(&str, &[CondTerm])]) -> FileAnalysis {
     let src = "1;\n";
@@ -39,12 +39,12 @@ struct Files {
 impl Files {
     fn put(&self, path: &str, fa: FileAnalysis) {
         let mut files = self.files.borrow_mut();
-        files.retain(|c| c.path != Path::new(path));
-        files.push(Arc::new(CachedModule::new(PathBuf::from(path), Arc::new(fa))));
+        files.retain(|c| c.path.as_path() != Path::new(path));
+        files.push(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(path), Arc::new(fa))));
         self.epoch.set(self.epoch.get() + 1);
     }
     fn drop_file(&self, path: &str) {
-        self.files.borrow_mut().retain(|c| c.path != Path::new(path));
+        self.files.borrow_mut().retain(|c| c.path.as_path() != Path::new(path));
         self.epoch.set(self.epoch.get() + 1);
     }
 }
@@ -109,7 +109,7 @@ fn trails(t: &DefineTable, name: &str) -> Vec<Vec<CondTerm>> {
 
 fn paths(t: &DefineTable, name: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> =
-        t.defs_named(name).expect("current").into_iter().map(|(c, _)| c.path.clone()).collect();
+        t.defs_named(name).expect("current").into_iter().map(|(c, _)| c.path.to_path_buf()).collect();
     out.sort();
     out
 }

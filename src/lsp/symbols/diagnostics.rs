@@ -61,7 +61,7 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
 /// on another file's search path and every verb now acts on it.
 pub fn search_root_diagnostics(
     analysis: &FileAnalysis,
-    path: Option<&std::path::Path>,
+    path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &ModuleIndex,
 ) -> Vec<Diagnostic> {
     use crate::build::language_driver::LanguageRegistry;

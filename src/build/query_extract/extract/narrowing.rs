@@ -6,17 +6,13 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct State {
-    /// Guard narrowing, joined per match: a guard (`isinstance(x, Foo)`,
-    /// `dynamic_cast<Foo*>(b)`, `opt.has_value()`) and the `@narrow.arm` it
-    /// enters. The subject is recorded with the scope the guard sits in (the
-    /// narrowing attaches there, like the Perl walker's) and its declared
-    /// type text, resolved up the guard's own scope chain. The arm can
-    /// precede the guard in source (`a if isinstance(x, T) else b`), so the
-    /// join waits for `finish`.
-    narrow_var: HashMap<usize, (String, ScopeId, Option<String>)>,
-    narrow_type: HashMap<usize, String>,
-    narrow_guard: HashMap<usize, String>,
-    narrow_arm: HashMap<usize, Span>,
+    /// Guard subjects as the walk reaches them: (match, subject, the scope
+    /// the guard sits in, its declared type text). The narrowing attaches
+    /// in the guard's scope, like the Perl walker's, and the declared type
+    /// resolves up the guard's own scope chain, both known only while the
+    /// walk is there. The arm can precede the guard in source (`a if
+    /// isinstance(x, T) else b`), so the join waits for `finish`.
+    narrow_subjects: Vec<(usize, String, ScopeId, Option<String>)>,
     /// (var name, declaring scope) → its declared-type text, joined per
     /// declaration match. Feeds the token-less optional-engagement narrowing
     /// (`if (opt)`): the guard names no type, so the refinement reads the
@@ -25,36 +21,22 @@ pub(super) struct State {
     /// the right inner type — resolved by the guard's scope chain at consumption.
     /// Written by the flow family, where a declaration's scope is known.
     pub(super) annot_text_by_var: HashMap<(String, ScopeId), String>,
-    /// Unevaluated-operand regions (`noexcept(...)`/`sizeof(...)`/`decltype(...)`):
-    /// a `std::move` whose call sits inside one is a type-trait, not a move.
-    unevaluated: Vec<(usize, usize)>,
-    /// `std::move(x)` halves, joined per match: the qualifier (`std`) + name
-    /// (`move`) verify the call IS std::move (no query predicates), the var is
-    /// the moved subject, the call span the region start + enclosing scope.
-    move_scope_txt: HashMap<usize, String>,
-    move_name_txt: HashMap<usize, String>,
-    move_var_txt: HashMap<usize, String>,
-    move_call: HashMap<usize, (Span, ScopeId)>,
+    /// `std::move(x)` calls that run, in source order, with the scope each
+    /// sits in: (match, call span, scope).
+    move_calls: Vec<(usize, Span, ScopeId)>,
 }
 
-pub(super) fn collect(st: &mut ExtractState, e: &Event) {
+pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
-        Capture::Unevaluated => st.narrowing.unevaluated.push((e.start_byte, e.end_byte)),
         // Control-flow construct spans: the use-after-move check reads these
         // to decide whether a move is straight-line in its scope.
         Capture::GuardRegion => st.out.control_regions.push(e.span()),
         // Parameter-list spans: the use-after-move check reads these to tell
         // a moved parameter (not flagged) from a moved local.
         Capture::ParamRegion => st.out.param_regions.push(e.span()),
-        _ => {}
-    }
-}
-
-pub(super) fn handle(st: &mut ExtractState, e: &Event) {
-    let subject = (st.pack.shape_name)(&e.text);
-    let n = &mut st.narrowing;
-    match e.cap {
         Capture::Narrow(NarrowCap::Var) => {
+            let subject = (st.pack.shape_name)(&e.text);
+            let n = &mut st.narrowing;
             // Innermost declaration first, so a same-named var in a sibling
             // function never supplies the declared type.
             let annot = st
@@ -62,33 +44,17 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 .iter()
                 .rev()
                 .find_map(|&(_, sid)| n.annot_text_by_var.get(&(subject.clone(), sid)).cloned());
-            n.narrow_var.insert(e.match_id, (subject, st.cur_scope, annot));
-        }
-        Capture::Narrow(NarrowCap::Arm) => {
-            n.narrow_arm.insert(e.match_id, e.span());
-        }
-        Capture::Narrow(NarrowCap::Type) => {
-            n.narrow_type.insert(e.match_id, e.text.clone());
-        }
-        Capture::Narrow(NarrowCap::Guard) => {
-            n.narrow_guard.insert(e.match_id, e.text.clone());
-        }
-        Capture::Move(MoveCap::Scope) => {
-            n.move_scope_txt.insert(e.match_id, e.text.clone());
-        }
-        Capture::Move(MoveCap::Name) => {
-            n.move_name_txt.insert(e.match_id, e.text.clone());
-        }
-        Capture::Move(MoveCap::Var) => {
-            n.move_var_txt.insert(e.match_id, e.text.clone());
+            n.narrow_subjects.push((e.match_id, subject, st.cur_scope, annot));
         }
         Capture::Move(MoveCap::Call) => {
-            // Drop moves inside an unevaluated operand — they never execute,
-            // so nothing is moved-from (rule #10: the property is "does this
-            // move run", asked of the region, not a shape-branch downstream).
-            let unevaluated_move = n.unevaluated.iter().any(|&(s, en)| e.start_byte >= s && e.end_byte <= en);
-            if !unevaluated_move {
-                n.move_call.insert(e.match_id, (e.span(), st.cur_scope));
+            // Drop moves inside an unevaluated operand
+            // (`noexcept(...)`/`sizeof(...)`/`decltype(...)`) — they never
+            // execute, so nothing is moved-from (rule #10: the property is
+            // "does this move run", asked of the region, not a shape-branch
+            // downstream).
+            let ad = st.adorned;
+            if !st.around(e).any(|a| ad.events()[a].cap == Capture::Unevaluated) {
+                st.narrowing.move_calls.push((e.match_id, e.span(), st.cur_scope));
             }
         }
         _ => {}
@@ -105,15 +71,18 @@ pub(super) fn finish(st: &mut ExtractState) {
     // TODO(pack-exit-guard): no pack guard narrows a false test, so the
     // early-exit fall-through (`if not isinstance(x, T): return`) waits on a
     // pack-side negation.
+    let ad = st.adorned;
+    let mut subjects = std::mem::take(&mut n.narrow_subjects);
+    subjects.sort_by_key(|s| s.0);
     let mut pending = Vec::new();
-    let mut arm_mids: Vec<usize> = n.narrow_arm.keys().copied().collect();
-    arm_mids.sort_unstable();
-    for mid in arm_mids {
-        let Some((subject, scope, annot)) = n.narrow_var.get(&mid) else { continue };
-        let Some(ty) = n.narrow_type.get(&mid).or(annot.as_ref()) else { continue };
-        let guard = n.narrow_guard.get(&mid).map(String::as_str);
+    for (mid, subject, scope, annot) in subjects {
+        let Some(arm) = ad.in_match(mid, Capture::Narrow(NarrowCap::Arm)) else { continue };
+        let Some(ty) = ad.in_match(mid, Capture::Narrow(NarrowCap::Type)).map(|t| &t.text).or(annot.as_ref()) else {
+            continue;
+        };
+        let guard = ad.in_match(mid, Capture::Narrow(NarrowCap::Guard)).map(|g| g.text.as_str());
         if let Some(refined) = (st.pack.narrow_guard)(guard, ty) {
-            pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope));
+            pending.push((subject, refined, arm.span(), scope));
         }
     }
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
@@ -154,12 +123,12 @@ pub(super) fn finish(st: &mut ExtractState) {
     // std::move sites → moved-from facts. The qualifier/name verify the
     // call IS `std::move` here (no query predicates), so the diagnostic never
     // sees the call shape — it reads the recorded var + span + scope.
-    for (mid, (span, scope)) in &n.move_call {
-        if n.move_scope_txt.get(mid).map(String::as_str) == Some("std")
-            && n.move_name_txt.get(mid).map(String::as_str) == Some("move")
-        {
-            if let Some(v) = n.move_var_txt.get(mid) {
-                out.moved_from.push(((st.pack.shape_name)(v), *span, *scope));
+    let ad = st.adorned;
+    let text = |mid, cap| ad.in_match(mid, Capture::Move(cap)).map(|t| t.text.as_str());
+    for &(mid, span, scope) in &n.move_calls {
+        if text(mid, MoveCap::Scope) == Some("std") && text(mid, MoveCap::Name) == Some("move") {
+            if let Some(v) = text(mid, MoveCap::Var) {
+                out.moved_from.push(((st.pack.shape_name)(v), span, scope));
             }
         }
     }

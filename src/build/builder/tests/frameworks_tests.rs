@@ -1307,7 +1307,7 @@ fn test_export_ok_resolves_cross_file() {
     idx.insert_cache(
         "Data::Fetcher",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            PathBuf::from("/fake/Data/Fetcher.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/Data/Fetcher.pm")),
             std::sync::Arc::new(provider_fa),
         ))),
     );
@@ -1819,7 +1819,7 @@ fn moo_new_resolves_through_the_base_or_stays_unresolved() {
     idx.insert_cache(
         "Moo::Object",
         Some(Arc::new(crate::model::file_analysis::CachedModule::new(
-            std::path::PathBuf::from("/fake/Moo/Object.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/Moo/Object.pm")),
             Arc::new(build_fa(base_src)),
         ))),
     );

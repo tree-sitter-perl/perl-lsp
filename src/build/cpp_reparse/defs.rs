@@ -120,9 +120,7 @@ pub(super) fn walk_macro_defs(
     let mut pending: Vec<(String, Macro, (tree_sitter::Point, tree_sitter::Point))> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut it = cursor.matches(query, tree.root_node(), src);
-    let mut match_id = 0usize;
     while let Some(m) = it.next() {
-        match_id += 1;
         let mut oname = None;
         let mut obody = None;
         let mut bname = None;
@@ -131,10 +129,11 @@ pub(super) fn walk_macro_defs(
         let mut fbody = None;
         // Any name capture pins the def site (its parent is the preproc_def).
         let mut name_node: Option<tree_sitter::Node> = None;
+        let mut conds = Vec::new();
         for c in m.captures {
             let txt = c.node.utf8_text(src).unwrap_or("");
             if let Some(k) = cond[c.index as usize] {
-                arms.capture(k, c.node, txt, match_id);
+                conds.push((k, c.node, txt));
                 continue;
             }
             match names[c.index as usize] {
@@ -165,11 +164,12 @@ pub(super) fn walk_macro_defs(
                 _ => {}
             }
         }
+        arms.capture_match(conds);
         let def_line = name_node.map(|n| n.start_position().row).unwrap_or(0);
         let name_span = name_node
             .map(|n| (n.start_position(), n.end_position()))
             .unwrap_or_default();
-        let def = |params, body| Macro { params, body, guards: Vec::new(), def_line };
+        let def = |params, body| Macro { params, body, guards: Vec::new(), def_line, variant_delegates: Vec::new() };
         if let (Some(n), Some(b)) = (oname, obody) {
             pending.push((n, def(None, b), name_span));
         }
@@ -193,11 +193,47 @@ pub(super) fn walk_macro_defs(
 }
 
 pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
-    let mut out = BTreeMap::new();
-    walk_macro_defs(tree, src, |n, m, _span| {
-        out.insert(n, m);
-    });
+    let mut out: BTreeMap<String, Macro> = BTreeMap::new();
+    walk_macro_defs(tree, src, |n, m, _span| insert_folded(&mut out, n, m));
     out
+}
+
+/// Last definition wins the body; the shadowed one's delegates survive.
+fn insert_folded(table: &mut BTreeMap<String, Macro>, name: String, mut m: Macro) {
+    if let Some(prev) = table.remove(&name) {
+        m.absorb_variant(&prev);
+    }
+    table.insert(name, m);
+}
+
+impl Macro {
+    /// This definition's direct-delegation callee. Function-like: a
+    /// whole-body single call `G(args)`. Object-like: a bare-identifier ALIAS
+    /// (`#define op_prune_chain_head Perl_op_prune_chain_head`, perl5's
+    /// non-threaded embed.h shape) — the same forwarding edge, spelled
+    /// without params.
+    pub fn delegate(&self) -> Option<String> {
+        match self.params {
+            Some(_) => delegation_target(&self.body),
+            None => bare_identifier(&self.body),
+        }
+    }
+
+    /// Every callee a use of this name may forward to, across all its
+    /// config variants.
+    pub fn all_delegates(&self) -> impl Iterator<Item = String> + '_ {
+        self.delegate().into_iter().chain(self.variant_delegates.iter().cloned())
+    }
+
+    /// Fold a shadowed same-named definition's delegates into this one.
+    pub fn absorb_variant(&mut self, other: &Macro) {
+        let own = self.delegate();
+        for d in other.all_delegates() {
+            if own.as_ref() != Some(&d) && !self.variant_delegates.contains(&d) {
+                self.variant_delegates.push(d);
+            }
+        }
+    }
 }
 
 /// The macro identity/navigation lane: every `#define` as a `MacroDef` carrying
@@ -210,27 +246,37 @@ pub fn collect_macro_defs(
     source: &str,
     arms: &mut crate::model::file_analysis::CondArms,
 ) -> Vec<crate::model::file_analysis::MacroDef> {
+    collect_file_macros(parser, source, arms).defs
+}
+
+/// One file's own `#define`s, from one parse and one walk: the per-variant
+/// identity lane AND the folded table (`collect_macros`' shape), so the
+/// delegation lane reads a variant's callees from the same `Macro` the
+/// gathered closure does.
+#[derive(Default)]
+pub struct FileMacros {
+    pub defs: Vec<crate::model::file_analysis::MacroDef>,
+    pub table: BTreeMap<String, Macro>,
+}
+
+pub fn collect_file_macros(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    arms: &mut crate::model::file_analysis::CondArms,
+) -> FileMacros {
     use crate::model::file_analysis::{MacroDef, Span};
-    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
-    let src = source.as_bytes();
-    let mut out = Vec::new();
-    walk_macro_defs(&tree, src, |name, m, (start, end)| {
-        // Function-like: a whole-body single call `G(args)`. Object-like: a
-        // bare-identifier ALIAS (`#define op_prune_chain_head
-        // Perl_op_prune_chain_head`, perl5's non-threaded embed.h shape) —
-        // the same forwarding edge, spelled without params.
-        let delegate = match m.params {
-            Some(_) => delegation_target(&m.body),
-            None => bare_identifier(&m.body),
-        };
-        out.push(MacroDef {
-            name,
-            params: m.params,
-            body: m.body,
-            arm: arms.intern(m.guards),
+    let mut out = FileMacros::default();
+    let Some(tree) = parser.parse(source, None) else { return out };
+    walk_macro_defs(&tree, source.as_bytes(), |name, m, (start, end)| {
+        out.defs.push(MacroDef {
+            name: name.clone(),
+            params: m.params.clone(),
+            body: m.body.clone(),
+            arm: arms.intern(m.guards.clone()),
             selection_span: Span { start, end },
-            delegate,
+            delegate: m.delegate(),
         });
+        insert_folded(&mut out.table, name, m);
     });
     out
 }
