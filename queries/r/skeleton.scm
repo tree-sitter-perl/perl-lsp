@@ -59,7 +59,8 @@
 
 ; ---- literals ----
 ; Parentheses hold the value they wrap.
-(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
 (string) @expr.lit.string
 (float) @expr.lit.number
 (integer) @expr.lit.number

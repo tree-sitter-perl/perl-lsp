@@ -112,11 +112,15 @@ impl FileAnalysis {
         self.resolve_variable(name, point).is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER))
     }
 
+    /// The declaration a use of the variable `name` at `point` names: the
+    /// binders' rule asked by name (`variable_binding`), so it agrees with
+    /// the binding on a ref of that spelling there. A global nothing
+    /// declares is no declaration.
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
-        let scope = self.scope_at(point)?;
-        variable_lookup_chain(&self.scopes, scope, name)
-            .bindings(&self.symbols)
-            .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
+        match self.variable_use_at(name, point)? {
+            VariableUse::Declared(id) => Some(self.symbol(id)),
+            VariableUse::Global { .. } | VariableUse::GatedOur => None,
+        }
     }
 
     /// The pointer/reference declarator stack of the in-scope variable
@@ -828,27 +832,27 @@ impl FileAnalysis {
         self.variable_binding(var_text, at).is_none_or(|id| !self.reassigned_vars.contains(&id))
     }
 
-    /// The variable a use of `name` written at `at` binds to — the
-    /// builder's binding rule (`variable_use`) asked by name, so it agrees
-    /// with the binding on every ref of that spelling there.
-    pub fn variable_binding(&self, name: &str, at: Point) -> Option<SymbolId> {
+    /// What a use of the variable `name` written at `at` names, by the
+    /// binders' rule (`variable_use`) over the declarations the analysis
+    /// holds.
+    fn variable_use_at(&self, name: &str, at: Point) -> Option<VariableUse> {
         let scope = self.scope_at(at)?;
-        let outcome = variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
-            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(|s| {
-                // An implicit global is minted from uses, not declared: the
-                // `Global` arm reaches it by its package.
-                let declared = match &s.detail {
-                    SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => false,
-                    _ => matches!(s.kind, SymKind::Variable | SymKind::Field),
-                };
-                let gate = match &s.detail {
-                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
-                    _ => None,
-                };
-                (declared && s.name == name).then_some((s.id, s.span.start, gate))
-            })
-        });
-        match outcome {
+        let chain = variable_lookup_chain(&self.scopes, scope, name);
+        Some(variable_use(name, at, chain, self.package_at(at), self.names(), |scope| {
+            self.symbols
+                .declared_directly_in(scope)
+                .iter()
+                .map(|sid| &self.symbols[sid.0 as usize])
+                .filter(|s| s.name == name)
+                .filter_map(Symbol::variable_decl)
+        }))
+    }
+
+    /// The variable a use of `name` written at `at` binds to — the
+    /// binders' rule (`variable_use`) asked by name, so it agrees with the
+    /// binding on every ref of that spelling there.
+    pub fn variable_binding(&self, name: &str, at: Point) -> Option<SymbolId> {
+        match self.variable_use_at(name, at)? {
             VariableUse::Declared(id) => Some(id),
             VariableUse::GatedOur => None,
             VariableUse::Global { package, name } => {

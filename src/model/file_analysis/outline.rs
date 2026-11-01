@@ -536,7 +536,7 @@ impl FileAnalysis {
                     if matches!(r.access, AccessKind::Write) { mods |= 1 << MOD_MODIFICATION; }
                     tokens.push(PerlSemanticToken { span: r.span, token_type, modifiers: mods });
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Constant usages color like the decl; framework DSL keywords → macro.
                     let is_const = r.resolved_package().map_or(false, |pkg| {
                         constant_names.contains(&(pkg, r.unqualified_target_name(self.names())))
