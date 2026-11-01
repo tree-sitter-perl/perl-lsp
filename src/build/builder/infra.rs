@@ -78,7 +78,7 @@ impl<'a> Builder<'a> {
     /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
-        let conditional = crate::cst::conditional_arm(node, crate::cst::ArmBound::Sub).is_some();
+        let conditional = crate::cst::conditional_arm(self.syntax, node, crate::cst::ArmBound::Sub).is_some();
         let tail = match self.arg_window_at(node) {
             Some(InferredType::Sequence(v)) if !conditional => v.into_iter().skip(1).collect(),
             _ => Vec::new(),

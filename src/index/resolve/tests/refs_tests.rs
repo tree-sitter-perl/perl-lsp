@@ -45,7 +45,7 @@ fn test_refs_to_finds_sub_across_workspace_files() {
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))
                 && r.access == AccessKind::Declaration),
         "expected declaration of foo in file A, got {:?}",
         results,
@@ -53,7 +53,7 @@ fn test_refs_to_finds_sub_across_workspace_files() {
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))
                 && r.access == AccessKind::Read),
         "expected call to foo in file B, got {:?}",
         results,
@@ -90,13 +90,13 @@ fn test_refs_to_exporter_extensible_cross_file() {
         RoleMask::EDITABLE,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))
             && r.access == AccessKind::Declaration),
         "expected declaration of foo in Ext, got {:?}",
         results,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))
             && r.access == AccessKind::Read),
         "expected call to foo in consumer, got {:?}",
         results,
@@ -131,12 +131,12 @@ fn test_refs_to_exporter_declare_cross_file() {
         RoleMask::EDITABLE,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)),
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))),
         "expected def of foo in Decl, got {:?}",
         results,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))
             && r.access == AccessKind::Read),
         "expected call to foo in consumer, got {:?}",
         results,
@@ -172,13 +172,13 @@ fn test_refs_to_importer_consumer_cross_file() {
         RoleMask::EDITABLE,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))
             && r.access == AccessKind::Declaration),
         "expected decl of foo in Src::Mod, got {:?}",
         results,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)),
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))),
         "expected import/call of foo in consumer pinned to Src::Mod, got {:?}",
         results,
     );
@@ -1123,7 +1123,7 @@ sub create { }
         resolve(
             &store,
             &fa,
-            FileKey::Path(PathBuf::from("/tmp/dh_scope_test.pl")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/dh_scope_test.pl"))),
             pt,
             Some(&idx),
             OverrideScope::default(),
@@ -1292,7 +1292,7 @@ $u->create(name => 'alice');
         .map(|r| {
             let fname = match &r.key {
                 FileKey::Path(p) => p.file_name().unwrap().to_str().unwrap().to_string(),
-                FileKey::Url(u) => u.to_string(),
+                FileKey::Url(u, _) => u.to_string(),
             };
             (fname, r.span.start.row)
         })
@@ -1429,7 +1429,7 @@ fn test_refs_to_finds_cross_file_hash_key_def() {
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_lib)),
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_lib))),
         "expected HashKeyDef match in Lib, got {:?}",
         results,
     );
@@ -1472,14 +1472,14 @@ fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)),
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))),
         "expected Alpha hit, got {:?}",
         results,
     );
     assert!(
         !results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b)),
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b))),
         "Beta's get_config must NOT show up in Alpha's references, got {:?}",
         results,
     );
@@ -1521,14 +1521,14 @@ fn test_refs_to_qualified_call_resolves_to_def() {
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_a)),
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_a))),
         "expected the def in A, got {:?}",
         results,
     );
     // Both qualified call sites in B.
     let b_hits = results
         .iter()
-        .filter(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b))
+        .filter(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b)))
         .count();
     assert_eq!(b_hits, 2, "expected both A::foo() call sites, got {:?}", results);
 }
@@ -1561,7 +1561,7 @@ fn test_refs_to_qualified_call_isolates_package() {
     // Only the A::foo() site, never C::foo().
     let b_hits = results
         .iter()
-        .filter(|r| matches!(&r.key, FileKey::Path(p) if p == &path_b))
+        .filter(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_b)))
         .count();
     assert_eq!(b_hits, 1, "only A::foo() should match, got {:?}", results);
 }
@@ -1683,7 +1683,7 @@ $b->touch();
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs.iter().any(|r| {
-        matches!(&r.key, FileKey::Path(p) if p == &consumer_path)
+        matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path))
     });
     assert!(
         consumer_hit,
@@ -1739,7 +1739,7 @@ $b->touch();
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(consumer_path),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(consumer_path)),
         tree_sitter::Point { row: 3, column: 4 },
         Some(&idx),
         OverrideScope::default(),
@@ -1830,7 +1830,7 @@ $x->ping();
         RoleMask::WORKSPACE,
     );
     assert!(
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &consumer_path)),
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path))),
         "refs_to(C::ping) missed consumer's $$x->ping() call site \
          (multi-hop: $$x typed as C only post-enrichment). hits: {:?}",
         refs.iter().map(|r| (&r.key, r.span.start.row)).collect::<Vec<_>>(),
@@ -2004,7 +2004,7 @@ $x->makeFoo()->ping();
         RoleMask::WORKSPACE,
     );
     assert!(
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &consumer_path)),
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&consumer_path))),
         "refs_to(P::ping) missed the chain hop $$x->makeFoo()->ping(). \
          The inner $$x->makeFoo() invocant ($$x) was typed only by \
          cross-file enrichment; chain typing must compose through the \
@@ -2058,7 +2058,7 @@ $x->makeFoo()->ping();
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(consumer_path),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(consumer_path)),
         tree_sitter::Point { row: 3, column: 18 },
         Some(&idx),
         OverrideScope::default(),
@@ -2125,14 +2125,14 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_reg)),
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_reg))),
         "expected the add_task registration in the registry file, got {:?}",
         results,
     );
     assert!(
         results
             .iter()
-            .any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_call)),
+            .any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_call))),
         "expected the cross-file enqueue caller, got {:?}",
         results,
     );
@@ -2202,12 +2202,12 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
     );
 
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_reg)),
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_reg))),
         "expected the add_task registration; got {:?}",
         results,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_call)),
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_call))),
         "expected the cross-file enqueue call-site in the unenriched subclass \
          worker to surface via query-time gated resolution; got {:?}",
         results,
@@ -2254,13 +2254,13 @@ fn refs_to_fans_runtime_exported_sub_to_consumer() {
     );
 
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_def)
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_def))
             && r.access == AccessKind::Declaration),
         "expected declaration of sweeten in the exporting package; got {:?}",
         results,
     );
     assert!(
-        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &path_use)),
+        results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&path_use))),
         "expected the consumer's import/call of sweeten to fan out; got {:?}",
         results,
     );
@@ -2302,7 +2302,7 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
 
     assert!(hit(&def), "missed Bank::make_account decl. hits: {:?}", refs);
     assert!(
@@ -2355,7 +2355,7 @@ fn refs_to_links_return_hash_key_cross_file() {
     assert!(target.supports_cross_file_rename(), "HashKeyOfSub must rename cross-file now");
 
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
     assert!(hit(&prod), "missed producer's host def. hits: {:?}", refs);
     assert!(
         hit(&cons),
@@ -2413,7 +2413,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
 
     assert!(hit(&def), "missed TaskInfo def. hits: {:?}", refs);
     assert!(hit(&caller1), "missed TaskProxy caller. hits: {:?}", refs);
@@ -2468,7 +2468,7 @@ fn references_cross_file_method_matches_inheriting_invocant() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
 
     assert!(hit(&role_path), "missed Role::REST::success decl. hits: {:?}", refs);
     assert!(
@@ -2533,5 +2533,5 @@ fn a_perl_constructor_retrieves_under_its_name() {
     assert!(fa.symbols().iter().any(|s| s.name == "new" && s.is_constructor()));
     let target = TargetRef::method("new".into(), "Base".into(), None, &fa, None, OverrideScope::Dispatch);
     assert!(target.constructed_classes.is_empty());
-    assert_eq!(target.retrieval_keys([], fa.names()), ["new"]);
+    assert_eq!(target.retrieval_keys(fa.names()), ["new"]);
 }
