@@ -50,16 +50,12 @@ pub fn php_pack() -> LangPack {
     }
 }
 
-/// A declared type as written (`int`, `?Foo`, `\App\User`). A union has
-/// no single type in the lattice, so it reads as no declared type; a class
-/// spelling resolves through the use-map at its site. `self`, `static` and
-/// `parent` never reach here: the document marks them `@type.enclosing` /
-/// `@type.super`.
+/// A single declared type as written (`int`, `?Foo`, `\App\User`): the
+/// document captures no union or intersection, and marks `self`, `static`
+/// and `parent` `@type.enclosing` / `@type.super`, so none reaches here. A
+/// class spelling resolves through the use-map at its site.
 fn declared_type(text: &str) -> Option<InferredType> {
     let t = text.trim().trim_start_matches('?');
-    if t.contains(['|', '&', '(']) {
-        return None;
-    }
     match t.to_ascii_lowercase().as_str() {
         "int" | "float" => Some(InferredType::Numeric),
         "string" => Some(InferredType::String),
