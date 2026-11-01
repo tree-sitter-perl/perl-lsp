@@ -3,7 +3,7 @@
 `std::move(x)` leaves `x` in a valid-but-unspecified moved-from state; a
 subsequent READ of `x` before it is reassigned is a bug (clang-tidy's
 `bugprone-use-after-move`). The machinery to record moves and the FlowEdge
-rebind-cutoff already existed (`moved_from`, `earliest_rebind_in` — the same
+rebind-cutoff already existed (`moved_from`, `RebindIndex` — the same
 cutoff the narrowing tier uses). The naive check on top of it emitted ~17 false
 positives over baseline library headers (spdlog/fmt/onednn) and was parked
 dark.

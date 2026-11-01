@@ -230,7 +230,7 @@ impl FileAnalysis {
             // Per-symbol opt-out. Plugins mark DSL imports / internal
             // infrastructure so the outline stays focused on real
             // user-visible structure.
-            if sym.hidden_in_outline() { continue; }
+            if sym.hidden_in_outline() || sym.is_mention() { continue; }
             if matches!(sym.kind, SymKind::Sub | SymKind::Method) && sym.namespace.is_framework() {
                 let key = (
                     sym.kind,
@@ -444,11 +444,11 @@ impl FileAnalysis {
         for sym in &self.symbols {
             match sym.kind {
                 SymKind::Variable | SymKind::Field => {
-                    let is_self = crate::model::conventions::is_conventional_invocant_name(&sym.name);
+                    let is_self = sym.flags.contains(SymbolFlags::RECEIVER);
                     let (sigil, is_readonly, is_param) = match &sym.detail {
                         // Anchored on a use, not a declaration: the use's
                         // own ref carries the token.
-                        SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. } => continue,
+                        SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => continue,
                         SymbolDetail::Variable { sigil, decl_kind } => {
                             let readonly = matches!(decl_kind, DeclKind::Field);
                             let is_param = matches!(decl_kind, DeclKind::Param | DeclKind::ForVar);
@@ -526,8 +526,10 @@ impl FileAnalysis {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => {
                     let sigil = r.target_name.chars().next().unwrap_or('$');
-                    let is_self =
-                        crate::model::conventions::is_conventional_invocant_name(&r.target_name);
+                    let is_self = r
+                        .resolved_symbol()
+                        .and_then(|sid| self.symbols.get(sid.0 as usize))
+                        .is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER));
                     let token_type = if is_self { TOK_KEYWORD } else { TOK_VARIABLE };
                     // Don't add sigil modifier for $self/$class — it would override the keyword color
                     let mut mods = if is_self { 0 } else { sigil_modifier(sigil) };

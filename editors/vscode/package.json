@@ -2,7 +2,7 @@
   "name": "vscode-perl-lsp",
   "displayName": "Perl (perl-lsp)",
   "description": "Perl IntelliSense — autocomplete, go-to-definition, hover, and project-wide cross-file rename. Type inference and framework intelligence (Moo/Moose, Mojolicious, DBIx::Class), powered by tree-sitter-perl.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "tree-sitter-perl",
   "license": "MIT",
   "icon": "icon.png",

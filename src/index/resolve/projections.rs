@@ -105,13 +105,7 @@ impl<'a> CandidateSet<'a> {
                 .origin
                 .find_occurrences(self.point, self.idx())
                 .into_iter()
-                .map(|(span, access)| RefLocation {
-                    key: self.origin_key.clone(),
-                    span,
-                    access,
-                    rewritable: true,
-                    label: None
-                })
+                .map(|(span, access)| RefLocation::at(self.origin_key.clone(), span, access))
                 .collect(),
         }
     }
@@ -129,16 +123,17 @@ impl<'a> CandidateSet<'a> {
     }
 
     /// linkedEditingRange: the co-edit set — the origin-file sites a rename
-    /// would rewrite with the typed text VERBATIM, so the co-edit set equals
-    /// the rename image's site set by construction. Two exclusions, both
-    /// rename policy: non-`rewritable` sites (const-folded names — rename
-    /// skips them too) and group members whose replacement is re-derived
+    /// would rewrite with the typed text VERBATIM. It reads the same
+    /// `SiteRewrite` rename does, but only the origin file's sites, so a
+    /// rename refused at a site elsewhere still co-edits here. Two
+    /// exclusions, both rename policy: sites rename does not rewrite (`SiteRewrite` other
+    /// than `Yes`) and group members whose replacement is re-derived
     /// rather than bare (`has_size` for attr `size` — co-editing one text
     /// across them would corrupt the affix).
     pub fn linked_editing_spans(&self) -> Vec<Span> {
         self.origin_occurrences()
             .into_iter()
-            .filter(|(loc, bare)| *bare && loc.rewritable)
+            .filter(|(loc, bare)| *bare && loc.rewrite.rewrites())
             .map(|(loc, _)| loc.span)
             .collect()
     }
@@ -194,13 +189,7 @@ impl<'a> CandidateSet<'a> {
                     }))
                     .map(|span| {
                         (
-                            RefLocation {
-                                key: self.origin_key.clone(),
-                                span: *span,
-                                access: AccessKind::Read,
-                                rewritable: true,
-                                label: None,
-                            },
+                            RefLocation::at(self.origin_key.clone(), *span, AccessKind::Read),
                             true,
                         )
                     })
@@ -243,13 +232,7 @@ impl<'a> CandidateSet<'a> {
                 .into_iter()
                 .map(|(span, access)| {
                     (
-                        RefLocation {
-                            key: self.origin_key.clone(),
-                            span,
-                            access,
-                            rewritable: true,
-                            label: None,
-                        },
+                        RefLocation::at(self.origin_key.clone(), span, access),
                         true,
                     )
                 })
@@ -258,39 +241,18 @@ impl<'a> CandidateSet<'a> {
     }
 
     /// Whether rename at this cursor would produce edits — the prepareRename
-    /// gate. Mirrors `rename_edits`' arms so the box is offered exactly where
-    /// edits exist. Pack targets probe the real edit set: a set rename would
-    /// refuse (alias-spelled sites) or no-op on must not offer a box.
-    pub fn renameable(&self) -> bool {
-        match self.resolution() {
-            Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
-                if self.pack {
-                    self.rename_edits("x").is_ok_and(|e| !e.is_empty())
-                } else {
-                    true
-                }
-            }
-            Some(ResolvedTarget::Group { .. }) => true,
-            Some(_) => self
-                .origin
-                .rename_at(self.point, "x")
-                .is_some_and(|e| !e.is_empty()),
-            None => false,
-        }
+    /// gate. It IS the rename probed with a placeholder name, so the box is
+    /// offered exactly where edits exist, and a rename that would refuse
+    /// answers its refusal before the user types a name.
+    pub fn renameable(&self) -> Result<bool, String> {
+        self.rename_edits("x").map(|e| !e.is_empty())
     }
 
-    /// Rename = the references image + rewritability policy, with each span
-    /// paired to ITS replacement text (bare vs re-derived affixed accessor
-    /// names for groups). Policy lives on the set/locations, not in handlers:
-    /// non-rewritable sites (const-folded names) are references but never
-    /// edits, and the walk stops at editable space.
-    /// `Ok(empty)` = nothing renameable here; `Err` = a rename that would
-    /// SILENTLY BREAK code — a pack set containing an alias-spelled site (a
-    /// use through a delegating `#define`, `rewritable: false`) refuses: the
-    /// macro's body isn't a collected span, so renaming the target would
-    /// leave the delegation chain pointing at the old name. Perl's
-    /// non-rewritable sites (variable-folded dispatch) keep their
-    /// long-standing skip.
+    /// Rename = the references image + each site's `SiteRewrite`, with each
+    /// span paired to ITS replacement text (bare vs re-derived affixed
+    /// accessor names for groups). `Ok(empty)` = nothing renameable here;
+    /// `Err` = a rename that would SILENTLY BREAK code at some site, refused
+    /// rather than emitted partially (`settle_rename_sites`).
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
         let editable = self
             .visibility_override
@@ -299,18 +261,9 @@ impl<'a> CandidateSet<'a> {
         Ok(match self.resolution() {
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 let locations = refs_to(self.files, self.module_index, t, editable);
-                if self.pack && locations.iter().any(|l| !l.rewritable) {
-                    return Err(format!(
-                        "rename of `{}` would leave sites that do not spell its name (a use \
-                         through a delegating macro, a construction) unchanged — refusing rather \
-                         than emitting a partial edit",
-                        t.name
-                    ));
-                }
                 let bare_new = self.bare_new_name(new_name);
-                locations
+                settle_rename_sites(&t.name, locations, |l| l)?
                     .into_iter()
-                    .filter(|loc| loc.rewritable)
                     .map(|loc| (loc, bare_new.to_string()))
                     .collect()
             }
@@ -325,7 +278,7 @@ impl<'a> CandidateSet<'a> {
                     members,
                     bare_new,
                     editable,
-                )
+                )?
             }
             // Lexical variables, unowned hash keys, non-cross-file targets:
             // the origin file's rename machinery owns the edit set.
@@ -336,13 +289,7 @@ impl<'a> CandidateSet<'a> {
                 .into_iter()
                 .map(|(span, text)| {
                     (
-                        RefLocation {
-                            key: self.origin_key.clone(),
-                            span,
-                            access: AccessKind::Read,
-                            rewritable: true,
-                            label: None
-                        },
+                        RefLocation::at(self.origin_key.clone(), span, AccessKind::Read),
                         text,
                     )
                 })
@@ -385,13 +332,7 @@ impl<'a> CandidateSet<'a> {
                             .whole_present(cached)
                             .field_sites_for_enum(&enum_name, Some(idx))
                         {
-                            out.push(RefLocation {
-                                key: FileKey::Path(cached.path.clone()),
-                                span,
-                                access: AccessKind::Read,
-                                rewritable: false,
-                                label: None
-                            });
+                            out.push(RefLocation::at(FileKey::Path(cached.path.clone()), span, AccessKind::Read).with_rewrite(SiteRewrite::Skip));
                         }
                     });
                 }

@@ -191,7 +191,7 @@ ARC 2  Flow combinator / value-flow tier (FlowEdge spine) 🔵 mostly done
        E  narrowing cutoff-on-edges ..................... ✅
           a narrowing is a SCOPED ASSERTION over a region, not a temporal
           value — must be explicitly region-bounded. `cst::rebinds_scalar`
-          deleted; cutoff is the shared `earliest_rebind_in`, edge-driven,
+          deleted; cutoff is the shared `RebindIndex`, edge-driven,
           consumed by Perl AND the query engine (cross-language).
        E0 binding-shape coverage ....................... ✅
        F  folded_from rename provenance ................. ✅ (const-fold
@@ -367,7 +367,7 @@ don't hard-code cpp assumptions that block the perl/python reuse.
 
 ### Cross-language narrowing/bind — LANDED
 
-One shared cutoff (`file_analysis::earliest_rebind_in`, edge-driven), consumed by
+One shared cutoff (`file_analysis::RebindIndex`, edge-driven), consumed by
 both the Perl builder AND the query engine. The grammar scan is gone.
 
 | language | `@flow` assign/decl | bind shapes (rebind) | `narrow_guard` | cutoff |

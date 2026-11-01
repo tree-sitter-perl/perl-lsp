@@ -62,6 +62,23 @@ impl ConclusionKey {
             _ => None,
         }
     }
+
+    /// The attachment this key projects — `from_attachment`'s inverse, or
+    /// `None` for a key no attachment names.
+    pub fn to_attachment(&self) -> Option<WitnessAttachment> {
+        match self {
+            Self::MethodOnClass { class, name } => Some(WitnessAttachment::PackageSymbol {
+                package: class.clone(),
+                name: name.clone(),
+            }),
+            Self::Field { owner, name } => Some(WitnessAttachment::Field {
+                owner: owner.clone(),
+                name: name.clone(),
+            }),
+            Self::TypeName(n) => Some(WitnessAttachment::TypeName(n.clone())),
+            Self::SubByName(_) => None,
+        }
+    }
 }
 
 /// How a `Link` treats the evaluating query's receiver as it hops.
@@ -1207,7 +1224,7 @@ fn walk_reachable(
 ///
 /// Exactly one, deliberately: several would need the fold's agreement rules to
 /// combine them, and re-deriving those here is a second spelling of
-/// `resolve_return_type`. More than one is `OpenNone`'s job.
+/// `join`. More than one is `OpenNone`'s job.
 /// The one `MethodOnClass` edge pointing at a class this file does not
 /// declare, if there is exactly one and nothing else competes with it.
 ///

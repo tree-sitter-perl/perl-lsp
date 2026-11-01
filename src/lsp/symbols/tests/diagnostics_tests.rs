@@ -970,6 +970,40 @@ fn diagnostic_options_deserialize_from_lsp_shape() {
     assert!(!opts.unresolved_dispatch, "absent key defaults to false");
 }
 
+// A union receiver: each arm is checked on its own.
+const UNION_PETS: &str = r#"
+package Cat;
+sub new { my $class = shift; return bless {}, $class }
+sub sound { 'meow' }
+sub purr { 'purr' }
+package Bird;
+sub new { my $class = shift; return bless {}, $class }
+sub sound { 'tweet' }
+package main;
+"#;
+
+fn union_pet_diags(call: &str) -> Vec<String> {
+    let src = format!("{UNION_PETS}sub g {{ my $pet = rand() ? Cat->new : Bird->new; $pet->{call}; }}\n1;\n");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    unresolved_method_diags(&src, &idx, DiagnosticOptions::default())
+}
+
+#[test]
+fn a_union_arm_without_the_method_warns_for_that_arm() {
+    let diags = union_pet_diags("purr");
+    assert_eq!(diags, ["'purr' is not defined in Bird, which $pet may be"]);
+}
+
+#[test]
+fn a_method_every_arm_answers_is_silent() {
+    assert!(union_pet_diags("sound").is_empty());
+}
+
+#[test]
+fn a_method_no_arm_answers_names_every_arm() {
+    assert_eq!(union_pet_diags("bark"), ["'bark' is not defined in Bird or Cat, which $pet may be"]);
+}
+
 /// `use strict;` and `use Moo;` are bare imports: until their producers are
 /// cached the valve keeps the file silent, so the lint's tests seed them the
 /// way @INC resolution does in the server.
@@ -1013,6 +1047,18 @@ fn missing_declaration_flags_each_undeclared_use() {
         .find(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == codes::MISSING_DECLARATION))
         .unwrap();
     assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+}
+
+/// An element, slice or `$#` access through a deref names the referent,
+/// not a variable: `${Bugzilla->languages}[0]` declares nothing and needs
+/// nothing declared.
+#[test]
+fn missing_declaration_ignores_deref_element_access() {
+    let source = "use strict; my $x = [];\nmy @r = (${Foo->bar}[0], ${ Foo->bar }{k}, @{Foo->bar}[1, 2], @{$x}{qw(a)}, %$x{a}, $$x[0], ${$x}[0], $#{Foo->bar}, $#$x, ${ f() }[0]);\nsub f { [] }\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
 }
 
 /// A global used inside a sub before a file-level `my` of the same name is
@@ -1190,4 +1236,31 @@ fn missing_declaration_reads_eval_replacement_as_code() {
     let found = missing_declarations(&collect_diagnostics(&parse_analysis(source), &module_index, Default::default()));
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].1.contains("'$typo'"), "{found:?}");
+}
+
+#[test]
+fn d3_d4_judge_each_guard_literal_not_the_condition() {
+    // A verdict on one conjunct is not a verdict on the condition: it lands
+    // on the literal, with that literal's own polarity, and the message
+    // states the subject's fact apart from the guard's outcome.
+    let src = r#"
+package Foo;
+sub new { bless {}, shift }
+package Main;
+sub g {
+    my $x = Foo->new;
+    if (!(defined($x) && $_[0])) { return 1; }
+    if (!defined $x) { return 2; }
+    return;
+}
+1;
+"#;
+    let diags = guard_diags(src);
+    assert_eq!(
+        diags,
+        vec![
+            ("redundant-guard".into(), "'$x' is always defined here; this guard is redundant".into()),
+            ("contradictory-guard".into(), "'$x' is always defined here; this guard can never pass".into()),
+        ],
+    );
 }
