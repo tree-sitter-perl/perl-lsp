@@ -1,6 +1,6 @@
 //! Pins for the `RefTable` call index — the call spanning exactly an
 //! expression, which chain-receiver dispatch in
-//! `method_call_invocant_class` reads. Only call-shaped refs go in, equal
+//! `resolve_receiver` reads. Only call-shaped refs go in, equal
 //! spans keep the first ref, and a receiver is the call spanning it
 //! exactly, so no lookup can land on the outer call itself.
 
@@ -61,7 +61,7 @@ Foo->new->bar();
         panic!("bar is a MethodCall");
     };
     assert_eq!(fa.refs.call_spanning(*span), Some(ref_idx(&fa, "new", is_method_call)));
-    assert_eq!(fa.method_call_invocant_class(bar, None).as_deref(), Some("Foo"));
+    assert_eq!(fa.receiver_classes(bar, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(), Some("Foo"));
 }
 
 /// `make_b()->touch()`: the function ref spans only its name, so no
@@ -80,7 +80,7 @@ make_b()->touch();
         panic!("touch is a MethodCall");
     };
     assert_eq!(fa.refs.call_spanning(*span), None);
-    assert_eq!(fa.method_call_invocant_class(touch, None).as_deref(), Some("B"));
+    assert_eq!(fa.receiver_classes(touch, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(), Some("B"));
 }
 
 /// A receiver no call spans falls through to its own shape: a bareword
@@ -105,7 +105,7 @@ $x->m();
             panic!("{name} is a MethodCall");
         };
         assert_eq!(fa.refs.call_spanning(*span), None);
-        assert_eq!(fa.method_call_invocant_class(r, None).as_deref(), Some("Bar"));
+        assert_eq!(fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(), Some("Bar"));
     }
 }
 
@@ -173,7 +173,7 @@ a()->b()->c()->d()->e()->f();
 "#,
     );
     let f = &fa.refs[ref_idx(&fa, "f", is_method_call)];
-    let _ = fa.method_call_invocant_class(f, None);
+    let _ = fa.receiver_classes(f, None, ReceiverPolicy::Navigate);
 }
 
 /// Only call-shaped refs answer: a hash access spanning an expression
@@ -226,7 +226,7 @@ sub create_user { return Foo->new }
 create_user(5)->name->baz;
 ",
     );
-    let class = |name: &str| fa.method_call_invocant_class(&fa.refs[ref_idx(&fa, name, is_method_call)], None);
+    let class = |name: &str| fa.receiver_classes(&fa.refs[ref_idx(&fa, name, is_method_call)], None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(class("name").as_deref(), Some("Foo"), "the function call is the whole receiver");
     assert_eq!(class("baz").as_deref(), Some("Bar"), "the receiver is the chain's last hop");
 }
@@ -250,7 +250,7 @@ $u->name->baz;
         .refs
         .iter()
         .filter(|r| is_method_call(&r.kind) && r.target_name == "baz")
-        .map(|r| fa.method_call_invocant_class(r, None))
+        .map(|r| fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string))
         .collect();
     assert_eq!(classes, vec![None, None], "an untyped hop leaves its receiver untyped");
 }

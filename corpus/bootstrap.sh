@@ -22,7 +22,7 @@ ONLY="${2:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CPM="$(command -v cpm || echo /tmp/cpm)"
 
-# The eight keepers. Each earned its slot; see README.md for the measurement.
+# The nine keepers. Each earned its slot; see README.md for the measurement.
 # A pin moves only with a re-measure: every recorded number is against it, and
 # the house plugins (house/<name>/) are copied out of the source at it.
 #   name|url|commit|why
@@ -35,6 +35,7 @@ REPOS=(
 "Webmin|https://github.com/webmin/webmin|60f980d83245191e26a67e63cfb86c7652cb613b|path-based require, 101 package decls, lowest hit rate"
 "BMO|https://github.com/mozilla-bteam/bmo|635a95c106cfe0cbf71809ffc244ae431100a4d1|healthy reference: 206 att/file at 99.90% hit"
 "openfoodfacts|https://github.com/openfoodfacts/openfoodfacts-server|978319802a53816791de579d6c967c44ed67bc0a|densest static graph, near-zero fan-out"
+"Conch|https://github.com/joyent/conch|fc8a0e3d7a0ec15bc216ee0843153225cccd1e8e|DBIC schema on a cross-file base: every result class's accessors are gated"
 )
 
 mkdir -p "$DEST" || exit 1
@@ -73,7 +74,7 @@ for ENTRY in "${REPOS[@]}"; do
   fi
 
   # Dependency manifest: use the repo's own if it has one, else derive.
-  # Six of the eight ship none — they are applications, not CPAN dists.
+  # Six of the nine ship none — they are applications, not CPAN dists.
   CF=""
   for c in cpanfile Makefile.PL Build.PL; do [ -f "$DEST/$NAME/$c" ] && CF="$c" && break; done
   if [ -z "$CF" ]; then

@@ -493,6 +493,10 @@ impl DiagCtx {
                 let options = self.options;
                 let uri = uri.clone();
                 tokio::task::spawn_blocking(move || {
+                    // One session for the stamp and the lints after it, so
+                    // they share each receiver's resolution.
+                    let _session =
+                        crate::model::witnesses::ResolutionSession::enter_with_receivers(&*idx);
                     match open_docs.enrich_open(&uri, &*idx) {
                         Some(analysis) => {
                             symbols::collect_diagnostics(&analysis, &idx, options)
@@ -608,6 +612,10 @@ pub(super) fn refresh_open_diagnostics(
     let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
     for (uri, language) in docs {
         let diagnostics = if hub(language) {
+            // One session per doc for its stamp and lints (see
+            // `publish_diagnostics`).
+            let _session =
+                crate::model::witnesses::ResolutionSession::enter_with_receivers(module_index);
             match open_docs.enrich_open(&uri, module_index) {
                 Some(analysis) => symbols::collect_diagnostics(&analysis, module_index, options),
                 None => continue, // closed mid-iteration

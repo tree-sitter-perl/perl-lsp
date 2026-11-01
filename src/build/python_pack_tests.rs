@@ -1316,7 +1316,7 @@ def f(h: Holder):
 
 /// A write to a member is an assignment to it, through any receiver: a
 /// declared attribute keeps its annotation over what is written to it,
-/// and an undeclared one whose writes disagree on the class has no value.
+/// and an undeclared one whose writes disagree on the class is either.
 #[cfg(feature = "python")]
 #[test]
 fn a_member_write_is_an_assignment_to_the_member() {
@@ -1360,7 +1360,11 @@ class Outer:
     let (defs, _, _) = landing(&idx, &path, Point::new(16, 25));
     assert_eq!(defs, [("mod.py".to_string(), 1)], "the annotation governs `made`");
     let (defs, _, _) = landing(&idx, &path, Point::new(18, 27));
-    assert_eq!(defs, [], "`either` is written a Widget and a Gadget");
+    assert_eq!(
+        defs,
+        [("mod.py".to_string(), 5), ("mod.py".to_string(), 1)],
+        "`either` is written a Widget and a Gadget, so it dispatches on both",
+    );
     let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
     assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
     let (defs, _, _) = landing(&idx, &path, Point::new(32, 32));
@@ -1550,4 +1554,87 @@ def f():
         [(3, Some(2)), (4, Some(2)), (6, Some(2)), (9, Some(8)), (10, Some(2))],
         "the write in a branch, g's read and f's return are f's; h's are h's"
     );
+}
+
+/// A receiver expression is typed by its value, never read as a class
+/// spelling: `self.either` (written two classes) is either class,
+/// `self.unknown` (never written) types nothing, and a class name read
+/// still types the class.
+#[cfg(feature = "python")]
+#[test]
+fn an_attribute_receiver_is_no_class_spelling() {
+    let src = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Gadget:
+    def spin(self):
+        return 2
+
+class Holder:
+    def __init__(self):
+        self.either = Widget()
+    def swap(self):
+        self.either = Gadget()
+    def maybe(self):
+        return self.either.spin()
+    def gone(self):
+        return self.unknown.spin()
+
+def make():
+    return Widget.spin(Widget())
+";
+    let (t, idx) = indexed("pyattrrecv", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let recv = |at: Point| fa.method_call_invocant_type(fa.ref_at(at).unwrap(), Some(&idx));
+    let either = recv(Point::new(14, 27)).expect("a slot written two classes");
+    let mut classes: Vec<String> =
+        either.receiver_arms().iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    classes.sort();
+    assert_eq!(classes, ["pkg.mod.Gadget", "pkg.mod.Widget"], "a slot written two classes is either");
+    assert_eq!(recv(Point::new(16, 28)), None, "a slot never written");
+    assert_eq!(
+        recv(Point::new(19, 18)).and_then(|t| t.class_name().map(str::to_string)).as_deref(),
+        Some("pkg.mod.Widget"),
+        "a class name read",
+    );
+}
+
+/// A method's receiver is its first parameter, whatever it is called; a
+/// `@staticmethod` and a free function have none, whatever theirs is.
+#[cfg(feature = "python")]
+#[test]
+fn a_receiver_is_a_methods_first_parameter_by_position() {
+    let src = "\
+class A:
+    def m(this, y):
+        return this
+    @staticmethod
+    def s(self):
+        return self
+    @classmethod
+    def c(klass: \"A\"):
+        return klass
+
+def f(self):
+    return self
+";
+    let fa = py_in(src, None);
+    let receiver = |name: &str, row: usize| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.selection_span.start.row == row)
+            .unwrap_or_else(|| panic!("{name} at {row}"))
+            .flags
+            .contains(crate::model::file_analysis::SymbolFlags::RECEIVER)
+    };
+    assert!(receiver("this", 1));
+    assert!(!receiver("y", 1));
+    assert!(!receiver("self", 4), "a staticmethod has no receiver");
+    assert!(receiver("klass", 7));
+    assert!(!receiver("self", 10), "a free function has no receiver");
+    assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
+    assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
 }

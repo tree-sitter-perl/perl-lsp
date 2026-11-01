@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 #[test]
@@ -1290,7 +1291,7 @@ fn stamp_pass_sharing_matches_lone_resolutions() {
                 let fa = build_fa(&src);
                 let mut checked = 0;
                 for r in fa.refs().iter().filter(|r| r.member_site().is_some()) {
-                    let lone = fa.method_call_invocant_class(r, None);
+                    let lone = fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string);
                     let stamped = r.method_target().map(|t| t.invocant_class().to_string());
                     assert_eq!(stamped, lone, "ref at {:?}", r.span);
                     checked += 1;
@@ -1415,6 +1416,29 @@ fn symbolic_reference_to_a_constant_name_is_the_global() {
     assert_eq!(folded_from(Point::new(3, 37), "$main::cain"), None);
 }
 
+/// A deref's element/slice/`$#` access visits its operand: the variable
+/// and the call inside get their refs (rename reaches them), the access
+/// itself names no variable, and a constant name is the package aggregate.
+#[test]
+fn deref_container_access_visits_its_operand() {
+    let src = "our @abel;\nmy $x = [];\nprint $$x[0], ${$x}[0], @$x[1], @{$x}{a}, %$x{a}, $$x{k}, $#$x, $#{$x};\nprint ${Foo->bar}[0], $#{Foo->bar}, ${\"abel\"}[0], $#{\"abel\"};\n";
+    let fa = build_fa(src);
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+    let x = fa.symbols().iter().find(|s| s.name == "$x").unwrap().id;
+    let x_uses = fa.refs().iter().filter(|r| r.resolved_symbol() == Some(x) && r.span.start.row == 2).count();
+    assert_eq!(x_uses, 8, "every deref of `$x`");
+    let bars = fa.refs().iter().filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "bar").count();
+    assert_eq!(bars, 2, "the call inside each braced deref");
+    let abel = fa.symbols().iter().find(|s| s.name == "@abel").unwrap().id;
+    let abel_cols: Vec<usize> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.resolved_symbol() == Some(abel) && r.span.start.row == 3)
+        .map(|r| r.span.start.column)
+        .collect();
+    assert_eq!(abel_cols, vec![39, 54], "each literal names `@main::abel`");
+}
+
 /// A declared variable never mints a global, and `use vars` declares.
 #[test]
 fn declared_variables_mint_no_implicit_global() {
@@ -1455,4 +1479,49 @@ fn a_perl_constructor_and_a_requires_marker_are_flags() {
     assert!(fa.symbols().iter().find(|s| s.name == "new").unwrap().is_constructor());
     assert!(!flags("newer").contains(SymbolFlags::CONSTRUCTOR));
     assert!(flags("fetch").contains(SymbolFlags::CONTRACT));
+}
+
+fn param_names(fa: &FileAnalysis, sub: &str) -> Vec<String> {
+    let sym = fa.symbols().iter().find(|s| s.name == sub).expect("sub");
+    match &sym.detail {
+        SymbolDetail::Sub { params, .. } => params.iter().map(|p| p.name.clone()).collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A statement that leaves `@_` alone consumes no argument, so the
+/// unpack after it still binds the next one (Moo's `import`:
+/// `my $target = caller; my $class = shift;`). One that reads or hands on
+/// `@_` ends the preamble.
+#[test]
+fn args_untouched_statements_do_not_end_the_unpack() {
+    let fa = build_fa(
+        "package Moo;\n\
+         sub import { my $target = caller; my $class = shift; $class->make_class($target); }\n\
+         sub make_class { 1 }\n\
+         sub counted { my $n = scalar(@_); my $x = shift; }\n\
+         sub handed { &other; my $x = shift; }\n\
+         sub guarded { return unless defined $_[0]; my $x = shift; }\n",
+    );
+    assert_eq!(param_names(&fa, "import"), ["$class"]);
+    assert!(fa.is_receiver_at("$class", Point::new(1, 60)), "the conventional invocant name settles it as the receiver");
+    assert!(param_names(&fa, "counted").is_empty(), "`@_` read: the preamble ends");
+    assert!(param_names(&fa, "handed").is_empty(), "`&other;` hands `@_` on");
+    assert!(param_names(&fa, "guarded").is_empty(), "`$_[0]` read");
+}
+
+/// A special variable binds like any global, but Perl owns its name: its
+/// uses are one identity, and rename declines it.
+#[test]
+fn special_variables_bind_but_never_rename() {
+    let fa = build_fa("sub f { my $x = shift; print @_, $_[0]; for (@_) { print $_ } }\n");
+    let at = |needle: &str, nth: usize| {
+        let src = "sub f { my $x = shift; print @_, $_[0]; for (@_) { print $_ } }\n";
+        let col = src.match_indices(needle).nth(nth).unwrap().0 + 1;
+        tree_sitter::Point::new(0, col)
+    };
+    assert!(fa.rename_at(at("@_", 0), "args").is_none());
+    assert!(fa.rename_at(at("$_ ", 0), "it").is_none());
+    assert_eq!(fa.find_references(at("@_", 0), None).len(), 3, "both `@_` and `$_[0]` name `@_`");
+    assert!(implicit_globals(&fa).is_empty(), "a special variable is a mention, not this file's global");
 }

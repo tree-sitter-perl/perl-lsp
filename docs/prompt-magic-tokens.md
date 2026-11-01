@@ -26,7 +26,7 @@ already models the invocant shape (`InvocantText::CurrentPackage` for
 `invocant_type_at_node` already mints `ClassName(current_package)` for
 `__PACKAGE__` in the constructor / bless / `mk_classdata` paths
 (`builder.rs` ~2213). But it isn't resolved **uniformly**: the column-keyed-verb
-dispatch (`method_call_invocant_class` / the arg-key seam) doesn't consult it, so
+dispatch (`method_call_invocant_classes` / the arg-key seam) doesn't consult it, so
 e.g. `__PACKAGE__->new({ name => 1 })` (a valid Row constructor) doesn't link its
 `name` arg key to the column, and `__PACKAGE__->some_method` doesn't always reach
 goto-def/rename.
