@@ -423,8 +423,9 @@ impl ModuleIndex {
     }
 
     /// Find all cached modules that *export* the given function name: the
-    /// modules the symbol index names (it covers every named symbol, not
-    /// just exports) whose surface carries the name, plus every descendant
+    /// packages of the files the symbol index locates (it files each file
+    /// under its home, covering every named symbol and every package's
+    /// export list) whose surface carries the name, plus every descendant
     /// of one whose own surface carries it — a class exporting nothing of
     /// its own exports what its inherited `import` does
     /// (`export_surface_with_index`).
@@ -437,8 +438,23 @@ impl ModuleIndex {
                 .iter()
                 .any(|c| c.analysis.export_surface_with_index(m, self).exports(func_name))
         };
+        // A home locates a file; the packages whose lists it carries are
+        // candidates too, each answering for its own list.
+        let mut packages: Vec<String> = Vec::new();
+        for home in self.modules_with_symbol(func_name) {
+            for c in self.def_candidates(&home) {
+                for (pkg, _) in c.analysis.exporting_packages() {
+                    if !packages.contains(pkg) {
+                        packages.push(pkg.clone());
+                    }
+                }
+            }
+            if !packages.contains(&home) {
+                packages.push(home);
+            }
+        }
         let mut result: Vec<String> = Vec::new();
-        for m in self.modules_with_symbol(func_name) {
+        for m in packages {
             if !exports(&m) {
                 continue;
             }

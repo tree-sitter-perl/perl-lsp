@@ -1164,6 +1164,9 @@ mod restamp_gate_tests {
             fn modules_with_symbol(&self, _n: &str) -> Vec<String> {
                 Vec::new()
             }
+            fn modules_providing_package(&self, _p: &str) -> Vec<String> {
+                Vec::new()
+            }
             fn find_exporters(&self, _n: &str) -> Vec<String> {
                 Vec::new()
             }

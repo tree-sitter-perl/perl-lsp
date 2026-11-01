@@ -943,6 +943,15 @@ impl FileAnalysis {
         self.packages.get(package).map(|p| &p.exports).filter(|e| !e.is_empty())
     }
 
+    /// Every package of this file that declares an export list, with it.
+    pub fn exporting_packages(&self) -> impl Iterator<Item = (&String, &PackageExports)> {
+        self.packages
+            .iter()
+            .filter(|_| self.exports_declared)
+            .map(|(pkg, p)| (pkg, &p.exports))
+            .filter(|(_, e)| !e.is_empty())
+    }
+
     /// Is `sym` exported — is its name on its own package's list?
     pub fn symbol_is_exported(&self, sym: &Symbol) -> bool {
         self.any_package_exports(&sym.name)
@@ -1022,12 +1031,12 @@ impl FileAnalysis {
             return None;
         }
         // Asked once per export query, so every step is a lookup until one
-        // could matter: the symbol index says which classes may declare an
-        // `import` (it files a file's names under each package the file
-        // registers, so it over-approximates), a class's lists are its
-        // package table's (kept through every strip), and only lists worth
-        // lending pay for reading the class's symbols to confirm the
-        // `import` is its own. The MRO past `module` starts at the parents
+        // could matter: a class may declare an `import` when a file
+        // attributing subs to it (the provider index) also declares one (the
+        // symbol index, filed under the file's home) — an over-approximation;
+        // a class's lists are its package table's (kept through every strip),
+        // and only lists worth lending pay for reading the class's symbols to
+        // confirm the `import` is its own. The MRO past `module` starts at the parents
         // this file gives it: each candidate file answers for its own
         // `@ISA` and its own `import`, and FHEM's `main` has 534 of them.
         let declares_here = |cls: &str| {
@@ -1037,10 +1046,11 @@ impl FileAnalysis {
         };
         let mut indexed: Option<HashSet<String>> = None;
         let mut may_declare = |cls: &str| {
-            declares_here(cls)
-                || indexed
-                    .get_or_insert_with(|| module_index.modules_with_symbol("import").into_iter().collect())
-                    .contains(cls)
+            declares_here(cls) || {
+                let indexed = indexed
+                    .get_or_insert_with(|| module_index.modules_with_symbol("import").into_iter().collect());
+                module_index.modules_providing_package(cls).iter().any(|home| indexed.contains(home))
+            }
         };
         let declares = |cls: &str| {
             declares_here(cls)

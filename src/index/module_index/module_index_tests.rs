@@ -323,6 +323,35 @@ fn a_workspace_file_exports_only_from_the_package_that_declares_the_list() {
     assert!(idx.find_exporters("help").is_empty(), "a sub no package exports is nobody's export");
 }
 
+/// A package lends its lists through an `import` of its own, wherever in
+/// the file the borrower sits: a child two packages below the file's first
+/// exports what its parent's `import` does, and a later package's own list
+/// files under that package, not the file's first.
+#[test]
+fn a_later_package_in_a_file_exports_its_own_list_and_its_parents() {
+    let idx = ModuleIndex::new_for_test();
+    let src = "package Three;\nsub first { 1 }\n\
+               package Three::Base;\nour @EXPORT_OK = qw(base_fn);\nsub import { 1 }\nsub base_fn { 1 }\n\
+               package Three::Kid;\nour @ISA = ('Three::Base');\n\
+               package Three::Lists;\nuse Exporter 'import';\nour @EXPORT_OK = qw(listed_fn);\nsub listed_fn { 1 }\n1;\n";
+    idx.insert_workspace_for_test(PathBuf::from("/fake/lib/Three.pm"), build_fa(src));
+    assert_eq!(idx.find_exporters("base_fn"), vec!["Three::Base", "Three::Kid"]);
+    assert_eq!(idx.find_exporters("listed_fn"), vec!["Three::Lists"]);
+}
+
+/// The `import` a child borrows may be declared by a package that is not
+/// its file's first: the index still finds it under that package.
+#[test]
+fn a_child_borrows_the_import_of_a_later_package_in_another_file() {
+    let idx = ModuleIndex::new_for_test();
+    let base = "package Four;\nsub first { 1 }\n\
+                package Four::Base;\nour @EXPORT_OK = qw(four_fn);\nsub import { 1 }\nsub four_fn { 1 }\n1;\n";
+    idx.insert_workspace_for_test(PathBuf::from("/fake/lib/Four.pm"), build_fa(base));
+    let kid = "package Four::Kid;\nour @ISA = ('Four::Base');\n1;\n";
+    idx.insert_workspace_for_test(PathBuf::from("/fake/lib/Four/Kid.pm"), build_fa(kid));
+    assert_eq!(idx.find_exporters("four_fn"), vec!["Four::Base", "Four::Kid"]);
+}
+
 #[test]
 fn test_find_exporters_exporter_extensible() {
     // Names declared via `export(...)` and `:Export` attributes are
@@ -883,6 +912,9 @@ fn enriched_present_default_is_the_raw_bag() {
             Vec::new()
         }
         fn modules_with_symbol(&self, _n: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn modules_providing_package(&self, _p: &str) -> Vec<String> {
             Vec::new()
         }
         fn find_exporters(&self, _n: &str) -> Vec<String> {
