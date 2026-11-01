@@ -1120,6 +1120,14 @@ impl SkeletonAnalysis {
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
             }
         }
+        // A spelled receiver (`this`) in a body that elides its receiver IS
+        // that receiver: `this->x` and a bare `x` are one place.
+        for (scope, span) in &self.receivers {
+            if let Some(m) = elided_receiver.get(scope.0 as usize).copied().flatten() {
+                use crate::model::file_analysis::{Binding, Place};
+                var_at.entry(*span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
+            }
+        }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
         // Variable on the lookup chain, NO declared-before constraint (a
         // forward goto is valid).

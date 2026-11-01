@@ -119,17 +119,20 @@ pub(super) fn finish(st: &mut ExtractState) {
         let guard = n.narrow_guard.get(&mid).map(String::as_str);
         let Some(refined) = (st.pack.narrow_guard)(guard, ty) else { continue };
         // A member subject (`isinstance(self.x, T)`) narrows its place, which
-        // only the assembled analysis can root (`PackPlaces`).
-        match n.narrow_node.get(&mid) {
-            Some((bytes, span)) if st.flow.is_member_read(*bytes) => {
-                let refined = written_type_at(out, &st.pack.names, refined, n.narrow_arm[&mid].start);
-                out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
-                    subject: *span,
-                    refined,
-                    region: n.narrow_arm[&mid],
-                });
-            }
-            _ => pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope)),
+        // only the assembled analysis can root (`PackPlaces`). So may a bare
+        // name: only assembly knows whether it is a local or a member of an
+        // elided receiver, and it keeps the place only for the member.
+        let place_subject = n.narrow_node.get(&mid).map(|(bytes, span)| (st.flow.is_member_read(*bytes), *span));
+        if let Some((_, span)) = place_subject {
+            let refined = written_type_at(out, &st.pack.names, refined.clone(), n.narrow_arm[&mid].start);
+            out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+                subject: span,
+                refined,
+                region: n.narrow_arm[&mid],
+            });
+        }
+        if !matches!(place_subject, Some((true, _))) {
+            pending.push((subject.clone(), refined, n.narrow_arm[&mid], *scope));
         }
     }
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region

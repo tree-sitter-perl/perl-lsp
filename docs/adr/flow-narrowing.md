@@ -185,8 +185,10 @@ per read. A guard whose subject is a member read (`isinstance(self.x, T)`,
 member write is a write of its place, and a variable or member read that no
 further member read reads through is an opaque use. A bare member name in
 a member function is rooted at the body's elided receiver
-(`Binding::Receiver`); an explicit `this->x` has no root yet, since `this`
-is read as no name. A receiver carries its place (`Invocant::Place`) only
+(`Binding::Receiver`), and so is a spelled receiver (`@receiver`, C++'s
+`this`) in that body, so `this->x` and a bare `x` are one place. A guard
+on a bare name records both a variable and a place narrowing; assembly
+keeps the place only when the name roots at the receiver. A receiver carries its place (`Invocant::Place`) only
 where a narrowing gives that place a value; elsewhere the place would
 answer nothing, so the ref keeps its plain receiver.
 
