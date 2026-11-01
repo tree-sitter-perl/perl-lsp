@@ -647,10 +647,21 @@ impl<'a> Builder<'a> {
             Some(n) => n,
             None => { self.queue_children(node); return; }
         };
-        let name = match name_node.utf8_text(self.source) {
-            Ok(s) => s.to_string(),
+        let spelled = match name_node.utf8_text(self.source) {
+            Ok(s) => s,
             Err(_) => { self.queue_children(node); return; }
         };
+        // `sub Foo::bar {}` declares `bar` in `Foo`, whatever package is in
+        // force; the body still runs in the package in force (its
+        // `__PACKAGE__`, `SUPER::`, unqualified names). The selection is the
+        // leaf, so a rename keeps the qualifier.
+        let (qualifier, leaf) = crate::model::conventions::split_qualified(spelled, &crate::model::conventions::PERL_SPELLINGS);
+        let package = match qualifier {
+            Some(q) => Some(crate::model::conventions::PERL_SPELLINGS.qualifier_package(q).to_string()),
+            None => self.current_package.clone(),
+        };
+        let name = leaf.to_string();
+        let selection = crate::cst::fq_tail_span(name_node, spelled);
 
         // A bodyless `sub NAME;` / `method NAME;` is a forward declaration, not
         // a definition (ts-parser-perl 1.1.1 parses these as real decl
@@ -699,12 +710,14 @@ impl<'a> Builder<'a> {
         // keep it) but not a workspace-addressable entity (workspace
         // search drops it).
         let lexical = node.child_by_field_name("lexical").is_some();
-        let sub_id = self.add_symbol(
+        let sub_id = self.add_symbol_in_package(
             name.clone(),
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
-            node_to_span(name_node),
+            selection,
             SymbolDetail::Sub { params: params.clone(), is_method, doc, opaque_return: false, is_constant: false, lexical },
+            Namespace::Language,
+            package.clone(),
         );
 
         // Exporter::Extensible method-attribute export form: `sub foo :Export`.
@@ -736,7 +749,7 @@ impl<'a> Builder<'a> {
 
         // Perl 5.38 methods: synthesize implicit $self with type → enclosing class
         if is_method {
-            if let Some(pkg) = self.current_package.clone() {
+            if let Some(pkg) = package.clone() {
                 let span = node_to_span(name_node);
                 self.add_symbol(
                     "$self".to_string(),
@@ -755,8 +768,8 @@ impl<'a> Builder<'a> {
         }
 
         // Detect first-param-is-self pattern
-        self.detect_first_param_type(&params, node);
-        if let (true, Some(package)) = (method_or_helper, self.current_package.clone()) {
+        self.detect_first_param_type(&params, node, package.clone());
+        if let (true, Some(package)) = (method_or_helper, package) {
             self.method_or_helper_subs.push(MethodOrHelperSub {
                 sub_id,
                 scope: self.current_scope(),
@@ -818,7 +831,7 @@ impl<'a> Builder<'a> {
         let sub_id = self.ensure_anon_sub_symbol(node, &params);
         self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
         self.record_signature_params(node, &params);
-        self.detect_first_param_type(&params, node);
+        self.detect_first_param_type(&params, node, self.current_package.clone());
         self.queue_children_then(node, move |b| {
             b.record_sub_tail(node);
             b.pop_scope();
@@ -1357,7 +1370,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(super) fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>) {
+    /// `package` is the class the sub belongs to.
+    pub(super) fn detect_first_param_type(&mut self, params: &[ParamInfo], node: Node<'a>, package: Option<String>) {
         // Find the first param with `is_invocant = true` — normally params[0] for
         // regular methods, but params[1] for `around` modifiers (params[0] is $orig).
         // The caller that sets up the param list (visit_sub for named subs,
@@ -1371,7 +1385,7 @@ impl<'a> Builder<'a> {
             None => return,
         };
 
-        if let Some(pkg) = self.current_package.clone() {
+        if let Some(pkg) = package {
             let (scope, span) = (self.current_scope(), node_to_span(node));
             self.push_invocant_type(&invocant, pkg, scope, span);
         }
