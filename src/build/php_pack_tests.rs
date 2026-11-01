@@ -1453,6 +1453,17 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
 
 // `$this` is the receiver of the method around it, stated by the document:
 // an object of that method's class. A function has no receiver.
+/// One system types `$this`: one capture states it, one table names its
+/// class, so its value is one witness.
+#[test]
+fn this_is_typed_once() {
+    use crate::model::witnesses::WitnessAttachment as WA;
+    let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\n");
+    let this = Span { start: Point::new(2, 24), end: Point::new(2, 29) };
+    let typed: Vec<_> = fa.witnesses.for_attachment(&WA::Expr(this)).into_iter().map(|w| w.source.clone()).collect();
+    assert_eq!(typed.len(), 1, "one witness types `$this`: {typed:?}");
+}
+
 #[test]
 fn this_is_the_receiver_of_its_method() {
     let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\nfunction g() { return $this; }\n");

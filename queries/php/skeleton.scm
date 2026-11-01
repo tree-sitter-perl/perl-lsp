@@ -247,9 +247,3 @@
       alias: (name)? @import.alias) @_clause)) @_group
  (#not-match? @_group "^use\\s+(function|const)\\s")
  (#not-match? @_clause "^(function|const)\\s"))
-
-; ---- the receiver ----
-; `$this` is the receiver of the method around it: an object of that
-; method's class.
-((variable_name (name) @_this) @receiver
- (#eq? @_this "this"))

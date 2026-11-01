@@ -220,9 +220,10 @@ pub struct SkeletonAnalysis {
     /// (join to the owning callable, chain it when the callable declares no
     /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
-    /// Nodes naming the receiver of the method around them (`@receiver`):
-    /// (enclosing scope, span). `into_file_analysis` types each as that
-    /// method's class, once the scopes know their callables.
+    /// Receiver parameters (`@receiver`, python's `self`): (enclosing scope,
+    /// the parameter's name token). `into_file_analysis` types each as its
+    /// method's class, once the scopes know their callables. An undeclared
+    /// receiver (`this`) is a `receiver_sites` entry.
     pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
@@ -711,47 +712,13 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        // A receiver is an object of the class of the method it belongs to:
-        // the nearest enclosing callable's, so a lambda (no owner) is
-        // transparent and a free function (a `Sub`) has none. A declared
-        // receiver is a parameter, flagged and typed from its binding on in
-        // the scope it binds in (a header parameter binds in the body); an
-        // undeclared one (`this`) is a value at its own read.
-        let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
-        {
-            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            for &(site_scope, span) in &self.receivers {
-                let declared = symbols.iter().position(|s| s.selection_span == span);
-                let scope = declared.map_or(site_scope, |i| symbols[i].scope);
-                let class = owning_callable(&self.scopes, scope)
-                    .and_then(|sid| symbols.get(sid.0 as usize))
-                    .filter(|s| matches!(s.kind, SymKind::Method))
-                    .and_then(|s| s.package.clone());
-                let (attachment, at) = match declared {
-                    Some(i) => {
-                        let sym = &mut symbols[i];
-                        sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
-                        let at = Span { start: span.start, end: span.start };
-                        (WA::Variable { name: sym.name.clone(), scope: sym.scope }, at)
-                    }
-                    None => (WA::Expr(span), span),
-                };
-                let Some(class) = class else { continue };
-                receiver_witnesses.push(Witness {
-                    attachment,
-                    source: WitnessSource::Builder("receiver".into()),
-                    payload: WP::InferredType(InferredType::ClassName(class)),
-                    span: at,
-                });
-            }
-        }
         // The class whose method each scope is the body of, or sits inside:
         // the nearest callable that declares one names it, in-class and
         // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
         // file scope, and only the method symbol carries `Buf`), so a closure
         // in a method reads the method's, and a free function's body has
-        // none. Scopes are pushed in id order, so a parent's answer is in
-        // hand before its children's.
+        // none: a lambda (no owner) is transparent. Scopes are pushed in id
+        // order, so a parent's answer is in hand before its children's.
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
@@ -763,6 +730,24 @@ impl SkeletonAnalysis {
             }
             out
         };
+        // A receiver parameter holds an object of its method's class (the
+        // method-class table's answer for the scope it binds in: a header
+        // parameter binds in the body), flagged and typed from its binding on.
+        let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+        {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            for &(_, span) in &self.receivers {
+                let Some(sym) = symbols.iter_mut().find(|s| s.selection_span == span) else { continue };
+                sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+                let Some(class) = method_class.get(sym.scope.0 as usize).cloned().flatten() else { continue };
+                receiver_witnesses.push(Witness {
+                    attachment: WA::Variable { name: sym.name.clone(), scope: sym.scope },
+                    source: WitnessSource::Builder("receiver".into()),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
+                    span: Span { start: span.start, end: span.start },
+                });
+            }
+        }
         // Implicit receiver: where the document says a body elides it, a bare
         // name is a member of that body's method class.
         let elided_class: Vec<Option<String>> = {
