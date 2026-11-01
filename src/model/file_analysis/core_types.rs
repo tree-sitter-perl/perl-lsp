@@ -166,6 +166,13 @@ pub enum ScopeKind {
     ForLoop { var: String },
 }
 
+impl ScopeKind {
+    /// A callable's body: the boundary `callable_reach` ends at.
+    pub fn is_callable(&self) -> bool {
+        matches!(self, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+    }
+}
+
 // ---- Package context ----
 
 /// One plugin-emitted diagnostic — the payload of

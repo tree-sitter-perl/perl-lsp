@@ -195,7 +195,10 @@ impl ExtractState<'_> {
             | DefCap::Reexport
             | DefCap::Union
             | DefCap::UnionField => match self.defs.hoists(match_id) {
-                true => self.out.scopes[self.cur_scope.0 as usize].parent.unwrap_or(self.cur_scope),
+                true => crate::model::file_analysis::scope_chain_of(&self.out.scopes, self.cur_scope)
+                    .get(1)
+                    .copied()
+                    .unwrap_or(self.cur_scope),
                 false => self.bind_scope(),
             },
         }

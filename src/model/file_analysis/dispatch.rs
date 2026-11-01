@@ -304,9 +304,9 @@ pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = S
     std::iter::from_fn(move || {
         let id = next?;
         let scope = &scopes[id.0 as usize];
-        next = match scope.kind {
-            ScopeKind::Sub { .. } | ScopeKind::Method { .. } => None,
-            _ => scope.parent,
+        next = match scope.kind.is_callable() {
+            true => None,
+            false => scope.parent,
         };
         Some(id)
     })
@@ -349,8 +349,7 @@ pub fn variable_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> Loo
 pub fn write_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
     lookup_chain_through(scopes, from, |id| {
         let scope = &scopes[id.0 as usize];
-        matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
-            && !scope.captures.iter().any(|c| c == name)
+        scope.kind.is_callable() && !scope.captures.iter().any(|c| c == name)
     })
 }
 
