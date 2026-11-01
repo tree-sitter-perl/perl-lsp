@@ -289,9 +289,10 @@ impl ModuleIndex {
         out
     }
 
-    /// Breadth-first walk over re-export edges (`reexport_modules`), starting
-    /// from `start` and visiting each reachable cached module — the start
-    /// modules first, then whatever they re-export. `visit` returns
+    /// Breadth-first walk over re-export edges (each package's
+    /// `reexport_modules`), starting from `start` and visiting each reachable
+    /// (module name, candidate file) — the start modules first, then whatever
+    /// they re-export. `visit` returns
     /// `ControlFlow::Break` to stop early. Bounded by a seen-set (cycles) and a
     /// fan-out cap; never does I/O. The single place the re-export edge
     /// traversal lives — `defining_module_cached` (def location) and
@@ -299,7 +300,7 @@ impl ModuleIndex {
     /// it instead of hand-copying the BFS.
     pub fn for_each_reexport_module<F>(&self, start: impl IntoIterator<Item = String>, mut visit: F)
     where
-        F: FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+        F: FnMut(&str, &Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     {
         const MAX: usize = 256;
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -316,10 +317,11 @@ impl ModuleIndex {
             // Every candidate file registered under the name — a split
             // module's re-export edges (and defs) span the set.
             for cached in crate::model::file_analysis::CrossFileLookup::def_candidates(self, &module) {
-                if visit(&cached).is_break() {
+                if visit(&module, &cached).is_break() {
                     return;
                 }
-                for next in &cached.analysis.reexport_modules {
+                let next_hops = cached.analysis.package_exports(&module).map_or(&[][..], |e| &e.reexport_modules);
+                for next in next_hops {
                     if !seen.contains(next) {
                         queue.push_back(next.clone());
                     }
@@ -339,7 +341,7 @@ impl ModuleIndex {
     ) -> Option<Arc<CachedModule>> {
         use std::ops::ControlFlow;
         let mut found = None;
-        self.for_each_reexport_module(std::iter::once(entry.to_string()), |cached| {
+        self.for_each_reexport_module(std::iter::once(entry.to_string()), |_, cached| {
             use crate::model::file_analysis::CrossFileLookup;
             // Existence probe over symbols only — the caller takes the
             // CachedModule and chooses its own view for detail reads.

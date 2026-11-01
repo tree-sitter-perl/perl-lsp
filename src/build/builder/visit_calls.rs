@@ -623,12 +623,32 @@ impl<'a> Builder<'a> {
             values.extend(self.extract_string_names(*child));
         }
         if !values.is_empty() {
+            let e = self.exports_of(None);
             if is_export {
-                self.export.extend(values);
+                e.export.extend(values);
             } else {
-                self.export_ok.extend(values);
+                e.export_ok.extend(values);
             }
         }
+    }
+
+    /// The export surface of `owner` — the package an export variable's
+    /// qualifier names (`@Pkg::EXPORT`) — or, unqualified, of the package
+    /// the walk is in. Exporter reads the variables of the package `import`
+    /// runs for, so this is where every export fact lands.
+    pub(super) fn exports_of(&mut self, owner: Option<&str>) -> &mut crate::model::file_analysis::PackageExports {
+        let pkg = self.export_owner(owner);
+        self.exports.entry(pkg).or_default()
+    }
+
+    fn export_owner(&self, owner: Option<&str>) -> String {
+        let root = || crate::model::conventions::PERL_SPELLINGS.root_package.as_deref().map(str::to_string);
+        match owner {
+            Some("") => root(),
+            Some(o) => Some(o.to_string()),
+            None => self.current_package.clone().or_else(root),
+        }
+        .unwrap_or_default()
     }
 
     // ---- Runtime exporter modeling ----
@@ -652,10 +672,15 @@ impl<'a> Builder<'a> {
     /// same-named symbol — no separate provenance, matching how `@EXPORT_OK`
     /// names already trace to their subs via the resolver.
     pub(super) fn record_runtime_exports(&mut self, names: impl IntoIterator<Item = String>) {
+        self.record_runtime_exports_of(None, names)
+    }
+
+    fn record_runtime_exports_of(&mut self, owner: Option<&str>, names: impl IntoIterator<Item = String>) {
+        let e = self.exports_of(owner);
         for name in names {
             if name.is_empty() { continue; }
-            if !self.export_ok.contains(&name) && !self.export.contains(&name) {
-                self.export_ok.push(name);
+            if !e.export_ok.contains(&name) && !e.export.contains(&name) {
+                e.export_ok.push(name);
             }
         }
     }
@@ -779,17 +804,22 @@ impl<'a> Builder<'a> {
     /// `module`'s surface." Deduped; the package's own name and empty/sigil'd
     /// junk are skipped. `ExportSurface` walks these transitively at query time.
     pub(super) fn record_reexport_edge(&mut self, module: &str) {
+        self.record_reexport_edge_of(None, module)
+    }
+
+    fn record_reexport_edge_of(&mut self, owner: Option<&str>, module: &str) {
         let module = module.trim();
         if module.is_empty() {
             return;
         }
         // A package re-exporting itself is a no-op edge (and a cycle the
         // query-time seen-set would absorb anyway); drop it here for cleanliness.
-        if self.current_package.as_deref() == Some(module) {
+        if self.export_owner(owner) == module {
             return;
         }
-        if !self.reexport_modules.iter().any(|m| m == module) {
-            self.reexport_modules.push(module.to_string());
+        let e = self.exports_of(owner);
+        if !e.reexport_modules.iter().any(|m| m == module) {
+            e.reexport_modules.push(module.to_string());
         }
     }
 
@@ -799,11 +829,11 @@ impl<'a> Builder<'a> {
     /// whose `varname` text is the fully-qualified `Pkg::EXPORT[_OK]`; we strip
     /// the trailing `::EXPORT`/`::EXPORT_OK` to recover the package. Recognized
     /// by shape (rule #10): any qualified export-var deref in the list is an edge.
-    pub(super) fn record_static_splice_reexports(&mut self, node: Node<'a>) {
+    pub(super) fn record_static_splice_reexports(&mut self, node: Node<'a>, owner: Option<&str>) {
         let mut edges = Vec::new();
         Self::collect_export_var_derefs(node, self.source, &mut edges);
         for pkg in edges {
-            self.record_reexport_edge(&pkg);
+            self.record_reexport_edge_of(owner, &pkg);
         }
     }
 
@@ -851,8 +881,9 @@ impl<'a> Builder<'a> {
     /// `true`). Recognized by shape, so the plain `our %EXPORT_TAGS = (...)`
     /// assignment and the call-wrapped `Readonly::Hash our %EXPORT_TAGS => (...)`
     /// (and Const::Fast and friends) ride the same path — `table` is just the
-    /// list literal, whatever produced it.
-    pub(super) fn fold_export_tags_table(&mut self, table: Node<'a>) {
+    /// list literal, whatever produced it. `owner` is the `%Pkg::EXPORT_TAGS`
+    /// qualifier, if any (`exports_of`).
+    pub(super) fn fold_export_tags_table(&mut self, table: Node<'a>, owner: Option<&str>) {
         let mut names = Vec::new();
         // Track the most recent tag-name key so each value array attributes its
         // members to the right tag for the `:tag` consumer selector. The table
@@ -865,7 +896,7 @@ impl<'a> Builder<'a> {
             if child.kind() == "anonymous_array_expression" {
                 let members = Self::keep_sub_export_names(self.extract_string_names(child));
                 if let Some(tag) = pending_tag.take() {
-                    self.export_tags.entry(tag).or_default().extend(members.iter().cloned());
+                    self.exports_of(owner).export_tags.entry(tag).or_default().extend(members.iter().cloned());
                 }
                 names.extend(members);
                 self.record_export_member_sites(child);
@@ -882,7 +913,7 @@ impl<'a> Builder<'a> {
         // Tag members are sub names exactly like `@EXPORT_OK` entries; drop
         // sigil'd globals / nested tag refs the array might have contributed.
         let names = Self::keep_sub_export_names(names);
-        self.record_runtime_exports(names);
+        self.record_runtime_exports_of(owner, names);
     }
 
     /// Recognize a call whose args declare `%EXPORT_TAGS` and fold the trailing
@@ -910,7 +941,7 @@ impl<'a> Builder<'a> {
                 crate::cst::literal_shape(child),
                 Some(LiteralShape::List | LiteralShape::ArrayRef)
             ) {
-                self.fold_export_tags_table(child);
+                self.fold_export_tags_table(child, None);
             }
         }
     }

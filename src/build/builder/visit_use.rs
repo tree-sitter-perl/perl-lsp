@@ -1112,14 +1112,18 @@ impl<'a> Builder<'a> {
     /// trailing identifier after the last `::` against the export-variable
     /// basename — so `@EXPORT`, `@Pkg::EXPORT`, `%Pkg::EXPORT_TAGS` all match
     /// without a per-package branch (rule #10).
-    pub(super) fn export_var_basename(var: &str) -> Option<&'static str> {
+    /// Returns the basename and the qualifier — the package the variable
+    /// belongs to when it is spelled out.
+    pub(super) fn export_var_basename(var: &str) -> Option<(&'static str, Option<&str>)> {
         let no_sigil = var.strip_prefix('@').or_else(|| var.strip_prefix('%')).unwrap_or(var);
-        match crate::model::file_analysis::split_qualified(no_sigil, &crate::model::conventions::PERL_SPELLINGS).1 {
-            "EXPORT_OK" => Some("@EXPORT_OK"),
-            "EXPORT" => Some("@EXPORT"),
-            "EXPORT_TAGS" => Some("%EXPORT_TAGS"),
-            _ => None,
-        }
+        let (owner, base) = crate::model::file_analysis::split_qualified(no_sigil, &crate::model::conventions::PERL_SPELLINGS);
+        let base = match base {
+            "EXPORT_OK" => "@EXPORT_OK",
+            "EXPORT" => "@EXPORT",
+            "EXPORT_TAGS" => "%EXPORT_TAGS",
+            _ => return None,
+        };
+        Some((base, owner))
     }
 
     /// The real RHS expression of an assignment. tree-sitter-perl maps the
@@ -1175,7 +1179,11 @@ impl<'a> Builder<'a> {
             // `@Pkg::EXPORT`, `%EXPORT_TAGS`, etc. `export_var_basename` strips
             // the sigil and any `Pkg::` qualifier so all spellings
             // map to one of the three export basenames (rule #10).
-            let export_var = Self::export_var_basename(lhs_text);
+            let (export_var, export_owner) = match Self::export_var_basename(lhs_text) {
+                Some((base, owner)) => (Some(base), owner.map(str::to_string)),
+                None => (None, None),
+            };
+            let export_owner = export_owner.as_deref();
 
             // Fold `%EXPORT_TAGS = ( tag => [names...], ... )` membership into
             // the export surface. The RHS list is the table literal; tag
@@ -1186,7 +1194,7 @@ impl<'a> Builder<'a> {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
                         if crate::cst::is_list_literal(child) {
-                            self.fold_export_tags_table(child);
+                            self.fold_export_tags_table(child, export_owner);
                         }
                     }
                 }
@@ -1205,17 +1213,14 @@ impl<'a> Builder<'a> {
                     self.record_export_member_sites(rhs);
                     // Form 1: `@EXPORT = ( 'own', @Other::EXPORT )` — any
                     // qualified export-var deref in the RHS is a re-export edge.
-                    self.record_static_splice_reexports(rhs);
+                    self.record_static_splice_reexports(rhs, export_owner);
                 }
                 // Union, not clobber: runtime-exporter discovery (`:Export`
                 // attrs, Sub::Exporter / Exporter::Declare setup) may have
                 // recorded names earlier in this package walk. An overwrite
                 // would drop them; the two mechanisms compose.
-                let target = if export_var == "@EXPORT" {
-                    &mut self.export
-                } else {
-                    &mut self.export_ok
-                };
+                let e = self.exports_of(export_owner);
+                let target = if export_var == "@EXPORT" { &mut e.export } else { &mut e.export_ok };
                 for name in names {
                     if !target.contains(&name) {
                         target.push(name);
@@ -1228,8 +1233,9 @@ impl<'a> Builder<'a> {
             if left.kind() == "glob" {
                 if self.enclosing_sub_name().as_deref() == Some("import") {
                     for name in self.extract_glob_export_names(left, node) {
-                        if !self.export.contains(&name) {
-                            self.export.push(name);
+                        let e = self.exports_of(None);
+                        if !e.export.contains(&name) {
+                            e.export.push(name);
                         }
                     }
                 }

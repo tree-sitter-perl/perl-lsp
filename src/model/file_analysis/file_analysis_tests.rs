@@ -2308,12 +2308,12 @@ fn export_tags_plain_hash_members_are_exported() {
         "#,
     );
     // Members reached only via a tag list join the same surface as @EXPORT_OK.
-    assert!(fa.exports_name("hashify"), "tag member hashify should export");
-    assert!(fa.exports_name("words_from_string"));
-    assert!(fa.exports_name("foo"));
+    assert!(fa.any_package_exports("hashify"), "tag member hashify should export");
+    assert!(fa.any_package_exports("words_from_string"));
+    assert!(fa.any_package_exports("foo"));
     // The tag *names* are selectors, not subs — never exports.
-    assert!(!fa.exports_name("data_conversion"));
-    assert!(!fa.exports_name("all"));
+    assert!(!fa.any_package_exports("data_conversion"));
+    assert!(!fa.any_package_exports("all"));
 }
 
 #[test]
@@ -2335,11 +2335,11 @@ fn export_tags_readonly_wrapped_members_are_exported() {
         1;
         "#,
     );
-    assert!(fa.exports_name("hashify"), "Readonly-wrapped tag member should export");
-    assert!(fa.exports_name("words_from_string"));
-    assert!(fa.exports_name("interpolate"));
-    assert!(!fa.exports_name("data_conversion"));
-    assert!(!fa.exports_name("all"));
+    assert!(fa.any_package_exports("hashify"), "Readonly-wrapped tag member should export");
+    assert!(fa.any_package_exports("words_from_string"));
+    assert!(fa.any_package_exports("interpolate"));
+    assert!(!fa.any_package_exports("data_conversion"));
+    assert!(!fa.any_package_exports("all"));
 }
 
 #[test]
@@ -2359,9 +2359,9 @@ fn name_in_no_export_or_tag_is_not_exported() {
         1;
         "#,
     );
-    assert!(fa.exports_name("hashify"));
-    assert!(fa.exports_name("foo"));
-    assert!(!fa.exports_name("private_helper"), "non-exported sub must stay unexported");
+    assert!(fa.any_package_exports("hashify"));
+    assert!(fa.any_package_exports("foo"));
+    assert!(!fa.any_package_exports("private_helper"), "non-exported sub must stay unexported");
 }
 
 #[test]

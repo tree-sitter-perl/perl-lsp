@@ -21,10 +21,6 @@ pub struct SurfaceFeed<'a> {
     pub packages: &'a HashMap<String, PackageFacts>,
     pub imports: &'a [Import],
     pub plugin_loads: &'a [PluginLoadFact],
-    pub export: &'a [String],
-    pub export_ok: &'a [String],
-    pub export_tags: &'a HashMap<String, Vec<String>>,
-    pub reexport_modules: &'a [String],
     pub plugin_namespaces: &'a [PluginNamespace],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
@@ -51,10 +47,6 @@ impl FileAnalysis {
             // so a new per-package fact is a compile error there.
             packages,
             imports,
-            export,
-            export_ok,
-            export_tags,
-            reexport_modules,
             dbic_source_name,
 
             // The pack and plugin lanes, destructured exhaustively for the
@@ -153,10 +145,6 @@ impl FileAnalysis {
             packages,
             imports,
             plugin_loads,
-            export,
-            export_ok,
-            export_tags,
-            reexport_modules,
             plugin_namespaces,
             app_surface_consumers,
             macro_defs,

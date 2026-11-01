@@ -375,10 +375,7 @@ fn build_once(
         var_decls: std::collections::HashMap::new(),
         declared_constants: std::collections::HashMap::new(),
         export_member_sites: Vec::new(),
-        export: Vec::new(),
-        export_ok: Vec::new(),
-        export_tags: std::collections::HashMap::new(),
-        reexport_modules: Vec::new(),
+        exports: std::collections::HashMap::new(),
         lib_roots: Vec::new(),
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
@@ -725,10 +722,6 @@ fn build_once(
         packages,
         method_call_bindings: b.method_call_bindings,
         framework_imports: b.framework_imports,
-        export: b.export,
-        export_ok: b.export_ok,
-        export_tags: b.export_tags,
-        reexport_modules: b.reexport_modules,
         lib_roots: b.lib_roots,
         plugin: crate::model::file_analysis::PluginFacts {
             namespaces: b.plugin_namespaces,
@@ -837,6 +830,7 @@ impl<'a> Builder<'a> {
             self.role_packages.clone(),
             self.dynamic_parent_packages.clone(),
             self.blessing_packages.clone(),
+            self.exports.clone(),
         )
     }
 

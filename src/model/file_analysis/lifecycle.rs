@@ -68,10 +68,6 @@ impl FileAnalysis {
             plugin,
             method_call_bindings,
             framework_imports,
-            export,
-            export_ok,
-            export_tags,
-            reexport_modules,
             lib_roots,
             type_provenance,
             namespace_ranges,
@@ -105,10 +101,6 @@ impl FileAnalysis {
             namespace_ranges,
             packages,
             framework_imports,
-            export,
-            export_ok,
-            export_tags,
-            reexport_modules,
             lib_roots,
             referenced_identities: Vec::new(),
             type_provenance,
@@ -926,17 +918,70 @@ impl FileAnalysis {
 
         self.refs.rebuild_indices(&self.pack.names);
 
-        // Export membership set — union of export + export_ok for O(1) lookup.
-        self.export_lookup = self.export.iter()
-            .chain(self.export_ok.iter())
+        self.export_lookup = self
+            .packages
+            .values()
+            .flat_map(|p| p.exports.export.iter().chain(&p.exports.export_ok))
             .cloned()
             .collect();
     }
 
-    /// True if `name` appears in `@EXPORT` or `@EXPORT_OK` for this module.
-    /// O(1) via `export_lookup` (built by `build_indices`).
-    pub fn exports_name(&self, name: &str) -> bool {
+    /// True if ANY package of this file has `name` in its `@EXPORT` or
+    /// `@EXPORT_OK` — a prefilter, O(1). Whether a given package exports
+    /// it is `package_exports`' answer.
+    pub fn any_package_exports(&self, name: &str) -> bool {
         self.export_lookup.contains(name)
+    }
+
+    /// What `package` itself exports, as written in this file. `None`: it
+    /// declares no export list here.
+    pub fn package_exports(&self, package: &str) -> Option<&PackageExports> {
+        self.packages.get(package).map(|p| &p.exports).filter(|e| !e.is_empty())
+    }
+
+    /// Is `sym` exported — is its name on its own package's list?
+    pub fn symbol_is_exported(&self, sym: &Symbol) -> bool {
+        self.any_package_exports(&sym.name)
+            && sym
+                .package
+                .as_deref()
+                .and_then(|p| self.package_exports(p))
+                .is_some_and(|e| e.exports(&sym.name))
+    }
+
+    /// Every re-export edge any package of this file declares — what a
+    /// landed file asks the dependency tier for.
+    pub fn reexport_modules(&self) -> impl Iterator<Item = &String> {
+        self.packages.values().flat_map(|p| &p.exports.reexport_modules)
+    }
+
+    /// The file-wide union of every package's lists — test introspection
+    /// over single-package fixtures, where the union IS the package's.
+    #[cfg(test)]
+    pub fn all_export(&self) -> Vec<String> {
+        self.union_of(|e| &e.export)
+    }
+    #[cfg(test)]
+    pub fn all_export_ok(&self) -> Vec<String> {
+        self.union_of(|e| &e.export_ok)
+    }
+    #[cfg(test)]
+    pub fn all_reexport_modules(&self) -> Vec<String> {
+        self.union_of(|e| &e.reexport_modules)
+    }
+    #[cfg(test)]
+    fn union_of(&self, f: impl Fn(&PackageExports) -> &Vec<String>) -> Vec<String> {
+        let mut pkgs: Vec<_> = self.packages.iter().collect();
+        pkgs.sort_by(|a, b| a.0.cmp(b.0));
+        let mut out: Vec<String> = Vec::new();
+        for (_, p) in pkgs {
+            for n in f(&p.exports) {
+                if !out.contains(n) {
+                    out.push(n.clone());
+                }
+            }
+        }
+        out
     }
 
     /// A producer module's export surface — the names a consumer's `use` can
@@ -946,9 +991,9 @@ impl FileAnalysis {
     /// single structure `imported_names` evaluates a consumer's import spec
     /// against, so diagnostics and nav share one notion of "what does this
     /// module export, and what does this `use` bind."
-    pub fn export_surface(&self) -> ExportSurface<'_> {
+    pub fn export_surface(&self, module: &str) -> ExportSurface<'_> {
         ExportSurface {
-            analysis: self,
+            own: self.package_exports(module),
             default_set: None,
             optional_set: None,
             tags: None,
@@ -982,7 +1027,9 @@ impl FileAnalysis {
     ) -> ExportSurface<'_> {
         // Perl's default MRO depth; also what bounds an `@ISA` cycle.
         const MAX_INHERITED_DEPTH: usize = 20;
-        let inherited = if self.export.is_empty() && self.export_ok.is_empty() && depth < MAX_INHERITED_DEPTH {
+        let own = self.package_exports(module);
+        let has_own = own.is_some_and(|e| !e.export.is_empty() || !e.export_ok.is_empty());
+        let inherited = if !has_own && depth < MAX_INHERITED_DEPTH {
             // `use DDP` binds Data::Printer's `p`: DDP declares no exports
             // but inherits Data::Printer's `import`, which exports its own.
             self.declared_parents(module).iter().find_map(|parent| {
@@ -994,32 +1041,35 @@ impl FileAnalysis {
         } else {
             None
         };
-        if self.reexport_modules.is_empty() && inherited.is_none() {
-            return self.export_surface();
+        let reexports: &[String] = own.map_or(&[], |e| &e.reexport_modules);
+        if reexports.is_empty() && inherited.is_none() {
+            return self.export_surface(module);
         }
 
-        let (mut default_set, mut optional_set) =
-            inherited.unwrap_or_else(|| (self.export.clone(), self.export_ok.clone()));
-        let mut tags: HashMap<String, Vec<String>> = self.export_tags.clone();
+        let (mut default_set, mut optional_set) = inherited
+            .unwrap_or_else(|| own.map_or_else(Default::default, |e| (e.export.clone(), e.export_ok.clone())));
+        let mut tags: HashMap<String, Vec<String>> = own.map(|e| e.export_tags.clone()).unwrap_or_default();
 
         // Merge every re-exported module's surface, walking the edges through the
         // one shared traversal (cycle-bounded + fan-out-capped). Own surface is
         // already seeded above, so we seed the queue with `reexport_modules`.
         module_index.for_each_reexport_module(
-            self.reexport_modules.to_vec(),
-            &mut |cached| {
-                let a = &cached.analysis;
-                for n in &a.export {
+            reexports.to_vec(),
+            &mut |name, cached| {
+                let Some(e) = cached.analysis.package_exports(name) else {
+                    return std::ops::ControlFlow::Continue(());
+                };
+                for n in &e.export {
                     if !default_set.contains(n) {
                         default_set.push(n.clone());
                     }
                 }
-                for n in &a.export_ok {
+                for n in &e.export_ok {
                     if !optional_set.contains(n) {
                         optional_set.push(n.clone());
                     }
                 }
-                for (tag, members) in &a.export_tags {
+                for (tag, members) in &e.export_tags {
                     let bucket = tags.entry(tag.clone()).or_default();
                     for m in members {
                         if !bucket.contains(m) {
@@ -1039,7 +1089,7 @@ impl FileAnalysis {
         }
 
         ExportSurface {
-            analysis: self,
+            own,
             default_set: Some(default_set),
             optional_set: Some(optional_set),
             tags: Some(tags),
@@ -1279,9 +1329,16 @@ impl FileAnalysis {
         fn pkg_facts(m: &HashMap<String, PackageFacts>) -> usize {
             let mut b = mcap(m);
             for (k, f) in m {
+                let e = &f.exports;
                 b += k.capacity()
-                    + (f.parents.capacity() + f.uses.capacity() + f.requires.capacity())
-                        * std::mem::size_of::<String>();
+                    + (f.parents.capacity()
+                        + f.uses.capacity()
+                        + f.requires.capacity()
+                        + e.export.capacity()
+                        + e.export_ok.capacity()
+                        + e.reexport_modules.capacity())
+                        * std::mem::size_of::<String>()
+                    + map_str_vec(&e.export_tags);
             }
             b
         }
@@ -1343,14 +1400,10 @@ impl FileAnalysis {
 
         // per-package small maps/sets + export lists.
         h.misc += pkg_facts(&self.packages)
-            + map_str_vec(&self.export_tags)
             + mcap(&self.type_provenance)
             + scap(&self.framework_imports)
             + scap(&self.reassigned_vars)
             + scap(&self.column_keyed_verbs)
-            + vcap(&self.export)
-            + vcap(&self.export_ok)
-            + vcap(&self.reexport_modules)
             + vcap(&self.referenced_identities)
             + vcap(&self.unrowed_attachment_names);
 

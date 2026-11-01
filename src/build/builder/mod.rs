@@ -387,21 +387,10 @@ struct Builder<'a> {
     /// so the local-sub filter can't run live). Tag-name keys never enter this
     /// list, so they get no ref (rule #7 narrow scope).
     export_member_sites: Vec<(String, Span, Option<String>)>,
-    /// Exported function names from @EXPORT assignments.
-    export: Vec<String>,
-    /// Exported function names from @EXPORT_OK assignments.
-    export_ok: Vec<String>,
-    /// `%EXPORT_TAGS` membership: tag name (without the `:`/`-` selector
-    /// prefix) → member sub names. Feeds the consumer-side `:tag` selector
-    /// expansion in `ExportSurface`; `:DEFAULT` is synthesized there from
-    /// `export`, so it is not stored here.
-    export_tags: std::collections::HashMap<String, Vec<String>>,
-    /// Re-export edges minted during the walk: module names whose export
-    /// surface this module folds into its own (static `@Other::EXPORT` splice,
-    /// loop-push over a resolvable module list, declarative `also => [...]`).
-    /// Flushed into `FileAnalysis.reexport_modules`; the surface walks them
-    /// transitively at query time. Dedup'd on insert via `record_reexport_edge`.
-    reexport_modules: Vec<String>,
+    /// Each package's export surface as the walk finds it — `@EXPORT`,
+    /// `@EXPORT_OK`, `%EXPORT_TAGS`, re-export edges — keyed by the package
+    /// whose export variable it is. Reached only through `exports_of`.
+    exports: std::collections::HashMap<String, crate::model::file_analysis::PackageExports>,
     /// `use lib` arguments, as written. Flushed into
     /// `FileAnalysis.lib_roots` — the per-asker half of module visibility.
     lib_roots: Vec<String>,

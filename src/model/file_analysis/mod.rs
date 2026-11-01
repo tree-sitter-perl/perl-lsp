@@ -103,28 +103,6 @@ pub struct FileAnalysis {
     /// Used to suppress "not defined" diagnostics for these known framework keywords.
     pub framework_imports: HashSet<String>,
 
-    /// Exported function names from `@EXPORT = ...` assignments.
-    pub export: Vec<String>,
-    /// Exported function names from `@EXPORT_OK = ...` assignments.
-    pub export_ok: Vec<String>,
-    /// `%EXPORT_TAGS` membership — tag name (no `:`/`-` prefix) → member subs.
-    /// Feeds the consumer-side `:tag` selector expansion (`ExportSurface`).
-    /// `:DEFAULT` is synthesized from `export` at query time, not stored.
-    #[serde(default)]
-    pub export_tags: HashMap<String, Vec<String>>,
-
-    /// Re-export edges: other modules whose export surface this module folds
-    /// into its own. Three statically-recognized idioms mint these (see
-    /// `docs/adr/reexport-surface.md`): a static `@Other::EXPORT` element in an
-    /// `@EXPORT` assignment, a loop-push over a statically-resolvable module
-    /// list (`push @EXPORT, @{"${m}::EXPORT"}`), and a declarative `also => [...]`
-    /// in `setup_import_methods`. `ExportSurface` walks these transitively at
-    /// query time (cross-file, seen-set bounded) — the closure is NOT baked here
-    /// (depth stays a query-time edge property, mirroring the inheritance
-    /// edge-walk). Runtime `import`-delegation is deliberately unmodeled.
-    #[serde(default)]
-    pub reexport_modules: Vec<String>,
-
     /// Search-path roots this file prepends to `@INC` — the literal
     /// arguments of its `use lib` lines, AS WRITTEN. THE per-asker half of
     /// module visibility: `t/lib` for a test, `lib` for the app, a vendored
@@ -334,9 +312,10 @@ pub struct FileAnalysis {
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
     #[serde(skip, default)]
     scope_starts: Vec<(Point, ScopeId)>, // sorted by start point
-    /// Union of `export` + `export_ok` for O(1) membership tests.
-    /// Rebuilt by `build_indices` (called from `new` and `after_deserialize`),
-    /// so it is valid for freshly-built and SQLite-cached modules alike.
+    /// Every name any package of this file exports — a file-wide prefilter
+    /// in front of the per-package lists (`PackageFacts::exports`), never
+    /// an answer on its own. Rebuilt by `build_indices` (called from `new`
+    /// and `after_deserialize`).
     #[serde(skip, default)]
     export_lookup: HashSet<String>,
 }
@@ -393,6 +372,46 @@ pub struct PackageFacts {
     /// parent-less base class (DateTime, Path::Tiny) offers.
     #[serde(default)]
     pub blesses: bool,
+
+    /// What this package exports. Exporter reads the export variables of
+    /// the package `import` is called on, so the lists are this package's,
+    /// never the file's: DBI.pm's `@EXPORT_OK` is `DBI`'s, and the
+    /// `DBD::Switch::dr` it also declares exports nothing.
+    #[serde(default)]
+    pub exports: PackageExports,
+}
+
+/// One package's export surface as written: `@EXPORT`, `@EXPORT_OK`,
+/// `%EXPORT_TAGS` and its re-export edges.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PackageExports {
+    /// `@EXPORT` — auto-imported by a bare `use M;`.
+    pub export: Vec<String>,
+    /// `@EXPORT_OK`, plus the names runtime exporters register.
+    pub export_ok: Vec<String>,
+    /// `%EXPORT_TAGS` membership — tag name (no `:`/`-` prefix) → member
+    /// subs. `:DEFAULT` is synthesized from `export` at query time.
+    pub export_tags: HashMap<String, Vec<String>>,
+    /// Re-export edges: modules whose export surface this package folds
+    /// into its own (`docs/adr/reexport-surface.md`) — a static
+    /// `@Other::EXPORT` element, a loop-push over a resolvable module list,
+    /// a declarative `also => [...]`. Walked transitively at query time,
+    /// never baked.
+    pub reexport_modules: Vec<String>,
+}
+
+impl PackageExports {
+    pub fn is_empty(&self) -> bool {
+        self.export.is_empty()
+            && self.export_ok.is_empty()
+            && self.export_tags.is_empty()
+            && self.reexport_modules.is_empty()
+    }
+
+    /// Is `name` in `@EXPORT` or `@EXPORT_OK`?
+    pub fn exports(&self, name: &str) -> bool {
+        self.export.iter().chain(&self.export_ok).any(|n| n == name)
+    }
 }
 
 impl PackageFacts {
@@ -408,6 +427,7 @@ impl PackageFacts {
         roles: HashSet<String>,
         dynamic_parents: HashSet<String>,
         blessing: HashSet<String>,
+        exports: HashMap<String, PackageExports>,
     ) -> HashMap<String, PackageFacts> {
         let mut out: HashMap<String, PackageFacts> = HashMap::new();
         for (pkg, v) in parents {
@@ -430,6 +450,9 @@ impl PackageFacts {
         }
         for pkg in blessing {
             out.entry(pkg).or_default().blesses = true;
+        }
+        for (pkg, v) in exports {
+            out.entry(pkg).or_default().exports = v;
         }
         out
     }
@@ -637,10 +660,6 @@ pub struct FileAnalysisParts {
     pub plugin: PluginFacts,
     pub method_call_bindings: Vec<MethodCallBinding>,
     pub framework_imports: HashSet<String>,
-    pub export: Vec<String>,
-    pub export_ok: Vec<String>,
-    pub export_tags: HashMap<String, Vec<String>>,
-    pub reexport_modules: Vec<String>,
     pub lib_roots: Vec<String>,
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
     pub namespace_ranges: Vec<NamespaceRange>,
