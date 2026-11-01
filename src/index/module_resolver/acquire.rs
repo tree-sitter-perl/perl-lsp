@@ -86,15 +86,18 @@ pub(super) fn acquire(
         return land_warm(core, &snap, name, warm, prefetch, strip_warm);
     }
     let placed = locate_and_parse(&snap, name);
-    let answers = answering(snap.driver, name, &placed);
-    let whole: Providers = placed.into_iter().map(|p| p.file).collect();
-    let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
+    // Only the files that answer land: one that does not (an enclosing
+    // package's file declaring other names) lands when its own name is
+    // asked, so a warm start, which stores only answers, fills the same
+    // slots a cold one does.
+    let whole: Providers = answering(snap.driver, name, &placed).into_iter().map(|i| Arc::clone(&placed[i].file)).collect();
+    let answers: Vec<usize> = (0..whole.len()).collect();
     // Per FILE: each provider gets its own row, so a shadowed twin
     // survives the warm start too. A miss is never persisted: no map's
     // inputs see every install (a pip or cpanm into a search root), so a
     // remembered miss would outlive the install that answers it, and
     // locating one again is a stat per search root.
-    let persisted = !rows.is_empty() && db.is_some_and(|conn| save_module_generation(conn, name, &Some(rows)));
+    let persisted = !whole.is_empty() && db.is_some_and(|conn| save_module_generation(conn, name, &Some(whole.clone())));
     let asks = descent(whole.iter().map(|m| &*m.analysis), prefetch);
     core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), persisted, eviction_enabled())?;
     Ok(if whole.is_empty() { Landed::Miss } else { Landed::Hit { providers: whole.len(), asks } })
