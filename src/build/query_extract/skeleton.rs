@@ -443,7 +443,19 @@ impl SkeletonAnalysis {
     /// indices, production reducer registry behind every query — from
     /// nothing but capture events. The existence proof that the engine
     /// is language-agnostic above this seam.
-    pub fn into_file_analysis(mut self) -> crate::model::file_analysis::FileAnalysis {
+    pub fn into_file_analysis(self) -> crate::model::file_analysis::FileAnalysis {
+        self.into_file_analysis_with(|_, _| Default::default())
+    }
+
+    /// `into_file_analysis` with a per-ref fact stamped over the FINAL refs
+    /// before the indices are built, so the index build sees it once.
+    pub fn into_file_analysis_with(
+        mut self,
+        stamp_delegates: impl FnOnce(
+            &[crate::model::file_analysis::Ref],
+            &crate::model::file_analysis::NameSpellings,
+        ) -> crate::model::file_analysis::RefDelegates,
+    ) -> crate::model::file_analysis::FileAnalysis {
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolId,
         };
@@ -1446,11 +1458,13 @@ impl SkeletonAnalysis {
             ..Default::default()
         };
         let fold_ranges = fold_ranges_of(&self.scopes);
+        let ref_delegates = stamp_delegates(&refs, &names);
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             fold_ranges,
             scopes: self.scopes,
             symbols,
             refs,
+            ref_delegates,
             witnesses: bag,
             packages,
             pack,

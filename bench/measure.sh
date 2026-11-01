@@ -4,6 +4,7 @@
 #   bench/measure.sh                     # every corpus, 3 reps, cold+warm
 #   bench/measure.sh FHEM                # one corpus (still 3 reps; 3 is the floor)
 #   bench/measure.sh --out runs/         # where the JSONL lands
+#   bench/measure.sh --no-instrumented   # skip the counter pass (KPIs only)
 #
 # Output is DELIBERATELY tall and raw: {kind,name,value,unit} per row, no
 # aggregation, no derived ratios. Reports slice it in DuckDB. A mean computed
@@ -27,6 +28,7 @@ OUT="$HERE/bench/runs"
 # you lose the box mid-measurement and the run with it.
 MAX_RSS_MB=8000
 MAX_SECS=1200
+INSTRUMENTED=1
 ONLY=()
 
 while [ $# -gt 0 ]; do
@@ -35,7 +37,8 @@ while [ $# -gt 0 ]; do
     --out)  OUT="$2"; shift 2;;
     --max-rss-mb) MAX_RSS_MB="$2"; shift 2;;
     --max-secs)   MAX_SECS="$2"; shift 2;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0;;
+    --no-instrumented) INSTRUMENTED=0; shift;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) ONLY+=("$1"); shift;;
   esac
 done
@@ -88,8 +91,17 @@ emit() { # corpus rep phase kind name value unit
 # Load average is recorded per measurement, not just per run: a corpus that
 # happened to run while the box was busy is not comparable to one that did
 # not, and averaging across them silently is the trap.
-measure_one() { # corpus root rep phase cachedir
-  local corpus="$1" root="$2" rep="$3" phase="$4" cache="$5"
+# Timed reps and counters come from DIFFERENT runs. With PERL_LSP_GHOST_STATS
+# on, a witness-heavy build pays for every hop counter it crosses (~25% wall on
+# a 46k-line file, `util/ghost_stats.rs::BuildScope`), so a wall, RSS or
+# per-file build time taken with it on is not the number a user sees. The timed
+# reps run with only the per-file build timer (`PERL_LSP_TIMINGS`, a pair of
+# clock reads per file); one extra instrumented pass per corpus carries the
+# counters, per-file check lanes and heap composition, and its own wall/RSS
+# land under `instrumented_*` kinds that no KPI reads.
+measure_one() { # corpus root rep phase cachedir instrumented(0|1)
+  local corpus="$1" root="$2" rep="$3" phase="$4" cache="$5" instr="$6"
+  local pfx=""; [ "$instr" = 1 ] && pfx="instrumented_"
   local g="$SCRATCH/g.json" t="$SCRATCH/t.json" h="$SCRATCH/h.json"
   rm -f "$g" "$t" "$h"
 
@@ -118,11 +130,12 @@ measure_one() { # corpus root rep phase cachedir
   #
   # ulimit and timeout remain HOST backstops set well above the soft cap:
   # only the kernel catches an allocation that outruns a 250ms poll.
+  local instr_env=()
+  [ "$instr" = 1 ] && instr_env=(PERL_LSP_GHOST_STATS=1 PERL_LSP_GHOST_JSON="$g" PERL_LSP_HEAP_JSON="$h")
   ( ulimit -v $(( (MAX_RSS_MB + 4000) * 1024 )) 2>/dev/null
-    PERL5LIB="$pl" XDG_CACHE_HOME="$cache" \
-    PERL_LSP_TIMINGS=1 PERL_LSP_GHOST_STATS=1 \
+    env PERL5LIB="$pl" XDG_CACHE_HOME="$cache" \
+    PERL_LSP_TIMINGS=1 PERL_LSP_TIMINGS_JSON="$t" "${instr_env[@]}" \
     PERL_LSP_MAX_RSS_MB="$MAX_RSS_MB" PERL_LSP_MAX_SECONDS="$MAX_SECS" \
-    PERL_LSP_GHOST_JSON="$g" PERL_LSP_TIMINGS_JSON="$t" PERL_LSP_HEAP_JSON="$h" \
       timeout -k 30 -s TERM $(( MAX_SECS + 120 )) \
       /usr/bin/time -f '%e %M %P' -o "$tf" \
       "$BIN" --check "$root" >/dev/null 2>&1 )
@@ -142,13 +155,13 @@ measure_one() { # corpus root rep phase cachedir
     124|137) outcome=hard_kill;;  # backstop fired — the soft cap did not
     *)   outcome=error;;
   esac
-  emit "$corpus" "$rep" "$phase" "outcome" "$outcome" "$rc" "exit_code"
+  emit "$corpus" "$rep" "$phase" "${pfx}outcome" "$outcome" "$rc" "exit_code"
 
   if [ -s "$tf" ]; then
     read -r wall maxrss cpupct < <(tail -1 "$tf")
-    emit "$corpus" "$rep" "$phase" "timing" "check.wall" "$(awk -v w="$wall" 'BEGIN{print w*1000}')" "ms"
-    emit "$corpus" "$rep" "$phase" "rss"    "peak"       "$(awk -v m="$maxrss" 'BEGIN{print m/1024}')" "MB"
-    emit "$corpus" "$rep" "$phase" "cpu"    "utilization" "${cpupct%\%}" "pct"
+    emit "$corpus" "$rep" "$phase" "${pfx}timing" "check.wall" "$(awk -v w="$wall" 'BEGIN{print w*1000}')" "ms"
+    emit "$corpus" "$rep" "$phase" "${pfx}rss"    "peak"       "$(awk -v m="$maxrss" 'BEGIN{print m/1024}')" "MB"
+    emit "$corpus" "$rep" "$phase" "${pfx}cpu"    "utilization" "${cpupct%\%}" "pct"
   fi
 
   # Every counter, every module. No top-N, no rounding — the distribution is
@@ -167,7 +180,8 @@ measure_one() { # corpus root rep phase cachedir
         {kind:"file_count", name:$f, tag:.key, value:.value, unit:"n"})
       | {t:"m",run_id:$run_id,corpus:$c,rep:$r,phase:$p} + .' "$g" >> "$JSONL"
 
-  [ -s "$t" ] && jq -c --arg run_id "$RUN_ID" --arg c "$corpus" --argjson r "$rep" --arg p "$phase" '
+  # Per-file build times are KPIs (p50/p99/max): taken from timed reps only.
+  [ "$instr" = 0 ] && [ -s "$t" ] && jq -c --arg run_id "$RUN_ID" --arg c "$corpus" --argjson r "$rep" --arg p "$phase" '
       .modules[] | {t:"m",run_id:$run_id,corpus:$c,rep:$r,phase:$p,
                     kind:(if .cached then "file_cached" else "file_build" end),
                     name:.module, value:(.build_ns/1e6), unit:"ms"},
@@ -190,7 +204,7 @@ measure_one() { # corpus root rep phase cachedir
       "$h" >> "$JSONL"
 
   local db; db="$(find "$cache" -name 'modules*.db' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END{print s+0}')"
-  emit "$corpus" "$rep" "$phase" "store" "modules_db_bytes" "${db:-0}" "bytes"
+  emit "$corpus" "$rep" "$phase" "${pfx}store" "modules_db_bytes" "${db:-0}" "bytes"
 }
 
 CORPORA=()
@@ -206,9 +220,16 @@ for corpus in "${CORPORA[@]}"; do
     # Cold means COLD: a private throwaway cache per rep, or the second rep
     # measures the first rep's cache and calls itself cold.
     cache="$SCRATCH/cache-$corpus-$rep"; rm -rf "$cache"; mkdir -p "$cache"
-    printf '  %-14s rep %s cold ' "$corpus" "$rep"; measure_one "$corpus" "$root" "$rep" cold "$cache"
-    printf 'warm\n';                                measure_one "$corpus" "$root" "$rep" warm "$cache"
+    printf '  %-14s rep %s cold ' "$corpus" "$rep"; measure_one "$corpus" "$root" "$rep" cold "$cache" 0
+    printf 'warm\n';                                measure_one "$corpus" "$root" "$rep" warm "$cache" 0
     rm -rf "$cache"
   done
+  if [ "$INSTRUMENTED" = 1 ]; then
+    # rep 0: the counter pass, never a sample of the timed population.
+    cache="$SCRATCH/cache-$corpus-instr"; rm -rf "$cache"; mkdir -p "$cache"
+    printf '  %-14s counters cold ' "$corpus"; measure_one "$corpus" "$root" 0 cold "$cache" 1
+    printf 'warm\n';                          measure_one "$corpus" "$root" 0 warm "$cache" 1
+    rm -rf "$cache"
+  fi
 done
 echo "done: $(wc -l < "$JSONL") rows"
