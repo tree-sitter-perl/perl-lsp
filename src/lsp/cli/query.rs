@@ -339,32 +339,17 @@ impl Drop for ScopedOpenDoc<'_> {
 
 /// Resolve what the query file uses before answering. The LSP backend
 /// asks on didOpen (`request_used`); a CLI query is one-shot, so it asks
-/// AND waits, bounded. Without it, modules nothing in the workspace
-/// literally `use`s — framework-implied SyntheticUses like
-/// Mojolicious::Plugin::DefaultHelpers — resolve in the editor but stay
-/// invisible to CLI probes and the gold harness.
+/// AND waits for the resolver to go idle — descent included, so a vendor
+/// class's parents have landed before the verb answers. Without it,
+/// modules nothing in the workspace literally `use`s — framework-implied
+/// SyntheticUses like Mojolicious::Plugin::DefaultHelpers — resolve in the
+/// editor but stay invisible to CLI probes and the gold harness.
 fn resolve_used_blocking(
     idx: &module_index::ModuleIndex,
     analysis: &file_analysis::FileAnalysis,
 ) {
-    let used = analysis.used_identities();
-    for name in &used {
-        idx.request_resolve(name);
-    }
-    // Global budget, not per-import: a cold cache resolving a
-    // framework's whole dependency tree must not stall the CLI for
-    // minutes. Each resolved module persists to the SQLite cache, so
-    // repeated runs converge to fully warm; within one run we answer
-    // with whatever resolved in time (the editor is eventually-
-    // consistent here too — it refreshes when resolution lands).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    for name in &used {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        let _ = idx.wait_resolved(name, left);
-    }
+    idx.request_used(analysis);
+    idx.wait_idle();
 }
 
 fn run_one(
