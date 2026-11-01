@@ -422,6 +422,8 @@ fn build_once(
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
+        framework_bases: std::collections::HashMap::new(),
+        extended_packages: std::collections::HashSet::new(),
         role_packages: std::collections::HashSet::new(),
         dbic_source_name: None,
         topic_group_spans: Vec::new(),
@@ -476,7 +478,10 @@ fn build_once(
         .plugins
         .framework_mode_makers()
         .filter_map(|m| match FrameworkMode::from_flavor(&m.flavor) {
-            Some(mode) => Some((m.module.clone(), (mode, m.imports.clone()))),
+            Some(mode) => Some((
+                m.module.clone(),
+                FrameworkModeGrant { mode, imports: m.imports.clone(), base: m.base.clone() },
+            )),
             None => {
                 log::error!(
                     "framework_mode_makers: unknown flavor `{}` for module `{}` — entry dropped",
@@ -525,6 +530,9 @@ fn build_once(
     // named-sub flushes below so pattern emissions ride the same
     // machinery as walk-interleaved hook emissions.
     bphase!("pattern_dispatch", b.dispatch_pattern_plugins(tree.root_node()));
+    // After every walk- and pattern-time parent, so the framework base
+    // is the MRO's last stop, behind the package's roles.
+    b.apply_framework_bases();
 
     b.pop_scope();
     let _ = file_scope;

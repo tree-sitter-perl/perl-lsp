@@ -345,7 +345,15 @@ sub f {
 // D8 — extend `unresolved-method` to cross-file-resolvable classes. A
 // cached module whose internal package name IS the class queried (so
 // resolution keys line up), unlike `fake_cached`'s always-`Fake` package.
-fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::module_index::CachedModule> {
+/// An index where Moo is installed: a Moo class's chain ends at a
+/// resolvable `Moo::Object` instead of an unresolved ancestor.
+pub(super) fn moo_installed_index() -> crate::index::module_index::ModuleIndex {
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_cache("Moo::Object", Some(cached_class("Moo::Object", &["new", "BUILDARGS", "does"])));
+    idx
+}
+
+pub(super) fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::module_index::CachedModule> {
     let mut src = format!("package {};\n", module);
     for m in methods {
         src.push_str(&format!("sub {} {{}}\n", m));

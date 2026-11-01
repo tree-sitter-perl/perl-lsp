@@ -318,11 +318,12 @@ impl<'a> Builder<'a> {
         // either hop. Mojo::Base stays a structural arm — its OO-ness is
         // decided by `-base`/parent args, not a name match.
         if let Some(pkg) = self.current_package.as_ref().cloned() {
-            if let Some((mode, keywords)) =
-                self.framework_mode_modules.get(&module_name).cloned()
-            {
-                self.framework_modes.insert(pkg, mode);
-                self.framework_imports.extend(keywords);
+            if let Some(grant) = self.framework_mode_modules.get(&module_name).cloned() {
+                self.framework_modes.insert(pkg.clone(), grant.mode);
+                self.framework_imports.extend(grant.imports);
+                if let Some(base) = grant.base {
+                    self.framework_bases.insert(pkg, base);
+                }
             } else if module_name == "Mojo::Base" {
                 // OO-ness is decided by `-base` or a parent-class arg, NOT by
                 // `-strict` — `-base` implies strict, and `use Mojo::Base
