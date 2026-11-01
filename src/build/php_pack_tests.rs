@@ -1765,9 +1765,9 @@ fn parent_names_the_class_extended() {
     assert_eq!(ret("App\\Lone", "f"), None);
 }
 
-/// A construction is an `Invoke` of the constructor on the class it
-/// names, with its arguments, and a reference on its class token keyed by
-/// that class, never by a constructor name.
+/// A construction is an `Invoke` of the constructor on the class its
+/// receiver's value is, with its arguments, and a reference on its class
+/// token keyed by that class, never by a constructor name.
 #[test]
 fn a_construction_calls_its_classs_constructor() {
     use crate::model::witnesses::{Callee, Lookup, WitnessPayload};
@@ -1777,11 +1777,15 @@ fn a_construction_calls_its_classs_constructor() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Construct { lookup }, args, .. } => {
-                let on = match lookup {
-                    Lookup::Named(c) => c.clone(),
-                    Lookup::Receiver => "$receiver".to_string(),
-                    Lookup::Super { .. } => unreachable!(),
+            WitnessPayload::Invoke { callee: Callee::Construct { lookup }, receiver, args } => {
+                // the class is the receiver's value, the one store of it
+                assert_eq!(*lookup, Lookup::Receiver);
+                let on = match receiver {
+                    Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => fa
+                        .expr_type_at_span(*recv, None)
+                        .and_then(|t| t.class_name().map(str::to_string))
+                        .unwrap_or_else(|| "untyped".to_string()),
+                    _ => "untyped".to_string(),
                 };
                 Some((on, args.as_ref().map_or(0, Vec::len)))
             }
@@ -1795,7 +1799,7 @@ fn a_construction_calls_its_classs_constructor() {
         ("Lib\\Clock", 0),
         ("App\\Box", 1),
         ("App\\Base", 1),
-        ("$receiver", 0),
+        ("Lib\\Clock", 0),
         ("App\\class@anonymous:20:18", 1),
     ]
     .iter()
