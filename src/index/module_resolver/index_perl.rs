@@ -611,5 +611,12 @@ pub fn index_workspace_with_index(
         }
     }
 
+    // What the project's files use is the dependency tier's to place, on
+    // the resolver thread — the pack indexer's tail, so a server and a
+    // one-shot run ask the same demand. Re-read first: a manifest that
+    // moved during the walk is read here.
+    idx.refresh_dependency_map(&PERL, Some(root));
+    idx.request_dependency_demand();
+
     count.load(Ordering::Relaxed)
 }

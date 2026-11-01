@@ -1143,3 +1143,41 @@ fn the_arm_table_survives_a_warm_round_trip() {
     assert_eq!(warm.pack.cond_arms, fa.pack.cond_arms);
     assert_eq!(arm_labels(&warm), arm_labels(&fa));
 }
+
+// What a map stamps is what moves its generation, and the stamp is shared
+// across processes through the store's fingerprint: an input the watcher
+// never reports moves a one-shot run's fingerprint where a running
+// server's generation stays put, and that run clears the import tier
+// under the server's stripped landings. So every input is a watched file.
+#[test]
+fn every_dependency_input_is_a_watched_manifest() {
+    let root = std::env::temp_dir().join(format!("dep-inputs-watched-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (rel, body) in [
+        ("local/lib/perl5/Foo.pm", "package Foo; 1;\n"),
+        ("cpanfile.snapshot", "# carton snapshot format: version 1.0\n"),
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (".venv/lib/python3.11/site-packages/m.py", ""),
+        ("composer.json", "{}\n"),
+        ("vendor/composer/installed.json", "{\"packages\": []}\n"),
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let registry = LanguageRegistry::compiled();
+    for id in registry.languages() {
+        let driver = registry.for_id(id).unwrap();
+        let Some(map) = driver.dependency_locator(Some(&root)) else { continue };
+        for input in map.inputs() {
+            let name = input.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            assert!(
+                driver.dependency_manifests().contains(&name),
+                "{id}: map input {} is stamped but never watched (manifests {:?})",
+                input.display(),
+                driver.dependency_manifests(),
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
