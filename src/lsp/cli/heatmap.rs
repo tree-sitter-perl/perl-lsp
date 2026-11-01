@@ -127,7 +127,7 @@ fn heatmap_symbol_row(
         None
     };
 
-    let exported = analysis.exports_name(&sym.name);
+    let exported = analysis.symbol_is_exported(sym);
     let native = matches!(sym.namespace, Namespace::Language);
 
     // Reachability guard — why a zero-fan-in symbol is NOT flagged dead.

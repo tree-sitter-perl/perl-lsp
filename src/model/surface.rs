@@ -47,6 +47,15 @@ pub struct PackageSurface {
     /// Cross-file-visible non-callables owned by this package (class
     /// fields, named-enum constants, `our` globals), sorted by (name, kind).
     pub values: Vec<ValueSurface>,
+    /// `@EXPORT`, sorted — what a bare `use` of this package binds.
+    pub exports: Vec<String>,
+    pub exports_ok: Vec<String>,
+    /// `%EXPORT_TAGS` membership, tag → sorted members. A member moving
+    /// between tags (or a tag rename) changes what a consumer's
+    /// `use Foo qw(:tag)` binds even when the flat `exports_ok` set is
+    /// unchanged — the grouping itself is cross-file semantics.
+    pub export_tags: Vec<(String, Vec<String>)>,
+    pub reexports: Vec<String>,
 }
 
 /// One callable's cross-file-visible contract.
@@ -129,8 +138,6 @@ pub struct Surface {
     /// DEPENDENCY half of the freshness edge: this file's enrichment
     /// depends on the Surface of each import ∪ parent ∪ bridge.
     pub imports: Vec<String>,
-    pub exports: Vec<String>,
-    pub exports_ok: Vec<String>,
     /// Plugin loads that carry a config value: load-name → the value's shape,
     /// sorted.
     ///
@@ -143,12 +150,6 @@ pub struct Surface {
     /// of them keeps diagnosing against the old key set for the rest of the
     /// session.
     pub loader_shapes: Vec<(String, InferredType)>,
-    /// `%EXPORT_TAGS` membership, tag → sorted members. A member moving
-    /// between tags (or a tag rename) changes what a consumer's
-    /// `use Foo qw(:tag)` binds even when the flat `exports_ok` set is
-    /// unchanged — the grouping itself is cross-file semantics.
-    pub export_tags: Vec<(String, Vec<String>)>,
-    pub reexports: Vec<String>,
     /// Classes plugin namespaces in THIS file bridge content onto.
     pub plugin_bridges: Vec<String>,
     /// What plugin emissions deferred on a cross-file `ClassIsa` gate would
@@ -205,6 +206,7 @@ impl Surface {
                 requires: _requires, // required names synthesize contract-marker Method symbols that already project
                 dynamic_parents: _dynamic_parents, // honest-silence gate for this file's own diagnostics; resolvable edges ride `parents`
                 blesses: _blesses, // class evidence for this file's own `@_` windows; what that does to returns rides `ret`
+                exports,
             } = facts;
             let entry = by_pkg.entry(pkg.clone()).or_insert_with(|| PackageSurface {
                 name: pkg.clone(),
@@ -215,6 +217,16 @@ impl Surface {
             parents.dedup();
             entry.parents = parents;
             entry.is_role = *is_role;
+            entry.exports = sorted_names(&exports.export);
+            entry.exports_ok = sorted_names(&exports.export_ok);
+            let mut tags: Vec<(String, Vec<String>)> = exports
+                .export_tags
+                .iter()
+                .map(|(tag, members)| (tag.clone(), sorted_names(members)))
+                .collect();
+            tags.sort_by(|a, b| a.0.cmp(&b.0));
+            entry.export_tags = tags;
+            entry.reexports = sorted_names(&exports.reexport_modules);
         }
         for sym in feed.symbols {
             match sym.kind {
@@ -361,12 +373,6 @@ impl Surface {
         loader_shapes
             .sort_by(|a, b| (&a.0, format!("{:?}", a.1)).cmp(&(&b.0, format!("{:?}", b.1))));
         loader_shapes.dedup();
-        let sorted = |v: &[String]| {
-            let mut v = v.to_vec();
-            v.sort_unstable();
-            v.dedup();
-            v
-        };
         let plugin_bridges = fa.bridge_classes();
         // The same mint the rows and the index feeds read: candidates, each
         // keyed to the package it would land in.
@@ -412,12 +418,6 @@ impl Surface {
             feed.include_directives.iter().map(|(_, raw)| raw.clone()).collect();
         includes.sort_unstable();
         includes.dedup();
-        let mut export_tags: Vec<(String, Vec<String>)> = feed
-            .export_tags
-            .iter()
-            .map(|(tag, members)| (tag.clone(), sorted(members)))
-            .collect();
-        export_tags.sort_by(|a, b| a.0.cmp(&b.0));
         Surface {
             packages,
             free_values,
@@ -425,17 +425,20 @@ impl Surface {
             macros,
             includes,
             imports,
-            exports: sorted(feed.export),
-            exports_ok: sorted(feed.export_ok),
             loader_shapes,
-            export_tags,
-            reexports: sorted(feed.reexport_modules),
             plugin_bridges,
             gated,
-            app_surface_consumers: sorted(feed.app_surface_consumers),
+            app_surface_consumers: sorted_names(feed.app_surface_consumers),
             dbic_source_name: feed.dbic_source_name.clone(),
         }
     }
+}
+
+fn sorted_names(v: &[String]) -> Vec<String> {
+    let mut v = v.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// Strip file-internal identities out of an `InferredType` so the surface
