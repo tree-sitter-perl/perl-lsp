@@ -190,6 +190,7 @@ pub struct ComposerLocator {
     /// The language the map serves: its namespace separator spells the
     /// identities, and the generated classmap is parsed in it.
     driver: &'static dyn LanguageDriver,
+    names: crate::model::file_analysis::NameSpellings,
     sep: String,
     psr_4: Vec<(String, Vec<PathBuf>)>,
     psr_0: Vec<(String, Vec<PathBuf>)>,
@@ -206,10 +207,12 @@ pub struct ComposerLocator {
 
 impl ComposerLocator {
     fn new(root: &Path, driver: &'static dyn LanguageDriver, config: Option<ResolvedConfig>) -> Self {
-        let sep = driver.lang_pack().and_then(|p| p.names.use_map_sep().map(str::to_string)).unwrap_or_default();
+        let names = driver.lang_pack().map(|p| p.names).unwrap_or_default();
+        let sep = names.use_map_sep().map(str::to_string).unwrap_or_default();
         let vendor_dir = config.as_ref().map(|c| c.vendor_dir.clone()).unwrap_or_else(|| root.join("vendor"));
         let mut loc = ComposerLocator {
             driver,
+            names,
             sep,
             psr_4: Vec::new(),
             psr_0: Vec::new(),
@@ -240,11 +243,9 @@ impl ComposerLocator {
     /// PSR-0 keeps the whole identity in the path, and a `_` in the class
     /// leaf (not the namespace) is a directory too.
     fn psr_0(&self, identity: &str, out: &mut Vec<PathBuf>) {
-        let (ns, leaf) = match identity.rfind(self.sep.as_str()) {
-            Some(i) => (&identity[..i + self.sep.len()], &identity[i + self.sep.len()..]),
-            None => ("", identity),
-        };
-        let rel = format!("{}{}.php", ns.replace(self.sep.as_str(), "/"), leaf.replace('_', "/"));
+        let (ns, leaf) = crate::model::conventions::split_qualified(identity, &self.names);
+        let dir = ns.map(|ns| format!("{}/", ns.replace(self.sep.as_str(), "/"))).unwrap_or_default();
+        let rel = format!("{dir}{}.php", leaf.replace('_', "/"));
         for (prefix, dirs) in &self.psr_0 {
             if identity.starts_with(prefix.as_str()) {
                 out.extend(dirs.iter().map(|d| d.join(&rel)).filter(|p| p.is_file()));
@@ -256,48 +257,47 @@ impl ComposerLocator {
         self.classmap.get_or_init(|| {
             let path = autoload_classmap(&self.vendor_dir);
             let Ok(source) = std::fs::read_to_string(&path) else { return HashMap::new() };
-            read_classmap(self.driver, &source, &self.vendor_dir, &self.base_dir)
+            read_classmap(self.driver, CLASSMAP_DOCUMENT, &source, &self.vendor_dir, &self.base_dir).unwrap_or_else(|e| {
+                log::error!("composer: {}: {e}", path.display());
+                HashMap::new()
+            })
         })
     }
 }
 
-/// The generated classmap's entries, through `composer-classmap.scm`. An
-/// entry whose path is spelled any other way than the query admits is
-/// skipped, never guessed at.
-fn read_classmap(driver: &dyn LanguageDriver, source: &str, vendor_dir: &Path, base_dir: &Path) -> HashMap<String, PathBuf> {
-    use tree_sitter::{Query, QueryCursor, StreamingIterator};
-    static SCM: &str = include_str!("../../queries/php/composer-classmap.scm");
+/// The classmap Composer generates is read through this document.
+const CLASSMAP_DOCUMENT: &str = include_str!("../../queries/php/composer-classmap.scm");
+
+/// The generated classmap's entries, through `document`. An entry whose
+/// path is spelled any other way than the document admits is skipped,
+/// never guessed at; a document whose captures the classmap vocabulary
+/// does not hold is an error.
+fn read_classmap(
+    driver: &dyn LanguageDriver,
+    document: &str,
+    source: &str,
+    vendor_dir: &Path,
+    base_dir: &Path,
+) -> Result<HashMap<String, PathBuf>, String> {
+    use crate::build::query_extract::{document_matches, ClassmapCap};
     let mut map = HashMap::new();
-    let mut parser = driver.make_parser();
-    let Some(lang) = parser.language().map(|l| (*l).clone()) else { return map };
-    let Some(tree) = parser.parse(source, None) else { return map };
-    let query = match Query::new(&lang, SCM) {
-        Ok(q) => q,
-        Err(e) => {
-            log::warn!("composer: classmap query does not compile: {e}");
-            return map;
-        }
-    };
-    let names = query.capture_names();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
-    while let Some(m) = matches.next() {
+    for m in document_matches::<ClassmapCap>(driver, document, source)? {
         let (mut class, mut path) = (None, None);
-        for c in m.captures {
-            let Some(text) = c.node.utf8_text(source.as_bytes()).ok().and_then(single_quoted) else { continue };
-            match names[c.index as usize] {
-                "classmap.class" => class = Some(text),
-                "classmap.path.vendor" => path = Some(normalize(vendor_dir, text.trim_start_matches('/'))),
-                "classmap.path.base" => path = Some(normalize(base_dir, text.trim_start_matches('/'))),
-                "classmap.path.absolute" => path = Some(normalize(Path::new("/"), &text)),
-                _ => {}
+        for (cap, text) in m {
+            let quoted = || single_quoted(text);
+            match cap {
+                ClassmapCap::Class => class = quoted(),
+                ClassmapCap::Anchor => {}
+                ClassmapCap::VendorPath => path = quoted().map(|t| normalize(vendor_dir, t.trim_start_matches('/'))),
+                ClassmapCap::BasePath => path = quoted().map(|t| normalize(base_dir, t.trim_start_matches('/'))),
+                ClassmapCap::AbsolutePath => path = quoted().map(|t| normalize(Path::new("/"), &t)),
             }
         }
         if let (Some(class), Some(path)) = (class, path) {
             map.entry(class).or_insert(path);
         }
     }
-    map
+    Ok(map)
 }
 
 /// A single-quoted PHP string's value: `\\` and `\'` are its only escapes.
