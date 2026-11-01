@@ -193,10 +193,27 @@ fn test_resolve_sub_return_type() {
 
 // ---- Return type resolution tests (decoupled, pure function) ----
 
+/// Perl's rules with no class order: the join the return-arm tests pin.
+struct Perl;
+
+impl TypeOrder for Perl {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        Unordered.isa(child, ancestor)
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        Unordered.common_class(classes)
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        crate::model::conventions::PERL_LATTICE.holds(rule)
+    }
+}
+
 #[test]
 fn test_resolve_return_type_all_agree() {
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::HashRef]),
+        join_all(&[InferredType::HashRef, InferredType::HashRef], &Perl),
         Some(InferredType::HashRef),
     );
 }
@@ -204,14 +221,14 @@ fn test_resolve_return_type_all_agree() {
 #[test]
 fn test_resolve_return_type_disagreement() {
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::ArrayRef]),
-        None,
+        join_all(&[InferredType::HashRef, InferredType::ArrayRef], &Perl),
+        Some(join(&InferredType::HashRef, &InferredType::ArrayRef, &Unordered)),
     );
 }
 
 #[test]
 fn test_resolve_return_type_empty() {
-    assert_eq!(resolve_return_type(&[]), None);
+    assert_eq!(join_all(&[], &Perl), None);
 }
 
 #[test]
@@ -220,11 +237,11 @@ fn unknown_absorbs_in_return_arm_agreement() {
     // not `None` (a lone typed arm would answer for the sub) and not the
     // coarse HashRef/Numeric joins below it.
     assert_eq!(
-        resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::Unknown]),
+        join_all(&[InferredType::ClassName("Foo".into()), InferredType::Unknown], &Perl),
         Some(InferredType::Unknown),
     );
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::Unknown]),
+        join_all(&[InferredType::HashRef, InferredType::Unknown], &Perl),
         Some(InferredType::Unknown),
     );
 }
@@ -232,56 +249,173 @@ fn unknown_absorbs_in_return_arm_agreement() {
 #[test]
 fn an_undef_arm_does_not_wrap_unknown_in_optional() {
     // `Optional<Unknown>` would claim a value half nothing supports.
-    assert_eq!(join_return_arms(&[InferredType::Unknown], true), Some(InferredType::Unknown));
+    assert_eq!(join_return_arms(&[InferredType::Unknown], true, &Unordered), Some(InferredType::Unknown));
     // The rule for a KNOWN value arm is untouched.
     assert_eq!(
-        join_return_arms(&[InferredType::ClassName("Foo".into())], true),
+        join_return_arms(&[InferredType::ClassName("Foo".into())], true, &Unordered),
         Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into())))),
     );
+}
+
+/// `Dog`, `Cat`, `Cow`, `Pig`, `Hen` isa `Animal`; nothing else.
+struct Farm;
+
+impl TypeOrder for Farm {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        child == ancestor || (ancestor == "Animal" && ["Dog", "Cat", "Cow", "Pig", "Hen"].contains(&child))
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        if classes.iter().all(|c| self.isa(c, "Animal")) {
+            Some("Animal".into())
+        } else {
+            Unordered.common_class(classes)
+        }
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        Perl.holds(rule)
+    }
+}
+
+fn class(c: &str) -> InferredType {
+    InferredType::ClassName(c.into())
+}
+
+#[test]
+fn join_takes_the_ancestor_of_related_classes() {
+    assert_eq!(join(&class("Dog"), &class("Animal"), &Farm), class("Animal"));
+    assert_eq!(join(&class("Animal"), &class("Dog"), &Farm), class("Animal"));
+    // An ancestor arriving later folds the union's arms into it.
+    let dog_or_cat = join(&class("Dog"), &class("Cat"), &Farm);
+    assert_eq!(join(&dog_or_cat, &class("Animal"), &Farm), class("Animal"));
+}
+
+#[test]
+fn unrelated_arms_join_to_a_canonical_union() {
+    let ab = join(&class("Bar"), &class("Foo"), &Unordered);
+    let ba = join(&class("Foo"), &class("Bar"), &Unordered);
+    assert_eq!(ab, ba);
+    let InferredType::Union(arms) = &ab else { panic!("expected a union, got {ab:?}") };
+    assert_eq!(&arms[..], &[class("Bar"), class("Foo")]);
+    // Associative: grouping doesn't move the answer.
+    let n = InferredType::Numeric;
+    assert_eq!(join(&ab, &n, &Unordered), join(&class("Bar"), &join(&class("Foo"), &n, &Unordered), &Unordered));
+    // Idempotent, and a union never nests.
+    assert_eq!(join(&ab, &ab, &Unordered), ab);
+    assert_eq!(join(&ab, &class("Foo"), &Unordered), ab);
+}
+
+#[test]
+fn an_undef_arm_wraps_the_union_in_optional() {
+    let ab = join(&class("Bar"), &class("Foo"), &Unordered);
+    let opt = join(&ab, &InferredType::Undef, &Unordered);
+    assert_eq!(opt, InferredType::Optional(Box::new(ab.clone())));
+    assert_eq!(join(&InferredType::Optional(Box::new(class("Bar"))), &class("Foo"), &Unordered), opt);
+}
+
+#[test]
+fn unknown_absorbs_a_union() {
+    let ab = join(&class("Bar"), &class("Foo"), &Unordered);
+    assert_eq!(join(&ab, &InferredType::Unknown, &Unordered), InferredType::Unknown);
+}
+
+#[test]
+fn past_the_cap_classes_widen_to_their_common_class() {
+    let animals: Vec<InferredType> = ["Dog", "Cat", "Cow", "Pig"].iter().map(|c| class(c)).collect();
+    // At the cap: still a union.
+    assert!(matches!(join_all(&animals, &Farm), Some(InferredType::Union(_))));
+    let mut five = animals.clone();
+    five.push(class("Hen"));
+    let (t, steps) = join_all_traced(&five, &Farm).unwrap();
+    assert_eq!(t, class("Animal"));
+    assert!(matches!(&steps[..], [Widening::CommonClass { to, .. }] if to == "Animal"));
+    // No common class: top, and the trace says so.
+    let wild: Vec<InferredType> = ["A", "B", "C", "D", "E"].iter().map(|c| class(c)).collect();
+    let (t, steps) = join_all_traced(&wild, &Farm).unwrap();
+    assert_eq!(t, InferredType::Unknown);
+    assert!(matches!(&steps[..], [Widening::Top { members }] if members.len() == 5));
+    // The cap is a function of the set: any order lands the same.
+    let mut rev = five.clone();
+    rev.reverse();
+    assert_eq!(join_all(&rev, &Farm), Some(class("Animal")));
+}
+
+#[test]
+fn subsumption_is_the_languages_call() {
+    let foo = class("Foo");
+    // Perl: an object is a blessed hash, truth is a number.
+    assert_eq!(join(&foo, &InferredType::HashRef, &Perl), foo);
+    assert_eq!(join(&InferredType::Bool, &InferredType::Numeric, &Perl), InferredType::Numeric);
+    // A language declaring neither keeps both arms.
+    assert!(matches!(join(&foo, &InferredType::HashRef, &Unordered), InferredType::Union(_)));
+    assert!(matches!(join(&InferredType::Bool, &InferredType::Numeric, &Unordered), InferredType::Union(_)));
+}
+
+#[test]
+fn join_lifts_a_plain_arm_into_an_optional() {
+    let foo = class("Foo");
+    let opt = InferredType::Optional(Box::new(foo.clone()));
+    assert_eq!(join(&opt, &foo, &Unordered), opt.clone());
+    assert_eq!(join(&foo, &opt, &Unordered), opt);
+}
+
+#[test]
+fn join_of_keyed_hashes_is_commutative_and_sorted() {
+    let hash = |ks: &[(&str, Option<InferredType>)]| InferredType::HashWithKeys {
+        keys: ks.iter().map(|(k, v)| (k.to_string(), v.clone().map(Box::new))).collect(),
+        open: false,
+    };
+    let a = hash(&[("port", Some(InferredType::Numeric)), ("host", Some(InferredType::String))]);
+    let b = hash(&[("user", None), ("port", Some(InferredType::String))]);
+    let ab = join(&a, &b, &Unordered);
+    assert_eq!(ab, join(&b, &a, &Unordered));
+    let num_or_str = join(&InferredType::Numeric, &InferredType::String, &Unordered);
+    assert_eq!(
+        ab,
+        hash(&[("host", Some(InferredType::String)), ("port", Some(num_or_str)), ("user", None)])
+    );
+    let c = hash(&[("port", Some(InferredType::Numeric))]);
+    assert_eq!(join(&ab, &c, &Unordered), join(&a, &join(&b, &c, &Unordered), &Unordered));
 }
 
 #[test]
 fn test_resolve_return_type_object_subsumes_hashref() {
     // Object + HashRef → Object wins (overloaded objects)
     assert_eq!(
-        resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::HashRef,]),
+        join_all(&[InferredType::ClassName("Foo".into()), InferredType::HashRef,], &Perl),
         Some(InferredType::ClassName("Foo".into())),
     );
     // Order shouldn't matter
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::ClassName("Foo".into()),]),
+        join_all(&[InferredType::HashRef, InferredType::ClassName("Foo".into()),], &Perl),
         Some(InferredType::ClassName("Foo".into())),
     );
 }
 
 #[test]
 fn test_resolve_return_type_object_does_not_subsume_arrayref() {
-    // Object + ArrayRef → disagreement
-    assert_eq!(
-        resolve_return_type(&[
-            InferredType::ClassName("Foo".into()),
-            InferredType::ArrayRef,
-        ]),
-        None,
-    );
+    // Object + ArrayRef → their union, not the object
+    let t = join_all(&[InferredType::ClassName("Foo".into()), InferredType::ArrayRef], &Perl).unwrap();
+    assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
-fn test_resolve_return_type_two_classes_disagree() {
+fn test_resolve_return_type_two_classes_union_and_absorb_the_hash() {
     assert_eq!(
-        resolve_return_type(&[
+        join_all(&[
             InferredType::ClassName("Foo".into()),
             InferredType::HashRef,
             InferredType::ClassName("Bar".into()),
-        ]),
-        None,
+        ], &Perl),
+        Some(join(&InferredType::ClassName("Bar".into()), &InferredType::ClassName("Foo".into()), &Perl)),
     );
 }
 
 #[test]
 fn test_resolve_return_type_single() {
     assert_eq!(
-        resolve_return_type(&[InferredType::CodeRef { return_edge: None }]),
+        join_all(&[InferredType::CodeRef { return_edge: None }], &Perl),
         Some(InferredType::CodeRef { return_edge: None }),
     );
 }
@@ -417,7 +551,7 @@ fn test_fq_method_call_nav_dispatches_from_named_class() {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "Widget::build")
         .expect("FQ method ref present");
     assert_eq!(
-        fa.method_call_invocant_class(mref, None).as_deref(),
+        fa.receiver_classes(mref, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Widget"),
         "FQ call dispatches from the named class, not the (untyped) invocant"
     );
@@ -483,7 +617,7 @@ fn test_super_method_nav_resolves_to_parent() {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "SUPER::greet")
         .expect("SUPER method ref present");
     assert_eq!(
-        fa.method_call_invocant_class(sref, None).as_deref(),
+        fa.receiver_classes(sref, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Base"),
         "SUPER dispatches to the enclosing package's parent"
     );
@@ -1481,7 +1615,7 @@ $r->get('/x')->to('Y#z');
 }
 
 /// End-to-end wiring check: the public path
-/// `resolve_invocant_class` now goes through the witness bag, so
+/// `invocant_classes_in_scope` now goes through the witness bag, so
 /// the Mojo `$self->{k}` access inside a Mojo::Base method no
 /// longer flips `$self` to HashRef — method chains downstream
 /// still see the class.
@@ -1504,7 +1638,7 @@ sub name {
     // At a point inside the method body where `$self` has been
     // assigned via `shift`, the flat `inferred_type` returns
     // HashRef (because the access flipped it). The witness-based
-    // path — which is what `resolve_invocant_class` now calls —
+    // path — which is what `invocant_classes_in_scope` now calls —
     // should return the class.
     let point = Point { row: 5, column: 15 };
 
@@ -1515,7 +1649,7 @@ sub name {
     assert_eq!(
         resolved.as_deref(),
         Some("Mojolicious::Routes::Route"),
-        "resolve_invocant_class (public path) should see $self as the class, \
+        "invocant_classes_in_scope (public path) should see $self as the class, \
              not HashRef — got {:?}",
         resolved
     );
@@ -1582,8 +1716,9 @@ sub disagree {
         .expect("sub disagree");
     let return_type = fa.symbol_return_type_via_bag(disagree.id, None);
     assert_eq!(
-        return_type, None,
-        "disagree: arms Numeric vs String → None"
+        return_type,
+        Some(join(&InferredType::Numeric, &InferredType::String, &Unordered)),
+        "disagree: arms Numeric vs String → their union"
     );
 }
 
@@ -1610,13 +1745,13 @@ my $x = $c ? 10 : "oops";
     let t_s = fa.inferred_type_via_bag("$s", p_s);
     assert_eq!(t_s, Some(InferredType::String), "agreeing string arms");
 
-    // $x: disagreeing — reducer returns None. The legacy
-    // fallback doesn't handle ternaries either, so overall None.
+    // $x: disagreeing arms join to their union.
     let p_x = Point { row: 4, column: 22 };
     let t_x = fa.inferred_type_via_bag("$x", p_x);
     assert_eq!(
-        t_x, None,
-        "disagreeing arms: bag returns None, legacy has no answer"
+        t_x,
+        Some(join(&InferredType::Numeric, &InferredType::String, &Unordered)),
+        "disagreeing arms: their union"
     );
 }
 
@@ -1655,8 +1790,8 @@ sub mix {
         .expect("sub mix");
 
     // Query the bag for the sub's Symbol attachment, expect the
-    // BranchArmFold to produce Numeric for `pick` and None for
-    // `mix` (disagreement).
+    // BranchArmFold to produce Numeric for `pick` and the arms' union
+    // for `mix`.
     use crate::model::witnesses::{
         FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
     };
@@ -1684,8 +1819,8 @@ sub mix {
     };
     assert_eq!(
         reg.query(&fa.witnesses, &q_m),
-        ReducedValue::None,
-        "mix: disagreement (Numeric vs String) → None"
+        ReducedValue::Type(join(&InferredType::Numeric, &InferredType::String, &Unordered)),
+        "mix: Numeric vs String → their union"
     );
 }
 
@@ -1936,7 +2071,7 @@ fn test_route_controller_token_resolves_cross_file() {
         })
         .expect("plugin emits MethodCall {invocant: users, method: list} for ->to('users#list')");
 
-    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    let class = app.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(
         class.as_deref(),
         Some("Some::App::Controller::Users"),
@@ -2023,7 +2158,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
                 panic!("partial ->to('#{action}') should emit MethodCall {{invocant: Alerts (camelized), method: {action}}}")
             });
 
-        let class = app.method_call_invocant_class(to_ref, Some(&idx));
+        let class = app.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
         assert_eq!(
             class.as_deref(),
             Some("GenericCo::Controller::Alerts"),
@@ -2042,7 +2177,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
         })
         .expect("sibling group partial ->to('#index') should inherit `billing` (camelized)");
     assert_eq!(
-        app.method_call_invocant_class(index_ref, Some(&idx)).as_deref(),
+        app.receiver_classes(index_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("GenericCo::Controller::Billing"),
         "sibling group must re-brand to `billing`, not leak `alerts`",
     );
@@ -2104,7 +2239,7 @@ fn test_route_controller_token_disambiguates_by_ownership() {
         })
         .expect("MethodCall for ->to('reports#monthly')");
 
-    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    let class = app.receiver_classes(to_ref, Some(&idx), ReceiverPolicy::Navigate).single().map(str::to_string);
     assert_eq!(
         class.as_deref(),
         Some("Beta::Controller::Reports"),
@@ -2909,7 +3044,7 @@ fn deep_isa_chain_within_visit_budget_still_resolves() {
 #[test]
 fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
     use crate::index::module_index::ModuleIndex;
-    use crate::model::file_analysis::{MethodTarget, RefBinding};
+    use crate::model::file_analysis::{FrozenReceiver, MethodTarget, ReceiverSource, ReceiverView};
 
     let path = std::path::PathBuf::from("/tmp/RestampGate.pm");
     let mut fa = build_fa_from_source(
@@ -2938,9 +3073,11 @@ fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
 
     // Poison it. With no NEW mark, the file's stamp is at or past the only
     // mark there is, so the gate must skip and the poison must survive.
-    fa.refs[i].binding = Some(RefBinding::Method(MethodTarget::CrossFile {
-        invocant_class: "SENTINEL".into(),
-    }));
+    fa.refs[i].bind_receiver(FrozenReceiver::from_arms(
+        vec![MethodTarget::CrossFile { invocant_class: "SENTINEL".into() }],
+        ReceiverSource::Stated,
+        ReceiverView::Index,
+    ));
     fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
     assert_eq!(
         fa.refs[i].method_target().map(|t| t.invocant_class()),
@@ -2956,6 +3093,50 @@ fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
         fa.refs[i].method_target().cloned(),
         stamped,
         "a provider moved, so the re-stamp runs and re-derives the real target"
+    );
+}
+
+/// A stamp holding the index keeps a union receiver off the ref and in the
+/// session's receiver memo, where the readers after it in the same session
+/// find it; the ref keeps only what the file alone resolved.
+#[test]
+fn an_index_stamp_leaves_a_union_receiver_to_the_session_memo() {
+    use crate::index::module_index::ModuleIndex;
+    use crate::model::file_analysis::{ReceiverPolicy, ReceiverView};
+    use crate::model::witnesses::ResolutionSession;
+
+    let mut fa = build_fa_from_source(
+        "package A;\nsub new { bless {}, shift }\nsub m { 1 }\n\
+         package B;\nsub new { bless {}, shift }\nsub m { 2 }\n\
+         package main;\nmy $c = 1;\nmy $x = $c ? A->new : B->new;\n$x->m;\n",
+    );
+    let idx = ModuleIndex::new_for_test();
+    let i = fa
+        .refs
+        .iter()
+        .position(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "m")
+        .expect("the `$x->m` MethodCall ref");
+
+    let _session = ResolutionSession::enter_with_receivers(&idx);
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let (classes, _) = ResolutionSession::receiver_answer(&idx, fa.instance.id(), i)
+        .expect("the stamp left its answer in the memo");
+    assert_eq!(classes.iter().collect::<Vec<_>>(), ["A", "B"]);
+    assert!(
+        fa.refs[i].frozen_receiver().is_none_or(|f| f.view == ReceiverView::Local),
+        "a union resolved under the index is not frozen on the ref"
+    );
+    assert_eq!(
+        fa.receiver_classes(&fa.refs[i], Some(&idx), ReceiverPolicy::Navigate)
+            .iter()
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+
+    let copy = fa.clone();
+    assert!(
+        ResolutionSession::receiver_answer(&idx, copy.instance.id(), i).is_none(),
+        "a clone is another copy and shares nothing"
     );
 }
 
@@ -3113,7 +3294,7 @@ fn unknown_return_is_not_displayed() {
     // no return rather than `→ unknown`.
     let fa = build_fa_from_source(
         "package Foo;\n\
-         sub fix { my ($s) = @_; $s = '' if $s eq 'x'; return $s; }\n\
+         sub fix { my ($s) = @_; $s = '' if defined $s; return $s; }\n\
          sub a { my $t = shift; fix($t->{k}) }\n\
          1;\n",
     );

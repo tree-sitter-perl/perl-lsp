@@ -2,7 +2,7 @@
 
 cpp member resolution routes through the SAME shape core resolves Perl
 `$obj->method` with: a `RefKind::MethodCall { invocant, invocant_span,
-method_name_span }`, typed query-time by `method_call_invocant_class` →
+method_name_span }`, typed query-time by `method_call_invocant_classes` →
 `expr_type_at_span(invocant_span)`, dispatched by `resolve_method_in_ancestors`.
 `find_definition` / `refs_to` / rename / hover all flow from that one ref, so
 the old cursor-time parallel stack (`pack_member_at`, `member_def_site`, the

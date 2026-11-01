@@ -170,11 +170,7 @@ pub fn index_workspace_with_index(
         // (not retried by the busy handler) — silently voiding the whole
         // backfill. Row-less files stay WHOLE this session (refs resident);
         // their rows land below for the next one.
-        let mut pending_backfill: Vec<(
-            PathBuf,
-            Vec<crate::model::file_analysis::RefRowSeed>,
-            Vec<crate::model::file_analysis::SymRowSeed>,
-        )> = Vec::new();
+        let mut pending_backfill: Vec<(PathBuf, crate::model::file_analysis::RowSeeds)> = Vec::new();
         let rows_present = module_cache::paths_with_ref_rows(conn);
         let (_n, _stale, gone) =
             module_cache::warm_cache_streaming(conn, "workspace", &mut |_name, path, fa| {
@@ -190,8 +186,7 @@ pub fn index_workspace_with_index(
                 if !rows_ok {
                     pending_backfill.push((
                         path.clone(),
-                        fa.ref_row_seeds(),
-                        fa.sym_row_seeds(),
+                        fa.row_seeds(),
                     ));
                 }
                 // The loader-shape half of these projections reads the
@@ -241,13 +236,12 @@ pub fn index_workspace_with_index(
             &pending_backfill,
             128,
             "workspace row backfill",
-            |conn, (path, seeds, sym_seeds)| {
+            |conn, (path, seeds)| {
                 if let Err(e) = module_cache::shred_derived_rows(
                     conn,
                     &path.to_string_lossy(),
                     "workspace",
                     seeds,
-                    sym_seeds,
                 ) {
                     log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
                 }
@@ -283,8 +277,7 @@ pub fn index_workspace_with_index(
         /// unpersistable); persist only.
         parts: Option<crate::index::module_index::WorkspaceRegistrationParts>,
         blob: crate::index::module_cache::EncodedAnalysis,
-        seeds: Vec<crate::model::file_analysis::RefRowSeed>,
-        sym_seeds: Vec<crate::model::file_analysis::SymRowSeed>,
+        seeds: crate::model::file_analysis::RowSeeds,
         closure: crate::model::file_analysis::path_intern::ClosureList,
         stamp: (i64, i64),
     }
@@ -315,7 +308,7 @@ pub fn index_workspace_with_index(
                             e.stamp,
                         );
                         if let Err(err) = module_cache::shred_derived_rows(
-                            conn, &path_str, "workspace", &e.seeds, &e.sym_seeds,
+                            conn, &path_str, "workspace", &e.seeds,
                         ) {
                             log::warn!(
                                 "Failed to shred derived rows for {:?}: {}",
@@ -429,9 +422,9 @@ pub fn index_workspace_with_index(
                             // One tag over both seed shreds so the sample
                             // count stays one-per-file and the average reads
                             // as "seed cost per file".
-                            let (seeds, sym_seeds) = crate::util::ghost_stats::timed(
+                            let seeds = crate::util::ghost_stats::timed(
                                 "walk.row_seeds",
-                                || (analysis.ref_row_seeds(), analysis.sym_row_seeds()),
+                                || analysis.row_seeds(),
                             );
                             // MEASUREMENT-ONLY (PERL_LSP_QUAL_DUMP=<path>): the
                             // shred-time (key, kind, qual) distribution per file,
@@ -441,8 +434,8 @@ pub fn index_workspace_with_index(
                             // is answered.
                             if crate::util::qual_dump::enabled() {
                                 let p = canon.to_string_lossy();
-                                let mut buf = String::with_capacity(seeds.len() * 48);
-                                for sd in &seeds {
+                                let mut buf = String::with_capacity(seeds.refs.len() * 48);
+                                for sd in &seeds.refs {
                                     buf.push_str(&format!(
                                         "{p}\t{}\t{}\t{}\t{}\n",
                                         sd.kind,
@@ -454,7 +447,7 @@ pub fn index_workspace_with_index(
                                 crate::util::qual_dump::append(&buf);
                             }
                             let closure = analysis.pack.include_closure.clone();
-                            (blob, seeds, sym_seeds, closure)
+                            (blob, seeds, closure)
                         })
                     } else {
                         None
@@ -480,13 +473,12 @@ pub fn index_workspace_with_index(
                                 q.push(canon.clone());
                             }
                         }
-                        let (blob, seeds, sym_seeds, closure) = payload.unwrap();
+                        let (blob, seeds, closure) = payload.unwrap();
                         send_to_writer(&fresh_tx, WsFresh {
                             path: canon.clone(),
                             parts: Some(parts),
                             blob,
                             seeds,
-                            sym_seeds,
                             closure,
                             stamp,
                         });
@@ -517,13 +509,12 @@ pub fn index_workspace_with_index(
                         // degraded / NO_EVICT) — accounted for the
                         // tripwire.
                         expected_whole.fetch_add(1, Ordering::Relaxed);
-                        if let Some((blob, seeds, sym_seeds, closure)) = payload {
+                        if let Some((blob, seeds, closure)) = payload {
                             send_to_writer(&fresh_tx, WsFresh {
                                 path: canon.clone(),
                                 parts: None,
                                 blob,
                                 seeds,
-                                sym_seeds,
                                 closure,
                                 stamp,
                             });

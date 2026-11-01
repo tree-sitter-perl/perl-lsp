@@ -329,6 +329,11 @@ fn whole_copy_registration_sites_are_allowlisted() {
         // register_workspace_module: TEST-ONLY today (fixtures build whole
         // copies directly). Its first production caller lands here.
         ("register_workspace_module", vec![]),
+        // `insert_cache` stores a WHOLE copy by construction (`persisted:
+        // false` — nothing was written, so the strip has no licence): CLI and
+        // test fixtures only. A production caller pins whole copies without
+        // tripping any other gate, so it lands here first.
+        ("insert_cache", vec![]),
         (
             "register_workspace_resident",
             vec![
@@ -343,29 +348,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ("module_index", 1, "register_workspace_stripping's residency half"),
                 ("module_resolver", 2, "deferred writer halves — stripped arcs only"),
             ],
-        ),
-        // `insert_cache` stores a WHOLE copy by construction (`persisted:
-        // false` — nothing was written, so the strip has no licence). Its one
-        // production reach is through `register_materialized_whole`, already
-        // bounded by that site's entry; a NEW caller would pin whole copies
-        // without tripping any other gate.
-        (
-            "insert_cache",
-            vec![(
-                "module_index",
-                1,
-                "register_materialized_whole’s cache-slot half",
-            )],
-        ),
-        (
-            "register_materialized_whole",
-            vec![(
-                "module_index",
-                1,
-                "gated-emission CLI/batch materialization — plugin-triggered \
-                 files only (sparse by construction), one-shot startup, whole \
-                 copy deliberate so whole_present sees the emissions",
-            )],
         ),
     ];
     let mut violations: Vec<String> = Vec::new();
@@ -1440,8 +1422,9 @@ fn language_spellings_have_one_home() {
         l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'")
     });
     let allow: &[(&str, usize, &str)] = &[
-        ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 7, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
+        ("index/module_cache/rows.rs", 1, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
+        ("index/module_cache/sql.rs", 1, "the LIKE statement's `ESCAPE` clause — SQL syntax, not a language spelling"),
+        ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
         ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
@@ -1680,7 +1663,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/narrowing.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/narrowing.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/pipeline.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
@@ -1727,7 +1710,7 @@ fn raw_scope_climbs_are_containment_only() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
-        ("build/query_extract/skeleton.rs", 1, "the callable a return site is an arm of"),
+        ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of, and a receiver belongs to"),
         ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
@@ -1842,4 +1825,237 @@ fn pack_facts_fields_are_ratcheted() {
         fields == RATCHET,
         "PackFacts shrank to {fields} fields — lower the ratchet ({RATCHET}) so it keeps biting"
     );
+}
+
+/// `src` with every comment and every string/char literal's CONTENTS blanked
+/// to spaces (delimiters and newlines kept), so byte offsets and line numbers
+/// still match the original and a scan over it sees only code.
+fn code_only(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for c in &mut out[from..to.min(b.len())] {
+            if *c != b'\n' {
+                *c = b' ';
+            }
+        }
+    };
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while i < b.len() {
+        if src[i..].starts_with("//") {
+            let end = src[i..].find('\n').map_or(b.len(), |n| i + n);
+            blank(&mut out, i, end);
+            i = end;
+        } else if src[i..].starts_with("/*") {
+            let (mut j, mut depth) = (i + 2, 1usize);
+            while j < b.len() && depth > 0 {
+                if src[j..].starts_with("/*") {
+                    depth += 1;
+                    j += 2;
+                } else if src[j..].starts_with("*/") {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            blank(&mut out, i, j);
+            i = j;
+        } else if b[i] == b'"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'"' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            blank(&mut out, i + 1, j);
+            i = j + 1;
+        } else if (b[i] == b'r' || (b[i] == b'b' && b.get(i + 1) == Some(&b'r')))
+            && (i == 0 || !ident(b[i - 1]))
+        {
+            let start = if b[i] == b'b' { i + 2 } else { i + 1 };
+            let hashes = b[start..].iter().take_while(|&&c| c == b'#').count();
+            if b.get(start + hashes) == Some(&b'"') {
+                let close = format!("\"{}", "#".repeat(hashes));
+                let body = start + hashes + 1;
+                let end = src[body..].find(&close).map_or(b.len(), |n| body + n);
+                blank(&mut out, body, end);
+                i = end + close.len();
+            } else {
+                i += 1;
+            }
+        } else if b[i] == b'\'' {
+            // A char literal is skipped; `'a` alone is a lifetime.
+            let len = if b.get(i + 1) == Some(&b'\\') {
+                // Past the backslash AND the escaped char, which may be `'`.
+                src.get(i + 3..).and_then(|r| r.find('\'')).map(|n| n + 4)
+            } else {
+                src[i + 1..].chars().next().and_then(|c| {
+                    let w = c.len_utf8();
+                    (b.get(i + 1 + w) == Some(&b'\'')).then_some(w + 2)
+                })
+            };
+            match len {
+                Some(n) => {
+                    blank(&mut out, i + 1, i + n - 1);
+                    i += n;
+                }
+                None => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("blanking keeps UTF-8")
+}
+
+/// `code` (from `code_only`) with every `#[cfg(test)]` module body blanked —
+/// a test module inside a production file is test code.
+fn without_test_modules(code: &str) -> String {
+    let mut out = code.to_string();
+    let mut from = 0;
+    while let Some(at) = code[from..].find("#[cfg(test)]").map(|n| from + n) {
+        from = at + 1;
+        let mut rest = code[at + "#[cfg(test)]".len()..].trim_start();
+        while rest.starts_with("#[") {
+            let skip = rest.find(']').map_or(rest.len(), |n| n + 1);
+            rest = rest[skip..].trim_start();
+        }
+        let rest = rest.strip_prefix("pub(crate) ").or_else(|| rest.strip_prefix("pub ")).unwrap_or(rest);
+        let Some(after_mod) = rest.strip_prefix("mod ") else { continue };
+        let name_len = after_mod.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(0);
+        if !after_mod[name_len..].trim_start().starts_with('{') {
+            continue;
+        }
+        let open = code.len() - after_mod.len() + name_len + after_mod[name_len..].find('{').unwrap();
+        let end = balanced_from(code, open, b'{', b'}');
+        out.replace_range(at..end, &" ".repeat(end - at));
+    }
+    out
+}
+
+/// The top-level arguments of the call whose `(` is at `open` in `code`.
+/// `::<…>` counts as nesting, so a turbofish's comma splits nothing.
+fn call_args(code: &str, open: usize) -> Vec<String> {
+    let b = code.as_bytes();
+    let (mut depth, mut angle, mut start, mut i) = (0usize, 0usize, open + 1, open);
+    let mut args = Vec::new();
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    args.push(code[start..i].trim().to_string());
+                    break;
+                }
+            }
+            b'<' if code[..i].ends_with("::") => angle += 1,
+            b'>' if angle > 0 => angle -= 1,
+            b',' if depth == 1 && angle == 0 => {
+                args.push(code[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if args.last().is_some_and(|a| a.is_empty()) {
+        args.pop();
+    }
+    args
+}
+
+/// Every SQL statement runs from the module cache's registry
+/// (`index/module_cache/sql.rs`), where `registered_statements_plan_without_
+/// scratch` EXPLAINs it: a statement that builds a scratch b-tree per call
+/// serializes parallel sweep workers on SQLite's process-global page-cache
+/// mutex, and nothing at the call site shows the shape. So a rusqlite call
+/// that takes SQL must take it as `<Sql>.registered()` — and `Sql` can only be
+/// minted by the registry. A `Connection` call is told from the `Statement`
+/// method of the same name by its arity. The rusqlite helpers that compose
+/// their own SQL (pragma, transaction, savepoint) are refused outright.
+#[test]
+fn sql_runs_only_registered_statements() {
+    // method → the argument count of the `Connection` form (None: any).
+    const SQL_CALLS: &[(&str, Option<usize>)] = &[
+        ("prepare", None),
+        ("prepare_cached", None),
+        ("execute_batch", None),
+        ("execute", Some(2)),
+        ("query_row", Some(3)),
+        ("query_row_and_then", Some(3)),
+    ];
+    const SELF_COMPOSING: &[&str] = &[
+        "pragma",
+        "pragma_query",
+        "pragma_query_value",
+        "pragma_update",
+        "pragma_update_and_check",
+        "transaction",
+        "transaction_with_behavior",
+        "unchecked_transaction",
+        "savepoint",
+        "savepoint_with_name",
+    ];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let registry_file = PathBuf::from("index/module_cache/sql.rs");
+    let is_registered = |arg: &str| {
+        arg.strip_suffix(".registered()").is_some_and(|recv| {
+            !recv.is_empty() && recv.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+        })
+    };
+    let mut violations = Vec::new();
+    for (path, _, _) in source_files() {
+        let rel = path.strip_prefix(&src).expect("under src/").to_path_buf();
+        let text = fs::read_to_string(&path).expect("read source");
+        let code = without_test_modules(&code_only(&text));
+        let site = |at: usize| {
+            let line = code[..at].matches('\n').count() + 1;
+            let shown = text.lines().nth(line - 1).unwrap_or_default().trim();
+            format!("{}:{line}: `{shown}`", rel.display())
+        };
+        if rel == registry_file {
+            // The tuple constructor appears once in the struct and once in
+            // the `registry!` arm; anything else mints `Sql` off the books.
+            let mints = code.matches("Sql(").count();
+            if mints != 2 {
+                violations.push(format!(
+                    "{}: `Sql(` appears {mints} times — only the `registry!` macro may build one",
+                    rel.display()
+                ));
+            }
+            continue;
+        }
+        if code.contains("fn registered(") {
+            violations.push(format!("{}: defines `registered()` outside the registry", rel.display()));
+        }
+        for (method, conn_arity) in SQL_CALLS {
+            let needle = format!(".{method}(");
+            for (at, _) in code.match_indices(&needle) {
+                let args = call_args(&code, at + needle.len() - 1);
+                if conn_arity.is_some_and(|n| args.len() != n) {
+                    continue;
+                }
+                let sql = args.first().map(String::as_str).unwrap_or("");
+                if !is_registered(sql) {
+                    violations.push(format!(
+                        "{} — .{method}() is handed SQL that is not registered: add it to \
+                         index/module_cache/sql.rs and pass `sql::NAME.registered()`",
+                        site(at)
+                    ));
+                }
+            }
+        }
+        for method in SELF_COMPOSING {
+            let needle = format!(".{method}(");
+            for (at, _) in code.match_indices(&needle) {
+                violations.push(format!(
+                    "{} — .{method}() runs SQL rusqlite composes, which the registry cannot \
+                     check; spell it as a registered statement",
+                    site(at)
+                ));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "unregistered SQL:\n{}", violations.join("\n"));
 }

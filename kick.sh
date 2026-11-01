@@ -36,6 +36,7 @@ ROWS=(
 "koha|../koha|10.2s|library ILS (separate tree)"
 "znuny|Znuny|79s|HEAVY: 8.2 GB, 3k files"
 "fhem|FHEM|slow start|editor OK; --check dies at 12+ GB (batch verb only)"
+"conch|Conch|8.2s|DBIC on a cross-file base: gated accessors everywhere"
 )
 
 pick_menu() {

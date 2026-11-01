@@ -189,7 +189,7 @@ the one feature most likely to destroy trust when wrong.
 
 The architecture note (`docs/cpp-golive-map.md`) already states the load-bearing insight: the
 **FlowEdge primitive** and the **region machinery** (scoped-assertion narrowing + edge-driven
-rebind cutoff, `earliest_rebind_in`) are **language-agnostic** and already shared across Perl /
+rebind cutoff, `RebindIndex`) are **language-agnostic** and already shared across Perl /
 C++ / Python. The cross-language narrowing table there explicitly lists the C++ guards we have
 not yet wired: `if(opt)`/`has_value()` → engaged, `holds_alternative<T>`/`get_if<T>` → `T`,
 `std::move(x)` rebind. **Those are the differentiators, and they are mostly *wiring on an
@@ -252,7 +252,7 @@ over clangd) · **[OUT-OF-SCOPE]** (needs a frontend; acknowledge).
 7. **`std::optional`/`std::variant`/pointer null narrowing in hover + inlay.**
    *How it reaches:* `narrow_guard` arm mapping `if(opt)`/`has_value()`→engaged,
    `holds_alternative<T>`/`get_if<T>`→`T`, `if(p)`→non-null; a small optional/variant/pointer
-   lattice; region scoping + `earliest_rebind_in` cutoff already exist.
+   lattice; region scoping + `RebindIndex` cutoff already exist.
 8. **Use-after-move diagnostic.**
    *How it reaches:* `std::move(x)` mints a Rebind (`.scm` pattern), the region between move and
    next rebind is flagged on read; the rebind-cutoff machinery already truncates at reassignment
