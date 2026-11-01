@@ -339,11 +339,15 @@ fn build_once(
         return too_deep_analysis(tree, depth);
     }
     let eval_trees = parse_eval_replacements(evals, source);
+    let syntax = crate::cst::SyntaxForest::new(
+        std::iter::once(tree.root_node()).chain(eval_trees.iter().map(|(_, t)| t.root_node())),
+    );
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
         eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
+        syntax: &syntax,
         scopes: Vec::new(),
         symbols: Vec::new(),
         owner_scope: std::collections::HashMap::new(),
@@ -577,7 +581,7 @@ fn build_once(
     // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
     // narrowed region at the first edge that rebinds its subject (the
     // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
-    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs(tree));
+    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
 
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
