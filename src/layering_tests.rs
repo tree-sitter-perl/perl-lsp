@@ -319,11 +319,12 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 2,
                 "insert_resolved's body, and the resolver thread's dependency landing \
                  (binds each name a landed file declares to its one stored copy, fresh \
-                 or warm) — stripped once \
-                 persisted; whole only where no row licenses the strip (always-loaded \
-                 files, by-products of another name's ask, a process with no store) or \
-                 a one-shot warm keeps it whole for wall, bounded by the demand closure \
-                 (the project's imports + parents, then ancestors)",
+                 or warm) — stripped once persisted; whole only where no row licenses \
+                 the strip (by-products of another name's ask, a process with no \
+                 store) or a one-shot warm keeps it whole for wall, bounded by the \
+                 demand closure — every session's alike: what the project's files use \
+                 (`used_identities`) and the map declares, then each landing's parents, \
+                 re-exports and (Perl) return classes",
             )],
         ),
         // register_workspace_module: TEST-ONLY today (fixtures build whole

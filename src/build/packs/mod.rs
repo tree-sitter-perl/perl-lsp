@@ -27,6 +27,6 @@ pub use perl::perl_pack;
 #[cfg(any(test, feature = "php"))]
 pub use php::php_pack;
 #[cfg(any(test, feature = "python"))]
-pub use python::{python_file_module, python_pack};
+pub use python::{python_file_module, python_pack, PYTHON_PACKAGE_MARKER};
 #[cfg(any(test, feature = "r"))]
 pub use r::r_pack;

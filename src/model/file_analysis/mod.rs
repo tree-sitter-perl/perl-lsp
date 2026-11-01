@@ -116,13 +116,6 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub search_roots: Vec<SearchRoot>,
 
-    /// Every class or package identity this file's references name that it
-    /// does not declare itself, sorted. Minted once in `new` from the refs,
-    /// because the refs are an evicted axis and the dependency tier's demand
-    /// (`used_identities`) is read off stripped copies and warm stubs.
-    #[serde(default)]
-    pub referenced_identities: Vec<String>,
-
     /// Per-symbol provenance for return types. Populated for plugin
     /// `overrides()` and for reducer-driven folds over the witness bag.
     /// Missing entry == `TypeProvenance::Inferred`.
@@ -488,10 +481,10 @@ impl FileAnalysis {
 
     /// Every identity this file names across files, first-named first: what
     /// it imports, the parents it declares, the classes and packages its
-    /// references name (`referenced_identities`), and the files its include
-    /// closure reached. The dependency tier's demand: every asker and every
-    /// descent reads this one list. Every lane it reads survives a strip and
-    /// rides the warm stub.
+    /// references name (`RefTable::named_identities`), and the files its
+    /// include closure reached. The dependency tier's demand: every asker
+    /// and every descent reads this one list. Every lane it reads survives
+    /// a strip and rides the warm stub.
     ///
     /// An include closure is named by path, not spelling: which file a
     /// spelling places depends on the includer and the unit's flags, which
@@ -500,7 +493,7 @@ impl FileAnalysis {
         let mut seen: HashSet<&str> = HashSet::new();
         let imports = self.imports.iter().map(|i| i.module_name.as_str());
         let parents = self.package_parent_edges().flat_map(|(_, ps)| ps.iter().map(String::as_str));
-        let referenced = self.referenced_identities.iter().map(String::as_str);
+        let referenced = self.refs.named_identities().iter().map(String::as_str);
         let mut out: Vec<String> = imports
             .chain(parents)
             .chain(referenced)
@@ -511,19 +504,17 @@ impl FileAnalysis {
         out
     }
 
-    /// `referenced_identities` from the refs: each package reference's
-    /// identity as the file spells it, less what the file declares.
-    fn mint_referenced_identities(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .refs()
-            .iter()
-            .filter(|r| matches!(r.kind, RefKind::PackageRef))
-            .map(|r| self.spelled_identity(r))
-            .filter(|id| !id.is_empty() && !self.packages.contains_key(id) && self.find_type_decl(id).is_none())
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+    /// Mint the ref table's `named_identities`: each package reference's
+    /// identity as the file spells it, less what the file declares — a
+    /// class or package symbol, or a namespace section. A `packages` entry
+    /// is no declaration: `@Other::EXPORT = …` records one for `Other`.
+    fn mint_named_identities(&mut self) {
+        let mut refs = std::mem::take(&mut self.refs);
+        refs.mint_named_identities(
+            |r| self.spelled_identity(r),
+            |id| self.find_type_decl(id).is_some() || self.namespace_ranges.iter().any(|n| n.namespace == id),
+        );
+        self.refs = refs;
     }
 
     /// Modules `use`-d inside `pkg`.
