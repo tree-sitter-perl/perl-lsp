@@ -305,6 +305,12 @@ impl ModuleIndex {
         })
     }
 
+    /// The map's generation: moves each time an input manifest does.
+    #[cfg(test)]
+    pub fn dependency_generation(&self) -> u64 {
+        self.core.dependency_generation()
+    }
+
     /// The identities the project's own files name across files: each
     /// file's imports and declared parents. Read off the resident copies —
     /// both lanes survive every strip and ride the warm stub.

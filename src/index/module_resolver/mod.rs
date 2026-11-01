@@ -1,6 +1,7 @@
 //! Module resolver: the background thread that lands dependency files for
-//! every served language — Perl's `@INC` — through the driver's dependency
-//! map (`acquire`), plus the workspace bulk indexers.
+//! every served language — Perl's `@INC`, Composer's `vendor/` — through
+//! the driver's dependency map (`acquire`), plus
+//! the workspace bulk indexers.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -81,3 +82,6 @@ use thread::*;
 #[cfg(test)]
 #[path = "module_resolver_tests.rs"]
 mod tests;
+#[cfg(all(test, feature = "php"))]
+#[path = "dependency_tests.rs"]
+mod dependency_tests;

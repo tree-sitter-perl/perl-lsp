@@ -162,7 +162,7 @@ pub trait LanguageDriver: Send + Sync {
         self.lang_pack().map(|p| ModuleSpelling { names: p.names, module_paths: p.module_paths })
     }
     /// Where this project keeps the dependencies the workspace walk does
-    /// not own (perl: carton's `local/`), and which of their files
+    /// not own (php: Composer's `vendor/`), and which of their files
     /// declares a name; `root` is `None` with no project open. `None` =
     /// the walk is the whole story.
     fn dependency_locator(&'static self, _root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
@@ -207,7 +207,7 @@ pub struct ModuleSpelling {
 /// The dependency tier's map for one project: a name nothing in the
 /// workspace declares → the files that may declare it. The index asks it
 /// on demand and parses only what it lands; the locator only probes the
-/// filesystem. Implemented per language (perl: `build::inc`).
+/// filesystem. Implemented per language (php: `build::composer`).
 pub trait DependencyLocator: Send + Sync {
     /// Files that may declare `identity`, most-preferred first.
     fn locate(&self, identity: &str) -> Vec<Located>;
@@ -410,8 +410,8 @@ pub struct PackDriver {
     /// (python). Asks the walk's marker snapshot, else the disk, so it
     /// runs in the gather phase.
     file_module: Option<FileModuleRule>,
-    /// The project's dependency map. `None` = the workspace walk is the
-    /// whole story.
+    /// The project's dependency map (php: Composer). `None` = the workspace
+    /// walk is the whole story.
     dependencies: Option<PackDependencies>,
 }
 
@@ -855,7 +855,10 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
-        dependencies: None,
+        dependencies: Some(PackDependencies {
+            locator: crate::build::composer::locator,
+            manifests: &["composer.json", "installed.json", "autoload_classmap.php"],
+        }),
     }
 }
 
