@@ -108,7 +108,7 @@ pub(super) fn acquire(
     // locating one again is a stat per search root.
     let persisted = !whole.is_empty() && db.is_some_and(|conn| save_module_generation(conn, name, &Some(whole.clone())));
     let asks = descent(whole.iter().map(|m| &*m.analysis), prefetch);
-    core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), persisted, eviction_enabled())?;
+    core.land_dependency(name, &answers, snap.generation, whole.clone(), persisted, eviction_enabled())?;
     Ok(if whole.is_empty() { Landed::Miss } else { Landed::Hit { providers: whole.len(), asks } })
 }
 
@@ -137,7 +137,7 @@ fn land_warm(
         .collect();
     // Every persisted row answered the name it is filed under.
     let answers: Vec<usize> = (0..n).collect();
-    core.land_dependency(Some((name, &answers)), snap.generation, providers, true, strip)?;
+    core.land_dependency(name, &answers, snap.generation, providers, true, strip)?;
     Ok(Landed::Hit { providers: n, asks })
 }
 
