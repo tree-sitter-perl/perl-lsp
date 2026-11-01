@@ -97,6 +97,9 @@ impl IndexCore {
         let locator: Arc<dyn DependencyLocator> = driver.dependency_locator(root.as_deref()).unwrap_or_else(|| {
             Arc::new(crate::build::search_path::SearchPathLocator::new(driver, Vec::new(), Vec::new(), Vec::new()))
         });
+        if let Some(marker) = driver.module_marker() {
+            crate::build::walk_markers::set_search_roots(marker, locator.search_roots());
+        }
         // Visibility ranks candidates against the search path, so it is
         // published before anything can land under it.
         self.set_inc_roots(locator.search_roots());

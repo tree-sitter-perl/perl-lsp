@@ -3,7 +3,7 @@
 //! one of the roots, spelled by the driver's `ModuleSpelling`.
 
 use crate::build::language_driver::{DependencyLocator, LanguageDriver, Located, LocatedBy};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct SearchPathLocator {
     sep: String,
@@ -69,6 +69,18 @@ impl DependencyLocator for SearchPathLocator {
     fn inputs(&self) -> &[PathBuf] {
         &self.inputs
     }
+}
+
+/// The directories directly under `root` that hold `marker`.
+pub fn marked_children(root: &Path, marker: &str) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut out: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join(marker).is_file())
+        .collect();
+    out.sort();
+    out
 }
 
 #[cfg(test)]

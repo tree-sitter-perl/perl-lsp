@@ -1,6 +1,6 @@
 //! Module resolver: the background thread that lands dependency files for
-//! every served language — Perl's `@INC`, Composer's `vendor/` — through
-//! the driver's dependency map (`acquire`), plus
+//! every served language — Perl's `@INC`, Composer's `vendor/`, a venv's
+//! `site-packages` — through the driver's dependency map (`acquire`), plus
 //! the workspace bulk indexers.
 
 use std::collections::HashMap;
@@ -85,3 +85,6 @@ mod tests;
 #[cfg(all(test, feature = "php"))]
 #[path = "dependency_tests.rs"]
 mod dependency_tests;
+#[cfg(all(test, feature = "python"))]
+#[path = "dependency_python_tests.rs"]
+mod dependency_python_tests;

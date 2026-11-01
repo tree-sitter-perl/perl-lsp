@@ -8,7 +8,7 @@ use crate::build::language_driver::{LanguageRegistry, Located, LocatedBy};
 fn a_name_is_its_module_or_the_module_declaring_it() {
     let dir = std::env::temp_dir().join(format!("search-path-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    for rel in ["site/a/__init__.py", "site/a/b.py", "site/a/b/__init__.py", "site/c.py"] {
+    for rel in ["site/a/__init__.py", "site/a/b.py", "site/a/b/__init__.py", "site/c.py", "env/pyvenv.cfg"] {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, "").unwrap();
@@ -25,4 +25,5 @@ fn a_name_is_its_module_or_the_module_declaring_it() {
     assert_eq!(loc.locate("a.b"), [s("a/b.py", LocatedBy::Exact), s("a/b/__init__.py", LocatedBy::Exact), s("a/__init__.py", LocatedBy::Enclosing)]);
     assert_eq!(loc.locate("c"), [s("c.py", LocatedBy::Exact)]);
     assert!(loc.locate("d.E").is_empty());
+    assert_eq!(marked_children(&dir, "pyvenv.cfg"), [dir.join("env")]);
 }

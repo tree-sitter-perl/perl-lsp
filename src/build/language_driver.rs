@@ -828,7 +828,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
-        dependencies: None,
+        dependencies: Some(PackDependencies { locator: crate::build::venv::locator, manifests: &["pyvenv.cfg"] }),
     }
 }
 
