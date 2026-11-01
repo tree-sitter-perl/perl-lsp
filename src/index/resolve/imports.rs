@@ -395,7 +395,7 @@ impl<'a> CandidateSet<'a> {
     /// call, or nothing binds it cross-file.
     pub fn function_binding(&self) -> Option<FunctionBinding<'a>> {
         let r = self.origin_analysis().ref_at(self.cursor())?;
-        if !matches!(r.kind, RefKind::FunctionCall { .. }) {
+        if !matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
             return None;
         }
         let idx = self.idx()?;

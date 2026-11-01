@@ -2743,7 +2743,6 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         access: AccessKind::Read,
         binding: None,
         folded_from: None,
-        import_name: false,
         arg_count: None,
     };
     // Linking without a resolved owner is a no-op — nothing to attach to.

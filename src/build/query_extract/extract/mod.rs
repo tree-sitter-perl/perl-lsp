@@ -189,10 +189,27 @@ impl ExtractState<'_> {
     fn def_scope(&self, kind: DefCap, match_id: usize) -> ScopeId {
         match kind {
             DefCap::Field | DefCap::Slot => self.member_scope(),
-            _ if self.defs.hoists(match_id) => {
-                self.out.scopes[self.cur_scope.0 as usize].parent.unwrap_or(self.cur_scope)
-            }
-            _ => self.bind_scope(),
+            DefCap::Sub
+            | DefCap::Method
+            | DefCap::Anon
+            | DefCap::Class
+            | DefCap::Package
+            | DefCap::Var
+            | DefCap::Local
+            | DefCap::Assigned
+            | DefCap::Constant
+            | DefCap::Enumerator
+            | DefCap::Label
+            | DefCap::Macro
+            | DefCap::Reexport
+            | DefCap::Union
+            | DefCap::UnionField => match self.defs.hoists(match_id) {
+                true => crate::model::file_analysis::scope_chain_of(&self.out.scopes, self.cur_scope)
+                    .get(1)
+                    .copied()
+                    .unwrap_or(self.cur_scope),
+                false => self.bind_scope(),
+            },
         }
     }
 
@@ -352,7 +369,7 @@ pub fn extract_in(
                 defs::flatten_nested(&mut st.defs, node, &links, source, match_id, &mut events)
             }
             Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
-                members::flatten_recv(&mut st.members, node, cap, pack, source, match_id, &mut events)
+                members::flatten_recv(&mut st.members, node, cap, source, match_id, &mut events)
             }
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
