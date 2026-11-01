@@ -57,7 +57,7 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
     if let Some(t) = t {
         crate::util::timings::record_built(attributed, Duration::ZERO, t.elapsed());
     }
-    Some(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::new(fa))))
+    Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(canon), Arc::new(fa))))
 }
 
 /// Resolve `name` under the current map: locate and parse with no lock

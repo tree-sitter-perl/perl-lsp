@@ -78,12 +78,10 @@ impl ModuleIndex {
             // as a fallback spelling; the discriminated helper survives the
             // readonly-open CANTOPEN/WAL race behind both.
             let raw = path.to_string_lossy().into_owned();
-            let canon = path
-                .canonicalize()
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned());
+            let canon = crate::util::canonical_path::CanonicalPath::resolve(path).to_string_lossy().into_owned();
             let mut spellings = vec![raw.clone()];
-            if let Some(c) = canon {
+            {
+                let c = canon;
                 if c != raw {
                     spellings.push(c);
                 }
@@ -350,7 +348,7 @@ impl ModuleIndex {
     }
 
     /// Return cached module path only — never does I/O.
-    pub fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    pub fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         self.core.cache
             .get(module_name)
             .and_then(|entry| entry.as_ref().map(|m| m.path.clone()))
