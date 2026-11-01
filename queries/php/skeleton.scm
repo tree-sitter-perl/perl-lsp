@@ -224,9 +224,10 @@
     (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
   ] .)
 ])
-; A caught exception is an instance of the class the clause names.
+; A caught exception is an instance of the class the clause names; a
+; clause naming several (`A | B`) names no single type.
 (catch_clause
-  type: (type_list) @type.annot
+  type: (type_list . (named_type) @type.annot .)
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned)
 (global_declaration (variable_name (name) @def.assigned.name) @def.assigned)
 (static_variable_declaration

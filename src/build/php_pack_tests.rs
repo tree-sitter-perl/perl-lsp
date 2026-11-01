@@ -1516,6 +1516,16 @@ fn a_by_name_ask_names_the_declaration_the_read_binds() {
     assert_eq!(fa.resolve_variable("acc", read).map(|s| s.id), Some(bound));
 }
 
+/// A caught exception is an instance of the one class its clause names; a
+/// clause naming several states no single type.
+#[test]
+fn a_caught_exception_is_its_clauses_class() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php\nfunction f() {\n    try {} catch (Oops $e) { $e; }\n    try {} catch (A | B $u) { $u; }\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("e", Point::new(2, 30)), Some(T::ClassName("Oops".into())));
+    assert_eq!(fa.inferred_type_via_bag("u", Point::new(3, 31)), None);
+}
+
 /// A variable's value is what was last written to it: an assignment edges
 /// to its right-hand side, so a declared return flows through it, a write
 /// replaces what came before, and a value inside the right-hand side (a
