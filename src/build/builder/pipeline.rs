@@ -718,6 +718,7 @@ fn build_once(
         scopes: b.scopes,
         symbols: b.symbols,
         refs: b.refs,
+        ref_delegates: Default::default(),
         fold_ranges: b.fold_ranges,
         imports: b.imports,
         call_bindings: b.call_bindings,
