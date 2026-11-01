@@ -556,6 +556,7 @@ impl FileAnalysis {
                     full.inferred_type_via_bag(field, sym.span.end)
                 })
             }
+            MethodResolution::Root { .. } => None,
         }
     }
 
@@ -592,6 +593,7 @@ impl FileAnalysis {
                     full.type_name_edge_of(&sym.name, sym.scope)
                 })
             }
+            MethodResolution::Root { .. } => None,
         }
     }
 
@@ -658,7 +660,7 @@ impl FileAnalysis {
         let owner = match self.resolve_method_in_ancestors(class, name, module_index) {
             Some(MethodResolution::Local { class, .. })
             | Some(MethodResolution::CrossFile { class, .. }) => class,
-            None => class.to_string(),
+            Some(MethodResolution::Root { .. }) | None => class.to_string(),
         };
         crate::model::witnesses::WitnessAttachment::Field { owner, name: name.to_string() }
     }

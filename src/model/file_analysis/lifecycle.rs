@@ -634,7 +634,7 @@ impl FileAnalysis {
                     let owner = match self.resolve_method_in_ancestors(&cn, name, module_index) {
                         Some(MethodResolution::Local { class, .. })
                         | Some(MethodResolution::CrossFile { class, .. }) => Some(class),
-                        None => None,
+                        Some(MethodResolution::Root { .. }) | None => None,
                     };
                     if let Some(owner) = owner {
                         crate::util::ghost_stats::count("owner.probe_total");

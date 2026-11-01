@@ -554,7 +554,7 @@ impl FileAnalysis {
         let defining = match self.resolve_member_key_in_ancestors(class_name, member.into(), module_index, want) {
             Some(MethodResolution::Local { class, .. })
             | Some(MethodResolution::CrossFile { class, .. }) => class,
-            None => return vec![class_name.to_string()],
+            Some(MethodResolution::Root { .. }) | None => return vec![class_name.to_string()],
         };
         let mut chain = Vec::new();
         self.for_each_ancestor_class(class_name, module_index, |cls| {
@@ -841,6 +841,8 @@ impl FileAnalysis {
                     name.map(|n| (class.clone(), n))
                 })
             }
+            // An implicit constructor is no member a reference can name.
+            MethodResolution::Root { .. } => None,
         }
     }
 
@@ -911,7 +913,46 @@ impl FileAnalysis {
                 None => std::ops::ControlFlow::Continue(()),
             }
         });
-        result.or(iface_fallback)
+        result
+            .or(iface_fallback)
+            .or_else(|| self.root_member(class_name, member, module_index, want))
+    }
+
+    /// The member the language guarantees every class, asked after the
+    /// whole MRO missed (`crate::model::roots`). A root that is a real class
+    /// (`UNIVERSAL`, `object`) is first searched like any class, so a user's
+    /// `sub UNIVERSAL::dump {}` answers with its declaration; the document
+    /// answers only when that misses.
+    fn root_member(
+        &self,
+        class_name: &str,
+        member: MemberKey<'_>,
+        module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
+    ) -> Option<MethodResolution> {
+        self.root_member_in(&crate::model::roots::installed(), class_name, member, module_index, want)
+    }
+
+    pub(crate) fn root_member_in(
+        &self,
+        roots: &crate::model::roots::LanguageRoots,
+        class_name: &str,
+        member: MemberKey<'_>,
+        module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
+    ) -> Option<MethodResolution> {
+        let surface = roots.surface(&self.language)?;
+        if let Some(root_class) = surface.class.as_deref() {
+            if let Some(r) = self.member_resolution_on_class_pass(root_class, member, module_index, want) {
+                return Some(r);
+            }
+        }
+        // Every root member is a callable.
+        if !want.admits_decl(SymKind::Method, self.names().member_namespace) {
+            return None;
+        }
+        let m = surface.member(member)?;
+        Some(MethodResolution::Root { class: class_name.to_string(), member: m.name.clone() })
     }
 
     /// `cls`'s own instance slot `name` (`slot_class_of`): this file's, else
@@ -955,6 +996,7 @@ impl FileAnalysis {
     ) -> bool {
         match r {
             MethodResolution::Local { .. } => self.declares_interface(cls),
+            MethodResolution::Root { .. } => false,
             MethodResolution::CrossFile { .. } => {
                 self.declares_interface(cls)
                     || module_index.is_some_and(|i| {
@@ -1021,7 +1063,11 @@ impl FileAnalysis {
                 }
             },
         );
-        result.or(iface_fallback)
+        // By name: a member the root reaches only by role (php's implicit
+        // `__construct`) is no answer to `parent::__construct()`.
+        result.or(iface_fallback).or_else(|| {
+            self.root_member(enclosing, MemberKey::Named(method_name), module_index, MemberKind::Callable)
+        })
     }
 
     /// Does `class` (or any ancestor we CAN reach) name a parent that
@@ -1042,8 +1088,10 @@ impl FileAnalysis {
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
+        let roots = crate::model::roots::installed();
         let class_is_known = |name: &str| -> bool {
-            if name == APP_SURFACE_CLASS {
+            // `class Foo(object)` names the root, which is always there.
+            if name == APP_SURFACE_CLASS || roots.is_root_class(&self.language, name) {
                 return true;
             }
             let local = self.symbols.iter().any(|s| {

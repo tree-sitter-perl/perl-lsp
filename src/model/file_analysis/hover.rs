@@ -104,7 +104,7 @@ impl FileAnalysis {
                 }
                 Some(text)
             }
-            None => None,
+            Some(MethodResolution::Root { .. }) | None => None,
         }
     }
 
@@ -253,6 +253,7 @@ impl FileAnalysis {
                                 Some(whole.format_symbol_hover(sym, "", Some(idx)))
                             })
                         }
+                        MethodResolution::Root { .. } => None,
                     };
                     let sections: Vec<String> =
                         self.receiver_classes(r, module_index, ReceiverPolicy::Edge).iter().filter_map(on).collect();
@@ -359,6 +360,7 @@ impl FileAnalysis {
                     Some(render(&full, sym))
                 })
             }
+            MethodResolution::Root { .. } => None,
         }
     }
 

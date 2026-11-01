@@ -69,13 +69,20 @@ pub enum MethodResolution {
     /// but it is confidently wrong whenever the code is, so the diagnostics
     /// lane reads this flag and says so (`docs/prompt-class-identity.md`).
     CrossFile { class: String, def_module: Option<String>, widened: bool },
+    /// Answered by the language's root surface (`crate::model::roots`)
+    /// after the whole MRO missed: `member` is guaranteed on `class` by the
+    /// language, and has no declaration to land on. `class` is the class
+    /// the ask was made on, not the root class.
+    Root { class: String, member: String },
 }
 
 impl MethodResolution {
-    /// The class the method resolved on (both variants carry it).
+    /// The class the method resolved on (every variant carries it).
     pub fn class(&self) -> &str {
         match self {
-            MethodResolution::Local { class, .. } | MethodResolution::CrossFile { class, .. } => class,
+            MethodResolution::Local { class, .. }
+            | MethodResolution::CrossFile { class, .. }
+            | MethodResolution::Root { class, .. } => class,
         }
     }
 }
@@ -927,6 +934,7 @@ impl FileAnalysis {
                     let whole = idx.bag_present(&cached);
                     whole.sub_info_view(name).map(|sub_info| cross_file_resolved(&sub_info))
                 }
+                MethodResolution::Root { .. } => None,
             })
             .collect();
         if !per_class.is_empty() {

@@ -3329,3 +3329,52 @@ fn used_identities_are_what_a_file_names_across_files() {
     stripped.evict_witness_bag();
     assert_eq!(stripped.used_identities(), used);
 }
+
+// ---- Language root surface: the MRO tail ----
+
+fn perl_roots() -> crate::model::roots::LanguageRoots {
+    use crate::model::roots::{RootDocument, RootMember, RootReach};
+    let m = |name: &str| RootMember { name: name.into(), constructor: false, reach: RootReach::Name, params: vec![], doc: None };
+    crate::model::roots::LanguageRoots::from_documents([&RootDocument {
+        language: "perl".into(),
+        class: Some("UNIVERSAL".into()),
+        members: vec![m("can"), m("isa")],
+    }])
+}
+
+fn perl_fa(src: &str) -> FileAnalysis {
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    crate::build::builder::build(&tree, src.as_bytes())
+}
+
+#[test]
+fn a_root_member_answers_with_no_location() {
+    let fa = perl_fa("package Foo;\nsub go {}\n1;\n");
+    let roots = perl_roots();
+    match fa.root_member_in(&roots, "Foo", MemberKey::Named("can"), None, MemberKind::Callable) {
+        Some(MethodResolution::Root { class, member }) => {
+            assert_eq!((class.as_str(), member.as_str()), ("Foo", "can"));
+        }
+        other => panic!("`can` is answered by the root, got {other:?}"),
+    }
+    assert!(fa.root_member_in(&roots, "Foo", MemberKey::Named("nope"), None, MemberKind::Callable).is_none());
+    assert!(
+        fa.root_member_in(&roots, "Foo", MemberKey::Named("can"), None, MemberKind::Value).is_none(),
+        "a root member is a callable: a value ask in a per-family namespace misses",
+    );
+}
+
+#[test]
+fn a_user_universal_sub_answers_with_its_declaration() {
+    // A file reopening UNIVERSAL: the root class is searched like any class
+    // before the document answers.
+    let fa = perl_fa("package Foo;\nsub go {}\npackage UNIVERSAL;\nsub dump { 1 }\n1;\n");
+    match fa.root_member_in(&perl_roots(), "Foo", MemberKey::Named("dump"), None, MemberKind::Callable) {
+        Some(MethodResolution::Local { class, sym_id }) => {
+            assert_eq!(class, "UNIVERSAL");
+            assert_eq!(fa.symbol(sym_id).selection_span.start.row, 3);
+        }
+        other => panic!("`sub UNIVERSAL::dump` is a real declaration, got {other:?}"),
+    }
+}

@@ -1069,7 +1069,7 @@ impl FileAnalysis {
                 // Caller should handle cross-file resolution via ModuleIndex
                 None
             }
-            None => None,
+            Some(MethodResolution::Root { .. }) | None => None,
         }
     }
 
