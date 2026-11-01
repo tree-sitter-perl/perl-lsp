@@ -269,6 +269,10 @@ struct Builder<'a> {
     // typing index) miss replacement code; the fix is a file tree type that
     // yields injected trees transparently, not a roots list each pass loops.
     eval_injections: std::collections::HashMap<usize, Node<'a>>,
+    /// Every parse this build reads (the main tree and each injection),
+    /// navigable by node identity — upward reads go through it, never
+    /// through `Node::parent`, which rescans from the root.
+    syntax: &'a crate::cst::SyntaxForest<'a>,
 
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,

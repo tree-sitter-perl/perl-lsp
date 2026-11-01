@@ -189,22 +189,41 @@ the sort, the shared `ExtractState`) and one file per family: `scopes`,
 `defs`, `refs`, `members`, `flow`, `narrowing`, `commands`, `imports`,
 `roots`, plus `links`, which the driver reads while flattening (below).
 `family(Capture)` is an exhaustive match, so a new variant does not
-compile until it names its family. The family's state (its per-match
-joins) lives in the same file, on a sub-struct of the shared
-`ExtractState`, and its handler sees one event at a time. A family file
-may expose up to four entry points, each run by the driver at a fixed
-point:
+compile until it names its family. A family file may expose up to three
+entry points, each run by the driver at a fixed point:
 
 - a flatten hook, for a capture that needs its live node (a declarator to
-  peel, an argument list to count);
-- `collect`, a pre-pass for joins a handler reads before the capture that
-  feeds them fires (a def's name, qualifier and return type sit inside the
-  def node, so their events sort after the def's own);
-- `handle`, called in source order with the scope stack in force;
+  peel, a receiver to unwrap). What it reads that the text cannot carry
+  rides on the event as a `Payload`;
+- `handle`, called once per event in source order, with the scope stack
+  and the ancestor stack in force;
 - post-passes, which the driver lists in the order their rows and
   witnesses land. That order is load-bearing: the witness bag is
   latest-wins for some reducers, and a flow join reads the symbol table
   only after def dedup and the command defs.
+
+## Decision: the extractor joins on the syntax tree, not on tables
+
+Every capture is a fact on its node in the core syntax tree
+(`docs/adr/core-syntax-tree.md`): a `NodeFacts` entry on the node's site,
+the head of the same-range chain it sits in, so the tags other patterns put
+on one node are that site's facts (`on`). A node's subtree is an id
+interval, so the captures inside it are one slice (`within`, and
+`list_items`, which skips a nested list of the same tag by its subtree
+end); the captures holding it are on its enclosing sites (`around`). The
+walk visits sites in preorder, a site's captures by tie rank then match
+order. Beside the tree sits only match → captures, because a match spans
+nodes: every capture a pattern made is one lookup from any other
+(`in_match`). The walk records what it minted on each capture (`Minted`: a
+declaring name, a class's identity, a member read's projection, the row a
+def's written return settles), so a capture of any match asks the node it
+names.
+
+A handler therefore keeps no join table. The state a family keeps is only
+what the walk alone knows when it reaches an event: the scope a target
+binds in, a context waiting for its body's scope, a narrowing waiting for
+the flow edges. A new cross-pattern fact is a field on `Minted` or a
+`Payload`, never a map keyed by match id or span.
 
 A feature that teaches the extractor a capture touches the variant, the
 family routing line, and the family file it lives in. When a language

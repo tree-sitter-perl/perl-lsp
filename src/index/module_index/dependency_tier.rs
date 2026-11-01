@@ -30,7 +30,7 @@ pub(crate) struct DependencyState {
     pub(crate) stamps: Vec<Option<(i64, i64)>>,
     pub(crate) generation: u64,
     /// Canonical path → the names it landed under.
-    pub(crate) landed: std::collections::HashMap<std::path::PathBuf, Vec<String>>,
+    pub(crate) landed: std::collections::HashMap<crate::util::canonical_path::CanonicalPath, Vec<String>>,
 }
 
 impl DependencyState {
@@ -86,7 +86,7 @@ fn stamps(inputs: &[std::path::PathBuf]) -> Vec<Option<(i64, i64)>> {
 /// file names it; the map searches every named root.
 #[derive(Default)]
 pub(crate) struct NamedRoots {
-    by_file: std::collections::HashMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+    by_file: std::collections::HashMap<crate::util::canonical_path::CanonicalPath, Vec<std::path::PathBuf>>,
 }
 
 impl NamedRoots {
@@ -99,8 +99,8 @@ impl NamedRoots {
     }
 
     /// Each named root with the files naming it, path-ordered.
-    pub(crate) fn namers(&self) -> std::collections::BTreeMap<std::path::PathBuf, Vec<std::path::PathBuf>> {
-        let mut out: std::collections::BTreeMap<std::path::PathBuf, Vec<std::path::PathBuf>> = Default::default();
+    pub(crate) fn namers(&self) -> std::collections::BTreeMap<std::path::PathBuf, Vec<crate::util::canonical_path::CanonicalPath>> {
+        let mut out: std::collections::BTreeMap<std::path::PathBuf, Vec<crate::util::canonical_path::CanonicalPath>> = Default::default();
         for (file, roots) in &self.by_file {
             for r in roots {
                 out.entry(r.clone()).or_default().push(file.clone());
@@ -125,7 +125,7 @@ impl IndexCore {
     /// Record the roots `file` names (none: it names none, or is gone).
     /// When the set of named roots moves, the resolver thread is woken to
     /// read the map again (`refresh_named_roots`).
-    pub(crate) fn name_search_roots(&self, file: &std::path::Path, roots: Vec<std::path::PathBuf>) {
+    pub(crate) fn name_search_roots(&self, file: &crate::util::canonical_path::CanonicalPath, roots: Vec<std::path::PathBuf>) {
         // Every registration passes here; the bulk walk must not queue on
         // the lock for the files that name nothing.
         if roots.is_empty() && self.named_files.load(std::sync::atomic::Ordering::Acquire) == 0 {
@@ -140,7 +140,7 @@ impl IndexCore {
             if roots.is_empty() {
                 named.by_file.remove(file);
             } else {
-                named.by_file.insert(file.to_path_buf(), roots);
+                named.by_file.insert(file.clone(), roots);
             }
             self.named_files.store(named.by_file.len(), std::sync::atomic::Ordering::Release);
             named.roots() != before
@@ -197,7 +197,7 @@ impl IndexCore {
             }),
         };
         let mut reask: Vec<String> = Vec::new();
-        let mut landed: std::collections::HashMap<std::path::PathBuf, Vec<String>> = Default::default();
+        let mut landed: std::collections::HashMap<crate::util::canonical_path::CanonicalPath, Vec<String>> = Default::default();
         if let Some(old) = old {
             let added: Vec<std::path::PathBuf> = named.iter().filter(|r| !old.named.contains(r)).cloned().collect();
             let dropped: Vec<&std::path::PathBuf> = old.named.iter().filter(|r| !named.contains(r)).collect();
@@ -364,17 +364,17 @@ impl IndexCore {
 
     /// Undo a landing of `path`: its candidates, any name slot it holds
     /// (re-picked from the survivors), and its edge feed.
-    pub(crate) fn retire_dependency(&self, path: &std::path::Path, names: &[String]) {
+    pub(crate) fn retire_dependency(&self, path: &crate::util::canonical_path::CanonicalPath, names: &[String]) {
         self.note_shape_change();
         for name in names {
             if let Some(mut v) = self.all_defs.get_mut(name) {
-                v.retain(|c| c.path != path);
+                v.retain(|c| c.path != *path);
             }
             self.all_defs.remove_if(name, |_, v| v.is_empty());
             let held = self
                 .cache
                 .get(name)
-                .is_some_and(|e| matches!(e.value(), Some(c) if c.path == path));
+                .is_some_and(|e| matches!(e.value(), Some(c) if c.path == *path));
             if held {
                 let survivor = self.all_defs.get(name).and_then(|v| {
                     best_candidate(&v.iter().collect::<Vec<_>>(), name, &|m, n| self.module_defines_class(m, n))
@@ -483,11 +483,11 @@ impl ModuleIndex {
                 return Arc::clone(reg);
             }
         }
-        let mut reach: std::collections::HashMap<std::path::PathBuf, Vec<RootReach>> = Default::default();
+        let mut reach: std::collections::HashMap<crate::util::canonical_path::CanonicalPath, Vec<RootReach>> = Default::default();
         for (root, namers) in &named {
-            let mut seen: std::collections::HashSet<std::path::PathBuf> = namers.iter().cloned().collect();
+            let mut seen: std::collections::HashSet<crate::util::canonical_path::CanonicalPath> = namers.iter().cloned().collect();
             let mut asked: std::collections::HashSet<String> = Default::default();
-            let mut frontier: Vec<(Arc<FileAnalysis>, &std::path::PathBuf)> = namers
+            let mut frontier: Vec<(Arc<FileAnalysis>, &crate::util::canonical_path::CanonicalPath)> = namers
                 .iter()
                 .filter_map(|n| self.all_files.get(n).map(|c| (Arc::clone(&c.analysis), n)))
                 .collect();

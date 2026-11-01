@@ -557,33 +557,34 @@ impl CrossFileLookup for ModuleIndex {
         member_prefilter_may_declare(rows)
     }
 
-    fn ref_candidate_paths(&self, keys: &[String]) -> Vec<std::path::PathBuf> {
+    // Rows carry the spelling registration persisted them under.
+    fn ref_candidate_paths(&self, keys: &[String]) -> Vec<crate::util::canonical_path::CanonicalPath> {
         self.with_rows_conn(|conn| {
             crate::index::module_cache::ref_candidate_files(conn, keys)
                 .into_iter()
-                .map(std::path::PathBuf::from)
+                .map(|p| crate::util::canonical_path::CanonicalPath::from_stored(p.into()))
                 .collect()
         })
         .unwrap_or_default()
     }
 
-    fn ref_indexed_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
+    fn ref_indexed_paths(&self) -> std::collections::HashSet<crate::util::canonical_path::CanonicalPath> {
         self.with_rows_conn(|conn| {
             crate::index::module_cache::paths_with_ref_rows(conn)
                 .into_iter()
-                .map(std::path::PathBuf::from)
+                .map(|p| crate::util::canonical_path::CanonicalPath::from_stored(p.into()))
                 .collect()
         })
         .unwrap_or_default()
     }
 
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+    fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
         // `all_files` holds exactly what a workspace/pack front door
         // registered; the @INC tier writes only the name-keyed cache.
         !self.all_files.contains_key(path)
     }
 
-    fn cached_by_path(&self, path: &std::path::Path) -> Option<Arc<CachedModule>> {
+    fn cached_by_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<Arc<CachedModule>> {
         // Registered files: the per-path registry is O(1). The @INC cache is
         // name-keyed with unique paths — linear fallback (its candidate sets
         // are @INC-sized, not tree-sized).
@@ -594,7 +595,7 @@ impl CrossFileLookup for ModuleIndex {
             entry
                 .value()
                 .as_ref()
-                .filter(|cm| cm.path == path)
+                .filter(|cm| &cm.path == path)
                 .cloned()
         })
     }
@@ -732,7 +733,7 @@ impl CrossFileLookup for ModuleIndex {
     // `parents_cached`: the trait default unions over `def_candidates`
     // (every file declaring the package), which is the honest Perl relation.
 
-    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         self.module_path_cached(module_name)
     }
 
@@ -814,13 +815,13 @@ impl CrossFileLookup for ModuleIndex {
         let mut seen: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
         for entry in self.all_files.iter() {
-            if seen.insert(entry.key().clone()) {
+            if seen.insert(entry.key().to_path_buf()) {
                 f(entry.value());
             }
         }
         for entry in self.core.cache.iter() {
             if let Some(ref cached) = *entry.value() {
-                if seen.insert(cached.path.clone()) {
+                if seen.insert(cached.path.to_path_buf()) {
                     f(cached);
                 }
             }
