@@ -69,7 +69,7 @@ pub struct DriverCaps {
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
     /// Files at or over this many bytes are never analyzed — the walk
-    /// lists them, and a re-analysis refuses them.
+    /// lists them and the dependency tier refuses them.
     pub file_cap: u64,
 }
 
@@ -167,6 +167,12 @@ pub trait LanguageDriver: Send + Sync {
     /// the walk is the whole story.
     fn dependency_locator(&'static self, _root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
         None
+    }
+    /// The names a file registers under, each with whether it declares a
+    /// class there — what the workspace front door files it by and what a
+    /// dependency file lands under. Default: every linkage-visible name.
+    fn registration_names(&self, analysis: &FileAnalysis) -> Vec<(String, bool)> {
+        analysis.linkage_feed()
     }
     /// File names whose change can move `dependency_locator`'s answer —
     /// the watcher subscribes to them; the locator's own `inputs` decide
@@ -328,6 +334,11 @@ impl LanguageDriver for PerlDriver {
     }
     fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
         Some(crate::build::inc::locator(root, self) as std::sync::Arc<dyn DependencyLocator>)
+    }
+    /// Perl subs link through their package, never by bare name: a file
+    /// registers under the packages it declares.
+    fn registration_names(&self, analysis: &FileAnalysis) -> Vec<(String, bool)> {
+        analysis.package_names()
     }
     fn dependency_manifests(&self) -> &[&'static str] {
         &["cpanfile.snapshot"]

@@ -486,6 +486,13 @@ pub fn index_pack_language(
             );
         }
     }
+    // The project's own files are registered: what they name that none of
+    // them declares is the dependency tier's to place, on the resolver
+    // thread. The map is re-read first if a manifest moved during the walk
+    // — an event then was deferred to this index, and this is where the
+    // index reads it.
+    index.refresh_dependency_map(driver, Some(root));
+    index.request_dependency_demand();
     if std::env::var_os("PERL_LSP_MEM_REPORT").is_some() {
         eprintln!("[mem-report] {}", crate::build::cpp_reparse::cache_size_report());
     }

@@ -988,6 +988,28 @@ fn reexport_cycle_resolves_finitely() {
 }
 
 #[test]
+fn a_module_exporting_nothing_answers_with_its_parents_surface_at_query_time() {
+    // DDP → Data::Printer: the child declares no exports and inherits the
+    // parent's `import`. Acquisition stores the child as written; the
+    // inherited surface is the query's answer.
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    register_module(&idx, "Printer", "package Printer;\nuse Exporter 'import';\nour @EXPORT = qw(p);\nsub p { 1 }\n1;\n");
+    register_module(&idx, "Shortcut", "package Shortcut;\nour @ISA = ('Printer');\n1;\n");
+    let kid = idx.get_cached("Shortcut").expect("Shortcut cached");
+    assert!(kid.analysis.export.is_empty(), "the child's own analysis exports nothing");
+
+    let surface = kid.analysis.export_surface_with_index("Shortcut", &idx);
+    assert_eq!(surface.default_set(), ["p".to_string()]);
+    let src = "use Shortcut;\np();\n";
+    assert!(!flags_fn(src, "p", &idx), "the inherited export binds");
+    assert!(
+        idx.find_exporters("p").contains(&"Shortcut".to_string()),
+        "the child exports `p` for auto-import too: {:?}",
+        idx.find_exporters("p"),
+    );
+}
+
+#[test]
 fn reexport_imported_names_evaluator_unchanged() {
     // Consumer-unchanged guard: `imported_names` is NOT special-cased for
     // re-exports — it binds whatever the surface reports. A surface built
@@ -1016,7 +1038,7 @@ fn reexport_imported_names_evaluator_unchanged() {
     );
 
     // Index-walked surface: same evaluator, transitive surface — base_fn binds.
-    let walked = m.analysis.export_surface_with_index(&idx);
+    let walked = m.analysis.export_surface_with_index("M", &idx);
     let bound_walked = crate::model::file_analysis::imported_names(import, &walked);
     assert!(bound_walked.iter().any(|(l, _)| l == "own_fn"));
     assert!(

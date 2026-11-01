@@ -67,15 +67,15 @@ pub(super) fn import_candidates(
             continue;
         }
         for cached in &cands {
-            let fa = &cached.analysis;
+            let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
             let all_exported: Vec<&String> = if import.imported_symbols.is_empty() {
                 // Bare `use Foo;` — offer @EXPORT
-                fa.export.iter().collect()
+                surface.default_set().iter().collect()
             } else {
                 // `use Foo qw(bar)` — offer remaining @EXPORT + @EXPORT_OK
                 let mut all = Vec::new();
-                all.extend(fa.export.iter());
-                all.extend(fa.export_ok.iter());
+                all.extend(surface.default_set().iter());
+                all.extend(surface.optional_set().iter());
                 all
             };
 
@@ -154,13 +154,18 @@ pub(super) fn unimported_export_candidates(
         .map(|i| i.module_name.as_str())
         .collect();
 
+    // Collected first: a surface reads the cache, and a lookup made under
+    // the iteration's shard guard can deadlock against a queued writer.
+    let mut cached_modules: Vec<(String, std::sync::Arc<crate::model::file_analysis::CachedModule>)> = Vec::new();
     idx.for_each_cached(&mut |module_name, cached| {
-        if imported_modules.contains(module_name) {
-            return;
+        if !imported_modules.contains(module_name) {
+            cached_modules.push((module_name.to_string(), cached.clone()));
         }
-
-        let fa = &cached.analysis;
-        let all_exported = fa.export.iter().chain(fa.export_ok.iter());
+    });
+    for (module_name, cached) in &cached_modules {
+        let module_name = module_name.as_str();
+        let surface = cached.analysis.export_surface_with_index(module_name, idx);
+        let all_exported = surface.default_set().iter().chain(surface.optional_set().iter());
         for name in all_exported {
             // Skip functions already defined locally
             if !origin.symbols_named(name).is_empty() {
@@ -181,7 +186,7 @@ pub(super) fn unimported_export_candidates(
                 display_override: None,
             });
         }
-    });
+    }
 
     // Sort for deterministic order
     candidates.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));
@@ -280,7 +285,7 @@ fn classify_import(
     module_index: &dyn CrossFileLookup,
 ) -> Option<(ImportResolution, String)> {
     if let Some(cached) = cached {
-        let surface = cached.analysis.export_surface_with_index(module_index);
+        let surface = cached.analysis.export_surface_with_index(&import.module_name, module_index);
         let bound = crate::model::file_analysis::imported_names(import, &surface);
         if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == func_name) {
             return Some((ImportResolution::Brought, remote.clone()));

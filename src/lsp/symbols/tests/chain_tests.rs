@@ -179,10 +179,8 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Use the ACTUAL Mojolicious library from @INC — the same
     // code nvim analyzes. If Mojo isn't installed, skip cleanly
     // so CI on bare systems doesn't break.
-    let inc_paths = crate::build::inc::discover_inc_paths();
     let insert_real = |name: &str| -> bool {
-        let mut p = crate::index::module_resolver::create_parser();
-        match crate::index::module_resolver::resolve_and_parse(&inc_paths, name, &mut p) {
+        match crate::index::module_resolver::parse_from_inc(name).into_iter().next() {
             Some(cached) => {
                 idx.insert_cache(name, Some(cached));
                 true
@@ -583,10 +581,8 @@ fn test_demo_chain_empirical_truth_table() {
         None,
     );
 
-    let inc = crate::build::inc::discover_inc_paths();
     let install = |name: &str| -> bool {
-        let mut p = crate::index::module_resolver::create_parser();
-        match crate::index::module_resolver::resolve_and_parse(&inc, name, &mut p) {
+        match crate::index::module_resolver::parse_from_inc(name).into_iter().next() {
             Some(c) => {
                 idx.insert_cache(name, Some(c));
                 true

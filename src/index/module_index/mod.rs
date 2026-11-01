@@ -52,43 +52,6 @@ pub fn rehydration_miss_count() -> usize {
     REHYDRATION_MISSES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The linkage-visible feed a registration extracts from a WHOLE analysis:
-/// (name, declares-a-Class) per visible symbol. Collected before any strip
-/// so the feeds and tie-breaks never read an emptied `symbols`.
-fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
-    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    let mut feed: Vec<(String, bool)> = Vec::new();
-    for sym in analysis.symbols() {
-        // The C-linkage surface (`FileAnalysis::is_linkage_visible`) —
-        // the same predicate completion gathering uses, so every name
-        // registered here is also offerable and vice versa.
-        if !analysis.is_linkage_visible(sym) {
-            continue;
-        }
-        let is_class = matches!(sym.kind, SymKind::Class);
-        match index.get(sym.name.as_str()) {
-            // A file declaring both a value AND a Class under one name
-            // ranks as a Class.
-            Some(&i) => feed[i].1 |= is_class,
-            None => {
-                index.insert(sym.name.as_str(), feed.len());
-                feed.push((sym.name.clone(), is_class));
-            }
-        }
-    }
-    // Class rank is visibility-INDEPENDENT (the old occupant scan matched
-    // any Class symbol): a non-linkage-visible Class sharing a visible
-    // value's name still ranks the file as declaring that Class.
-    for sym in analysis.symbols() {
-        if matches!(sym.kind, SymKind::Class) {
-            if let Some(&i) = index.get(sym.name.as_str()) {
-                feed[i].1 = true;
-            }
-        }
-    }
-    feed
-}
-
 /// The leaves a registration files a feed's classes under for widening
 /// (`IndexCore::leaf_defs`): each class identity's leaf, keyed the way the
 /// row store keys it (`name_match_key`), where it differs from the
@@ -141,9 +104,41 @@ pub(crate) struct ResolveQueue {
     /// Normal priority: missing modules.
     pub pending: Mutex<Vec<String>>,
     pub condvar: Condvar,
+    /// The dependency map moved: the drain hands back an empty batch, so
+    /// the thread adopts the new generation even when nothing is asked.
+    pub map_moved: std::sync::atomic::AtomicBool,
+    /// A batch is out of the queue and not yet landed. Set under `pending`
+    /// as the batch is taken, so "queue empty and not busy" is never true
+    /// while a name is in flight.
+    pub busy: std::sync::atomic::AtomicBool,
+    /// The thread has read its map and warmed its store; before that an
+    /// empty queue is not idle.
+    pub started: std::sync::atomic::AtomicBool,
 }
 
 impl ResolveQueue {
+    pub fn new() -> Self {
+        ResolveQueue {
+            priority: Mutex::new(Vec::new()),
+            pending: Mutex::new(Vec::new()),
+            condvar: Condvar::new(),
+            map_moved: Default::default(),
+            busy: Default::default(),
+            started: Default::default(),
+        }
+    }
+
+    /// Queue `names` for the resolver and wake it.
+    pub fn ask(&self, names: impl IntoIterator<Item = String>) {
+        let mut pending = self.pending.lock().unwrap();
+        for n in names {
+            if !pending.contains(&n) {
+                pending.push(n);
+            }
+        }
+        self.condvar.notify_one();
+    }
+
     /// Wake the drain after enqueueing. The notify is taken under `pending`
     /// — the mutex `drain_next_batch` parks on — so it cannot land in the
     /// window between the drain's queue checks and its park, where a condvar
@@ -181,6 +176,8 @@ pub(crate) use index_core::IndexCore;
 pub(crate) use index_core::strip_import_copy_one;
 
 mod dependency_tier;
+pub(crate) use dependency_tier::{MapMoved, MapSnapshot};
+pub use dependency_tier::dependency_demand_of;
 mod lookup;
 mod queries;
 mod registration;
@@ -260,13 +257,6 @@ pub struct ModuleIndex {
     /// (epoch, key) pairs overwrite in place, never accumulate — so the
     /// ceiling is the registered-file count × ~100 bytes.
     enrichment_key_memo: Arc<DashMap<std::path::PathBuf, (u64, u64)>>,
-    /// The linkage-visible (name, declares-a-Class) pairs each file
-    /// registered — the exact inverse list `unregister_file` walks AND the
-    /// class-rank source for the cache-slot tie-break. Recorded at
-    /// registration (pre-strip) because the resident copy's `symbols` may be
-    /// evicted, and rehydration after an edit persists would fetch the NEW
-    /// generation's names.
-    registered_names: Arc<DashMap<std::path::PathBuf, Vec<(String, bool)>>>,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
     /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`
@@ -286,35 +276,6 @@ pub struct ModuleIndex {
     /// next query reopens the recreated DB.
     ref_rows_conn: crate::index::module_cache::RetainedReader,
 }
-
-// ---- Module-level helpers ----
-
-/// Return the parents of the primary package of a module, preferring the
-/// package with the same name as `module_name` and falling back to the
-/// single-package case if only one package exists in the file.
-/// Every `package X;` / `class X` a FileAnalysis declares, in declaration
-/// order, deduped — `(name, is-class)` in the `registered_names` record
-/// shape. Workspace registration keys the candidate tables on ALL of them:
-/// a multi-package `.pm` is ordinary Perl, and keying on the first name
-/// alone leaves every later package unreachable by name. Empty for scripts
-/// with no explicit package declaration.
-pub fn package_names(analysis: &FileAnalysis) -> Vec<(String, bool)> {
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for sym in analysis.symbols() {
-        if matches!(sym.kind, SymKind::Package | SymKind::Class)
-            && seen.insert(sym.name.as_str())
-        {
-            out.push((sym.name.clone(), matches!(sym.kind, SymKind::Class)));
-        }
-    }
-    out
-}
-
-pub fn primary_package_parents(analysis: &FileAnalysis, module_name: &str) -> Vec<String> {
-    analysis.declared_parents(module_name).to_vec()
-}
-
 
 #[cfg(test)]
 #[path = "module_index_tests.rs"]

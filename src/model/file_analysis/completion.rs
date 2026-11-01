@@ -956,7 +956,7 @@ impl FileAnalysis {
                         .visible_def_candidates(&import.module_name)
                         .iter()
                         .find_map(|cached| {
-                            let surface = cached.analysis.export_surface_with_index(idx);
+                            let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
                             imported_names(import, &surface)
                                 .iter()
                                 .find(|(local, _)| local == name)

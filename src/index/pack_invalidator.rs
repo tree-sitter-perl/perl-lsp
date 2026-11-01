@@ -374,8 +374,9 @@ impl PackInvalidator {
         let canon = canonical(path);
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
-        // The dependency tier's own events: a manifest moves the map, and a
-        // file under a tier root is never a workspace file — the next
+        // The dependency tier's own events: a manifest moves the map (a new
+        // generation asks again for what the old one landed), and a file
+        // under a tier root is never a workspace file — the next
         // generation, not a registration, is what refreshes it.
         if index.is_dependency_input(&canon) {
             index.refresh_dependency_map_again();
@@ -489,6 +490,12 @@ impl PackInvalidator {
             .par_iter()
             .filter_map(|p| Some((p.clone(), Arc::new(analyze_file(driver, p, driver.caps().file_cap)?))))
             .collect();
+        // What the changed file now names that nothing declares is the
+        // dependency tier's to place: asked of the resolver once the file registers.
+        let demand: Vec<String> = changed_fa
+            .as_deref()
+            .map(crate::index::module_index::dependency_demand_of)
+            .unwrap_or_default();
         if let Some(fa) = changed_fa {
             results.push((canon.clone(), fa));
         }
@@ -576,6 +583,9 @@ impl PackInvalidator {
                     self.register_after_swap(pack, p, arc, false, event_gen);
                 }
             }
+        }
+        for name in &demand {
+            pack.request_resolve(name);
         }
         Swept { skip_consumers, refiled }
     }

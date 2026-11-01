@@ -1280,21 +1280,21 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(dir.join("lib/My")).unwrap();
+    std::fs::create_dir_all(dir.join("local/lib/perl5/My")).unwrap();
     std::fs::write(
-        dir.join("lib/My/App.pm"),
+        dir.join("local/lib/perl5/My/App.pm"),
         "package My::App;\nuse Mojolicious::Lite;\nplugin 'GenericCoApp', { minion => 1, redis => 'r' };\n1;\n",
     )
     .unwrap();
 
     let idx = ModuleIndex::new_for_test();
-    // file:// spelling — the thread's project-lib discovery strips the
-    // scheme to find `lib/`.
+    // file:// spelling — the thread strips the scheme to find the
+    // project's `local/lib/perl5`.
     idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
     idx.request_resolve("My::App");
     assert!(
         idx.wait_resolved("My::App", std::time::Duration::from_secs(30)),
-        "resolver thread should resolve the project-lib module",
+        "resolver thread should resolve the carton-installed module",
     );
 
     let mut shapes: Vec<String> = Vec::new();
@@ -1424,8 +1424,9 @@ async fn resolver_fires_refresh_after_every_drained_batch() {
         fires_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
 
-    // Project-local lib with three modules; no cpanfile, so the resolver
-    // sends no progress traffic over the unread socket.
+    // Carton-installed modules (project `lib/` is the walk's, never the
+    // tier's); no cpanfile, so the resolver sends no progress traffic over
+    // the unread socket.
     let dir = std::env::temp_dir().join(format!(
         "qx-batch-fire-{}-{}",
         std::process::id(),
@@ -1434,10 +1435,10 @@ async fn resolver_fires_refresh_after_every_drained_batch() {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(dir.join("lib/Batch")).unwrap();
+    std::fs::create_dir_all(dir.join("local/lib/perl5/Batch")).unwrap();
     for m in ["A", "B", "C"] {
         std::fs::write(
-            dir.join(format!("lib/Batch/{m}.pm")),
+            dir.join(format!("local/lib/perl5/Batch/{m}.pm")),
             format!("package Batch::{m};\nsub go {{ 1 }}\n1;\n"),
         )
         .unwrap();
@@ -1449,7 +1450,7 @@ async fn resolver_fires_refresh_after_every_drained_batch() {
         idx.request_resolve(name);
         assert!(
             idx.wait_resolved(name, std::time::Duration::from_secs(30)),
-            "{name} should resolve from the project lib"
+            "{name} should resolve from the project's local/"
         );
         // The fire lands right after the batch loop's last module; give the
         // thread a moment to reach it.

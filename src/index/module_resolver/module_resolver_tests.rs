@@ -9,6 +9,10 @@ fn inc_over(roots: &[PathBuf]) -> SearchPathLocator {
     SearchPathLocator::new(&PerlDriver, roots.to_vec(), Vec::new(), Vec::new())
 }
 
+fn files(placed: Vec<Placed>) -> Providers {
+    placed.into_iter().map(|p| p.file).collect()
+}
+
 #[test]
 fn test_resolve_module_list_util() {
     if discover_inc_paths().is_empty() {
@@ -257,13 +261,8 @@ fn import_tier_strip_gates_on_persistence() {
 #[test]
 fn priority_push_wakes_a_parked_drain() {
     use std::sync::mpsc;
-    use std::sync::{Condvar, Mutex};
 
-    let queue = Arc::new(ResolveQueue {
-        priority: Mutex::new(Vec::new()),
-        pending: Mutex::new(Vec::new()),
-        condvar: Condvar::new(),
-    });
+    let queue = Arc::new(ResolveQueue::new());
     let (tx, rx) = mpsc::channel();
     let q = Arc::clone(&queue);
     std::thread::spawn(move || {
@@ -340,11 +339,7 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     // unreachable. Both providers must survive as candidates.
     use crate::model::file_analysis::CrossFileLookup;
     let (a, b) = twin_roots("relation");
-    let mut parser = create_parser();
-    let mut memo: ParseMemo = HashMap::new();
-    let providers =
-        resolve_and_parse_with_memo(&[a.clone(), b.clone()], "Twin", &mut parser, &mut memo)
-            .expect("Twin resolves");
+    let providers = files(locate_and_parse(&perl_snapshot(Arc::new(inc_over(&[a.clone(), b.clone()]))), "Twin"));
     assert_eq!(providers.len(), 2, "both providers parse");
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -459,17 +454,10 @@ fn two_askers_with_different_use_lib_see_different_providers() {
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut parser = create_parser();
-    let mut memo: ParseMemo = HashMap::new();
     // The process @INC has only the app lib: `t/lib` is a root ONLY the
     // test file declares, which is exactly the discriminator.
     idx.set_inc_roots_for_test(&[applib.clone()]);
-    let providers = resolve_and_parse_with_memo(
-        &[applib.clone(), testlib.clone()],
-        "Twin",
-        &mut parser,
-        &mut memo,
-    )
-    .expect("Twin resolves");
+    let providers = files(locate_and_parse(&perl_snapshot(Arc::new(inc_over(&[applib.clone(), testlib.clone()]))), "Twin"));
     assert_eq!(providers.len(), 2);
     idx.insert_cache_providers("Twin", Some(providers));
 
@@ -732,10 +720,105 @@ fn perls_map_is_inc_with_the_project_libs_first() {
     assert_eq!(at("Twin"), vec![local.clone(), lib.clone()]);
     assert!(at("Outer::Inner").is_empty(), "no Outer/Inner.pm: Outer.pm is not searched for it");
 
+    // Project `lib/` is searched but is the workspace walk's to index: the
+    // tier lands only what is under its roots or outside the project.
+    let snap = crate::index::module_index::MapSnapshot {
+        driver: &PerlDriver,
+        root: Some(dir.clone()),
+        locator: inc.clone(),
+        generation: 0,
+    };
+    let providers = files(locate_and_parse(&snap, "Twin"));
+    let paths: Vec<PathBuf> = providers.iter().map(|p| p.path.clone()).collect();
+    assert_eq!(paths, vec![local.clone()]);
+    assert!(!snap.in_tier(&lib));
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_cache_providers("Twin", Some(providers));
+    assert_eq!(idx.get_cached("Twin").map(|c| c.path.clone()), Some(local), "the @INC-order winner");
+
     // No project: the process @INC alone, and the map owns no directory.
     let bare = crate::build::inc::locator(None, &PerlDriver);
     assert_eq!(bare.search_roots(), discover_inc_paths().as_slice());
     assert!(bare.roots().is_empty() && bare.inputs().is_empty());
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every ask goes through `request_resolve`, and the landing is the
+/// resolver thread's (`IndexCore::land_dependency` asserts which thread it
+/// runs on). A file lands under the asked name and under every other
+/// package it declares; a front door's name keeps its front-door winner.
+#[test]
+fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let dir = std::env::temp_dir().join(format!("perl-land-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Outer;\n1;\n"),
+        ("lib/Mine.pm", "package Mine;\nsub ours { 1 }\n1;\n"),
+        (
+            "local/lib/perl5/Outer.pm",
+            "package Outer;\nsub hi { 1 }\npackage Outer::Inner;\nsub deep { 1 }\npackage Mine;\nsub theirs { 1 }\n1;\n",
+        ),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    index_workspace_with_index(&dir, &idx, None, None);
+    assert!(idx.get_cached("Outer").is_none(), "indexing asks nothing for a Perl project");
+
+    idx.request_dependency_demand();
+    idx.wait_idle();
+    let outer = dir.join("local/lib/perl5/Outer.pm");
+    assert_eq!(idx.get_cached("Outer").map(|c| c.path.clone()), Some(outer.clone()));
+    assert_eq!(
+        idx.get_cached("Outer::Inner").map(|c| c.path.clone()),
+        Some(outer.clone()),
+        "a declared package lands with the file that declares it",
+    );
+    assert_eq!(
+        idx.get_cached("Mine").map(|c| c.path.clone()),
+        Some(dir.join("lib/Mine.pm")),
+        "the project's own `Mine` keeps the slot",
+    );
+    assert_eq!(idx.def_candidates("Mine").len(), 2, "the dependency's `Mine` is still a candidate");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The file a name's path spells is that name's file, whatever package it
+/// declares: `require JSON::backportPP` loads `JSON/backportPP.pm`, which
+/// declares `JSON::PP`. (Spelled afresh: the process `@INC` may hold the
+/// real one.)
+#[test]
+fn a_file_at_the_asked_path_answers_the_asked_name_whatever_it_declares() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let dir = std::env::temp_dir().join(format!("perl-exact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Acme::ShimPP;\n1;\n"),
+        ("local/lib/perl5/Acme/ShimPP.pm", "package Acme::PP;\nsub encode_json { 1 }\n1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    index_workspace_with_index(&dir, &idx, None, None);
+    idx.request_dependency_demand();
+    idx.wait_idle();
+    let file = dir.join("local/lib/perl5/Acme/ShimPP.pm");
+    assert_eq!(idx.get_cached("Acme::ShimPP").map(|c| c.path.clone()), Some(file.clone()));
+    assert_eq!(idx.def_candidates("Acme::ShimPP").len(), 1);
+    assert_eq!(
+        idx.get_cached("Acme::PP").map(|c| c.path.clone()),
+        Some(file),
+        "and it answers the package it declares",
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

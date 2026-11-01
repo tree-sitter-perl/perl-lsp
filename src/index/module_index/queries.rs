@@ -12,7 +12,6 @@ impl ModuleIndex {
             open_doc_paths: Arc::new(DashMap::new()),
             closedness: Arc::new(Default::default()),
             all_files: Arc::new(DashMap::new()),
-            registered_names: Arc::new(DashMap::new()),
             freshness: Arc::new(crate::model::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             enriched_order: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -28,13 +27,7 @@ impl ModuleIndex {
 
     pub fn new(client: Client, on_diagnostics_refresh: impl Fn() + Send + Sync + 'static) -> Self {
         let core = Arc::new(IndexCore::new());
-        if serves_perl() {
-            module_resolver::spawn_resolver(
-                Arc::clone(&core),
-                client,
-                Box::new(on_diagnostics_refresh),
-            );
-        }
+        module_resolver::spawn_resolver(Arc::clone(&core), client, Box::new(on_diagnostics_refresh));
         Self::from_core(core)
     }
 
@@ -163,6 +156,7 @@ impl ModuleIndex {
     pub fn request_resolve(&self, module_name: &str) {
         let is_stale = self.core.stale_modules.contains_key(module_name);
         if self.core.cache.contains_key(module_name) && !is_stale {
+            crate::util::timings::record_cached(module_name);
             return; // fresh and cached
         }
         if is_stale {
@@ -178,6 +172,48 @@ impl ModuleIndex {
         // `pending`, and the drain's lock order forbids holding `priority`
         // across it.
         self.core.queue.notify_new_work();
+    }
+
+    /// `request_resolve` for everything the project's own files name
+    /// (`dependency_demand`).
+    pub fn request_dependency_demand(&self) {
+        for name in self.dependency_demand() {
+            self.request_resolve(&name);
+        }
+    }
+
+    /// Block until the resolver has read its map and has nothing queued or
+    /// in flight — for one-shot callers that answer from a settled index.
+    /// Every landing happens on the resolver thread, so this is the only
+    /// way such a caller sees one.
+    pub fn wait_idle(&self) {
+        use std::sync::atomic::Ordering::Acquire;
+        let q = &self.core.queue;
+        let mut guard = self.core.resolved.mu.lock().unwrap();
+        loop {
+            // Read under `pending`: the drain takes a batch and marks the
+            // queue busy under that lock, so no batch is between the two.
+            let idle = {
+                let pending = q.pending.lock().unwrap();
+                q.started.load(Acquire)
+                    && pending.is_empty()
+                    && q.priority.lock().unwrap().is_empty()
+                    && !q.map_moved.load(Acquire)
+                    && !q.busy.load(Acquire)
+            };
+            if idle {
+                return;
+            }
+            // The timeout only bounds a wake the thread's notify could
+            // race; every state change above is followed by one.
+            guard = self
+                .core
+                .resolved
+                .cv
+                .wait_timeout(guard, std::time::Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
     }
 
     /// Return the cached CachedModule for a module name. Never does I/O.
@@ -203,7 +239,7 @@ impl ModuleIndex {
                     .iter()
                     .filter(|c| visible.contains(&c.path.to_string_lossy().into_owned()))
                     .collect();
-                if let Some(best) = best_candidate(&reachable, module_name, &|m, n| self.module_defines_class(m, n)) {
+                if let Some(best) = best_candidate(&reachable, module_name, &|m, n| self.core.module_defines_class(m, n)) {
                     return Some(best);
                 }
             }
@@ -237,7 +273,7 @@ impl ModuleIndex {
                 .iter()
                 .filter(|c| c.path.to_str().is_some_and(|p| visible.contains(p)))
                 .collect();
-            if let Some(best) = best_candidate(&reachable, entry.key(), &|m, n| self.module_defines_class(m, n)) {
+            if let Some(best) = best_candidate(&reachable, entry.key(), &|m, n| self.core.module_defines_class(m, n)) {
                 out.push((entry.key().clone(), best));
             }
         }
@@ -371,21 +407,32 @@ impl ModuleIndex {
         None
     }
 
-    /// Find all cached modules that *export* the given function name.
-    /// Starts from the generic symbol index, then filters to modules
-    /// whose `export` / `export_ok` list actually contains the name —
-    /// the reverse_index covers every named symbol, not just exports.
+    /// Find all cached modules that *export* the given function name: the
+    /// modules the symbol index names (it covers every named symbol, not
+    /// just exports), plus their descendants — a module exporting nothing
+    /// answers with its parent's surface — kept when their surface carries
+    /// the name.
     pub fn find_exporters(&self, func_name: &str) -> Vec<String> {
-        let mut result: Vec<String> = self.modules_with_symbol(func_name)
-            .into_iter()
-            .filter(|m| {
-                // ANY candidate file of the module may carry the export list.
-                crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
-                    .iter()
-                    .any(|c| c.analysis.export.iter().any(|e| e == func_name)
-                        || c.analysis.export_ok.iter().any(|e| e == func_name))
-            })
-            .collect();
+        use crate::model::file_analysis::CrossFileLookup;
+        let mut frontier = self.modules_with_symbol(func_name);
+        let mut seen: std::collections::HashSet<String> = frontier.iter().cloned().collect();
+        let mut result: Vec<String> = Vec::new();
+        while let Some(m) = frontier.pop() {
+            // ANY candidate file of the module may carry the export list.
+            let exports = self
+                .def_candidates(&m)
+                .iter()
+                .any(|c| c.analysis.export_surface_with_index(&m, self).exports(func_name));
+            if !exports {
+                continue;
+            }
+            for (_pkg, child) in self.direct_children_of(&m) {
+                if seen.insert(child.clone()) {
+                    frontier.push(child);
+                }
+            }
+            result.push(m);
+        }
         result.sort();
         result.dedup();
         result
@@ -483,9 +530,7 @@ impl ModuleIndex {
 
     pub fn new_for_cli() -> Self {
         let core = Arc::new(IndexCore::new());
-        if serves_perl() {
-            module_resolver::spawn_test_resolver(Arc::clone(&core));
-        }
+        module_resolver::spawn_test_resolver(Arc::clone(&core));
         Self::from_core(core)
     }
 
@@ -508,10 +553,6 @@ impl ModuleIndex {
     /// `PERL_LSP_LONG_LIVED=1` forces the long-lived behaviors in one-shot
     /// CLI processes — the harness lane that keeps the server-only paths
     /// (enriched retries, warm @INC strip) under a regression net.
-    pub fn is_long_lived(&self) -> bool {
-        self.core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     pub fn mark_long_lived_from_env(&self) {
         if std::env::var("PERL_LSP_LONG_LIVED").as_deref() == Ok("1") {
             self.mark_long_lived();
@@ -544,15 +585,10 @@ impl ModuleIndex {
         self.core.builtins.insert(name.to_string(), doc.to_string());
     }
 
-    /// Direct access to the raw cache DashMap (for CLI warm_cache integration).
+    /// Direct access to the raw cache DashMap (tests seeding a warm load).
+    #[cfg(test)]
     pub fn cache_raw(&self) -> &DashMap<String, Option<Arc<CachedModule>>> {
         &self.core.cache
-    }
-
-    /// The candidate relation behind the name-slot winner — the warm lane
-    /// fills it alongside `cache_raw` so a warm start keeps every provider.
-    pub fn all_defs_raw(&self) -> &DashMap<String, Vec<Arc<CachedModule>>> {
-        &self.core.all_defs
     }
 
     /// Insert a module directly into the cache (for CLI and testing).
@@ -595,8 +631,8 @@ impl ModuleIndex {
     }
 }
 
-/// The resolver thread is the Perl `@INC` tier: a pack process has no
-/// dependency tier for it to scan, so it never spawns.
+/// The served language reads and writes the Perl hub's store
+/// (`modules.db`); a pack process's is installed by its indexer.
 fn serves_perl() -> bool {
     crate::build::language_driver::LanguageRegistry::served().caps().hub_enrichment
 }

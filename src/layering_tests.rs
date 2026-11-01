@@ -303,6 +303,26 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ),
             ],
         ),
+        (
+            "insert_resolved",
+            vec![(
+                "module_index",
+                2,
+                "insert_cache_providers (test seeding, insert_cache) and a dependency \
+                 landing's miss, which stores no copy",
+            )],
+        ),
+        (
+            "publish_resolved",
+            vec![(
+                "module_index",
+                2,
+                "insert_resolved's body, and the resolver thread's dependency landing \
+                 (each name a landed file declares) — stripped once persisted, whole \
+                 where nothing persisted it (a pack language's landing), bounded by \
+                 the demand closure (the project's imports + parents, then ancestors)",
+            )],
+        ),
         // register_workspace_module: TEST-ONLY today (fixtures build whole
         // copies directly). Its first production caller lands here.
         ("register_workspace_module", vec![]),
