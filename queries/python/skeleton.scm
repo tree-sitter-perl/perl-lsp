@@ -217,7 +217,8 @@
 (attribute object: (identifier) @expr.read.var)
 
 ; Parentheses hold the value they wrap.
-(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
 (string) @expr.lit.string
 (integer) @expr.lit.number
 (float) @expr.lit.number

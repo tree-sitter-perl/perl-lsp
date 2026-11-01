@@ -90,8 +90,7 @@ pub struct CallSite {
     /// The callee as its token spells it: a member's name, a free call's
     /// name token.
     pub callee: String,
-    /// Where the callee's token starts, the key a free call's reference
-    /// shares.
+    /// Where the callee's token starts: the site its name resolves at.
     pub callee_at: tree_sitter::Point,
     /// A member call's receiver expression; `None` for a free call.
     pub receiver: Option<Span>,
@@ -235,9 +234,10 @@ pub struct SkeletonAnalysis {
     /// (join to the owning callable, chain it when the callable declares no
     /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
-    /// Nodes naming the receiver of the method around them (`@receiver`):
-    /// (enclosing scope, span). `into_file_analysis` types each as that
-    /// method's class, once the scopes know their callables.
+    /// Receiver parameters (`@receiver`, python's `self`): (enclosing scope,
+    /// the parameter's name token). `into_file_analysis` types each as its
+    /// method's class, once the scopes know their callables. An undeclared
+    /// receiver (`this`) is a `receiver_sites` entry.
     pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
@@ -270,36 +270,6 @@ pub struct MemberWrite {
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
     pub value: crate::model::file_analysis::Span,
-}
-
-/// A variable's declaration, as a use resolves it (`nearest_declaration`).
-pub(crate) struct VariableDecl<I> {
-    pub scope: crate::model::file_analysis::ScopeId,
-    /// Where it is declared: in force from here on.
-    pub at: Point,
-    pub id: I,
-    /// Declared for its whole scope, wherever it is written (a variable an
-    /// assignment declares, `@def.assigned`).
-    pub scope_wide: bool,
-}
-
-/// The declaration a use of a variable at `at` names: along `chain`, in the
-/// nearest scope holding one of `decls` in force at the use, the latest
-/// declared at or before it, or one declared scope-wide.
-pub(crate) fn nearest_declaration<I: Copy>(
-    chain: &crate::model::file_analysis::LookupChain,
-    decls: &[VariableDecl<I>],
-    at: Point,
-) -> Option<I> {
-    chain.scopes().find_map(|sc| {
-        decls
-            .iter()
-            .filter(|d| d.scope == sc && (d.at <= at || d.scope_wide))
-            // the earliest of equals: `max_by_key` keeps the last
-            .rev()
-            .max_by_key(|d| d.at)
-            .map(|d| d.id)
-    })
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -770,47 +740,13 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        // A receiver is an object of the class of the method it belongs to:
-        // the nearest enclosing callable's, so a lambda (no owner) is
-        // transparent and a free function (a `Sub`) has none. A declared
-        // receiver is a parameter, flagged and typed from its binding on in
-        // the scope it binds in (a header parameter binds in the body); an
-        // undeclared one (`this`) is a value at its own read.
-        let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
-        {
-            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            for &(site_scope, span) in &self.receivers {
-                let declared = symbols.iter().position(|s| s.selection_span == span);
-                let scope = declared.map_or(site_scope, |i| symbols[i].scope);
-                let class = owning_callable(&self.scopes, scope)
-                    .and_then(|sid| symbols.get(sid.0 as usize))
-                    .filter(|s| matches!(s.kind, SymKind::Method))
-                    .and_then(|s| s.package.clone());
-                let (attachment, at) = match declared {
-                    Some(i) => {
-                        let sym = &mut symbols[i];
-                        sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
-                        let at = Span { start: span.start, end: span.start };
-                        (WA::Variable { name: sym.name.clone(), scope: sym.scope }, at)
-                    }
-                    None => (WA::Expr(span), span),
-                };
-                let Some(class) = class else { continue };
-                receiver_witnesses.push(Witness {
-                    attachment,
-                    source: WitnessSource::Builder("receiver".into()),
-                    payload: WP::InferredType(InferredType::ClassName(class)),
-                    span: at,
-                });
-            }
-        }
         // The class whose method each scope is the body of, or sits inside:
         // the nearest callable that declares one names it, in-class and
         // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
         // file scope, and only the method symbol carries `Buf`), so a closure
         // in a method reads the method's, and a free function's body has
-        // none. Scopes are pushed in id order, so a parent's answer is in
-        // hand before its children's.
+        // none: a lambda (no owner) is transparent. Scopes are pushed in id
+        // order, so a parent's answer is in hand before its children's.
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
@@ -822,6 +758,24 @@ impl SkeletonAnalysis {
             }
             out
         };
+        // A receiver parameter holds an object of its method's class (the
+        // method-class table's answer for the scope it binds in: a header
+        // parameter binds in the body), flagged and typed from its binding on.
+        let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+        {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            for &(_, span) in &self.receivers {
+                let Some(sym) = symbols.iter_mut().find(|s| s.selection_span == span) else { continue };
+                sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+                let Some(class) = method_class.get(sym.scope.0 as usize).cloned().flatten() else { continue };
+                receiver_witnesses.push(Witness {
+                    attachment: WA::Variable { name: sym.name.clone(), scope: sym.scope },
+                    source: WitnessSource::Builder("receiver".into()),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
+                    span: Span { start: span.start, end: span.start },
+                });
+            }
+        }
         // Implicit receiver: where the document says a body elides it, a bare
         // name is a member of that body's method class.
         let elided_class: Vec<Option<String>> = {
@@ -837,27 +791,20 @@ impl SkeletonAnalysis {
             out
         };
         // What a use-map call names a function by (`function_identity`); the
-        // earliest declaration of a name wins.
-        let free_functions: FreeFunctions = symbols
-            .iter()
-            .rev()
-            .filter(|s| matches!(s.kind, SymKind::Sub))
-            .map(|s| ((s.package.as_deref().unwrap_or(""), s.name.as_str()), s.id))
-            .collect();
-        // Each free call under a use-map, by where its name token starts: the
-        // function it names and the identity a class of that spelling has
-        // there. Its `Invoke` and its reference both read this one answer, and
-        // an imported name pins to the function it names the same way.
-        let free_calls: std::collections::HashMap<tree_sitter::Point, (crate::model::file_analysis::QualifiedName, String)> =
-            self.refs
-                .iter()
-                .filter(|r| matches!(r.kind, super::vocab::RefCap::Call | super::vocab::RefCap::Import))
-                .filter_map(|r| {
-                    let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols)?;
-                    let function = function_identity(&map, names.functions, &r.name, &free_functions);
-                    Some((r.start, (function, map.resolve(&r.name).identity(map.sep))))
-                })
-                .collect();
+        // earliest declaration of a name wins, as in `callee_sid`.
+        let mut free_functions: FreeFunctions = Default::default();
+        for s in symbols.iter().filter(|s| matches!(s.kind, SymKind::Sub)) {
+            free_functions.entry((s.package.as_deref().unwrap_or(""), s.name.as_str())).or_insert(s.id);
+        }
+        // A free call under a use-map, from its callee as written and where
+        // that token stands: the function it names and the identity a class
+        // of that spelling has there. Its `Invoke` and its reference (an
+        // imported name's too) each ask it of their own capture.
+        let free_call = |written: &str, at: tree_sitter::Point| {
+            let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at, &symbols)?;
+            let function = function_identity(&map, &names, written, &free_functions);
+            Some((function, map.resolve(written).identity(map.sep)))
+        };
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -877,9 +824,6 @@ impl SkeletonAnalysis {
         // resolve via the SAME chase Perl uses — no bypass. Declared
         // returns need no fixpoint (the type is in the syntax); only the
         // edge-minting half of the fold's writeback is needed here.
-        // The class each class-naming receiver token names, which a
-        // construction's reference on that token takes as its name.
-        let named_class: std::collections::HashMap<Span, String>;
         {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
             let mk = |att: WA, pay: WP, span: Span| Witness {
@@ -1036,8 +980,8 @@ impl SkeletonAnalysis {
                 Some(map.resolve(written).identity(map.sep))
             };
             // A receiver token that names a class has that class as its
-            // value, and a call on it dispatches there.
-            let mut receiver_class: std::collections::HashMap<Span, String> = Default::default();
+            // value; a call on it dispatches on that value like on any
+            // receiver's.
             for r in &self.receiver_sites {
                 let class = match r.names {
                     super::vocab::ReceiverCap::Enclosing => method_class.get(r.scope.0 as usize).cloned().flatten(),
@@ -1058,12 +1002,10 @@ impl SkeletonAnalysis {
                 bag.push(Witness {
                     attachment: WA::Expr(r.span),
                     source: WitnessSource::Builder("receiver_class".into()),
-                    payload: WP::InferredType(InferredType::ClassName(class.clone())),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
                     span: r.span,
                 });
-                receiver_class.insert(r.span, class);
             }
-            named_class = receiver_class.clone();
             let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
@@ -1114,17 +1056,14 @@ impl SkeletonAnalysis {
                 // when it has one.
                 let (callee, receiver) = match site.receiver {
                     Some(recv) => {
-                        let lookup = match receiver_class.get(&recv) {
-                            Some(class) => crate::model::witnesses::Lookup::Named(class.clone()),
-                            None => crate::model::witnesses::Lookup::Receiver,
-                        };
+                        let lookup = crate::model::witnesses::Lookup::Receiver;
                         let callee = match site.constructs {
                             true => crate::model::witnesses::Callee::Construct { lookup },
                             false => crate::model::witnesses::Callee::Method { name: name.clone(), lookup, constructs: false },
                         };
                         (callee, Some(WA::Expr(recv)))
                     }
-                    None => match free_calls.get(&site.callee_at) {
+                    None => match free_call(name, site.callee_at) {
                         Some((fq, identity)) => {
                             // under a use-map a class is filed under the
                             // identity its spelling names at the call
@@ -1163,16 +1102,13 @@ impl SkeletonAnalysis {
         // twin); fields are members, reached through a receiver. A variable
         // a write declares is its callable's from the top of the body, so a
         // read above its first write (a loop's) reaches it.
-        let mut defs_by_name: std::collections::HashMap<String, Vec<VariableDecl<SymbolId>>> =
-            std::collections::HashMap::new();
+        let mut defs_by_name: std::collections::HashMap<
+            &str,
+            Vec<(crate::model::file_analysis::ScopeId, crate::model::file_analysis::VariableDecl<'_, SymbolId>)>,
+        > = std::collections::HashMap::new();
         for s in &symbols {
-            if matches!(s.kind, SymKind::Variable) {
-                defs_by_name.entry(s.name.clone()).or_default().push(VariableDecl {
-                    scope: s.scope,
-                    at: s.selection_span.start,
-                    id: s.id,
-                    scope_wide: self.symbols[s.id.0 as usize].kind == DefCap::Assigned,
-                });
+            if let Some(d) = s.variable_decl() {
+                defs_by_name.entry(s.name.as_str()).or_default().push((s.scope, d));
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
@@ -1183,8 +1119,15 @@ impl SkeletonAnalysis {
         // resolves the same way a bare call does). rule #7: the token gets a
         // ref whether or not the def is local.
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
+        // The binders' one rule (`variable_use`); a use it finds no
+        // declaration for is unresolved.
         let resolve_var = |name: &String, chain: crate::model::file_analysis::LookupChain, span: &Span| {
-            nearest_declaration(&chain, defs_by_name.get(name)?, span.start)
+            let decls = defs_by_name.get(name.as_str())?;
+            let decls_in = |sc| decls.iter().filter(move |(s, _)| *s == sc).map(|(_, d)| *d);
+            match crate::model::file_analysis::variable_use(name, span.start, chain, None, &names, decls_in) {
+                crate::model::file_analysis::VariableUse::Declared(id) => Some(id),
+                crate::model::file_analysis::VariableUse::Global { .. } | crate::model::file_analysis::VariableUse::GatedOur => None,
+            }
         };
         // A token an assignment writes is that write, not a read of it.
         let written: std::collections::HashSet<(Point, Point)> = self
@@ -1243,10 +1186,10 @@ impl SkeletonAnalysis {
         // Variable on the lookup chain, NO declared-before constraint (a
         // forward goto is valid).
         for (name, ref_scope, ref_span) in &self.label_refs {
-            let Some(cands) = defs_by_name.get(name) else { continue };
+            let Some(cands) = defs_by_name.get(name.as_str()) else { continue };
             let resolved: Option<SymbolId> = crate::model::file_analysis::lookup_chain(&self.scopes, *ref_scope)
                 .scopes()
-                .find_map(|sc| cands.iter().find(|d| d.scope == sc).map(|d| d.id));
+                .find_map(|sc| cands.iter().find(|(s, _)| *s == sc).map(|(_, d)| d.id));
             if let Some(did) = resolved {
                 local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
@@ -1290,7 +1233,7 @@ impl SkeletonAnalysis {
                     // Under a use-map a call, and an imported name, is pinned
                     // to its function's namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call | RefCap::Import => {
-                        if let Some((function, _)) = free_calls.get(&r.start) {
+                        if let Some((function, _)) = free_call(&r.name, r.start) {
                             let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
@@ -1377,13 +1320,17 @@ impl SkeletonAnalysis {
                     scope: r.scope,
                     // A construction's token names the class it constructs,
                     // so its reference is retrieved under the class
-                    // reference's key.
+                    // reference's key: the class its receiver's value states.
                     target_name: match r.constructs {
                         true => r
                             .invocant
                             .as_ref()
-                            .and_then(|(at, _)| named_class.get(at))
-                            .cloned()
+                            .and_then(|(at, _)| {
+                                bag.iter_attachment(&crate::model::witnesses::WitnessAttachment::Expr(*at)).find_map(|w| match &w.payload {
+                                    crate::model::witnesses::WitnessPayload::InferredType(InferredType::ClassName(c)) => Some(c.clone()),
+                                    _ => None,
+                                })
+                            })
                             .unwrap_or_else(|| r.name.clone()),
                         false => r.name.clone(),
                     },
@@ -1720,13 +1667,15 @@ impl SkeletonAnalysis {
 /// one by the language's `FunctionLookup`.
 fn function_identity(
     map: &crate::model::file_analysis::UseMap,
-    lookup: crate::model::file_analysis::FunctionLookup,
+    names: &crate::model::file_analysis::NameSpellings,
     written: &str,
     free_functions: &FreeFunctions,
 ) -> crate::model::file_analysis::QualifiedName {
     use crate::model::file_analysis::{FunctionLookup, QualifiedName};
-    match lookup {
-        _ if written.contains(map.sep) => map.resolve(written),
+    if crate::model::file_analysis::split_qualified(written, names).0.is_some() {
+        return map.resolve(written);
+    }
+    match names.functions {
         FunctionLookup::Global => QualifiedName::new("", written),
         FunctionLookup::NamespaceThenGlobal => {
             let own = map.own_namespace.unwrap_or("");
@@ -1954,6 +1903,11 @@ fn symbol_flags_of(kind: DefCap, attributes: &[String]) -> SymbolFlags {
     let mut flags = SymbolFlags::empty();
     if let Some(f) = kind.marker().and_then(|m| SymbolFlags::try_from(m).ok()) {
         flags.insert(f);
+    }
+    // A variable an assignment declares is its callable's from the top of
+    // the body (`defs::unify_assigned`).
+    if kind == DefCap::Assigned {
+        flags.insert(SymbolFlags::SCOPE_WIDE);
     }
     // A `@sym.attr` token is source text (cpp's `register`, a php `#[Attr]`
     // name): a spelling the table does not know is display-only, never an

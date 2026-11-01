@@ -923,8 +923,9 @@ class Timer {
 
 /// A member call is a call ref on the method's name token and an `Invoke`
 /// on its receiver; a property read is a value ref and the receiver's
-/// slot. A receiver that names its class (`$this`, `self`, `Timer`)
-/// dispatches on that class.
+/// slot. Every member call dispatches on its receiver's value, and a
+/// receiver that names its class (`$this`, `self`, `Timer`) has that class
+/// as its value.
 #[test]
 fn member_calls_and_reads_name_their_member_on_the_receiver() {
     use crate::model::file_analysis::RefKind;
@@ -960,12 +961,17 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, .. }, args, .. } => Some((
+            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, .. }, receiver, args } => Some((
                 w.span.start.row,
                 name.clone(),
-                match lookup {
-                    Lookup::Named(class) => Some(class.clone()),
-                    _ => None,
+                {
+                    assert_eq!(*lookup, Lookup::Receiver);
+                    match receiver {
+                        Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => {
+                            fa.expr_type_at_span(*recv, None).and_then(|t| t.class_name().map(str::to_string))
+                        }
+                        _ => None,
+                    }
                 },
                 args.iter().flatten().map(|a| matches!(a, CallArg::Spread(_))).collect(),
             )),
@@ -974,13 +980,14 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
         .collect();
     calls.sort();
     let timer = || Some("App\\Timer".to_string());
+    let clock = || Some("App\\Clock".to_string());
     let call = |row: usize, name: &str, named: Option<String>, args: &[bool]| (row, name.to_string(), named, args.to_vec());
     assert_eq!(
         calls,
         [
-            call(11, "start", None, &[false, true]),
-            call(12, "name", None, &[]),
-            call(14, "start", None, &[]),
+            call(11, "start", clock(), &[false, true]),
+            call(12, "name", timer(), &[]),
+            call(14, "start", clock(), &[]),
             call(15, "name", timer(), &[]),
             call(16, "make", timer(), &[]),
             call(17, "make", timer(), &[]),
@@ -1233,6 +1240,8 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(ret("full"), clock, "a fully qualified class");
     assert_eq!(ret("count"), Some(T::Numeric));
     assert_eq!(ret("either"), None, "a union has no single type");
+    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
+    assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
     assert_eq!(ret("nothing"), None);
     assert_eq!(ret("bare"), None);
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
@@ -1492,6 +1501,19 @@ fn a_write_declares_its_variable_once_per_function() {
     assert_eq!(scope_of("d"), scope_of("b"), "a branch is no scope of its own");
     assert_eq!(scope_of("z"), scope_of("b"), "a by-reference capture declares around the closure");
     assert_ne!(scope_of("e"), scope_of("b"), "a closure's write is the closure's");
+}
+
+/// A by-name ask agrees with the binding a read carries: a read above the
+/// write that declares its variable (a loop's) binds to that declaration,
+/// and `resolve_variable` there names it too.
+#[test]
+fn a_by_name_ask_names_the_declaration_the_read_binds() {
+    let src = "<?php\nfunction f($xs) {\n    foreach ($xs as $v) {\n        if ($acc) { $acc->add($v); }\n        $acc = $v;\n    }\n}\n";
+    let fa = php(src);
+    let read = Point::new(3, 13);
+    let bound = fa.ref_at(read).and_then(|r| r.resolved_symbol()).expect("the read binds");
+    assert_eq!(fa.symbol(bound).selection_span.start, Point::new(4, 9), "to the declaring write");
+    assert_eq!(fa.resolve_variable("acc", read).map(|s| s.id), Some(bound));
 }
 
 /// A variable's value is what was last written to it: an assignment edges
@@ -2268,6 +2290,39 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
 
 // `$this` is the receiver of the method around it, stated by the document:
 // an object of that method's class. A function has no receiver.
+/// One system types `$this`: one capture states it, one table names its
+/// class, so its value is one witness.
+#[test]
+fn this_is_typed_once() {
+    use crate::model::witnesses::WitnessAttachment as WA;
+    let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\n");
+    let this = Span { start: Point::new(2, 24), end: Point::new(2, 29) };
+    let typed: Vec<_> = fa.witnesses.for_attachment(&WA::Expr(this)).into_iter().map(|w| w.source.clone()).collect();
+    assert_eq!(typed.len(), 1, "one witness types `$this`: {typed:?}");
+}
+
+/// A call on a receiver that names a class dispatches on the receiver's
+/// value, the one store of that class: no second, span-keyed copy picks a
+/// named lookup.
+#[test]
+fn a_class_receiver_dispatches_on_its_value() {
+    use crate::model::witnesses::{Callee, Lookup, WitnessAttachment as WA, WitnessPayload as WP};
+    let fa = php("<?php\nclass A {\n  static function m() { return 1; }\n  function f() { return self::m(); }\n}\n");
+    let call = Span { start: Point::new(3, 24), end: Point::new(3, 33) };
+    let lookups: Vec<_> = fa
+        .witnesses
+        .for_attachment(&WA::Expr(call))
+        .into_iter()
+        .filter_map(|w| match &w.payload {
+            WP::Invoke { callee: Callee::Method { lookup, .. }, .. } => Some(lookup.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lookups, [Lookup::Receiver]);
+    let recv = Span { start: Point::new(3, 24), end: Point::new(3, 28) };
+    assert_eq!(fa.expr_type_at_span(recv, None), Some(InferredType::ClassName("A".into())));
+}
+
 #[test]
 fn this_is_the_receiver_of_its_method() {
     let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\nfunction g() { return $this; }\n");

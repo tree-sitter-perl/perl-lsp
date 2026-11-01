@@ -56,14 +56,12 @@ impl State {
 
 /// `@member.recv.name` / `@member.recv`: a member access receiver, which
 /// the document states is a written name or an expression. An expression
-/// peels its transparent wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner,
-/// so the minted MethodCall ref's invocant_span lands on the inner expression
-/// `expr_type_at_span` already types.
+/// in a wrapper (`(p)`, `(*p)`, `(&o)`) stays the wrapper: the document's
+/// `@expr.wrapper` edge types it as what it holds.
 pub(super) fn flatten_recv(
     members: &mut State,
     node: tree_sitter::Node<'_>,
     cap: MemberCap,
-    pack: &LangPack,
     source: &[u8],
     match_id: usize,
     events: &mut Vec<Event>,
@@ -72,13 +70,12 @@ pub(super) fn flatten_recv(
     // op-DX applies only to a written-name receiver (its deref_stack
     // resolves by name); a wrapper/chain doesn't.
     members.member_simple.insert(match_id, named);
-    let inner = if named { node } else { peel_receiver(node, pack.recv_peel) };
-    let text = inner.utf8_text(source).unwrap_or("").to_string();
+    let text = node.utf8_text(source).unwrap_or("").to_string();
     // A written name (`w`, `Widget`) may spell a class; an expression never does.
     let invocant = if named { Invocant::assume_canonical(text.clone()) } else { Invocant::expr(text.clone()) };
-    let span = Span { start: inner.start_position(), end: inner.end_position() };
+    let span = Span { start: node.start_position(), end: node.end_position() };
     members.member_recv.insert(match_id, (span, invocant));
-    events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
+    events.push(Event::at(node, Capture::Member(MemberCap::Recv), text, match_id));
 }
 
 /// `@arity.args`: the call wrote an argument list, so its arity is known
@@ -154,23 +151,4 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 
 pub(super) fn finish(st: &mut ExtractState) {
     st.out.param_sigs = std::mem::take(&mut st.members.param_sigs);
-}
-
-/// Drop transparent receiver wrappers (`(*p)` → `p`) through each one's
-/// first named child; the node itself when it is not a wrapper, or when a
-/// wrapper has no named child.
-pub(super) fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sitter::Node<'a> {
-    let mut inner = node;
-    for _ in 0..32 {
-        if !wrappers.contains(&inner.kind()) {
-            return inner;
-        }
-        let mut c = inner.walk();
-        let first = inner.named_children(&mut c).find(|ch| !ch.is_extra());
-        match first {
-            Some(ch) => inner = ch,
-            None => return node,
-        }
-    }
-    node
 }
