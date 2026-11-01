@@ -64,14 +64,12 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is a long-lived session's
-    // prefetch, the Perl hub's only: a pack's wider descent waits on a
-    // measurement. A one-shot run asks what its own files use and descends
-    // as packs do, the same split as `Declared::Listed`: measured on FHEM
-    // (php-stack-release-gates-2026-11-01), the prefetch landed 1,173
-    // names instead of 303 and cost a cold `--check` 30 s; no diagnostic
-    // moved, only the exporter lists a hint names grew.
-    let prefetch = server.is_some() && hub;
+    // Warm-copy strip is a long-lived-process behavior; one-shot CLI keeps
+    // warm copies whole for wall (rehydration never amortizes), unless the
+    // harness lane forces long-lived behavior on it.
+    let strip_warm = core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
+        && eviction_enabled()
+        && (server.is_some() || std::env::var("PERL_LSP_LONG_LIVED").as_deref() == Ok("1"));
     let mut adopted = 0u64;
     let mut progress = Progress::default();
     let mut persists = DependencyPersists::default();
@@ -109,16 +107,28 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             batch.iter().filter(|n| asked.insert(n.as_str()) && wants_landing(&core, &seen, n)).cloned().collect();
         for slice in todo.chunks(width) {
             let snap = core.map_snapshot();
+            // A current landing in the store answers before anything is
+            // parsed; only the names it does not hold go to the parse.
+            let mut warm: Vec<Option<Result<Landed, crate::index::module_index::MapMoved>>> = slice
+                .iter()
+                .map(|n| {
+                    let s = snap.as_ref().filter(|_| !core.stale_modules.contains_key(n))?;
+                    acquire_warm(&core, s, n, db.as_ref(), strip_warm)
+                })
+                .collect();
+            let cold: Vec<String> =
+                slice.iter().zip(&warm).filter(|(_, w)| w.is_none()).map(|(n, _)| n.clone()).collect();
             let mut placed = match &snap {
-                Some(snap) => place_frontier(snap, slice),
+                Some(snap) => place_frontier(snap, &cold),
                 None => Vec::new(),
             }
             .into_iter();
-            for module_name in slice {
-                let placed = placed.next();
+            for (module_name, warm) in slice.iter().zip(warm.iter_mut()) {
+                let warm = warm.take();
+                let placed = if warm.is_none() { placed.next() } else { None };
                 // Re-asked here, since an earlier landing of this batch may
                 // have answered it (a file declaring several asked names).
-                if !wants_landing(&core, &seen, module_name) {
+                if warm.is_none() && !wants_landing(&core, &seen, module_name) {
                     continue;
                 }
                 let is_re_resolve = core.stale_modules.contains_key(module_name);
@@ -131,24 +141,23 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 }
 
                 crate::util::ghost_stats::count("resolver.module_resolved");
-                let whole = match (&snap, placed) {
-                    (Some(snap), Some(placed)) => match land_placed(&core, snap, module_name, placed, &mut persists) {
-                        Ok(whole) => whole,
-                        Err(_moved) => {
-                            // Asked again once the loop adopts the new map.
-                            seen.remove(module_name);
-                            core.queue.ask([module_name.clone()]);
-                            continue;
-                        }
-                    },
-                    _ => None,
+                let landed = match (warm, &snap, placed) {
+                    (Some(landed), _, _) => landed,
+                    (None, Some(snap), Some(placed)) => land_placed(&core, snap, module_name, placed, &mut persists),
+                    _ => Ok(Landed::Miss),
                 };
-                match &whole {
-                    Some(providers) => log::info!("Resolved '{}': {} provider(s)", module_name, providers.len()),
-                    None => log::info!("Nothing provides '{}'", module_name),
-                }
-                if let Some(providers) = &whole {
-                    ask_unresolved(&core, &seen, descent(providers, prefetch));
+                match landed {
+                    Ok(Landed::Hit { providers, asks }) => {
+                        log::info!("Resolved '{}': {} provider(s)", module_name, providers);
+                        ask_unresolved(&core, &seen, asks);
+                    }
+                    Ok(Landed::Miss) => log::info!("Nothing provides '{}'", module_name),
+                    Err(_moved) => {
+                        // Asked again once the loop adopts the new map.
+                        seen.remove(module_name);
+                        core.queue.ask([module_name.clone()]);
+                        continue;
+                    }
                 }
 
                 // Remove from stale set after re-resolution (no-op otherwise).
@@ -197,7 +206,7 @@ fn wants_landing(core: &IndexCore, seen: &HashMap<String, i64>, name: &str) -> b
     seen.get(name).is_none_or(|&ver| ver < module_cache::EXTRACT_VERSION)
 }
 
-/// Report the prefetch's progress for one landed name.
+/// Report the declared dependencies' progress for one landed name.
 fn report_progress(srv: &ServerSession, progress: &mut Progress, module_name: &str) {
     if progress.total == 0 || progress.done >= progress.total {
         return;
@@ -220,7 +229,7 @@ fn report_progress(srv: &ServerSession, progress: &mut Progress, module_name: &s
     }));
 }
 
-/// How far a session's prefetch of the declared dependencies has got.
+/// How far a server's landing of the declared dependencies has got.
 #[derive(Default)]
 struct Progress {
     total: usize,
@@ -230,9 +239,7 @@ struct Progress {
 /// Adopt a new map: what was resolved under the old one may resolve
 /// differently now, so its record of tries clears, the store drops what the
 /// old map landed, the listing refreshes, and what the project declares is
-/// asked — every `Declared::Loaded` in every session, a `Declared::Listed`
-/// only where the session prefetches (a server; a one-shot run asks what
-/// its files use, which is everything it runs).
+/// asked, in every session alike (a server reports its progress).
 fn adopt_map(
     core: &IndexCore,
     db: Option<&rusqlite::Connection>,
@@ -258,18 +265,17 @@ fn adopt_map(
         *listed = core.list_available();
     }
     let mut loaded: Vec<String> = Vec::new();
-    let mut prefetched: Vec<String> = Vec::new();
+    let mut listed_names: Vec<String> = Vec::new();
     for d in snap.locator.declared_demand() {
         match d {
             Declared::Loaded(n) => loaded.push(n.clone()),
-            Declared::Listed(n) if server.is_some() => prefetched.push(n.clone()),
-            Declared::Listed(_) => {}
+            Declared::Listed(n) => listed_names.push(n.clone()),
         }
     }
-    prefetched.retain(|n| !core.cache.contains_key(n.as_str()));
-    if let (Some(srv), false) = (server, prefetched.is_empty()) {
-        log::info!("{} declared dependencies queued for indexing", prefetched.len());
-        *progress = Progress { total: prefetched.len(), done: 0 };
+    listed_names.retain(|n| !core.cache.contains_key(n.as_str()));
+    if let (Some(srv), false) = (server, listed_names.is_empty()) {
+        log::info!("{} declared dependencies queued for indexing", listed_names.len());
+        *progress = Progress { total: listed_names.len(), done: 0 };
         let token = NumberOrString::String("perl-lsp/indexing".to_string());
         let _ = srv.handle.block_on(srv.client.send_request::<request::WorkDoneProgressCreate>(
             WorkDoneProgressCreateParams { token: token.clone() },
@@ -284,14 +290,15 @@ fn adopt_map(
             })),
         }));
     }
-    loaded.extend(prefetched);
+    loaded.extend(listed_names);
     ask_unresolved(core, seen, loaded);
 }
 
-/// The served language's store — its validity gates, Perl's builtin docs,
-/// and the warm load of every persisted landing through the one landing
-/// (`IndexCore::land_dependency`), so a warm copy retires with its map
-/// like a fresh one. Returns the store.
+/// The served language's store, past its validity gates, with Perl's
+/// builtin docs hydrated. Nothing warms here: a persisted landing is read
+/// when its name is asked (`acquire`), through the one landing
+/// (`IndexCore::land_dependency`), so a warm copy retires with its map like
+/// a fresh one.
 fn open_store(
     core: &IndexCore,
     server: Option<&ServerSession>,
@@ -315,32 +322,6 @@ fn open_store(
             }
             Err(e) => log::warn!("Builtins hydrate failed: {}", e),
         }
-    }
-    // Warm-copy strip is a long-lived-process behavior; one-shot CLI keeps
-    // warm copies whole for wall (rehydration never amortizes), unless the
-    // harness lane forces long-lived behavior on it.
-    let strip_warm = core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
-        && eviction_enabled()
-        && (server.is_some() || std::env::var("PERL_LSP_LONG_LIVED").as_deref() == Ok("1"));
-    let (n, stale_names) = module_cache::warm_cache(&conn, &mut |name, providers| {
-        // Every persisted row answered the name it is filed under.
-        let answers: Vec<usize> = (0..providers.len()).collect();
-        core.land_dependency(Some((name, &answers)), snap.generation, providers, true, strip_warm)
-            .is_ok()
-    });
-    log::info!("Warmed module cache: {} entries loaded from disk, {} stale", n, stale_names.len());
-    for name in &stale_names {
-        core.stale_modules.insert(name.clone(), ());
-    }
-    // Server sessions re-resolve stale modules eagerly; headless ones
-    // re-resolve on demand (`request_resolve` queues stale names with
-    // priority).
-    if server.is_some() && !stale_names.is_empty() {
-        {
-            let mut pq = core.queue.priority.lock().unwrap();
-            pq.extend(stale_names);
-        }
-        core.queue.notify_new_work();
     }
     Some(conn)
 }

@@ -102,7 +102,6 @@ impl FileAnalysis {
             packages,
             framework_imports,
             search_roots,
-            referenced_identities: Vec::new(),
             type_provenance,
             witnesses,
             bag_evicted: false,
@@ -129,7 +128,7 @@ impl FileAnalysis {
             exports_declared: false,
         };
         fa.build_indices();
-        fa.referenced_identities = fa.mint_referenced_identities();
+        fa.mint_named_identities();
         fa
     }
 
@@ -1006,43 +1005,120 @@ impl FileAnalysis {
         }
     }
 
+    /// What `use module` binds through an `import` it does not declare:
+    /// `use` calls the first `import` up `module`'s MRO, and an `import`
+    /// declared by another class exports what that class lists — Data::
+    /// Printer's for `use DDP`. Exporter's own `import` reads the lists of
+    /// the class it was called on, so a class inheriting it exports only
+    /// what it lists itself: Exporter lists nothing, and nothing is lent.
+    fn inherited_import_lists(
+        &self,
+        module: &str,
+        module_index: &dyn CrossFileLookup,
+    ) -> Option<(Vec<String>, Vec<String>)> {
+        // Only a parent edge lends an `import`; most packages (`main`
+        // above all) declare none.
+        if self.declared_parents(module).is_empty() {
+            return None;
+        }
+        // Asked once per export query, so every step is a lookup until one
+        // could matter: the symbol index says which classes may declare an
+        // `import` (it files a file's names under each package the file
+        // registers, so it over-approximates), a class's lists are its
+        // package table's (kept through every strip), and only lists worth
+        // lending pay for reading the class's symbols to confirm the
+        // `import` is its own. The MRO past `module` starts at the parents
+        // this file gives it: each candidate file answers for its own
+        // `@ISA` and its own `import`, and FHEM's `main` has 534 of them.
+        let declares_here = |cls: &str| {
+            self.symbols_named("import").iter().any(|&sid| {
+                matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(sid, cls)
+            })
+        };
+        let mut indexed: Option<HashSet<String>> = None;
+        let mut may_declare = |cls: &str| {
+            declares_here(cls)
+                || indexed
+                    .get_or_insert_with(|| module_index.modules_with_symbol("import").into_iter().collect())
+                    .contains(cls)
+        };
+        let declares = |cls: &str| {
+            declares_here(cls)
+                || module_index
+                    .visible_def_candidates(cls)
+                    .iter()
+                    .any(|c| module_index.symbols_present(c).has_sub_in_package("import", cls))
+        };
+        let lists_of = |cls: &str| -> Option<(Vec<String>, Vec<String>)> {
+            let listing = |e: &PackageExports| !e.export.is_empty() || !e.export_ok.is_empty();
+            let own = self.package_exports(cls).filter(|e| listing(e)).map(|e| (e.export.clone(), e.export_ok.clone()));
+            own.or_else(|| {
+                module_index.visible_def_candidates(cls).iter().find_map(|c| {
+                    c.analysis.package_exports(cls).filter(|e| listing(e)).map(|e| (e.export.clone(), e.export_ok.clone()))
+                })
+            })
+        };
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        let graph = GraphView::new(self, Some(module_index));
+        // `Some(answer)` once a class whose `import` runs is reached.
+        let mut answer: Option<Option<(Vec<String>, Vec<String>)>> = None;
+        {
+            let mut visit = |cls: &str| {
+                if cls == module || !may_declare(cls) {
+                    return false;
+                }
+                match lists_of(cls) {
+                    // Lending nothing whether or not the `import` is its own.
+                    None => answer = Some(None),
+                    Some(lists) if declares(cls) => answer = Some(Some(lists)),
+                    Some(_) => return false,
+                }
+                true
+            };
+            for parent in self.declared_parents(module) {
+                let mut found = visit(parent);
+                if !found {
+                    graph.walk(Node::Class(parent.clone()), EdgeKindMask::INHERITS, &mut |n| match n {
+                        Node::Class(c) if visit(c) => {
+                            found = true;
+                            WalkControl::Stop
+                        }
+                        _ => WalkControl::Continue,
+                    });
+                }
+                if found {
+                    break;
+                }
+            }
+        }
+        let lists = answer??;
+        // An `import` this file gives the module shadows the inherited one
+        // (in this file's view, as its `@ISA` is).
+        if declares_here(module) {
+            return None;
+        }
+        Some(lists)
+    }
+
     /// Like `export_surface`, but resolved through `module_index`: a module
-    /// exporting nothing answers with its first exporting parent's surface,
-    /// and every re-exported module's surface (default ∪ optional ∪ tags)
-    /// is merged in, walked cross-file via
+    /// exporting nothing answers with what the `import` it inherits exports
+    /// (`inherited_import_lists`), and every re-exported module's surface
+    /// (default ∪ optional ∪ tags) is merged in, walked cross-file via
     /// `ModuleIndex::for_each_reexport_module` (seen-set for cycles, fan-out
     /// cap). With neither, the result is `export_surface` (own-only, zero
     /// extra storage). `module` is the name the consumer `use`d — the
-    /// package whose `@ISA` the inherited `import` comes through. This is
-    /// the one closure site — the consumer evaluator (`imported_names`) is
-    /// untouched; it binds whatever the surface reports.
+    /// package whose MRO `use` finds `import` on. This is the one closure
+    /// site — the consumer evaluator (`imported_names`) is untouched; it
+    /// binds whatever the surface reports.
     pub fn export_surface_with_index(
         &self,
         module: &str,
         module_index: &dyn CrossFileLookup,
     ) -> ExportSurface<'_> {
-        self.export_surface_at_depth(module, module_index, 0)
-    }
-
-    fn export_surface_at_depth(
-        &self,
-        module: &str,
-        module_index: &dyn CrossFileLookup,
-        depth: usize,
-    ) -> ExportSurface<'_> {
-        // Perl's default MRO depth; also what bounds an `@ISA` cycle.
-        const MAX_INHERITED_DEPTH: usize = 20;
         let own = self.package_exports(module);
         let has_own = own.is_some_and(|e| !e.export.is_empty() || !e.export_ok.is_empty());
-        let inherited = if !has_own && depth < MAX_INHERITED_DEPTH {
-            // `use DDP` binds Data::Printer's `p`: DDP declares no exports
-            // but inherits Data::Printer's `import`, which exports its own.
-            self.declared_parents(module).iter().find_map(|parent| {
-                let pc = module_index.get_cached(parent)?;
-                let s = pc.analysis.export_surface_at_depth(parent, module_index, depth + 1);
-                (!s.default_set().is_empty() || !s.optional_set().is_empty())
-                    .then(|| (s.default_set().to_vec(), s.optional_set().to_vec()))
-            })
+        let inherited = if !has_own {
+            self.inherited_import_lists(module, module_index)
         } else {
             None
         };
@@ -1409,7 +1485,6 @@ impl FileAnalysis {
             + scap(&self.framework_imports)
             + scap(&self.reassigned_vars)
             + scap(&self.column_keyed_verbs)
-            + vcap(&self.referenced_identities)
             + vcap(&self.unrowed_attachment_names);
 
         h

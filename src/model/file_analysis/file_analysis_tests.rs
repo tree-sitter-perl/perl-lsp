@@ -3377,3 +3377,26 @@ fn a_user_universal_sub_answers_with_its_declaration() {
         other => panic!("`sub UNIVERSAL::dump` is a real declaration, got {other:?}"),
     }
 }
+
+/// Assigning another package's export list records facts about that
+/// package, and declares nothing: the producer it names is still demand.
+/// The identities ride the reference axis's own owner, which keeps them
+/// through the refs' eviction and a blob round trip.
+#[test]
+fn a_package_whose_lists_a_file_assigns_is_still_demand() {
+    let fa = build_fa_from_source(
+        "package My::App;
+@Other::EXPORT = qw(x);
+sub go { Other->hi }
+1;
+",
+    );
+    assert!(fa.used_identities().iter().any(|u| u == "Other"), "{:?}", fa.used_identities());
+    let mut stripped = fa.clone();
+    stripped.evict_refs();
+    assert!(stripped.refs().is_empty());
+    assert_eq!(stripped.used_identities(), fa.used_identities());
+    let bytes = bincode::serialize(&stripped).unwrap();
+    let back: FileAnalysis = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(back.used_identities(), fa.used_identities());
+}

@@ -310,8 +310,8 @@ fn test_registration_feeds_export_only_names() {
 
 /// An export list belongs to the package that declares it: a project file
 /// declaring two packages registers under both, but only the one whose
-/// `@EXPORT_OK` names `two_fn` exports it. A sibling that inherits the
-/// exporter answers with its parent's surface.
+/// `@EXPORT_OK` names `two_fn` exports it. A sibling inheriting Exporter's
+/// `import` through it exports only its own (empty) lists.
 #[test]
 fn a_workspace_file_exports_only_from_the_package_that_declares_the_list() {
     let idx = ModuleIndex::new_for_test();
@@ -319,7 +319,7 @@ fn a_workspace_file_exports_only_from_the_package_that_declares_the_list() {
                package Two::Helper;\nsub help { 1 }\n\
                package Two::Kid;\nour @ISA = ('Two');\n1;\n";
     idx.insert_workspace_for_test(PathBuf::from("/fake/lib/Two.pm"), build_fa(src));
-    assert_eq!(idx.find_exporters("two_fn"), vec!["Two", "Two::Kid"]);
+    assert_eq!(idx.find_exporters("two_fn"), vec!["Two"]);
     assert!(idx.find_exporters("help").is_empty(), "a sub no package exports is nobody's export");
 }
 
