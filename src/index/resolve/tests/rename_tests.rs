@@ -93,7 +93,7 @@ $d->ping;
     let hits: Vec<(&str, usize)> = locs.iter().map(|r| {
         let fname = match &r.key {
             FileKey::Path(p) => p.file_name().unwrap().to_str().unwrap(),
-            FileKey::Url(_) => "url",
+            FileKey::Url(_, _) => "url",
         };
         (fname, r.span.start.row)
     }).collect();
@@ -140,7 +140,7 @@ sub ping { "pong" }
     idx.insert_cache(
         "Base",
         Some(Arc::new(crate::model::file_analysis::CachedModule::new(
-            dep_path.clone(),
+            crate::util::canonical_path::CanonicalPath::resolve(dep_path.clone()),
             Arc::new(parse(dep_src)),
         ))),
     );
@@ -168,7 +168,7 @@ $b->ping;
     let editable_locs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     for loc in &editable_locs {
         assert!(
-            !matches!(&loc.key, FileKey::Path(p) if p == &dep_path),
+            !matches!(&loc.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&dep_path)),
             "rename emitted an edit for the dep file (read-only): {:?}", editable_locs,
         );
     }
@@ -176,7 +176,7 @@ $b->ping;
     // Sanity: VISIBLE would find the dep decl.
     let visible_locs = refs_to(&store, Some(&idx), &target, RoleMask::VISIBLE);
     assert!(
-        visible_locs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &dep_path)),
+        visible_locs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&dep_path))),
         "sanity: VISIBLE should see dep file's ping decl: {:?}", visible_locs,
     );
 }
@@ -249,7 +249,7 @@ $g->hello;
         v.iter().map(|r| {
             let p = match &r.key {
                 FileKey::Path(p) => p.display().to_string(),
-                FileKey::Url(u) => u.to_string(),
+                FileKey::Url(u, _) => u.to_string(),
             };
             (p, r.span.start.row)
         }).collect()
@@ -330,7 +330,7 @@ fn rename_from_child_call_site_includes_inherited_base_declaration() {
     idx.insert_workspace_for_test(script_path.clone(), script_fa);
 
     let locs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| locs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| locs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
 
     assert!(
         hit(&base_path),

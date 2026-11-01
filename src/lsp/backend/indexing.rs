@@ -82,17 +82,7 @@ impl Backend {
             let ws_key = module_index.workspace_root();
             let conn = crate::index::module_cache::open_cache_db(ws_key.as_deref(), "perl");
             for (path, typ) in perl_changes {
-                // A DELETED file can't canonicalize (it's gone) — resolve the
-                // parent instead so the spelling still matches the canonical
-                // keys everything was registered/persisted under.
-                let canon = path.canonicalize().unwrap_or_else(|_| {
-                    match (path.parent(), path.file_name()) {
-                        (Some(dir), Some(name)) => std::fs::canonicalize(dir)
-                            .map(|d| d.join(name))
-                            .unwrap_or_else(|_| path.clone()),
-                        _ => path.clone(),
-                    }
-                });
+                let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
                 if let Some(ref conn) = conn {
                     crate::index::module_cache::invalidate_generation(conn, &canon.to_string_lossy());
                     if canon != path {
@@ -177,7 +167,7 @@ impl Backend {
                     module_index
                         .visible_def_candidates(class)
                         .iter()
-                        .map(|c| c.path.clone())
+                        .map(|c| c.path.to_path_buf())
                         .collect()
                 };
                 let consumers_of = |p: &std::path::Path| -> Vec<PathBuf> {

@@ -2,6 +2,7 @@
 //! `run_one` — shared verbatim by the single-mode wrappers and `--batch`.
 
 use super::*;
+use crate::util::canonical_path::CanonicalPath;
 
 // ---- CLI Commands ----
 
@@ -124,7 +125,7 @@ pub(crate) fn cli_hover_single_file(file: &str, line_str: &str, col_str: &str) {
         let cs = resolve::resolve(
             &files,
             &analysis,
-            open_docs::FileKey::Path(std::path::PathBuf::from(file)),
+            open_docs::FileKey::Path(CanonicalPath::resolve(file)),
             point,
             None,
             resolve::OverrideScope::default(),
@@ -324,9 +325,10 @@ impl<'a> ScopedOpenDoc<'a> {
             language: driver.id(),
             baseline_surface: None,
             path: Some(path.to_path_buf()),
+            canonical_path: Default::default(),
         };
         ws.insert_open(url.clone(), doc);
-        let key = open_docs::FileKey::Url(url.clone());
+        let key = ws.key_of(&url);
         (Self { ws, url }, analysis, key)
     }
 }
@@ -432,7 +434,7 @@ fn run_one(
                 for loc in locs {
                     let path = match &loc.key {
                         open_docs::FileKey::Path(p) => p.display().to_string(),
-                        open_docs::FileKey::Url(u) => u.to_file_path()
+                        open_docs::FileKey::Url(u, _) => u.to_file_path()
                             .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                     };
                     let (line, col) = sources.display(
@@ -460,7 +462,7 @@ fn run_one(
             // named (rule #10) — the same gate the LSP handler asks.
             if language_driver::LanguageRegistry::has_include_tokens(lang_id) {
                 if let Some(incs) = symbols::pack_include_references(
-                    &analysis, point, Some(file_path.as_path()), base_idx)
+                    &analysis, point, Some(&CanonicalPath::resolve(file_path.clone())), base_idx)
                 {
                     for (path, span) in incs {
                         let ps = path.display().to_string();
@@ -483,7 +485,7 @@ fn run_one(
             for loc in cs.references() {
                 let path = match &loc.key {
                     open_docs::FileKey::Path(p) => p.display().to_string(),
-                    open_docs::FileKey::Url(u) => u.to_file_path()
+                    open_docs::FileKey::Url(u, _) => u.to_file_path()
                         .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                 };
                 let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
@@ -510,7 +512,7 @@ fn run_one(
             for loc in cs.implementations() {
                 let path = match &loc.key {
                     open_docs::FileKey::Path(p) => p.display().to_string(),
-                    open_docs::FileKey::Url(u) => u.to_file_path()
+                    open_docs::FileKey::Url(u, _) => u.to_file_path()
                         .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                 };
                 let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
@@ -682,14 +684,13 @@ fn run_one(
             // reparse (no native cursor-context) takes the pack path — the
             // same one the LSP server uses.
             let (items, is_incomplete) = if !language_driver::LanguageRegistry::caps(doc.language).cursor_context {
+                let canon = doc.path.as_ref().map(CanonicalPath::resolve);
                 tphase!("completion_items", backend::pack_completion(
                     ws, &doc.analysis, &doc.text, &doc.tree, point, doc.language,
-                    doc.path.as_deref(), idx))
+                    canon.as_ref(), idx))
             } else {
-                let file_path = std::path::Path::new(file).canonicalize()
-                    .unwrap_or_else(|_| std::path::PathBuf::from(file));
                 tphase!("completion_items", symbols::completion_items(
-                    ws, &open_docs::FileKey::Path(file_path),
+                    ws, &open_docs::FileKey::Path(CanonicalPath::resolve(file)),
                     &doc.analysis, &doc.tree, &doc.text, pos, idx,
                     Some(doc.stable_outline.package_lines())))
             };
@@ -912,7 +913,7 @@ fn run_one(
 fn key_display(key: &open_docs::FileKey) -> String {
     match key {
         open_docs::FileKey::Path(p) => p.display().to_string(),
-        open_docs::FileKey::Url(u) => u
+        open_docs::FileKey::Url(u, _) => u
             .to_file_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| u.to_string()),
@@ -1043,7 +1044,7 @@ fn run_rename(
     for (loc, text) in cs.rename_edits(new_name)? {
         let path = match &loc.key {
             open_docs::FileKey::Path(p) => p.display().to_string(),
-            open_docs::FileKey::Url(u) => u.to_file_path()
+            open_docs::FileKey::Url(u, _) => u.to_file_path()
                 .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
         };
         let edit = span_to_json(&mut sources, &path, loc.span, text);
@@ -1133,7 +1134,7 @@ impl Drop for SweepPermit<'_> {
 fn sweep_one_file(
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
-    path: &std::path::Path,
+    path: &CanonicalPath,
     fa: &std::sync::Arc<file_analysis::FileAnalysis>,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let file = path.display().to_string();
@@ -1144,7 +1145,7 @@ fn sweep_one_file(
     // while the unit is still held.
     crate::util::timings::set_current_file(Some(path));
     let cached = std::sync::Arc::new(file_analysis::CachedModule::new(
-        path.to_path_buf(),
+        path.clone(),
         std::sync::Arc::clone(fa),
     ));
     let _sweep = crate::util::ghost_stats::SweepScope::start();
@@ -1212,7 +1213,7 @@ fn for_each_enriched_diagnostic(
     // the backend's language dispatch, on the process's one language.
     let hub = language_driver::LanguageRegistry::served().caps().hub_enrichment;
     let _g_snap = crate::util::timings::PhaseGuard::start("cli::diag_snapshot");
-    let mut entries: Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> =
+    let mut entries: Vec<(CanonicalPath, std::sync::Arc<file_analysis::FileAnalysis>)> =
         Vec::new();
     if hub {
         idx.for_each_registered_file(&mut |cm| {
