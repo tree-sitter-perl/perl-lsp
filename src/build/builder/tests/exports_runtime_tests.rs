@@ -282,10 +282,10 @@ fn sub_exporter_use_setup_records_exports() {
          sub beta { 2 }\n\
          1;\n",
     );
-    assert!(fa.export_ok.contains(&"alpha".to_string()),
-        "export_ok should contain alpha; got {:?}", fa.export_ok);
-    assert!(fa.export_ok.contains(&"beta".to_string()),
-        "export_ok should contain beta; got {:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"alpha".to_string()),
+        "export_ok should contain alpha; got {:?}", fa.all_export_ok());
+    assert!(fa.all_export_ok().contains(&"beta".to_string()),
+        "export_ok should contain beta; got {:?}", fa.all_export_ok());
 }
 
 #[test]
@@ -297,8 +297,8 @@ fn sub_exporter_setup_exporter_call_records_exports() {
          sub gamma { 3 }\n\
          1;\n",
     );
-    assert!(fa.export_ok.contains(&"gamma".to_string()),
-        "export_ok should contain gamma; got {:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"gamma".to_string()),
+        "export_ok should contain gamma; got {:?}", fa.all_export_ok());
 }
 
 #[test]
@@ -310,8 +310,8 @@ fn sub_exporter_generator_hashref_records_keys() {
          sub _gen_delta { sub { 4 } }\n\
          1;\n",
     );
-    assert!(fa.export_ok.contains(&"delta".to_string()),
-        "export_ok should contain generator name delta; got {:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"delta".to_string()),
+        "export_ok should contain generator name delta; got {:?}", fa.all_export_ok());
 }
 
 /// Sub::Exporter `exports` member collection is separator-agnostic: the
@@ -335,9 +335,9 @@ fn sub_exporter_exports_plain_comma_members_join_surface() {
         let fa = build_fa(&src);
         for name in ["foo", "bar"] {
             assert!(
-                fa.exports_name(name),
+                fa.any_package_exports(name),
                 "exports `{exports}`: `{name}` must join the surface; export_ok={:?}",
-                fa.export_ok,
+                fa.all_export_ok(),
             );
         }
     }
@@ -362,16 +362,16 @@ fn sub_exporter_setup_array_members_and_groups_join_surface() {
     );
     for name in ["foo", "bar", "baz"] {
         assert!(
-            fa.exports_name(name),
-            "exports_name({name}) should be true; export_ok={:?}",
-            fa.export_ok
+            fa.any_package_exports(name),
+            "any_package_exports({name}) should be true; export_ok={:?}",
+            fa.all_export_ok()
         );
     }
     assert!(
-        !fa.export_ok.contains(&"default".to_string())
-            && !fa.export_ok.contains(&"extra".to_string()),
+        !fa.all_export_ok().contains(&"default".to_string())
+            && !fa.all_export_ok().contains(&"extra".to_string()),
         "group selector keys must not join the surface; got {:?}",
-        fa.export_ok
+        fa.all_export_ok()
     );
 }
 
@@ -480,9 +480,9 @@ fn sub_exporter_setup_exporter_call_with_groups() {
          sub delta {}\n\
          1;\n",
     );
-    assert!(fa.exports_name("gamma") && fa.exports_name("delta"),
-        "setup_exporter exports should join surface; got {:?}", fa.export_ok);
-    assert!(!fa.export_ok.contains(&"all".to_string()),
+    assert!(fa.any_package_exports("gamma") && fa.any_package_exports("delta"),
+        "setup_exporter exports should join surface; got {:?}", fa.all_export_ok());
+    assert!(!fa.all_export_ok().contains(&"all".to_string()),
         "group selector `all` must not join the surface");
 }
 
@@ -496,8 +496,8 @@ fn non_sub_exporter_use_unaffected() {
          sub leak {}\n\
          1;\n",
     );
-    assert!(!fa.export_ok.contains(&"leak".to_string()),
-        "non-Sub::Exporter use must not record exports; got {:?}", fa.export_ok);
+    assert!(!fa.all_export_ok().contains(&"leak".to_string()),
+        "non-Sub::Exporter use must not record exports; got {:?}", fa.all_export_ok());
     // And no spurious export-member ref on the local sub.
     let leak_refs = fa.refs().iter().filter(|r| r.target_name == "leak"
         && matches!(&r.kind, RefKind::FunctionCall { .. })).count();
@@ -519,8 +519,8 @@ fn moose_exporter_setup_import_methods_records_exports() {
          1;\n",
     );
     for name in ["has_table", "col", "belongs_to"] {
-        assert!(fa.export_ok.contains(&name.to_string()),
-            "export_ok should contain {}; got {:?}", name, fa.export_ok);
+        assert!(fa.all_export_ok().contains(&name.to_string()),
+            "export_ok should contain {}; got {:?}", name, fa.all_export_ok());
     }
 }
 
@@ -533,10 +533,10 @@ fn type_library_add_type_records_named_export() {
          __PACKAGE__->add_type({ name => 'Email' });\n\
          1;\n",
     );
-    assert!(fa.export_ok.contains(&"PositiveInt".to_string()),
-        "export_ok should contain PositiveInt; got {:?}", fa.export_ok);
-    assert!(fa.export_ok.contains(&"Email".to_string()),
-        "export_ok should contain Email; got {:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"PositiveInt".to_string()),
+        "export_ok should contain PositiveInt; got {:?}", fa.all_export_ok());
+    assert!(fa.all_export_ok().contains(&"Email".to_string()),
+        "export_ok should contain Email; got {:?}", fa.all_export_ok());
 }
 
 #[test]
@@ -547,9 +547,9 @@ fn non_exporter_setup_does_not_pollute_exports() {
          My::Thing->configure({ name => 'nope', exports => [qw/leak/] });\n\
          1;\n",
     );
-    assert!(!fa.export_ok.contains(&"leak".to_string()),
-        "unrelated method call must not record exports; got {:?}", fa.export_ok);
-    assert!(!fa.export_ok.contains(&"nope".to_string()));
+    assert!(!fa.all_export_ok().contains(&"leak".to_string()),
+        "unrelated method call must not record exports; got {:?}", fa.all_export_ok());
+    assert!(!fa.all_export_ok().contains(&"nope".to_string()));
 }
 
 #[test]
@@ -565,10 +565,10 @@ fn setup_verb_name_without_exporter_use_does_not_pollute_exports() {
          __PACKAGE__->setup_import_methods(as_is => [qw/leak/]);\n\
          1;\n",
     );
-    assert!(!fa.export_ok.contains(&"Widget".to_string()),
-        "add_type without Type::Library use must not record exports; got {:?}", fa.export_ok);
-    assert!(!fa.export_ok.contains(&"leak".to_string()),
-        "setup_import_methods without Moose::Exporter use must not record exports; got {:?}", fa.export_ok);
+    assert!(!fa.all_export_ok().contains(&"Widget".to_string()),
+        "add_type without Type::Library use must not record exports; got {:?}", fa.all_export_ok());
+    assert!(!fa.all_export_ok().contains(&"leak".to_string()),
+        "setup_import_methods without Moose::Exporter use must not record exports; got {:?}", fa.all_export_ok());
 }
 
 #[test]
@@ -583,10 +583,10 @@ fn export_ok_array_assignment_unions_with_runtime_exports() {
          sub array_export { }\n\
          1;\n",
     );
-    assert!(fa.export_ok.contains(&"attr_export".to_string()),
-        "runtime :Export attr survives the array assignment; got {:?}", fa.export_ok);
-    assert!(fa.export_ok.contains(&"array_export".to_string()),
-        "array-assigned name recorded; got {:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"attr_export".to_string()),
+        "runtime :Export attr survives the array assignment; got {:?}", fa.all_export_ok());
+    assert!(fa.all_export_ok().contains(&"array_export".to_string()),
+        "array-assigned name recorded; got {:?}", fa.all_export_ok());
 }
 
 // Moo/Moose non-default has options: predicate, clearer,
@@ -1294,9 +1294,9 @@ fn shift_invocant_typed_like_at_underscore() {
 fn an_assigned_qualified_export_var_is_not_a_reexport() {
     let fa = build_fa("package Mine;\n@Other::EXPORT_OK = qw(x);\n1;\n");
     assert!(
-        fa.reexport_modules.is_empty(),
+        fa.all_reexport_modules().is_empty(),
         "the LHS names the target, not a source: {:?}",
-        fa.reexport_modules
+        fa.all_reexport_modules()
     );
 }
 
@@ -1304,7 +1304,7 @@ fn an_assigned_qualified_export_var_is_not_a_reexport() {
 #[test]
 fn a_spliced_qualified_export_var_is_a_reexport() {
     let fa = build_fa("package Mine;\nour @EXPORT_OK = ('own', @Other::EXPORT_OK);\n1;\n");
-    assert_eq!(fa.reexport_modules, vec!["Other".to_string()]);
+    assert_eq!(fa.all_reexport_modules(), vec!["Other".to_string()]);
 }
 
 /// Reassigning an array replaces its folded value: the left `@names` is not

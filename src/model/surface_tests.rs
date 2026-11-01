@@ -157,13 +157,14 @@ fn export_tag_regrouping_flips_the_verdict() {
     let moved = "package Acme::T;\nour %EXPORT_TAGS = (math => ['area'], io => ['slurp', 'perim']);\nsub area { return 1 }\nsub perim { return 2 }\nsub slurp { return 3 }\n1;\n";
     let s0 = surface(base);
     let s1 = surface(moved);
+    let pkg = |s: &Surface| s.packages.iter().find(|p| p.name == "Acme::T").cloned().unwrap();
     assert!(
-        !s0.export_tags.is_empty(),
+        !pkg(&s0).export_tags.is_empty(),
         "tags must project: {:?}",
-        s0.export_tags
+        pkg(&s0).export_tags
     );
     assert_eq!(
-        s0.exports_ok, s1.exports_ok,
+        pkg(&s0).exports_ok, pkg(&s1).exports_ok,
         "the flat export set is identical — only the grouping moved"
     );
     assert_ne!(s0, s1, "tag regrouping must change the surface");

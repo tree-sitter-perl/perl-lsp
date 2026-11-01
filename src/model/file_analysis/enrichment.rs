@@ -450,7 +450,7 @@ impl FileAnalysis {
                 // none of `needed_names` contributes nothing — and the
                 // expensive part of finding that out is fetching a view.
                 //
-                // `export_lookup` (@EXPORT u @EXPORT_OK) is not an evictable
+                // `any_package_exports` (@EXPORT u @EXPORT_OK) is not an evictable
                 // axis and is rebuilt by `build_indices` on every copy, so this
                 // reads the RESIDENT analysis: no rehydrate, no decode, no LRU
                 // traffic. Measured on the substrate: it drops the per-candidate
@@ -458,7 +458,7 @@ impl FileAnalysis {
                 // that matched nothing). Do not "simplify" this to a
                 // symbols-axis probe — `symbols_present` rehydrates too, and
                 // doing that made the chase SLOWER, not faster.
-                if !needed_names.iter().any(|n| cached.analysis.exports_name(n)) {
+                if !needed_names.iter().any(|n| cached.analysis.any_package_exports(n)) {
                     crate::util::ghost_stats::count("chase.candidate_skipped");
                     continue;
                 }
@@ -485,7 +485,7 @@ impl FileAnalysis {
                     if !needed_names.contains(sym.name.as_str()) {
                         continue;
                     }
-                    if !whole.exports_name(&sym.name) {
+                    if !whole.symbol_is_exported(sym) {
                         continue;
                     }
                     crate::util::ghost_stats::count("chase.sym_matched");
@@ -1191,6 +1191,7 @@ mod restamp_gate_tests {
                 &self,
                 _s: Vec<String>,
                 _v: &mut dyn FnMut(
+                    &str,
                     &std::sync::Arc<crate::model::file_analysis::CachedModule>,
                 ) -> std::ops::ControlFlow<()>,
             ) {

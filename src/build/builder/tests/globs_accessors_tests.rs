@@ -880,18 +880,18 @@ sub opt_util { 3 }
 "#;
     let fa = build_fa(src);
     assert!(
-        fa.export.contains(&"trick_taint".to_string())
-            && fa.export.contains(&"detaint_natural".to_string()),
+        fa.all_export().contains(&"trick_taint".to_string())
+            && fa.all_export().contains(&"detaint_natural".to_string()),
         "qualified @Pkg::EXPORT must populate the default set; got export={:?}",
-        fa.export,
+        fa.all_export(),
     );
     assert!(
-        fa.export_ok.contains(&"opt_util".to_string()),
+        fa.all_export_ok().contains(&"opt_util".to_string()),
         "qualified @Pkg::EXPORT_OK must populate the optional set; got export_ok={:?}",
-        fa.export_ok,
+        fa.all_export_ok(),
     );
     // Tag membership is preserved per-tag for the `:tag` consumer selector.
-    let surface = fa.export_surface();
+    let surface = fa.export_surface("Bugzilla::Util");
     let all = surface.tag_members("all").expect("all tag present");
     assert!(
         all.contains(&"trick_taint") && all.contains(&"opt_util"),
@@ -921,7 +921,7 @@ fn export_tags_plain_comma_folds_members() {
             "package P;\nour %EXPORT_TAGS = {table};\nsub foo {{ 1 }}\nsub bar {{ 2 }}\n",
         );
         let fa = build_fa(&src);
-        let surface = fa.export_surface();
+        let surface = fa.export_surface("P");
         let all = surface
             .tag_members("all")
             .unwrap_or_else(|| panic!("`all` tag must fold for table `{table}`"));
@@ -931,9 +931,9 @@ fn export_tags_plain_comma_folds_members() {
             all,
         );
         assert!(
-            fa.export_ok.contains(&"foo".to_string()),
+            fa.all_export_ok().contains(&"foo".to_string()),
             "table `{table}`: tag members join the export surface; got export_ok={:?}",
-            fa.export_ok,
+            fa.all_export_ok(),
         );
     }
 }
