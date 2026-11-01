@@ -85,10 +85,10 @@ fn landing(idx: &ModuleIndex, root: &Path, rel: &str, at: Point) -> (Vec<(String
     let p = root.join(rel);
     let fa = idx.workspace_file_for_test(&p).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(p), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p)), at, Some(idx), OverrideScope::default());
     let short = |k: &FileKey| match k {
         FileKey::Path(p) => p.strip_prefix(root).unwrap().display().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     (
         cs.definitions().iter().map(|d| (short(&d.key), d.span.start.row)).collect(),
@@ -138,8 +138,8 @@ fn a_psr_4_dependency_parent_resolves_as_the_dependency_tier() {
     assert!(widening(&idx, &root, "src/User.php").is_empty());
 
     let vendor_base = root.join("vendor/acme/model/src/Base.php");
-    assert!(idx.is_dependency_path(&vendor_base));
-    assert!(!idx.is_dependency_path(&root.join("src/User.php")));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&vendor_base)));
+    assert!(!idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&root.join("src/User.php"))));
     // only what the project asks for is parsed
     assert!(idx.def_candidates("Acme\\Model\\Unused").is_empty());
     assert_eq!(idx.dependency_generation(), 1);
@@ -152,7 +152,7 @@ fn a_classmap_entry_resolves() {
     let idx = indexed(&root);
     let (defs, _) = landing(&idx, &root, "src/Old.php", at(OLD, "hi()"));
     assert_eq!(defs, [("vendor/old/lib/legacy/thing.php".to_string(), 2)]);
-    assert!(idx.is_dependency_path(&root.join("vendor/old/lib/legacy/thing.php")));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&root.join("vendor/old/lib/legacy/thing.php"))));
 }
 
 /// No usable `composer.json`: today's behaviour — `vendor/` is still not
@@ -304,7 +304,7 @@ fn completes(idx: &ModuleIndex, root: &Path, rel: &str, typed: &str) -> Vec<(Str
     parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
     let tree = parser.parse(&typed, None).unwrap();
     let (items, _) =
-        crate::lsp::backend::pack_completion(&OpenDocs::new(), &fa, &typed, &tree, point, "php", Some(&path), idx);
+        crate::lsp::backend::pack_completion(&OpenDocs::new(), &fa, &typed, &tree, point, "php", Some(&crate::util::canonical_path::CanonicalPath::resolve(&path)), idx);
     items.into_iter().map(|i| (i.label, i.detail)).collect()
 }
 
@@ -372,7 +372,7 @@ fn a_class_named_with_no_use_lands() {
     assert!(used.iter().any(|u| u == "Acme\\Model\\Root"), "{used:?}");
     for (class, rel) in [("Acme\\Model\\Unused", "Unused.php"), ("Acme\\Model\\Root", "Root.php")] {
         assert!(!idx.def_candidates(class).is_empty(), "{class} did not land");
-        assert!(idx.is_dependency_path(&root.join("vendor/acme/model/src").join(rel)));
+        assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&root.join("vendor/acme/model/src").join(rel))));
     }
 }
 
@@ -410,7 +410,7 @@ fn an_always_loaded_file_lands_once_and_warms() {
 
     crate::index::module_cache::with_test_cache_dir(&store, busy, || {
         let idx = indexed(&root);
-        assert!(idx.is_dependency_path(&helpers));
+        assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&helpers)));
         assert!(declares(&idx, "acme_help"));
     });
     assert_eq!(import_rows(&store, "%/helpers.php"), 1, "filed under its own path");

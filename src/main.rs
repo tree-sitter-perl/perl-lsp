@@ -150,6 +150,10 @@ async fn main() {
             cli_clear_cache(args.get(2).map(|s| s.as_str()));
             return;
         }
+        Some("--equiv-dump") if args.len() >= 4 => {
+            cli_equiv_dump(&args[2], &args[3..]);
+            return;
+        }
         Some("--parse") if args.len() == 3 => {
             cli_parse(&args[2]);
             return;

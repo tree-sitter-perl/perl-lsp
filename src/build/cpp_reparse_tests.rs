@@ -122,6 +122,7 @@ fn two_tier_matches_single_tier_expansion() {
                 body: body.to_string(),
                 guards: Vec::new(),
                 def_line: 0,
+                variant_delegates: Vec::new(),
             },
         );
     };
@@ -849,6 +850,7 @@ fn macro_table(defs: &[(&str, Option<&[&str]>, &str)]) -> PreExpandedExternal {
                 body: body.to_string(),
                 guards: Vec::new(),
                 def_line: 0,
+                variant_delegates: Vec::new(),
             },
         );
     }

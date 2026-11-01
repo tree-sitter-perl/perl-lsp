@@ -70,12 +70,12 @@ fn at(src: &str, needle: &str) -> Point {
 fn defs(idx: &ModuleIndex, base: &Path, file: &Path, at: Point) -> Vec<(String, usize)> {
     let fa = std::sync::Arc::new(crate::build::source_files::analyze_file(cpp(), file, u64::MAX).unwrap());
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(file.to_path_buf()), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(file)), at, Some(idx), OverrideScope::default());
     cs.definitions()
         .iter()
         .map(|d| match &d.key {
             FileKey::Path(p) => (p.strip_prefix(base).unwrap_or(p).display().to_string(), d.span.start.row),
-            FileKey::Url(u) => (u.to_string(), d.span.start.row),
+            FileKey::Url(u, _) => (u.to_string(), d.span.start.row),
         })
         .collect()
 }
@@ -97,7 +97,7 @@ fn a_header_the_compile_database_places_outside_the_project_answers_goto_def() {
         defs(&idx, &base, &main, at(MAIN, "detail_fn")),
         [("third_party/include/acme/detail.h".to_string(), 1)]
     );
-    assert!(idx.is_dependency_path(&base.join(widget)));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(base.join(widget))));
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn with_no_database_the_walk_up_places_a_header_above_the_project() {
     let main = base.join("proj/src/main.cpp");
     let idx = indexed(&base.join("proj"));
     assert_eq!(defs(&idx, &base, &main, Point { row: 1, column: 20 }), [("include/up.h".to_string(), 0)]);
-    assert!(idx.is_dependency_path(&base.join("include/up.h")));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(base.join("include/up.h"))));
 }
 
 fn rewrite_unseen(p: &Path, from: &str, to: &str) {
@@ -178,11 +178,11 @@ fn a_landed_header_registers_once_however_many_names_it_declares() {
     let idx = indexed(&base.join("proj"));
     let header = base.join("include/many.h");
     for name in ["m1", "m2", "m3", "M4", "m5_t", "m6"] {
-        assert_eq!(idx.get_cached(name).map(|c| c.path.clone()), Some(header.clone()), "{name} binds the header");
+        assert_eq!(idx.get_cached(name).map(|c| c.path.clone().into_path_buf()), Some(header.clone()), "{name} binds the header");
     }
     let fed = idx.modules_with_symbol("m2");
     assert_eq!(fed.len(), 1, "fed under one name, not one per declared name: {fed:?}");
-    assert_eq!(idx.get_cached(&fed[0]).map(|c| c.path.clone()), Some(header));
+    assert_eq!(idx.get_cached(&fed[0]).map(|c| c.path.clone().into_path_buf()), Some(header));
 }
 
 /// Landings persist through the batched writer: one transaction per chunk
@@ -202,7 +202,7 @@ fn dependency_persists_batch_into_one_transaction() {
         .map(|(p, _)| {
             let path = base.join(p);
             let fa = crate::build::source_files::analyze_file(cpp(), &path, u64::MAX).unwrap();
-            std::sync::Arc::new(crate::index::module_index::CachedModule::new(path, std::sync::Arc::new(fa)))
+            std::sync::Arc::new(crate::index::module_index::CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(path), std::sync::Arc::new(fa)))
         })
         .collect();
     let busy = std::time::Duration::from_secs(5);
