@@ -405,6 +405,7 @@ impl<'a> Builder<'a> {
                 if name == "extends" {
                     if let Some(pkg) = self.current_package.clone() {
                         if self.framework_modes.contains_key(&pkg) {
+                            self.extended_packages.insert(pkg.clone());
                             self.visit_extends_call(node, &pkg);
                         }
                     }
@@ -1040,7 +1041,7 @@ impl<'a> Builder<'a> {
         uses.iter().any(|m| {
             self.framework_mode_modules
                 .get(m)
-                .is_some_and(|(_, kws)| kws.iter().any(|k| k == kw))
+                .is_some_and(|g| g.imports.iter().any(|k| k == kw))
         })
     }
 
