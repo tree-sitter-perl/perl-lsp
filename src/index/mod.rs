@@ -15,3 +15,4 @@ pub mod conclusion_cache;
 pub mod conclusion_flush;
 pub mod pack_invalidator;
 pub mod resolve;
+pub mod sweep;
