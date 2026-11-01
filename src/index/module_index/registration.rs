@@ -379,52 +379,6 @@ impl Drop for SweepMemoGuard {
 }
 
 impl ModuleIndex {
-    /// Re-register a WHOLE (non-stripped) cached copy carrying materialized
-    /// gated emissions. The cache slot routes through `insert_cache` — the
-    /// canonical registration seam — so `edges.feed` publishes the freshly
-    /// synthesized accessors' name records (making them cross-file-visible)
-    /// and the loader-shape / import-gen bookkeeping runs; the path-keyed
-    /// registry pins the whole copy so `whole_present` answers with the
-    /// emissions and no per-query enriched-overlay hop is needed.
-    ///
-    /// WHOLE-COPY residency here is a deliberate, bounded exception (visible
-    /// to `whole_copy_registration_sites_are_allowlisted`): gated emissions
-    /// exist only for plugin-triggered files whose `ClassIsa` gate resolves
-    /// cross-file (sparse by construction), and materialization is
-    /// CLI/batch-only (one-shot startup) — the warm server never calls it.
-    pub(super) fn register_materialized_whole(
-        &self,
-        name: String,
-        path: std::path::PathBuf,
-        cm: Arc<CachedModule>,
-    ) {
-        // Replace, never add: `all_files` is the front-door registry, and an
-        // @INC copy landing in it would read as a project file.
-        if let Some(mut slot) = self.all_files.get_mut(&path) {
-            *slot = cm.clone();
-        }
-        // The path's `all_defs` candidates must track the same generation —
-        // a stale candidate would serve the pre-materialization analysis to
-        // every by-name candidate reader.
-        if let Some(rec) = self.core.registered_names.get(&path) {
-            for (n, _) in rec.iter() {
-                if let Some(mut v) = self.core.all_defs.get_mut(n) {
-                    if let Some(i) = v.iter().position(|c| c.path == path) {
-                        v[i] = cm.clone();
-                    }
-                }
-            }
-            for leaf in super::widening_leaves(cm.analysis.names(), &rec) {
-                if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
-                    if let Some(i) = v.iter().position(|c| c.path == path) {
-                        v[i] = cm.clone();
-                    }
-                }
-            }
-        }
-        self.insert_cache(&name, Some(cm));
-    }
-
     /// Insert a resolved module into the name-keyed cache slot — a thin
     /// front over `IndexCore::insert_resolved`, the one spelling shared
     /// with the resolver thread. CLI/test copies stay whole (`persisted:
@@ -722,7 +676,7 @@ impl ModuleIndex {
         self.core.mint_registration_gen(path);
     }
 
-    fn registration_gen_of(&self, path: &std::path::Path) -> u64 {
+    pub(super) fn registration_gen_of(&self, path: &std::path::Path) -> u64 {
         self.core.registration_gen.get(path).map(|g| *g).unwrap_or(0)
     }
 
@@ -805,19 +759,8 @@ impl ModuleIndex {
         });
         let path = &cached.path;
         let key = self.enrichment_key_memoized(cached);
-        // What THIS request reads. A walk declares it on its session; a
-        // one-shot CLI verb on the process cell; anything else gets `full()`.
-        let needed = crate::model::file_analysis::enrichment_profile();
         if let Some(e) = self.enriched.get(path) {
-            // Fresh AND at least as full as this request needs. A fresh entry
-            // that does not cover falls through to the rebuild below — which
-            // is a cache miss, not an error: the partial copy is missing
-            // exactly the product this verb asked for, and serving it would
-            // read as a missing ANSWER.
-            if e.key == key && !e.profile.covers(needed) {
-                crate::util::ghost_stats::count("enriched_snapshot.profile_miss");
-            }
-            if e.key == key && e.profile.covers(needed) {
+            if e.key == key {
                 let hit = e.analysis.clone();
                 drop(e);
                 // LRU touch — a FIFO would let any sweep evict the hot dep
@@ -902,18 +845,7 @@ impl ModuleIndex {
             whole.heap_estimate().total() as u64,
         );
         let mut copy: FileAnalysis = (*whole).clone();
-        // A session around the build, same as `enrich_open`'s: the overlay's
-        // enrichment is where the cross-file consult cascade lives (FHEM
-        // measured 12.3M slot-value attempts inside these builds, every one
-        // `session.absent`), and without a session the candidate-answer memo
-        // is inert on exactly the path that repeats. A caller already holding
-        // a session (server verbs) nests — this owns only when outermost.
-        {
-            let _session = crate::model::witnesses::ResolutionSession::enter(Some(
-                self as &dyn crate::model::file_analysis::CrossFileLookup,
-            ));
-            copy.enrich_imported_types_with_keys_for(Some(self), Some(&cached.path));
-        }
+        copy.enrich_imported_types_with_keys_for(Some(self), Some(&cached.path));
         let arc = Arc::new(copy);
         // Cycle-tainted: some dep declined mid-enrich (mutual imports), so
         // this copy baked a RAW view of that dep. Caching it would serve
@@ -932,16 +864,9 @@ impl ModuleIndex {
         let stored: Option<Arc<FileAnalysis>> =
             if tainted || bytes > enriched_byte_cap { None } else { Some(arc) };
         let entry_bytes = if stored.is_some() { bytes } else { 0 };
-        // Recorded as what the build actually ran under. With one profile axis
-        // that IS the join with whatever the replaced entry held, because the
-        // only way `covers` fails is a partial entry meeting a fuller request.
-        // A second axis would make this a lossy replacement — still SOUND
-        // (every entry states exactly what it is, so `covers` keeps answering
-        // correctly), just a rebuild for the other verb. Join here if that
-        // ever costs more than it saves.
         self.enriched.insert(
             path.clone(),
-            EnrichedEntry { key, analysis: stored.clone(), bytes: entry_bytes, profile: needed },
+            EnrichedEntry { key, analysis: stored.clone(), bytes: entry_bytes },
         );
         {
             let mut order = self.enriched_order.lock().unwrap();
@@ -2000,14 +1925,6 @@ impl ModuleIndex {
 }
 
 /// One entry in the enrichment overlay.
-///
-/// `profile` is a FIELD, not part of the key. Keying on it would let a
-/// `diagnostics` copy and a `full` copy of the same file coexist under one
-/// fingerprint, doubling the bytes for a distinction only one of them needs;
-/// as a field, the fuller build replaces the partial one and serves both.
-/// Acceptance is `profile.covers(needed)` — a copy enriched under a profile at
-/// least as full as the request's. Never equality: `full` must serve a
-/// `diagnostics` request, or every verb mix thrashes.
 pub(crate) struct EnrichedEntry {
     /// Fingerprint of the file plus its providers — the freshness half.
     pub key: u64,
@@ -2015,6 +1932,4 @@ pub(crate) struct EnrichedEntry {
     /// key: repeat queries skip the deep-copy until the key moves.
     pub analysis: Option<Arc<FileAnalysis>>,
     pub bytes: usize,
-    /// What this copy was actually enriched under.
-    pub profile: crate::model::file_analysis::EnrichmentProfile,
 }

@@ -43,7 +43,7 @@ resolvable by the time each contribution is queried.
 `resolve_expression_type` gains an `array_element_expression` arm
 that queries the array's witness and projects via `element_at`.
 Cursor-context completion falls back to this arm when no witness is
-recorded at the node's span; `method_call_invocant_class` (hover,
+recorded at the node's span; `method_call_invocant_classes` (hover,
 dispatch) reads the same witness tree-free, through
 `expr_type_at_span`.
 

@@ -234,13 +234,7 @@ pub(super) fn dispatch_handler_locations(
                 }
                 if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
                     if o == owner {
-                        locs.push(RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span: sym.selection_span,
-                            access: AccessKind::Declaration,
-                            rewritable: true,
-                            label: None
-                        });
+                        locs.push(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration));
                     }
                 }
             }

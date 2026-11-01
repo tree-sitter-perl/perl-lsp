@@ -20,10 +20,15 @@ memo does not.
 `ResolutionSession::enter(index)` is an RAII guard, thread-local, opened
 once around a WALK — `CandidateSet::references()` (target minting resolves
 invocants too, so it belongs inside), `refs_to` for its other callers, and
-`OpenDocs::enrich_open`, because the open-doc heal runs the same cascade on
-a background thread. Nested enters ride the open one. While it is open the
-`PackageSymbol` /
-`Field` cross-file hops answer from a memo of **candidate
+`enrich_imported_types_with_keys_for` itself, because enrichment runs the
+same cascade and has callers of every kind: the open-doc heal on a
+background thread, the enriched overlay, and every CLI verb. Opening it in
+the enrichment body rather than at each call site means no caller can
+enrich without the memo and the budget — a CLI `--completion` that did,
+on FHEM, ran for hours with no deadline to stop it. Nested enters ride
+the open one. While it is open the candidate hops of the class-keyed
+ladder — one ladder, `class_fallback`, for `PackageSymbol`, `Field`,
+`Param` and `TypeName` — answer from a memo of **candidate
 contributions**: "what does the file at `path` contribute to this query".
 It also shares `visible_def_candidates` (a clone + sort of the whole
 candidate vec per call, asked millions of times per walk) and carries the
@@ -74,10 +79,58 @@ Receiver is the whole structural identity, not a variant tag —
 Hop (1) skips a candidate whose bag IS the querying bag: the reducers
 above already ran on it, and re-entering would recurse. A memo HIT can't
 make that check — it has no bag in hand. It doesn't need to: the stored
-value for candidate `X` is `query_rec(X.bag, q, ctx_X)`, which is exactly
-what a query already running on `X.bag` with the same key computes. Serving
+value for candidate `X` is `query_rec(X.bag, q, ctx_X)` — X's own answer,
+with the class's candidate fan-out cut (next section) — which is exactly what a query
+already running on `X.bag` with the same key computes. Serving
 it early is the fixpoint, not a different answer. Self-skipped candidates
 are never STORED, so an entry always describes a full evaluation.
+
+## The candidate fan-out is keyed without the bag
+
+A candidate is consulted through a chase of its own bag, and when that
+candidate cannot answer locally, its chase reaches the same class's
+candidates again. Keyed by the bag (`VisitedKey`), that inner fan-out is
+a new node and walks every other candidate again, so a class with n
+files nests n deep per query. FHEM has 534 files declaring `main`. One
+slot write in `70_Jabber.pm` sat at the 512-frame depth cap, with every
+frame holding a rehydrated analysis (2.7 GB). The open never finished.
+
+With an index, hop (1) of the ladder is a node of its own in
+`QueryState` (`fan_out_node`), keyed by attachment, receiver and arity.
+When it is on the path, the inner frame skips it and counts a cut, and
+the frame that owns it walks the remaining candidates. Off the path, the
+first walk's answer serves the rest of the query. The key drops the
+asking bag because the bag cannot move the fan-out's answer: each
+candidate is chased on its own bag, and the asker's own candidate is
+the self-skip above.
+
+Only the fan-out is bag-free. The ancestry hop reduces the attachment
+re-keyed to each parent on the bag that asked, and a candidate's bag can
+state its parent's member where the asker's cannot: `Base.pm` writes
+`my $self = Grand->new; $self->{_area} = {..}`, which is
+`Field{Grand, _area}`, so `Field{Base, _area}` asked from `Kid.pm`
+reaches it only through `Base.pm`'s chase walking ancestry on its own
+bag. A skipped fan-out still walks the ancestry. Keying the whole ladder
+without the bag lost exactly those answers (Znuny's chart `_plotarea`).
+
+So a candidate's stored contribution is its own answer: its bag, its
+bag's view of the class's ancestry, and wherever those edges lead, with
+the class's fan-out cut.
+
+An index-less chase (a bake, a hand-built FA) has no fan-out to key.
+
+A free function's cross-file half (`free_function_cross_file`: its
+exporters, then a pack's linkage-visible definitions, and for a
+constructing call the class's definitions) is the same shape — a
+fan-out over files, each chased on its own bag — so it is the same node,
+keyed by name and constructed class, and spends the consult budget per
+file it decodes as the ladder's candidates do. Two fan-outs, one node:
+whatever bounds one bounds the other.
+
+The no-decode `Link` walk (`follow_link`) resolves a hop to candidate
+files through `ClassLadder::of` on the key's attachment, so every key a
+ladder bakes (methods, slots, type names) walks, and the walk can never
+name a class's files differently from the ladder that baked the `Link`.
 
 ## What actually made the verb return
 
@@ -87,7 +140,7 @@ enough — the attribution matters more than the total:
 - **the memo** — breadth: the same candidate answered once per walk instead
   of once per call site;
 - **the budget at the cross-file BOUNDARY, not per hop** — gating hops
-  individually (the `PackageSymbol` candidate loop only) let the cheap hops
+  individually (the class ladder's candidate loop only) let the cheap hops
   through and the walk kept running. One gate at the entry to the whole
   cross-file fallback region is the honest placement;
 - **an enrichment depth cap** — depth: `ENRICHING` refuses only a path
@@ -96,8 +149,8 @@ enough — the attribution matters more than the total:
   analysis per level. Measured at 138k files: one consult descended 220+
   frames of enrich → query → enrich and never came back. A memo cannot help
   a walk that never comes back up to the hop where the memo is consulted;
-- **a session around `enrich_open`** — the open-doc heal runs the identical
-  cascade on a background thread with no walk to bound it.
+- **a session inside enrichment** — the open-doc heal, the overlay and
+  the CLI verbs run the identical cascade with no walk to bound it.
 
 The depth cap is a containment measure, not a tuned value. It exists to
 bound a recursion whose real defect is that the cycle guard is
