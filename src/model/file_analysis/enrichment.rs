@@ -242,7 +242,6 @@ impl FileAnalysis {
                     access: gr.access,
                     binding: gr.binding.clone(),
                     folded_from: None,
-                    import_name: false,
                     arg_count: None,
                 });
             }
