@@ -206,9 +206,9 @@ struct Minted {
     declares: bool,
     /// The identity a class def filed itself under.
     class: Option<Box<str>>,
-    /// A member read's (receiver span, member): what a place written here
-    /// projects, so a write lands where the read looks.
-    projects: Option<Box<(Span, String)>>,
+    /// A member read's (receiver span, member, member token): what a place
+    /// written here projects, so a write lands where the read looks.
+    projects: Option<Box<(Span, String, Span)>>,
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`

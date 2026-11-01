@@ -215,6 +215,9 @@ pub struct SkeletonAnalysis {
     /// undecided: which member each writes is the receiver's type's, settled by
     /// `settle_member_writes`.
     pub member_writes: Vec<MemberWrite>,
+    /// The member tokens an `@flow.place` writes (`n` in `obj.n = v`,
+    /// `obj.n += 1`): their member refs are `AccessKind::Write`.
+    pub write_sites: Vec<crate::model::file_analysis::Span>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -1090,14 +1093,16 @@ impl SkeletonAnalysis {
                 )
             })
             .collect();
+        let write_sites: std::collections::HashSet<Span> = std::mem::take(&mut self.write_sites).into_iter().collect();
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
             .iter()
             .filter_map(|r| {
-                use crate::model::file_analysis::{RefBinding, RefKind};
+                use crate::model::file_analysis::{AccessKind, RefBinding, RefKind};
                 use super::vocab::RefCap;
                 let span = Span { start: r.start, end: r.end };
                 let mut binding = None;
+                let mut access = AccessKind::Read;
                 let kind = match r.kind {
                     // A qualified call (`fmt::format_to(...)`): Perl parity —
                     // the whole spelling rides `target_name`, the qualifier
@@ -1113,6 +1118,9 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        if write_sites.contains(&span) {
+                            access = AccessKind::Write;
+                        }
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1159,7 +1167,7 @@ impl SkeletonAnalysis {
                     span,
                     scope: r.scope,
                     target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    access,
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
@@ -1595,8 +1603,14 @@ fn settle_member_writes(
     // point, clear-and-emit: each round re-derives every write against the
     // bag the last round left. Each round that moves settles a write it
     // could not before or retypes one, so the writes' count bounds it.
+    if writes.is_empty() {
+        return;
+    }
+    let _t = crate::util::ghost_stats::ScopedNs::start("member_write::settle");
+    crate::util::ghost_stats::count_by("member_write::writes", writes.len() as u64);
     let mut settled: Vec<Witness> = Vec::new();
     for _ in 0..=writes.len() {
+        crate::util::ghost_stats::count("member_write::rounds");
         let mut values = Vec::new();
         for w in &writes {
             let Some(class) =

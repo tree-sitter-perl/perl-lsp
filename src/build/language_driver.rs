@@ -1098,6 +1098,7 @@ fn remap_spans(
         names: _,
         slot_writes,
         member_writes,
+        write_sites,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1178,6 +1179,9 @@ fn remap_spans(
         let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
+    }
+    for span in write_sites.iter_mut() {
+        *span = rspan(*span);
     }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);

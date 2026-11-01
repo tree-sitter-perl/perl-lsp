@@ -900,6 +900,17 @@
   left: (identifier) @flow.target
   right: (_) @flow.source)
 
+; An assignment writes the place its left side denotes, whatever that is: a
+; member read's place is the member of the class its receiver is
+; (`this->p = v`, `o.p = v`, `q->p += 1`). Every assignment operator writes
+; the place; only `=` states the value it takes.
+(assignment_expression
+  left: (_) @flow.place)
+(assignment_expression
+  left: (_) @flow.place
+  operator: "="
+  right: (_) @flow.source)
+
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
 ; Capture the moved var + the whole call span; the minter checks scope/name

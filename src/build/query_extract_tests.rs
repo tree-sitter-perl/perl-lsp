@@ -3283,3 +3283,83 @@ fn python_call_arg_count_skips_comments() {
     let call = skel.refs.iter().find(|r| r.name == "f" && r.invocant.is_some()).expect("f member call ref");
     assert_eq!(call.arg_count, Some(2));
 }
+
+/// An assignment writes the member its left side reads, through any
+/// receiver and with any assignment operator: the member token is a write,
+/// and highlight tells it from a read.
+#[test]
+fn cpp_a_member_an_assignment_writes_is_a_write() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use crate::model::file_analysis::AccessKind;
+    let p = std::path::PathBuf::from("/x/write.cpp");
+    let src = "\
+struct Foo { int spin(); };
+struct H {
+    Foo* p;
+    int n;
+    void init(H& o, H* q) {
+        this->p = 0;
+        o.n = 1;
+        q->n += 2;
+        int k = q->n + this->p->spin();
+    }
+};
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let accesses = |name: &str| -> Vec<(usize, AccessKind)> {
+        fa.refs()
+            .iter()
+            .filter(|r| r.target_name == name && r.member_site().is_some())
+            .map(|r| (r.span.start.row, r.access))
+            .collect()
+    };
+    assert_eq!(accesses("p"), vec![(5, AccessKind::Write), (8, AccessKind::Read)]);
+    assert_eq!(accesses("n"), vec![(6, AccessKind::Write), (7, AccessKind::Write), (8, AccessKind::Read)]);
+    let store = OpenDocs::new();
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(p.clone()));
+    let mut seen: Vec<(usize, AccessKind)> = resolve(&store, &fa, key, Point::new(6, 10), None, OverrideScope::default())
+        .highlights()
+        .into_iter()
+        .map(|l| (l.span.start.row, l.access))
+        .collect();
+    seen.sort_by_key(|&(row, _)| row);
+    assert_eq!(
+        seen,
+        vec![(3, AccessKind::Declaration), (6, AccessKind::Write), (7, AccessKind::Write), (8, AccessKind::Read)],
+        "highlight from a written member sees the writes as writes",
+    );
+}
+
+/// A member write gives the member its value: one this file declares keeps
+/// its declared type over what is written, and one it does not declare
+/// (its class is only forward-declared here) takes the written value.
+#[test]
+fn cpp_a_member_write_is_an_assignment_to_the_member() {
+    use crate::build::language_driver::LanguageRegistry;
+    let p = std::path::PathBuf::from("/x/value.cpp");
+    let src = "\
+struct Foo { int spin(); };
+struct Bar { int turn(); };
+Bar* make_bar();
+struct Remote;
+struct H {
+    Foo* p;
+    void init(Remote* r) {
+        r->q = make_bar();
+        this->p = make_bar();
+    }
+    void use(Remote* r) {
+        auto a = r->q;
+        auto b = this->p;
+        return;
+    }
+};
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let at = Point::new(13, 8);
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("a"), Some(InferredType::ClassName("Bar".into())), "an undeclared member takes its write");
+    assert_eq!(ty("b"), Some(InferredType::ClassName("Foo".into())), "a declared member keeps its type");
+}

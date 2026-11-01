@@ -190,7 +190,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
                 st.minted[ix].value = true;
-                st.minted[ix].projects = Some(Box::new((recv.span(), member.clone())));
+                st.minted[ix].projects = Some(Box::new((recv.span(), member.clone(), name.span())));
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -322,10 +322,17 @@ pub(super) fn finish(st: &mut ExtractState) {
     // decided by its receiver's type, which only the assembled analysis
     // answers (`skeleton::settle_member_writes`). A name's place is its
     // binding, which `@flow.target` writes and rebinds; a place no read
-    // projects (a call, a literal) takes nothing.
+    // projects (a call, a literal) takes nothing. The member token is a
+    // write whether or not a value flows in (a compound assignment states
+    // none).
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
-        let read = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last();
-        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(ad, &st.minted, place.match_id)) {
+        let Some((receiver, member, token)) =
+            ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last()
+        else {
+            continue;
+        };
+        out.write_sites.push(*token);
+        if let Some(value) = source_value_span(ad, &st.minted, place.match_id) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: *receiver,
                 member: member.clone(),
