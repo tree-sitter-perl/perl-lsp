@@ -2,7 +2,7 @@
 //! search root (python's `sys.path`, perl's `@INC`): a name is a file under
 //! one of the roots, spelled by the driver's `ModuleSpelling`.
 
-use crate::build::language_driver::{DependencyLocator, LanguageDriver, Located, LocatedBy};
+use crate::build::language_driver::{Declared, DependencyLocator, LanguageDriver, Located, LocatedBy};
 use std::path::{Path, PathBuf};
 
 pub struct SearchPathLocator {
@@ -17,6 +17,7 @@ pub struct SearchPathLocator {
     /// each holding some of `search`.
     roots: Vec<PathBuf>,
     inputs: Vec<PathBuf>,
+    declared: Vec<Declared>,
 }
 
 impl SearchPathLocator {
@@ -33,7 +34,14 @@ impl SearchPathLocator {
             search,
             roots: roots.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or(p)).collect(),
             inputs,
+            declared: Vec::new(),
         }
+    }
+
+    /// The same map, with what the project declares besides.
+    pub fn declaring(mut self, declared: Vec<Declared>) -> Self {
+        self.declared = declared;
+        self
     }
 }
 
@@ -63,6 +71,9 @@ impl DependencyLocator for SearchPathLocator {
             }
         }
         out
+    }
+    fn declared_demand(&self) -> &[Declared] {
+        &self.declared
     }
     fn roots(&self) -> &[PathBuf] {
         &self.roots

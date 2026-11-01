@@ -84,8 +84,8 @@ pub(super) fn acquire(
 
 /// What a landed file asks for next. Parents and re-exports always: the
 /// MRO and a module's export surface read them at query time. With
-/// `prefetch`, also its imports and the classes its subs return — the
-/// chain a long-lived session walks before anyone asks for it.
+/// `prefetch`, everything it uses (`used_identities`) and the classes its
+/// subs return — the chain a session walks before anyone asks for it.
 pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();
@@ -103,7 +103,7 @@ pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<St
         if !prefetch {
             continue;
         }
-        asks.extend(fa.imports.iter().map(|i| i.module_name.clone()));
+        asks.extend(fa.used_identities());
         // `has foo => sub { Bar->new }`, plugin-emitted typed subs, return
         // annotations: classes a chain walks through at query time.
         for sym in fa.symbols() {

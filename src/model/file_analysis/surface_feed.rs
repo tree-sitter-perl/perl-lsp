@@ -132,6 +132,7 @@ impl FileAnalysis {
             column_keyed_verbs: _column_keyed_verbs, // baked from the plugin registry, not this file's source; the plugin fingerprint owns invalidation
             language: _language,                 // the origin's serving-language identity; `resolve()` reads it live per query, never baked into a consumer's cached state
             lib_roots: _lib_roots,               // `use lib` changes what THIS file sees of @INC, never what a consumer sees of this file
+            referenced_identities: _referenced_identities, // what THIS file asks the dependency tier for, never what a consumer sees of it
             dynamic_dispatch_sites: _dynamic_dispatch_sites, // heatmap soundness counter, read live
             attr_projections: _attr_projections, // grouping metadata for live rename/reference queries; every member is a synthesized symbol already projected
 

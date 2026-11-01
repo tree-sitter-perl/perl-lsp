@@ -3118,3 +3118,31 @@ fn unknown_return_is_not_displayed() {
     assert_eq!(fa.find_method_return_type("Foo", "a", None, None), Some(InferredType::Unknown));
     assert_eq!(fa.method_detail("Foo", "a", None, None), "Foo");
 }
+
+/// Demand is what a file uses: its imports, its parents, and every package
+/// its references name — first-named first, once each — never a package
+/// it declares itself.
+#[test]
+fn used_identities_are_what_a_file_names_across_files() {
+    let fa = build_fa_from_source(
+        "package My::App;\nuse parent -norequire, 'Base::Thing';\nuse Foo::Bar;\n\
+         sub go { Other::Class->new; My::App->x; require Req::Mod; Foo::Bar->y }\n1;\n",
+    );
+    let used = fa.used_identities();
+    for name in ["Foo::Bar", "Base::Thing", "Other::Class", "Req::Mod"] {
+        assert!(used.iter().any(|u| u == name), "{name} missing from {used:?}");
+    }
+    assert!(!used.iter().any(|u| u == "My::App"), "a declared package is not demand: {used:?}");
+    let mut once = used.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(once.len(), used.len(), "each identity once: {used:?}");
+    assert_eq!(used.first().map(String::as_str), Some(fa.imports[0].module_name.as_str()), "imports first");
+
+    // It survives every strip: the warm stub and a stripped copy ask the same.
+    let mut stripped = fa.clone();
+    stripped.evict_refs();
+    stripped.evict_symbols();
+    stripped.evict_witness_bag();
+    assert_eq!(stripped.used_identities(), used);
+}

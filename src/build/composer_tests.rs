@@ -114,6 +114,7 @@ fn a_missing_or_malformed_manifest_locates_nothing_but_still_names_its_inputs() 
 
     let root = project("none", &[("vendor/composer/installed.json", V2)]);
     assert!(ResolvedConfig::load(&root, true).is_err());
+    assert!(locator(&root, php()).declared_demand().is_empty());
 
     // a malformed installed.json is a project with nothing installed
     let root = project("badinst", &[("composer.json", ROOT_JSON), ("vendor/composer/installed.json", "[{")]);
@@ -186,6 +187,7 @@ fn psr_4_answers_by_the_longest_prefix_and_psr_0_keeps_the_whole_identity() {
             ("vendor/acme/model/src/Deep/Thing.php", "<?php"),
             ("vendor/old/lib/lib/Old/Tool/Hammer.php", "<?php"),
             ("vendor/old/lib/legacy/anything.php", "<?php\nclass Legacy_Widget {}\n"),
+            ("vendor/acme/model/helpers.php", "<?php"),
             ("vendor/composer/autoload_classmap.php", CLASSMAP),
         ],
     );
@@ -207,6 +209,10 @@ fn psr_4_answers_by_the_longest_prefix_and_psr_0_keeps_the_whole_identity() {
     assert_eq!(at("Legacy_Widget"), [v("old/lib/legacy/anything.php")]);
     // and answers first, as Composer's loader asks it first
     assert_eq!(at("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
+    // a `files` entry is declared, and asked by its own path
+    let helpers = v("acme/model/helpers.php").display().to_string();
+    assert_eq!(loc.declared_demand(), [Declared::Loaded(helpers.clone())]);
+    assert_eq!(loc.locate(&helpers), [Located { path: v("acme/model/helpers.php"), by: LocatedBy::Exact }]);
     assert_eq!(loc.roots(), [root.join("vendor")]);
 }
 

@@ -4,7 +4,7 @@
 //! the tier's root, so the workspace walk leaves it out. Project `lib/` is
 //! searched but never a tier root: the walk keeps owning it.
 
-use crate::build::language_driver::LanguageDriver;
+use crate::build::language_driver::{Declared, LanguageDriver};
 use crate::build::search_path::SearchPathLocator;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,5 +66,14 @@ pub fn locator(root: Option<&Path>, driver: &'static dyn LanguageDriver) -> Arc<
         // writes its snapshot.
         inputs = vec![lib, root.join("cpanfile.snapshot")];
     }
-    Arc::new(SearchPathLocator::new(driver, search, roots, inputs))
+    // The cpanfile's `requires` are read once per map, not a map input:
+    // listing a module changes what a session prefetches, not where any
+    // name is.
+    let declared = root
+        .map(crate::build::cpanfile::parse_cpanfile)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Declared::Listed)
+        .collect();
+    Arc::new(SearchPathLocator::new(driver, search, roots, inputs).declaring(declared))
 }

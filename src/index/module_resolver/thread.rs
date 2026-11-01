@@ -23,48 +23,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // Track which extract version each module was resolved at.
     let mut seen: HashMap<String, i64> = HashMap::new();
 
-    // Queue cpanfile dependencies (non-blocking — lets priority items go first).
-    // Track total for progress reporting in the main loop. Server-only: a
-    // one-shot session must not burn its wall resolving the dep tree in the
-    // background.
-    let mut cpanfile_total = 0usize;
-    let mut cpanfile_done = 0usize;
-    if let (Some(srv), true) = (&server, hub) {
-        if let Some(root_path) = root_path.as_ref() {
-            let cpanfile_modules = cpanfile::parse_cpanfile(root_path);
-            let to_resolve: Vec<String> = cpanfile_modules
-                .into_iter()
-                .filter(|m| !core.cache.contains_key(m.as_str()))
-                .collect();
-
-            if !to_resolve.is_empty() {
-                cpanfile_total = to_resolve.len();
-                log::info!("cpanfile: {} modules queued for indexing", cpanfile_total);
-
-                // Start progress bar.
-                let token = NumberOrString::String("perl-lsp/indexing".to_string());
-                let _ = srv.handle.block_on(srv.client.send_request::<request::WorkDoneProgressCreate>(
-                    WorkDoneProgressCreateParams { token: token.clone() },
-                ));
-                srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
-                    ProgressParams {
-                        token,
-                        value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
-                            WorkDoneProgressBegin {
-                                title: "Indexing Perl modules".into(),
-                                cancellable: Some(false),
-                                message: None,
-                                percentage: Some(0),
-                            },
-                        )),
-                    },
-                ));
-
-                core.queue.ask(to_resolve);
-            }
-        }
-    }
-
     // The conclusion-repair frontier: paths holding a valid blob whose map the
     // derivation-fingerprint gate cleared. Enumerated ONCE here rather than
     // re-queried per slice — the set only shrinks as we drain it, and a
@@ -105,32 +63,23 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         })
         .unwrap_or_default();
 
-    // Descent beyond parents and re-exports is the Perl hub's prefetch. A
-    // one-shot run takes it too: what it lands persists, so the next run
-    // warms it instead of parsing.
+    // Descent beyond parents and re-exports is the Perl hub's prefetch: a
+    // pack's wider descent waits on a measurement. A one-shot run takes it
+    // too: what it lands persists, so the next run warms it instead of
+    // parsing.
     let prefetch = hub;
     let mut adopted = 0u64;
+    let mut progress = Progress::default();
+    // Adopted before the first wait as well as after each, so what the map
+    // declares is asked though nothing else is.
+    adopt_map(&core, db.as_ref(), server.as_ref(), &mut seen, &mut adopted, &mut listed, &mut progress);
     core.queue.started.store(true, std::sync::atomic::Ordering::Release);
     notify_resolved(&core);
 
     // Main resolve loop — drain priority first, then pending.
     loop {
         let batch = drain_or_repair(&core, &core.queue, &mut repair_frontier, db.as_ref());
-
-        // A new map: what was resolved under the old one may resolve
-        // differently now.
-        let generation = core.dependency_generation();
-        if generation != adopted {
-            adopted = generation;
-            seen.clear();
-            // What the old map landed retired with it; its rows go too.
-            if let (Some(conn), Some(snap)) = (db.as_ref(), core.map_snapshot()) {
-                let _ = module_cache::validate_dependency_fingerprint(conn, snap.fingerprint);
-            }
-            if generation != listed {
-                listed = core.list_available();
-            }
-        }
+        adopt_map(&core, db.as_ref(), server.as_ref(), &mut seen, &mut adopted, &mut listed, &mut progress);
 
         // One diagnostics refresh per drained BATCH, not per module: a
         // resolve takes longer than the refresh debounce's settle window,
@@ -182,20 +131,20 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             // Remove from stale set after re-resolution (no-op otherwise).
             core.stale_modules.remove(&module_name);
 
-            // Report cpanfile progress.
+            // Report the prefetch's progress.
             if let Some(srv) = &server {
-                if cpanfile_total > 0 && cpanfile_done < cpanfile_total {
-                    cpanfile_done += 1;
-                    let pct = (cpanfile_done * 100 / cpanfile_total) as u32;
+                if progress.total > 0 && progress.done < progress.total {
+                    progress.done += 1;
+                    let pct = (progress.done * 100 / progress.total) as u32;
                     let token = NumberOrString::String("perl-lsp/indexing".to_string());
-                    if cpanfile_done < cpanfile_total {
+                    if progress.done < progress.total {
                         srv.handle.block_on(srv.client.send_notification::<notification::Progress>(
                             ProgressParams {
                                 token,
                                 value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
                                     WorkDoneProgressReport {
                                         cancellable: Some(false),
-                                        message: Some(format!("{} ({}/{})", module_name, cpanfile_done, cpanfile_total)),
+                                        message: Some(format!("{} ({}/{})", module_name, progress.done, progress.total)),
                                         percentage: Some(pct),
                                     },
                                 )),
@@ -207,7 +156,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                                 token,
                                 value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
                                     WorkDoneProgressEnd {
-                                        message: Some(format!("Indexed {} modules", cpanfile_total)),
+                                        message: Some(format!("Indexed {} modules", progress.total)),
                                     },
                                 )),
                             },
@@ -231,6 +180,73 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
         }
     }
+}
+
+/// How far a session's prefetch of the declared dependencies has got.
+#[derive(Default)]
+struct Progress {
+    total: usize,
+    done: usize,
+}
+
+/// Adopt a new map: what was resolved under the old one may resolve
+/// differently now, so its record of tries clears, the store drops what the
+/// old map landed, the listing refreshes, and what the project declares is
+/// asked — every `Declared::Loaded` in every session, a `Declared::Listed`
+/// only where the session prefetches (a server; a one-shot run asks what
+/// its files use, which is everything it runs).
+fn adopt_map(
+    core: &IndexCore,
+    db: Option<&rusqlite::Connection>,
+    server: Option<&ServerSession>,
+    seen: &mut HashMap<String, i64>,
+    adopted: &mut u64,
+    listed: &mut u64,
+    progress: &mut Progress,
+) {
+    use crate::build::language_driver::Declared;
+    let generation = core.dependency_generation();
+    if generation == *adopted {
+        return;
+    }
+    *adopted = generation;
+    seen.clear();
+    let Some(snap) = core.map_snapshot() else { return };
+    if let Some(conn) = db {
+        let _ = module_cache::validate_dependency_fingerprint(conn, snap.fingerprint);
+    }
+    if generation != *listed {
+        *listed = core.list_available();
+    }
+    let mut loaded: Vec<String> = Vec::new();
+    let mut prefetched: Vec<String> = Vec::new();
+    for d in snap.locator.declared_demand() {
+        match d {
+            Declared::Loaded(n) => loaded.push(n.clone()),
+            Declared::Listed(n) if server.is_some() => prefetched.push(n.clone()),
+            Declared::Listed(_) => {}
+        }
+    }
+    prefetched.retain(|n| !core.cache.contains_key(n.as_str()));
+    if let (Some(srv), false) = (server, prefetched.is_empty()) {
+        log::info!("{} declared dependencies queued for indexing", prefetched.len());
+        *progress = Progress { total: prefetched.len(), done: 0 };
+        let token = NumberOrString::String("perl-lsp/indexing".to_string());
+        let _ = srv.handle.block_on(srv.client.send_request::<request::WorkDoneProgressCreate>(
+            WorkDoneProgressCreateParams { token: token.clone() },
+        ));
+        srv.handle.block_on(srv.client.send_notification::<notification::Progress>(ProgressParams {
+            token,
+            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "Indexing dependencies".into(),
+                cancellable: Some(false),
+                message: None,
+                percentage: Some(0),
+            })),
+        }));
+    }
+    loaded.extend(prefetched);
+    ask_unresolved(core, seen, loaded);
 }
 
 /// The served language's store — its validity gates, Perl's builtin docs,

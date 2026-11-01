@@ -12,7 +12,6 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::Client;
 
-use crate::build::cpanfile;
 use crate::index::module_cache;
 use crate::index::module_index::{
     CachedModule, IndexCore, Providers, ResolveQueue,

@@ -174,10 +174,17 @@ impl ModuleIndex {
         self.core.queue.notify_new_work();
     }
 
-    /// `request_resolve` for everything the project's own files name
+    /// `request_resolve` for everything the project's own files use
     /// (`dependency_demand`).
     pub fn request_dependency_demand(&self) {
         for name in self.dependency_demand() {
+            self.request_resolve(&name);
+        }
+    }
+
+    /// `request_resolve` for everything one file uses (`used_identities`).
+    pub fn request_used(&self, analysis: &FileAnalysis) {
+        for name in analysis.used_identities() {
             self.request_resolve(&name);
         }
     }

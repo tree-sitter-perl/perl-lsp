@@ -212,6 +212,11 @@ pub struct ModuleSpelling {
 pub trait DependencyLocator: Send + Sync {
     /// Files that may declare `identity`, most-preferred first.
     fn locate(&self, identity: &str) -> Vec<Located>;
+    /// What the project declares it depends on apart from what its files
+    /// use, asked like a use. Each is a name `locate` places.
+    fn declared_demand(&self) -> &[Declared] {
+        &[]
+    }
     /// Directories whose files belong to this tier, never to the walk.
     fn roots(&self) -> &[std::path::PathBuf];
     /// The manifests this map was read from: a change to any is a new map.
@@ -226,6 +231,18 @@ pub trait DependencyLocator: Send + Sync {
     /// completion offers before anything asks for a body. A directory the
     /// workspace sits in is never walked (`build::search_path::listable`).
     fn for_each_name(&self, _workspace: Option<&std::path::Path>, _visit: &mut dyn FnMut(&str)) {}
+}
+
+/// A dependency a project declares outside its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Declared {
+    /// The runtime loads it whatever the project names (Composer's
+    /// `files`), so every session asks for it: nothing that calls into it
+    /// is a use the demand would see.
+    Loaded(String),
+    /// The manifest lists it (a cpanfile's `requires`). What the project
+    /// runs it also uses, so only a session that prefetches asks for it.
+    Listed(String),
 }
 
 /// A file a dependency map places for a name, and how it got there.

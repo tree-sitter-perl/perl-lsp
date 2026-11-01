@@ -347,23 +347,13 @@ impl ModuleIndex {
         self.core.dependency_generation()
     }
 
-    /// The identities the project's own files name across files: each
-    /// file's imports and declared parents. Read off the resident copies —
-    /// both lanes survive every strip and ride the warm stub.
+    /// What the project's own files use across files (`used_identities`),
+    /// read off the resident copies.
     pub fn dependency_demand(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        self.for_each_registered_file(&mut |cm| out.extend(dependency_demand_of(&cm.analysis)));
+        self.for_each_registered_file(&mut |cm| out.extend(cm.analysis.used_identities()));
         out.sort();
         out.dedup();
         out
     }
-}
-
-/// One file's cross-file asks: what it imports and the parents it names.
-pub fn dependency_demand_of(fa: &FileAnalysis) -> Vec<String> {
-    let mut out: Vec<String> = fa.imports.iter().map(|i| i.module_name.clone()).collect();
-    for (_child, parents) in fa.package_parent_edges() {
-        out.extend(parents.iter().cloned());
-    }
-    out
 }
