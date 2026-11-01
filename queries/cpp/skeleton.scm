@@ -868,25 +868,23 @@
   declarator: (identifier) @flow.rebind)
 
 ; the std container / optional / smart-pointer resets put a moved-from object
-; back into a known state, so the receiver rebinds at the call: a use after
-; `x.clear()` is NOT a use-after-move. An ordinary `x.use()` is not here, so
-; the canonical bug still flags.
+; back into a known state: a use after `x.clear()` is NOT a use-after-move. A
+; variable receiver rebinds at the call; a member receiver's place gets a
+; value again. An ordinary `x.use()` is not here, so the canonical bug still
+; flags.
 (call_expression
   function: (field_expression
-    argument: (identifier) @flow.rebind
+    argument: [
+      (identifier) @flow.rebind
+      (field_expression) @flow.place
+    ]
     field: (field_identifier) @_m)
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
-; A write to a member, or one of those resets on it, gives that place a
-; value again: it ends a narrowing or a move of the member. It states no
-; value: the member's is its declaration's.
+; A write to a member gives that place a value again: it ends a narrowing or
+; a move of the member. It states no value: the member's is its declaration's.
 (assignment_expression
   left: (field_expression) @flow.place)
-(call_expression
-  function: (field_expression
-    argument: (field_expression) @flow.place
-    field: (field_identifier) @_m)
-  (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
