@@ -99,11 +99,12 @@ pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
 /// No `::` → the node's own span. FQ identifiers are single-line tokens, so
 /// the tail column is `start.column + byte_offset_of_tail`.
 pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
-    match text.rfind("::") {
+    let sep = crate::model::conventions::PERL_SPELLINGS.sep().unwrap_or_default();
+    match text.rfind(sep).filter(|_| !sep.is_empty()) {
         Some(idx) => {
             let s = node.start_position();
             Span {
-                start: tree_sitter::Point { row: s.row, column: s.column + idx + 2 },
+                start: tree_sitter::Point { row: s.row, column: s.column + idx + sep.len() },
                 end: node.end_position(),
             }
         }

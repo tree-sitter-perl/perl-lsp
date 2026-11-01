@@ -906,3 +906,28 @@ fn only_the_package_isa_names_parents() {
     assert!(parents_of(&fa, "L").is_empty());
     assert!(!fa.has_dynamic_parents("L"));
 }
+
+/// `sub Foo::bar {}` declares `bar` in `Foo`, wherever it is written: the
+/// symbol's package is the qualifier, its name the leaf, its selection the
+/// leaf's token, and `Foo`'s method walk finds it.
+#[test]
+fn a_qualified_sub_belongs_to_the_package_its_name_spells() {
+    let src = "package Ext;\nsub Foo::bar { my ($self) = @_; return $self }\nsub UNIVERSAL::dump { 1 }\nsub ::top { 1 }\n";
+    let fa = build_fa(src);
+    let bar = fa.symbols_named("bar").iter().map(|&id| fa.symbol(id)).next().expect("bar is minted under its leaf");
+    assert_eq!(bar.package.as_deref(), Some("Foo"));
+    assert_eq!((bar.selection_span.start.column, bar.selection_span.end.column), (9, 12));
+    assert!(fa.symbols_named("Foo::bar").is_empty());
+    let dump = fa.symbols_named("dump").iter().map(|&id| fa.symbol(id)).next().expect("dump");
+    assert_eq!(dump.package.as_deref(), Some("UNIVERSAL"));
+    let top = fa.symbols_named("top").iter().map(|&id| fa.symbol(id)).next().expect("top");
+    assert_eq!(top.package.as_deref(), Some("main"));
+    assert!(matches!(
+        fa.resolve_method_in_ancestors("Foo", "bar", None),
+        Some(MethodResolution::Local { ref class, .. }) if class == "Foo"
+    ));
+    assert!(fa.resolve_method_in_ancestors("Ext", "bar", None).is_none());
+    // The body's invocant is the class the sub is declared in.
+    let at = Point { row: 1, column: 40 };
+    assert_eq!(fa.inferred_type_via_bag("$self", at).and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("Foo"));
+}

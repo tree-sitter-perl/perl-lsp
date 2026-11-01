@@ -868,7 +868,10 @@ impl<'a> Builder<'a> {
                 ScopeKind::Sub { name } => (false, Some(name.as_str())),
                 _ => continue,
             };
-            let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
+            // The class a sub belongs to is its symbol's (`sub Foo::bar`
+            // is `Foo`'s), not the package in force around it.
+            let owner_pkg = scope.owner.and_then(|o| self.symbols[o.0 as usize].package.clone());
+            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded.contains(&scope.id)) else { continue };
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             // A named sub of a class package is a method unless the file
             // only ever calls it as a plain function.
