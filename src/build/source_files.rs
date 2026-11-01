@@ -1,6 +1,7 @@
-//! A language's source files on disk: the one directory walk every indexer
-//! and dependency map shares, and the one guarded read-and-analyze every
-//! pack-driver parse goes through.
+//! A language's source files on disk: the directory walk every indexer and
+//! dependency map shares, and the size-capped read-and-analyze every
+//! indexing and dependency parse of a file on disk goes through. An open
+//! editor buffer is analyzed straight from memory, uncapped.
 
 use crate::build::language_driver::LanguageDriver;
 use crate::model::file_analysis::FileAnalysis;
@@ -93,6 +94,11 @@ pub fn report_oversize(oversize: &[(PathBuf, u64)], cap: u64) {
 /// reported with the file it hit, since one that doesn't name its file
 /// costs a bisection.
 pub fn analyze_file(driver: &dyn LanguageDriver, path: &Path, cap: u64) -> Option<FileAnalysis> {
+    // Stat before reading: a generated gigabyte under `vendor/` is refused
+    // without being read whole first.
+    if std::fs::metadata(path).ok()?.len() >= cap {
+        return None;
+    }
     let source = std::fs::read_to_string(path).ok()?;
     if source.len() as u64 >= cap {
         return None;
