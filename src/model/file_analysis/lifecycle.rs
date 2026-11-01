@@ -1018,25 +1018,87 @@ impl FileAnalysis {
         module_index: &dyn CrossFileLookup,
     ) -> Option<(Vec<String>, Vec<String>)> {
         // Only a parent edge lends an `import`; most packages (`main`
-        // above all) declare none, and the MRO walk is not free.
+        // above all) declare none.
         if self.declared_parents(module).is_empty() {
             return None;
         }
-        let (class, file) = match self.resolve_method_in_ancestors(module, "import", Some(module_index))? {
-            MethodResolution::Local { class, .. } if class == module => return None,
-            MethodResolution::Local { class, .. } => (class, None),
-            MethodResolution::CrossFile { class, .. } if class == module => return None,
-            MethodResolution::CrossFile { class, def_module, .. } => {
-                let file = module_index.get_cached(def_module.as_deref().unwrap_or(&class))?;
-                (class, Some(file))
+        // Asked once per export query, so every step is a lookup until one
+        // could matter: the symbol index says which classes may declare an
+        // `import` (it files a file's names under each package the file
+        // registers, so it over-approximates), a class's lists are its
+        // package table's (kept through every strip), and only lists worth
+        // lending pay for reading the class's symbols to confirm the
+        // `import` is its own. The MRO past `module` starts at the parents
+        // this file gives it: each candidate file answers for its own
+        // `@ISA` and its own `import`, and FHEM's `main` has 534 of them.
+        let declares_here = |cls: &str| {
+            self.symbols_named("import").iter().any(|&sid| {
+                matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(sid, cls)
+            })
+        };
+        let mut indexed: Option<HashSet<String>> = None;
+        let mut may_declare = |cls: &str| {
+            declares_here(cls)
+                || indexed
+                    .get_or_insert_with(|| module_index.modules_with_symbol("import").into_iter().collect())
+                    .contains(cls)
+        };
+        let declares = |cls: &str| {
+            declares_here(cls)
+                || module_index
+                    .visible_def_candidates(cls)
+                    .iter()
+                    .any(|c| module_index.symbols_present(c).has_sub_in_package("import", cls))
+        };
+        let lists_of = |cls: &str| -> Option<(Vec<String>, Vec<String>)> {
+            let listing = |e: &PackageExports| !e.export.is_empty() || !e.export_ok.is_empty();
+            let own = self.package_exports(cls).filter(|e| listing(e)).map(|e| (e.export.clone(), e.export_ok.clone()));
+            own.or_else(|| {
+                module_index.visible_def_candidates(cls).iter().find_map(|c| {
+                    c.analysis.package_exports(cls).filter(|e| listing(e)).map(|e| (e.export.clone(), e.export_ok.clone()))
+                })
+            })
+        };
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        let graph = GraphView::new(self, Some(module_index));
+        // `Some(answer)` once a class whose `import` runs is reached.
+        let mut answer: Option<Option<(Vec<String>, Vec<String>)>> = None;
+        {
+            let mut visit = |cls: &str| {
+                if cls == module || !may_declare(cls) {
+                    return false;
+                }
+                match lists_of(cls) {
+                    // Lending nothing whether or not the `import` is its own.
+                    None => answer = Some(None),
+                    Some(lists) if declares(cls) => answer = Some(Some(lists)),
+                    Some(_) => return false,
+                }
+                true
+            };
+            for parent in self.declared_parents(module) {
+                let mut found = visit(parent);
+                if !found {
+                    graph.walk(Node::Class(parent.clone()), EdgeKindMask::INHERITS, &mut |n| match n {
+                        Node::Class(c) if visit(c) => {
+                            found = true;
+                            WalkControl::Stop
+                        }
+                        _ => WalkControl::Continue,
+                    });
+                }
+                if found {
+                    break;
+                }
             }
-        };
-        let s = match &file {
-            Some(f) => f.analysis.export_surface_with_index(&class, module_index),
-            None => self.export_surface_with_index(&class, module_index),
-        };
-        (!s.default_set().is_empty() || !s.optional_set().is_empty())
-            .then(|| (s.default_set().to_vec(), s.optional_set().to_vec()))
+        }
+        let lists = answer??;
+        // An `import` this file gives the module shadows the inherited one
+        // (in this file's view, as its `@ISA` is).
+        if declares_here(module) {
+            return None;
+        }
+        Some(lists)
     }
 
     /// Like `export_surface`, but resolved through `module_index`: a module
