@@ -174,9 +174,10 @@ pub trait LanguageDriver: Send + Sync {
     fn registration_names(&self, analysis: &FileAnalysis) -> Vec<(String, bool)> {
         analysis.linkage_feed()
     }
-    /// File names whose change can move `dependency_locator`'s answer —
-    /// the watcher subscribes to them; the locator's own `inputs` decide
-    /// which changes count.
+    /// The file names the watcher subscribes to so a package install
+    /// moves the map: every name a locator's `inputs` spell, since an
+    /// input no watcher reports moves a one-shot run's fingerprint and not
+    /// the server's (`every_dependency_input_is_a_watched_manifest`).
     fn dependency_manifests(&self) -> &[&'static str] {
         &[]
     }
@@ -854,7 +855,7 @@ fn python_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
-        file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
+        file_module: Some(FileModuleRule { marker: crate::build::packs::PYTHON_PACKAGE_MARKER, name: crate::build::packs::python_file_module }),
         dependencies: Some(PackDependencies { locator: crate::build::venv::locator, manifests: &["pyvenv.cfg"] }),
     }
 }

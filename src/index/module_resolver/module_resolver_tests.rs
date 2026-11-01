@@ -713,7 +713,7 @@ fn perls_map_is_inc_with_the_project_libs_first() {
     expected.extend(discover_inc_paths());
     assert_eq!(inc.search_roots(), expected.as_slice());
     assert_eq!(inc.roots(), [dir.join("local")]);
-    assert_eq!(inc.inputs(), [dir.join("local/lib/perl5"), dir.join("cpanfile.snapshot")]);
+    assert_eq!(inc.inputs(), [dir.join("cpanfile.snapshot")]);
     // The cpanfile's requires are declared, for a prefetching session.
     use crate::build::language_driver::Declared;
     assert_eq!(inc.declared_demand(), [Declared::Listed("Outer".into()), Declared::Listed("Twin".into())]);

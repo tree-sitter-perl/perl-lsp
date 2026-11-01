@@ -42,15 +42,15 @@ pub fn python_pack() -> LangPack {
         annot_type: annotation_type,
         module_paths: |m| {
             let base = m.replace('.', "/");
-            vec![format!("{base}.py"), format!("{base}/__init__.py")]
+            vec![format!("{base}.py"), format!("{base}/{PYTHON_PACKAGE_MARKER}")]
         },
         // `pkg/mod.py` is `pkg.mod`, `pkg/__init__.py` is `pkg`; a segment
         // that is no identifier (`six-1.16.dist-info`) names no module.
         module_of: |p| {
             let stem = p.strip_suffix(".py")?;
             let module = match stem.rsplit_once('/') {
-                Some((dir, "__init__")) => dir,
-                None if stem == "__init__" => return None,
+                Some((dir, PACKAGE_STEM)) => dir,
+                None if stem == PACKAGE_STEM => return None,
                 _ => stem,
             };
             let ident = |s: &str| {
@@ -135,6 +135,11 @@ fn split_top_level(t: &str, sep: char) -> Vec<&str> {
     out
 }
 
+/// The file that makes a directory a package, and its stem, which names
+/// the package rather than a module in it.
+pub const PYTHON_PACKAGE_MARKER: &str = "__init__.py";
+const PACKAGE_STEM: &str = "__init__";
+
 /// The module `path` is: its stem under the chain of package directories
 /// above it (walk up while the directory is marked — holds `__init__.py`;
 /// the first unmarked one is the import root), `__init__` naming its
@@ -142,7 +147,7 @@ fn split_top_level(t: &str, sep: char) -> Vec<&str> {
 /// a script dir) is named from the root instead, when it lies under one.
 pub fn python_file_module(path: &Path, dirs: &MarkedDirs<'_>) -> Option<FileModule> {
     let stem = path.file_stem()?.to_str()?;
-    let is_package = stem == "__init__";
+    let is_package = stem == PACKAGE_STEM;
     let mut segments: Vec<String> = Vec::new();
     if !is_package {
         segments.push(stem.to_string());

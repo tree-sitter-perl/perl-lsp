@@ -524,18 +524,99 @@ pub enum IdentitySpelling {
     Reference,
 }
 
+spelled! {
+    /// A capture of `queries/php/composer-classmap.scm`, the classmap
+    /// `composer dump-autoload` generates: read beside the extraction
+    /// (`document_matches`), never part of a pack's skeleton.
+    pub enum ClassmapCap {
+        /// The class identity, a single-quoted string.
+        Class = "classmap.class",
+        /// The variable a path is anchored at; only the document's
+        /// predicates read it.
+        Anchor = "classmap.anchor",
+        /// A path under `$vendorDir`.
+        VendorPath = "classmap.path.vendor",
+        /// A path under `$baseDir`.
+        BasePath = "classmap.path.base",
+        /// A path under neither, spelled whole.
+        AbsolutePath = "classmap.path.absolute",
+    }
+}
+
+impl super::DocumentVocab for ClassmapCap {
+    fn from_capture(name: &str) -> Option<Self> {
+        Self::parse(name)
+    }
+}
+
 impl Capture {
     /// Whether this capture's token spells a module or class identity, and
     /// how. The cursor's module-path slot reads it.
     pub fn identity_spelling(&self) -> Option<IdentitySpelling> {
+        // Exhaustive: a new capture is a compile error here until it says
+        // whether module-path completion reads it.
+        use Capture as C;
         match self {
-            Capture::Import(ImportCap::Name | ImportCap::Module | ImportCap::Prefix | ImportCap::Path | ImportCap::Arg) => {
+            C::Import(ImportCap::Name | ImportCap::Module | ImportCap::Prefix | ImportCap::Path | ImportCap::Arg) => {
                 Some(IdentitySpelling::Import)
             }
-            Capture::Ref(RefCap::Type) | Capture::NamedReceiver(ReceiverCap::Class) | Capture::Parent | Capture::ParentSuper => {
+            C::Import(ImportCap::Statement | ImportCap::Relative | ImportCap::Alias) => None,
+            C::Ref(RefCap::Type) | C::NamedReceiver(ReceiverCap::Class) | C::Parent | C::ParentSuper => {
                 Some(IdentitySpelling::Reference)
             }
-            _ => None,
+            C::Ref(
+                RefCap::Call
+                | RefCap::Import
+                | RefCap::QCall
+                | RefCap::Method
+                | RefCap::MemberValue
+                | RefCap::MemberCall
+                | RefCap::Var
+                | RefCap::Key
+                | RefCap::Label,
+            ) => None,
+            C::NamedReceiver(ReceiverCap::Enclosing | ReceiverCap::Super | ReceiverCap::Declared) => None,
+            C::Def { .. }
+            | C::DefPair
+            | C::DefHoist
+            | C::RefSpelled
+            | C::Scope(_)
+            | C::ClosureCapture
+            | C::Context(_)
+            | C::Alias(_)
+            | C::MacroAlias(_)
+            | C::Tmpl(_)
+            | C::Flow(_)
+            | C::Expr(_)
+            | C::Obs(_)
+            | C::Arm
+            | C::Narrow(_)
+            | C::Move(_)
+            | C::GuardRegion
+            | C::Unevaluated
+            | C::ParamRegion
+            | C::Member(_)
+            | C::MemberOp(_)
+            | C::Receiver
+            | C::Mark(_)
+            | C::Arity(_)
+            | C::Domain(_)
+            | C::Shape(_)
+            | C::Cmd(_)
+            | C::NestedTarget
+            | C::Qualifier
+            | C::OolDef
+            | C::RetType
+            | C::TypeRelative(_)
+            | C::TypeAnnot
+            | C::SymAttr
+            | C::SpecPrimary
+            | C::NsInline
+            | C::AnonAggMember
+            | C::LinkFrom(_)
+            | C::Deref(_)
+            | C::DerefLeaf(_)
+            | C::Link(_) => None,
         }
     }
 
