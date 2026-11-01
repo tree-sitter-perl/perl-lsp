@@ -139,7 +139,7 @@ pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<St
         // A re-exporting module (Test::Most → Test::More) pulls its
         // producers' surfaces transitively, so those producers must land
         // even when no file `use`s them directly.
-        asks.extend(fa.reexport_modules.iter().cloned());
+        asks.extend(fa.reexport_modules().cloned());
         if !prefetch {
             continue;
         }

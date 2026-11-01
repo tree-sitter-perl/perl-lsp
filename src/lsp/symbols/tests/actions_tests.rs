@@ -103,7 +103,7 @@ fn test_unimported_completion_with_auto_import() {
     idx.insert_cache(
         "List::Util",
         Some(fake_cached(
-            "/usr/lib/perl5/List/Util.pm",
+            "List::Util", "/usr/lib/perl5/List/Util.pm",
             &[],
             &["first", "max", "min"],
         )),
@@ -160,7 +160,7 @@ fn test_unimported_completion_skips_imported_modules() {
     idx.insert_cache(
         "List::Util",
         Some(fake_cached(
-            "/usr/lib/perl5/List/Util.pm",
+            "List::Util", "/usr/lib/perl5/List/Util.pm",
             &[],
             &["first", "max", "min"],
         )),
@@ -168,7 +168,7 @@ fn test_unimported_completion_skips_imported_modules() {
     idx.insert_cache(
         "Scalar::Util",
         Some(fake_cached(
-            "/usr/lib/perl5/Scalar/Util.pm",
+            "Scalar::Util", "/usr/lib/perl5/Scalar/Util.pm",
             &[],
             &["blessed", "reftype"],
         )),
@@ -252,7 +252,7 @@ my $sq   = Math::Util::s
     module_index.insert_cache(
         "Scalar::Util",
         Some(fake_cached(
-            "/usr/lib/perl5/Scalar/Util.pm",
+            "Scalar::Util", "/usr/lib/perl5/Scalar/Util.pm",
             &[],
             &["blessed", "reftype"],
         )),
@@ -334,13 +334,13 @@ my $x = Math::
     // the real "every package in its own .pm" project layout.
     module_index.insert_cache(
         "Math::Stats",
-        Some(fake_cached("/usr/lib/perl5/Math/Stats.pm", &[], &["mean", "stddev"])),
+        Some(fake_cached("Math::Stats", "/usr/lib/perl5/Math/Stats.pm", &[], &["mean", "stddev"])),
     );
     // Unrelated module — must not bleed into Math:: results.
     module_index.insert_cache(
         "Scalar::Util",
         Some(fake_cached(
-            "/usr/lib/perl5/Scalar/Util.pm",
+            "Scalar::Util", "/usr/lib/perl5/Scalar/Util.pm",
             &[],
             &["blessed", "reftype"],
         )),

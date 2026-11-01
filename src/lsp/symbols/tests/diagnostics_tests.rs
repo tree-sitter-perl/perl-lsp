@@ -13,11 +13,12 @@ pub(super) fn parse_analysis(source: &str) -> FileAnalysis {
 /// Build a CachedModule by parsing a synthesized Perl source listing the given exports.
 /// Used by tests to seed ModuleIndex with known export lists without real @INC files.
 pub(super) fn fake_cached(
+    package: &str,
     path: &str,
     exports: &[&str],
     exports_ok: &[&str],
 ) -> std::sync::Arc<crate::index::module_index::CachedModule> {
-    let mut source = String::from("package Fake;\n");
+    let mut source = format!("package {package};\n");
     if !exports.is_empty() {
         source.push_str(&format!("our @EXPORT = qw({});\n", exports.join(" ")));
     }

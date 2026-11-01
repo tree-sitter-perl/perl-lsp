@@ -93,7 +93,7 @@ impl SymbolTable {
         &self,
         names: &NameSpellings,
         linkage_visible: impl Fn(&Symbol) -> bool,
-        exported: impl Fn(&str) -> bool,
+        exported: impl Fn(&Symbol) -> bool,
     ) -> Vec<SymRowSeed> {
         self.symbols
             .iter()
@@ -108,7 +108,7 @@ impl SymbolTable {
                 if matches!(&s.detail, SymbolDetail::Sub { lexical: true, .. }) {
                     flags |= SymRowSeed::FLAG_LEXICAL_SUB;
                 }
-                if exported(&s.name) {
+                if exported(s) {
                     flags |= SymRowSeed::FLAG_EXPORTED;
                 }
                 SymRowSeed {
@@ -250,11 +250,11 @@ impl FileAnalysis {
 
     /// Project every symbol into its relational row seed
     /// (`docs/adr/relational-ref-index.md`) — the shredder's input, twin
-    /// of `ref_row_seeds`. Exportedness reads the SAME `export`/`export_ok`
-    /// surface the Surface projection does (`exports_name` →
-    /// `export_lookup`), so "exported" never drifts between the two.
+    /// of `ref_row_seeds`. Exportedness reads the SAME per-package lists
+    /// the Surface projection does (`symbol_is_exported`), so "exported"
+    /// never drifts between the two.
     pub fn sym_row_seeds(&self) -> Vec<SymRowSeed> {
         self.symbols
-            .row_seeds(&self.pack.names, |s| self.is_linkage_visible(s), |n| self.exports_name(n))
+            .row_seeds(&self.pack.names, |s| self.is_linkage_visible(s), |s| self.symbol_is_exported(s))
     }
 }
