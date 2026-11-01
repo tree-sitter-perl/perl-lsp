@@ -106,9 +106,9 @@ Variable shape witnesses:
   drills back typed, and a typo beside it still hints.
 - **Dynamic key, conditional write, scope-crossing write, or slice
   write → OPEN.** Conditionality is syntactic
-  (`cst::is_conditionally_executed`: if/unless, postfix modifiers,
-  ternary, loops, short-circuit chains — over-marking is the safe
-  direction, it only widens) plus structural at the pass (the write's
+  (`cst::conditional_arm` with `ArmBound::Sub`: if/unless bodies, loop
+  bodies, postfix modifiers, ternary branches, short-circuit right
+  operands) plus structural at the pass (the write's
   scope chain crossing any boundary before the attachment scope:
   nested block or closure, execution unknowable). Slice writes land
   several keys at once; all six spellings (`@h{…}`/`%h{k}`,
@@ -156,7 +156,8 @@ An escape — a scalar READ in any non-element-access position: call
 argument, RHS alias, invocant, sigil deref — hands the reference to
 code that may write any key. That IS a dynamic-key write, so the walk
 records it as a `KeyWrite { key: None }` at the escape span (first
-site per var; one widening witness covers everything after it) and
+site per variable, by binding — two subs' `my $p` are two variables;
+one widening witness covers everything after it) and
 the mutation-extension pass opens the shape there. Temporal: reads
 BEFORE the first escape keep their closed shape and still diagnose —
 strictly better than the suppression set this replaced. Slice bases
@@ -167,9 +168,13 @@ only `\%h` ref-taking escapes.
 ### The whole-story gate is one clause, naming its modeled replacement
 
 `FileAnalysis::closed_shape_is_whole_story(var)` = not reassigned.
-**Reassignment** (`reassigned_scalars`): a Write targeting the
-variable itself (`$v = …`, `%h = …`); element writes are mutations,
-modeled above. The clause is the trust-gate stand-in for the
+**Reassignment** (`reassigned_vars`, by declaring symbol): a Write
+targeting the variable itself (`$v = …`, `%h = …`); element writes are mutations,
+modeled above. The symbol is the ref's binding, and every variable ref has
+one: a qualified (`%Foswiki::cfg`) or special (`%ENV`) global binds to its
+`(package, name)` global like any undeclared use. The gate asks by name
+through `variable_binding`, which applies the binder's own rule
+(`variable_use`), so the asked identity is the one the writes bound. The clause is the trust-gate stand-in for the
 unmodeled conditional-reassignment disagreement (`$spec = {…} unless
 ref $spec`) plus the unknown-RHS reassignment (`$h = fetch()` — the
 bag has no retraction, so a stale closed shape would survive

@@ -17,7 +17,8 @@ impl FileAnalysis {
 
     /// Find the symbol whose selection_span contains the point.
     pub fn symbol_at(&self, point: Point) -> Option<&Symbol> {
-        self.symbols.iter().find(|s| contains_point(&s.selection_span, point))
+        // A mention is anchored on a use, which declares nothing.
+        self.symbols.iter().find(|s| contains_point(&s.selection_span, point) && !s.is_mention())
     }
 
     /// The innermost callable (Sub/Method) whose body span contains the
@@ -67,8 +68,10 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable => {
-                    if let Some(sym_id) = r.resolved_symbol() {
-                        return Some(self.symbol(sym_id).selection_span);
+                    // A `Mention` is no definition: the global is declared
+                    // elsewhere, if anywhere (the adapter's cross-file arm).
+                    if let Some(sym) = r.resolved_symbol().map(|id| self.symbol(id)).filter(|s| !s.is_mention()) {
+                        return Some(sym.selection_span);
                     }
                 }
                 RefKind::FunctionCall => {
@@ -99,7 +102,7 @@ impl FileAnalysis {
                     // $x->m`) returns None: honest miss. There is NO
                     // same-name fallback — a typed OR chained-method-return
                     // receiver now carries a real edge
-                    // (`method_call_invocant_class` resolves chain
+                    // (`resolve_receiver` resolves chain
                     // receivers via `expr_type_at_span`), so jumping to an
                     // arbitrary same-named sub when the class can't infer is
                     // never right (the `->new` / `'Users#create'` flood, the
@@ -327,20 +330,18 @@ impl FileAnalysis {
                             // `$obj->foo(...)` expression so we use
                             // `method_name_span` to highlight just
                             // the identifier.
-                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
-                                (Some(cn), Some(pkg)) if cn == *pkg => {
-                                    results.push((*method_name_span, r.access));
-                                }
-                                _ => {}
+                            if sym_package.as_deref().is_some_and(|pkg| {
+                                self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(pkg)
+                            }) {
+                                results.push((*method_name_span, r.access));
                             }
                         }
                         (RefKind::FieldAccess { member_name_span, .. },
                          SymKind::Field | SymKind::Variable) if r.unqualified_target_name(self.names()) == sym.name => {
-                            match (self.method_call_invocant_class(r, module_index), &sym_package) {
-                                (Some(cn), Some(pkg)) if cn == *pkg => {
-                                    results.push((*member_name_span, r.access));
-                                }
-                                _ => {}
+                            if sym_package.as_deref().is_some_and(|pkg| {
+                                self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(pkg)
+                            }) {
+                                results.push((*member_name_span, r.access));
                             }
                         }
                         (RefKind::PackageRef, SymKind::Package | SymKind::Class | SymKind::Module)
@@ -395,6 +396,14 @@ impl FileAnalysis {
         // spelling rewrites all of them.
         if let Some(group) = self.field_group_at(point) {
             return Some(self.rename_field_group(&group, new_name));
+        }
+        // Perl owns a special variable's name (`@_`, `$_`, `%ENV`): it has
+        // occurrences, but no rename.
+        if self.ref_at(point).is_some_and(|r| {
+            matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                && crate::model::conventions::is_special_variable(&r.target_name)
+        }) {
+            return None;
         }
         let refs = self.find_references(point, None);
         if refs.is_empty() {
@@ -472,11 +481,7 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             if r.member_site().is_some() {
                 let bare = r.unqualified_target_name(self.names());
-                let cls = r
-                    .method_target()
-                    .map(|t| t.invocant_class().to_string())
-                    .or_else(|| self.method_call_invocant_class(r, None));
-                if let Some(class) = cls {
+                for class in self.receiver_classes(r, None, ReceiverPolicy::Edge) {
                     if let Some(g) = self.field_group_named(bare, &class) {
                         if g.has_reader {
                             return Some(g);
@@ -755,11 +760,7 @@ impl FileAnalysis {
                 if r.unqualified_target_name(self.names()) != method {
                     continue;
                 }
-                let cls = r
-                    .method_target()
-                    .map(|t| t.invocant_class().to_string())
-                    .or_else(|| self.method_call_invocant_class(r, None));
-                if cls.as_deref() == Some(g.class.as_str()) {
+                if self.receiver_classes(r, None, ReceiverPolicy::Edge).contains(&g.class) {
                     spans.push(*method_name_span);
                 }
             }
@@ -833,11 +834,7 @@ impl FileAnalysis {
                     if r.unqualified_target_name(self.names()) != g.bare {
                         continue;
                     }
-                    let cls = r
-                        .method_target()
-                        .map(|t| t.invocant_class().to_string())
-                        .or_else(|| self.method_call_invocant_class(r, None));
-                    if cls.as_deref() == Some(g.class.as_str()) {
+                    if self.receiver_classes(r, None, ReceiverPolicy::Edge).contains(&g.class) {
                         spans.push(site.name_span);
                     }
                 }
@@ -901,11 +898,7 @@ impl FileAnalysis {
         if let (Some(enclosing), Some(idx)) = (enclosing_call, module_index) {
             let verb = enclosing.unqualified_target_name(self.names());
             if self.is_column_keyed_verb(verb) {
-                if let Some(class) = enclosing
-                    .method_target()
-                    .map(|t| t.invocant_class().to_string())
-                    .or_else(|| self.method_call_invocant_class(enclosing, module_index))
-                {
+                for class in self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge) {
                     // The class's files as a SET: a shadow in ANY candidate
                     // overrides DBIC's verb (same gate as the builder's
                     // `user_shadows_verb`); the column may be minted by any.
@@ -938,10 +931,10 @@ impl FileAnalysis {
         // Inline method-chain receiver: `$obj->method->{key}` — the key
         // belongs to `method`'s return value, owned `Sub{invocant_class, method}`.
         if let Some(enclosing) = enclosing_call {
-            if let Some(class) = enclosing
-                .method_target()
-                .map(|t| t.invocant_class().to_string())
-                .or_else(|| self.method_call_invocant_class(enclosing, module_index))
+            // An owner is ONE producer: a union receiver's call has a
+            // return per arm, and no single `Sub` owns the key.
+            if let Some(class) =
+                self.receiver_classes(enclosing, module_index, ReceiverPolicy::Edge).single().map(str::to_string)
             {
                 return Some(HashKeyOwner::Sub {
                     package: Some(class),
@@ -1118,6 +1111,26 @@ impl FileAnalysis {
     /// falls through to symbol-at resolution; if that also has no
     /// class context (orphan Sub), returns `None` — the cursor isn't
     /// on something we can safely rename.
+    /// The member access whose member TOKEN the cursor is on. `ref_at` can
+    /// return a `MethodCall` for a cursor anywhere in the call (its span
+    /// covers the args), but only the member token names the member: a hash
+    /// key in the args (`$rs->search({ order_by => 1 })`) must not hijack
+    /// `search`. The token is the QUALIFIED one (`SUPER::|new`,
+    /// `Foo::Bar::|m`): the user sees it as one word, while the renamable
+    /// identifier stays the bare tail.
+    pub fn member_token_at(&self, point: Point) -> Option<&Ref> {
+        let r = self.ref_at(point)?;
+        let (RefKind::MethodCall { method_name_span: span, .. }
+        | RefKind::FieldAccess { member_name_span: span, .. }) = &r.kind
+        else {
+            return None;
+        };
+        let mut token = *span;
+        let qual = r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
+        token.start.column = token.start.column.saturating_sub(qual);
+        contains_point(&token, point).then_some(r)
+    }
+
     pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -1151,29 +1164,13 @@ impl FileAnalysis {
                         package,
                     });
                 }
-                RefKind::MethodCall { method_name_span, .. }
-                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
-                    // `ref_at` can return a MethodCall ref for a cursor anywhere
-                    // in the call — its span covers the args. But only the
-                    // method-name token renames the method: a hash key in the
-                    // args (`$rs->search({ order_by => 1 })`) that didn't resolve
-                    // to a column must NOT hijack `search`. Gate on the name span
-                    // — widened to the QUALIFIED token: `method_name_span`
-                    // covers the bare tail only, so a cursor on the qualifier
-                    // segment (`SUPER::|new`, `Foo::Bar::|m`) minted no identity
-                    // — goto-def (span-generous) answered while references /
-                    // rename / highlights came back empty. The renamable
-                    // identifier stays the bare tail; only cursor ACCEPTANCE
-                    // covers the token the user sees as one word.
-                    let token_span = {
-                        let mut s = *method_name_span;
-                        let qual =
-                            r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
-                        s.start.column = s.start.column.saturating_sub(qual);
-                        s
-                    };
-                    if contains_point(&token_span, point) {
-                        if let Some(class) = self.method_call_invocant_class(r, module_index) {
+                RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
+                    if self.member_token_at(point).is_some() {
+                        // One class names one kind; a union member's arms are
+                        // grouped by the CandidateSet, which asks per arm.
+                        if let Some(class) =
+                            self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).single().map(str::to_string)
+                        {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
                             return Some(RenameKind::Method {
@@ -1342,12 +1339,10 @@ impl FileAnalysis {
                 | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
                     // Member refs target a class — `None` scope
                     // doesn't reach members.
-                    if let (Some(cls), Some(wanted)) =
-                        (self.method_call_invocant_class(r, module_index), scope.as_ref())
-                    {
-                        if &cls == wanted {
-                            edits.push((*method_name_span, new_name.to_string()));
-                        }
+                    if scope.as_deref().is_some_and(|wanted| {
+                        self.receiver_classes(r, module_index, ReceiverPolicy::Navigate).contains(wanted)
+                    }) {
+                        edits.push((*method_name_span, new_name.to_string()));
                     }
                 }
                 _ => {}

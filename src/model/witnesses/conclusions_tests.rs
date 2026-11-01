@@ -248,6 +248,36 @@ fn a_link_chain_resolves_to_the_answer_at_its_end() {
     );
 }
 
+/// Every class-keyed key walks, not only methods: a slot's `Link` resolves to
+/// candidate files through the same class ladder the bake ran, and a
+/// `SubByName` (no class to name files by) degrades to the decode.
+#[test]
+fn a_field_link_resolves_through_the_class_ladder() {
+    let field = |owner: &str| ConclusionKey::Field { owner: owner.into(), name: "k".into() };
+    let a = m(vec![(
+        field("A"),
+        Conclusion::Link {
+            targets: vec![field("B")],
+            arity: None,
+            receiver: ReceiverRule::Thread,
+        },
+    )]);
+    let b = m(vec![(
+        field("B"),
+        Conclusion::Value(crate::model::file_analysis::InferredType::HashRef),
+    )]);
+    let resolve = move |class: &str| match class {
+        "A" => vec![("/a.pm".to_string(), Some(a.clone()))],
+        "B" => vec![("/b.pm".to_string(), Some(b.clone()))],
+        _ => vec![],
+    };
+    let follow = |k: ConclusionKey| {
+        crate::model::witnesses::registry::follow_link_with(&resolve, &[k], &None, None, &[])
+    };
+    assert_eq!(follow(field("A")), Some(crate::model::file_analysis::InferredType::HashRef));
+    assert_eq!(follow(ConclusionKey::SubByName("A".into())), None);
+}
+
 /// A cycle terminates instead of spinning, and degrades to a decode.
 #[test]
 fn a_cyclic_link_chain_terminates() {
@@ -400,6 +430,7 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
         module_index: None,
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
+        lattice: crate::model::conventions::lattice_for(&fa.language),
     };
     let att = WitnessAttachment::PackageSymbol {
         package: class.to_string(),

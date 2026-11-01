@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 // ---- Ref tests ----
@@ -457,6 +458,81 @@ fn test_extract_coderef_literal() {
     );
 }
 
+/// A scalar dereferenced as an aggregate holds a ref to one, in every
+/// spelling: block or sigil, whole, element, slice or `$#`.
+#[test]
+fn deref_spellings_type_the_operand() {
+    let fa = build_fa(
+        "sub f {\nmy ($a1, $a2, $a3, $a4, $h1, $h2, $h3, $h4) = @_;\nprint $$a1[0], ${$a2}[0], @$a3[1], $#{$a4};\nprint $$h1{k}, ${$h2}{k}, @{$h3}{qw(a)}, %$h4{a};\nreturn;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(4, 0));
+    for v in ["$a1", "$a2", "$a3", "$a4"] {
+        assert_eq!(at(v), Some(InferredType::ArrayRef), "{v}");
+    }
+    for v in ["$h1", "$h2", "$h3", "$h4"] {
+        assert_eq!(at(v), Some(InferredType::HashRef), "{v}");
+    }
+}
+
+/// A deref in a conditionally-run arm (postfix modifier, ternary branch,
+/// short-circuit RHS) types its operand inside the arm only; one that always
+/// runs — an arithmetic operand included — types it from there on.
+#[test]
+fn conditional_deref_types_its_arm_only() {
+    let fa = build_fa(
+        "sub f {\nmy ($a, $b, $c, $d, $e) = @_;\nmy @x = (@$a, $a) if $e;\nmy $y = $e ? $$b[0] : 0;\n$e && %$c;\nmy $n = @$d + 1;\nreturn;\n}\n",
+    );
+    let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
+    assert_eq!(at("$a", 2, 14), Some(InferredType::ArrayRef), "inside the modified statement");
+    for v in ["$a", "$b", "$c"] {
+        assert_eq!(at(v, 6, 0), None, "{v} past its arm");
+    }
+    assert_eq!(at("$d", 6, 0), Some(InferredType::ArrayRef));
+}
+
+/// Every use observes its operand on the same rule as a deref: a numeric,
+/// string or builtin-argument use in an arm says nothing past the arm; a
+/// use of a place observes the place; a use never overrides a value.
+#[test]
+fn every_use_observes_on_one_rule() {
+    let fa = build_fa(
+        "sub f {\nmy ($n, $s, $e, $self) = @_;\nmy $y = $e ? $n + 1 : 0;\nprint 1 if $e && $s eq 'x';\nmy @l = @{$self->{items}};\nmy $v = Foo->new; $v . '';\nreturn;\n}\n",
+    );
+    let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
+    assert_eq!(at("$n", 2, 18), Some(InferredType::Numeric), "inside the arm");
+    assert_eq!(at("$n", 6, 0), None, "past the arm");
+    assert_eq!(at("$s", 6, 0), None, "past the short-circuit");
+    assert_eq!(at("$self->{items}", 6, 0), Some(InferredType::ArrayRef));
+    assert_eq!(at("$v", 6, 0).as_ref().and_then(|t| t.class_name()), Some("Foo"));
+}
+
+/// A write in a postfix modifier's condition runs whenever the statement
+/// does; only the modified statement is the arm that may be skipped.
+#[test]
+fn a_rebind_in_a_postfix_condition_is_unconditional() {
+    let fa = build_fa(
+        "sub f {\nmy ($x, $y) = (1, 2);\nprint 1 if ($x = 'a');\n$y = 'b' if $x;\nreturn;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(4, 0));
+    assert_eq!(at("$x"), Some(InferredType::String));
+    assert_eq!(at("$y"), Some(InferredType::Unknown), "the modified statement may not run");
+}
+
+/// `&$x` / `&{$x}` call a code ref; `$$x` / `*{$x}` deref a scalar or glob
+/// ref, which the lattice has no type for.
+#[test]
+fn code_derefs_type_the_operand_and_scalar_or_glob_derefs_do_not() {
+    let fa = build_fa(
+        "sub f {\nmy ($c1, $c2, $s, $g) = @_;\n&$c1(1); &{$c2}(2); print $$s; print *{$g}{CODE};\nreturn;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(3, 0));
+    for v in ["$c1", "$c2"] {
+        assert!(matches!(at(v), Some(InferredType::CodeRef { .. })), "{v}: {:?}", at(v));
+    }
+    assert_eq!(at("$s"), None);
+    assert_eq!(at("$g"), None);
+}
+
 #[test]
 fn test_refgen_types_by_what_it_references() {
     // Only `\&name` is code: `\%h` and `\@a` are container refs, and a
@@ -785,10 +861,11 @@ fn test_return_type_implicit_last_expr() {
 }
 
 #[test]
-fn test_return_type_conflicting_returns_unknown() {
-    // Two returns with different types → None (unknown)
+fn test_return_type_conflicting_returns_union() {
+    // Two returns with different shapes → their union
     let fa = build_fa("sub ambiguous {\n    if (1) { return {} }\n    return [];\n}");
-    assert_eq!(fa.sub_return_type_at_arity("ambiguous", None), None);
+    let t = fa.sub_return_type_at_arity("ambiguous", None).unwrap();
+    assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
@@ -1006,6 +1083,20 @@ fn test_return_type_undef_arm_before_explicit_return_still_undef() {
         fa.sub_return_type_at_arity("always", None),
         Some(InferredType::Undef)
     );
+}
+
+#[test]
+fn test_return_type_undef_valued_arm_beside_an_untyped_arm_not_undef() {
+    // `return $self->_log(..)` is a value arm whose value is undef; the
+    // last arm calls something nothing types. Joining only the typed arms
+    // said `Undef`, and `return if !$m; $m->Foo` then warned that a live
+    // object's method call dies (Znuny's `_GetTransportModule`).
+    let fa = build_fa(
+        "package T;\nsub _log { return; }\nsub get {\n    my ($self, $y) = @_;\n    return if !$y;\n    \
+         if ($y > 1) { return $self->_log('bad'); }\n    return $Kernel::OM->Get($y);\n}\n",
+    );
+    assert_eq!(fa.sub_return_type_at_arity("_log", None), Some(InferredType::Undef));
+    assert_ne!(fa.sub_return_type_at_arity("get", None), Some(InferredType::Undef));
 }
 
 /// `package A` with a constructor, then `sub f` whose body is `body`.
@@ -1319,7 +1410,7 @@ $h{it}->kid();
         {
             continue;
         }
-        let via_ref = fa.method_call_invocant_class(r, None);
+        let via_ref = fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string);
         let via_node =
             crate::lsp::cursor_context::resolve_expression_type(&fa, invocant_node, src.as_bytes(), None)
                 .and_then(|t| t.class_name().map(|s| s.to_string()));
@@ -1348,7 +1439,7 @@ $h{it}->kid();
             && r.target_name == "kid"
     });
     assert_eq!(
-        kid_on_scalar.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        kid_on_scalar.and_then(|r| fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)).as_deref(),
         Some("Foo"),
         "scalar invocant `$f->kid` should type as Foo, tree-free",
     );
@@ -1357,7 +1448,7 @@ $h{it}->kid();
             && r.target_name == "kid"
     });
     assert_eq!(
-        kid_on_array.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        kid_on_array.and_then(|r| fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)).as_deref(),
         Some("Foo"),
         "array-element invocant `$arr[0]->kid` should type as Foo, tree-free",
     );
@@ -1679,6 +1770,73 @@ fn test_ref_eq_current_package_narrows_to_the_enclosing_class() {
     assert_eq!(ret.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", ret);
 }
 
+/// `STMT if G` / `STMT unless G` narrow STMT by G's polarity, exit or not;
+/// an exit's fall-through keeps the opposite polarity.
+#[test]
+fn postfix_guard_narrows_the_statement_it_guards() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($h, $e) = @_;\n    print $h if ref($h) eq 'HASH';\n    print $h unless ref($h) eq 'HASH';\n    return $e if ref($e) eq 'ARRAY';\n    print $e;\n}\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$h", Point::new(3, 10)), Some(InferredType::HashRef));
+    assert_eq!(fa.inferred_type_via_bag("$h", Point::new(4, 10)), None, "`unless` asserts the negation, which `ref-eq` lacks");
+    assert_eq!(fa.inferred_type_via_bag("$e", Point::new(5, 11)), Some(InferredType::ArrayRef), "the exit itself");
+    assert_eq!(fa.inferred_type_via_bag("$e", Point::new(6, 10)), None, "`ref-eq` has no negation");
+}
+
+/// `ref`/`reftype`/`blessed` return a tag naming the variable they were
+/// asked of; comparing the tag to a literal guards that variable, whether
+/// the call is inline or its result was kept (`my $ref = ref $x`).
+#[test]
+fn a_kept_ref_tag_guards_the_variable_it_names() {
+    let fa = build_fa(
+        "package P; use Scalar::Util qw(blessed);\nsub f {\n    my ($p, $q, $c, $d) = @_;\n    my $rp = ref $p;\n    if ($rp eq 'ARRAY') { print $p; }\n    my $kq = blessed $q;\n    print $q if $kq eq 'Foo';\n    print $c if blessed($c) eq 'Bar';\n    my $rd = Scalar::Util::reftype($d);\n    print $d if $rd eq 'Foo';\n    return;\n}\n",
+    );
+    let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
+    assert_eq!(at("$p", 4, 33), Some(InferredType::ArrayRef));
+    assert_eq!(at("$q", 6, 10).as_ref().and_then(|t| t.class_name()), Some("Foo"));
+    assert_eq!(at("$c", 7, 10).as_ref().and_then(|t| t.class_name()), Some("Bar"));
+    assert_eq!(at("$d", 9, 10), None, "`reftype` never names a class");
+    assert_eq!(at("$rp", 4, 0), Some(InferredType::RefTagOf {
+        subject: "$p".into(),
+        site: Span { start: Point::new(3, 13), end: Point::new(3, 19) },
+        via: crate::model::file_analysis::RefTagFn::Ref,
+    }));
+}
+
+/// `blessed`/`reftype` are Scalar::Util's: a file's own `sub blessed`
+/// reports nothing.
+#[test]
+fn a_ref_tag_function_is_the_one_its_library_exports() {
+    let fa = build_fa(
+        "package P;\nsub blessed { 1 }\nsub f {\n    my ($p) = @_;\n    print $p if blessed($p) eq 'Foo';\n    return;\n}\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$p", Point::new(4, 10)), None);
+}
+
+/// A tag says what its subject held when the tag was computed: a rebind
+/// in between voids it, and a tag returned from another sub names that
+/// sub's variable, never the caller's namesake.
+#[test]
+fn a_ref_tag_guards_nothing_once_its_subject_moves_or_its_sub_ends() {
+    let fa = build_fa(
+        "sub t { my $y = shift; return ref $y }\nsub f {\n    my ($x, $y) = @_;\n    my $r = ref $x;\n    $x = 1;\n    print $x if $r eq 'HASH';\n    my $s = t($x);\n    print $y if $s eq 'HASH';\n    return;\n}\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 10)), Some(InferredType::Numeric), "rebound since the tag");
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(7, 10)), None, "another sub's tag");
+    assert!(fa.sub_return_type_at_arity("t", None).is_some_and(|t| t.is_string()));
+}
+
+/// Every return arm of Getopt::Long::Descriptive's `_norm_imply` is a hash
+/// ref once the `$ref eq 'HASH'` arm narrows `$what`.
+#[test]
+fn norm_imply_returns_a_hashref() {
+    let fa = build_fa(
+        "sub _norm_imply {\n  my ($what) = @_;\n  return { $what => 1 } unless my $ref = ref $what;\n  return $what                      if $ref eq 'HASH';\n  return { map { $_ => 1 } @$what } if $ref eq 'ARRAY';\n  die \"can't imply: $what\";\n}\n",
+    );
+    let ret = fa.sub_return_type_at_arity("_norm_imply", None);
+    assert!(ret.as_ref().is_some_and(|t| t.is_hash_shaped()), "{ret:?}");
+}
+
 #[test]
 fn test_indirect_object_call_reads_subs_of_the_current_package() {
     // Perl looks the class name up as a sub in the package in force at the
@@ -1718,3 +1876,4 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
+

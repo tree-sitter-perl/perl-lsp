@@ -870,3 +870,13 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
     assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
     assert!(php_widening(&idx, user.0).is_empty());
 }
+
+// `$this` is the receiver of the method around it, stated by the document:
+// an object of that method's class. A function has no receiver.
+#[test]
+fn this_is_the_receiver_of_its_method() {
+    let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\nfunction g() { return $this; }\n");
+    let at = |row, col| fa.expr_type_at_span(Span { start: Point::new(row, col), end: Point::new(row, col + 5) }, None);
+    assert_eq!(at(2, 24), Some(InferredType::ClassName("A".into())));
+    assert_eq!(at(4, 22), None);
+}
