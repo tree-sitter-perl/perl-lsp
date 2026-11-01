@@ -21,7 +21,7 @@ impl ModuleIndex {
 
     /// The registered copy at `path`.
     pub(crate) fn workspace_file_for_test(&self, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
-        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
     }
 }
@@ -35,7 +35,7 @@ fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> 
     let tree = parser.parse(source, None).unwrap();
     let analysis = crate::build::builder::build(&tree, source.as_bytes());
     Arc::new(CachedModule::new(
-        PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/"))),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/")))),
         Arc::new(analysis),
     ))
 }
@@ -1000,7 +1000,7 @@ fn cache_bridged(
     idx.insert_cache(
         module_name,
         Some(Arc::new(CachedModule::new(
-            PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/"))),
+            crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/")))),
             Arc::new(fa),
         ))),
     );
@@ -1182,7 +1182,7 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     let mut fa = crate::build::builder::build(&tree, src.as_bytes());
     fa.evict_to(crate::model::file_analysis::Residency::Skeleton);
     let cm = Arc::new(CachedModule::new(
-        PathBuf::from("/fake/Ghost.pm"),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/Ghost.pm")),
         Arc::new(fa),
     ));
 
@@ -1514,7 +1514,7 @@ fn second_package_in_file_is_reachable_by_name() {
     let _ = idx.register_workspace_resident(path.clone(), Arc::new(fa));
     for name in ["Alpha::First", "Alpha::Second"] {
         let cm = idx.get_cached(name).unwrap_or_else(|| panic!("{name} unreachable"));
-        assert_eq!(cm.path, path);
+        assert_eq!(cm.path, crate::util::canonical_path::CanonicalPath::resolve(&path));
         assert!(idx.is_workspace_module(name), "{name} not marked workspace");
     }
     // The reverse index sees the second package's sub too.
@@ -1540,11 +1540,11 @@ fn same_package_two_files_is_order_independent() {
         let cands = idx.def_candidates("Shared::Thing");
         let mut paths: Vec<_> = cands.iter().map(|c| c.path.clone()).collect();
         paths.sort();
-        assert_eq!(paths, vec![pa.clone(), pb.clone()], "both files stay candidates");
+        assert_eq!(paths, vec![crate::util::canonical_path::CanonicalPath::resolve(&pa), crate::util::canonical_path::CanonicalPath::resolve(&pb)], "both files stay candidates");
         winners.push(idx.get_cached("Shared::Thing").expect("winner").path.clone());
     }
     assert_eq!(winners[0], winners[1], "winner must not depend on registration order");
-    assert_eq!(winners[0], pa, "smallest-path tie-break");
+    assert_eq!(winners[0], crate::util::canonical_path::CanonicalPath::resolve(&pa), "smallest-path tie-break");
 }
 
 /// Re-registering one file must not wipe a same-named sibling's edges
@@ -1588,12 +1588,12 @@ fn package_reopened_in_three_files_unregisters_cleanly() {
         let _ = idx.register_workspace_resident(p.clone(), Arc::new(build_fa(&src)));
     }
     assert_eq!(idx.def_candidates("Tri::Pod").len(), 3);
-    assert_eq!(idx.get_cached("Tri::Pod").unwrap().path, paths[0]);
+    assert_eq!(idx.get_cached("Tri::Pod").unwrap().path, crate::util::canonical_path::CanonicalPath::resolve(&paths[0]));
 
     // Removing the WINNER re-picks the next-smallest path.
     idx.unregister_workspace_path(&paths[0]);
     assert_eq!(idx.def_candidates("Tri::Pod").len(), 2);
-    assert_eq!(idx.get_cached("Tri::Pod").unwrap().path, paths[1]);
+    assert_eq!(idx.get_cached("Tri::Pod").unwrap().path, crate::util::canonical_path::CanonicalPath::resolve(&paths[1]));
     // The departed file's sub left the reverse index; survivors' stayed.
     assert!(idx.modules_with_symbol("sub0").is_empty());
     assert!(!idx.modules_with_symbol("sub2").is_empty());
@@ -1949,7 +1949,7 @@ fn an_enriched_copy_keeps_the_degraded_marker() {
     let mut fa = (*consumer.analysis).clone();
     fa.degraded = true;
     let degraded_consumer = Arc::new(CachedModule::new(
-        consumer.path.to_path_buf(),
+        crate::util::canonical_path::CanonicalPath::resolve(consumer.path.to_path_buf()),
         Arc::new(fa),
     ));
     idx.register_workspace_module(

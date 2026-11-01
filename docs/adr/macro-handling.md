@@ -120,6 +120,25 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   ranking (fixes win32-wins).
 - **See-through** — a direct-delegation wrapper's goto-def reaches the delegate
   (`SvREFCNT_inc → Perl_SvREFCNT_inc`) via a delegation value-witness.
+  The backward half is minted at the use: the build resolves each used
+  macro name's transitive delegate chain through the file's own `#define`s
+  and its gathered include closure (every config variant counts —
+  `Macro::all_delegates`, read the same way from both tables) and stamps it
+  on each use site as a `RefTable` column (`RefDelegates`: a per-ref id
+  into chains interned per macro, so the table is empty outside C and no
+  `Ref` grows). The stamp runs over the final refs before the indices
+  build, so the use is indexed and row-shredded under each delegate's key
+  in the one index build: references on `Perl_SvREFCNT_inc` find
+  `SvREFCNT_inc(x)` through the ordinary key bucket, with no query-time
+  macro scan and no query-time visibility check — the file's own
+  preprocessor view already decided it. A site gets the chain only where
+  the preprocessor expands the name there: an object-like macro at any
+  call, read or type-position ref; a function-like one only at a call or
+  an expanded site (an erased use, a token inside a `#define` body), so a
+  same-named variable is not a reference to the delegate. Freshness rides
+  the Surface: macro bodies are on it, so a header edit that changes a
+  delegate re-analyzes its includers. Known over-match: a use outside the
+  `#define`'s live range (before it, or after an `#undef`) still lists.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 

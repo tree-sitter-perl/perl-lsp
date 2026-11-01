@@ -372,7 +372,7 @@ fn resolve_imports_with_pack(
             idx.insert_cache(
                 module,
                 Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                    path,
+                    crate::util::canonical_path::CanonicalPath::resolve(path),
                     std::sync::Arc::new(fa),
                 ))),
             );
@@ -460,7 +460,7 @@ fn python_cross_file_function_refs_through_refs_to() {
                 crate::index::open_docs::FileKey::Path(p) => {
                     p.file_name().unwrap().to_string_lossy().to_string()
                 }
-                crate::index::open_docs::FileKey::Url(u) => u.to_string(),
+                crate::index::open_docs::FileKey::Url(u, _) => u.to_string(),
             };
             (f, l.access)
         })
@@ -635,7 +635,7 @@ fn python_workspace_rename_for_free() {
         [(pa.clone(), src_a.to_string()), (pb.clone(), src_b.to_string())].into();
     for loc in &locs {
         let crate::index::open_docs::FileKey::Path(p) = &loc.key else { panic!() };
-        let text = texts.get_mut(p).unwrap();
+        let text = texts.get_mut(p.as_path()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         let line = lines[loc.span.start.row];
         let mut new_line = line.to_string();
@@ -1195,6 +1195,25 @@ fn cpp_declarator_leaf_names_its_def() {
     let kind = |name: &str| skel.symbols.iter().find(|s| s.name == name).map(|s| s.kind);
     assert_eq!(kind("m"), Some(DefCap::Field));
     assert_eq!(kind("l"), Some(DefCap::Local));
+}
+
+/// A parameter list's arity is read off its own captures: each parameter
+/// required, defaulted or variadic, and a comment between two parameters
+/// no parameter at all.
+#[test]
+fn cpp_param_arity_reads_each_parameter() {
+    let skel = cpp_skel(
+        "void a(int x, int y);\nvoid b(int x, /* c */ int y = 2, ...);\ntemplate<class... T> void c(T... xs);\nvoid d(void (*cb)(int, int));\n",
+    );
+    let arity = |row: usize| {
+        // the row's outermost list: the callable's own, not a callback's
+        let (_, a) = skel.param_sigs.iter().filter(|(span, _)| span.start.row == row).min_by_key(|(span, _)| span.start.column).unwrap();
+        (a.total, a.required, a.variadic)
+    };
+    assert_eq!(arity(0), (2, 2, false));
+    assert_eq!(arity(1), (2, 1, true), "a comment is no parameter; `...` makes it variadic");
+    assert_eq!(arity(2), (0, 0, true), "a template pack takes any number, counting none");
+    assert_eq!(arity(3), (1, 1, false), "the callback's own list is a separate signature");
 }
 
 #[test]

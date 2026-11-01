@@ -143,7 +143,7 @@ impl<'a> CandidateSet<'a> {
     /// admits the origin's own sites exactly when the full walk would.
     fn origin_role(&self) -> RoleMask {
         match &self.origin_key {
-            FileKey::Url(_) => RoleMask::OPEN,
+            FileKey::Url(_, _) => RoleMask::OPEN,
             FileKey::Path(p) => match self.module_index {
                 Some(idx) => super::refs::index_role(idx, p),
                 None => RoleMask::DEPENDENCY,
@@ -177,7 +177,7 @@ impl<'a> CandidateSet<'a> {
                 .collect()
             }
             Some(ResolvedTarget::Group { local_spans, pinned_spans, members, .. }) => {
-                let origin_path = key_for_sort(&self.origin_key);
+                let origin_path = self.origin_key.canonical_path();
                 let mut out: Vec<(RefLocation, bool)> = local_spans
                     .iter()
                     // Pinned spans live in the class file — they join only
@@ -185,7 +185,7 @@ impl<'a> CandidateSet<'a> {
                     // in `local_spans` instead, so this is the remote-mint,
                     // cursor-in-class-file edge).
                     .chain(pinned_spans.iter().filter_map(|(p, s)| {
-                        (*p == origin_path).then_some(s)
+                        (Some(p) == origin_path).then_some(s)
                     }))
                     .map(|span| {
                         (

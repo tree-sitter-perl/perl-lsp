@@ -31,32 +31,74 @@ struct Tested {
     at: (Pos, Pos),
 }
 
-/// The `@cond.*` captures of one document run, collected in any order.
+/// The `@cond.test*` capture an arm states, as read from its match.
+pub struct ArmTest<'a> {
+    pub cap: CondCap,
+    pub start: tree_sitter::Point,
+    pub end: tree_sitter::Point,
+    /// The captured node's source text.
+    pub text: &'a str,
+}
+
+impl ArmTest<'_> {
+    fn tested(&self) -> Option<Tested> {
+        let at = (pos(self.start), pos(self.end));
+        let (test, negated) = match self.cap {
+            CondCap::Test => (CondTest::Expr(self.text.split_whitespace().collect::<Vec<_>>().join(" ")), false),
+            CondCap::TestDefined => (CondTest::Defined(self.text.trim().to_string()), false),
+            CondCap::TestUndefined => (CondTest::Defined(self.text.trim().to_string()), true),
+            CondCap::If | CondCap::Else | CondCap::Guard => return None,
+        };
+        Some(Tested { test, negated, at })
+    }
+}
+
+/// One arm before it is placed.
+struct Region {
+    span: (Pos, Pos),
+    /// The arm's own test, as written.
+    test: Option<Tested>,
+    alternative: bool,
+}
+
+/// The `@cond.*` arms of one document run, stated in any order.
 #[derive(Default)]
 pub struct ArmBuilder {
-    /// `@cond.if` nodes, by match.
-    ifs: Vec<(usize, (Pos, Pos))>,
-    /// `@cond.test*` tokens, by match.
-    tests: Vec<(usize, Tested)>,
-    elses: Vec<(Pos, Pos)>,
+    regions: Vec<Region>,
     guards: Vec<(Pos, Pos)>,
 }
 
 impl ArmBuilder {
-    /// Record one capture. `text` is the captured node's source text.
-    pub fn capture(&mut self, cap: CondCap, node: tree_sitter::Node<'_>, text: &str, match_id: usize) {
-        let span = (pos(node.start_position()), pos(node.end_position()));
-        let tested = |test, negated| Tested { test, negated, at: span };
-        match cap {
-            CondCap::If => self.ifs.push((match_id, span)),
-            CondCap::Else => self.elses.push(span),
-            CondCap::Guard => self.guards.push(span),
-            CondCap::Test => {
-                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                self.tests.push((match_id, tested(CondTest::Expr(text), false)))
+    /// An arm over `start..end`: what it tests, if it tests, and whether it
+    /// runs where the arm it hangs off fails. One node may be stated twice
+    /// (an `#elif` is an arm that tests AND an alternative); it is one arm.
+    pub fn arm(&mut self, start: tree_sitter::Point, end: tree_sitter::Point, test: Option<ArmTest<'_>>, alternative: bool) {
+        let span = (pos(start), pos(end));
+        self.regions.push(Region { span, test: test.and_then(|t| t.tested()), alternative });
+    }
+
+    /// An include guard's name token: its test holds for the rest of the
+    /// file, so it guards nothing inside it.
+    pub fn guard(&mut self, start: tree_sitter::Point, end: tree_sitter::Point) {
+        self.guards.push((pos(start), pos(end)));
+    }
+
+    /// One raw query match's `@cond.*` captures, for a walk outside the
+    /// extractor (the macro gather's `#define` walk): a match states one
+    /// arm with its test, or an alternative, or a guard.
+    pub fn capture_match<'a>(&mut self, caps: impl IntoIterator<Item = (CondCap, tree_sitter::Node<'a>, &'a str)>) {
+        let caps: Vec<_> = caps.into_iter().collect();
+        let mut test = caps.iter().find_map(|&(k, n, text)| {
+            matches!(k, CondCap::Test | CondCap::TestDefined | CondCap::TestUndefined)
+                .then(|| ArmTest { cap: k, start: n.start_position(), end: n.end_position(), text })
+        });
+        for &(k, n, _) in &caps {
+            match k {
+                CondCap::If => self.arm(n.start_position(), n.end_position(), test.take(), false),
+                CondCap::Else => self.arm(n.start_position(), n.end_position(), None, true),
+                CondCap::Guard => self.guard(n.start_position(), n.end_position()),
+                CondCap::Test | CondCap::TestDefined | CondCap::TestUndefined => {}
             }
-            CondCap::TestDefined => self.tests.push((match_id, tested(CondTest::Defined(text.trim().to_string()), false))),
-            CondCap::TestUndefined => self.tests.push((match_id, tested(CondTest::Defined(text.trim().to_string()), true))),
         }
     }
 
@@ -65,30 +107,19 @@ impl ArmBuilder {
     /// arm it hangs off plus that arm's negated test (and, for an `#elif`,
     /// its own).
     pub fn finish(self) -> ArmRegions {
-        struct Region {
-            span: (Pos, Pos),
-            /// The arm's own test, as written.
-            test: Option<Tested>,
-            alternative: bool,
-        }
-        let mut regions: Vec<Region> = Vec::new();
-        let mut index: std::collections::HashMap<(Pos, Pos), usize> = Default::default();
-        let mut region_at = |span: (Pos, Pos), regions: &mut Vec<Region>| -> usize {
-            *index.entry(span).or_insert_with(|| {
-                regions.push(Region { span, test: None, alternative: false });
-                regions.len() - 1
-            })
-        };
-        for (m, span) in &self.ifs {
-            let r = region_at(*span, &mut regions);
-            regions[r].test = self.tests.iter().find(|(tm, _)| tm == m).map(|(_, t)| t.clone());
-        }
-        for span in &self.elses {
-            let r = region_at(*span, &mut regions);
-            regions[r].alternative = true;
-        }
+        let mut regions = self.regions;
         // Outermost first, so a region's enclosing one is placed before it.
         regions.sort_by(|a, b| a.span.0.cmp(&b.span.0).then(b.span.1.cmp(&a.span.1)));
+        // A node stated twice (an `#elif`: an arm that tests, and an
+        // alternative) is one arm.
+        regions.dedup_by(|dup, kept| {
+            let same = dup.span == kept.span;
+            if same {
+                kept.test = kept.test.take().or(dup.test.take());
+                kept.alternative |= dup.alternative;
+            }
+            same
+        });
 
         let mut arms = CondArms::default();
         let mut placed: Vec<(Pos, Pos, ArmId)> = Vec::with_capacity(regions.len());

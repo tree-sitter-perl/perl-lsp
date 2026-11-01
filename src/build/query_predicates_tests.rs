@@ -16,11 +16,12 @@ fn admitted(query_src: &str) -> Vec<String> {
     parser.set_language(&lang).unwrap();
     let tree = parser.parse(SRC, None).unwrap();
     let root = tree.root_node();
+    let syntax = crate::cst::SyntaxForest::new([root]);
     let mut out = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut it = cursor.matches(&query, root, SRC.as_bytes());
     while let Some(m) = it.next() {
-        if admits(&query, m, root) {
+        if admits(&query, m, || &syntax) {
             out.extend(
                 m.captures
                     .iter()

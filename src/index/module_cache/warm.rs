@@ -100,7 +100,10 @@ pub fn warm_cache_streaming(
 /// a file that changed or predates this extractor is placed and parsed
 /// again, a file that is gone has its rows dropped, and a row remembering a
 /// miss is ignored, since a miss is located again rather than remembered.
-pub fn warm_module(conn: &Connection, name: &str) -> Option<Vec<(PathBuf, FileAnalysis)>> {
+pub fn warm_module(
+    conn: &Connection,
+    name: &str,
+) -> Option<Vec<(crate::util::canonical_path::CanonicalPath, FileAnalysis)>> {
     let mut stmt = conn.prepare_cached(sql::WARM_MODULE_ROWS.registered()).ok()?;
     let rows = stmt
         .query_map(params![NAME_KEYED_SOURCE, name], |row| {
@@ -145,7 +148,7 @@ pub fn warm_module(conn: &Connection, name: &str) -> Option<Vec<(PathBuf, FileAn
             current = false;
             continue;
         }
-        out.push((path, fa));
+        out.push((crate::util::canonical_path::CanonicalPath::from_stored(path), fa));
     }
     (current && !out.is_empty()).then_some(out)
 }
