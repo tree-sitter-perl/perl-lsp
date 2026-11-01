@@ -92,6 +92,64 @@ pub fn warm_cache_streaming(
     (count, stale_names, missing)
 }
 
+/// The landing persisted under `name`, read when `name` is asked and never
+/// before: a cache serves what demand asks for, so a warm start lands the
+/// same names a cold one would. The files come back whole (the bag too:
+/// what a landing asks for next reads it) in the order they were written,
+/// which is the map's precedence order. `None` unless every row is current:
+/// a file that changed or predates this extractor is placed and parsed
+/// again, a file that is gone has its rows dropped, and a row remembering a
+/// miss is ignored, since a miss is located again rather than remembered.
+pub fn warm_module(conn: &Connection, name: &str) -> Option<Vec<(PathBuf, FileAnalysis)>> {
+    let mut stmt = conn.prepare_cached(sql::WARM_MODULE_ROWS.registered()).ok()?;
+    let rows = stmt
+        .query_map(params![NAME_KEYED_SOURCE, name], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let mut out = Vec::new();
+    let mut stat_memo: std::collections::HashMap<String, (i64, i64)> = std::collections::HashMap::new();
+    let mut current = true;
+    for (path_str, mtime, size, blob, bag, version, deps_stamp) in rows {
+        let path = match classify_row_generation(&path_str, mtime, size, version) {
+            RowGeneration::Current(p) => p,
+            RowGeneration::Sentinel => continue,
+            RowGeneration::Missing => {
+                let _ = crate::index::module_cache::invalidate_generation(conn, &path_str);
+                current = false;
+                continue;
+            }
+            RowGeneration::StampStale | RowGeneration::VersionStale => {
+                current = false;
+                continue;
+            }
+        };
+        let Some(fa) = blob.filter(|b| !b.is_empty()).and_then(|b| decode_analysis_parts(&b, bag.as_deref(), true))
+        else {
+            current = false;
+            continue;
+        };
+        // A pack file's analysis bakes its headers: the row is valid only
+        // while the whole closure is unchanged, not just the file itself.
+        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != deps_stamp {
+            current = false;
+            continue;
+        }
+        out.push((path, fa));
+    }
+    (current && !out.is_empty()).then_some(out)
+}
+
 /// One persisted row's generation verdict — the shared first half of every
 /// warm scan's validity check (the second half, the closure stamp, runs
 /// after decode on whichever struct is in hand). A new validity axis goes
@@ -113,9 +171,9 @@ pub(crate) enum RowGeneration {
     /// A newer stamp is a downgrade (an editor rolled its plugin back
     /// against a warm cache); its blobs decode to nothing this binary can
     /// read, and admitting them registered stubs nothing could rehydrate:
-    /// 739 files indexed, 0 symbols, 0 diagnostics, silently. The caller
-    /// decides between skip (workspace tiers re-analyze from the walk) and
-    /// queue-for-re-resolve (the name-keyed @INC tier).
+    /// 739 files indexed, 0 symbols, 0 diagnostics, silently. Every caller
+    /// skips it: the workspace tiers re-analyze from the walk, and the
+    /// name-keyed tier places the name again when it is asked.
     VersionStale,
     Current(PathBuf),
 }
@@ -276,139 +334,33 @@ pub fn warm_pack_stream_with_stubs(
     count
 }
 
-/// The name-keyed (import-tier) warm lane, for every language's store:
-/// each persisted landing, one NAME at a time, handed to `land` with the
-/// files that answered it — or with none, for a remembered miss. The table
-/// holds one row per FILE, so a name with two providers warms as both. The
-/// map's precedence order is not stored, so they arrive in path order (the
-/// order-independent tie-break the workspace tier uses), which repeats
-/// byte-identically across warms. `land` returning false stops the scan:
-/// the map moved under it, and what it would land is asked again. Returns
-/// the rows warmed and the names whose rows predate this extractor (landed
-/// all the same, and asked again).
+/// Every persisted landing, one NAME at a time through `warm_module`,
+/// handed to `land`: what a session that asked every stored name would
+/// warm. Test-only — a session warms only the names it asks
+/// (`warm_module`). `land` returning false stops the scan. Returns the
+/// rows warmed and no stale names (a stale row is re-placed when asked).
+#[cfg(test)]
 pub fn warm_cache(
     conn: &Connection,
     land: &mut dyn FnMut(&str, Vec<Arc<CachedModule>>) -> bool,
 ) -> (usize, Vec<String>) {
-    // 'workspace' rows are path-keyed and stream through
-    // `warm_cache_streaming`. The tag is the keying scheme, never the
-    // writer: every name-keyed producer shares `NAME_KEYED_SOURCE` so a new
-    // writer cannot strand its rows unread. The order is the primary key's,
-    // so the scan walks its index and a name's rows arrive together.
-    let mut stmt = match conn.prepare(sql::WARM_MODULES_BY_NAME.registered()) {
-        Ok(s) => s,
+    let names: Vec<String> = match conn.prepare(sql::WARM_MODULES_BY_NAME.registered()) {
+        Ok(mut stmt) => stmt
+            .query_map(params![NAME_KEYED_SOURCE], |row| row.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default(),
         Err(_) => return (0, Vec::new()),
     };
-
-    let rows = match stmt.query_map(params![NAME_KEYED_SOURCE], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<Vec<u8>>>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(_) => return (0, Vec::new()),
-    };
-
-    /// One name's rows: the files that warmed, and whether a remembered
-    /// miss was among them.
-    struct Group {
-        name: String,
-        providers: Vec<Arc<CachedModule>>,
-        miss: bool,
-    }
-    fn flush(group: Option<Group>, land: &mut dyn FnMut(&str, Vec<Arc<CachedModule>>) -> bool) -> bool {
-        match group {
-            // A file outranks a remembered miss of the same name.
-            Some(g) if !g.providers.is_empty() || g.miss => land(&g.name, g.providers),
-            _ => true,
-        }
-    }
-
+    let mut names = names;
+    names.dedup();
     let mut count = 0usize;
-    let mut stale_names = Vec::new();
-    let mut group: Option<Group> = None;
-    // Closure members overlap heavily across rows; stat each once per warm.
-    let mut stat_memo: std::collections::HashMap<String, (i64, i64)> =
-        std::collections::HashMap::new();
-    for row in rows.map(|r| {
-        if let Err(ref e) = r {
-            log::warn!("cache warm scan error (row skipped / scan may truncate): {}", e);
-        }
-        r
-    }).flatten() {
-        let (module_name, path_str, cached_mtime, cached_size, analysis_blob, row_extract_version, row_deps_stamp) = row;
-        if group.as_ref().is_none_or(|g| g.name != module_name) {
-            if !flush(group.take(), land) {
-                return (count, stale_names);
-            }
-            group = Some(Group { name: module_name.clone(), providers: Vec::new(), miss: false });
-        }
-        let g = group.as_mut().expect("opened above");
-
-        let path = match classify_row_generation(
-            &path_str,
-            cached_mtime,
-            cached_size,
-            row_extract_version,
-        ) {
-            // Negative sentinel: empty path + NULL blob — a remembered miss.
-            RowGeneration::Sentinel => {
-                g.miss = true;
-                count += 1;
-                continue;
-            }
-            RowGeneration::StampStale => continue,
-            // The provider file is gone. Its rows can only be seen here, so
-            // drop the generation rather than carry it forever.
-            RowGeneration::Missing => {
-                let _ = crate::index::module_cache::invalidate_generation(conn, &path_str);
-                continue;
-            }
-            // Stale entries still load, queued for priority re-resolve.
-            RowGeneration::VersionStale => {
-                stale_names.push(module_name.clone());
-                PathBuf::from(&path_str)
-            }
-            RowGeneration::Current(p) => p,
-        };
-
-        match analysis_blob {
-            Some(blob) if !blob.is_empty() => match decode_analysis_parts(&blob, None, false) {
-                Some(fa) => {
-                    // A pack file's analysis bakes its headers (splices,
-                    // witnesses, closure): the row is valid only while the
-                    // whole closure is unchanged, not just the file itself.
-                    if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
-                        continue;
-                    }
-                    g.providers.push(Arc::new(CachedModule::new(path, Arc::new(fa))));
-                    count += 1;
-                }
-                None => {
-                    log::warn!("Failed to decode cached analysis for '{}', skipping", module_name);
-                }
-            },
-            _ => {
-                // Blob missing / empty on a NON-sentinel row (a legacy
-                // NULL-blob write): re-resolve rather than remember a miss —
-                // a sentinel here would be a terminal cross-session false
-                // negative for a real module.
-                if path_str.is_empty() {
-                    g.miss = true;
-                } else {
-                    stale_names.push(module_name);
-                }
-                count += 1;
-            }
+    for name in names {
+        let Some(files) = warm_module(conn, &name) else { continue };
+        count += files.len();
+        let providers = files.into_iter().map(|(p, fa)| Arc::new(CachedModule::new(p, Arc::new(fa)))).collect();
+        if !land(&name, providers) {
+            break;
         }
     }
-    flush(group.take(), land);
-
-    (count, stale_names)
+    (count, Vec::new())
 }

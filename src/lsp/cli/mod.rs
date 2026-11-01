@@ -332,13 +332,11 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         );
     }
 
-    // Every language's dependencies land on the resolver thread; a
-    // one-shot verb answers from the settled index, so it waits for what
-    // the project's own files name (and what those landings name in turn).
-    timings::phase("cli::resolve_dependencies", || {
-        module_index.request_dependency_demand();
-        module_index.wait_idle();
-    });
+    // Every language's dependencies land on the resolver thread, asked by
+    // the indexer as a server's are; a one-shot verb answers from the
+    // settled index, so it waits for what the project's own files name
+    // (and what those landings ask in turn).
+    timings::phase("cli::resolve_dependencies", || module_index.wait_idle());
     (ws, module_index)
 }
 

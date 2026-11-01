@@ -336,6 +336,11 @@ registry! {
     WARM_MODULES_BY_NAME => NoScratch,
         "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp \
          FROM modules WHERE source = ?1 ORDER BY module_name, path";
+    /// One asked name's rows, bag included, in the order they were written:
+    /// the map's precedence order.
+    WARM_MODULE_ROWS => NoScratch,
+        "SELECT path, mtime_secs, file_size, analysis, bag, extract_version, deps_stamp \
+         FROM modules WHERE source = ?1 AND module_name = ?2 ORDER BY rowid";
     /// The stub BLOB is column 6, read only after the stamp checks pass;
     /// `length(m.analysis)` reads the record header, not the blob.
     WARM_PACK_WITH_STUBS => NoScratch,

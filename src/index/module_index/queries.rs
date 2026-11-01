@@ -162,16 +162,19 @@ impl ModuleIndex {
             crate::util::timings::record_cached(module_name);
             return; // fresh and cached
         }
-        if is_stale {
+        if !is_stale {
+            // The one dedup'ing enqueue: a name asked per keystroke is
+            // queued once between drains.
+            self.core.queue.ask([module_name.to_string()]);
+            return;
+        }
+        {
             let mut priority = self.core.queue.priority.lock().unwrap();
             if !priority.contains(&module_name.to_string()) {
                 priority.push(module_name.to_string());
             }
-        } else {
-            let mut pending = self.core.queue.pending.lock().unwrap();
-            pending.push(module_name.to_string());
         }
-        // Both guards are out of scope here — `notify_new_work` takes
+        // The guard is out of scope here — `notify_new_work` takes
         // `pending`, and the drain's lock order forbids holding `priority`
         // across it.
         self.core.queue.notify_new_work();
@@ -421,27 +424,37 @@ impl ModuleIndex {
 
     /// Find all cached modules that *export* the given function name: the
     /// modules the symbol index names (it covers every named symbol, not
-    /// just exports), plus their descendants — a module exporting nothing
-    /// answers with its parent's surface — kept when their surface carries
-    /// the name.
+    /// just exports) whose surface carries the name, plus every descendant
+    /// of one whose own surface carries it — a class exporting nothing of
+    /// its own exports what its inherited `import` does
+    /// (`export_surface_with_index`).
     pub fn find_exporters(&self, func_name: &str) -> Vec<String> {
         use crate::model::file_analysis::CrossFileLookup;
-        let mut frontier = self.modules_with_symbol(func_name);
-        let mut seen: std::collections::HashSet<String> = frontier.iter().cloned().collect();
-        let mut result: Vec<String> = Vec::new();
-        while let Some(m) = frontier.pop() {
-            // ANY candidate file of the module may carry the export list.
-            let exports = self
-                .def_candidates(&m)
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        // ANY candidate file of the module may carry the export list.
+        let exports = |m: &str| {
+            self.def_candidates(m)
                 .iter()
-                .any(|c| c.analysis.export_surface_with_index(&m, self).exports(func_name));
-            if !exports {
+                .any(|c| c.analysis.export_surface_with_index(m, self).exports(func_name))
+        };
+        let mut result: Vec<String> = Vec::new();
+        for m in self.modules_with_symbol(func_name) {
+            if !exports(&m) {
                 continue;
             }
-            for (_pkg, child) in self.direct_children_of(&m) {
-                if seen.insert(child.clone()) {
-                    frontier.push(child);
-                }
+            if let Some(seed) = self.def_candidates(&m).first().cloned() {
+                GraphView::new(&seed.analysis, Some(self)).walk(
+                    Node::Class(m.clone()),
+                    EdgeKindMask::INHERITS_INV,
+                    &mut |node| {
+                        if let Node::Class(d) = node {
+                            if exports(d) {
+                                result.push(d.clone());
+                            }
+                        }
+                        WalkControl::Continue
+                    },
+                );
             }
             result.push(m);
         }
