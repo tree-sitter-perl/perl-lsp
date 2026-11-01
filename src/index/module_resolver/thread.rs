@@ -109,6 +109,12 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // one-shot run takes it too: what it lands persists, so the next run
     // warms it instead of parsing.
     let prefetch = hub;
+    // Warm-copy strip is a long-lived-process behavior; one-shot CLI keeps
+    // warm copies whole for wall (rehydration never amortizes), unless the
+    // harness lane forces long-lived behavior on it.
+    let strip_warm = core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
+        && eviction_enabled()
+        && (server.is_some() || std::env::var("PERL_LSP_LONG_LIVED").as_deref() == Ok("1"));
     let mut adopted = 0u64;
     core.queue.started.store(true, std::sync::atomic::Ordering::Release);
     notify_resolved(&core);
@@ -162,21 +168,18 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             }
 
             crate::util::ghost_stats::count("resolver.module_resolved");
-            let whole = match acquire(&core, &module_name, db.as_ref()) {
-                Ok(whole) => whole,
+            match acquire(&core, &module_name, db.as_ref(), prefetch, strip_warm) {
+                Ok(Landed::Hit { providers, asks }) => {
+                    log::info!("Resolved '{}': {} provider(s)", module_name, providers);
+                    ask_unresolved(&core, &seen, asks);
+                }
+                Ok(Landed::Miss) => log::info!("Nothing provides '{}'", module_name),
                 Err(_moved) => {
                     // Asked again once the loop adopts the new map.
                     seen.remove(&module_name);
                     core.queue.ask([module_name]);
                     continue;
                 }
-            };
-            match &whole {
-                Some(providers) => log::info!("Resolved '{}': {} provider(s)", module_name, providers.len()),
-                None => log::info!("Nothing provides '{}'", module_name),
-            }
-            if let Some(providers) = &whole {
-                ask_unresolved(&core, &seen, descent(providers, prefetch));
             }
 
             // Remove from stale set after re-resolution (no-op otherwise).
@@ -233,10 +236,11 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     }
 }
 
-/// The served language's store — its validity gates, Perl's builtin docs,
-/// and the warm load of every persisted landing through the one landing
-/// (`IndexCore::land_dependency`), so a warm copy retires with its map
-/// like a fresh one. Returns the store.
+/// The served language's store, past its validity gates, with Perl's
+/// builtin docs hydrated. Nothing warms here: a persisted landing is read
+/// when its name is asked (`acquire`), through the one landing
+/// (`IndexCore::land_dependency`), so a warm copy retires with its map like
+/// a fresh one.
 fn open_store(
     core: &IndexCore,
     server: Option<&ServerSession>,
@@ -260,32 +264,6 @@ fn open_store(
             }
             Err(e) => log::warn!("Builtins hydrate failed: {}", e),
         }
-    }
-    // Warm-copy strip is a long-lived-process behavior; one-shot CLI keeps
-    // warm copies whole for wall (rehydration never amortizes), unless the
-    // harness lane forces long-lived behavior on it.
-    let strip_warm = core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
-        && eviction_enabled()
-        && (server.is_some() || std::env::var("PERL_LSP_LONG_LIVED").as_deref() == Ok("1"));
-    let (n, stale_names) = module_cache::warm_cache(&conn, &mut |name, providers| {
-        // Every persisted row answered the name it is filed under.
-        let answers: Vec<usize> = (0..providers.len()).collect();
-        core.land_dependency(Some((name, &answers)), snap.generation, providers, true, strip_warm)
-            .is_ok()
-    });
-    log::info!("Warmed module cache: {} entries loaded from disk, {} stale", n, stale_names.len());
-    for name in &stale_names {
-        core.stale_modules.insert(name.clone(), ());
-    }
-    // Server sessions re-resolve stale modules eagerly; headless ones
-    // re-resolve on demand (`request_resolve` queues stale names with
-    // priority).
-    if server.is_some() && !stale_names.is_empty() {
-        {
-            let mut pq = core.queue.priority.lock().unwrap();
-            pq.extend(stale_names);
-        }
-        core.queue.notify_new_work();
     }
     Some(conn)
 }
