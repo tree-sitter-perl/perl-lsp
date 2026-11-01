@@ -99,3 +99,22 @@ fn facts_sit_on_their_nodes_in_arrival_order() {
     assert_eq!(facts.positions(s.node(ids[1]).subtree()), 0..3);
     assert!(facts.on(ids[0]).is_empty());
 }
+
+#[test]
+fn a_kind_scan_finds_what_a_walk_finds_under_every_node() {
+    let tree = parse(SRC);
+    let forest = SyntaxForest::new([tree.root_node()]);
+    let nodes = every_node(tree.root_node());
+    let mut kinds: Vec<u16> = nodes.iter().map(|n| n.kind_id()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    for n in &nodes {
+        let lifted = forest.lift(*n).unwrap();
+        for k in &kinds {
+            let want: Vec<_> =
+                every_node(*n).into_iter().skip(1).filter(|d| d.kind_id() == *k).collect();
+            let got: Vec<_> = lifted.descendants_of_kind(&[*k]).map(|d| d.ts()).collect();
+            assert_eq!(got, want, "kind {k} under {n:?}");
+        }
+    }
+}
