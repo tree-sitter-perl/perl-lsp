@@ -175,7 +175,20 @@ impl ExtractState<'_> {
     fn def_scope(&self, kind: DefCap) -> ScopeId {
         match kind {
             DefCap::Field | DefCap::Slot => self.member_scope(),
-            _ => self.bind_scope(),
+            DefCap::Sub
+            | DefCap::Method
+            | DefCap::Anon
+            | DefCap::Class
+            | DefCap::Package
+            | DefCap::Var
+            | DefCap::Local
+            | DefCap::Constant
+            | DefCap::Enumerator
+            | DefCap::Label
+            | DefCap::Macro
+            | DefCap::Reexport
+            | DefCap::Union
+            | DefCap::UnionField => self.bind_scope(),
         }
     }
 
