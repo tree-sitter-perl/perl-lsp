@@ -137,7 +137,7 @@ allowlist, which reads like rule #10's partial enumeration, but:
 - `Ref::match_verdict_baked` is `true` for every ref kind except `MethodCall`
   and `HashKeyAccess`, so no other kind can ever need the upgrade;
 - the only matcher arms that consult the bag are `(Sub|Method, MethodCall)`
-  (`method_call_invocant_class` when `method_target()` is `None` — exactly the
+  (`method_call_invocant_classes` when `method_target()` is `None` — exactly the
   unbaked case) and `Handler` (`applicable_dispatches`, no-op when
   `provisional_dispatches` is empty). Both are in the allowlist;
 - I specifically chased the delegation-alias path, where a name that is not

@@ -23,6 +23,8 @@ pub fn php_pack() -> LangPack {
             functions: FunctionLookup::NamespaceThenGlobal,
             ..NameSpellings::NONE
         },
+        // `bool` is not an `int`: `bool|int` is a union a signature spells.
+        lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         shape_name: |raw| raw.to_string(),
         // An anonymous class is one class per place it is written: PHP
         // names it `class@anonymous` and where it stands.

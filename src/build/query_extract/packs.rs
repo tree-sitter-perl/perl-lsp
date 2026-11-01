@@ -18,6 +18,10 @@ pub struct LangPack {
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
     pub names: NameSpellings,
+    /// Which cross-family types the language's joins fold into one another
+    /// (`docs/adr/union-types.md`). Registered by language id
+    /// (`conventions::register_lattice`).
+    pub lattice: crate::model::file_analysis::LatticeRules,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -72,10 +76,10 @@ pub struct LangPack {
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped, through their first named
     /// child, so the invocant types via the inner.
     pub recv_peel: &'static [&'static str],
-    /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
-    /// IMMEDIATE member-access receiver is one — the receiver whose
-    /// `deref_stack` resolves by name to decide the expected operator. Also the
-    /// cursor-completion "is this receiver a bare variable" test.
+    /// Simple-variable node kinds (`identifier`): the cursor sentinel's "is
+    /// this receiver a bare variable" test, read off the raw node it climbs
+    /// to like its other node-kind tables. Extraction never reads it: the
+    /// document states a written-name receiver as `@member.recv.name`.
     pub simple_var_kinds: &'static [&'static str],
     /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
     /// the cursor-completion path climbs to + types the receiver of. Empty =
@@ -116,6 +120,7 @@ impl LangPack {
             id: _,
             query_source: _,
             names: _,
+            lattice: _,
             shape_name: _,
             default_name: _,
             annot_type: _,

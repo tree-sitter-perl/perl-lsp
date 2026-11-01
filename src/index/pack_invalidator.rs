@@ -530,10 +530,9 @@ impl PackInvalidator {
                                 continue;
                             }
                             if !arc.degraded {
-                                let seeds: Vec<_> = arc.ref_row_seeds();
-                                let sym_seeds = arc.sym_row_seeds();
+                                let seeds = arc.row_seeds();
                                 if let Err(e) = module_cache::shred_derived_rows(
-                                    conn, &p_str, "workspace", &seeds, &sym_seeds,
+                                    conn, &p_str, "workspace", &seeds,
                                 ) {
                                     log::warn!("Failed to shred derived rows for {:?}: {}", p, e);
                                 }
