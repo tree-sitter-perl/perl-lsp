@@ -82,7 +82,7 @@ pub(crate) struct IndexCore {
     /// token `enrichment_key` hashes (an Arc pointer can be freed and its
     /// address reused; a counter can't run backwards). Bumped by every
     /// registration front door.
-    pub(crate) registration_gen: DashMap<std::path::PathBuf, u64>,
+    pub(crate) registration_gen: DashMap<crate::util::canonical_path::CanonicalPath, u64>,
     pub(crate) gen_counter: std::sync::atomic::AtomicU64,
     /// Monotone count of index-shape mutations NOT already visible through
     /// `gen_counter` or the freshness write count (cache-slot swaps on
@@ -149,7 +149,7 @@ pub(crate) struct IndexCore {
     /// persists would fetch the NEW generation's names. Membership is the
     /// tier test: a dependency landing never takes a name one of these
     /// paths declares.
-    pub(crate) registered_names: DashMap<std::path::PathBuf, Vec<(String, bool)>>,
+    pub(crate) registered_names: DashMap<crate::util::canonical_path::CanonicalPath, Vec<(String, bool)>>,
 }
 
 impl IndexCore {
@@ -190,7 +190,7 @@ impl IndexCore {
     }
 
     /// Did a front door register `path`?
-    pub(crate) fn is_front_door(&self, path: &std::path::Path) -> bool {
+    pub(crate) fn is_front_door(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
         self.registered_names.contains_key(path)
     }
 
@@ -222,7 +222,7 @@ impl IndexCore {
     pub(crate) fn set_inc_roots(&self, roots: &[std::path::PathBuf]) {
         let canon: Vec<std::path::PathBuf> = roots
             .iter()
-            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .map(|p| crate::util::canonical_path::CanonicalPath::resolve(p.as_path()).into_path_buf())
             .collect();
         if let Ok(mut g) = self.inc_roots.write() {
             *g = Arc::new(canon);
@@ -233,12 +233,12 @@ impl IndexCore {
     /// enrichment key's ABA-proof identity token: a re-registration (or an
     /// @INC re-resolve) bumps the gen, moving every consumer's key — where a
     /// bare Arc pointer could be freed and its address reused.
-    pub(crate) fn mint_registration_gen(&self, path: &std::path::Path) {
+    pub(crate) fn mint_registration_gen(&self, path: &crate::util::canonical_path::CanonicalPath) {
         crate::util::ghost_stats::count("epoch.gen_mint");
         let g = self
             .gen_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.registration_gen.insert(path.to_path_buf(), g);
+        self.registration_gen.insert(path.clone(), g);
     }
 
     /// THE one spelling of "a module resolution landed in the name-keyed

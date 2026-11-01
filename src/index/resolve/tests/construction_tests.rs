@@ -48,7 +48,7 @@ impl Ws {
         let i = src.find(needle).unwrap_or_else(|| panic!("`{needle}` in {file}")) + offset;
         let row = src[..i].matches('\n').count();
         let point = tree_sitter::Point { row, column: i - src[..i].rfind('\n').map_or(0, |n| n + 1) };
-        f(&resolve(&self.store, &fa, FileKey::Path(path.clone()), point, Some(&self.idx), scope))
+        f(&resolve(&self.store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), point, Some(&self.idx), scope))
     }
 
     fn rel(&self, key: &FileKey) -> String {

@@ -88,7 +88,7 @@ sub new {
     );
 
     let core = IndexCore::new();
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/x/Demo/Has/Event.pm"), analysis));
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
     core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
@@ -105,11 +105,11 @@ sub new {
     // protects against None-over-Some).
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
-    let cached2 = Arc::new(CachedModule::new(PathBuf::from("/y/Demo/Has/Event.pm"), analysis2));
+    let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
     core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
-        PathBuf::from("/y/Demo/Has/Event.pm"),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
     );
 }
 
@@ -234,7 +234,7 @@ fn import_tier_strip_gates_on_persistence() {
     let fa = crate::build::builder::build(&tree, source.as_bytes());
     assert!(!fa.witnesses.is_empty());
     let cm = Arc::new(CachedModule::new(
-        PathBuf::from("/inc/Strip.pm"),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/inc/Strip.pm")),
         Arc::new(fa),
     ));
 
@@ -322,7 +322,7 @@ fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let found = at(&[a.clone(), b.clone()]);
     assert_eq!(
         found,
-        vec![a.join("Twin.pm"), b.join("Twin.pm")],
+        vec![crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")).into_path_buf(), crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm")).into_path_buf()],
         "both roots provide Twin; the relation must hold both, @INC order first",
     );
     // The winner is still exactly what `require` would load.
@@ -362,11 +362,11 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     let owner = idx
         .candidate_defining_sub("Twin", "only_in_b")
         .expect("only_in_b is defined by the shadowed provider");
-    assert_eq!(owner.path, b.join("Twin.pm"));
+    assert_eq!(owner.path, crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm")));
     let owner_a = idx
         .candidate_defining_sub("Twin", "only_in_a")
         .expect("only_in_a is defined by the winning provider");
-    assert_eq!(owner_a.path, a.join("Twin.pm"));
+    assert_eq!(owner_a.path, crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")));
 }
 
 #[test]
@@ -398,11 +398,11 @@ fn a_workspace_file_still_shadows_an_inc_provider_of_the_same_name() {
     let inc_fa = build(inc_src);
     let ws_fa = build(ws_src);
 
-    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(inc_pm.clone(), inc_fa))));
+    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(inc_pm.clone()), inc_fa))));
     idx.register_workspace_module(ws_pm.clone(), ws_fa);
 
     assert_eq!(
-        idx.get_cached("Shadowed").map(|c| c.path.clone()),
+        idx.get_cached("Shadowed").map(|c| c.path.to_path_buf()),
         Some(std::fs::canonicalize(&ws_pm).unwrap_or(ws_pm.clone())),
         "the workspace file must hold the name slot",
     );
@@ -445,7 +445,9 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     // visibility rules, decided at CandidateSet construction so every
     // projection inherits it.
     use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
-    let base = std::env::temp_dir().join(format!("perl-lsp-asker-{}", std::process::id()));
+    // Fixed-width pid: the path is spelled into an analyzed source, and the
+    // equivalence dump compares that source's spans across two test runs.
+    let base = std::env::temp_dir().join(format!("perl-lsp-asker-{:010}", std::process::id()));
     let (applib, testlib) = (base.join("lib"), base.join("t").join("lib"));
     std::fs::create_dir_all(&applib).unwrap();
     std::fs::create_dir_all(&testlib).unwrap();
@@ -475,7 +477,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
         let axis = VisibilityAxis::for_origin(fa, None, &idx, crate::model::file_analysis::PackVisibility::Host);
         let scoped = ScopedLookup::new(&idx, &empty, None, axis);
-        scoped.get_cached("Twin").map(|c| c.path.clone())
+        scoped.get_cached("Twin").map(|c| c.path.to_path_buf())
     };
 
     assert_eq!(
@@ -734,12 +736,12 @@ fn perls_map_is_inc_with_the_project_libs_first() {
         fingerprint: 0,
     };
     let providers = files(locate_and_parse(&snap, "Twin"));
-    let paths: Vec<PathBuf> = providers.iter().map(|p| p.path.clone()).collect();
+    let paths: Vec<PathBuf> = providers.iter().map(|p| p.path.clone().into_path_buf()).collect();
     assert_eq!(paths, vec![local.clone()]);
     assert!(!snap.in_tier(&lib));
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.insert_cache_providers("Twin", Some(providers));
-    assert_eq!(idx.get_cached("Twin").map(|c| c.path.clone()), Some(local), "the @INC-order winner");
+    assert_eq!(idx.get_cached("Twin").map(|c| c.path.clone().into_path_buf()), Some(local), "the @INC-order winner");
 
     // No project: the process @INC alone, and the map owns no directory.
     let bare = crate::build::inc::locator(None, &PerlDriver);
@@ -778,14 +780,14 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
     index_workspace_with_index(&dir, &idx, None, None);
     idx.wait_idle();
     let outer = dir.join("local/lib/perl5/Outer.pm");
-    assert_eq!(idx.get_cached("Outer").map(|c| c.path.clone()), Some(outer.clone()));
+    assert_eq!(idx.get_cached("Outer").map(|c| c.path.clone().into_path_buf()), Some(outer.clone()));
     assert_eq!(
-        idx.get_cached("Outer::Inner").map(|c| c.path.clone()),
+        idx.get_cached("Outer::Inner").map(|c| c.path.clone().into_path_buf()),
         Some(outer.clone()),
         "a declared package lands with the file that declares it",
     );
     assert_eq!(
-        idx.get_cached("Mine").map(|c| c.path.clone()),
+        idx.get_cached("Mine").map(|c| c.path.clone().into_path_buf()),
         Some(dir.join("lib/Mine.pm")),
         "the project's own `Mine` keeps the slot",
     );
@@ -881,10 +883,10 @@ fn a_file_at_the_asked_path_answers_the_asked_name_whatever_it_declares() {
     idx.request_dependency_demand();
     idx.wait_idle();
     let file = dir.join("local/lib/perl5/Acme/ShimPP.pm");
-    assert_eq!(idx.get_cached("Acme::ShimPP").map(|c| c.path.clone()), Some(file.clone()));
+    assert_eq!(idx.get_cached("Acme::ShimPP").map(|c| c.path.clone().into_path_buf()), Some(file.clone()));
     assert_eq!(idx.def_candidates("Acme::ShimPP").len(), 1);
     assert_eq!(
-        idx.get_cached("Acme::PP").map(|c| c.path.clone()),
+        idx.get_cached("Acme::PP").map(|c| c.path.clone().into_path_buf()),
         Some(file),
         "and it answers the package it declares",
     );

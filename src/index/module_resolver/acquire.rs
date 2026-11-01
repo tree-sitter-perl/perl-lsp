@@ -58,7 +58,7 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
     if let Some(t) = t {
         crate::util::timings::record_built(attributed, Duration::ZERO, t.elapsed());
     }
-    Some(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::new(fa))))
+    Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(canon), Arc::new(fa))))
 }
 
 /// What an acquisition landed: nothing, or the asked name's providers and
@@ -119,7 +119,7 @@ fn land_warm(
     core: &IndexCore,
     snap: &MapSnapshot,
     name: &str,
-    warm: Vec<(PathBuf, crate::model::file_analysis::FileAnalysis)>,
+    warm: Vec<(crate::util::canonical_path::CanonicalPath, crate::model::file_analysis::FileAnalysis)>,
     strip: bool,
 ) -> Result<Landed, MapMoved> {
     let asks = descent(snap.driver, warm.iter().map(|(_, fa)| fa));

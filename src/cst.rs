@@ -23,6 +23,9 @@
 use tree_sitter::Node;
 
 use crate::model::conventions::Sigil;
+
+mod syntax;
+pub(crate) use syntax::{NodeFacts, NodeId, Structure, SyntaxForest};
 use crate::model::file_analysis::Span;
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
@@ -383,27 +386,29 @@ pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
 /// The container deref around `elem`: `@{$h->{k}}` / `%{$h->{k}}` (a
 /// container whose varname is a block holding `elem`) and `$h->{k}->@*` /
 /// `$h->{k}->%*`. `None` when `elem` is not the whole deref operand.
-pub(crate) fn deref_container_of(elem: Node) -> Option<Node> {
-    let p = elem.parent()?;
+pub(crate) fn deref_container_of<'t>(syn: &SyntaxForest<'t>, elem: Node<'t>) -> Option<Node<'t>> {
+    let mut up = syn.ancestors(elem);
+    let p = up.next()?;
     if matches!(p.kind(), "array_deref_expression" | "hash_deref_expression") {
         return Some(p);
     }
     if p.kind() != "expression_statement" {
         return None;
     }
-    let block = p.parent().filter(|b| b.kind() == "block")?;
-    let varname = block.parent().filter(|v| v.kind() == "varname")?;
-    varname.parent().filter(|c| matches!(c.kind(), "array" | "hash"))
+    up.next().filter(|b| b.kind() == "block")?;
+    up.next().filter(|v| v.kind() == "varname")?;
+    up.next().filter(|c| matches!(c.kind(), "array" | "hash"))
 }
 
 /// The assignment whose target list holds `node` as an element:
 /// `($h->{k}, $x) = …`. A direct target (`$h->{k} = …`) is not in a list.
-pub(crate) fn list_assignment_target_of<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    let mut group = node.parent().filter(|g| is_list_literal(*g))?;
-    while let Some(up) = group.parent().filter(|g| is_list_literal(*g)) {
-        group = up;
+pub(crate) fn list_assignment_target_of<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Node<'t>> {
+    let mut up = syn.ancestors(node).peekable();
+    let mut group = up.next().filter(|g| is_list_literal(*g))?;
+    while let Some(outer) = up.next_if(|g| is_list_literal(*g)) {
+        group = outer;
     }
-    let assign = group.parent().filter(|a| a.kind() == "assignment_expression")?;
+    let assign = up.next().filter(|a| a.kind() == "assignment_expression")?;
     (assign.child_by_field_name("left")? == group).then_some(assign)
 }
 
@@ -589,22 +594,26 @@ pub(crate) fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<St
 /// `$foo{k}` reads `%foo`, `@foo{...}` slices `%foo`. Resolves the access
 /// node + its parent's shape to the *declared* variable's sigil + bare name.
 /// `None` = not a container-element access (caller keeps the raw text).
-pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
+pub(crate) fn canonical_container_name<'a>(
+    syn: &SyntaxForest<'a>,
+    node: Node<'a>,
+    src: &'a [u8],
+) -> Option<String> {
     if deref_operand(node).is_some() {
         return None;
     }
     let bare = varname_child(node)?.text(src)?;
-    Some(format!("{}{}", container_sigil(node)?.char(), bare))
+    Some(format!("{}{}", container_sigil(syn, node)?.char(), bare))
 }
 
 /// The sigil of the aggregate a container access reads — `@` for `$a[0]`,
 /// `@a[..]`, `%a[..]`, `$#a`; `%` for `$h{k}`, `@h{..}`, `%h{..}`. The
 /// access node's own sigil never says it: a slice is always `@`.
-pub(crate) fn container_sigil(node: Node) -> Option<Sigil> {
+pub(crate) fn container_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Sigil> {
     if node.kind() == "arraylen" {
         return Some(Sigil::Array);
     }
-    let parent = node.parent()?;
+    let parent = syn.parent(node)?;
     match parent.kind() {
         "array_element_expression" => Some(Sigil::Array),
         "hash_element_expression" => Some(Sigil::Hash),
@@ -625,7 +634,7 @@ pub(crate) fn container_sigil(node: Node) -> Option<Sigil> {
 /// scalar, `@{..}` / `@$x` an array, `%{..}` / `%$x` a hash, an element,
 /// slice or `$#` access the aggregate it reads, `&{..}` / `&$x` code,
 /// `*{..}` a glob.
-pub(crate) fn deref_sigil(node: Node) -> Option<Sigil> {
+pub(crate) fn deref_sigil<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Sigil> {
     match node.kind() {
         "scalar" => Some(Sigil::Scalar),
         "array" => Some(Sigil::Array),
@@ -633,7 +642,7 @@ pub(crate) fn deref_sigil(node: Node) -> Option<Sigil> {
         "function" | "code_deref_expression" => Some(Sigil::Code),
         "glob" | "glob_deref_expression" => Some(Sigil::Glob),
         "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
-            container_sigil(node)
+            container_sigil(syn, node)
         }
         _ => None,
     }
@@ -675,6 +684,7 @@ pub(crate) fn deref_operand_expr<'a>(node: Node<'a>) -> Option<Node<'a>> {
 /// invalidation scan). Dynamic keys and accessor projections return
 /// `None` — not a stable place identity.
 pub(crate) fn canonical_place_path<'a>(
+    syn: &SyntaxForest<'a>,
     node: Node<'a>,
     src: &'a [u8],
 ) -> Option<(String, String)> {
@@ -699,9 +709,9 @@ pub(crate) fn canonical_place_path<'a>(
     // projection (`$self->{a}{b}`, `$h{a}{b}`).
     let root = match base.kind() {
         "scalar" => canonical_var_name(base, src)?,
-        "container_variable" => canonical_container_name(base, src)?,
+        "container_variable" => canonical_container_name(syn, base, src)?,
         "hash_element_expression" | "array_element_expression" => {
-            canonical_place_path(base, src)?.1
+            canonical_place_path(syn, base, src)?.1
         }
         _ => return None,
     };
@@ -1088,15 +1098,8 @@ pub(crate) fn string_list_with_residue(
 
 /// The block (or file) `node` runs in: the extent a fact observed at
 /// `node` can hold over when no conditional arm bounds it.
-pub(crate) fn enclosing_block(node: Node) -> Option<Node> {
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        if matches!(p.kind(), "block" | "source_file") {
-            return Some(p);
-        }
-        cur = p.parent();
-    }
-    None
+pub(crate) fn enclosing_block<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Node<'t>> {
+    syn.ancestors(node).find(|p| matches!(p.kind(), "block" | "source_file"))
 }
 
 /// How far [`conditional_arm`] climbs: to the enclosing sub (or file), or
@@ -1140,10 +1143,10 @@ pub(crate) fn ref_tag_call<'a>(
 /// construct does, so the climb passes through them. `None` = `node` runs
 /// whenever its bound does. Scope-crossing conditionality (a write inside
 /// a closure relative to an outer variable's scope) is the caller's check.
-pub(crate) fn conditional_arm<'a>(node: Node<'a>, bound: ArmBound) -> Option<Node<'a>> {
+pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound: ArmBound) -> Option<Node<'a>> {
     let mut child = node;
-    let mut cur = node.parent();
-    while let Some(p) = cur {
+    let mut up = syn.ancestors(node);
+    while let Some(p) = up.next() {
         let is_field = |f: &str| p.child_by_field_name(f).is_some_and(|c| c == child);
         let arm = match p.kind() {
             "subroutine_declaration_statement"
@@ -1171,7 +1174,6 @@ pub(crate) fn conditional_arm<'a>(node: Node<'a>, bound: ArmBound) -> Option<Nod
             return Some(child);
         }
         child = p;
-        cur = p.parent();
     }
     None
 }
@@ -1218,8 +1220,9 @@ pub(crate) fn element_arrow_deref(element: Node, src: &[u8]) -> bool {
 /// other (first) named child. Element-access bases keep the reference
 /// in hand; every other read position (call argument, RHS alias, list,
 /// invocant, sigil deref) lets it escape to code that may mutate it.
-pub(crate) fn is_element_access_base(node: Node) -> bool {
-    let Some(parent) = node.parent() else { return false };
+pub(crate) fn is_element_access_base<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> bool {
+    let mut up = syn.ancestors(node);
+    let Some(parent) = up.next() else { return false };
     match parent.kind() {
         "hash_element_expression" | "array_element_expression" => {
             parent.named_child(0).is_some_and(|c| c == node)
@@ -1235,7 +1238,7 @@ pub(crate) fn is_element_access_base(node: Node) -> bool {
         // container's varname. Plain sigil derefs (`%$h`, `$$h`) keep
         // their escape classification — only slice containers are
         // value-copying reads.
-        "varname" => parent.parent().is_some_and(|gp| {
+        "varname" => up.next().is_some_and(|gp| {
             matches!(
                 gp.kind(),
                 "slice_container_variable" | "keyval_container_variable"
