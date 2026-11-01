@@ -1709,7 +1709,6 @@ fn tree_steps_go_through_the_syntax_tree() {
         ("build/cursor_sentinel.rs", 3, "cursor time: one climb per request over the sentinel reparse"),
         ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
         ("build/walk_markers.rs", 3, "std::path::Path, not a tree"),
-        ("lsp/backend/indexing.rs", 1, "std::path::Path, not a tree"),
         ("lsp/backend/server.rs", 1, "std::path::Path, not a tree"),
         ("lsp/cli/mod.rs", 1, "std::path::Path, not a tree"),
         ("lsp/cli/query.rs", 1, "std::path::Path, not a tree"),
