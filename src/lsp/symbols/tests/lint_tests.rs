@@ -6,7 +6,7 @@ use super::*;
 
 fn role_requires_diags(source: &str) -> Vec<String> {
     let analysis = parse_analysis(source);
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let module_index = moo_installed_index();
     collect_diagnostics(&analysis, &module_index, Default::default())
         .into_iter()
         .filter(|d| {

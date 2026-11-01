@@ -47,7 +47,7 @@ pub(crate) fn place_frontier(snap: &MapSnapshot, names: &[String]) -> Vec<Vec<Pl
                 .locate(name)
                 .into_iter()
                 .filter_map(|Located { path, by }| {
-                    let canon = std::fs::canonicalize(&path).unwrap_or(path);
+                    let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
                     (seen.insert(canon.clone()) && snap.in_tier(&canon)).then_some((canon, by))
                 })
                 .collect()
