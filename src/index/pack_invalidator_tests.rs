@@ -78,7 +78,7 @@ fn register_pair(
 fn arc_of(pack: &ModuleIndex, path: &Path) -> usize {
     let mut found = None;
     pack.for_each_registered_file(&mut |cm| {
-        if cm.path == path {
+        if cm.path == crate::util::canonical_path::CanonicalPath::resolve(&path) {
             found = Some(Arc::as_ptr(&cm.analysis) as usize);
         }
     });
@@ -287,7 +287,7 @@ fn registered(pack: &ModuleIndex, path: &Path) -> Arc<FileAnalysis> {
     let canon = std::fs::canonicalize(path).unwrap();
     let mut found = None;
     pack.for_each_registered_file(&mut |cm| {
-        if cm.path == canon {
+        if cm.path == crate::util::canonical_path::CanonicalPath::resolve(&canon) {
             found = Some(Arc::clone(&cm.analysis));
         }
     });
@@ -387,7 +387,7 @@ fn a_file_whose_blob_did_not_land_is_not_stripped() {
 fn class_names(pack: &ModuleIndex, path: &Path) -> Vec<String> {
     let mut names = Vec::new();
     pack.for_each_registered_file(&mut |cm| {
-        if cm.path == path {
+        if cm.path == crate::util::canonical_path::CanonicalPath::resolve(&path) {
             names = cm
                 .analysis
                 .symbols()
