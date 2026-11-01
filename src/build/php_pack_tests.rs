@@ -1503,6 +1503,19 @@ fn a_write_declares_its_variable_once_per_function() {
     assert_ne!(scope_of("e"), scope_of("b"), "a closure's write is the closure's");
 }
 
+/// A by-name ask agrees with the binding a read carries: a read above the
+/// write that declares its variable (a loop's) binds to that declaration,
+/// and `resolve_variable` there names it too.
+#[test]
+fn a_by_name_ask_names_the_declaration_the_read_binds() {
+    let src = "<?php\nfunction f($xs) {\n    foreach ($xs as $v) {\n        if ($acc) { $acc->add($v); }\n        $acc = $v;\n    }\n}\n";
+    let fa = php(src);
+    let read = Point::new(3, 13);
+    let bound = fa.ref_at(read).and_then(|r| r.resolved_symbol()).expect("the read binds");
+    assert_eq!(fa.symbol(bound).selection_span.start, Point::new(4, 9), "to the declaring write");
+    assert_eq!(fa.resolve_variable("acc", read).map(|s| s.id), Some(bound));
+}
+
 /// A variable's value is what was last written to it: an assignment edges
 /// to its right-hand side, so a declared return flows through it, a write
 /// replaces what came before, and a value inside the right-hand side (a

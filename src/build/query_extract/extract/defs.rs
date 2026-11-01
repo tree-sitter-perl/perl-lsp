@@ -336,21 +336,16 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
 /// in the body reaches it whatever the order. Every other write is a
 /// `var_writes` row of the declaration it reaches.
 pub(super) fn unify_assigned(st: &mut ExtractState) {
-    use crate::build::query_extract::skeleton::{nearest_declaration, VariableDecl};
-    use crate::model::file_analysis::{callable_reach, write_lookup_chain, SymKind};
+    use crate::model::file_analysis::{callable_reach, latest_in_force, write_lookup_chain, ScopeId, SymKind, VariableDecl};
     let out = &mut st.out;
     if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
     }
     // Every other Variable def declares where it is written, from its token on.
-    let mut decls: HashMap<String, Vec<VariableDecl<()>>> = HashMap::new();
+    let mut decls: HashMap<String, Vec<(ScopeId, VariableDecl<'static, ()>)>> = HashMap::new();
+    let decl = |at, scope_wide| VariableDecl { id: (), at, gate: None, scope_wide };
     for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == SymKind::Variable) {
-        decls.entry(s.name.clone()).or_default().push(VariableDecl {
-            scope: s.scope,
-            at: s.name_start,
-            id: (),
-            scope_wide: false,
-        });
+        decls.entry(s.name.clone()).or_default().push((s.scope, decl(s.name_start, false)));
     }
     let mut order: Vec<usize> = (0..out.symbols.len()).filter(|&i| out.symbols[i].kind == DefCap::Assigned).collect();
     order.sort_by_key(|&i| out.symbols[i].name_start);
@@ -358,18 +353,16 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
     for i in order {
         let s = &out.symbols[i];
         let chain = write_lookup_chain(&out.scopes, s.scope, &s.name);
-        let seen = decls.get(&s.name).is_some_and(|d| nearest_declaration(&chain, d, s.name_start).is_some());
+        // The binders' per-scope rule (`variable_use`), along the write chain.
+        let seen = decls.get(&s.name).is_some_and(|d| {
+            chain.scopes().any(|sc| latest_in_force(d.iter().filter(|(ds, _)| *ds == sc).map(|(_, d)| *d), s.name_start).is_some())
+        });
         if seen {
             keep[i] = false;
             out.var_writes.push((s.name.clone(), s.scope, Span { start: s.name_start, end: s.name_end }));
         } else {
             let home = callable_reach(&out.scopes, s.scope).last().unwrap_or(s.scope);
-            decls.entry(s.name.clone()).or_default().push(VariableDecl {
-                scope: home,
-                at: s.name_start,
-                id: (),
-                scope_wide: true,
-            });
+            decls.entry(s.name.clone()).or_default().push((home, decl(s.name_start, true)));
             out.symbols[i].scope = home;
         }
     }

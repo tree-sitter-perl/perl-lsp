@@ -121,10 +121,14 @@ in source order; the first one per name that reaches nothing is the
 declaration, re-anchored to the callable around it (`callable_reach`, or
 the file), and is visible from the top of that body, so a read above it in
 a loop reaches it. Every other one becomes a `var_writes` row, minted as a
-`Variable` ref with `AccessKind::Write`. One resolver,
-`skeleton::nearest_declaration`, answers the unification, the writes and
-the reads, along two chains of the model's (`model/file_analysis/
-dispatch.rs`): a read looks along `variable_lookup_chain`, which a closed
+`Variable` ref with `AccessKind::Write`. The declaration carries
+`SymbolFlags::SCOPE_WIDE`. One rule, the model's `variable_use`
+(`model/file_analysis/dispatch.rs`, with `latest_in_force` per scope),
+answers the unification, the writes and the reads for every language: each
+binder mints its refs from it and `FileAnalysis::variable_binding` /
+`resolve_variable` answer by name from it, over the declarations
+`Symbol::variable_decl` states. It walks two chains of the model's: a read
+looks along `variable_lookup_chain`, which a closed
 body ends unless it captures the name; a write along `write_lookup_chain`,
 which any callable ends unless it captures the name, because assigning a
 name a python or R closure reads from around it makes a local. The
