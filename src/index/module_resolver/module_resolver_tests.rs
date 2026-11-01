@@ -36,8 +36,8 @@ our @EXPORT = qw(delta);
     let mut parser = create_parser();
     let tree = parser.parse(source, None).unwrap();
     let analysis = crate::build::builder::build(&tree, source.as_bytes());
-    assert_eq!(analysis.export, vec!["delta"]);
-    assert_eq!(analysis.export_ok, vec!["alpha", "beta", "gamma"]);
+    assert_eq!(analysis.all_export(), vec!["delta"]);
+    assert_eq!(analysis.all_export_ok(), vec!["alpha", "beta", "gamma"]);
 }
 
 #[test]
@@ -50,7 +50,7 @@ our @EXPORT_OK = ('foo', 'bar', 'baz');
     let mut parser = create_parser();
     let tree = parser.parse(source, None).unwrap();
     let analysis = crate::build::builder::build(&tree, source.as_bytes());
-    assert_eq!(analysis.export_ok, vec!["foo", "bar", "baz"]);
+    assert_eq!(analysis.all_export_ok(), vec!["foo", "bar", "baz"]);
 }
 
 #[test]
@@ -827,6 +827,38 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
         "the project's own `Mine` keeps the slot",
     );
     assert_eq!(idx.def_candidates("Mine").len(), 2, "the dependency's `Mine` is still a candidate");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A landed file registers under every package it declares, and each of
+/// them exports only what its own `@EXPORT`/`@EXPORT_OK` names (or, with
+/// none, what its first exporting parent does). DBI.pm declares
+/// `DBD::Switch::dr`; that name exports nothing.
+#[test]
+fn a_landed_file_exports_only_from_the_package_that_declares_the_list() {
+    let dir = std::env::temp_dir().join(format!("perl-land-exports-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Outer;\n1;\n"),
+        (
+            "local/lib/perl5/Outer.pm",
+            "package Outer;\nuse Exporter 'import';\nour @EXPORT_OK = qw(hi);\nsub hi { 1 }\n\
+             package Outer::Inner;\nsub deep { 1 }\n\
+             package Outer::Kid;\nour @ISA = ('Outer');\n1;\n",
+        ),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    index_workspace_with_index(&dir, &idx, None, None);
+    idx.request_dependency_demand();
+    idx.wait_idle();
+    assert!(idx.get_cached("Outer::Inner").is_some(), "the declared package landed");
+    assert_eq!(idx.find_exporters("hi"), vec!["Outer", "Outer::Kid"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

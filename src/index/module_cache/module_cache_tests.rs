@@ -83,8 +83,8 @@ fn test_db_save_and_load_roundtrip() {
 
     let loaded = cache.get("TestModule").unwrap();
     let loaded = loaded.as_ref().unwrap();
-    assert_eq!(loaded.analysis.export, vec!["foo", "bar"]);
-    assert_eq!(loaded.analysis.export_ok, vec!["baz"]);
+    assert_eq!(loaded.analysis.all_export(), vec!["foo", "bar"]);
+    assert_eq!(loaded.analysis.all_export_ok(), vec!["baz"]);
 
     let _ = std::fs::remove_file(&pm);
 }
@@ -862,9 +862,9 @@ fn flag_exported_minted_from_exports_source() {
     assert_eq!(exported("beta"), Some(true), "@EXPORT_OK member is flagged");
     assert_eq!(exported("gamma"), Some(false), "non-exported sub is not flagged");
     // The flag must never diverge from the source it is baked from.
-    assert!(cached.analysis.exports_name("alpha"));
-    assert!(cached.analysis.exports_name("beta"));
-    assert!(!cached.analysis.exports_name("gamma"));
+    assert!(cached.analysis.any_package_exports("alpha"));
+    assert!(cached.analysis.any_package_exports("beta"));
+    assert!(!cached.analysis.any_package_exports("gamma"));
     let _ = std::fs::remove_file(&pm);
 }
 

@@ -136,7 +136,7 @@ fn bare_use_suppresses_export_ok_names() {
     let analysis = parse_analysis(source);
     let module_index = crate::index::module_index::ModuleIndex::new_for_test();
     // Seed with a module whose names are ONLY in export_ok (runtime-exporter style).
-    let cached = fake_cached("/fake/FakeTypeConstraints.pm", &[], &["subtype", "as", "where", "coerce"]);
+    let cached = fake_cached("FakeTypeConstraints", "/fake/FakeTypeConstraints.pm", &[], &["subtype", "as", "where", "coerce"]);
     module_index.insert_cache("FakeTypeConstraints", Some(cached));
     let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let unresolved: Vec<&str> = diags.iter()
@@ -162,7 +162,7 @@ fn genuinely_undefined_still_flags_with_export_ok_module_in_scope() {
     let source = "use FakeTypeConstraints;\ntruly_undefined_fn();\n";
     let analysis = parse_analysis(source);
     let module_index = crate::index::module_index::ModuleIndex::new_for_test();
-    let cached = fake_cached("/fake/FakeTypeConstraints.pm", &[], &["subtype", "as"]);
+    let cached = fake_cached("FakeTypeConstraints", "/fake/FakeTypeConstraints.pm", &[], &["subtype", "as"]);
     module_index.insert_cache("FakeTypeConstraints", Some(cached));
     let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let unresolved: Vec<&str> = diags.iter()
@@ -676,7 +676,7 @@ sub to_json { }\n\
 1;\n";
     let fa = parse_analysis(jsonpp);
     assert_eq!(
-        fa.export,
+        fa.all_export(),
         vec!["encode_json", "decode_json", "from_json", "to_json"],
         "the BEGIN-ISA Exporter spelling must not hide @EXPORT extraction"
     );
@@ -935,9 +935,9 @@ fn reexport_loop_push_dynamic_list_mints_no_edge() {
     // Confirm no edge was minted on M.
     let m = idx.get_cached("M").expect("M cached");
     assert!(
-        m.analysis.reexport_modules.is_empty(),
+        m.analysis.all_reexport_modules().is_empty(),
         "dynamic list must mint no re-export edge, got: {:?}",
-        m.analysis.reexport_modules,
+        m.analysis.all_reexport_modules(),
     );
 
     let src = "use M;\na_fn();\n";
@@ -956,9 +956,9 @@ fn reexport_declarative_also_binds() {
     );
     let m = idx.get_cached("M").expect("M cached");
     assert!(
-        m.analysis.reexport_modules.contains(&"Base".to_string()),
+        m.analysis.all_reexport_modules().contains(&"Base".to_string()),
         "also => ['Base'] mints a re-export edge, got: {:?}",
-        m.analysis.reexport_modules,
+        m.analysis.all_reexport_modules(),
     );
 
     let src = "use M;\nbase_fn();\n";
@@ -996,7 +996,7 @@ fn a_module_exporting_nothing_answers_with_its_parents_surface_at_query_time() {
     register_module(&idx, "Printer", "package Printer;\nuse Exporter 'import';\nour @EXPORT = qw(p);\nsub p { 1 }\n1;\n");
     register_module(&idx, "Shortcut", "package Shortcut;\nour @ISA = ('Printer');\n1;\n");
     let kid = idx.get_cached("Shortcut").expect("Shortcut cached");
-    assert!(kid.analysis.export.is_empty(), "the child's own analysis exports nothing");
+    assert!(kid.analysis.all_export().is_empty(), "the child's own analysis exports nothing");
 
     let surface = kid.analysis.export_surface_with_index("Shortcut", &idx);
     assert_eq!(surface.default_set(), ["p".to_string()]);
@@ -1029,7 +1029,7 @@ fn reexport_imported_names_evaluator_unchanged() {
     let import = consumer.imports.iter().find(|i| i.module_name == "M").expect("use M import");
 
     // Own-only surface: just M's own @EXPORT — base_fn NOT visible.
-    let own = m.analysis.export_surface();
+    let own = m.analysis.export_surface("M");
     let bound_own = crate::model::file_analysis::imported_names(import, &own);
     assert!(bound_own.iter().any(|(l, _)| l == "own_fn"));
     assert!(
