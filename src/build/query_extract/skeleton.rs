@@ -87,8 +87,7 @@ pub struct CallSite {
     /// The callee as its token spells it: a member's name, a free call's
     /// name token.
     pub callee: String,
-    /// Where the callee's token starts, the key a free call's reference
-    /// shares.
+    /// Where the callee's token starts: the site its name resolves at.
     pub callee_at: tree_sitter::Point,
     /// A member call's receiver expression; `None` for a free call.
     pub receiver: Option<Span>,
@@ -763,26 +762,20 @@ impl SkeletonAnalysis {
             out
         };
         // What a use-map call names a function by (`function_identity`); the
-        // earliest declaration of a name wins.
-        let free_functions: FreeFunctions = symbols
-            .iter()
-            .rev()
-            .filter(|s| matches!(s.kind, SymKind::Sub))
-            .map(|s| ((s.package.as_deref().unwrap_or(""), s.name.as_str()), s.id))
-            .collect();
-        // Each free call under a use-map, by where its name token starts: the
-        // function it names and the identity a class of that spelling has
-        // there. Its `Invoke` and its reference both read this one answer.
-        let free_calls: std::collections::HashMap<tree_sitter::Point, (crate::model::file_analysis::QualifiedName, String)> =
-            self.refs
-                .iter()
-                .filter(|r| r.kind == super::vocab::RefCap::Call)
-                .filter_map(|r| {
-                    let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols)?;
-                    let function = function_identity(&map, names.functions, &r.name, &free_functions);
-                    Some((r.start, (function, map.resolve(&r.name).identity(map.sep))))
-                })
-                .collect();
+        // earliest declaration of a name wins, as in `callee_sid`.
+        let mut free_functions: FreeFunctions = Default::default();
+        for s in symbols.iter().filter(|s| matches!(s.kind, SymKind::Sub)) {
+            free_functions.entry((s.package.as_deref().unwrap_or(""), s.name.as_str())).or_insert(s.id);
+        }
+        // A free call under a use-map, from its callee as written and where
+        // that token stands: the function it names and the identity a class
+        // of that spelling has there. Its `Invoke` and its reference each ask
+        // it of their own capture.
+        let free_call = |written: &str, at: tree_sitter::Point| {
+            let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at, &symbols)?;
+            let function = function_identity(&map, &names, written, &free_functions);
+            Some((function, map.resolve(written).identity(map.sep)))
+        };
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -1032,7 +1025,7 @@ impl SkeletonAnalysis {
                         },
                         Some(WA::Expr(recv)),
                     ),
-                    None => match free_calls.get(&site.callee_at) {
+                    None => match free_call(name, site.callee_at) {
                         Some((fq, identity)) => {
                             // under a use-map a class is filed under the
                             // identity its spelling names at the call
@@ -1172,7 +1165,7 @@ impl SkeletonAnalysis {
                     // Under a use-map a call is pinned to its function's
                     // namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call => {
-                        if let Some((function, _)) = free_calls.get(&r.start) {
+                        if let Some((function, _)) = free_call(&r.name, r.start) {
                             let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
@@ -1577,13 +1570,15 @@ impl SkeletonAnalysis {
 /// one by the language's `FunctionLookup`.
 fn function_identity(
     map: &crate::model::file_analysis::UseMap,
-    lookup: crate::model::file_analysis::FunctionLookup,
+    names: &crate::model::file_analysis::NameSpellings,
     written: &str,
     free_functions: &FreeFunctions,
 ) -> crate::model::file_analysis::QualifiedName {
     use crate::model::file_analysis::{FunctionLookup, QualifiedName};
-    match lookup {
-        _ if written.contains(map.sep) => map.resolve(written),
+    if crate::model::file_analysis::split_qualified(written, names).0.is_some() {
+        return map.resolve(written);
+    }
+    match names.functions {
         FunctionLookup::Global => QualifiedName::new("", written),
         FunctionLookup::NamespaceThenGlobal => {
             let own = map.own_namespace.unwrap_or("");
