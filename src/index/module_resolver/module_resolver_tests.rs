@@ -795,9 +795,10 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
 }
 
 /// A landed file registers under every package it declares, and each of
-/// them exports only what its own `@EXPORT`/`@EXPORT_OK` names (or, with
-/// none, what its first exporting parent does). DBI.pm declares
-/// `DBD::Switch::dr`; that name exports nothing.
+/// them exports only what its own `@EXPORT`/`@EXPORT_OK` names: DBI.pm
+/// declares `DBD::Switch::dr`, and that name exports nothing. `Outer::Kid`
+/// inherits Exporter's `import`, which reads the lists of the class it is
+/// called on, so it exports nothing either (`inherited_import_lists`).
 #[test]
 fn a_landed_file_exports_only_from_the_package_that_declares_the_list() {
     let dir = std::env::temp_dir().join(format!("perl-land-exports-{}", std::process::id()));
@@ -822,7 +823,7 @@ fn a_landed_file_exports_only_from_the_package_that_declares_the_list() {
     idx.request_dependency_demand();
     idx.wait_idle();
     assert!(idx.get_cached("Outer::Inner").is_some(), "the declared package landed");
-    assert_eq!(idx.find_exporters("hi"), vec!["Outer", "Outer::Kid"]);
+    assert_eq!(idx.find_exporters("hi"), vec!["Outer"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
