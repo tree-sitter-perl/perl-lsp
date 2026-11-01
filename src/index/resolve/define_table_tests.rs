@@ -126,6 +126,11 @@ fn the_table_follows_the_index_file_by_file() {
     t.ensure_synced(&idx);
     assert_eq!(idx.walks.get(), walks);
 
+    // A new copy with the same names answers from the new copy's arms.
+    idx.put("/p/b.h", defines(&[("KNOB", &[guard("OTHER")]), ("B", &[guard("KNOB")])]));
+    t.ensure_synced(&idx);
+    assert_eq!(trails(&t, "KNOB"), vec![vec![guard("OTHER")], vec![guard("PLAT")]]);
+
     // A new copy of b.h replaces its sites; a.h's stay.
     idx.put("/p/b.h", defines(&[("B", &[])]));
     t.ensure_synced(&idx);
