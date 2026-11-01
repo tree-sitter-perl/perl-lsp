@@ -315,7 +315,7 @@ pub(super) fn pack_symbol_def_location(
     // the scoped lookup).
     let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for cached in module_index.def_candidates(name) {
-        if !seen_paths.insert(cached.path.clone()) {
+        if !seen_paths.insert(cached.path.to_path_buf()) {
             continue;
         }
         let whole = module_index.whole_present(&cached);
@@ -323,7 +323,7 @@ pub(super) fn pack_symbol_def_location(
             candidates.push((
                 has_body(&whole, sym),
                 false,
-                cached.path.clone(),
+                cached.path.to_path_buf(),
                 sym.selection_span.start.row,
                 sym.selection_span.start.column,
                 RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration),
@@ -341,8 +341,8 @@ pub(super) fn pack_symbol_def_location(
 
 pub(crate) fn key_for_sort(k: &FileKey) -> PathBuf {
     match k {
-        FileKey::Path(p) => p.clone(),
-        FileKey::Url(u) => u.to_file_path().unwrap_or_else(|_| PathBuf::from(u.as_str())),
+        FileKey::Path(p) => p.to_path_buf(),
+        FileKey::Url(u, _) => k.canonical_path().map_or_else(|| PathBuf::from(u.as_str()), |p| p.to_path_buf()),
     }
 }
 
@@ -698,7 +698,7 @@ pub fn references_mask_for(
     if !found_in_editable {
         found_in_editable = editable_copy_satisfies(
             module_index,
-            &retrieval_keys(target, &[]),
+            &retrieval_keys(target),
             &|fa: &FileAnalysis| fa.symbols().iter().any(|s| symbol_defines_target(s, target, fa)),
         );
     }
@@ -812,16 +812,6 @@ pub(super) fn file_sees_target_ids(
         })
 }
 
-/// A `FileKey`'s canonical path string — the spelling the visibility facts
-/// (`def_paths`, alias def sites, include closures) are keyed in.
-pub(super) fn canonical_file_str(key: &FileKey) -> String {
-    let file_path = key_for_sort(key);
-    std::fs::canonicalize(&file_path)
-        .unwrap_or(file_path)
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// The refs of `analysis` that can match `name` under any matcher arm — the
 /// in-file half of the relational narrowing (`RefTable::by_key`), in ref
 /// order. Callers iterate this instead of the whole ref vec.
@@ -855,26 +845,12 @@ pub(super) fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
     target: &TargetRef,
-    aliases: &[DelegationAlias],
     module_index: Option<&dyn CrossFileLookup>,
-    file_str: &str,
+    file: &CanonicalPath,
     memo: &WalkMemo,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::model::file_analysis::HashKeyOwner;
-
-    // An alias applies in THIS file only if its `#define` is visible here
-    // (macro expansion requires inclusion). Files of another language have
-    // no pack closure, so they can never match an alias — the cross-language
-    // pollution gate.
-    let visible_aliases: Vec<&DelegationAlias> = aliases
-        .iter()
-        .filter(|a| {
-            a.def_path == file_str
-                || analysis.pack.include_closure.contains(&a.def_path)
-        })
-        .collect();
-
     // Pack languages: name lookups during matching (invocant typing, the
     // typedef chase) must resolve against THIS file's include closure — the
     // same visibility goto-def uses at this file's cursors — or a scanned
@@ -884,12 +860,11 @@ pub(super) fn collect_from_analysis(
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
         Some(idx) if !analysis.pack.include_closure.is_empty() => {
-            let path = key_for_sort(key);
             // Guarded by a non-empty include closure — a pack-only shape.
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
-                Some(path.as_path()),
+                Some(file),
                 crate::model::file_analysis::VisibilityAxis::IncludeClosure,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
@@ -1003,16 +978,22 @@ pub(super) fn collect_from_analysis(
         TargetKind::Method { class } => Some(Some(class.clone())),
         _ => None,
     };
-    // Only the key buckets for the target and its visible aliases can hold
-    // a match; the union is walked in ref order so `out` keeps the vec's
-    // order (the final sort is by start point, and same-start refs — a
-    // chain's outer call and its receiver — rely on insertion order).
+    // Only the key buckets for the target (and, for a constructor, the
+    // classes it constructs) can hold a match — a use spelled through a
+    // delegating macro is bucketed under the delegate's key too. The union
+    // is walked in ref order so `out` keeps the vec's order (the final sort
+    // is by start point, and same-start refs — a chain's outer call and its
+    // receiver — rely on insertion order).
     let mut keyed: Vec<usize> = Vec::new();
-    for k in target.retrieval_keys(visible_aliases.iter().map(|a| a.name.as_str()), analysis.names()) {
+    for k in target.retrieval_keys(analysis.names()) {
         keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
     }
     keyed.sort_unstable();
     keyed.dedup();
+    let delegable = matches!(
+        target.kind,
+        TargetKind::Sub { .. } | TargetKind::Method { .. } | TargetKind::FileScopeValue
+    );
     let all_refs = analysis.refs();
     for &ri in &keyed {
         let r = &all_refs[ri];
@@ -1053,19 +1034,14 @@ pub(super) fn collect_from_analysis(
         // A use spelled through a delegating macro (`IncRef(x)` where
         // `#define IncRef(sv) Perl_Inc(sv)`, or the object-like alias
         // `#define op_prune_chain_head Perl_op_prune_chain_head`) IS a use of
-        // the target — the backward see-through. Call-shaped when the use was
-        // left unexpanded, a bare Variable read when the expansion erased it
-        // (the re-minted read carries the alias's name). Bypasses the package
-        // gates below (the delegation edge already pinned the identity) and
-        // is never rewritable (the token spells the MACRO's name).
+        // the target — the backward see-through, minted by the build with
+        // this file's own preprocessor view (`RefTable::delegations`).
+        // Bypasses the package gates below (the delegation edge already
+        // pinned the identity) and is never rewritable (the token spells the
+        // MACRO's name).
         let alias_matched = !name_matches
-            && matches!(
-                r.kind,
-                RefKind::FunctionCall | RefKind::ImportedName | RefKind::Variable | RefKind::PackageRef
-            )
-            && visible_aliases
-                .iter()
-                .any(|a| a.name == r.unqualified_target_name(analysis.names()));
+            && delegable
+            && analysis.ref_delegates(ri).iter().any(|d| *d == target.name);
         if !name_matches && !alias_matched {
             continue;
         }

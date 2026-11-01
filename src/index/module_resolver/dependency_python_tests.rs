@@ -55,12 +55,12 @@ fn defs(idx: &ModuleIndex, root: &Path, rel: &str, at: Point) -> Vec<(String, us
     let p = root.join(rel);
     let fa = idx.workspace_file_for_test(&p).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(p), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p)), at, Some(idx), OverrideScope::default());
     cs.definitions()
         .iter()
         .map(|d| match &d.key {
             FileKey::Path(p) => (p.strip_prefix(root).unwrap().display().to_string(), d.span.start.row),
-            FileKey::Url(u) => (u.to_string(), d.span.start.row),
+            FileKey::Url(u, _) => (u.to_string(), d.span.start.row),
         })
         .collect()
 }
@@ -81,7 +81,7 @@ fn a_venv_places_what_the_workspace_imports() {
     assert_eq!(defs(&idx, &root, "app/user.py", at(USER, "root()")), [(models.clone(), 1)]);
     // a module outside any package is named from the search root
     assert_eq!(defs(&idx, &root, "app/user.py", at(USER, "six()")), [(format!("{SITE}/six.py"), 1)]);
-    assert!(idx.is_dependency_path(&root.join(&models)));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&root.join(&models))));
     // each landed under the identity the import spells, so nothing widens;
     // `acme/__init__.py` encloses the name without declaring it, so it is
     // not a candidate

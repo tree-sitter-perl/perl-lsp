@@ -198,7 +198,7 @@ impl<'a> Builder<'a> {
                 // walks Variable bases the same as Edge(Variable)).
                 if let Some(container) = node.child_by_field_name("hash") {
                     let name =
-                        crate::cst::canonical_container_name(container, self.source)?;
+                        crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                     let scope = self.scope_stack.last().copied()
                         .unwrap_or_else(|| self.scope_at_point(node.start_position()));
                     return Some(WitnessPayload::Projected {
@@ -453,7 +453,7 @@ impl<'a> Builder<'a> {
                 let container = node.child_by_field_name("array")?;
                 let idx: i32 =
                     node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
-                let name = crate::cst::canonical_container_name(container, self.source)?;
+                let name = crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                 Some(WitnessPayload::Projected {
                     base: WitnessAttachment::Variable {
                         name,
