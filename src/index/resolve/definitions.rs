@@ -879,17 +879,27 @@ impl<'a> CandidateSet<'a> {
                 let mut found: Vec<RefLocation> = Vec::new();
                 for cn in analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate) {
                     // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named
-                    // class; a construction calls its class's constructor.
-                    let Some(called) = analysis.called_member(r, &cn, Some(idx)) else { continue };
+                    // class; a construction asks its class for the constructor
+                    // by role. The invocant may have resolved (a plugin-bridged
+                    // route token → controller class) to a class in THIS file:
+                    // a bridged invocant is never frozen (its class needs the
+                    // index), so the member is resolved here.
+                    let key = r.member_key(analysis.names());
+                    let resolution = analysis.resolve_member_key_in_ancestors(&cn, key, Some(idx), want);
+                    // A member the language guarantees has no declaration: an
+                    // honest miss. A construction's own class token answers
+                    // through its `PackageRef`, the cursor's companion.
+                    if matches!(resolution, Some(MethodResolution::Root { .. })) {
+                        continue;
+                    }
+                    let Some(called) = (match &resolution {
+                        Some(res) => analysis.resolved_member_name(res, key, Some(idx)),
+                        None => key.name().map(str::to_string),
+                    }) else {
+                        continue;
+                    };
                     let method: &str = &called;
-                    let on_class = |cn: String| -> Vec<RefLocation> {
-                        // The invocant resolved (e.g. a plugin-bridged route token
-                        // → controller class) but the controller lives in THIS
-                        // file: jump to the local method symbol. The build-time
-                        // freeze normally serves same-file dispatch, but a bridged
-                        // invocant is never frozen (its class needs the index), so
-                        // re-resolve here.
-                        let resolution = analysis.resolve_member_in_ancestors(&cn, method, Some(idx), want);
+                    let on_class = |resolution: Option<MethodResolution>| -> Vec<RefLocation> {
                         if let Some(MethodResolution::Local { sym_id, .. }) = resolution {
                             if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
                                 return vec![self.origin_decl(sym.selection_span)];
@@ -976,7 +986,7 @@ impl<'a> CandidateSet<'a> {
                         }
                         Vec::new()
                     };
-                    for loc in on_class(cn) {
+                    for loc in on_class(resolution) {
                         if !found.iter().any(|l| file_key_eq(&l.key, &loc.key) && l.span == loc.span) {
                             found.push(loc);
                         }

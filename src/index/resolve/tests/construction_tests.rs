@@ -247,3 +247,53 @@ fn a_constructors_fan_in_counts_its_constructions() {
     }
 }
 
+
+/// A class no class in its chain gives a constructor still constructs: the
+/// language root answers the construction, with no declaration to land on,
+/// so goto-def and hover offer the class alone.
+#[test]
+fn a_construction_with_no_declared_constructor_lands_on_its_class() {
+    let ws = Ws::new(
+        "php-plain",
+        &[
+            ("Lib/Plain.php", "<?php\nnamespace Lib;\n\nclass Plain {\n    public function go() {}\n}\n"),
+            ("App/Make.php", "<?php\nnamespace App;\nuse Lib\\Plain;\nfunction make() {\n    $p = new Plain();\n}\n"),
+        ],
+    );
+    let at = "new Plain".find("Plain").unwrap();
+    let defs = ws.ask("App/Make.php", "new Plain", at, OverrideScope::Hierarchy, |cs| ws.sites(cs.definitions()));
+    assert_eq!(defs, [("Lib/Plain.php".to_string(), 3)]);
+    let hover = ws.ask("App/Make.php", "new Plain", at, OverrideScope::Hierarchy, |cs| {
+        cs.hover_candidate().map(|l| (ws.rel(&l.key), l.span.start.row))
+    });
+    assert_eq!(hover, Some(("Lib/Plain.php".to_string(), 3)));
+
+    let ws = Ws::new(
+        "python-plain",
+        &[
+            ("lib/__init__.py", ""),
+            ("lib/plain.py", "#\n#\n#\nclass Plain:\n    def go(self):\n        pass\n"),
+            ("app/__init__.py", ""),
+            ("app/make.py", "from lib.plain import Plain\ndef make():\n    p = Plain()\n"),
+        ],
+    );
+    let defs = ws.ask("app/make.py", "Plain()", 0, OverrideScope::Hierarchy, |cs| ws.sites(cs.definitions()));
+    assert_eq!(defs, [("lib/plain.py".to_string(), 3)]);
+}
+
+/// A UNIVERSAL member is answered, but no declaration exists: goto-def is
+/// an honest miss, and a file reopening UNIVERSAL lands on its own sub.
+#[test]
+fn a_universal_member_has_no_location_unless_declared() {
+    let ws = Ws::new(
+        "perl-universal",
+        &[
+            ("lib/Foo.pm", "package Foo;\nsub new { bless {}, shift }\nsub go { my $self = shift; $self->can('go'); $self->dump }\n1;\n"),
+            ("lib/Debug.pm", "package Debug;\npackage UNIVERSAL;\nsub dump { 1 }\n1;\n"),
+        ],
+    );
+    let can = ws.ask("lib/Foo.pm", "can(", 0, OverrideScope::Hierarchy, |cs| ws.sites(cs.definitions()));
+    assert!(can.is_empty(), "`can` has no declaration: {can:?}");
+    let dump = ws.ask("lib/Foo.pm", "dump }", 0, OverrideScope::Hierarchy, |cs| ws.sites(cs.definitions()));
+    assert_eq!(dump, [("lib/Debug.pm".to_string(), 2)], "a reopened UNIVERSAL answers with its sub");
+}
