@@ -130,10 +130,10 @@ impl<'a> Builder<'a> {
                 if self.element_written_in_place(node) {
                     self.record_in_place_write(node);
                 }
-                // Only the arrow form `$x->[i]` has a scalar-ref receiver; the
-                // direct `$arr[i]` indexes the named array.
-                if crate::cst::element_arrow_deref(node, self.source) {
-                    self.record_arrow_deref(node, crate::model::file_analysis::DerefForm::ArrayIndex);
+                // The direct `$arr[i]` indexes the named array; only a
+                // subscript through a reference has a receiver.
+                if let Some(base) = crate::cst::element_deref_base(node) {
+                    self.record_arrow_deref(node, base, crate::model::file_analysis::DerefForm::ArrayIndex);
                 }
                 self.queue_children(node);
             }
@@ -141,7 +141,9 @@ impl<'a> Builder<'a> {
                 // The call's value is the expr arm's `Invoke` on the
                 // operand; here only the operand's rep is observed.
                 self.infer_deref_type(node, TypeObservation::CodeRefInvocation);
-                self.record_arrow_deref(node, crate::model::file_analysis::DerefForm::Call);
+                if let Some(operand) = crate::cst::NodeExt::elements(&node).next() {
+                    self.record_arrow_deref(node, operand, crate::model::file_analysis::DerefForm::Call);
+                }
                 self.queue_children(node);
             }
             // Symbolic code-deref: `&{ EXPR }` / `&{ EXPR }(...)`. The operand

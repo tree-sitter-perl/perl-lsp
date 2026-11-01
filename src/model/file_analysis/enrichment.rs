@@ -892,10 +892,8 @@ impl FileAnalysis {
     /// covered: method (`$x->m`) and hash (`$x->{k}`) carry a receiver-typed
     /// ref; array (`$x->[i]`) and code (`$x->()`) carry none, so the builder
     /// records them as `arrow_deref_sites` and this query merges the two
-    /// sources. The residual is the receiver *shape*, not the arrow form: only
-    /// a plain scalar operand is recorded, so a chain receiver (`f()->[0]`,
-    /// `$x->{k}->()`) is skipped — only a plain scalar can be provably
-    /// `Undef`/`Optional`.
+    /// sources. A receiver is a variable or a part of one (`$x->{k}->()`);
+    /// a value receiver (`f()->[0]`) is skipped, since nothing narrows it.
     pub fn deref_receiver_sites(
         &self,
         module_index: Option<&dyn CrossFileLookup>,
@@ -937,16 +935,15 @@ impl FileAnalysis {
                 });
             }
         }
-        // Array (`$x->[i]`) / code (`$x->()`) derefs have no typed ref; the
-        // builder records them so they join the same stream.
+        // Derefs with no typed ref naming their receiver; the builder
+        // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
-            if let Some(ty) =
-                self.inferred_type_via_bag_ctx(&s.receiver, s.span.start, module_index)
-            {
+            let subject = s.subject();
+            if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
                 out.push(DerefSite {
                     span: s.span,
                     receiver: s.receiver.clone(),
-                    subject: Subject::Variable(s.receiver.clone()),
+                    subject,
                     receiver_ty: ty,
                     form: s.form.clone(),
                 });

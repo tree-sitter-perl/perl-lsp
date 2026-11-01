@@ -127,13 +127,15 @@ impl FileAnalysis {
         self.resolve_variable(name, point).map(|s| s.deref_stack.as_slice())
     }
 
-    /// Each READ of a variable that occurs after a `std::move` of it and
-    /// before it is reassigned — a use-after-move bug. The moved-from region
-    /// runs from the move call to the earliest FlowEdge rebinding the var (the
-    /// SAME edge-driven cutoff narrowing uses, `RebindIndex`), or the
-    /// enclosing scope's end. Reads are matched on name + access AND filtered
-    /// to the move's scope subtree, so a same-named var in another function
-    /// never false-flags. Returns (var name, read span).
+    /// Each READ of a moved place (`x`, `other.msg`) after its `std::move`
+    /// and before it is given a value again — a use-after-move bug. The
+    /// moved-from region runs from the move call to the earliest FlowEdge
+    /// rebinding the root (the SAME edge-driven cutoff narrowing uses,
+    /// `RebindIndex`) or write of the moved part, or the enclosing scope's
+    /// end. The reads are the move's own (`MoveSite::reads`): keyed by the
+    /// root's declaration, so a same-named var elsewhere never matches, and
+    /// by path, so a sibling member of a moved member is no read of it.
+    /// Returns (moved subject as written, read span).
     ///
     /// The check is deliberately the DECIDABLE subset: it flags only a
     /// straight-line moved-then-used LOCAL. Three conservative gates keep it
@@ -152,7 +154,7 @@ impl FileAnalysis {
     ///    subobject-move idiom, not flagged.
     /// What stays out: any use that needs true path-sensitivity (a use in a
     /// different branch arm, a loop-carried move, a reset via a by-mutable-ref
-    /// call), and non-local / subobject moves.
+    /// call), and moves of a parameter or of a part of one.
     pub fn use_after_move_reads(&self) -> Vec<(String, Span)> {
         let key = |p: &Point| (p.row, p.column);
         let contains = |outer: &Span, inner: &Span| {
@@ -160,7 +162,8 @@ impl FileAnalysis {
         };
         let mut out = Vec::new();
         let rebinds = RebindIndex::new(&self.flow_edges);
-        for (name, move_span, move_scope) in &self.pack.moved_from {
+        for m in &self.pack.moved_from {
+            let (move_span, move_scope) = (&m.call, &m.scope);
             let scope_span = self.scope(*move_scope).span;
             // GATE B (in-function): only a move that is lexically inside SOME
             // function body is executable straight-line code we can reason
@@ -196,38 +199,38 @@ impl FileAnalysis {
             // GATE E (locals only): a moved PARAMETER is a forwarding /
             // subobject-move idiom — move-constructors and `operator=` move
             // the rvalue-ref param into a base/member subobject and then read
-            // sibling members, which this tier can't tell from a real bug
-            // without subobject + path analysis. Detect param-ness by the moved
-            // var's declaration landing inside a parameter list; only moves of
+            // sibling members, which this tier can't tell from a real bug: the
+            // base subobject a whole-parameter move feeds is decided by the
+            // callee's parameter type, which no capture states. Only moves of
             // LOCALS are flagged. This is what clears the last real-header FPs.
-            let chain = self.lookup_chain(*move_scope);
-            let moved_is_param = self.symbols.iter().any(|s| {
-                s.name == *name
-                    && chain.contains(s.scope)
-                    && self
-                        .pack.param_regions
-                        .iter()
-                        .any(|pr| contains(pr, &s.selection_span))
-            });
-            if moved_is_param {
-                continue;
-            }
+            // A member of the elided receiver is no parameter, and nothing
+            // in the body rebinds the receiver.
+            let root_name = match &m.place.root {
+                Binding::Lexical(root) => {
+                    let decl = self.symbol(*root);
+                    if self.pack.param_regions.iter().any(|pr| contains(pr, &decl.selection_span)) {
+                        continue;
+                    }
+                    Some(decl.name.as_str())
+                }
+                Binding::Receiver(_) => None,
+                Binding::Package(..) => continue,
+            };
             let scope_end = scope_span.end;
             let region = Span { start: move_span.end, end: scope_end };
-            let cutoff = rebinds.earliest_in(name, region).unwrap_or(scope_end);
-            for r in self.refs() {
-                if r.target_name != *name || r.access != AccessKind::Read {
-                    continue;
-                }
-                let p = r.span.start;
-                // strictly after the move, strictly before the rebind cutoff
-                if key(&p) <= key(&move_span.end) || key(&p) >= key(&cutoff) {
-                    continue;
-                }
-                // same variable: the read must sit inside the move's scope
-                // subtree (the move scope is on the read's scope chain).
-                if scope_chain_of(&self.scopes, r.scope).contains(move_scope) {
-                    out.push((name.clone(), r.span));
+            let reset = m.resets.iter().map(|s| s.start).filter(|p| key(p) > key(&move_span.end)).min_by_key(key);
+            // A reset past the move's scope (a write in a sibling arm) must
+            // not stretch the cutoff beyond it.
+            let cutoff = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset, Some(scope_end)]
+                .into_iter()
+                .flatten()
+                .min_by_key(key)
+                .unwrap_or(scope_end);
+            for read in &m.reads {
+                let p = read.start;
+                // strictly after the move, strictly before the reset cutoff
+                if key(&p) > key(&move_span.end) && key(&p) < key(&cutoff) {
+                    out.push((m.spelling.clone(), *read));
                 }
             }
         }

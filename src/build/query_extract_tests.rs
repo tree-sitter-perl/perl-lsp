@@ -1653,6 +1653,87 @@ void f() {
 }
 
 #[test]
+fn cpp_member_move_flags_only_reads_of_the_moved_part() {
+    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` is a use of the
+    // moved part until `p.msg` is written again. A read of all of `p` hands
+    // the whole on (a copy, a log line) and reads none of the moved state
+    // itself.
+    let src = "\
+struct Msg {};
+struct Packet { Msg msg; int id; };
+void f() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p.id);
+  use(p.msg);
+  p.msg = Msg();
+  use(p.msg);
+}
+void g() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    reads.sort();
+    assert_eq!(reads, vec![("p.msg".to_string(), 6)]);
+}
+
+#[test]
+fn cpp_move_of_an_implicit_member_flags_its_reads() {
+    // A bare `name_` in a member function is `this->name_`: rooted at the
+    // body's receiver, so its move and its reads are one place.
+    let src = "\
+class C {
+  Name name_;
+  Name other_;
+  void f();
+  void g();
+};
+void C::f() {
+  sink(std::move(name_));
+  use(other_);
+  use(name_);
+}
+void C::g() {
+  sink(std::move(name_));
+  name_ = Name();
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    // Assigning `name_` gives it a value again (fmt's `args.h` list push).
+    assert_eq!(reads, vec![("name_".to_string(), 9)]);
+}
+
+#[test]
+fn cpp_reset_past_the_move_scope_does_not_stretch_it() {
+    // spdlog's `user_chars`: the move sits in an `if` arm; the read and the
+    // reassignment are in the `else` arm, outside the move's scope.
+    let src = "\
+class C {
+  Name name_;
+  void f(bool c);
+};
+void C::f(bool c) {
+  if (c) {
+    sink(std::move(name_));
+  } else {
+    use(name_);
+    name_ = Name();
+  }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    assert!(fa.use_after_move_reads().is_empty(), "{:?}", fa.use_after_move_reads());
+}
+
+#[test]
 fn cpp_conditional_move_does_not_flag_sibling_arm() {
     // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
     // `if` arm bounds its moved-from region to that arm — the read of `x` in the
@@ -1907,6 +1988,32 @@ void f(Base* b) {
         Some(InferredType::ClassName("Derived".into())),
         "dynamic_cast narrows b to Derived inside the guard",
     );
+}
+
+#[test]
+fn cpp_dynamic_cast_narrows_a_member() {
+    // A member subject narrows the place it denotes: `h.b` is Derived inside
+    // the guard and its declared Base outside.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder { Base* b; };
+void f(Holder h) {
+    if (dynamic_cast<Derived*>(h.b)) {
+        h.b->run();
+    }
+    h.b->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    assert_eq!(classes, vec![(5, Some("Derived".to_string())), (7, Some("Base".to_string()))]);
 }
 
 #[test]

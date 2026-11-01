@@ -733,6 +733,31 @@ fn access_base(node: Node) -> Option<(Node, bool)> {
     Some((node.elements().next()?, true))
 }
 
+/// The operand an element access subscripts through the reference it
+/// holds (`$x` in `$x->[0]`, `$x->{a}` in `$x->{a}[0]`); `None` for a
+/// named container (`$a[0]`, `$h{k}`).
+pub(crate) fn element_deref_base(node: Node) -> Option<Node> {
+    access_base(node).and_then(|(base, through_ref)| through_ref.then_some(base))
+}
+
+/// A scalar variable read as itself (`$x`), not through a deref (`$$x`).
+pub(crate) fn is_plain_scalar(node: Node) -> bool {
+    node.kind() == "scalar" && deref_operand(node).is_none()
+}
+
+/// A deref whose receiver is no plain variable: the receiver and the form.
+/// `$x->{a}{k}`'s receiver is `$x->{a}`; `$$x[0]`'s is `$$x`.
+pub(crate) fn deref_of_part(node: Node) -> Option<(Node, crate::model::file_analysis::DerefForm)> {
+    use crate::model::file_analysis::DerefForm;
+    let (receiver, form) = match node.kind() {
+        "hash_element_expression" => (element_deref_base(node)?, DerefForm::HashKey),
+        "array_element_expression" => (element_deref_base(node)?, DerefForm::ArrayIndex),
+        "coderef_call_expression" => (node.elements().next()?, DerefForm::Call),
+        _ => return None,
+    };
+    (!is_plain_scalar(receiver)).then_some((receiver, form))
+}
+
 /// The variable a place hangs off, bound; a deref spelling's operand
 /// leads to it.
 fn place_root(node: Node, src: &[u8], binder: &mut impl PlaceBinder) -> Option<Place> {

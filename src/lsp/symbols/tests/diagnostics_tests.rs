@@ -291,7 +291,8 @@ sub f {
 }
 
 #[test]
-fn d1_undef_deref_hash_form() {
+fn d1_element_deref_on_undef_autovivifies() {
+    // `$x->{host}` on an undef `$x` makes `$x` a hash ref; nothing dies.
     let src = r#"
 package P;
 sub f {
@@ -301,9 +302,7 @@ sub f {
 }
 1;
 "#;
-    let diags = undef_deref_diags(src);
-    assert_eq!(diags.len(), 1, "hash deref on undef fires");
-    assert!(diags[0].message.contains("hash deref"), "{}", diags[0].message);
+    assert!(undef_deref_diags(src).is_empty(), "an element deref autovivifies");
 }
 
 #[test]
@@ -823,12 +822,35 @@ sub f {
 1;
 "#;
     let diags = undef_deref_diags(src);
-    assert_eq!(diags.len(), 2, "array + code deref on undef both fire: {:?}",
+    assert_eq!(diags.len(), 1, "the code deref fires; the array deref autovivifies: {:?}",
         diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+    assert!(diags[0].message.contains("call"), "{}", diags[0].message);
 }
 
 #[test]
-fn d2_optional_array_deref() {
+fn d1_undef_deref_through_a_place() {
+    // The receiver is a part of a variable: the narrowing on that place
+    // reaches its derefs, and only the call dies (the element derefs
+    // autovivify).
+    let src = r#"
+package P;
+sub f {
+    my ($self) = @_;
+    return if defined $self->{cb};
+    $self->{cb}->();
+    $self->{cb}->[0];
+    $self->{cb}{k};
+    $self->{other}{k};
+}
+1;
+"#;
+    let diags = undef_deref_diags(src);
+    let messages: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages, ["'$self->{cb}' is undef here; a `->(...)` call on it dies at runtime"]);
+}
+
+#[test]
+fn d2_optional_array_deref_autovivifies() {
     let src = r#"
 package Foo;
 sub new { bless [], shift }
@@ -852,7 +874,7 @@ sub use_it {
         .into_iter()
         .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "optional-deref"))
         .count();
-    assert_eq!(n, 1, "unguarded Optional array deref fires");
+    assert_eq!(n, 0, "an array deref of a maybe-undef variable autovivifies; nothing dies");
 }
 
 #[test]

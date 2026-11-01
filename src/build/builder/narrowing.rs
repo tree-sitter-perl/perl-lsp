@@ -10,12 +10,11 @@
 //! Decisions (engine-is-emission, truncation soundness, polarity +
 //! the `Undef` negative lattice): `docs/adr/flow-narrowing.md`.
 
-use std::collections::HashMap;
 
 use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::node_to_span;
-use crate::model::file_analysis::{Access, Binding, InferredType, PathStep, Place, ScopeId, Span, Subject};
+use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span, Subject};
 
 use super::extract::ListSlot;
 use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Builder};
@@ -178,109 +177,6 @@ pub(super) struct PendingNarrow {
     fact: RegionFact,
     region: Span,
     scope: ScopeId,
-}
-
-/// Every site that could disturb a place, per root binding in source
-/// order — the place sibling of `RebindIndex`, built in one pass over the
-/// file's trees. Each site is an access of a place (`Place::disturbed_by`
-/// decides what it disturbs); a read that steps further in is not one.
-/// Conservative: it under-narrows.
-#[derive(Default)]
-struct PlaceDisturbanceIndex {
-    sites: HashMap<Binding, Vec<(Point, Access, Place)>>,
-    /// The same sites keyed by path, so a place whose every step is exact
-    /// reads only the sites on its own path: a file that writes thousands
-    /// of sibling slots (`$T{0}{a} = …; $T{0}{b} = …`) costs each fact a
-    /// lookup per step, not a scan of every sibling write in its region.
-    paths: HashMap<Binding, PathNode>,
-}
-
-/// The sites whose path runs through one node of a root's path tree.
-#[derive(Default)]
-struct PathNode {
-    /// Sites whose path ends here: every access, and the writes alone.
-    ends: Vec<Point>,
-    end_writes: Vec<Point>,
-    /// Sites whose next step names no single slot (a key variable, a
-    /// slice): checked by `disturbed_by`.
-    inexact: Vec<(Point, Access, Place)>,
-    next: HashMap<PathStep, PathNode>,
-}
-
-/// The first of `points` (sorted) inside `region`.
-fn first_in(points: &[Point], region: Span) -> Option<Point> {
-    let i = points.partition_point(|p| point_lt(*p, region.start));
-    points.get(i).copied().filter(|p| point_lt(*p, region.end))
-}
-
-impl PlaceDisturbanceIndex {
-    fn add(&mut self, at: Point, access: Access, place: Place) {
-        let mut node = self.paths.entry(place.root.clone()).or_default();
-        let mut exact = true;
-        for step in &place.path {
-            if !step.is_exact() {
-                exact = false;
-                break;
-            }
-            node = node.next.entry(step.clone()).or_default();
-        }
-        if exact {
-            node.ends.push(at);
-            if access == Access::Write {
-                node.end_writes.push(at);
-            }
-        } else {
-            node.inexact.push((at, access, place.clone()));
-        }
-        self.sites.entry(place.root.clone()).or_default().push((at, access, place));
-    }
-
-    fn seal(&mut self) {
-        fn seal_node(n: &mut PathNode) {
-            n.ends.sort_unstable_by_key(|p| (p.row, p.column));
-            n.end_writes.sort_unstable_by_key(|p| (p.row, p.column));
-            n.inexact.sort_by_key(|(p, ..)| (p.row, p.column));
-            n.next.values_mut().for_each(seal_node);
-        }
-        for sites in self.sites.values_mut() {
-            sites.sort_by_key(|(p, ..)| (p.row, p.column));
-        }
-        self.paths.values_mut().for_each(seal_node);
-    }
-
-    /// The earliest disturbance of `place` within `region` (start
-    /// inclusive, end exclusive).
-    fn earliest_in(&self, place: &Place, region: Span) -> Option<Point> {
-        if !place.path.iter().all(PathStep::is_exact) {
-            let sites = self.sites.get(&place.root)?;
-            let i = sites.partition_point(|(p, ..)| point_lt(*p, region.start));
-            return sites[i..]
-                .iter()
-                .take_while(|(p, ..)| point_lt(*p, region.end))
-                .find(|(_, access, other)| place.disturbed_by(*access, other))
-                .map(|(p, ..)| *p);
-        }
-        // Only the sites on the place's own path can disturb it: a write
-        // to it or above it, an opaque use strictly above it.
-        let mut node = self.paths.get(&place.root)?;
-        let mut best = None;
-        for depth in 0..=place.path.len() {
-            let ends = if depth < place.path.len() { &node.ends } else { &node.end_writes };
-            best = earliest_point(best, first_in(ends, region));
-            let i = node.inexact.partition_point(|(p, ..)| point_lt(*p, region.start));
-            let inexact = node.inexact[i..]
-                .iter()
-                .take_while(|(p, ..)| point_lt(*p, region.end))
-                .find(|(_, access, other)| place.disturbed_by(*access, other))
-                .map(|(p, ..)| *p);
-            best = earliest_point(best, inexact);
-            match place.path.get(depth).and_then(|step| node.next.get(step)) {
-                Some(n) => node = n,
-                None => break,
-            }
-        }
-        best
-    }
 }
 
 /// Where a fact about `subject` attaches: a variable on its name in the
@@ -949,7 +845,6 @@ impl<'a> Builder<'a> {
     pub(super) fn apply_narrowing_cutoffs(&mut self, tree: &'a Tree) {
         use crate::model::witnesses::{Witness, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
-        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         let wanted: std::collections::HashSet<String> = pending
             .iter()
             .filter_map(|pn| match &pn.subject {
@@ -957,10 +852,15 @@ impl<'a> Builder<'a> {
                 NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
             })
             .collect();
-        let places = (!wanted.is_empty()).then(|| {
+        let places = if wanted.is_empty() {
+            None
+        } else {
             let roots = std::iter::once(tree.root_node()).chain(self.eval_injections.values().copied());
-            self.place_disturbances(roots, &wanted)
-        });
+            let (idx, sites) = self.place_disturbances(roots, &wanted);
+            self.arrow_deref_sites.extend(sites);
+            Some(idx)
+        };
+        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
@@ -1026,17 +926,24 @@ impl<'a> Builder<'a> {
         match binding {
             Binding::Lexical(sid) => &self.symbols[sid.0 as usize].name,
             Binding::Package(_, name) => name,
+            // Perl has no elided receiver: `$self` is a lexical.
+            Binding::Receiver(_) => "",
         }
     }
 
     /// Every access of a place rooted at a `wanted` name, over the file's
     /// trees: one survey, with each name bound by position.
+    ///
+    /// The same survey mints the deref sites whose receiver is a part of a
+    /// variable (`$self->{cb}->()`): only a narrowed place can type one,
+    /// and only a wanted root is read here.
     fn place_disturbances(
         &self,
         roots: impl IntoIterator<Item = Node<'a>>,
         wanted: &std::collections::HashSet<String>,
-    ) -> PlaceDisturbanceIndex {
+    ) -> (PlaceDisturbanceIndex, Vec<crate::model::file_analysis::ArrowDerefSite>) {
         let mut idx = PlaceDisturbanceIndex::default();
+        let mut sites = Vec::new();
         for root in roots {
             // Each tree runs in document order; an injected tree restarts it.
             let mut binder = SurveyBinder { builder: self, scopes: super::infra::ScopeCursor::new(&self.scopes), wanted };
@@ -1052,7 +959,23 @@ impl<'a> Builder<'a> {
                         | "scalar"
                         | "array"
                         | "hash"
+                        | "coderef_call_expression"
                 ) {
+                    return;
+                }
+                if let Some((receiver, form)) = crate::cst::deref_of_part(node) {
+                    let read = crate::cst::read_place(receiver, self.source, &mut binder)
+                        .filter(|r| r.exact && !r.place.is_variable());
+                    if let (Some(read), Ok(text)) = (read, receiver.utf8_text(self.source)) {
+                        sites.push(crate::model::file_analysis::ArrowDerefSite {
+                            receiver: text.to_string(),
+                            place: Some(Box::new(read.place)),
+                            span: node_to_span(node),
+                            form,
+                        });
+                    }
+                }
+                if kind == "coderef_call_expression" {
                     return;
                 }
                 // Preorder reaches an access before what it reads through,
@@ -1081,7 +1004,7 @@ impl<'a> Builder<'a> {
             });
         }
         idx.seal();
-        idx
+        (idx, sites)
     }
 
     /// Run the declarative `@flow` query (`queries/perl/flow.scm`) and mint a

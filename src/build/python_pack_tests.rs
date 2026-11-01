@@ -1503,3 +1503,77 @@ def f(self):
     assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
     assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
 }
+
+#[test]
+fn a_member_receiver_down_to_a_variable_is_its_place() {
+    use crate::model::file_analysis::{Binding, PathStep, Place, RefKind};
+    // Only a place a narrowing gives a value rides on its receiver.
+    let fa = py_in(
+        "class B:\n    pass\nclass A:\n    def go(self):\n        if isinstance(self.a.b, B):\n            self.a.b.run()\n        f().x.run()\n        if isinstance(self.c, B):\n            self.c.run()\n        self.d.run()\n",
+        None,
+    );
+    let me = fa.symbols().iter().find(|s| s.name == "self" && s.kind == SymKind::Variable).expect("self param").id;
+    let places: Vec<Option<Place>> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| r.member_site().unwrap().invocant.place().cloned())
+        .collect();
+    let member = |m: &str| PathStep::Member(m.to_string());
+    assert_eq!(
+        places,
+        vec![
+            Some(Place { root: Binding::Lexical(me), path: vec![member("a"), member("b")] }),
+            None,
+            Some(Place { root: Binding::Lexical(me), path: vec![member("c")] }),
+            None,
+        ],
+        "a value-rooted receiver is no place, and an unnarrowed one carries none"
+    );
+}
+
+/// The class each `run()` call's receiver types as, by row.
+fn run_receivers(src: &str) -> Vec<(usize, Option<String>)> {
+    use crate::model::file_analysis::RefKind;
+    let fa = py_in(src, None);
+    let mut out: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| {
+            let t = fa.method_call_invocant_type(r, None);
+            (r.span.start.row, t.and_then(|t| t.class_name().map(str::to_string)))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn isinstance_narrows_a_member_until_it_is_disturbed() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.other = 1
+            self.pet.run()
+            self.pet = make()
+            self.pet.run()
+        self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            self.reset()
+            self.pet.run()
+";
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        run_receivers(src),
+        vec![(6, foo.clone()), (8, foo), (10, None), (11, None), (15, None)],
+        "a sibling write leaves the narrowing; a write to the member, the arm's end, and the receiver handed \
+         whole to a call end it"
+    );
+}

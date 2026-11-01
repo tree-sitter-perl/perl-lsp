@@ -170,10 +170,25 @@ the builder binds the root and every key variable where they are written
 
 Place facts attach to `WitnessAttachment::Place`, temporal like
 `Variable` but with no scope walk: the place is its own identity, and
-the region decides where a fact holds. A method call mints its receiver's
-place on the ref (`receiver_place`), so the receiver query and the deref
-diagnostics read it without re-reading the spelling. Plain variables stay
-on `Variable { name, scope }` until the variable lane moves onto bindings.
+the region decides where a fact holds. A member access carries its
+receiver's place on its invocant (`Invocant::Place`), and a deref with no
+ref of its own carries it on its `ArrowDerefSite`, so the receiver query
+and the deref diagnostics read it without re-reading the spelling. Plain
+variables stay on `Variable { name, scope }` until the variable lane moves
+onto bindings.
+
+A pack builds the same places from its captures at skeleton assembly
+(`query_extract/places.rs`): a member read whose receivers lead down to a
+resolved variable read is that variable's declaration plus a `Member` step
+per read. A guard whose subject is a member read (`isinstance(self.x, T)`,
+`dynamic_cast<D*>(o.b)`) narrows that place, cut by the same index: a
+member write is a write of its place, and a variable or member read that no
+further member read reads through is an opaque use. A bare member name in
+a member function is rooted at the body's elided receiver
+(`Binding::Receiver`); an explicit `this->x` has no root yet, since `this`
+is read as no name. A receiver carries its place (`Invocant::Place`) only
+where a narrowing gives that place a value; elsewhere the place would
+answer nothing, so the ref keeps its plain receiver.
 
 Truncation is `Place::disturbed_by`: a **write** disturbs the place and
 everything under it — the place itself, a proper prefix, or an

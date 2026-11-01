@@ -1655,7 +1655,7 @@ fn positional_reads_skip_grammar_extras() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/emit.rs", 13, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/emit.rs", 12, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
@@ -1711,7 +1711,7 @@ fn raw_scope_climbs_are_containment_only() {
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
         ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
-        ("model/file_analysis/queries.rs", 4, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable, is the read in the move's subtree; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
+        ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
     ];
     let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));

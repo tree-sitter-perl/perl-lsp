@@ -47,6 +47,13 @@ pub(super) struct State {
     pub(super) observations: Vec<(String, ScopeId, crate::model::witnesses::TypeObservation, Span)>,
 }
 
+impl State {
+    /// Whether the node at `bytes` is a member read.
+    pub(super) fn is_member_read(&self, bytes: (usize, usize)) -> bool {
+        self.member_reads.contains_key(&bytes)
+    }
+}
+
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::TypeAnnot => {
@@ -238,6 +245,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 let member = (pack.shape_name)(&name.text);
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
                 f.member_reads.insert((e.start_byte, e.end_byte), (recv.span(), member.clone()));
+                out.member_reads.push(crate::build::query_extract::MemberRead {
+                    span,
+                    receiver: recv.span(),
+                    member: member.clone(),
+                });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -369,6 +381,9 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
     place_mids.sort_unstable();
     for mid in place_mids {
         let read = byte_range_of(events, *mid, Capture::Flow(FlowCap::Place)).and_then(|r| f.member_reads.get(&r));
+        if read.is_some() {
+            out.place_writes.push(f.flow_places[mid]);
+        }
         if let (Some((receiver, member)), Some(value)) = (read, source_value_span(f, events, *mid)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: *receiver,
