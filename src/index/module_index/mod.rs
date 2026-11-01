@@ -232,7 +232,7 @@ pub struct ModuleIndex {
     /// that declare NOTHING registrable (a header-only `#include` shim). The
     /// name-keyed views can't reach those, but whole-project sweeps
     /// (`for_each_cached_file`) must.
-    all_files: Arc<DashMap<std::path::PathBuf, Arc<CachedModule>>>,
+    all_files: Arc<DashMap<crate::util::canonical_path::CanonicalPath, Arc<CachedModule>>>,
     /// The freshness engine (`docs/adr/storage-engine.md`):
     /// per-file span-free surface records + the reverse-dependency index.
     /// Fed at registration (whole copy, pre-strip) and on open-doc
@@ -245,8 +245,8 @@ pub struct ModuleIndex {
     /// `None` payload = a DECLINED build (byte-cap giant / cycle-tainted)
     /// at this key: repeat queries skip the deep-copy entirely until a
     /// provider change moves the key.
-    enriched: Arc<DashMap<std::path::PathBuf, EnrichedEntry>>,
-    enriched_order: Arc<std::sync::Mutex<std::collections::VecDeque<std::path::PathBuf>>>,
+    enriched: Arc<DashMap<crate::util::canonical_path::CanonicalPath, EnrichedEntry>>,
+    enriched_order: Arc<std::sync::Mutex<std::collections::VecDeque<crate::util::canonical_path::CanonicalPath>>>,
     /// Applied copies of gated files (`gated_views`): what every view of
     /// a closed file whose deferred plugin emissions fire hands out.
     gated_views: Arc<gated_views::GatedViews>,
@@ -262,14 +262,14 @@ pub struct ModuleIndex {
     /// construction: ONE entry per distinct consulted path — superseded
     /// (epoch, key) pairs overwrite in place, never accumulate — so the
     /// ceiling is the registered-file count × ~100 bytes.
-    enrichment_key_memo: Arc<DashMap<std::path::PathBuf, (u64, u64)>>,
+    enrichment_key_memo: Arc<DashMap<crate::util::canonical_path::CanonicalPath, (u64, u64)>>,
     /// The linkage-visible (name, declares-a-Class) pairs each file
     /// registered — the exact inverse list `unregister_file` walks AND the
     /// class-rank source for the cache-slot tie-break. Recorded at
     /// registration (pre-strip) because the resident copy's `symbols` may be
     /// evicted, and rehydration after an edit persists would fetch the NEW
     /// generation's names.
-    registered_names: Arc<DashMap<std::path::PathBuf, Vec<(String, bool)>>>,
+    registered_names: Arc<DashMap<crate::util::canonical_path::CanonicalPath, Vec<(String, bool)>>>,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
     /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`

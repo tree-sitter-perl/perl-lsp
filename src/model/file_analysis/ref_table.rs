@@ -60,6 +60,70 @@ pub struct RefTable {
     /// where its first receiver does, so this is the file's deepest chain.
     #[serde(skip, default)]
     longest_call_chain: usize,
+
+    /// Per-site macro delegation, minted by the build: the use at ref `i`
+    /// IS a use of every name in its chain, so it is indexed (and
+    /// row-shredded) under each delegate's key too — the backward half of
+    /// goto-def's see-through. Empty outside C.
+    #[serde(default)]
+    delegates: RefDelegates,
+}
+
+/// A column parallel to the refs: `of[i]` names ref `i`'s delegate chain
+/// (1-based into `chains`, 0 = none), so a per-site fact costs nothing on
+/// `Ref` itself or in a file without macros. `of` covers the build-time
+/// refs only; refs enrichment appends above the baseline have no entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RefDelegates {
+    #[serde(default)]
+    of: Vec<u32>,
+    #[serde(default)]
+    chains: Vec<Box<[String]>>,
+}
+
+impl RefDelegates {
+    /// Stamp each ref `key_of` names a macro for with that macro's chain,
+    /// asking `chain_for` once per distinct key (one entry per macro, not
+    /// per site).
+    pub fn stamp<'a>(
+        refs: &'a [Ref],
+        mut key_of: impl FnMut(&'a Ref) -> Option<&'a str>,
+        mut chain_for: impl FnMut(&str) -> Option<Box<[String]>>,
+    ) -> Self {
+        let mut ids: HashMap<&str, Option<u32>> = HashMap::new();
+        let mut out = RefDelegates::default();
+        for (i, r) in refs.iter().enumerate() {
+            let Some(key) = key_of(r) else { continue };
+            let id = *ids.entry(key).or_insert_with(|| {
+                chain_for(key).map(|chain| {
+                    out.chains.push(chain);
+                    out.chains.len() as u32
+                })
+            });
+            let Some(id) = id else { continue };
+            if out.of.is_empty() {
+                out.of = vec![0; refs.len()];
+            }
+            out.of[i] = id;
+        }
+        out
+    }
+
+    fn at(&self, i: usize) -> &[String] {
+        match self.of.get(i) {
+            Some(&id) if id > 0 => &self.chains[id as usize - 1],
+            _ => &[],
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.of.capacity() * std::mem::size_of::<u32>()
+            + self
+                .chains
+                .iter()
+                .map(|c| c.iter().map(|d| d.capacity() + std::mem::size_of::<String>()).sum::<usize>())
+                .sum::<usize>()
+    }
 }
 
 impl RefTable {
@@ -67,6 +131,11 @@ impl RefTable {
     /// `rebuild_indices`, which the owning `FileAnalysis` runs.
     pub fn from_vec(refs: Vec<Ref>) -> Self {
         RefTable { refs, ..Default::default() }
+    }
+
+    /// `from_vec` plus the build's per-site macro delegation column.
+    pub fn from_parts(refs: Vec<Ref>, delegates: RefDelegates) -> Self {
+        RefTable { refs, delegates, ..Default::default() }
     }
 
     pub fn as_slice(&self) -> &[Ref] {
@@ -165,9 +234,41 @@ impl RefTable {
             .map(|(_, &i)| (self.refs[i].span.start, i))
     }
 
-    /// Every ref's relational row seed, in ref order.
+    /// Every ref's relational row seed, in ref order. A delegated use adds
+    /// one seed per delegate key, so retrieval for the delegate finds it.
     pub fn row_seeds(&self, names: &NameSpellings) -> Vec<RefRowSeed> {
-        self.refs.iter().map(|r| r.row_seed(names)).collect()
+        let mut out = Vec::with_capacity(self.refs.len());
+        for (i, r) in self.refs.iter().enumerate() {
+            let seed = r.row_seed(names);
+            for d in self.delegates_at(i) {
+                let key = name_match_key(d, names);
+                if key != seed.key {
+                    out.push(RefRowSeed { key, ..seed.clone() });
+                }
+            }
+            out.push(seed);
+        }
+        out
+    }
+
+    /// The names ref `i` reaches through macro delegation.
+    pub fn delegates_at(&self, i: usize) -> &[String] {
+        self.delegates.at(i)
+    }
+
+    /// Bucket ref `i` under its own match key and every delegate's.
+    fn index_keys(&mut self, i: usize, names: &NameSpellings) {
+        let own = self.refs[i].match_key(names);
+        let extra: Vec<String> = self
+            .delegates_at(i)
+            .iter()
+            .map(|d| name_match_key(d, names))
+            .filter(|k| *k != own)
+            .collect();
+        for k in extra {
+            self.by_key.entry(k).or_default().push(i);
+        }
+        self.by_key.entry(own).or_default().push(i);
     }
 
     /// Seal the enrichment baseline at the current length.
@@ -187,8 +288,9 @@ impl RefTable {
         self.by_target.clear();
         self.calls_by_span.clear();
         self.member_hops.clear();
-        for (i, r) in self.refs.iter().enumerate() {
-            self.by_key.entry(r.match_key(names)).or_default().push(i);
+        for i in 0..self.refs.len() {
+            self.index_keys(i, names);
+            let r = &self.refs[i];
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
@@ -226,9 +328,9 @@ impl RefTable {
         );
         self.by_key.clear();
         self.by_target.clear();
-        for (i, r) in self.refs.iter().enumerate() {
-            self.by_key.entry(r.match_key(names)).or_default().push(i);
-            if let Some(sym_id) = r.resolved_symbol() {
+        for i in 0..self.refs.len() {
+            self.index_keys(i, names);
+            if let Some(sym_id) = self.refs[i].resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
         }
@@ -245,6 +347,7 @@ impl RefTable {
         self.calls_by_span = Vec::new();
         self.member_hops = Vec::new();
         self.longest_call_chain = 0;
+        self.delegates = RefDelegates::default();
         self.evicted = true;
     }
 
@@ -271,7 +374,8 @@ impl RefTable {
                 .refs
                 .iter()
                 .map(|r| r.target_name.capacity() + std::mem::size_of::<String>())
-                .sum::<usize>();
+                .sum::<usize>()
+            + self.delegates.heap_bytes();
 
         let mut b = mcap(&self.by_target)
             + mcap(&self.by_key)
@@ -364,5 +468,10 @@ impl FileAnalysis {
     /// of `sym_row_seeds`.
     pub fn ref_row_seeds(&self) -> Vec<RefRowSeed> {
         self.refs.row_seeds(&self.pack.names)
+    }
+
+    /// The names ref `ri` reaches through macro delegation.
+    pub fn ref_delegates(&self, ri: usize) -> &[String] {
+        self.refs.delegates_at(ri)
     }
 }

@@ -372,7 +372,7 @@ fn resolve_imports_with_pack(
             idx.insert_cache(
                 module,
                 Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                    path,
+                    crate::util::canonical_path::CanonicalPath::resolve(path),
                     std::sync::Arc::new(fa),
                 ))),
             );
@@ -460,7 +460,7 @@ fn python_cross_file_function_refs_through_refs_to() {
                 crate::index::open_docs::FileKey::Path(p) => {
                     p.file_name().unwrap().to_string_lossy().to_string()
                 }
-                crate::index::open_docs::FileKey::Url(u) => u.to_string(),
+                crate::index::open_docs::FileKey::Url(u, _) => u.to_string(),
             };
             (f, l.access)
         })
@@ -634,7 +634,7 @@ fn python_workspace_rename_for_free() {
         [(pa.clone(), src_a.to_string()), (pb.clone(), src_b.to_string())].into();
     for loc in &locs {
         let crate::index::open_docs::FileKey::Path(p) = &loc.key else { panic!() };
-        let text = texts.get_mut(p).unwrap();
+        let text = texts.get_mut(p.as_path()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         let line = lines[loc.span.start.row];
         let mut new_line = line.to_string();
