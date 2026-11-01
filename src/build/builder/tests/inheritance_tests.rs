@@ -829,3 +829,80 @@ fn an_override_never_inherits_the_parents_return_type() {
         "a name the child does not override still inherits",
     );
 }
+
+fn parents_of(fa: &FileAnalysis, pkg: &str) -> Vec<String> {
+    fa.declared_parents(pkg).to_vec()
+}
+
+/// Every spelling of an `@ISA` write extends the parents through one path:
+/// `push`, `unshift`, `splice`, a self-referencing assignment, and the
+/// qualified `@Pkg::ISA` from another package.
+#[test]
+fn isa_edits_extend_the_parents_in_every_spelling() {
+    let fa = build_fa(
+        "
+            package P;
+            use parent 'Base';
+            push @ISA, 'Pushed';
+            unshift @ISA, qw(First);
+            @ISA = (@ISA, 'Last');
+            package Q;
+            our @ISA = ('A', 'B', 'C');
+            splice @ISA, 1, 1, 'X', 'Y';
+            package R;
+            push @P::ISA, 'FromR';
+            push(@R::ISA, \"Own\");
+        ",
+    );
+    assert_eq!(parents_of(&fa, "P"), ["First", "Base", "Pushed", "Last", "FromR"]);
+    assert_eq!(parents_of(&fa, "Q"), ["A", "X", "Y", "C"]);
+    assert_eq!(parents_of(&fa, "R"), ["Own"]);
+    for pkg in ["P", "Q", "R"] {
+        assert!(!fa.has_dynamic_parents(pkg), "{pkg}: every value folded");
+    }
+}
+
+/// A pushed value that names no class (`push @JSON::ISA, $module`, JSON's
+/// `_set_module`) leaves the ancestry incomplete: the package is marked
+/// dynamic so method checks stay silent.
+#[test]
+fn a_computed_isa_value_marks_the_parents_dynamic() {
+    let fa = build_fa(
+        "
+            package JSON;
+            sub _set_module { my $module = shift; push @JSON::ISA, $module; }
+            package K;
+            our @ISA = ('Known', compute());
+            package S;
+            our @ISA = ('A', 'B');
+            splice @ISA, $i, 1;
+            package F;
+            my $base = 'Folded';
+            push @ISA, $base;
+        ",
+    );
+    assert!(fa.has_dynamic_parents("JSON"));
+    assert!(parents_of(&fa, "JSON").is_empty());
+    assert!(fa.has_dynamic_parents("K"));
+    assert_eq!(parents_of(&fa, "K"), ["Known"], "a call's arguments are not parents");
+    assert!(fa.has_dynamic_parents("S"));
+    assert_eq!(parents_of(&fa, "S"), ["A", "B"]);
+    assert!(!fa.has_dynamic_parents("F"));
+    assert_eq!(parents_of(&fa, "F"), ["Folded"]);
+}
+
+/// Only a package's `@ISA` is a parent list: a lexical `my @ISA` and any
+/// other array leave the parents alone.
+#[test]
+fn only_the_package_isa_names_parents() {
+    let fa = build_fa(
+        "
+            package L;
+            my @ISA;
+            push @ISA, 'NotAParent';
+            push @LIST, 'Nor';
+        ",
+    );
+    assert!(parents_of(&fa, "L").is_empty());
+    assert!(!fa.has_dynamic_parents("L"));
+}

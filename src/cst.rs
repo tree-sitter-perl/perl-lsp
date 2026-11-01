@@ -337,6 +337,16 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
     flat.into_iter().filter(|n| n.is_named()).collect()
 }
 
+/// A value's list elements: a grouping container's spliced elements, or
+/// the value itself when it is a single expression (`qw(...)`, a call).
+pub(crate) fn list_elements_or_self<'a>(node: Node<'a>) -> Vec<Node<'a>> {
+    if is_list_literal(node) {
+        list_elements(node)
+    } else {
+        vec![node]
+    }
+}
+
 /// Peel transparent grouping wrappers — a `parenthesized_expression` or a
 /// single-element `list_expression` — down to the expression inside.
 /// These are pure grouping in Perl (`($x)` IS `$x`), so descending changes
