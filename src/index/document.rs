@@ -45,6 +45,9 @@ pub struct Document {
     /// The file's path, for cross-file analysis (C++ resolves #include'd
     /// macros relative to it). `None` for Perl / unrouted docs.
     pub path: Option<std::path::PathBuf>,
+    /// The file's canonical spelling, stamped by `OpenDocs` as the document
+    /// enters the store, so a query reads it instead of resolving the URL.
+    pub canonical_path: crate::util::canonical_path::CanonicalPath,
 }
 
 impl Document {
@@ -68,6 +71,7 @@ impl Document {
             language: driver.id(),
             baseline_surface: None,
             path,
+            canonical_path: Default::default(),
         })
     }
 
@@ -99,6 +103,7 @@ impl Document {
             language: "perl",
             baseline_surface,
             path: None,
+            canonical_path: Default::default(),
         })
     }
 
