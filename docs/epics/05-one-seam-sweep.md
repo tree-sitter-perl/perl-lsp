@@ -78,7 +78,7 @@ existing tests green.
 
 ### Phase E — backlog item 3: one text→class resolver
 
-`invocant_text_to_class`, `resolve_invocant_class`, and cursor_context's
+`invocant_text_to_class`, `invocant_classes_in_scope`, and cursor_context's
 `resolve_text_invocant` are three near-duplicates with different
 fallbacks. Collapse to one `FileAnalysis` seam; `cursor_context`
 composes it (rules #3/#5). **Before collapsing, table the three fallback

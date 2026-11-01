@@ -310,6 +310,15 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                             enqueue(&mut pending, c);
                         }
                     }
+                    // A gated emission's accessors name classes too (a
+                    // `belongs_to` its target); queued as candidates, like
+                    // every other feed of gated content.
+                    for w in m.analysis.gated_candidates().witnesses {
+                        use crate::model::{file_analysis::InferredType, witnesses::WitnessPayload};
+                        if let WitnessPayload::InferredType(InferredType::ClassName(c)) = w.payload {
+                            enqueue(&mut pending, c);
+                        }
+                    }
                     }
                     if !pending.is_empty() {
                         core.queue.condvar.notify_one();

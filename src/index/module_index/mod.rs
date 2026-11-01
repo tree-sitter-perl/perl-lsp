@@ -181,6 +181,7 @@ pub(crate) use index_core::IndexCore;
 pub(crate) use index_core::strip_import_copy_one;
 
 mod dependency_tier;
+mod gated_views;
 mod lookup;
 mod queries;
 mod registration;
@@ -247,6 +248,9 @@ pub struct ModuleIndex {
     /// provider change moves the key.
     enriched: Arc<DashMap<std::path::PathBuf, EnrichedEntry>>,
     enriched_order: Arc<std::sync::Mutex<std::collections::VecDeque<std::path::PathBuf>>>,
+    /// Applied copies of gated files (`gated_views`): what every view of
+    /// a closed file whose deferred plugin emissions fire hands out.
+    gated_views: Arc<gated_views::GatedViews>,
     /// Report-only ghost-list accounting for the overlay
     /// (`PERL_LSP_GHOST_STATS`). `None` when the gate is off.
     enriched_ghost: Option<Arc<crate::util::ghost_stats::GhostStats>>,
