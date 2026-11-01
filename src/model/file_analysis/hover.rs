@@ -153,7 +153,7 @@ impl FileAnalysis {
                         return Some(self.format_symbol_hover_at(sym, source, point, module_index));
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: hover shows the sub whose
                     // package matches what the ref resolved to. Qualified
                     // calls match on the bare tail (symbols are keyed by

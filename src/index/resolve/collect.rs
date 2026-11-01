@@ -518,7 +518,7 @@ pub(super) fn span_is_folded_name(
 ) -> bool {
     analysis.refs().iter().any(|r| {
         (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-            || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
+            || (include_calls && matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName)))
             && r.span == span
             && r.target_name != literal_name
     })
@@ -1019,11 +1019,10 @@ pub(super) fn collect_from_analysis(
         // Where calling a class constructs it (python's `Foo()`), a call
         // whose name is a class runs that class's constructor, as php's
         // `new Foo` does: the class it constructs, asked only for a
-        // constructor target. An imported name (python's `from m import
-        // Foo`) names the class and runs nothing.
+        // constructor target. An `ImportedName` names the class and runs
+        // nothing, so its kind keeps it out.
         let call_constructs = (!target.constructed_classes.is_empty()
-            && matches!(r.kind, RefKind::FunctionCall)
-            && !r.import_name)
+            && matches!(r.kind, RefKind::FunctionCall))
         .then(|| analysis.class_named_by_call(r, module_index))
         .flatten();
         let construction = r.constructs() || call_constructs.is_some();
@@ -1035,7 +1034,7 @@ pub(super) fn collect_from_analysis(
         // Where calling a class constructs it, a call-shaped token can name
         // a class too (`class_named_by_call`), so a class target reads it
         // as one.
-        let call_names_class = matches!(r.kind, RefKind::FunctionCall)
+        let call_names_class = matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName)
             && matches!(target.kind, TargetKind::Package)
             && analysis.pack.names.class_call_sep().is_some();
         let name_matches = if matches!(r.kind, RefKind::PackageRef) || call_names_class {
@@ -1046,7 +1045,7 @@ pub(super) fn collect_from_analysis(
             // A construction is keyed by its class; whether it runs this
             // constructor is the dispatch check below.
             !target.constructed_classes.is_empty()
-        } else if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
+        } else if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1062,7 +1061,7 @@ pub(super) fn collect_from_analysis(
         let alias_matched = !name_matches
             && matches!(
                 r.kind,
-                RefKind::FunctionCall { .. } | RefKind::Variable | RefKind::PackageRef
+                RefKind::FunctionCall | RefKind::ImportedName | RefKind::Variable | RefKind::PackageRef
             )
             && visible_aliases
                 .iter()
@@ -1079,7 +1078,7 @@ pub(super) fn collect_from_analysis(
                 call_constructs.as_deref().is_some_and(|cn| reaches_target(cn, MemberKey::Constructor, class))
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
-             RefKind::FunctionCall) => {
+             RefKind::FunctionCall | RefKind::ImportedName) => {
                 // callable_scope_for_refs is derived from the same target.kind
                 // match above; a mismatch means malformed input rather than a
                 // real match, so skip this ref instead of asserting the invariant.
@@ -1193,7 +1192,7 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
-            (TargetKind::Package, RefKind::FunctionCall) => call_names_class,
+            (TargetKind::Package, RefKind::FunctionCall | RefKind::ImportedName) => call_names_class,
             // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
@@ -1241,7 +1240,7 @@ pub(super) fn collect_from_analysis(
                 }
             },
             (TargetKind::FileScopeValue, RefKind::PackageRef) => true,
-            (TargetKind::FileScopeValue, RefKind::FunctionCall) => {
+            (TargetKind::FileScopeValue, RefKind::FunctionCall | RefKind::ImportedName) => {
                 r.resolved_package().is_none()
             }
             (

@@ -74,7 +74,7 @@ impl FileAnalysis {
                         return Some(sym.selection_span);
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: pick the sub whose package
                     // matches the ref's resolved_package. When the
                     // call pinned a specific package (import or
@@ -311,7 +311,7 @@ impl FileAnalysis {
             for r in self.refs() {
                 if r.resolved_symbol().is_some() { continue; }
                 match (&r.kind, &sym.kind) {
-                        (RefKind::FunctionCall, SymKind::Sub) => {
+                        (RefKind::FunctionCall | RefKind::ImportedName, SymKind::Sub) => {
                             // Match the bare callable name so qualified call
                             // sites (`Foo::baz()`, target_name "Foo::baz")
                             // pair with `sub baz`; `resolved_package` (the
@@ -1143,7 +1143,7 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // A CORE-bound ref is a builtin call keyword (`shift`,
                     // `keys`, ...). It has an identity — the in-file
                     // occurrence union serves highlights/references — but no
@@ -1341,7 +1341,7 @@ impl FileAnalysis {
         for r in self.refs() {
             if r.target_name != old_name { continue; }
             match &r.kind {
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     if r.resolved_package() == scope.as_deref() {
                         edits.push((r.span, new_name.to_string()));
                     }

@@ -1155,7 +1155,6 @@ impl SkeletonAnalysis {
                 )
                 .map(crate::model::file_analysis::RefBinding::Symbol),
                 folded_from: None,
-                import_name: false,
                 arg_count: None,
             });
         }
@@ -1176,7 +1175,6 @@ impl SkeletonAnalysis {
                     access: crate::model::file_analysis::AccessKind::Read,
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
-                    import_name: false,
                     arg_count: None,
                 }),
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
@@ -1199,7 +1197,6 @@ impl SkeletonAnalysis {
                     access: crate::model::file_analysis::AccessKind::Read,
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
-                    import_name: false,
                     arg_count: None,
                 });
             }
@@ -1237,7 +1234,10 @@ impl SkeletonAnalysis {
                             let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
-                        RefKind::FunctionCall
+                        match r.kind {
+                            RefCap::Import => RefKind::ImportedName,
+                            _ => RefKind::FunctionCall,
+                        }
                     }
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
                     // the full path rides `target_name`, the qualifier the
@@ -1337,7 +1337,6 @@ impl SkeletonAnalysis {
                     access,
                     binding,
                     folded_from: None,
-                    import_name: r.kind == RefCap::Import,
                     arg_count: r.arg_count,
                 })
             })
@@ -1383,7 +1382,6 @@ impl SkeletonAnalysis {
                 access: crate::model::file_analysis::AccessKind::Read,
                 binding: None,
                 folded_from: None,
-                import_name: false,
                 arg_count: None,
             });
         }
@@ -1458,7 +1456,6 @@ impl SkeletonAnalysis {
                             ),
                         )),
                         folded_from: None,
-                        import_name: false,
                         arg_count: None,
                     });
                 }

@@ -1536,12 +1536,6 @@ pub struct Ref {
     /// kinds).
     #[serde(default)]
     pub arg_count: Option<usize>,
-    /// A `FunctionCall` on a name an import binds from another module
-    /// (python's `from m import Foo`): it references the def the name
-    /// resolves to, so a rename rewrites the import line, but it calls
-    /// nothing, so it never runs a class's constructor.
-    #[serde(default)]
-    pub import_name: bool,
 }
 
 pub use crate::model::conventions::{name_match_key, split_qualified};
@@ -1767,9 +1761,10 @@ impl Ref {
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
+            RefKind::ImportedName => 8,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
-            RefKind::FunctionCall => {
+            RefKind::FunctionCall | RefKind::ImportedName => {
                 (1, self.resolved_package().map(str::to_string))
             }
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
@@ -2255,6 +2250,14 @@ pub enum RefKind {
         member_name_span: Span,
         member_op: Option<(MemberOp, Span)>,
     },
+    /// A name an import binds from another module (python's `from m import
+    /// Foo`): a reference to the def the name resolves to, pinned through
+    /// `Ref::binding` as a call to it is, so goto-def, references and
+    /// rename reach the import line. It calls nothing: no call hierarchy,
+    /// fan-out, arity or unresolved-call lane reads it, and it never runs a
+    /// class's constructor. Kept at the END for bincode variant-index
+    /// stability.
+    ImportedName,
 }
 
 /// The receiver half of a member access, whatever the member's kind — the
