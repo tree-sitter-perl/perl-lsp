@@ -8,20 +8,14 @@ use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(super) struct State {
-    /// per match, the command identifier and its argument count
+    /// per match, the command identifier and the scope it is written in
     cmd_names: BTreeMap<usize, (String, Span, ScopeId)>,
-    cmd_args: BTreeMap<usize, usize>,
 }
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
-    match e.cap {
-        Capture::Cmd(CmdCap::Name) => {
-            st.commands.cmd_names.insert(e.match_id, (e.text.clone(), e.span(), st.cur_scope));
-        }
-        Capture::Cmd(CmdCap::Arg) => {
-            *st.commands.cmd_args.entry(e.match_id).or_default() += 1;
-        }
-        _ => {}
+    // An argument is counted through its command's match.
+    if e.cap == Capture::Cmd(CmdCap::Name) {
+        st.commands.cmd_names.insert(e.match_id, (e.text.clone(), e.span(), st.cur_scope));
     }
 }
 
@@ -38,7 +32,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             scope: *scope,
             invocant: None,
             member_op: None,
-            arg_count: Some(c.cmd_args.get(mid).copied().unwrap_or(0)),
+            arg_count: Some(st.adorned.of_match(*mid).filter(|t| t.cap == Capture::Cmd(CmdCap::Arg)).count()),
             constructs: false,
         });
     }

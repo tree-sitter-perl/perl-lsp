@@ -5,7 +5,7 @@
 
 use crate::model::file_analysis::{CachedModule, CondTerm, CrossFileLookup, MacroDef};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use crate::util::canonical_path::CanonicalPath;
 use std::sync::{Arc, Weak};
 
 /// The file set is the one `for_each_cached_file` serves, read at
@@ -18,7 +18,7 @@ use std::sync::{Arc, Weak};
 pub(crate) struct DefineTable {
     /// The `resolution_epoch` the file set was last read at.
     synced: Option<u64>,
-    files: HashMap<PathBuf, u32>,
+    files: HashMap<CanonicalPath, u32>,
     slots: Vec<Option<FileDefines>>,
     free: Vec<u32>,
     by_name: HashMap<Arc<str>, Vec<Site>>,
@@ -29,7 +29,7 @@ struct FileDefines {
     /// Identity, not ownership: a strong handle would keep alive a copy the
     /// index has replaced. Held, it also keeps the address from being reused.
     module: Weak<CachedModule>,
-    path: PathBuf,
+    path: CanonicalPath,
     /// Each `macro_defs` entry's name, in order.
     defs: Vec<Arc<str>>,
     pass: u64,

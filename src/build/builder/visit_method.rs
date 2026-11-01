@@ -548,7 +548,7 @@ impl<'a> Builder<'a> {
         // canonical name so the key ref, the shape witness, and the
         // KeyWrite all key the same variable.
         let var_text = match node.child_by_field_name("hash") {
-            Some(c) => crate::cst::canonical_container_name(c, self.source)
+            Some(c) => crate::cst::canonical_container_name(self.syntax, c, self.source)
                 .or_else(|| self.get_hash_var_from_element(node)),
             None => self.get_hash_var_from_element(node),
         };
@@ -644,13 +644,13 @@ impl<'a> Builder<'a> {
     /// ancestors)? Mirrors `detect_anon_hash_owner`'s bless branch — bless
     /// keys are instance slots; `return { ... }` keys are not.
     pub(super) fn anon_hash_is_blessed(&self, anon_hash: Node<'a>) -> bool {
-        let mut ancestor = anon_hash.parent();
+        let mut ancestor = self.syntax.parent(anon_hash);
         for _ in 0..5 {
             let Some(a) = ancestor else { return false };
             if self.is_bless_call(a) {
                 return true;
             }
-            ancestor = a.parent();
+            ancestor = self.syntax.parent(a);
         }
         false
     }

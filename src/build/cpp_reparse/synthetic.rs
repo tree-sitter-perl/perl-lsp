@@ -409,14 +409,13 @@ fn field_block_variant_sites(
     let mut cursor = QueryCursor::new();
     let mut it = cursor.matches(query, tree.root_node(), src);
     let mut out = Vec::new();
-    let mut match_id = 0usize;
     while let Some(m) = it.next() {
-        match_id += 1;
         let mut name_node: Option<tree_sitter::Node> = None;
         let mut body_node: Option<tree_sitter::Node> = None;
+        let mut conds = Vec::new();
         for c in m.captures {
             if let Some(k) = cond[c.index as usize] {
-                arms.capture(k, c.node, c.node.utf8_text(src).unwrap_or(""), match_id);
+                conds.push((k, c.node, c.node.utf8_text(src).unwrap_or("")));
                 continue;
             }
             // Object- and function-like field-block macros both mint a base; the
@@ -428,6 +427,7 @@ fn field_block_variant_sites(
                 _ => {}
             }
         }
+        arms.capture_match(conds);
         let (Some(nn), Some(bn)) = (name_node, body_node) else { continue };
         if nn.utf8_text(src).unwrap_or("") != macro_name {
             continue;
