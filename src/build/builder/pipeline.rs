@@ -316,6 +316,7 @@ pub(super) fn build_with_plugins_inner(
             })
         });
     }
+    crate::build::equiv_dump::record(source, None, &fa);
     fa
 }
 

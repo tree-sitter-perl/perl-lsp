@@ -49,6 +49,7 @@ mod hover;
 mod sym_index;
 mod completion;
 pub use completion::*;
+mod equiv_dump;
 
 // ---- FileAnalysis ----
 
