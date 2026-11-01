@@ -102,7 +102,6 @@ impl FileAnalysis {
             packages,
             framework_imports,
             lib_roots,
-            referenced_identities: Vec::new(),
             type_provenance,
             witnesses,
             bag_evicted: false,
@@ -129,7 +128,7 @@ impl FileAnalysis {
             exports_declared: false,
         };
         fa.build_indices();
-        fa.referenced_identities = fa.mint_referenced_identities();
+        fa.mint_named_identities();
         fa
     }
 
@@ -1486,7 +1485,6 @@ impl FileAnalysis {
             + scap(&self.framework_imports)
             + scap(&self.reassigned_vars)
             + scap(&self.column_keyed_verbs)
-            + vcap(&self.referenced_identities)
             + vcap(&self.unrowed_attachment_names);
 
         h

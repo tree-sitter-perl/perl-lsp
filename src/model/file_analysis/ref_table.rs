@@ -11,8 +11,9 @@ use super::*;
 
 /// Every ref in one file, plus the derived lookups over them.
 ///
-/// Serialized fields are the refs themselves and the enrichment baseline;
-/// the three indices are `serde(skip)` and rebuilt after load, and the
+/// Serialized fields are the refs themselves, the enrichment baseline and
+/// the identities the refs name; the indices are `serde(skip)` and rebuilt
+/// after load, and the
 /// eviction flag is `serde(skip)` so a rehydrated table is refs-present
 /// (an empty `refs` on a evicted table means "on disk", never "no
 /// references" — see `docs/adr/relational-ref-index.md`).
@@ -28,6 +29,14 @@ pub struct RefTable {
 
     #[serde(skip, default)]
     evicted: bool,
+
+    /// Every class or package identity the build-time refs name that the
+    /// file does not declare, sorted: the reference axis's share of the
+    /// dependency tier's demand (`FileAnalysis::used_identities`). Kept
+    /// through `evict`, because demand is read off stripped copies and warm
+    /// stubs; re-minted with the refs, never beside them.
+    #[serde(default)]
+    named_identities: Vec<String>,
 
     /// Refs bucketed by `Ref::match_key` — the SAME key the relational
     /// `refs` rows carry, so an in-file probe narrows exactly as the
@@ -146,6 +155,28 @@ impl RefTable {
         self.refs.iter().map(|r| r.row_seed(names)).collect()
     }
 
+    /// Mint `named_identities` from the refs: each package reference's
+    /// identity (`identity`, the file's spelling resolved), less what
+    /// `declared` says the file declares itself.
+    pub fn mint_named_identities(&mut self, identity: impl Fn(&Ref) -> String, declared: impl Fn(&str) -> bool) {
+        let mut out: Vec<String> = self
+            .refs
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::PackageRef))
+            .map(identity)
+            .filter(|id| !id.is_empty() && !declared(id))
+            .collect();
+        out.sort();
+        out.dedup();
+        self.named_identities = out;
+    }
+
+    /// The identities the refs name across files (`mint_named_identities`);
+    /// present on an evicted table too.
+    pub fn named_identities(&self) -> &[String] {
+        &self.named_identities
+    }
+
     /// Seal the enrichment baseline at the current length.
     pub fn seal_baseline(&mut self) {
         self.base_count = self.refs.len();
@@ -214,6 +245,7 @@ impl RefTable {
     /// eviction axis. Lossless: the on-disk analysis keeps the full vec,
     /// and the backward walk retrieves candidates from the relational
     /// index and rehydrates through `whole_present`. Idempotent.
+    /// `named_identities` stays: it is what demand reads of a stripped copy.
     pub fn evict(&mut self) {
         self.refs = Vec::new();
         self.by_key = HashMap::new();
@@ -247,7 +279,9 @@ impl RefTable {
                 .refs
                 .iter()
                 .map(|r| r.target_name.capacity() + std::mem::size_of::<String>())
-                .sum::<usize>();
+                .sum::<usize>()
+            + self.named_identities.capacity() * std::mem::size_of::<String>()
+            + self.named_identities.iter().map(String::capacity).sum::<usize>();
 
         let mut b = mcap(&self.by_target)
             + mcap(&self.by_key)

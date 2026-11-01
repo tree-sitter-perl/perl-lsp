@@ -101,7 +101,7 @@ impl FileAnalysis {
             // LIVE through the current analysis per query; no consumer
             // bakes them into cached enrichment, so freshness needs no
             // Surface edge for them.
-            refs: _refs,                         // the whole reference axis — use-sites, their indices, their baseline and eviction flag
+            refs: _refs,                         // the whole reference axis — use-sites, their indices, their baseline, eviction flag, and the identities they name (what THIS file asks the dependency tier for, never what a consumer sees of it)
             fold_ranges: _fold_ranges,
             namespace_ranges: _namespace_ranges, // where this file's own code and spellings sit; its classes' identities already carry the namespace
             call_bindings: _call_bindings,       // this file's call sites — the CONSUMER half of the edge; the provider names ride `imports`
@@ -124,7 +124,6 @@ impl FileAnalysis {
             column_keyed_verbs: _column_keyed_verbs, // baked from the plugin registry, not this file's source; the plugin fingerprint owns invalidation
             language: _language,                 // the origin's serving-language identity; `resolve()` reads it live per query, never baked into a consumer's cached state
             lib_roots: _lib_roots,               // `use lib` changes what THIS file sees of @INC, never what a consumer sees of this file
-            referenced_identities: _referenced_identities, // what THIS file asks the dependency tier for, never what a consumer sees of it
             dynamic_dispatch_sites: _dynamic_dispatch_sites, // heatmap soundness counter, read live
             attr_projections: _attr_projections, // grouping metadata for live rename/reference queries; every member is a synthesized symbol already projected
 
