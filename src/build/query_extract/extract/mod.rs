@@ -82,17 +82,18 @@ fn family(cap: Capture) -> Family {
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::ParamReceiver
         | C::Mark(_) => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)
+        | C::Arm
         | C::Domain(_)
         | C::Shape(_)
         | C::TypeAnnot
-        | C::AnonAggMember => Family::Flow,
+        | C::AnonAggMember
+        | C::Receiver => Family::Flow,
         C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing
         }
@@ -329,8 +330,8 @@ pub fn extract_in(
             Capture::NestedTarget => {
                 defs::flatten_nested(&mut st.defs, node, &links, source, match_id, &mut events)
             }
-            Capture::Member(MemberCap::Recv) => {
-                members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
+            Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
+                members::flatten_recv(&mut st.members, node, cap, pack, source, match_id, &mut events)
             }
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
@@ -407,7 +408,6 @@ pub fn extract_in(
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
-    defs::emit_receiver_types(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

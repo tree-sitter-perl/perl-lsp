@@ -42,7 +42,7 @@
       "col": 30,
       "expect": {
         "all": [
-          "_assert_addr_list_ok($header, $allow_empty, $list)",
+          "_assert_addr_list_ok($header, $allow_empty, $list: ArrayRef)",
           "active param: 0 ($header)"
         ],
         "none": []
@@ -58,8 +58,8 @@
       "col": 41,
       "expect": {
         "all": [
-          "_assert_addr_list_ok($header, $allow_empty, $list)",
-          "active param: 2 ($list)"
+          "_assert_addr_list_ok($header, $allow_empty, $list: ArrayRef)",
+          "active param: 2 ($list: ArrayRef)"
         ],
         "none": []
       },

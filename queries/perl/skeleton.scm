@@ -8,6 +8,7 @@
 ;   @def.<kind>          whole definition node
 ;   @def.<kind>.name     its name token
 ;   @scope               a lexical scope region
+;   @arm                 a conditionally-run arm; an @obs inside holds only within it
 ;   @context.package     sticky namespace context (flat `package Foo;`)
 ;   @ref.<kind>          a reference; text is the name
 ;   @import + @import.name
@@ -106,6 +107,20 @@
 (assignment_expression
   left: (scalar) @flow.target
   right: (_) @flow.source) @flow.assign
+
+; ---- conditionally-run arms ----
+; An observation made inside an arm holds only within it (the walker's
+; `cst::conditional_arm`, block-relative): the statement a postfix
+; modifier runs, a ternary branch, a short-circuit's right operand. A
+; condition, a loop list and a left operand run whenever their construct
+; does, so they are no arm.
+(postfix_conditional_expression (_) @arm condition: (_))
+(postfix_loop_expression (_) @arm condition: (_))
+(postfix_for_expression (_) @arm list: (_))
+(conditional_expression consequent: (_) @arm)
+(conditional_expression alternative: (_) @arm)
+(lowprec_logical_expression right: (_) @arm)
+(binary_expression ["&&" "||" "//"] right: (_) @arm)
 
 ; ---- spike 3b: operator evidence ----
 ; Perl's edge over other dynamic languages is operator orientation:

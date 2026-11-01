@@ -46,15 +46,13 @@ pub fn pack_completion(
     let crate::lsp::cursor_slot::DetectedSlot { slot, .. } =
         crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, Some(xidx));
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
-        if let Some(class) =
-            receiver.receiver_type.as_ref().and_then(|ty| ty.class_name().map(|s| s.to_string()))
-        {
+        if let Some(ty) = receiver.receiver_type.as_ref() {
             // Mode A: the member items carry the operator-swap edit
             // (`p.` → `p->`) when the receiver's pointer depth wants
             // a different operator than was typed. The diagnostic
             // path (Mode B) is the universal fallback.
-            if let Some(items) = symbols::member_completion_for_class(
-                analysis, &class, xidx, receiver.op_fix.clone(), point,
+            if let Some(items) = symbols::member_completion_for_type(
+                analysis, ty, xidx, receiver.op_fix.clone(), point,
             ) {
                 return (items, false);
             }

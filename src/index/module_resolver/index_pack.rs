@@ -140,11 +140,7 @@ pub fn index_pack_language(
             let mut dead_rows: Vec<PathBuf> = Vec::new();
             // Deferred past the warm scan — same SQLITE_BUSY_SNAPSHOT
             // rationale as the workspace indexer's backfill.
-            let mut pending_backfill: Vec<(
-                PathBuf,
-                Vec<crate::model::file_analysis::RefRowSeed>,
-                Vec<crate::model::file_analysis::SymRowSeed>,
-            )> = Vec::new();
+            let mut pending_backfill: Vec<(PathBuf, crate::model::file_analysis::RowSeeds)> = Vec::new();
             // Stubs whose files warmed through the FULL path this scan —
             // written after it so the next warm takes the stub lane.
             let mut pending_stubs: Vec<(PathBuf, Vec<u8>, (i64, i64))> = Vec::new();
@@ -196,8 +192,7 @@ pub fn index_pack_language(
                     if !rows_ok {
                         pending_backfill.push((
                             path.clone(),
-                            fa.ref_row_seeds(),
-                            fa.sym_row_seeds(),
+                            fa.row_seeds(),
                         ));
                     }
                     // The ladder that used to be `strip_bag && rows_ok`.
@@ -243,13 +238,12 @@ pub fn index_pack_language(
                 &pending_backfill,
                 128,
                 "pack row backfill",
-                |conn, (path, seeds, sym_seeds)| {
+                |conn, (path, seeds)| {
                     if let Err(e) = module_cache::shred_derived_rows(
                         conn,
                         &path.to_string_lossy(),
                         "workspace",
                         seeds,
-                        sym_seeds,
                     ) {
                         log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
                     }
@@ -292,8 +286,7 @@ pub fn index_pack_language(
             // same chunk txn as the blob so the next warm start registers
             // from it without decoding `blob`.
             stub_blob: Option<Vec<u8>>,
-            seeds: Vec<crate::model::file_analysis::RefRowSeed>,
-            sym_seeds: Vec<crate::model::file_analysis::SymRowSeed>,
+            seeds: crate::model::file_analysis::RowSeeds,
             stamp: (i64, i64),
         }
         let (fresh_tx, fresh_rx) = bounded_persist_channel::<FreshEntry>();
@@ -332,7 +325,7 @@ pub fn index_pack_language(
                                 e.stamp,
                             );
                             if let Err(err) = module_cache::shred_derived_rows(
-                                conn, &path_str, "workspace", &e.seeds, &e.sym_seeds,
+                                conn, &path_str, "workspace", &e.seeds,
                             ) {
                                 log::warn!(
                                     "Failed to shred derived rows for {:?}: {}",
@@ -420,10 +413,7 @@ pub fn index_pack_language(
                     // (`save_*` skip degraded rows, so their bag would be lost).
                     let payload = if persist && !analysis.degraded {
                         module_cache::encode_analysis(&analysis).map(|blob| {
-                            let seeds: Vec<_> =
-                                analysis.ref_row_seeds();
-                            let sym_seeds = analysis.sym_row_seeds();
-                            (blob, seeds, sym_seeds)
+                            (blob, analysis.row_seeds())
                         })
                     } else {
                         None
@@ -445,7 +435,7 @@ pub fn index_pack_language(
                         // Recording before the writer's COMMIT is safe — the
                         // freshness index is session-local.
                         parts.record_surface(&pack_index, &canon);
-                        let (blob, seeds, sym_seeds) = payload.unwrap();
+                        let (blob, seeds) = payload.unwrap();
                         let arc = Arc::clone(parts.arc());
                         send_to_writer(&fresh_tx, FreshEntry {
                             path: canon.clone(),
@@ -454,7 +444,6 @@ pub fn index_pack_language(
                             blob,
                             stub_blob,
                             seeds,
-                            sym_seeds,
                             stamp,
                         });
                     } else {
@@ -464,7 +453,7 @@ pub fn index_pack_language(
                         }
                         let arc = Arc::new(analysis);
                         pack_index.register_symbols(path.clone(), arc.clone());
-                        if let Some((blob, seeds, sym_seeds)) = payload {
+                        if let Some((blob, seeds)) = payload {
                             send_to_writer(&fresh_tx, FreshEntry {
                                 path: canon.clone(),
                                 arc,
@@ -472,7 +461,6 @@ pub fn index_pack_language(
                                 blob,
                                 stub_blob: None,
                                 seeds,
-                                sym_seeds,
                                 stamp,
                             });
                         }

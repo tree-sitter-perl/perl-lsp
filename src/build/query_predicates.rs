@@ -14,9 +14,12 @@ enum Relation {
     Parent,
     /// Any proper ancestor of the captured node.
     Ancestor,
+    /// The captured node itself.
+    Node,
 }
 
-/// One structural predicate: `(#[not-]has-<relation>? @cap kind ...)`.
+/// One structural predicate: `(#[not-]has-<relation>? @cap kind ...)`, or
+/// `(#[not-]is-kind? @cap kind ...)` on the captured node itself.
 struct Structural<'q> {
     relation: Relation,
     negated: bool,
@@ -30,6 +33,8 @@ fn relation_of(operator: &str) -> Option<(Relation, bool)> {
         "not-has-parent?" => (Relation::Parent, true),
         "has-ancestor?" => (Relation::Ancestor, false),
         "not-has-ancestor?" => (Relation::Ancestor, true),
+        "is-kind?" => (Relation::Node, false),
+        "not-is-kind?" => (Relation::Node, true),
         _ => return None,
     })
 }
@@ -152,6 +157,9 @@ pub fn admits(query: &Query, m: &QueryMatch<'_, '_>, root: Node<'_>) -> bool {
 }
 
 fn holds(s: &Structural<'_>, node: Node<'_>, root: Node<'_>) -> bool {
+    if s.relation == Relation::Node {
+        return s.kinds.contains(&node.kind());
+    }
     let mut cur = root;
     let mut parent = None;
     let mut ancestor_hit = false;
@@ -168,6 +176,7 @@ fn holds(s: &Structural<'_>, node: Node<'_>, root: Node<'_>) -> bool {
     match s.relation {
         Relation::Parent => parent.is_some_and(|p| s.kinds.contains(&p.kind())),
         Relation::Ancestor => ancestor_hit,
+        Relation::Node => unreachable!("answered before the walk"),
     }
 }
 

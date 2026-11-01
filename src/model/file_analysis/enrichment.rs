@@ -57,38 +57,11 @@ impl FileAnalysis {
             if shapes.is_empty() {
                 continue;
             }
-            let agreed = if shapes.windows(2).all(|w| w[0] == w[1]) {
-                shapes.pop().unwrap()
-            } else {
-                // disagree → widen: union of keys when every shape is
-                // keyed, OPEN (a key any caller passes may arrive);
-                // anything else declines.
-                let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
-                let mut all_keyed = true;
-                for sh in &shapes {
-                    match sh {
-                        InferredType::HashWithKeys { keys: ks, .. } => {
-                            for (k, v) in ks.iter() {
-                                match keys.iter_mut().find(|(ek, _)| ek == k) {
-                                    None => keys.push((k.clone(), v.clone())),
-                                    Some((_, ev)) => {
-                                        if *ev != *v {
-                                            *ev = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            all_keyed = false;
-                            break;
-                        }
-                    }
-                }
-                if !all_keyed {
-                    continue;
-                }
-                InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open: true }
+            // Every caller's shape, joined: keyed hashes keep every key any
+            // caller passes. Callers that pass no one shape type nothing.
+            let agreed = match crate::model::file_analysis::join_all(&shapes, &self.type_order(module_index)) {
+                Some(InferredType::Union(_) | InferredType::Unknown) | None => continue,
+                Some(t) => t,
             };
             // Anchored at the parameter's binding token (a write marker at
             // its declaration retires what lies strictly before it), else
@@ -107,48 +80,115 @@ impl FileAnalysis {
         }
     }
 
-    /// Materialize deferred plugin pattern emissions ([`GatedEmission`])
-    /// whose `ClassIsa` gate is now satisfied CROSS-FILE. Called from
-    /// `enrich_imported_types_with_keys` after the symbol/ref/witness
-    /// truncation, so the re-fired content sits above the baselines and is
-    /// re-derived every enrichment cycle (idempotent). Deterministic: gate
-    /// resolution goes through `class_isa_prefix` (the single MRO seam), and
-    /// symbols are minted with positional `SymbolId`s exactly as the builder
-    /// would have — a file enriched late converges to one built with the
-    /// ancestry known. Rule #10: the "should this synthesis apply?" question
-    /// is answered by asking the ancestry graph, never by a shape branch.
-    fn apply_gated_emissions(&mut self, module_index: Option<&dyn CrossFileLookup>) {
+    /// Which of this file's [`GatedEmission`]s fire under `module_index`,
+    /// one verdict per emission: each asks its [`Question`], so a file read
+    /// late converges to one built with its ancestry known. Emissions
+    /// asking the same question (one DBIC class's `add_columns` +
+    /// relationships) ask it once.
+    pub fn gate_verdicts(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<bool> {
+        let facts = InFile { fa: self, index: module_index };
+        let mut asked: Vec<(Question, bool)> = Vec::new();
+        self.plugin
+            .gated_emissions
+            .iter()
+            .map(|em| {
+                let question = em.question();
+                if let Some((_, fires)) = asked.iter().find(|(q, _)| *q == question) {
+                    return *fires;
+                }
+                let fires = question.decide(&facts) == Verdict::Yes;
+                asked.push((question, fires));
+                fires
+            })
+            .collect()
+    }
+
+    /// Every gated emission's content as if each gate fired. The producer
+    /// feeds (ref/sym rows, the reverse index, bridges) index these as
+    /// CANDIDATES; whether a gate holds is asked where a copy is handed to a
+    /// reader, so a candidate the gate refuses costs a wasted decode, never
+    /// a wrong answer.
+    pub fn gated_candidates(&self) -> GatedMint {
+        self.mint_gated(|_| true)
+    }
+
+    /// The symbols a listing adds to this file under `verdicts`, with no
+    /// view built. A symbol-evicted copy cannot dedup them against its own
+    /// symbols; a listing dedups its results.
+    pub fn shown_gated_symbols(&self, verdicts: &[bool]) -> Vec<Symbol> {
+        self.mint_gated(|i| verdicts.get(i).copied().unwrap_or(false)).symbols
+    }
+
+    /// Every name a gated emission could add to this file, as the rows key
+    /// them: its own presence rows (`held`), so a retrieval that must not
+    /// miss a view finds the file without the base rows claiming the names.
+    pub fn held_row_names(&self) -> Vec<String> {
         if self.plugin.gated_emissions.is_empty() {
-            return;
+            return Vec::new();
         }
+        let names = &self.pack.names;
+        let mint = self.gated_candidates();
+        let mut out: Vec<String> = mint.refs.iter().map(|r| r.match_key(names)).collect();
+        for s in &mint.symbols {
+            out.push(s.name.clone());
+            out.push(crate::model::conventions::name_match_key(&s.name, names));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Everything the relational rows store of this file.
+    pub fn row_seeds(&self) -> RowSeeds {
+        RowSeeds { refs: self.ref_row_seeds(), syms: self.sym_row_seeds(), held: self.held_row_names() }
+    }
+
+    /// A copy with the emissions `verdicts` fires applied: the view of a
+    /// gated file. The applied content sits above the enrichment baselines,
+    /// so a later enrichment of the copy truncates and re-applies it.
+    pub fn with_gated_emissions(&self, verdicts: &[bool]) -> FileAnalysis {
+        let mut copy = self.clone();
+        copy.apply_gated_emissions(verdicts);
+        copy.rebuild_enrichment_indices();
+        copy
+    }
+
+    fn apply_gated_emissions(&mut self, verdicts: &[bool]) {
+        let mint = self.mint_gated(|i| verdicts.get(i).copied().unwrap_or(false));
+        for sym in mint.symbols {
+            self.symbols.push(sym);
+        }
+        for r in mint.refs {
+            self.refs.push(r);
+        }
+        for w in mint.witnesses {
+            self.witnesses.push(w);
+        }
+    }
+
+    /// The symbols, refs and witnesses the emissions `fires` selects add to
+    /// this file, minted as the builder would have: positional `SymbolId`s
+    /// after the current symbols, and never a second copy of a symbol
+    /// already present (the builder's `apply_emit_action` dedup).
+    fn mint_gated(&self, fires: impl Fn(usize) -> bool) -> GatedMint {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        // Snapshot: the borrow of `self.plugin.gated_emissions` can't overlap the
-        // `&mut self` symbol/ref/witness pushes below.
-        let emissions = std::mem::take(&mut self.plugin.gated_emissions);
-        for em in &emissions {
-            let fires = em.gate_prefixes.iter().any(|prefix| {
-                class_isa_prefix(&em.package, prefix, &self.packages, module_index)
-            });
-            if !fires {
+        let mut mint = GatedMint::default();
+        for (i, em) in self.plugin.gated_emissions.iter().enumerate() {
+            if !fires(i) {
                 continue;
             }
             let scope = self.scope_at(em.scope_point).unwrap_or(ScopeId(0));
             let ns = Namespace::framework(em.plugin_id.clone());
             for gs in &em.symbols {
                 let pkg = gs.on_class.clone().or_else(|| Some(em.package.clone()));
-                // Same dedup the builder's `apply_emit_action` runs: never
-                // stack a second identical synthesized symbol.
-                let dup = self.symbols.iter().any(|s| {
-                    s.name == gs.name
-                        && s.kind == gs.kind
-                        && s.package == pkg
-                        && s.namespace == ns
-                });
-                if dup {
+                let same = |s: &Symbol| {
+                    s.name == gs.name && s.kind == gs.kind && s.package == pkg && s.namespace == ns
+                };
+                if self.symbols.iter().any(same) || mint.symbols.iter().any(same) {
                     continue;
                 }
-                let id = SymbolId(self.symbols.len() as u32);
-                self.symbols.push(Symbol {
+                let id = SymbolId((self.symbols.len() + mint.symbols.len()) as u32);
+                mint.symbols.push(Symbol {
                     id,
                     name: gs.name.clone(),
                     kind: gs.kind,
@@ -167,11 +207,11 @@ impl FileAnalysis {
                 });
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
-                    // the builder's Method emit. Class-scoped methods also get
-                    // the `PackageSymbol{package,name} → Edge(Symbol(sid))`
-                    // mirror the fold writeback would have pushed, so cross-
-                    // file return-type queries resolve the relationship shape.
-                    self.witnesses.push(Witness {
+                    // the builder's Method emit, plus the
+                    // `PackageSymbol{package,name}` mirror the fold writeback
+                    // would have pushed so cross-file return-type queries
+                    // resolve the relationship shape.
+                    mint.witnesses.push(Witness {
                         attachment: WitnessAttachment::Symbol(id),
                         source: WitnessSource::Plugin(em.plugin_id.clone()),
                         payload: WitnessPayload::InferredType(rt.clone()),
@@ -179,7 +219,7 @@ impl FileAnalysis {
                     });
                     if matches!(gs.kind, SymKind::Method | SymKind::Sub) {
                         if let Some(class) = &pkg {
-                            self.witnesses.push(Witness {
+                            mint.witnesses.push(Witness {
                                 attachment: WitnessAttachment::PackageSymbol {
                                     package: class.clone(),
                                     name: gs.name.clone(),
@@ -193,7 +233,7 @@ impl FileAnalysis {
                 }
             }
             for gr in &em.refs {
-                self.refs.push(Ref {
+                mint.refs.push(Ref {
                     kind: gr.kind.clone(),
                     span: gr.span,
                     scope,
@@ -205,155 +245,9 @@ impl FileAnalysis {
                 });
             }
         }
-        self.plugin.gated_emissions = emissions;
+        mint
     }
 
-    /// Materialize deferred gated emissions into a WORKSPACE-resident cached
-    /// copy, standalone (not inside the full enrichment pass). Used by the
-    /// index-completion pass so `whole_present` — the view every cross-file
-    /// goto-def / references reader consults — sees a DBIC result class's
-    /// synthesized accessors WITHOUT paying the per-query enriched overlay.
-    /// Idempotent: `apply_gated_emissions` dedups against existing symbols, so
-    /// a second call is a no-op; the emissions sit above the symbol table's
-    /// enrichment baseline and a later full enrichment re-derives them the
-    /// same way. Rebuilds the name/scope indices so `symbols_named` /
-    /// `sub_info_view` find them.
-    pub fn materialize_gated_emissions(&mut self, module_index: &dyn CrossFileLookup) {
-        if self.plugin.gated_emissions.is_empty() {
-            return;
-        }
-        self.apply_gated_emissions(Some(module_index));
-        self.rebuild_enrichment_indices();
-    }
-
-}
-
-/// What a verb's consumers actually READ out of enrichment.
-///
-/// The verb declares what it
-/// needs and the machinery obeys, never asking which verb it serves. Soundness
-/// is by construction rather than by freshness — a product no consumer reads
-/// need not be produced, and that argument does not decay the way a cache's
-/// does.
-///
-/// The license for the first profile is an ablation, not a reading of the
-/// code: `--check`'s diagnostics lanes type invocants through the bag and
-/// resolve methods directly, so none of them consults `method_target()`. The
-/// re-stamp that fills it is therefore pure cost for that verb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnrichmentProfile {
-    stamp_method_targets: bool,
-}
-
-impl EnrichmentProfile {
-    /// Everything. The default, and what every server verb gets.
-    pub const fn full() -> Self {
-        EnrichmentProfile { stamp_method_targets: true }
-    }
-
-    /// Diagnostics only — no `MethodCall` dispatch-target re-stamp.
-    pub const fn diagnostics() -> Self {
-        EnrichmentProfile { stamp_method_targets: false }
-    }
-
-    /// Asked of the profile, never derived from a verb name by a consumer.
-    pub const fn stamps_method_targets(self) -> bool {
-        self.stamp_method_targets
-    }
-
-    /// Is a copy enriched under `self` usable by a request that needs
-    /// `needed`? The lattice's ≥, and the whole never-serve-partial-to-fuller
-    /// guarantee.
-    ///
-    /// Directional on purpose: `full` serves a `diagnostics` request (it
-    /// contains everything that one reads), and `diagnostics` does NOT serve a
-    /// `full` request. Getting this backwards is silent — the fuller verb
-    /// receives a copy missing exactly the product it asked for, and reads it
-    /// as a missing ANSWER.
-    pub const fn covers(self, needed: EnrichmentProfile) -> bool {
-        !needed.stamp_method_targets || self.stamp_method_targets
-    }
-
-    /// The least profile covering both. Test-only until a server verb
-    /// declares a partial profile (the overlay pins hold the join rule).
-    #[cfg(test)]
-    pub const fn join(self, other: EnrichmentProfile) -> EnrichmentProfile {
-        EnrichmentProfile {
-            stamp_method_targets: self.stamp_method_targets || other.stamp_method_targets,
-        }
-    }
-}
-
-/// The process's declared profile. `full()` until a verb says otherwise.
-static PROFILE: std::sync::OnceLock<EnrichmentProfile> = std::sync::OnceLock::new();
-
-/// Declare the profile for this process. **One-shot CLI verbs only.**
-///
-/// A process-wide cell is the verb's declaration precisely because a one-shot
-/// CLI process serves exactly one verb: there is no second consumer to be
-/// surprised, and nothing it enriches outlives the process — the
-/// `enriched_snapshot` overlay is resident, not persisted.
-///
-/// A SERVER verb must never call this — not because a partial profile is
-/// unavailable there, but because the cell is the wrong scope for it: one
-/// process serves many verbs, and a value set here outlives the verb that
-/// wanted it and answers the next one. The per-walk declaration a server
-/// verb would use (`ResolutionSession::declared_profile`) is a read-only
-/// slot today — no verb sets it, so every server walk enriches `full()`
-/// (docs/PARKED.md, design-debt tier).
-pub fn declare_enrichment_profile(profile: EnrichmentProfile) {
-    let _ = PROFILE.set(profile);
-}
-
-/// The profile in force. `full()` when nobody declared one.
-///
-/// `PERL_LSP_FULL_ENRICHMENT=1` overrides any declaration back to `full()`.
-/// That is the A/B CONTROL, and it is not optional decoration: once a verb
-/// declares a partial profile, the full behaviour is no longer reachable, and
-/// a claim of "set-identical output" becomes unfalsifiable the moment it
-/// cannot be re-run. `PERL_LSP_SKIP_MC_STAMP` only skips harder — it is the
-/// same direction as the profile, so it cannot serve as the control.
-pub fn enrichment_profile() -> EnrichmentProfile {
-    static FULL_OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let forced = *FULL_OVERRIDE
-        .get_or_init(|| std::env::var_os("PERL_LSP_FULL_ENRICHMENT").is_some());
-    // The open walk's declaration wins over the process cell: a server serves
-    // many verbs from one process, and the cell cannot tell them apart.
-    let declared = crate::model::witnesses::ResolutionSession::declared_profile()
-        .or_else(|| PROFILE.get().copied());
-    resolve_profile(declared, forced)
-}
-
-/// The precedence rule, separated from the cells that hold it so it can be
-/// tested. Both cells are `OnceLock`s — a test that set either would decide
-/// the answer for every other test in the process, so the rule has to be
-/// reachable without them.
-///
-/// This is where a mistake would be quiet rather than loud: get the precedence
-/// backwards and the CONTROL stops working, which does not fail anything — it
-/// just makes every future "set-identical" claim unfalsifiable, because the
-/// full behaviour is no longer reachable to compare against.
-pub(crate) fn resolve_profile(
-    declared: Option<EnrichmentProfile>,
-    full_override: bool,
-) -> EnrichmentProfile {
-    if full_override {
-        return EnrichmentProfile::full();
-    }
-    declared.unwrap_or_else(EnrichmentProfile::full)
-}
-
-/// Does this run fill the `MethodCall` dispatch-target edge?
-///
-/// Two independent reasons not to, and they are different in kind: the PROFILE
-/// is policy (no consumer of this verb reads the edge) and the ABLATION is
-/// measurement (the flag that licensed the policy, kept alive so the claim
-/// stays re-checkable). Either suppresses; neither implies the other.
-pub(crate) fn should_stamp_method_targets(
-    profile: EnrichmentProfile,
-    ablation_set: bool,
-) -> bool {
-    profile.stamps_method_targets() && !ablation_set
 }
 
 /// Score every re-stamp the gate skipped, by running it anyway and comparing.
@@ -380,13 +274,13 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         path: Option<&std::path::Path>,
     ) {
-        let before: Vec<Option<MethodTarget>> =
-            self.refs.iter().map(|r| r.method_target().cloned()).collect();
+        let arms = |r: &Ref| r.frozen_receiver().map(|f| f.targets().to_vec());
+        let before: Vec<Option<Vec<MethodTarget>>> = self.refs.iter().map(arms).collect();
         self.stamp_method_call_targets(module_index);
         let diverged = self
             .refs
             .iter()
-            .map(|r| r.method_target().cloned())
+            .map(arms)
             .zip(before.iter())
             .filter(|(now, was)| now != *was)
             .count();
@@ -426,6 +320,10 @@ impl FileAnalysis {
         path: Option<&std::path::Path>,
     ) {
         crate::util::ghost_stats::count("enrich_imported_types_with_keys");
+        // Enrichment is a walk (`docs/adr/resolution-session.md`): every
+        // caller gets the candidate memo and the budget, nested callers ride
+        // the outer session.
+        let _session = crate::model::witnesses::ResolutionSession::enter(module_index);
         // Truncate back to baseline so repeated enrichment doesn't
         // accumulate duplicates. Enrichment pushes Variable witnesses
         // via `push_type_constraint` and synthetic symbols + witnesses
@@ -444,7 +342,8 @@ impl FileAnalysis {
         // reaching `DBIx::Class` through a cross-file intermediate base).
         // Runs first so the synthesized symbols exist for the rest of the
         // pass and the final `rebuild_enrichment_indices`. See `GatedEmission`.
-        self.apply_gated_emissions(module_index);
+        let verdicts = self.gate_verdicts(module_index);
+        self.apply_gated_emissions(&verdicts);
 
         // Loader-config param typing: join my `loader_config_params`
         // markers with caller-side `PluginLoad` facts across the index.
@@ -804,6 +703,7 @@ impl FileAnalysis {
                 module_index,
                 package_parents: &self.packages,
                 app_surface_consumers: &self.plugin.app_surface_consumers,
+                lattice: crate::model::conventions::lattice_for(&self.language),
             };
             crate::model::witnesses::emit_mutation_extension_witnesses(
                 &mut self.witnesses,
@@ -814,54 +714,31 @@ impl FileAnalysis {
             self.key_writes = key_writes;
         }
 
-        // Re-stamp the MethodCall dispatch-target edges now that the bag
-        // carries enriched cross-file invocant types. Enrichment truncated
-        // refs back to their baseline, wiping the build-time (local-only)
-        // edge; this re-derives it with the index so cross-file-typed
-        // invocants resolve. Single-sourced: refs_to / find_def / hover
-        // read this frozen edge, never re-derive at query time.
-        // Two gates, and they are different things.
+        // Re-stamp the receivers now that the bag carries enriched
+        // cross-file invocant types: every receiver consumer reads this
+        // freeze (`receiver_classes`), never re-derives at query time.
         //
-        // The PROFILE is policy: a verb whose consumers never read
-        // `method_target()` does not pay to fill it. Asked of the profile, so
-        // this code never learns which verb it serves.
-        //
-        // `PERL_LSP_SKIP_MC_STAMP` stays as MEASUREMENT: it is how the profile
-        // was licensed in the first place ("does this verb read the edge?"),
-        // and keeping the A/B alive is what lets the next person re-check the
-        // claim instead of trusting this comment.
-        //
-        // The GATE is neither: it is the freshness question. A re-stamp
-        // re-derives what the build already froze unless some provider of
-        // this file has moved, and the flush is what knows that — see
+        // The GATE is the freshness question: a re-stamp re-derives what the
+        // build already froze unless some provider of this file has moved,
+        // and the flush is what knows that — see
         // `CrossFileLookup::restamp_owed`. Every unknown fails open.
-        let profile_wants = enrichment_profile().stamps_method_targets();
-        let ablation = std::env::var_os("PERL_LSP_SKIP_MC_STAMP").is_some();
-        if should_stamp_method_targets(enrichment_profile(), ablation) {
-            let owed = match (path, module_index) {
-                (Some(p), Some(idx)) => idx.restamp_owed(p, self.stamped_at),
-                _ => true,
-            };
-            if owed {
-                self.stamp_method_call_targets(module_index);
-                if let Some(idx) = module_index {
-                    // Recorded only for a stamp that ran WITH the index: a
-                    // build-time stamp resolved nothing cross-file, so
-                    // treating it as a stamp would license skipping the very
-                    // first enrichment re-stamp — the one with the most to
-                    // add. The clock is read AFTER the stamp, so a wave that
-                    // lands mid-stamp is not credited to it.
-                    self.stamped_at = Some(idx.flush_epoch());
-                }
-            } else if restamp_gate_equiv() {
-                self.score_restamp_gate_skip(module_index, path);
+        let owed = match (path, module_index) {
+            (Some(p), Some(idx)) => idx.restamp_owed(p, self.stamped_at),
+            _ => true,
+        };
+        if owed {
+            self.stamp_method_call_targets(module_index);
+            if let Some(idx) = module_index {
+                // Recorded only for a stamp that ran WITH the index: a
+                // build-time stamp resolved nothing cross-file, so
+                // treating it as a stamp would license skipping the very
+                // first enrichment re-stamp — the one with the most to
+                // add. The clock is read AFTER the stamp, so a wave that
+                // lands mid-stamp is not credited to it.
+                self.stamped_at = Some(idx.flush_epoch());
             }
-        } else {
-            crate::util::ghost_stats::count(if profile_wants {
-                "enrich.mc_stamp_skipped_by_ablation"
-            } else {
-                "enrich.mc_stamp_skipped_by_profile"
-            });
+        } else if restamp_gate_equiv() {
+            self.score_restamp_gate_skip(module_index, path);
         }
         self.rebuild_enrichment_indices();
     }
@@ -888,7 +765,7 @@ impl FileAnalysis {
     /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
     /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
     /// when present, else cross-file resolution of the call's invocant via
-    /// `method_call_invocant_class` with the module index — which lights up
+    /// `resolve_receiver` with the module index — which lights up
     /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
     /// `$self->_minion->enqueue`) that only type once other modules are in
     /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
@@ -898,31 +775,40 @@ impl FileAnalysis {
         gated: &'a ProvisionalDispatch,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> GateResult<&'a DispatchCandidate> {
-        let recv = self.dispatch_receiver_class(gated, module_index);
-        gated.resolve_for(recv.as_deref(), &self.packages, module_index)
+        // A union receiver applies the handler when any arm passes the gate.
+        let mut out = GateResult::ReceiverUntyped;
+        for recv in self.dispatch_receiver_classes(gated, module_index) {
+            match gated.resolve_for(Some(&recv), &self.packages, module_index) {
+                applies @ GateResult::Applies(_) => return applies,
+                other => out = other,
+            }
+        }
+        out
     }
 
-    /// Resolve the receiver class for a gated dispatch candidate: the
+    /// Resolve the receiver classes for a gated dispatch candidate: the
     /// build-time hint, else the call's invocant via the MethodCall ref at
     /// `call_span` (cross-file aware through the bag). Uses only the gate-input
     /// accessors, never the gated handler payload.
-    fn dispatch_receiver_class(
+    fn dispatch_receiver_classes(
         &self,
         gated: &ProvisionalDispatch,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<String> {
-        gated.receiver_hint().cloned().or_else(|| {
-            let call_span = gated.call_span();
-            let dispatcher = gated.dispatcher();
-            self.refs
-                .iter()
-                .find(|r| {
-                    r.span == call_span
-                        && r.target_name == dispatcher
-                        && matches!(r.kind, RefKind::MethodCall { .. })
-                })
-                .and_then(|r| self.method_call_invocant_class(r, module_index))
-        })
+    ) -> ReceiverClasses {
+        if let Some(hint) = gated.receiver_hint() {
+            return [hint.clone()].into_iter().collect();
+        }
+        let call_span = gated.call_span();
+        let dispatcher = gated.dispatcher();
+        self.refs
+            .iter()
+            .find(|r| {
+                r.span == call_span
+                    && r.target_name == dispatcher
+                    && matches!(r.kind, RefKind::MethodCall { .. })
+            })
+            .map(|r| self.receiver_classes(r, module_index, ReceiverPolicy::Navigate))
+            .unwrap_or_default()
     }
 
     /// Query-time handler call-sites in THIS file: every gated dispatch
@@ -1144,6 +1030,7 @@ impl FileAnalysis {
                 verdict,
                 subject: g.subject.clone(),
                 predicate: g.predicate.clone(),
+                satisfied,
             });
         }
         out
@@ -1249,75 +1136,6 @@ impl FileAnalysis {
     }
 
 
-}
-
-#[cfg(test)]
-mod profile_tests {
-    use super::*;
-
-    /// The A/B control must win over a declared profile.
-    ///
-    /// Get this backwards and nothing fails: the control silently stops
-    /// working, and every future "output is set-identical with the profile"
-    /// claim becomes unfalsifiable because the full behaviour is no longer
-    /// reachable to compare against. That is the same shape as a watcher that
-    /// cannot tell quiet from blind — it reports success by being unable to
-    /// look.
-    #[test]
-    fn the_full_override_beats_a_declared_profile() {
-        assert!(
-            resolve_profile(Some(EnrichmentProfile::diagnostics()), true)
-                .stamps_method_targets(),
-            "PERL_LSP_FULL_ENRICHMENT must restore the full profile, or the A/B \
-             that licensed the partial one can never be re-run"
-        );
-        assert!(
-            !resolve_profile(Some(EnrichmentProfile::diagnostics()), false)
-                .stamps_method_targets(),
-            "without the override, the declared profile stands"
-        );
-        assert!(
-            resolve_profile(None, false).stamps_method_targets(),
-            "an undeclared profile is FULL — a server verb must never get a \
-             partial one by omission"
-        );
-    }
-
-    /// Profile and ablation are independent suppressors, and the truth table
-    /// is the whole contract: policy says "no consumer reads it", measurement
-    /// says "prove that". Collapsing them into one flag would make the
-    /// licensing evidence and the thing it licenses the same switch.
-    #[test]
-    fn either_the_profile_or_the_ablation_suppresses_the_stamp() {
-        let full = EnrichmentProfile::full();
-        let diag = EnrichmentProfile::diagnostics();
-        assert!(should_stamp_method_targets(full, false), "full + no ablation stamps");
-        assert!(!should_stamp_method_targets(full, true), "the ablation alone suppresses");
-        assert!(!should_stamp_method_targets(diag, false), "the profile alone suppresses");
-        assert!(!should_stamp_method_targets(diag, true), "both suppress");
-    }
-
-    /// The lattice's order, in the direction that matters.
-    ///
-    /// `covers` is not equality and not symmetry. A full copy contains
-    /// everything a diagnostics request reads, so refusing it would make two
-    /// verbs evict each other on every alternation; a diagnostics copy is
-    /// missing exactly what a full request came for, so serving it is a
-    /// silently short answer.
-    #[test]
-    fn the_profile_lattice_orders_full_above_diagnostics() {
-        let full = EnrichmentProfile::full();
-        let diag = EnrichmentProfile::diagnostics();
-        assert!(full.covers(diag), "full must serve a diagnostics request");
-        assert!(!diag.covers(full), "diagnostics must NOT serve a full request");
-        assert!(full.covers(full));
-        assert!(diag.covers(diag));
-        // The join is the least profile serving both, and it is full here
-        // because full is the top of a single-axis lattice.
-        assert_eq!(diag.join(full), full);
-        assert_eq!(full.join(diag), full);
-        assert_eq!(diag.join(diag), diag);
-    }
 }
 
 #[cfg(test)]
