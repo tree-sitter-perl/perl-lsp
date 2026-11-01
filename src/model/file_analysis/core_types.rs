@@ -383,8 +383,8 @@ pub enum FunctionLookup {
     #[default]
     Global,
     /// The namespace in force when it declares the function, else the
-    /// global namespace: PHP's fallback for an unqualified function, which
-    /// its `use` rows never name.
+    /// global namespace: PHP's fallback for an unqualified function. (A
+    /// `use function` row names one too; those rows are not read yet.)
     NamespaceThenGlobal,
 }
 

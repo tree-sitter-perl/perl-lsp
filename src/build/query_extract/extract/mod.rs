@@ -180,10 +180,24 @@ impl ExtractState<'_> {
     fn def_scope(&self, kind: DefCap, match_id: usize) -> ScopeId {
         match kind {
             DefCap::Field | DefCap::Slot => self.member_scope(),
-            _ if self.defs.hoists(match_id) => {
-                self.out.scopes[self.cur_scope.0 as usize].parent.unwrap_or(self.cur_scope)
-            }
-            _ => self.bind_scope(),
+            DefCap::Sub
+            | DefCap::Method
+            | DefCap::Anon
+            | DefCap::Class
+            | DefCap::Package
+            | DefCap::Var
+            | DefCap::Local
+            | DefCap::Assigned
+            | DefCap::Constant
+            | DefCap::Enumerator
+            | DefCap::Label
+            | DefCap::Macro
+            | DefCap::Reexport
+            | DefCap::Union
+            | DefCap::UnionField => match self.defs.hoists(match_id) {
+                true => self.out.scopes[self.cur_scope.0 as usize].parent.unwrap_or(self.cur_scope),
+                false => self.bind_scope(),
+            },
         }
     }
 

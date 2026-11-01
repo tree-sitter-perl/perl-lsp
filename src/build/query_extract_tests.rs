@@ -3236,6 +3236,19 @@ fn cpp_this_reads_the_enclosing_class() {
     }
 }
 
+// One system types `this`: the token is stated once (`@receiver.enclosing`)
+// and its class is the method-class table's, so its value is one witness.
+#[test]
+fn cpp_this_is_typed_once() {
+    use crate::model::witnesses::WitnessAttachment as WA;
+    let src = "class S {\n void f() { this->g(); }\n void g();\n};\n";
+    let fa = cpp_fa(src);
+    let this = crate::model::file_analysis::Span { start: Point::new(1, 12), end: Point::new(1, 16) };
+    let typed: Vec<_> = fa.witnesses.for_attachment(&WA::Expr(this)).into_iter().map(|w| w.source.clone()).collect();
+    assert_eq!(typed.len(), 1, "one witness types `this`: {typed:?}");
+    assert_eq!(fa.expr_type_at_span(this, None), Some(InferredType::ClassName("S".into())));
+}
+
 // A comment inside a Python argument list is not an argument.
 #[test]
 fn python_call_arg_count_skips_comments() {

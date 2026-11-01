@@ -41,9 +41,9 @@
  (#any-of? @_class "self" "static"))
 
 ; ---- callables ----
-; A declared return is the callable's value at every call.
-(function_definition name: (name) @def.sub.name return_type: (_)? @rettype) @def.sub
-(method_declaration name: (name) @def.method.name return_type: (_)? @rettype) @def.method
+; A declared return (a single type) is the callable's value at every call.
+(function_definition name: (name) @def.sub.name return_type: [(named_type) (primitive_type) (optional_type)]? @rettype) @def.sub
+(method_declaration name: (name) @def.method.name return_type: [(named_type) (primitive_type) (optional_type)]? @rettype) @def.method
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own. A function, a method or a closure sees no
 ; variable of the code around it but the ones its `use` clause names; an
@@ -56,10 +56,11 @@
 ; ---- parameters ----
 ; A parameter is a local of its callable, named like every variable by
 ; the token after its `$`: a read of `$x` references `x` and leaves the
-; `$` alone. Its declared type is its value from the binding site on. A
-; variadic's declared type is its elements', so the local stays untyped.
+; `$` alone. Its declared type (a single one) is its value from the binding
+; site on. A variadic's declared type is its elements', so the local stays
+; untyped.
 (simple_parameter
-  type: (_)? @type.annot
+  type: [(named_type) (primitive_type) (optional_type)]? @type.annot
   name: (variable_name (name) @def.local.name @flow.target)) @def.local
 (variadic_parameter
   name: (variable_name (name) @def.local.name)) @def.local
@@ -67,11 +68,12 @@
 ; ---- properties ----
 ; A property is a data member of its class, named without the `$` it is
 ; declared with: `$obj->x` reads the member `x`. The `$x` it is written as
-; is the spelling it is listed by. A declared type is the member's value.
-; `readonly` is display vocabulary, no flag.
+; is the spelling it is listed by. A declared type is the member's value;
+; a union or intersection names no single type, so only a single type is
+; captured. `readonly` is display vocabulary, no flag.
 (property_declaration
   (readonly_modifier)? @sym.attr
-  type: (_)? @type.annot
+  type: [(named_type) (primitive_type) (optional_type)]? @type.annot
   (property_element
     name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
 ; A constructor parameter with a visibility or `readonly` is also a
@@ -83,7 +85,7 @@
 ; captures; tree-sitter drops the rest silently.)
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
-  type: (_)? @type.annot
+  type: [(named_type) (primitive_type) (optional_type)]? @type.annot
   name: [
     (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled
     (by_ref
@@ -311,9 +313,3 @@
       alias: (name)? @import.alias) @_clause)) @_group
  (#not-match? @_group "^use\\s+(function|const)\\s")
  (#not-match? @_clause "^(function|const)\\s"))
-
-; ---- the receiver ----
-; `$this` is the receiver of the method around it: an object of that
-; method's class.
-((variable_name (name) @_this) @receiver
- (#eq? @_this "this"))

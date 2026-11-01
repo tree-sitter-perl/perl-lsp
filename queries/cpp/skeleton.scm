@@ -730,7 +730,8 @@
  (#not-is-kind? @member.recv identifier))
 
 ; `this` is the object the enclosing method runs on, an instance of the
-; method's class (out-of-line bodies included).
+; method's class (out-of-line bodies included), never a name to spell a
+; class.
 (this) @receiver.enclosing
 
 ; which operator a member access wrote, so op-DX can name the other one. A
@@ -854,9 +855,6 @@
 (binary_expression
   operator: ["==" "!=" "<" ">" "<=" ">=" "&&" "||"]) @expr.lit.bool
 (identifier) @expr.read.var
-; `this` is the receiver of the method around it: an object of that
-; method's class, never a name to spell a class.
-(this) @receiver
 
 ; `return EXPR;` — the returned expression's OWN span already carries
 ; whatever witness the general rules above minted for its shape (a literal,
