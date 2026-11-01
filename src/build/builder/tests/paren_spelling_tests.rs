@@ -48,19 +48,19 @@ fn sub_exporter_generator_keys_in_parens() {
     let fa = build_fa(
         "package My::Exporter;\nuse Sub::Exporter -setup => { exports => { (delta => \\&_gen) } };\nsub _gen { sub { 4 } }\n1;\n",
     );
-    assert!(fa.export_ok.contains(&"delta".to_string()), "{:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"delta".to_string()), "{:?}", fa.all_export_ok());
 }
 
 #[test]
 fn push_exports_in_parens() {
     let fa = build_fa("package Foo;\nuse Exporter 'import';\nour @EXPORT_OK = qw(foo);\npush(@EXPORT_OK, 'bar');\npush((@EXPORT_OK), 'baz');\n");
-    assert_eq!(fa.export_ok, vec!["foo", "bar", "baz"]);
+    assert_eq!(fa.all_export_ok(), vec!["foo", "bar", "baz"]);
 }
 
 #[test]
 fn importer_menu_single_pair_in_parens() {
     let fa = build_fa("package My::Menu;\nsub IMPORTER_MENU { return (export => [qw/foo/]) }\nsub foo { 1 }\n");
-    assert!(fa.export_ok.contains(&"foo".to_string()), "{:?}", fa.export_ok);
+    assert!(fa.all_export_ok().contains(&"foo".to_string()), "{:?}", fa.all_export_ok());
 }
 
 #[test]

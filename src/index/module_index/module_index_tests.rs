@@ -217,16 +217,16 @@ fn test_extract_exports_list_util() {
     assert!(cached.is_some(), "Should parse List::Util");
     let cached = cached.unwrap();
     assert!(
-        cached.analysis.export_ok.contains(&"first".to_string()),
+        cached.analysis.all_export_ok().contains(&"first".to_string()),
         "List::Util should export_ok 'first', got: {:?}",
-        cached.analysis.export_ok
+        cached.analysis.all_export_ok()
     );
     assert!(
-        cached.analysis.export_ok.contains(&"any".to_string()),
+        cached.analysis.all_export_ok().contains(&"any".to_string()),
         "List::Util should export_ok 'any'"
     );
     assert!(
-        cached.analysis.export_ok.contains(&"min".to_string()),
+        cached.analysis.all_export_ok().contains(&"min".to_string()),
         "List::Util should export_ok 'min'"
     );
 }
@@ -251,12 +251,12 @@ fn test_resolver_thread_flow() {
     );
     let cached = idx.get_cached("Carp").unwrap();
     assert!(
-        cached.analysis.export.contains(&"carp".to_string()),
+        cached.analysis.all_export().contains(&"carp".to_string()),
         "Carp should export 'carp', got: {:?}",
-        cached.analysis.export
+        cached.analysis.all_export()
     );
     assert!(
-        cached.analysis.export.contains(&"croak".to_string()),
+        cached.analysis.all_export().contains(&"croak".to_string()),
         "Carp should export 'croak'"
     );
 }
@@ -306,6 +306,21 @@ fn test_registration_feeds_export_only_names() {
     idx.insert_cache("Scalar::Util", Some(parse_source_to_cached(src, "Scalar::Util")));
     assert_eq!(idx.find_exporters("weaken"), vec!["Scalar::Util"]);
     assert_eq!(idx.find_exporters("blessed"), vec!["Scalar::Util"]);
+}
+
+/// An export list belongs to the package that declares it: a project file
+/// declaring two packages registers under both, but only the one whose
+/// `@EXPORT_OK` names `two_fn` exports it. A sibling that inherits the
+/// exporter answers with its parent's surface.
+#[test]
+fn a_workspace_file_exports_only_from_the_package_that_declares_the_list() {
+    let idx = ModuleIndex::new_for_test();
+    let src = "package Two;\nuse Exporter 'import';\nour @EXPORT_OK = qw(two_fn);\nsub two_fn { 1 }\n\
+               package Two::Helper;\nsub help { 1 }\n\
+               package Two::Kid;\nour @ISA = ('Two');\n1;\n";
+    idx.insert_workspace_for_test(PathBuf::from("/fake/lib/Two.pm"), build_fa(src));
+    assert_eq!(idx.find_exporters("two_fn"), vec!["Two", "Two::Kid"]);
+    assert!(idx.find_exporters("help").is_empty(), "a sub no package exports is nobody's export");
 }
 
 #[test]
@@ -891,7 +906,7 @@ fn enriched_present_default_is_the_raw_bag() {
         fn for_each_reexport_module(
             &self,
             _start: Vec<String>,
-            _visit: &mut dyn FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+            _visit: &mut dyn FnMut(&str, &Arc<CachedModule>) -> std::ops::ControlFlow<()>,
         ) {
         }
         fn for_each_entity_bridged_to(
@@ -1808,7 +1823,7 @@ fn an_evicted_copy_still_answers_its_export_surface() {
                sub make { my $c = shift; return bless {}, $c; }\nsub helper { return 1 }\n1;\n";
     let full = parse_source_to_cached(src, "Widget");
     assert!(
-        full.analysis.exports_name("make") && full.analysis.exports_name("helper"),
+        full.analysis.any_package_exports("make") && full.analysis.any_package_exports("helper"),
         "fixture must export both names before eviction"
     );
 
@@ -1816,16 +1831,16 @@ fn an_evicted_copy_still_answers_its_export_surface() {
         let mut fa = (*full.analysis).clone();
         fa.evict_to(level);
         assert!(
-            fa.exports_name("make"),
+            fa.any_package_exports("make"),
             "@EXPORT name unreachable at {level:?} — the chase's resident gate \
              would skip this provider and lose its imported types"
         );
         assert!(
-            fa.exports_name("helper"),
+            fa.any_package_exports("helper"),
             "@EXPORT_OK name unreachable at {level:?} — same silent loss"
         );
         assert!(
-            !fa.exports_name("never_exported"),
+            !fa.any_package_exports("never_exported"),
             "the gate must stay an over-approximation, not answer true for everything"
         );
     }

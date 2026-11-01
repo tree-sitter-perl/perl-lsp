@@ -947,7 +947,7 @@ pub trait CrossFileLookup {
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
-        visit: &mut dyn FnMut(&std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+        visit: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     );
     /// `visit` returns `Break` to stop the walk — and, more importantly, the
     /// per-candidate rehydrates behind it: entity resolution decodes each
@@ -1557,7 +1557,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
-        visit: &mut dyn FnMut(&std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+        visit: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     ) {
         self.inner.for_each_reexport_module(start, visit)
     }

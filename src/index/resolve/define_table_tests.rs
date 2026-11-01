@@ -78,7 +78,7 @@ impl CrossFileLookup for Files {
     fn for_each_reexport_module(
         &self,
         _s: Vec<String>,
-        _v: &mut dyn FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+        _v: &mut dyn FnMut(&str, &Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     ) {
     }
     fn for_each_entity_bridged_to(

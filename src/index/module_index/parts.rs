@@ -217,8 +217,8 @@ impl ModuleEdgeIndexes {
             match self.name_records.get(path) {
                 Some(rec) => rec.clone(),
                 // No record (a stripped copy fed without ever being fed
-                // whole — shouldn't happen, but degrade to the pinned
-                // export names rather than nothing).
+                // whole — shouldn't happen): the export names below, read
+                // from the never-evicted package table, still land.
                 None => Self::symbol_derived_names(analysis),
             }
         } else {
@@ -237,6 +237,13 @@ impl ModuleEdgeIndexes {
             };
         for name in names {
             push_unique(&self.names, name, &mut fed.names);
+        }
+        // An export list is its package's, so its names file under that
+        // package alone — never under every name the file registers.
+        if let Some(e) = analysis.package_exports(module_name) {
+            for name in e.export.iter().chain(&e.export_ok) {
+                push_unique(&self.names, name.clone(), &mut fed.names);
+            }
         }
         for class in bridges {
             push_unique(&self.bridges, class, &mut fed.bridges);
@@ -399,10 +406,10 @@ impl ModuleEdgeIndexes {
         }
     }
 
-    /// Every name `find_exporters` might need to locate a module by:
-    /// declared module-visible symbols plus the export/export_ok lists.
-    /// Variables and fields are skipped — file-local, not queryable
-    /// across files.
+    /// Every declared module-visible symbol name — what
+    /// `modules_with_symbol` locates a module by. Variables and fields are
+    /// skipped — file-local, not queryable across files. Export lists are
+    /// per package and fed by `feed` under their own package.
     fn indexable_names(analysis: &FileAnalysis) -> Vec<String> {
         let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
         let gated = analysis.gated_candidates();
@@ -415,8 +422,6 @@ impl ModuleEdgeIndexes {
                 names.insert(sym.name.clone());
             }
         }
-        names.extend(analysis.export.iter().cloned());
-        names.extend(analysis.export_ok.iter().cloned());
         names.into_iter().collect()
     }
 

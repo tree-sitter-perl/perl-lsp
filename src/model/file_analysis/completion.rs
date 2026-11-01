@@ -409,7 +409,7 @@ impl FileAnalysis {
             for sym in &whole.symbols {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                 if sym.name != sub_name { continue; }
-                if !whole.exports_name(&sym.name) { continue; }
+                if !whole.symbol_is_exported(sym) { continue; }
                 if let Some(sub_info) = whole.sub_info_view(&sym.name) {
                     let hk = sub_info.hash_keys();
                     if !hk.is_empty() {

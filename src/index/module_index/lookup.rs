@@ -834,7 +834,7 @@ impl CrossFileLookup for ModuleIndex {
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
-        visit: &mut dyn FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
+        visit: &mut dyn FnMut(&str, &Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     ) {
         self.for_each_reexport_module(start, visit)
     }
