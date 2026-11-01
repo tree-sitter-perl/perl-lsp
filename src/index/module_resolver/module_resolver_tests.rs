@@ -724,7 +724,7 @@ fn perls_map_is_inc_with_the_project_libs_first() {
     expected.extend(discover_inc_paths());
     assert_eq!(inc.search_roots(), expected.as_slice());
     assert_eq!(inc.roots(), [dir.join("local")]);
-    assert_eq!(inc.inputs(), [dir.join("local/lib/perl5"), dir.join("cpanfile.snapshot")]);
+    assert_eq!(inc.inputs(), [dir.join("cpanfile.snapshot")]);
 
     let local = dir.join("local/lib/perl5/Twin.pm");
     let lib = dir.join("lib/Twin.pm");

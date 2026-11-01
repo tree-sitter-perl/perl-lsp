@@ -62,9 +62,11 @@ pub fn locator(root: Option<&Path>, driver: &'static dyn LanguageDriver) -> Arc<
         if lib.is_dir() {
             roots.push(root.join(BASE));
         }
-        // An install creates or touches the lib directory; carton also
-        // writes its snapshot.
-        inputs = vec![lib, root.join("cpanfile.snapshot")];
+        // Carton's snapshot, the one manifest an install rewrites that the
+        // watcher hears about. The lib directory is no input: its stamp
+        // moves on an install no watcher reports, and a stamp only a
+        // one-shot run sees would clear a running server's landings.
+        inputs = vec![root.join("cpanfile.snapshot")];
     }
     Arc::new(SearchPathLocator::new(driver, search, roots, inputs))
 }

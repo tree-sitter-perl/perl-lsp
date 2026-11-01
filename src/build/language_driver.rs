@@ -168,9 +168,10 @@ pub trait LanguageDriver: Send + Sync {
     fn dependency_locator(&'static self, _root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {
         None
     }
-    /// File names whose change can move `dependency_locator`'s answer —
-    /// the watcher subscribes to them; the locator's own `inputs` decide
-    /// which changes count.
+    /// The file names the watcher subscribes to so a package install
+    /// moves the map: every name a locator's `inputs` spell, since an
+    /// input no watcher reports moves a one-shot run's fingerprint and not
+    /// the server's (`every_dependency_input_is_a_watched_manifest`).
     fn dependency_manifests(&self) -> &[&'static str] {
         &[]
     }
