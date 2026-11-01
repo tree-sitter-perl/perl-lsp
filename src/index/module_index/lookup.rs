@@ -759,6 +759,10 @@ impl CrossFileLookup for ModuleIndex {
         self.modules_with_symbol(name)
     }
 
+    fn modules_providing_package(&self, package: &str) -> Vec<String> {
+        self.modules_providing_package(package)
+    }
+
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.find_exporters(func_name)
     }
