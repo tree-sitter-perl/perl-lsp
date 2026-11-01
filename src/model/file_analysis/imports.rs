@@ -97,7 +97,8 @@ pub struct Import {
 /// Without an index (`export_surface`, the back-compat path) only the module's
 /// own surface is visible.
 pub struct ExportSurface<'a> {
-    pub(super) analysis: &'a FileAnalysis,
+    /// The package's own lists as written; `None` = it declares none.
+    pub(super) own: Option<&'a PackageExports>,
     /// `@EXPORT` ∪ re-exported defaults. `None` = own-only (no index walk).
     pub(super) default_set: Option<Vec<String>>,
     /// `@EXPORT_OK` ∪ re-exported optionals.
@@ -113,12 +114,12 @@ impl<'a> ExportSurface<'a> {
     /// `@EXPORT` (∪ re-exported defaults when index-walked) — auto-imported by a
     /// bare `use M;`.
     pub fn default_set(&self) -> &[String] {
-        self.default_set.as_deref().unwrap_or(&self.analysis.export)
+        self.default_set.as_deref().or(self.own.map(|e| e.export.as_slice())).unwrap_or(&[])
     }
 
     /// `@EXPORT_OK` (∪ re-exported optionals) — opt-in only; never auto-imported.
     pub fn optional_set(&self) -> &[String] {
-        self.optional_set.as_deref().unwrap_or(&self.analysis.export_ok)
+        self.optional_set.as_deref().or(self.own.map(|e| e.export_ok.as_slice())).unwrap_or(&[])
     }
 
     /// Members of a `%EXPORT_TAGS` tag, with `:DEFAULT` synthesized as
@@ -131,7 +132,7 @@ impl<'a> ExportSurface<'a> {
         if let Some(tags) = &self.tags {
             return tags.get(tag).map(|v| v.iter().map(|s| s.as_str()).collect());
         }
-        self.analysis
+        self.own?
             .export_tags
             .get(tag)
             .map(|v| v.iter().map(|s| s.as_str()).collect())
@@ -144,25 +145,22 @@ impl<'a> ExportSurface<'a> {
         if let Some(all) = &self.all_names {
             return all.contains(name);
         }
-        self.analysis.exports_name(name)
+        self.own.is_some_and(|e| e.exports(name))
     }
 
     /// Every name on the surface, materialized into an owned set with the same
     /// membership `exports()` reports. Lets a caller resolving many names
     /// against one producer snapshot the surface once instead of re-walking
-    /// re-export edges per name (the diagnostics hot path). Own-only mirrors
-    /// `export_lookup` (`@EXPORT ∪ @EXPORT_OK`); the transitive case returns the
+    /// re-export edges per name (the diagnostics hot path). Own-only is the
+    /// package's `@EXPORT ∪ @EXPORT_OK`; the transitive case returns the
     /// precomputed union.
     pub fn all_names(&self) -> HashSet<String> {
         if let Some(all) = &self.all_names {
             return all.clone();
         }
-        self.analysis
-            .export
-            .iter()
-            .chain(self.analysis.export_ok.iter())
-            .cloned()
-            .collect()
+        self.own
+            .map(|e| e.export.iter().chain(&e.export_ok).cloned().collect())
+            .unwrap_or_default()
     }
 }
 

@@ -1190,8 +1190,8 @@ our @EXPORT = qw(delta);
 our @EXPORT_OK = qw(alpha beta gamma);
 ",
     );
-    assert_eq!(fa.export, vec!["delta"]);
-    assert_eq!(fa.export_ok, vec!["alpha", "beta", "gamma"]);
+    assert_eq!(fa.all_export(), vec!["delta"]);
+    assert_eq!(fa.all_export_ok(), vec!["alpha", "beta", "gamma"]);
 }
 
 #[test]
@@ -1202,7 +1202,7 @@ package Bar;
 our @EXPORT_OK = ('foo', 'bar', 'baz');
 ",
     );
-    assert_eq!(fa.export_ok, vec!["foo", "bar", "baz"]);
+    assert_eq!(fa.all_export_ok(), vec!["foo", "bar", "baz"]);
 }
 
 #[test]
@@ -1215,7 +1215,7 @@ our @EXPORT_OK = qw(foo);
 push @EXPORT_OK, 'bar', 'baz';
 ",
     );
-    assert_eq!(fa.export_ok, vec!["foo", "bar", "baz"]);
+    assert_eq!(fa.all_export_ok(), vec!["foo", "bar", "baz"]);
 }
 
 #[test]
@@ -1230,7 +1230,7 @@ export(qw( foo $bar @baz -tag ));
 sub foo { 1 }
 ",
     );
-    assert_eq!(fa.export_ok, vec!["foo"]);
+    assert_eq!(fa.all_export_ok(), vec!["foo"]);
 }
 
 #[test]
@@ -1245,9 +1245,9 @@ sub bar :Export { 2 }
 sub plain { 3 }
 ",
     );
-    assert!(fa.export_ok.contains(&"foo".to_string()));
-    assert!(fa.export_ok.contains(&"bar".to_string()));
-    assert!(!fa.export_ok.contains(&"plain".to_string()));
+    assert!(fa.all_export_ok().contains(&"foo".to_string()));
+    assert!(fa.all_export_ok().contains(&"bar".to_string()));
+    assert!(!fa.all_export_ok().contains(&"plain".to_string()));
 }
 
 #[test]
@@ -1262,10 +1262,10 @@ export bar => sub { 2 };
 exports qw/a b/;
 ",
     );
-    assert!(fa.export_ok.contains(&"foo".to_string()));
-    assert!(fa.export_ok.contains(&"bar".to_string()));
-    assert!(fa.export_ok.contains(&"a".to_string()));
-    assert!(fa.export_ok.contains(&"b".to_string()));
+    assert!(fa.all_export_ok().contains(&"foo".to_string()));
+    assert!(fa.all_export_ok().contains(&"bar".to_string()));
+    assert!(fa.all_export_ok().contains(&"a".to_string()));
+    assert!(fa.all_export_ok().contains(&"b".to_string()));
 }
 
 #[test]
@@ -1280,7 +1280,7 @@ sub export { 1 }
 export('not_an_export');
 ",
     );
-    assert!(fa.export_ok.is_empty());
+    assert!(fa.all_export_ok().is_empty());
 }
 
 /// Gate 5: `find_subs_for_call` (resolution path) must check `export_ok`, not
@@ -1298,7 +1298,7 @@ fn test_export_ok_resolves_cross_file() {
         "package Data::Fetcher;\nour @EXPORT_OK = qw(fetch_data);\nsub fetch_data { my ($url) = @_; }\n1;\n",
     );
     assert!(
-        provider_fa.export_ok.contains(&"fetch_data".to_string()),
+        provider_fa.all_export_ok().contains(&"fetch_data".to_string()),
         "provider must record fetch_data in export_ok",
     );
 
@@ -1374,10 +1374,10 @@ sub IMPORTER_MENU {
 sub foo { 1 }
 ",
     );
-    assert!(fa.export_ok.contains(&"foo".to_string()));
-    assert!(fa.export_ok.contains(&"bar".to_string()));
-    assert!(fa.export_ok.contains(&"baz".to_string()));
-    assert!(!fa.export_ok.contains(&"quux".to_string()));
+    assert!(fa.all_export_ok().contains(&"foo".to_string()));
+    assert!(fa.all_export_ok().contains(&"bar".to_string()));
+    assert!(fa.all_export_ok().contains(&"baz".to_string()));
+    assert!(!fa.all_export_ok().contains(&"quux".to_string()));
 }
 
 #[test]
@@ -1403,7 +1403,7 @@ our @THINGS = qw(a b);
 our @EXPORT_OK = (@THINGS, 'c');
 ",
     );
-    assert_eq!(fa.export_ok, vec!["a", "b", "c"]);
+    assert_eq!(fa.all_export_ok(), vec!["a", "b", "c"]);
 }
 
 #[test]
@@ -1414,7 +1414,7 @@ my @THINGS = qw(a b);
 our @EXPORT_OK = (@THINGS, 'c');
 ",
     );
-    assert_eq!(fa.export_ok, vec!["a", "b", "c"]);
+    assert_eq!(fa.all_export_ok(), vec!["a", "b", "c"]);
 }
 
 #[test]
@@ -1427,7 +1427,7 @@ my @COMMON = qw(alpha beta);
 our @EXPORT_OK = (@COMMON, 'gamma');
 ",
     );
-    assert_eq!(fa.export_ok, vec!["alpha", "beta", "gamma"]);
+    assert_eq!(fa.all_export_ok(), vec!["alpha", "beta", "gamma"]);
 }
 
 #[test]
@@ -1441,7 +1441,7 @@ use constant ALL => (BASE, 'c');
 our @EXPORT_OK = (ALL);
 ",
     );
-    assert_eq!(fa.export_ok, vec!["a", "b", "c"]);
+    assert_eq!(fa.all_export_ok(), vec!["a", "b", "c"]);
 }
 
 #[test]
@@ -1463,14 +1463,14 @@ sub import {
 "#,
     );
     assert!(
-        fa.export.contains(&"p".to_string()),
+        fa.all_export().contains(&"p".to_string()),
         "should detect p export: {:?}",
-        fa.export
+        fa.all_export()
     );
     assert!(
-        fa.export.contains(&"np".to_string()),
+        fa.all_export().contains(&"np".to_string()),
         "should detect np export: {:?}",
-        fa.export
+        fa.all_export()
     );
 }
 
@@ -1492,9 +1492,9 @@ sub import {
 "#,
     );
     assert!(
-        fa.export.contains(&"dump_it".to_string()),
+        fa.all_export().contains(&"dump_it".to_string()),
         "should resolve aliased export: {:?}",
-        fa.export
+        fa.all_export()
     );
 }
 
@@ -1518,19 +1518,19 @@ sub import {
 "#,
     );
     assert!(
-        fa.export.contains(&"try".to_string()),
+        fa.all_export().contains(&"try".to_string()),
         "should detect try: {:?}",
-        fa.export
+        fa.all_export()
     );
     assert!(
-        fa.export.contains(&"catch".to_string()),
+        fa.all_export().contains(&"catch".to_string()),
         "should detect catch: {:?}",
-        fa.export
+        fa.all_export()
     );
     assert!(
-        fa.export.contains(&"finally".to_string()),
+        fa.all_export().contains(&"finally".to_string()),
         "should detect finally: {:?}",
-        fa.export
+        fa.all_export()
     );
 }
 
@@ -1548,9 +1548,9 @@ sub import {
 "#,
     );
     assert!(
-        fa.export.contains(&"bar".to_string()),
+        fa.all_export().contains(&"bar".to_string()),
         "should fall back to RHS name: {:?}",
-        fa.export
+        fa.all_export()
     );
 }
 
@@ -1567,9 +1567,9 @@ sub setup {
 "#,
     );
     assert!(
-        fa.export.is_empty(),
+        fa.all_export().is_empty(),
         "should not export from non-import sub: {:?}",
-        fa.export
+        fa.all_export()
     );
 }
 
