@@ -310,6 +310,8 @@ impl<'a> Builder<'a> {
             "hash_element_expression" => {
                 // A hash element's VALUE type is independent of the
                 // container's class — never `$self`'s class.
+                // TODO(union-chain-walker): a union base answers nothing
+                // here; the registry's `Projected` drill joins its arms.
                 let base = node.named_child(0)?;
                 let base_ty = self.invocant_type_at_node(base)?;
                 let key_node = node.child_by_field_name("key")?;

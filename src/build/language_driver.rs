@@ -323,7 +323,7 @@ impl LanguageDriver for PerlDriver {
         Maturity::Stable
     }
     fn id(&self) -> &'static str {
-        "perl"
+        crate::model::conventions::PERL_LANGUAGE
     }
     fn extensions(&self) -> &[&'static str] {
         &["pm", "pl", "t"]
@@ -1248,6 +1248,7 @@ fn remap_spans(
         // name/scope-keyed — no spans to fix.
         field_types: _,
         return_sites,
+        receivers,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
@@ -1334,7 +1335,7 @@ fn remap_spans(
     for site in receiver_sites.iter_mut() {
         site.span = rspan(site.span);
     }
-    for (_, span) in return_sites.iter_mut() {
+    for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
         *span = rspan(*span);
     }
     // Member writes settle through `expr_type_at_span` on the receiver and an
@@ -1587,6 +1588,13 @@ impl LanguageRegistry {
             drivers.push(Box::new(cmake_driver()));
             #[cfg(feature = "php")]
             drivers.push(Box::new(php_driver()));
+            // Registered here too, not only on analysis, because a warm start
+            // answers from cached analyses no driver has built this process.
+            for d in &drivers {
+                if let Some(pack) = d.lang_pack() {
+                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                }
+            }
             LanguageRegistry { drivers }
         })
     }
