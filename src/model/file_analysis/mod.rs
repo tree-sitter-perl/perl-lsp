@@ -53,6 +53,7 @@ mod hover;
 mod sym_index;
 mod completion;
 pub use completion::*;
+mod equiv_dump;
 
 // ---- FileAnalysis ----
 
@@ -656,6 +657,8 @@ pub struct FileAnalysisParts {
     pub scopes: Vec<Scope>,
     pub symbols: Vec<Symbol>,
     pub refs: Vec<Ref>,
+    /// The build's per-site macro delegation column over `refs`.
+    pub ref_delegates: RefDelegates,
     pub fold_ranges: Vec<FoldRange>,
     pub imports: Vec<Import>,
     pub call_bindings: Vec<CallBinding>,

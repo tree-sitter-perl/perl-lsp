@@ -17,7 +17,7 @@ fn build(src: &str) -> FileAnalysis {
 }
 
 fn module(src: &str) -> Arc<CachedModule> {
-    Arc::new(CachedModule::new(PathBuf::from("/t/mod.pm"), Arc::new(build(src))))
+    Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/t/mod.pm")), Arc::new(build(src))))
 }
 
 /// A lookup whose rows half answers a FIXED verdict, so each test can pin
@@ -122,7 +122,7 @@ fn declared_parents_fail_open_over_provably_absent_rows() {
 fn the_unrowed_residue_fails_open_over_provably_absent_rows() {
     let mut fa = build("package main;\nsub other { 1 }\n");
     fa.unrowed_attachment_names = vec!["ghost_sub".to_string()];
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/t/mod.pm"), Arc::new(fa)));
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/t/mod.pm")), Arc::new(fa)));
     assert!(sweep_candidate_may_answer(
         &RowsSay(false),
         &cached,
@@ -144,7 +144,7 @@ fn the_unrowed_residue_fails_open_over_provably_absent_rows() {
 fn an_app_surface_consumer_class_fails_open() {
     let mut fa = build("package main;\nsub other { 1 }\n");
     fa.plugin.app_surface_consumers.push("main".to_string());
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/t/mod.pm"), Arc::new(fa)));
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/t/mod.pm")), Arc::new(fa)));
     assert!(sweep_candidate_may_answer(
         &RowsSay(false),
         &cached,

@@ -155,7 +155,7 @@ pub fn index_workspace_with_index(
     // its stale generation is dropped.
     let canon_members: std::collections::HashSet<PathBuf> = paths
         .iter()
-        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+        .map(|p| crate::util::canonical_path::CanonicalPath::resolve(p.as_path()).into_path_buf())
         .collect();
 
     // WARM: stream valid 'workspace' rows — record projections from the
@@ -369,7 +369,7 @@ pub fn index_workspace_with_index(
             // Blobs are keyed canonical (matches the warm rows + the CLI's
             // canonicalized origin staging); register under the same spelling
             // so cold and warm runs key the stores identically.
-            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
             if warmed.contains(&canon) {
                 if let Some(cb) = progress {
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
