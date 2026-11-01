@@ -32,7 +32,7 @@ fn parse_source_to_cached(source: &str, path: &std::path::Path) -> Arc<CachedMod
         .unwrap();
     let tree = parser.parse(source, None).unwrap();
     let fa = crate::build::builder::build(&tree, source.as_bytes());
-    Arc::new(CachedModule::new(path.to_path_buf(), Arc::new(fa)))
+    Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(path.to_path_buf()), Arc::new(fa)))
 }
 
 /// Slice-2: `load_one` decodes a single persisted analysis BY PATH with its
@@ -434,7 +434,7 @@ fn header_change_invalidates_consumer_row_via_deps_stamp() {
     let mut fa = crate::build::builder::build(&tree, source.as_bytes());
     fa.pack.include_closure =
         crate::model::file_analysis::path_intern::ClosureList::from_iter(std::iter::once(hdr_canon.as_str()));
-    let cached = Some(Arc::new(CachedModule::new(pm.clone(), Arc::new(fa))));
+    let cached = Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(pm.clone()), Arc::new(fa))));
     // warm_cache serves the 'import' tier ('workspace' rows stream through
     // warm_cache_streaming); the deps_stamp semantics under test are
     // source-independent.
@@ -473,7 +473,7 @@ fn degraded_analysis_is_not_persisted() {
     let tree = parser.parse(&source, None).unwrap();
     let mut fa = crate::build::builder::build(&tree, source.as_bytes());
     fa.degraded = true;
-    let cached = Some(Arc::new(CachedModule::new(pm.clone(), Arc::new(fa))));
+    let cached = Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(pm.clone()), Arc::new(fa))));
     save_to_db(&conn, "Degraded", &cached, "workspace");
 
     let rows: i64 = conn

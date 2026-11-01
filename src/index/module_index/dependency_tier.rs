@@ -24,7 +24,7 @@ pub(crate) struct DependencyState {
     pub(crate) stamps: Vec<Option<(i64, i64)>>,
     pub(crate) generation: u64,
     /// Canonical path → the names it landed under.
-    pub(crate) landed: std::collections::HashMap<std::path::PathBuf, Vec<String>>,
+    pub(crate) landed: std::collections::HashMap<crate::util::canonical_path::CanonicalPath, Vec<String>>,
 }
 
 impl DependencyState {
@@ -246,17 +246,17 @@ impl IndexCore {
 
     /// Undo a landing of `path`: its candidates, any name slot it holds
     /// (re-picked from the survivors), and its edge feed.
-    pub(crate) fn retire_dependency(&self, path: &std::path::Path, names: &[String]) {
+    pub(crate) fn retire_dependency(&self, path: &crate::util::canonical_path::CanonicalPath, names: &[String]) {
         self.note_shape_change();
         for name in names {
             if let Some(mut v) = self.all_defs.get_mut(name) {
-                v.retain(|c| c.path != path);
+                v.retain(|c| c.path != *path);
             }
             self.all_defs.remove_if(name, |_, v| v.is_empty());
             let held = self
                 .cache
                 .get(name)
-                .is_some_and(|e| matches!(e.value(), Some(c) if c.path == path));
+                .is_some_and(|e| matches!(e.value(), Some(c) if c.path == *path));
             if held {
                 let survivor = self.all_defs.get(name).and_then(|v| {
                     best_candidate(&v.iter().collect::<Vec<_>>(), name, &|m, n| self.module_defines_class(m, n))

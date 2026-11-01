@@ -55,12 +55,12 @@ fn defs(idx: &ModuleIndex, root: &Path, rel: &str, at: Point) -> Vec<(String, us
     let p = root.join(rel);
     let fa = idx.workspace_file_for_test(&p).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(p), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p)), at, Some(idx), OverrideScope::default());
     cs.definitions()
         .iter()
         .map(|d| match &d.key {
             FileKey::Path(p) => (p.strip_prefix(root).unwrap().display().to_string(), d.span.start.row),
-            FileKey::Url(u) => (u.to_string(), d.span.start.row),
+            FileKey::Url(u, _) => (u.to_string(), d.span.start.row),
         })
         .collect()
 }
@@ -81,7 +81,7 @@ fn a_venv_places_what_the_workspace_imports() {
     assert_eq!(defs(&idx, &root, "app/user.py", at(USER, "root()")), [(models.clone(), 1)]);
     // a module outside any package is named from the search root
     assert_eq!(defs(&idx, &root, "app/user.py", at(USER, "six()")), [(format!("{SITE}/six.py"), 1)]);
-    assert!(idx.is_dependency_path(&root.join(&models)));
+    assert!(idx.is_dependency_path(&crate::util::canonical_path::CanonicalPath::resolve(&root.join(&models))));
     // each landed under the identity the import spells, so nothing widens;
     // `acme/__init__.py` encloses the name without declaring it, so it is
     // not a candidate
@@ -107,7 +107,7 @@ fn an_unused_venv_module_completes_from_the_map() {
     parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
     let tree = parser.parse(typed, None).unwrap();
     let (items, _) = crate::lsp::backend::pack_completion(
-        &OpenDocs::new(), &fa, typed, &tree, Point::new(0, typed.len()), "python", Some(&path), &idx,
+        &OpenDocs::new(), &fa, typed, &tree, Point::new(0, typed.len()), "python", Some(&crate::util::canonical_path::CanonicalPath::resolve(&path)), &idx,
     );
     let got: Vec<(String, Option<String>)> = items.into_iter().map(|i| (i.label, i.detail)).collect();
     assert!(got.contains(&("acme.unused".to_string(), Some("available".to_string()))), "{got:?}");
