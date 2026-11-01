@@ -991,7 +991,6 @@ impl<'a> Builder<'a> {
                 access: AccessKind::Read,
                 binding: pkg.map(|package| RefBinding::Function { package }),
                 folded_from: None,
-                import_name: false,
                 arg_count: None,
             });
         }
