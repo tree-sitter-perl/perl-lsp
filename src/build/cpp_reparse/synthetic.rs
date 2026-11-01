@@ -470,15 +470,32 @@ fn known_config(
 /// The config a unit ranks under: the closure's `#define` sites and
 /// `toolchain`'s predefined macros (`__GNUC__`, `__x86_64__`, …) — the
 /// unit's own toolchain, so a C unit ranks with `__cplusplus` undefined; no
-/// toolchain predefines nothing. Build-side variant selection AND navigation
-/// (`resolve::ranking_config`) reach `KnownConfig::from_defines` through here.
+/// toolchain predefines nothing. Build-side variant selection reaches
+/// `KnownConfig::from_defines` through here, navigation through
+/// `reach_config`; both seed from `predefined`, so they cannot disagree on
+/// which macros the toolchain turns on.
 pub fn unit_config(
     sites: crate::build::cpp_macro_model::DefineSites,
     toolchain: Option<&crate::build::cpp_toolchain::Toolchain>,
 ) -> crate::build::cpp_macro_model::KnownConfig {
+    crate::build::cpp_macro_model::KnownConfig::from_defines(sites, predefined(toolchain))
+}
+
+/// `unit_config` over every site `sites_of` holds, built for only the names
+/// `asked` reaches (`KnownConfig::over_reach`) — navigation's form, which
+/// asks a few names of a whole index.
+pub fn reach_config(
+    asked: &std::collections::HashSet<String>,
+    sites_of: &mut dyn FnMut(&str, &mut dyn FnMut(&[crate::model::file_analysis::CondTerm])),
+    toolchain: Option<&crate::build::cpp_toolchain::Toolchain>,
+) -> crate::build::cpp_macro_model::KnownConfig {
+    crate::build::cpp_macro_model::KnownConfig::over_reach(asked, sites_of, predefined(toolchain))
+}
+
+/// The macros `toolchain` turns on before any `#define` (`__GNUC__`, …).
+fn predefined(toolchain: Option<&crate::build::cpp_toolchain::Toolchain>) -> Vec<String> {
     let info = toolchain.and_then(|t| t.info());
-    let predefined = info.iter().flat_map(|tc| tc.predefined_macros.iter().map(|(name, _)| name.as_str()));
-    crate::build::cpp_macro_model::KnownConfig::from_defines(sites, predefined)
+    info.iter().flat_map(|tc| tc.predefined_macros.iter().map(|(name, _)| name.clone())).collect()
 }
 
 /// Advance a Point over `bytes` (newlines bump the row, reset the column).

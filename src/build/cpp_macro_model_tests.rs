@@ -176,3 +176,61 @@ fn a_knob_with_one_possible_site_stays() {
     let on = KnownConfig::from_defines(sites(&[("K", &[defined("__cplusplus")]), ("K", &[])]), Vec::<String>::new());
     assert_eq!(classify(&[defined("K")], &on), Reachability::Active);
 }
+
+/// A config built over what a question reaches answers every reached name
+/// exactly as the whole-universe one: membership, settled-ness, and the
+/// reason — including a reason that depends on WHEN a knob settled (`LATE`
+/// settles two passes in, so `X`'s reason names `ABSENT`, not `LATE`), a
+/// cycle that never settles, a predefined name, and a name defined both
+/// ways.
+#[test]
+fn a_reach_scoped_config_answers_as_the_whole_one() {
+    let not = |n: &str| CondTerm { test: CondTest::Defined(n.to_string()), negated: true };
+    let defs: Vec<(&str, Vec<CondTerm>)> = vec![
+        ("X", vec![defined("LATE"), defined("ABSENT")]),
+        ("LATE", vec![defined("MID")]),
+        ("MID", vec![defined("__cplusplus")]),
+        ("CYC_A", vec![defined("CYC_B")]),
+        ("CYC_B", vec![defined("CYC_A")]),
+        ("BOTH", vec![defined("__cplusplus")]),
+        ("BOTH", vec![]),
+        ("NEG", vec![not("__GNUC__")]),
+        ("PRE", vec![defined("ABSENT")]),
+        ("EXPR", vec![t("defined(MID) || CYC_A > 1")]),
+        ("UNRELATED", vec![defined("ABSENT")]),
+    ];
+    let whole = {
+        let mut s = DefineSites::default();
+        for (n, tr) in &defs {
+            s.add(n, tr);
+        }
+        KnownConfig::from_defines(s, ["__GNUC__", "PRE"])
+    };
+    let names = ["X", "LATE", "MID", "CYC_A", "CYC_B", "BOTH", "NEG", "PRE", "EXPR", "ABSENT", "__GNUC__"];
+    let trails: Vec<Vec<CondTerm>> = names
+        .iter()
+        .map(|n| vec![defined(n)])
+        .chain(names.iter().map(|n| vec![not(n)]))
+        .chain(defs.iter().map(|(_, tr)| tr.clone()))
+        .chain([vec![defined("LATE"), defined("ABSENT")], vec![defined("ABSENT"), defined("LATE")]])
+        .collect();
+    for trail in &trails {
+        let mut asked = HashSet::new();
+        guard_names(trail, &mut asked);
+        let reach = KnownConfig::over_reach(
+            &asked,
+            &mut |name, f| {
+                for (n, tr) in &defs {
+                    if *n == name {
+                        f(tr);
+                    }
+                }
+            },
+            ["__GNUC__", "PRE"],
+        );
+        assert_eq!(classify(trail, &reach), classify(trail, &whole), "{}", render_trail(trail));
+        for own in names {
+            assert_eq!(classify_variant(trail, &reach, own), classify_variant(trail, &whole, own));
+        }
+    }
+}

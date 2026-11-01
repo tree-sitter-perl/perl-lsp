@@ -315,8 +315,8 @@ impl CrossFileLookup for ModuleIndex {
         self.enrichment_epoch()
     }
 
-    fn config_memo(&self) -> Option<&crate::model::toolchain::ConfigMemo> {
-        Some(&self.config_memo)
+    fn define_table(&self) -> Option<&crate::model::file_analysis::DerivedSlot> {
+        Some(&self.define_table)
     }
 
     fn flush_epoch(&self) -> u64 {

@@ -203,9 +203,16 @@ whitespace.
 A query ranks under the ASKER's config: `resolve::ranking_config` reads the
 asker's `PackFacts::toolchain` (never its path —
 `layering_tests::toolchains_are_derived_only_in_the_build_tier`) and every
-`#define` site the asker and the index hold, and the index holds the result
-for one `resolution_epoch` per (toolchain, fingerprint of the asker's own
-defines), at most eight entries (`ConfigMemo`). Macro variants
+`#define` site the asker and the index hold. It is built per question over
+only the names the question reaches (`KnownConfig::over_reach`): the names
+the candidates' guards read, then every name a reached knob's own `#define`
+trails read. A knob settles on exactly those names, pass for pass, so each
+verdict and its reason are the whole-universe config's. The sites come from
+the index's `#define` table (`resolve::DefineTable`), which follows the
+index one changed file at a time — a whole-index config rebuilt per epoch
+made every macro goto-def after an index change pay a sweep over every
+file's macro table plus a full settle (~35 ms warm on curl, measured
+2026-11-01). Macro variants
 (`ranked_macro_variants`) and declarations share it: reachability is the
 first sort key of the overload ranking and of `pack_symbol_def_location`, its
 verdict rides `RefLocation::label`, hover presents the top candidate, and

@@ -187,47 +187,53 @@ pub(crate) fn qualifier_at_point(source: &str, point: tree_sitter::Point) -> Opt
     (s < e).then(|| &source[s..e])
 }
 
-/// The reachability config `analysis` asks under: its own toolchain's
-/// predefined macros and every `#define` site it and the index hold,
-/// settled. Shared by macro-variant and declaration ranking, and held by the
-/// index for one `resolution_epoch` per (toolchain, own defines) — a sweep
-/// over every cached file's macro table is not a per-query cost.
+/// The reachability config `analysis` asks the names in `asked` under: its
+/// own toolchain's predefined macros and every `#define` site it and the
+/// index hold, settled — built over only what `asked` reaches, so it costs
+/// the question, not the index (`KnownConfig::over_reach`). Shared by
+/// macro-variant and declaration ranking. The asker's own sites join the
+/// index's: an open buffer's defines are fresher than its indexed copy's.
 pub(crate) fn ranking_config(
     analysis: &FileAnalysis,
-    module_index: Option<&dyn CrossFileLookup>,
-) -> std::sync::Arc<crate::build::cpp_macro_model::KnownConfig> {
-    use std::hash::{Hash, Hasher};
-    let build = || {
-        let mut defines = crate::build::cpp_macro_model::DefineSites::default();
-        for m in &analysis.pack.macro_defs {
-            defines.add(&m.name, analysis.pack.cond_arms.trail(m.arm));
-        }
-        if let Some(idx) = module_index {
-            idx.for_each_cached_file(&mut |cached| {
-                for m in &cached.analysis.pack.macro_defs {
-                    defines.add(&m.name, cached.analysis.pack.cond_arms.trail(m.arm));
-                }
-            });
-        }
-        crate::build::cpp_reparse::unit_config(defines, analysis.pack.toolchain.as_ref())
-    };
-    let Some((idx, memo)) = module_index.and_then(|i| i.config_memo().map(|m| (i, m))) else {
-        return std::sync::Arc::new(build());
-    };
-    let mut h = std::collections::hash_map::DefaultHasher::new();
+    table: &super::define_table::DefineTable,
+    asked: &std::collections::HashSet<String>,
+) -> crate::build::cpp_macro_model::KnownConfig {
+    let mut own: std::collections::HashMap<&str, Vec<&[crate::model::file_analysis::CondTerm]>> =
+        std::collections::HashMap::new();
     for m in &analysis.pack.macro_defs {
-        m.name.hash(&mut h);
-        analysis.pack.cond_arms.trail(m.arm).hash(&mut h);
+        own.entry(m.name.as_str()).or_default().push(analysis.pack.cond_arms.trail(m.arm));
     }
-    memo.get_or_build(idx.resolution_epoch(), (analysis.pack.toolchain.clone(), h.finish()), build)
+    crate::build::cpp_reparse::reach_config(
+        asked,
+        &mut |name, f| {
+            for trail in own.get(name).into_iter().flatten() {
+                f(trail);
+            }
+            table.sites_of(name, f);
+        },
+        analysis.pack.toolchain.as_ref(),
+    )
 }
 
-/// Reachability of declarations for one asker, its config built on the
-/// first candidate an arm encloses: a language with no arms never builds it.
+/// Run `f` on the index's `#define` table, or on a fresh one when there is
+/// no index or it lends none.
+fn with_define_table<R>(
+    module_index: Option<&dyn CrossFileLookup>,
+    f: impl FnOnce(&mut super::define_table::DefineTable) -> R,
+) -> R {
+    match module_index.and_then(|i| i.define_table()) {
+        Some(slot) => slot.with(f),
+        None => f(&mut Default::default()),
+    }
+}
+
+/// Reachability of declarations for one asker. Its config covers every
+/// name the trails asked so far read, and grows when one reads a new name;
+/// a language with no arms never builds it.
 pub(super) struct ArmRanker<'a> {
     analysis: &'a FileAnalysis,
     module_index: Option<&'a dyn CrossFileLookup>,
-    cfg: std::cell::OnceCell<std::sync::Arc<crate::build::cpp_macro_model::KnownConfig>>,
+    cfg: std::cell::RefCell<(std::collections::HashSet<String>, Option<crate::build::cpp_macro_model::KnownConfig>)>,
 }
 
 impl<'a> ArmRanker<'a> {
@@ -245,8 +251,20 @@ impl<'a> ArmRanker<'a> {
         if trail.is_empty() {
             return crate::build::cpp_macro_model::Reachability::Active;
         }
-        let cfg = self.cfg.get_or_init(|| ranking_config(self.analysis, self.module_index));
-        crate::build::cpp_macro_model::classify(trail, cfg)
+        let mut reads = std::collections::HashSet::new();
+        crate::build::cpp_macro_model::guard_names(trail, &mut reads);
+        let mut held = self.cfg.borrow_mut();
+        let (asked, cfg) = &mut *held;
+        if cfg.is_none() || !reads.is_subset(asked) {
+            asked.extend(reads);
+            *cfg = Some(with_define_table(self.module_index, |table| {
+                if let Some(idx) = self.module_index {
+                    table.ensure_synced(idx);
+                }
+                ranking_config(self.analysis, table, asked)
+            }));
+        }
+        crate::build::cpp_macro_model::classify(trail, cfg.as_ref().expect("built above"))
     }
 }
 
@@ -270,8 +288,6 @@ pub(crate) fn ranked_macro_variants(
 
     // Every def site of `word` — config variants live in different headers
     // (win32.h vs perl.h); we keep them ALL, never the last-writer only.
-    // Enumerating the cache directly is robust to a cold reverse index —
-    // `modules_with_symbol` can be empty before it warms.
     let mut sites: Vec<(MacroDef, FileKey, Vec<CondTerm>)> = Vec::new();
     let mut seen: HashSet<(PathBuf, usize, usize)> = HashSet::new();
     let mut push = |m: &MacroDef, k: &FileKey, arms: &CondArms, sites: &mut Vec<(MacroDef, FileKey, Vec<CondTerm>)>| {
@@ -283,19 +299,39 @@ pub(crate) fn ranked_macro_variants(
     for m in analysis.pack.macro_defs.iter().filter(|m| m.name == word) {
         push(m, origin_key, &analysis.pack.cond_arms, &mut sites);
     }
-    // Per-FILE sweep: the name-keyed cache view both repeats files and hides
-    // a file that lost every name tie.
-    module_index.for_each_cached_file(&mut |cached| {
-        let file_key = FileKey::Path(cached.path.clone());
-        for m in cached.analysis.pack.macro_defs.iter().filter(|m| m.name == word) {
-            push(m, &file_key, &cached.analysis.pack.cond_arms, &mut sites);
+    let cfg = with_define_table(Some(module_index), |table| {
+        // The table names `word`'s files while it is current; behind the
+        // index, the per-FILE walk that brings it current gathers them —
+        // the name-keyed cache view both repeats files and hides a file
+        // that lost every name tie, and the walk is robust to a cold
+        // reverse index.
+        let held = table.is_current(module_index).then(|| table.defs_named(word)).flatten();
+        match held {
+            Some(defs) => {
+                for (cached, i) in defs {
+                    let file_key = FileKey::Path(cached.path.clone());
+                    push(&cached.analysis.pack.macro_defs[i], &file_key, &cached.analysis.pack.cond_arms, &mut sites);
+                }
+            }
+            None => table.sync(module_index, &mut |cached| {
+                let file_key = FileKey::Path(cached.path.clone());
+                for m in cached.analysis.pack.macro_defs.iter().filter(|m| m.name == word) {
+                    push(m, &file_key, &cached.analysis.pack.cond_arms, &mut sites);
+                }
+            }),
         }
+        if sites.is_empty() {
+            return None;
+        }
+        let mut asked = HashSet::new();
+        for (_, _, trail) in &sites {
+            crate::build::cpp_macro_model::guard_names(trail, &mut asked);
+        }
+        Some(ranking_config(analysis, table, &asked))
     });
-
-    if sites.is_empty() {
+    let Some(cfg) = cfg else {
         return Vec::new();
-    }
-    let cfg = ranking_config(analysis, Some(module_index));
+    };
 
     // Rank, active-first. Never prune — a lower-ranked (e.g. win32) def stays,
     // labeled. The secondary (path, line, col) key is a TOTAL order so the

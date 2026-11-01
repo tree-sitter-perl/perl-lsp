@@ -5,6 +5,25 @@ use super::*;
 
 // ---- Cross-file lookup capability ----
 
+/// One value the index holds for a query tier and lends it under a lock —
+/// a table the tier keeps in step with the index (`resolve::DefineTable`).
+/// The value's type is the query tier's, so the slot holds it erased.
+#[derive(Default)]
+pub struct DerivedSlot {
+    slot: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>>,
+}
+
+impl DerivedSlot {
+    /// Run `f` on the held `T`, made with `T::default()` when absent.
+    pub fn with<T: Default + Send + 'static, R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if !slot.as_ref().is_some_and(|v| v.is::<T>()) {
+            *slot = Some(Box::new(T::default()));
+        }
+        f(slot.as_mut().and_then(|v| v.downcast_mut::<T>()).expect("the slot holds a T"))
+    }
+}
+
 /// A module in the cache — its filesystem path plus the full FileAnalysis of
 /// its source. Shared by reference-count so async handlers don't deep-copy.
 #[derive(Debug)]
@@ -431,10 +450,10 @@ pub trait CrossFileLookup {
         0
     }
 
-    /// The index's slot for per-asker reachability configs, valid for one
-    /// `resolution_epoch`. `None` (the default): the caller rebuilds per
-    /// query, which is slower and never stale.
-    fn config_memo(&self) -> Option<&crate::model::toolchain::ConfigMemo> {
+    /// The index's slot for its `#define` table (`resolve::DefineTable`),
+    /// kept in step with the index across epochs. `None` (the default): the
+    /// caller builds a table per query, which is slower and never stale.
+    fn define_table(&self) -> Option<&DerivedSlot> {
         None
     }
 
@@ -1281,8 +1300,8 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
     }
-    fn config_memo(&self) -> Option<&crate::model::toolchain::ConfigMemo> {
-        self.inner.config_memo()
+    fn define_table(&self) -> Option<&DerivedSlot> {
+        self.inner.define_table()
     }
     fn is_dependency_path(&self, path: &std::path::Path) -> bool {
         self.inner.is_dependency_path(path)

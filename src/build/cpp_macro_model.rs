@@ -93,6 +93,49 @@ impl KnownConfig {
         cfg
     }
 
+    /// `from_defines` over every site `sites_of` holds, built only for the
+    /// names `asked` reaches: each asked name, then every name a reached
+    /// knob's `#define` trails read. A knob settles on exactly those names,
+    /// pass for pass, so each reached name's verdict — ON, a knob, or
+    /// settled and why — is the whole-universe config's; a name outside the
+    /// reach must not be asked. `sites_of(name, f)` calls `f` once per
+    /// `#define` of `name` with its trail (empty = unconditional).
+    pub fn over_reach<S: Into<String>>(
+        asked: &HashSet<String>,
+        sites_of: &mut dyn FnMut(&str, &mut dyn FnMut(&[CondTerm])),
+        predefined: impl IntoIterator<Item = S>,
+    ) -> Self {
+        let predefined: HashSet<String> = predefined.into_iter().map(Into::into).collect();
+        let mut sites = DefineSites::default();
+        let mut reached: HashSet<String> = HashSet::new();
+        let mut stack: Vec<String> = asked.iter().cloned().collect();
+        while let Some(name) = stack.pop() {
+            if predefined.contains(&name) || !reached.insert(name.clone()) {
+                continue;
+            }
+            let mut unconditional = false;
+            let mut trails: Vec<Vec<CondTerm>> = Vec::new();
+            sites_of(&name, &mut |trail| match trail.is_empty() {
+                true => unconditional = true,
+                false => trails.push(trail.to_vec()),
+            });
+            if unconditional {
+                sites.unconditional.insert(name);
+                continue;
+            }
+            if trails.is_empty() {
+                continue;
+            }
+            let mut reads = HashSet::new();
+            for trail in &trails {
+                guard_names(trail, &mut reads);
+            }
+            stack.extend(reads.into_iter().filter(|n| !reached.contains(n)));
+            sites.conditional.insert(name, trails);
+        }
+        Self::from_defines(sites, predefined)
+    }
+
     /// The fixed point: drop every knob whose `#define`s are all provably
     /// unreachable under the config so far. Only ever shrinks the universe,
     /// so each pass can only turn Unknown into False, and it terminates.
@@ -292,6 +335,16 @@ fn term_cond(t: &CondTerm) -> Cond {
         CondTest::Expr(text) => parse_cond(text),
     };
     if t.negated { Cond::Not(Box::new(c)) } else { c }
+}
+
+/// Every macro name `trail`'s verdict reads — the names a config must
+/// answer for to classify it (`KnownConfig::over_reach`).
+pub fn guard_names(trail: &[CondTerm], out: &mut HashSet<String>) {
+    let mut atoms = Vec::new();
+    for t in trail {
+        term_cond(t).atoms(true, &mut atoms);
+    }
+    out.extend(atoms.into_iter().map(|(name, _)| name));
 }
 
 fn conjunction(conds: &[Cond], cfg: &Asked) -> Tri {

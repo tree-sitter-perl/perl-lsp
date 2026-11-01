@@ -49,6 +49,7 @@ mod hierarchy;
 mod imports;
 mod refs;
 mod collect;
+mod define_table;
 pub use target::*;
 pub use identity::*;
 pub use hierarchy::*;
