@@ -29,24 +29,15 @@ pub mod rhai_host;
 /// the on-disk plugin set unchanged — every workspace without a repo-local
 /// `.perl-lsp/`, i.e. almost all of them — the early warm IS the registry
 /// and the first `didOpen` build pays nothing. A root that does change the
-/// set rebuilds here, exactly as expensive as the old lazy path. Racing
-/// callers block on the mutex while one builds, same as the old `OnceLock`.
+/// set rebuilds here, exactly as expensive as the old lazy path.
 pub fn default_plugin_registry() -> std::sync::Arc<PluginRegistry> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    type Cell = Mutex<Option<(Vec<std::path::PathBuf>, Arc<PluginRegistry>)>>;
-    static REG: OnceLock<Cell> = OnceLock::new();
-    let key = rhai_host::plugin_source_paths();
-    let mut cell = REG
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some((cached_key, reg)) = cell.as_ref() {
-        if *cached_key == key {
-            return reg.clone();
-        }
-    }
+    static REG: KeyedCell<Vec<std::path::PathBuf>, PluginRegistry> = KeyedCell::new();
+    REG.get_or_build(rhai_host::plugin_source_paths(), build_default_registry, warm_registry_queries)
+}
+
+fn build_default_registry() -> PluginRegistry {
     let engine =
-        crate::util::timings::phase("registry::engine", || Arc::new(rhai_host::make_engine()));
+        crate::util::timings::phase("registry::engine", || std::sync::Arc::new(rhai_host::make_engine()));
     let mut reg = PluginRegistry::new();
     crate::util::timings::phase("registry::rhai_compile", || {
         for p in rhai_host::load_bundled(engine.clone()) {
@@ -58,11 +49,14 @@ pub fn default_plugin_registry() -> std::sync::Arc<PluginRegistry> {
             }
         }
     });
-    // Compile every pattern query now, once, while the cell is held —
-    // before the parallel workspace index charges `Query::new` to per-file
-    // build. See `pattern_dispatch::warm_pattern_queries`. The flow query
-    // is independent of the pattern set, so it compiles alongside rather
-    // than after.
+    reg
+}
+
+/// Compile every pattern query now, once — before the parallel workspace
+/// index charges `Query::new` to per-file build. See
+/// `pattern_dispatch::warm_pattern_queries`. The flow query is independent
+/// of the pattern set, so it compiles alongside rather than after.
+fn warm_registry_queries(reg: &PluginRegistry) {
     crate::util::timings::phase("registry::queries", || {
         rayon::join(
             || {
@@ -73,9 +67,40 @@ pub fn default_plugin_registry() -> std::sync::Arc<PluginRegistry> {
             crate::build::builder::warm_flow_query,
         )
     });
-    let reg = Arc::new(reg);
-    *cell = Some((key, reg.clone()));
-    reg
+}
+
+/// A process-wide value keyed by what it was built from, rebuilt when the
+/// key moves. Its lock covers only `build`, which must stay off the rayon
+/// pool; `warm` runs on the pool AFTER the value is installed, with no lock
+/// held. A worker waiting inside a pool join steals other jobs, and a stolen
+/// job that asks this cell for its value would otherwise block on the lock
+/// that same join holds, forever (a gold run hung 18 minutes on it).
+/// Racing callers wait only for the pool-free build; one that arrives
+/// before the warm finishes gets the installed value and compiles on demand.
+struct KeyedCell<K, V> {
+    slot: std::sync::Mutex<Option<(K, std::sync::Arc<V>)>>,
+}
+
+impl<K: PartialEq, V> KeyedCell<K, V> {
+    const fn new() -> Self {
+        Self { slot: std::sync::Mutex::new(None) }
+    }
+
+    fn get_or_build(&self, key: K, build: impl FnOnce() -> V, warm: impl FnOnce(&V)) -> std::sync::Arc<V> {
+        let built = {
+            let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((cached_key, value)) = slot.as_ref() {
+                if *cached_key == key {
+                    return value.clone();
+                }
+            }
+            let value = std::sync::Arc::new(build());
+            *slot = Some((key, value.clone()));
+            value
+        };
+        warm(&built);
+        built
+    }
 }
 
 // ---- Context snapshots passed to plugins ----
@@ -1763,6 +1788,35 @@ pub struct TriggerQuery<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// The registry's warm waits on the shared pool, and a pool job asks
+    /// the same cell for the registry (a resolver analysis stolen by a
+    /// worker waiting in that warm). On a one-thread pool the job can only
+    /// finish if the cell is free while the warm waits; holding the lock
+    /// across the warm deadlocks every time.
+    #[test]
+    fn a_warm_on_the_pool_never_holds_the_cell() {
+        use std::sync::mpsc;
+        static CELL: super::KeyedCell<u32, u32> = super::KeyedCell::new();
+        let pool = std::sync::Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let value = CELL.get_or_build(1, || 7, |_| {
+                let (job_tx, job_rx) = mpsc::channel();
+                pool.spawn(move || {
+                    let _ = job_tx.send(*CELL.get_or_build(1, || 0, |_| {}));
+                });
+                pool.install(|| ());
+                assert_eq!(job_rx.recv().ok(), Some(7), "the pool job reads the installed value");
+            });
+            let _ = tx.send(*value);
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok(7),
+            "the cell's lock was held across pool work"
+        );
+    }
+
     use super::*;
     use tree_sitter::Point;
 
