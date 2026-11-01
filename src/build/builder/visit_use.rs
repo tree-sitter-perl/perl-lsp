@@ -327,11 +327,12 @@ impl<'a> Builder<'a> {
         // either hop. Mojo::Base stays a structural arm — its OO-ness is
         // decided by `-base`/parent args, not a name match.
         if let Some(pkg) = self.current_package.as_ref().cloned() {
-            if let Some((mode, keywords)) =
-                self.framework_mode_modules.get(&module_name).cloned()
-            {
-                self.framework_modes.insert(pkg, mode);
-                self.framework_imports.extend(keywords);
+            if let Some(grant) = self.framework_mode_modules.get(&module_name).cloned() {
+                self.framework_modes.insert(pkg.clone(), grant.mode);
+                self.framework_imports.extend(grant.imports);
+                if let Some(base) = grant.base {
+                    self.framework_bases.insert(pkg, base);
+                }
             } else if module_name == "Mojo::Base" {
                 // OO-ness is decided by `-base` or a parent-class arg, NOT by
                 // `-strict` — `-base` implies strict, and `use Mojo::Base
@@ -1145,6 +1146,88 @@ impl<'a> Builder<'a> {
         rhs
     }
 
+    /// The package whose `@ISA` the array `var` (spelled at `at`) is, or
+    /// `None` for any other array: `@ISA` / `our @ISA` in the package in
+    /// force, `@Pkg::ISA` in `Pkg`.
+    fn isa_package(&self, var: &str, at: Node<'a>) -> Option<String> {
+        match self.binding_key_here(var, at.start_position()) {
+            super::consts::BindingKey::Package(pkg, base) if crate::model::conventions::is_isa_var(&base) => Some(pkg),
+            _ => None,
+        }
+    }
+
+    /// Every write to a package's `@ISA` — assignment, `push`, `unshift`,
+    /// `splice` — lands here, so each spelling extends the parents the same
+    /// way. `target` is the array written (spelled `var`), `values` the
+    /// list elements the write supplies. A value that does not fold to a
+    /// class name (`push @ISA, $module`) marks the package's ancestry
+    /// dynamic, so inheritance-dependent checks stay silent instead of
+    /// trusting a partial list.
+    pub(super) fn record_isa_write(&mut self, var: &str, target: Node<'a>, edit: IsaEdit, values: &[Node<'a>]) {
+        let Some(pkg) = self.isa_package(var, target) else { return };
+        let current = self.package_parents.get(&pkg).cloned().unwrap_or_default();
+        let mut residue = false;
+        let mut named: Vec<String> = Vec::new();
+        for &value in values {
+            let text = value.utf8_text(self.source).unwrap_or_default();
+            // `@ISA = (@ISA, 'X')` reads the parents in hand, wherever they
+            // came from (`use parent`, an earlier push), not just a folded
+            // literal assignment.
+            if value.kind() == "array" && self.isa_package(text, value).as_deref() == Some(pkg.as_str()) {
+                named.extend(current.iter().cloned());
+                continue;
+            }
+            if value.kind() == "scalar" {
+                match self.resolve_constant_strings(text, value) {
+                    Some(v) => named.extend(v),
+                    None => residue = true,
+                }
+                continue;
+            }
+            // A call or any other computed element: its arguments are not
+            // parents.
+            let foldable = crate::cst::literal_shape(value).is_some()
+                || matches!(value.kind(), "bareword" | "autoquoted_bareword" | "array" | "map_grep_expression");
+            if !foldable {
+                residue = true;
+                continue;
+            }
+            let (v, r) = crate::cst::string_list_with_residue(value, self.source, &mut |n| {
+                let Ok(text) = n.utf8_text(self.source) else { return vec![] };
+                let Some(values) = self.resolve_constant_strings(text, n) else { return vec![] };
+                let span = node_to_span(n);
+                values.into_iter().map(|v| (v, span)).collect()
+            });
+            residue |= r;
+            named.extend(v.into_iter().map(|(s, _)| s));
+        }
+        let mut parents = match edit {
+            IsaEdit::Assign => named,
+            IsaEdit::Append => current.iter().cloned().chain(named).collect(),
+            IsaEdit::Prepend => named.into_iter().chain(current.iter().cloned()).collect(),
+            IsaEdit::Splice { offset, length } => match splice_range(current.len(), offset, length) {
+                Some(range) => {
+                    let mut out = current.clone();
+                    out.splice(range, named);
+                    out
+                }
+                // An offset we can't read removes we-don't-know-what.
+                None => {
+                    residue = true;
+                    current.iter().cloned().chain(named).collect()
+                }
+            },
+        };
+        let mut seen = std::collections::HashSet::new();
+        parents.retain(|p| seen.insert(p.clone()));
+        if residue {
+            self.dynamic_parent_packages.insert(pkg.clone());
+        }
+        if parents != current && !(parents.is_empty() && !self.package_parents.contains_key(&pkg)) {
+            self.package_parents.replace(pkg, parents);
+        }
+    }
+
     pub(super) fn visit_assignment(&mut self, node: Node<'a>) {
         let mut const_writes: Vec<(String, ConstFold)> = Vec::new();
         // Check for @ISA assignment: `our @ISA = (...)`
@@ -1153,19 +1236,10 @@ impl<'a> Builder<'a> {
             // `state`/`local`); `None` for an element, glob or list target.
             let lhs_var = self.get_var_text_from_lhs(left).unwrap_or_default();
             let lhs_text = lhs_var.as_str();
-            if lhs_text == "@ISA" {
-                if let Some(ref pkg) = self.current_package {
-                    // The right-hand side only: the left `@ISA` folds through
-                    // the constant table to an earlier package's parents.
-                    let parents = self
-                        .assignment_rhs(node)
-                        .map(|rhs| self.extract_string_names(rhs))
-                        .unwrap_or_default();
-                    if !parents.is_empty() {
-                        // @ISA = replaces (not appends)
-                        self.package_parents.replace(pkg.clone(), parents);
-                    }
-                }
+            if let Some(rhs) = self.assignment_rhs(node) {
+                // The right-hand side only: the left `@ISA` folds through
+                // the constant table to an earlier package's parents.
+                self.record_isa_write(lhs_text, left, IsaEdit::Assign, &crate::cst::list_elements_or_self(rhs));
             }
 
             // Export package-variable assignment — `our @EXPORT`, the qualified
@@ -1788,4 +1862,37 @@ fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>
 enum ConstFold {
     Literal(String, Span),
     Values(Option<Vec<String>>),
+}
+
+/// How a statement rewrites an `@ISA` (`Builder::record_isa_write`).
+#[derive(Clone, Copy)]
+pub(super) enum IsaEdit {
+    Assign,
+    Append,
+    Prepend,
+    /// `splice @ISA, OFFSET, LENGTH, LIST`; `None` is an operand that is
+    /// present but not a literal integer.
+    Splice { offset: Option<Option<i64>>, length: Option<Option<i64>> },
+}
+
+/// The elements `splice` removes from a list of `len`, by Perl's rules for
+/// negative and out-of-range operands. An absent offset is 0 and an absent
+/// length runs to the end; `None` when an operand is not a literal.
+fn splice_range(len: usize, offset: Option<Option<i64>>, length: Option<Option<i64>>) -> Option<std::ops::Range<usize>> {
+    let n = len as i64;
+    let off = match offset {
+        None => 0,
+        Some(o) => {
+            let o = o?;
+            if o < 0 { (n + o).max(0) } else { o.min(n) }
+        }
+    };
+    let take = match length {
+        None => n - off,
+        Some(l) => {
+            let l = l?;
+            if l < 0 { (n - off + l).max(0) } else { l.min(n - off) }
+        }
+    };
+    Some(off as usize..(off + take) as usize)
 }

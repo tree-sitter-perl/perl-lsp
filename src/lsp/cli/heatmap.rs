@@ -238,7 +238,8 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     let (ws, idx) = cli_full_startup(root);
     let scope = override_scope_from_env();
 
-    let entries = registered_whole(&idx);
+    let sweep = crate::index::sweep::CorpusSweep::open(&idx);
+    let entries = sweep.registered_whole();
 
 
     let normalize = |locs: &[resolve::RefLocation]| -> Vec<String> {
@@ -336,23 +337,6 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     if mismatched > 0 {
         super::exit_with(1, "exit");
     }
-}
-
-/// Every registered project file, refs-present (index copies are
-/// refs-evicted; fan-out scans + set minting read refs), path-sorted for a
-/// deterministic report. Batch-CLI-sized cost, not a query path.
-fn registered_whole(
-    idx: &crate::index::module_index::ModuleIndex,
-) -> Vec<(CanonicalPath, std::sync::Arc<file_analysis::FileAnalysis>)> {
-    let mut entries = Vec::new();
-    idx.for_each_registered_file(&mut |cached| {
-        entries.push((
-            cached.path.clone(),
-            file_analysis::CrossFileLookup::whole_present(idx, cached),
-        ));
-    });
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
 }
 
 /// The relational pre-prune a tier hands its items: the DISTINCT ref-name
@@ -463,8 +447,11 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
 
     let (ws, idx) = cli_full_startup(root);
 
-    // Stable file order so output is deterministic across runs.
-    let entries = registered_whole(&idx);
+    let sweep = crate::index::sweep::CorpusSweep::open(&idx);
+    if let Some(cap) = sweep.cache_cap() {
+        eprintln!("Rehydration cache: {} MiB for the sweep", cap / (1024 * 1024));
+    }
+    let entries = sweep.registered_whole();
 
     // Workspace-level soundness gate. Any dynamic method dispatch makes the
     // static call graph an under-approximation of method reachability, so a
@@ -537,19 +524,6 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     } else {
         None
     };
-
-    // One walk per declaration over a frozen index: memoize the relational
-    // retrieval for the sweep (same-named declarations share their
-    // candidate set; the shredded-path set is fetched once, not per walk),
-    // and size the rehydration LRU to the corpus — the sweep's working set
-    // by construction (`cache_policy::sweep_bag_cache_cap`).
-    let _retrieval = resolve::RetrievalMemoGuard::open();
-    // Every walk's ancestry prefilter re-asks the same row probes, each under
-    // SQLite's process-global mutexes — memoized for the sweep (#195).
-    let _probes = crate::index::module_index::SweepProbeGuard::open();
-    if let Some(cap) = idx.size_bag_cache_for_sweep() {
-        eprintln!("Rehydration cache: {} MiB for the sweep", cap / (1024 * 1024));
-    }
 
     // One work item per eligible declaration, through `heatmap_symbol_row`
     // — the one place fan-in/fan-out/dead are computed, so Perl and pack
