@@ -245,7 +245,7 @@ fn test_helper_not_loaded_exempts_installed_plugins() {
     idx.insert_cache(
         "My::Plugin::WasLoaded",
         Some(std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-            std::path::PathBuf::from("/inc/My/Plugin/WasLoaded.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/inc/My/Plugin/WasLoaded.pm")),
             std::sync::Arc::new(fa),
         ))),
     );
@@ -265,7 +265,7 @@ mod pack_macro_goto {
             .analyze(src);
         let store = crate::index::open_docs::OpenDocs::new();
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
-        let key = crate::index::open_docs::FileKey::Path(std::path::PathBuf::from("/fake/macro.c"));
+        let key = crate::index::open_docs::FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/macro.c")));
         crate::index::resolve::resolve(
             &store,
             &fa,

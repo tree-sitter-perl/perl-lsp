@@ -77,7 +77,7 @@ impl QueryCx {
         crate::index::resolve::resolve(
             &self.open_docs,
             analysis,
-            FileKey::Url(uri.clone()),
+            self.open_docs.key_of(uri),
             point,
             Some(lookup),
             scope,
@@ -108,10 +108,10 @@ impl QueryCx {
         uri: &Url,
     ) -> Option<(Arc<crate::model::file_analysis::FileAnalysis>, FileKey)> {
         if let Some(doc) = self.open_docs.get_open(uri) {
-            return Some((Arc::clone(&doc.analysis), FileKey::Url(uri.clone())));
+            return Some((Arc::clone(&doc.analysis), FileKey::Url(uri.clone(), doc.canonical_path.clone())));
         }
         let path = uri.to_file_path().ok()?;
-        let key = FileKey::Path(path);
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path));
         let analysis =
             crate::index::resolve::analysis_for_key(&self.open_docs, Some(&*self.module_index), &key)?;
         Some((analysis, key))

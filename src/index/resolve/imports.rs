@@ -306,10 +306,10 @@ pub(crate) fn resolve_imported_function_classified<'b>(
     analysis: &'b FileAnalysis,
     func_name: &str,
     module_index: &dyn CrossFileLookup,
-) -> Option<(&'b crate::model::file_analysis::Import, Option<PathBuf>, String, ImportResolution)> {
+) -> Option<(&'b crate::model::file_analysis::Import, Option<CanonicalPath>, String, ImportResolution)> {
     let mut best: Option<(
         &'b crate::model::file_analysis::Import,
-        Option<PathBuf>,
+        Option<CanonicalPath>,
         String,
         ImportResolution,
     )> = None;
@@ -318,7 +318,7 @@ pub(crate) fn resolve_imported_function_classified<'b>(
         // a split exporter's surface (and the sub itself) may live in a
         // losing candidate. `Brought` is the strongest verdict per import.
         let cands = module_index.visible_def_candidates(&import.module_name);
-        let mut hit: Option<(Option<PathBuf>, String, ImportResolution)> = None;
+        let mut hit: Option<(Option<CanonicalPath>, String, ImportResolution)> = None;
         if cands.is_empty() {
             if let Some((res, remote)) = classify_import(import, func_name, None, module_index) {
                 hit = Some((None, remote, res));
@@ -358,7 +358,7 @@ pub(crate) fn resolve_imported_function<'b>(
     analysis: &'b FileAnalysis,
     func_name: &str,
     module_index: &dyn CrossFileLookup,
-) -> Option<(&'b crate::model::file_analysis::Import, PathBuf, String)> {
+) -> Option<(&'b crate::model::file_analysis::Import, CanonicalPath, String)> {
     // Goto-def needs a concrete module path to jump to.
     resolve_imported_function_classified(analysis, func_name, module_index)
         .and_then(|(import, path, remote, _)| path.map(|p| (import, p, remote)))
@@ -374,7 +374,7 @@ pub enum FunctionBinding<'a> {
     /// imports like `del` → `delete`).
     Imported {
         import: &'a crate::model::file_analysis::Import,
-        path: PathBuf,
+        path: CanonicalPath,
         remote: String,
     },
     /// Fully-qualified call with no import: the qualifier names the defining

@@ -425,8 +425,7 @@ impl DiagCtx {
             }
             doc.baseline_surface.clone()?
         };
-        let path = uri.to_file_path().ok()?;
-        let canon = std::fs::canonicalize(&path).unwrap_or(path);
+        let canon = self.open_docs.file_path_of(uri)?;
         Some(self.module_index.record_and_dirty_value(
             &canon,
             surface,
@@ -445,12 +444,9 @@ impl DiagCtx {
             return;
         }
         let mut to_refresh: Vec<Url> = Vec::new();
-        self.open_docs.for_each_open(|u, _doc| {
-            if let Ok(p) = u.to_file_path() {
-                let c = std::fs::canonicalize(&p).unwrap_or(p);
-                if dirty.contains(&c) {
-                    to_refresh.push(u.clone());
-                }
+        self.open_docs.for_each_open(|u, doc| {
+            if u.to_file_path().is_ok() && dirty.contains(doc.canonical_path.as_path()) {
+                to_refresh.push(u.clone());
             }
         });
         for u in to_refresh {

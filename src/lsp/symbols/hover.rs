@@ -121,7 +121,7 @@ fn render_candidate_hover(
     let mut found: Option<std::sync::Arc<crate::model::file_analysis::CachedModule>> = None;
     if let Some(midx) = module_index {
         midx.for_each_cached_file(&mut |cached| {
-            if found.is_none() && cached.path == path {
+            if found.is_none() && Some(&cached.path) == loc.key.canonical_path() {
                 found = Some(std::sync::Arc::clone(cached));
             }
         });

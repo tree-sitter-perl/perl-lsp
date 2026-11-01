@@ -44,25 +44,22 @@ pub fn analysis_for_key(
     module_index: Option<&dyn CrossFileLookup>,
     key: &FileKey,
 ) -> Option<Arc<FileAnalysis>> {
-    let path = match key {
-        FileKey::Url(u) => {
-            let mut hit = None;
-            files.for_each_open(|url, doc| {
-                if url == u {
-                    hit = Some(Arc::clone(&doc.analysis));
-                }
-            });
-            if hit.is_some() {
-                return hit;
+    if let FileKey::Url(u, _) = key {
+        let mut hit = None;
+        files.for_each_open(|url, doc| {
+            if url == u {
+                hit = Some(Arc::clone(&doc.analysis));
             }
-            u.to_file_path().ok()?
+        });
+        if hit.is_some() {
+            return hit;
         }
-        FileKey::Path(p) => p.clone(),
-    };
+    }
+    let path = key.canonical_path()?;
     // Index copies are symbols-evicted after persist; the enclosing-caller
     // lookup reads symbols, so rehydrate (`whole_present`) rather than answer
     // absence-as-answer.
-    module_index.and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)))
+    module_index.and_then(|idx| idx.cached_by_path(path).map(|cm| idx.whole_present(&cm)))
 }
 
 impl<'a> CandidateSet<'a> {

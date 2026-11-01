@@ -55,7 +55,7 @@ pub fn find_definition(
     let cs = crate::index::resolve::resolve(
         files,
         analysis,
-        crate::index::open_docs::FileKey::Url(uri.clone()),
+        files.key_of(uri),
         position_to_point(pos),
         Some(module_index),
         crate::index::resolve::OverrideScope::default(),
@@ -91,9 +91,9 @@ pub(super) fn config_variant_leaf_display(
     module_index: &dyn CrossFileLookup,
 ) -> Option<String> {
     // Hover reads only the winning variant's BODY, never its location, so the
-    // queried file's own key is immaterial — a placeholder keys its local
+    // queried file's own key is immaterial — the empty path keys its local
     // `macro_defs` without colliding with the real cross-file def paths.
-    let local = crate::index::open_docs::FileKey::Path(std::path::PathBuf::from("/__hover_local__"));
+    let local = crate::index::open_docs::FileKey::Path(Default::default());
     let ranked = crate::index::resolve::ranked_macro_variants(analysis, spelling, &local, module_index);
     // A single-variant (or non-) macro flows to its leaf already; only the
     // config-variant JOIN abstraction needs the display-side variant pick.
@@ -162,7 +162,7 @@ pub fn pack_include_definition(
 pub fn pack_include_references(
     analysis: &FileAnalysis,
     point: Point,
-    self_path: Option<&std::path::Path>,
+    self_path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &dyn CrossFileLookup,
 ) -> Option<Vec<(std::path::PathBuf, crate::model::file_analysis::Span)>> {
     let raw = analysis
@@ -186,7 +186,7 @@ pub fn pack_include_references(
     collect(base, analysis);
     // Per-FILE sweep; skip the cursor file (fresh copy already collected).
     module_index.for_each_cached_file(&mut |cached| {
-        if cached.path == base {
+        if &cached.path == base {
             return;
         }
         collect(&cached.path, &cached.analysis);
@@ -203,7 +203,7 @@ pub fn pack_include_references(
 pub fn pack_include_references(
     _analysis: &FileAnalysis,
     _point: Point,
-    _self_path: Option<&std::path::Path>,
+    _self_path: Option<&crate::util::canonical_path::CanonicalPath>,
     _module_index: &dyn CrossFileLookup,
 ) -> Option<Vec<(std::path::PathBuf, crate::model::file_analysis::Span)>> {
     None

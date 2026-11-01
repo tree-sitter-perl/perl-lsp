@@ -7,7 +7,7 @@
 //! index copy (it is the fresher text); walks claim open paths first and
 //! skip the index entry for them.
 
-use std::path::PathBuf;
+use crate::util::canonical_path::CanonicalPath;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -35,8 +35,30 @@ pub enum FileRole {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum FileKey {
-    Path(PathBuf),
-    Url(Url),
+    Path(CanonicalPath),
+    /// A document addressed by URL, with the canonical path it names (empty
+    /// when it names no file). Build it with `OpenDocs::key_of`, so a Url
+    /// key and a Path key for one file compare by the same spelling.
+    Url(Url, CanonicalPath),
+}
+
+impl FileKey {
+    /// The canonical file this key names; `None` for a URL that names no
+    /// file.
+    pub fn canonical_path(&self) -> Option<&CanonicalPath> {
+        match self {
+            FileKey::Path(p) => Some(p),
+            FileKey::Url(_, p) => (!p.as_os_str().is_empty()).then_some(p),
+        }
+    }
+}
+
+/// A document URL's canonical spelling: the file it names. A URL that
+/// names no file (`untitled:`) gets the empty path, which no index fact is
+/// filed under — resolving its text would ask the filesystem about a
+/// relative path that means nothing.
+fn canonical_spelling(url: &Url) -> CanonicalPath {
+    url.to_file_path().map(CanonicalPath::resolve).unwrap_or_default()
 }
 
 /// The unified store.
@@ -85,7 +107,7 @@ impl OpenDocs {
                 return false;
             }
         }
-        let doc = if !driver.caps().hub_enrichment {
+        let mut doc = if !driver.caps().hub_enrichment {
             match Document::new_routed(text, driver, path.clone()) {
                 Some(d) => d,
                 None => return false,
@@ -96,14 +118,37 @@ impl OpenDocs {
                 None => return false,
             }
         };
+        doc.canonical_path = canonical_spelling(&url);
         self.open.insert(url, doc);
         true
     }
 
     /// Install an already-built Document — the CLI stages its query file
     /// this way, with the analysis it built and enriched itself.
-    pub fn insert_open(&self, url: Url, doc: Document) {
+    pub fn insert_open(&self, url: Url, mut doc: Document) {
+        doc.canonical_path = canonical_spelling(&url);
         self.open.insert(url, doc);
+    }
+
+    /// The canonical file path a URL names: an open document's stamp,
+    /// minted when it entered the store, else resolved here — a closed
+    /// file still names itself (an origin queried by URL need not be
+    /// open). `None` only when the URL names no file.
+    ///
+    /// Takes a shard read lock: the `for_each_open` deadlock rule applies.
+    /// The key a URL-addressed request resolves under.
+    ///
+    /// Takes a shard read lock: the `for_each_open` deadlock rule applies.
+    pub fn key_of(&self, url: &Url) -> FileKey {
+        FileKey::Url(url.clone(), self.file_path_of(url).unwrap_or_default())
+    }
+
+    pub fn file_path_of(&self, url: &Url) -> Option<CanonicalPath> {
+        let path = url.to_file_path().ok()?;
+        if let Some(stamp) = self.open.get(url).map(|doc| doc.canonical_path.clone()) {
+            return Some(stamp);
+        }
+        Some(CanonicalPath::resolve(path))
     }
 
     /// Close an open file. Its index copy (the on-disk text) answers from

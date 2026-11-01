@@ -4,6 +4,7 @@
 //! walk, so this directory cannot become a laundering hole between layers.
 
 pub mod ghost_stats;
+pub mod canonical_path;
 pub mod json_sink;
 pub mod qual_dump;
 pub mod text;

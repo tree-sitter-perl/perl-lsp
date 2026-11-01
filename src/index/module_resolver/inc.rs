@@ -2,6 +2,7 @@
 //! in-process parse with its parent-fallback memo.
 
 use super::*;
+use crate::util::canonical_path::CanonicalPath;
 
 // ---- Module parsing ----
 
@@ -29,9 +30,9 @@ pub(super) fn parse_module(
 /// files (XS/PP twins, a project `lib/` shadowing an installed copy,
 /// `t/lib` vs `lib` per entrypoint); stopping at the first hit is what made
 /// the tier answer from whichever root happened to win.
-pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<PathBuf> {
+pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<CanonicalPath> {
     let rel_path = module_name.replace("::", "/") + ".pm";
-    let mut out: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<CanonicalPath> = Vec::new();
     for inc in inc_paths {
         let full = inc.join(&rel_path);
         if full.is_file() {
@@ -41,7 +42,7 @@ pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<Pat
             // per-asker search-path rank prefix-match a candidate against
             // canonical roots with no query-time `canonicalize` — that is
             // filesystem I/O, and it would land on a request path.
-            let canon = std::fs::canonicalize(&full).unwrap_or(full);
+            let canon = CanonicalPath::resolve(full);
             if !out.contains(&canon) {
                 out.push(canon);
             }
@@ -56,7 +57,7 @@ pub fn resolve_module_paths(inc_paths: &[PathBuf], module_name: &str) -> Vec<Pat
 /// which only the test-side `ModuleIndex::resolve_module` still asks for.
 #[cfg(test)]
 pub fn resolve_module_path(inc_paths: &[PathBuf], module_name: &str) -> Option<PathBuf> {
-    resolve_module_paths(inc_paths, module_name).into_iter().next()
+    resolve_module_paths(inc_paths, module_name).into_iter().next().map(PathBuf::from)
 }
 
 #[allow(dead_code)]
@@ -132,7 +133,7 @@ fn resolve_and_parse_inner(
 fn parse_one_provider(
     inc_paths: &[PathBuf],
     module_name: &str,
-    path: PathBuf,
+    path: CanonicalPath,
     parser: &mut Parser,
     visiting: &mut std::collections::HashSet<String>,
     memo: &mut ParseMemo,

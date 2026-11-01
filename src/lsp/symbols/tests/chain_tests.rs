@@ -13,7 +13,7 @@ use super::*;
 fn cached_under(name: &str, source: &str) -> std::sync::Arc<crate::index::module_index::CachedModule> {
     let analysis = parse_analysis(source);
     std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-        std::path::PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
+        crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/")))),
         std::sync::Arc::new(analysis),
     ))
 }
