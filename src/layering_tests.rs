@@ -1628,7 +1628,6 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
         ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
-        ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
         ("cst.rs", 27, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
         ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),

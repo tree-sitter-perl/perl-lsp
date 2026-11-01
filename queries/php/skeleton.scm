@@ -186,7 +186,8 @@
  (#eq? @receiver.enclosing "$this"))
 
 ; Parentheses hold the value they wrap.
-(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
 
 ; ---- writes ----
 ; A variable belongs to its function: the first write declares it, and
