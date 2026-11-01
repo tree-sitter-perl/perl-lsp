@@ -158,6 +158,12 @@ pub fn split_qualified_var<'a>(name: &'a str, names: &'a NameSpellings) -> Optio
     pkg.map(|p| (names.qualifier_package(p), format!("{sigil}{base}")))
 }
 
+/// Whether a sigil-led basename (`split_qualified_var`'s, or a bare
+/// spelling) is `@ISA`, the array that holds a package's parents.
+pub fn is_isa_var(base: &str) -> bool {
+    base == "@ISA"
+}
+
 /// The qualified spelling of a variable: `('$', "Foo", "x")` → `$Foo::x`.
 /// The inverse of `split_qualified_var`.
 pub fn qualify_var(sigil: char, package: &str, base: &str, names: &NameSpellings) -> String {
