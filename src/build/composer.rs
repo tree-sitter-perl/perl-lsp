@@ -190,6 +190,7 @@ pub struct ComposerLocator {
     /// The language the map serves: its namespace separator spells the
     /// identities, and the generated classmap is parsed in it.
     driver: &'static dyn LanguageDriver,
+    names: crate::model::file_analysis::NameSpellings,
     sep: String,
     psr_4: Vec<(String, Vec<PathBuf>)>,
     psr_0: Vec<(String, Vec<PathBuf>)>,
@@ -206,10 +207,12 @@ pub struct ComposerLocator {
 
 impl ComposerLocator {
     fn new(root: &Path, driver: &'static dyn LanguageDriver, config: Option<ResolvedConfig>) -> Self {
-        let sep = driver.lang_pack().and_then(|p| p.names.use_map_sep().map(str::to_string)).unwrap_or_default();
+        let names = driver.lang_pack().map(|p| p.names).unwrap_or_default();
+        let sep = names.use_map_sep().map(str::to_string).unwrap_or_default();
         let vendor_dir = config.as_ref().map(|c| c.vendor_dir.clone()).unwrap_or_else(|| root.join("vendor"));
         let mut loc = ComposerLocator {
             driver,
+            names,
             sep,
             psr_4: Vec::new(),
             psr_0: Vec::new(),
@@ -240,11 +243,9 @@ impl ComposerLocator {
     /// PSR-0 keeps the whole identity in the path, and a `_` in the class
     /// leaf (not the namespace) is a directory too.
     fn psr_0(&self, identity: &str, out: &mut Vec<PathBuf>) {
-        let (ns, leaf) = match identity.rfind(self.sep.as_str()) {
-            Some(i) => (&identity[..i + self.sep.len()], &identity[i + self.sep.len()..]),
-            None => ("", identity),
-        };
-        let rel = format!("{}{}.php", ns.replace(self.sep.as_str(), "/"), leaf.replace('_', "/"));
+        let (ns, leaf) = crate::model::conventions::split_qualified(identity, &self.names);
+        let dir = ns.map(|ns| format!("{}/", ns.replace(self.sep.as_str(), "/"))).unwrap_or_default();
+        let rel = format!("{dir}{}.php", leaf.replace('_', "/"));
         for (prefix, dirs) in &self.psr_0 {
             if identity.starts_with(prefix.as_str()) {
                 out.extend(dirs.iter().map(|d| d.join(&rel)).filter(|p| p.is_file()));
