@@ -123,7 +123,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             let snap = core.map_snapshot();
             // A current landing in the store answers before anything is
             // parsed; only the names it does not hold go to the parse.
-            let mut answered: Vec<(String, bool, Result<Landed, MapMoved>)> = Vec::new();
+            let mut answered: Vec<(String, bool, Result<Landed, crate::index::module_index::MapMoved>)> = Vec::new();
             if let Some(s) = &snap {
                 todo.retain(|(name, re)| {
                     if *re {
