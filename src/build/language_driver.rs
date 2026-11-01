@@ -376,7 +376,6 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
-        crate::model::conventions::register_lattice(self.id(), || (self.pack)().lattice);
         self.analyze_pipeline(source, path)
     }
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
