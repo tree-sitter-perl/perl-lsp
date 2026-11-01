@@ -697,7 +697,7 @@ pub fn references_mask_for(
     if !found_in_editable {
         found_in_editable = editable_copy_satisfies(
             module_index,
-            &retrieval_keys(target, &[]),
+            &retrieval_keys(target),
             &|fa: &FileAnalysis| fa.symbols().iter().any(|s| symbol_defines_target(s, target, fa)),
         );
     }
@@ -844,27 +844,12 @@ pub(super) fn collect_from_analysis(
     key: &FileKey,
     analysis: &FileAnalysis,
     target: &TargetRef,
-    aliases: &[DelegationAlias],
     module_index: Option<&dyn CrossFileLookup>,
     file: &CanonicalPath,
     memo: &WalkMemo,
     out: &mut Vec<RefLocation>,
 ) {
     use crate::model::file_analysis::HashKeyOwner;
-    let file_str = file.to_string_lossy();
-
-    // An alias applies in THIS file only if its `#define` is visible here
-    // (macro expansion requires inclusion). Files of another language have
-    // no pack closure, so they can never match an alias — the cross-language
-    // pollution gate.
-    let visible_aliases: Vec<&DelegationAlias> = aliases
-        .iter()
-        .filter(|a| {
-            a.def_path == *file_str
-                || analysis.pack.include_closure.contains(&a.def_path)
-        })
-        .collect();
-
     // Pack languages: name lookups during matching (invocant typing, the
     // typedef chase) must resolve against THIS file's include closure — the
     // same visibility goto-def uses at this file's cursors — or a scanned
@@ -965,22 +950,18 @@ pub(super) fn collect_from_analysis(
         TargetKind::Method { class } => Some(Some(class.clone())),
         _ => None,
     };
-    // Only the key buckets for the target and its visible aliases can hold
-    // a match; the union is walked in ref order so `out` keeps the vec's
-    // order (the final sort is by start point, and same-start refs — a
-    // chain's outer call and its receiver — rely on insertion order).
+    // Only the target key's bucket can hold a match — a use spelled through
+    // a delegating macro is bucketed under the delegate's key too. Walked in
+    // ref order so `out` keeps the vec's order (the final sort is by start
+    // point, and same-start refs — a chain's outer call and its receiver —
+    // rely on insertion order).
     let target_key = crate::model::file_analysis::name_match_key(&target.name, analysis.names());
-    let mut keyed: Vec<usize> = analysis.ref_indices_keyed(&target_key).to_vec();
-    for a in &visible_aliases {
-        let k = crate::model::file_analysis::name_match_key(&a.name, analysis.names());
-        if k != target_key {
-            keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
-        }
-    }
-    keyed.sort_unstable();
-    keyed.dedup();
+    let delegable = matches!(
+        target.kind,
+        TargetKind::Sub { .. } | TargetKind::Method { .. } | TargetKind::FileScopeValue
+    );
     let all_refs = analysis.refs();
-    for &ri in &keyed {
+    for &ri in analysis.ref_indices_keyed(&target_key) {
         let r = &all_refs[ri];
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
@@ -1005,19 +986,14 @@ pub(super) fn collect_from_analysis(
         // A use spelled through a delegating macro (`IncRef(x)` where
         // `#define IncRef(sv) Perl_Inc(sv)`, or the object-like alias
         // `#define op_prune_chain_head Perl_op_prune_chain_head`) IS a use of
-        // the target — the backward see-through. Call-shaped when the use was
-        // left unexpanded, a bare Variable read when the expansion erased it
-        // (the re-minted read carries the alias's name). Bypasses the package
-        // gates below (the delegation edge already pinned the identity) and
-        // is never rewritable (the token spells the MACRO's name).
+        // the target — the backward see-through, minted by the build with
+        // this file's own preprocessor view (`RefTable::delegations`).
+        // Bypasses the package gates below (the delegation edge already
+        // pinned the identity) and is never rewritable (the token spells the
+        // MACRO's name).
         let alias_matched = !name_matches
-            && matches!(
-                r.kind,
-                RefKind::FunctionCall { .. } | RefKind::Variable | RefKind::PackageRef
-            )
-            && visible_aliases
-                .iter()
-                .any(|a| a.name == r.unqualified_target_name(analysis.names()));
+            && delegable
+            && analysis.ref_delegates(ri).iter().any(|d| *d == target.name);
         if !name_matches && !alias_matched {
             continue;
         }

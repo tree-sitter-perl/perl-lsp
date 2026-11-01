@@ -177,7 +177,8 @@ The spike's axes live in CandidateSet construction:
   so EDITABLE rename and VISIBLE references mean the same thing for a pack
   workspace as for a Perl one.
 - **delegation / `Specializes` / domain edges** — consumers declare
-  traversal: references walks delegation aliases (never the domain
+  traversal: references reaches macro-spelled uses through the delegation
+  keys the build minted on them (never the domain
   bridge); `implementations()` walks `Specializes` families and the
   enum-def → field-slot domain bridge; goto-def sees through direct
   delegation on the top-ranked macro variant.

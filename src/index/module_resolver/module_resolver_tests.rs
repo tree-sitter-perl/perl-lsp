@@ -448,7 +448,9 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     // visibility rules, decided at CandidateSet construction so every
     // projection inherits it.
     use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
-    let base = std::env::temp_dir().join(format!("perl-lsp-asker-{}", std::process::id()));
+    // Fixed-width pid: the path is spelled into an analyzed source, and the
+    // equivalence dump compares that source's spans across two test runs.
+    let base = std::env::temp_dir().join(format!("perl-lsp-asker-{:010}", std::process::id()));
     let (applib, testlib) = (base.join("lib"), base.join("t").join("lib"));
     std::fs::create_dir_all(&applib).unwrap();
     std::fs::create_dir_all(&testlib).unwrap();

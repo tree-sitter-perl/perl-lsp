@@ -1681,6 +1681,44 @@ fn positional_reads_skip_grammar_extras() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// Upward and sideways steps go through the core syntax tree
+/// (`cst::SyntaxForest`, `docs/adr/core-syntax-tree.md`). tree-sitter's
+/// `Node::parent` and its sibling steps rescan from the root on every call
+/// — linear in each level's width, so a climb on a flat 750-statement file
+/// costs hundreds of steps per hop, and per-use climbs are what made
+/// Webmin's build slower with every feature. The raw sites left run once per
+/// request, read a `Path`, or walk a tree no build forest holds yet; each says
+/// which. Shrink-only.
+#[test]
+fn tree_steps_go_through_the_syntax_tree() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Cst, Layer::Build, Layer::Lsp])
+        .into_iter()
+        .filter(|(rel, _)| rel != "cst/syntax.rs")
+        .collect();
+    let seen = count_lines(&files, &|l| {
+        [".parent()", ".prev_sibling()", ".next_sibling()", ".prev_named_sibling()", ".next_named_sibling()", "child_with_descendant("]
+            .iter()
+            .any(|p| l.contains(p))
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/cpp_reparse/defs.rs", 2, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cpp_reparse/expand.rs", 1, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cpp_reparse/gather.rs", 2, "std::path::Path, not a tree"),
+        ("build/cpp_reparse/synthetic.rs", 1, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cpp_reparse/validate.rs", 3, "the C++ reparse's own trees, outside any build forest"),
+        ("build/cursor_sentinel.rs", 3, "cursor time: one climb per request over the sentinel reparse"),
+        ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
+        ("build/walk_markers.rs", 3, "std::path::Path, not a tree"),
+        ("lsp/backend/server.rs", 1, "std::path::Path, not a tree"),
+        ("lsp/cli/mod.rs", 1, "std::path::Path, not a tree"),
+        ("lsp/cli/query.rs", 1, "std::path::Path, not a tree"),
+        ("lsp/cursor_context.rs", 12, "the Perl cursor detector (rule #6): one climb per request"),
+        ("lsp/symbols/signature.rs", 3, "cursor time: one climb per signature-help request"),
+    ];
+    let drift = allowlist_drift("tree steps (cst::SyntaxForest)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A name lookup walks `lookup_chain` — the `LookupChain` a scope's
 /// bindings are listed through, which carries every language's scoping
 /// rule (`Scope::direct`, …). A raw climb up `Scope::parent` sees every
@@ -1705,6 +1743,7 @@ fn raw_scope_climbs_are_containment_only() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
+        ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
         ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of, and a receiver belongs to"),
         ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
