@@ -4,22 +4,98 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
-## Unreleased
+## v0.9.0 — 2026-10-31
 
-### One language per process
+### Union types
 
-- **A perl-lsp process now serves exactly one language.** `perl-lsp --lang
-  cpp` starts a C/C++ server; with no `--lang` it serves Perl. An editor with
-  Perl and C++ open runs two servers. Editor configs for a pack language must
-  add `--lang <id>`. CLI verbs that name a file pick its language
-  themselves; `--batch`, `--check`, `--heatmap` and `--workspace-symbol`
-  take `--lang`. A file of another compiled language is refused with a
-  message naming the `--lang` to use, rather than read in the wrong one.
-- `--check` / `--heatmap` on a Perl tree no longer index the C/XS files
-  beside it, so those numbers drop on mixed trees.
-- `--parse <file> <lang>` is now `--parse <file> --lang <lang>`.
-- The `all-langs` build feature is gone; enable the languages you want
-  (`--features cpp,python`).
+- **A value that can be one of several types is now `A|B`.** When the
+  arms of a return, ternary, `||` / `//` or slot write share no common
+  type, the answer is a union (up to four arms; hover and inlay hints show
+  `Cat|Bird`) instead of nothing. Where they do share one, the arms join to
+  it: a class and its ancestor give the ancestor, `Optional<T>` with `U`
+  gives `Optional<T|U>`, and differently keyed hash literals merge their
+  keys. `A|B|undef` reads as an optional union.
+- **Every feature reads every arm.** `$pet->sound` on `Cat|Bird` dispatches
+  on each class and joins the answers; goto-def offers both `Cat::sound`
+  and `Bird::sound`, references and rename from the call reach both,
+  `Cat::sound`'s references include the call, and completion offers the
+  methods both arms have. Hash and array drills on a union read each arm.
+- **`$pet->purr` warns per arm**: "'purr' is not defined in Bird, which
+  $pet may be". Renaming `Cat::sound` from its declaration refuses when a
+  union call would end up naming a method the other arm lacks, and points
+  at the call to rename from instead.
+- Each language states which cross-family folds its join allows (Perl lets
+  an object absorb a hashref and a Bool fold into Numeric; C++, Python and
+  R only the latter).
+
+### Type inference
+
+- **`\%h` and `\@a` are a HashRef and an ArrayRef, not a CodeRef.** A sub
+  returning `\%requested` (BMO's `Bugzilla::fields`) used to type as a code
+  reference. `\&name` is still a CodeRef.
+- **Indirect-object `new Foo(...)` is a constructor call.** `new
+  Bugzilla::Product({...})` used to read as a call to the enclosing class's
+  own `new`, so methods on the result were flagged as missing. It now types,
+  navigates and diagnoses exactly like `Bugzilla::Product->new({...})`.
+  Following Perl's own rule, this only applies when the file has declared,
+  `use`d or `require`d that package and no sub of that name is declared
+  above the call, so `ok Foo::bar()` in tests stays a function call.
+- **Inherited constructors keep the caller's class.** `Daemon->new` read as
+  `Server` when `Server::new` did `$class->SUPER::new(@_)`, and `B->wrap`
+  read as `A`. Calls on the invocant now follow whoever called the method,
+  through every level of inheritance.
+- **Hash keys written in place count as keys.** `push @{$h->{list}}, …`,
+  `$h->{n}++`, `($h->{o}) = …`, `@{$h->{arr}} = ()` and nested writes like
+  `$h->{a}{y} = …` or `$self->{s}{z} = …` now add their key to the hash's
+  shape. Later reads of those keys no longer draw an unknown-key hint, and a
+  typo beside them still does (`$h->{lisst}` → "keys: a, list, n, o").
+- **A helper's first parameter is not the class.** In a class, a sub the
+  file only ever calls as a plain function (`_check_requestee($flag)`) no
+  longer types its first parameter as the enclosing package, which flagged
+  every method called on it. Subs called as methods, `method`s, and subs
+  whose first parameter is `$self` / `$class` / `$this` / `$proto` keep
+  their invocant. Only a sub's first `shift` is ever its invocant.
+- **Guards narrow every arm they control.** `STMT if G` narrows STMT itself
+  (`return $x->{k} if ref($x) eq 'HASH'`), and so do a ternary branch, the
+  right side of `&&` / `||` / `and` / `or`, a `while` / `until` / C-style
+  `for` body and `STMT while G`. `do {...} while G` does not, since its
+  block runs before the first test.
+- **`ref`, `reftype` and `blessed` results guard their subject**, inline or
+  through a variable: `my $r = ref $x; ... return $x if $r eq 'HASH'` types
+  `$x` in that return. `blessed($x) eq 'Foo'` is a class guard. The tag is
+  still a string everywhere else.
+- **A use inside a conditional arm only speaks for that arm.** A deref,
+  numeric / string / regex operator or builtin argument under a postfix
+  modifier, ternary branch or short-circuit no longer types the variable
+  for the rest of the sub, and a use never overrides a value the variable
+  was assigned.
+- **Every deref spelling is a use of its operand.** `$x` in `$$x[0]`,
+  `${$x}[0]`, `@$x[...]`, `$#{$x}` and `$$h{k}` is found by references and
+  renamed with the variable (rename used to skip these), and types it as an
+  array or hash reference. `${Class->method}[0]` no longer warns that
+  `@{Class->method}` is undeclared.
+- **Parameters past unrelated statements.** `my $target = caller; my $class
+  = shift;` still makes `$class` the first parameter: statements that don't
+  touch `@_` no longer end the parameter scan.
+- **Escapes and reassignments are per variable, not per name.** Passing
+  `$param` to a call in one sub no longer stops another sub's `$param` from
+  opening its hash shape, and `$q = ...` in one sub no longer silences the
+  key-typo check on every other `$q` in the file.
+- **Narrowing reads `&&`, `||`, `!`, `and`, `or` and `not`.** A failed
+  `A && B` no longer narrows both sides as if each had failed:
+  `return if (defined($x) && $y)` used to type `$x` as undef for the rest
+  of the block. A failed `A || B` proves both sides false.
+- **Key writes in a nested block open the outer variable's shape.**
+  `my $d = {}; { $d->{$k} = 1; } print $d->{Name};` no longer hints that
+  `Name` is missing (also writes in loops, `if`, `eval` and closures).
+- **A `// {}` or `|| {}` floor is an open hash** when nothing types the
+  left side, so keys read off it don't hint.
+- **Qualified and special globals are tracked per variable.** Writes to
+  `%Foswiki::cfg` or `%ENV` count as reassignments, so their literal shape
+  no longer claims to be complete.
+- On the eight-project corpus these remove about 1,800 false
+  `unresolved-method`, `unresolved-function` and `unknown-hash-key` hints
+  (Foswiki −550, Znuny −451, BMO −319).
 
 ### Undeclared variables (#116)
 
@@ -60,6 +136,144 @@ crate / VS Code extension versions.
   use-list word with its span (`ctx.import_words`). `use vars` is now a
   bundled plugin built on it, so an in-house module that declares globals
   can get the same treatment from `PERL_LSP_PLUGIN_DIR`.
+
+### Parsing
+
+- **ts-parser-perl 2.0.3.** `f( $h{k} )` is a hash element again, not an
+  indirect-object call that read `$h` as a scalar, and a line starting with
+  `=` inside a multi-line string (`print "\n====…`) no longer opens a POD
+  block that swallowed the rest of the file. A `->` inside a string that
+  doesn't start a subscript (`"a $x->"`, `"$h{K}->Word"`) is plain text
+  instead of a parse error that hid the rest of the sub.
+- **The code side of `s{...}{...}e` is read as code.** Its `my` declares,
+  its calls and methods are seen, and `$Param{k}` in it reads `%Param`.
+
+### Editor
+
+- **Plugin-made accessors in closed files work in the editor.** A DBIC
+  result class whose base is in another file (its columns and
+  relationships), and mojo-events handlers in the same position, now answer
+  completion, goto-def, hover and references from closed files too; before,
+  only the CLI saw them.
+- **Faster method completion and dispatch completion.** Completion after
+  `->` walks each ancestor once (a diamond used to be walked once per path;
+  Foswiki −7%), and Minion task-name completion after `enqueue(` reads the
+  handler index instead of decoding every cached file (p50 682 → 141 ms on
+  WeBWorK).
+- **No more hang on projects where hundreds of files share one package.**
+  Opening FHEM's `70_Jabber.pm` (534 files in `package main`) never
+  finished; the cross-file fallback for methods, hash slots, parameters
+  and type names is now one bounded walk, and every enrichment runs under
+  the 30 s resolution budget. FHEM `--check` peak memory drops about 14%.
+- **Faster checks and diagnostics on large files.** Narrowing and
+  expression typing index their lookups once per file instead of scanning
+  per query (Znuny's `scripts/test/PDF.t` no longer takes two minutes to
+  build), and the unresolved-method lints read the receiver answers the
+  enrichment pass already computed instead of resolving each call again.
+- **Closing a buffer with unsaved edits no longer leaves those edits in the
+  index.** After close, the file answers from its saved text on disk, as
+  every other unopened file does.
+- The workspace-index progress token is now `perl-lsp/workspace-index`.
+
+### One language per process (C/C++, Python, R, CMake, PHP builds only)
+
+The released binaries and the VS Code extension are Perl-only, so nothing in
+this section changes for them. It matters if you build with language
+features (`cargo install perl-lsp --features cpp`).
+
+- **A perl-lsp process now serves exactly one language.** `perl-lsp --lang
+  cpp` starts a C/C++ server; with no `--lang` it serves Perl. An editor with
+  Perl and C++ open runs two servers. **Editor configs for a pack language
+  must add `--lang <id>`.** CLI verbs that name a file pick its language
+  themselves; `--batch`, `--check`, `--heatmap` and `--workspace-symbol`
+  take `--lang`. A file of another compiled language is refused with a
+  message naming the `--lang` to use, rather than read in the wrong one.
+- `--check` / `--heatmap` on a Perl tree no longer index the C/XS files
+  beside it, so their wall time, memory and file counts drop on mixed trees.
+- A C/C++ server no longer starts the Perl `@INC` resolver.
+- `--parse <file> <lang>` is now `--parse <file> --lang <lang>`.
+- The `all-langs` build feature is gone; enable the languages you want
+  (`--features cpp,python`).
+- References and rename in a pack language treat project files as editable
+  and anything else the index holds as read-only dependencies, the same rule
+  Perl uses.
+- CLI `--workspace-symbol` and `--dump-package` now cover pack-language
+  files too.
+
+### PHP (early, `--features php` only)
+
+- **A new `php` build feature** (`--lang php`). It declares namespaces,
+  classes, interfaces, traits, functions and methods, with their flags
+  (static, abstract, non-public, constructor). `extends`, `implements`,
+  trait `use` and imported class names are class references, so goto-def,
+  references and rename reach them across files.
+- **`use` rows bind in the namespace section they are written in**, so one
+  section's imports no longer leak into another's.
+- An interface, trait or abstract class is a role: a class that composes one
+  and misses a required method is warned on the clause that names it.
+- Method calls, properties and variable types are not resolved yet.
+
+### Python (`--features python` only)
+
+- **Classes are named by their module path** (`pkg.models.User`), found from
+  the `__init__.py` chain. `from pkg.models import User`, `import a.b as c`
+  and relative imports resolve class names, so two `User` classes in
+  different modules no longer merge for goto-def, references and rename.
+- Calling a class constructs it: `User()` renames with the class.
+- **A class body is a namespace for its own code.** `class Outer: class
+  Inner:` is `pkg.mod.Outer.Inner`, so Django's per-model `class Meta:`
+  classes stay apart for goto-def, references, rename and members. A bare
+  name in the class body (or a nested class's base list) finds the nested
+  class; a method, as in Python, does not see its class body's names.
+- **A def's header resolves where the def is written.** Parameter
+  annotations, defaults and `-> T` see the enclosing class body's names;
+  typed and defaulted parameters are parameters, and every name in an
+  annotation is a class reference that renames with its class.
+- **Class attributes and `self` writes are members.** `count = 0`,
+  `a: int` and `b: int = 5` in a class body, and `self.n = 1` (or a write
+  through any receiver typed as the class) in a method, are fields:
+  goto-def, references, rename, hover and completion after `obj.` reach
+  them. A write declares a field only when the class and its parents don't
+  already have one.
+- **Modules are named from the indexed package directories.** Adding or
+  removing an `__init__.py` re-files the modules under it, and stale cache
+  rows re-index instead of keeping their old name.
+
+- **Calls are typed.** A call has its callee's `-> T` (spelled through the
+  callee's own imports) or the type its `return`s agree on, in the defining
+  file and from other files, and calling a class imported from another
+  file constructs it (`Holder()`, `Widget().spin()`).
+- **Assignments write what their left side names.** `self.made = Widget()`,
+  `h.kept = ...` through a typed parameter and nested `self.inner.deep = ...`
+  give the member a value, so `self.made.spin()` resolves, in subclasses
+  and other files too.
+- **A class attribute renames as one thing** from `count`, `Counter.count`
+  or `self.count`, in any file, and a member read that ends a body
+  (`return self.count`) is found by goto-def, references and rename.
+
+### C/C++, PHP and Python
+
+- **A receiver is something the language states, not a Perl name.** A
+  Python or PHP variable called `$self` / `$class` / `$this` is no longer
+  treated as a receiver in semantic tokens, inlay hints and completion;
+  PHP's `$this` and C++'s `this->m()` dispatch on the enclosing class.
+- **Guards narrow and uses observe within their arm**, on the same rules
+  as Perl.
+
+### Python and PHP: unindexed classes
+
+- **A class imported from a module nothing indexes resolves to a same-named
+  class in another namespace, and says so.** Goto-def and hover land on the
+  stand-in, labelled `widened: A\Model stands in for Vendor\Model`, and an
+  information diagnostic `resolved-by-widening` sits on the class reference.
+  Once the real module is indexed, it takes over and the diagnostic goes.
+  References and rename never widen.
+
+### Upgrading
+
+- The analysis cache format changed (extract version 235 → 291, reference
+  rows v9, stubs v11), and six bundled plugins were added. The first start
+  after upgrading re-indexes the project once.
 
 ## v0.8.0 — 2026-10-19
 

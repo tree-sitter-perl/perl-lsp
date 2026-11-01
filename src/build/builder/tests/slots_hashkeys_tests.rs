@@ -1,3 +1,4 @@
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 // ---- ${@} block-interpolation token-stream bleed recovery (TASK-C / G1) ----
@@ -135,6 +136,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
         module_index: None,
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
+        lattice: crate::model::conventions::lattice_for(&fa.language),
     };
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,
@@ -168,11 +170,13 @@ fn slot_type_two_agreeing_writes() {
 }
 
 #[test]
-fn slot_type_two_disagreeing_writes_none() {
+fn slot_type_two_disagreeing_writes_union() {
     let src = "package Foo;\nsub a {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub b {\n  my $self = shift;\n  $self->{h} = Other->new;\n}\n";
     let fa = build_fa(src);
-    // Disagreeing writes → honest None (no guess).
-    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+    // Disagreeing writes → the union of the written classes.
+    let t = slot_type(&fa, "Foo", "h").expect("disagreeing writes fold to their union");
+    let InferredType::Union(arms) = &t else { panic!("expected a union, got {t:?}") };
+    assert_eq!(arms.iter().filter_map(|a| a.class_name()).collect::<Vec<_>>(), ["Helper", "Other"]);
 }
 
 #[test]
@@ -324,7 +328,7 @@ ${$ref}->other;
     };
     assert_eq!(invocant.text(), "$sner");
     assert_eq!(
-        fa.method_call_invocant_class(thing, None).as_deref(),
+        fa.receiver_classes(thing, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Foo"),
         "braced spelling resolves through the variable's type",
     );
@@ -360,7 +364,7 @@ $c->bump;
         .find(|r| r.target_name == "bump" && matches!(r.kind, RefKind::MethodCall { .. }))
         .expect("MethodCall ref for bump");
     assert_eq!(
-        fa.method_call_invocant_class(bump, None).as_deref(),
+        fa.receiver_classes(bump, None, ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(),
         Some("Counter"),
         "const-folded invocant should dispatch on Counter",
     );
@@ -1412,4 +1416,96 @@ fn levels_on_a_write_path_are_not_read_as_drills() {
     let Some(InferredType::HashWithKeys { keys: inner, .. }) = keys[0].1.as_deref() else { panic!("1.0: {:?}", keys[0]) };
     let names: Vec<&str> = inner.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(names, ["system", "emeter"]);
+}
+
+/// Escapes and reassignments belong to a variable, not to its spelling:
+/// one sub handing its `$p` to a call must not use up another sub's escape
+/// (the FHEM HttpUtils false unknown-hash-key), and one sub reassigning its
+/// `$q` must not silence another sub's typo.
+#[test]
+fn escapes_and_reassignments_are_per_variable() {
+    let src = "\
+package Foo;
+sub a1 { my $p = { url => 1 }; fetch($p); }
+sub a2 { my $p = { url => 1 }; fetch($p); print $p->{header}; }
+sub b1 { my $q = { url => 1 }; $q = {}; }
+sub b2 { my $q = { url => 1 }; print $q->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 4)]);
+}
+
+/// A qualified global and a special variable are variables too: their
+/// writes bind, so a reassignment opens their shape whatever package the
+/// use is written in (Foswiki's `local %Foswiki::cfg = (…)` then
+/// `%Foswiki::cfg = %$upper`).
+#[test]
+fn qualified_and_special_globals_are_reassigned_by_binding() {
+    let src = "\
+package Foswiki::Configure::Query;
+sub load { local %Foswiki::cfg = ( Engine => 1 ); %Foswiki::cfg = %$upper; print $Foswiki::cfg{BOOTSTRAPDIRS}; }
+sub env { %ENV = ( PATH => 1 ); %ENV = %$saved; print $ENV{HOME}; }
+package main;
+sub q { my $q = { url => 1 }; print $q->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 4)], "only the never-reassigned lexical reports");
+    // One identity per global, wherever it is spelled, and none of them is
+    // this file's own outline entry.
+    let cfg: Vec<_> = fa.symbols().iter().filter(|s| s.name == "%cfg").collect();
+    assert_eq!(cfg.len(), 1);
+    assert_eq!(cfg[0].package.as_deref(), Some("Foswiki"));
+    let env = fa.symbols().iter().find(|s| s.name == "%ENV").expect("%ENV binds");
+    assert_eq!(env.package.as_deref(), Some("main"), "a special variable lives in main");
+    assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
+}
+
+/// A write inside a nested block lands on the variable, wherever the block
+/// is: the read after the block sees the shape the write opened (Foswiki
+/// Register.pm's `try { … $data->{$k} = … }`). The write's own access in the
+/// block is no home for the variable's shape.
+#[test]
+fn key_writes_in_nested_blocks_reach_the_variable() {
+    let src = "\
+package Foo;
+sub s1 { my ($k) = @_; my $d = {}; { $d->{$k} = 1; } print $d->{Name}; }
+sub s2 { my $d = {}; for my $x (@_) { $d->{$x} = 1; } print $d->{Name}; }
+sub s3 { my $d = {}; if ($_[0]) { $d->{Name} = 1; } print $d->{Name}; }
+sub s4 { my $d = {}; while (shift) { $d->{Name} = 1; } print $d->{Name}; }
+sub s5 { my $d = {}; eval { $d->{Name} = 1; }; print $d->{Name}; }
+sub s6 { my $d = {}; { $d->{Name} = 1; } print $d->{Name}; }
+sub s7 { my $d; { $d = {}; $d->{Name} = 1; print $d->{Name}; } }
+sub s8 { my $d = {}; { my $d = {}; $d->{Name} = 1; } print $d->{Name}; }
+sub s9 { my $d = { Name => 1 }; print $d->{typo}; }
+sub s10 { my $d = {}; run(sub { $d->{Name} = 1; }); print $d->{Name}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("Name".to_string(), 8), ("typo".to_string(), 9)]);
+}
+
+/// A fallback floor written against a value nothing types says what kind
+/// of value the author expects, not that it is the empty literal: `$o->{y}
+/// // {}` may hold any keys (98_Modbus.pm, TablePlugin Core.pm).
+#[test]
+fn a_floor_against_an_unseen_value_is_an_open_shape() {
+    let src = "\
+package Foo;
+sub a { my ($o) = @_; my $x = $o->{y} // {}; print $x->{k}; }
+sub b { my ($o) = @_; my $x = $o->{y} || {}; print $x->{k}; }
+sub c { my $x = {}; print $x->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 3)]);
 }

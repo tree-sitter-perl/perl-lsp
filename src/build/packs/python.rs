@@ -2,10 +2,15 @@
 
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
-    ClassCall, ClassSpelling, ConstructionKey, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType, MemberNamespace, NameSpellings,
+    join_all, ClassCall, ClassSpelling, ConstructionKey, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType,
+    MemberNamespace, NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
+
+/// Python's subsumption rules: `bool <: int`.
+const PYTHON_LATTICE: crate::model::file_analysis::LatticeRules =
+    crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]);
 
 pub fn python_pack() -> LangPack {
     LangPack {
@@ -30,23 +35,11 @@ pub fn python_pack() -> LangPack {
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },
+        // `bool` is a subclass of `int`.
+        lattice: PYTHON_LATTICE,
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
-        annot_type: |text| match text.trim() {
-            "str" => Some(InferredType::String),
-            "int" | "float" => Some(InferredType::Numeric),
-            "list" => Some(InferredType::ArrayRef),
-            "dict" => Some(InferredType::HashRef),
-            // `None` is the null value's type, and a subscript, union or
-            // string annotation is no class spelling.
-            "None" => None,
-            t if t.chars().next().is_some_and(|c| c.is_uppercase())
-                && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
-            {
-                Some(InferredType::ClassName(t.to_string()))
-            }
-            _ => None,
-        },
+        annot_type: annotation_type,
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -64,6 +57,67 @@ pub fn python_pack() -> LangPack {
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }
+}
+
+/// An annotation's type. `A | B` and `Union[A, B]` are the join of their
+/// arms, `Optional[A]` is `A | None`; a spelling with an arm this can't
+/// read types nothing, rather than claiming the arms it can.
+fn annotation_type(text: &str) -> Option<InferredType> {
+    let t = text.trim();
+    let arms: Vec<&str> = if let Some(inner) = subscript(t, "Optional") {
+        vec![inner, "None"]
+    } else if let Some(inner) = subscript(t, "Union") {
+        split_top_level(inner, ',')
+    } else {
+        split_top_level(t, '|')
+    };
+    if arms.len() > 1 {
+        let types = arms
+            .into_iter()
+            .map(|arm| if arm == "None" { Some(InferredType::Undef) } else { annotation_type(arm) })
+            .collect::<Option<Vec<_>>>()?;
+        // An annotation names no classes' relations, only the language's.
+        return join_all(&types, &PYTHON_LATTICE);
+    }
+    match t {
+        "str" => Some(InferredType::String),
+        "int" | "float" => Some(InferredType::Numeric),
+        // `None` is the null value's type: an arm of a union, no type alone.
+        "None" => None,
+        "list" => Some(InferredType::ArrayRef),
+        "dict" => Some(InferredType::HashRef),
+        // A subscript or string annotation is no class spelling.
+        t if t.chars().next().is_some_and(|c| c.is_uppercase())
+            && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
+        {
+            Some(InferredType::ClassName(t.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// `inner` of `name[inner]`, also spelled `typing.name[inner]`.
+fn subscript<'a>(t: &'a str, name: &str) -> Option<&'a str> {
+    let rest = t.strip_prefix("typing.").unwrap_or(t).strip_prefix(name)?;
+    rest.trim_start().strip_prefix('[')?.strip_suffix(']')
+}
+
+/// `t` split on `sep` outside any brackets.
+fn split_top_level(t: &str, sep: char) -> Vec<&str> {
+    let (mut depth, mut start, mut out) = (0i32, 0, Vec::new());
+    for (i, c) in t.char_indices() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth -= 1,
+            c if c == sep && depth == 0 => {
+                out.push(t[start..i].trim());
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(t[start..].trim());
+    out
 }
 
 /// The module `path` is: its stem under the chain of package directories

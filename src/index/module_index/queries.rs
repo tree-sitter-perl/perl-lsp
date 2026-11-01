@@ -15,6 +15,7 @@ impl ModuleIndex {
             freshness: Arc::new(crate::model::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             enriched_order: Arc::new(std::sync::Mutex::new(Default::default())),
+            gated_views: Arc::new(Default::default()),
             enriched_ghost: crate::util::ghost_stats::GhostStats::new_if_enabled(
                 "enriched-overlay".into(),
             ),
@@ -591,44 +592,6 @@ impl ModuleIndex {
         &self.core.cache
     }
 
-    /// Insert a module directly into the cache (for CLI and testing).
-    /// After indexing completes (cross-file ancestry fully populated),
-    /// MATERIALIZE deferred gated plugin emissions (`GatedEmission`) into each
-    /// cached copy whose gate now resolves cross-file. A DBIC result class's
-    /// column/relationship accessors are recorded but not applied at build
-    /// (the `ClassIsa` trigger can't see the cross-file base, rule #1); this
-    /// pass applies them once the index knows the ancestry, so `whole_present`
-    /// — the view every cross-file goto-def / references reader consults —
-    /// sees them WITHOUT a per-query enriched-overlay hop.
-    ///
-    /// The cheap gate — `gated_emissions` is NOT an eviction axis, so an
-    /// evicted resident copy still carries it — decides whether a file needs
-    /// materializing; the whole (rehydrated) view is only pulled for those.
-    /// The re-registered copy is whole (symbols resident); this is the
-    /// one-shot CLI's deterministic path (re-pinning is harmless when the
-    /// process is about to answer one query and exit). The warm server never
-    /// calls this — it has the enriched-overlay fallback in
-    /// `method_resolution_on_class`. Idempotent (`materialize_gated_emissions`
-    /// dedups against already-present symbols).
-    pub fn materialize_gated_emissions(&self) {
-        let mut updates: Vec<(String, std::path::PathBuf, Arc<FileAnalysis>)> = Vec::new();
-        for entry in self.core.cache.iter() {
-            let Some(cached) = entry.value() else { continue };
-            if cached.analysis.plugin.gated_emissions.is_empty() {
-                continue;
-            }
-            // Rehydrate the whole view (the resident copy may be
-            // symbols-evicted) before appending the synthesized accessors.
-            let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, cached);
-            let mut copy = (*whole).clone();
-            copy.materialize_gated_emissions(self);
-            updates.push((entry.key().clone(), cached.path.clone(), Arc::new(copy)));
-        }
-        for (name, path, analysis) in updates {
-            let cm = Arc::new(CachedModule::new(path.clone(), analysis));
-            self.register_materialized_whole(name, path, cm);
-        }
-    }
 }
 
 /// The served language reads and writes the Perl hub's store

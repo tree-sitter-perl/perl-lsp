@@ -2,6 +2,7 @@
 //! spelling: lexicals by their declaration, package variables and
 //! `use constant` names by package.
 
+use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
 
 /// `(row, invocant class)` of every method call named `name`.
@@ -9,7 +10,7 @@ fn calls(fa: &FileAnalysis, name: &str) -> Vec<(usize, Option<String>)> {
     fa.refs()
         .iter()
         .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == name)
-        .map(|r| (r.span.start.row, fa.method_call_invocant_class(r, None)))
+        .map(|r| (r.span.start.row, fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)))
         .collect()
 }
 

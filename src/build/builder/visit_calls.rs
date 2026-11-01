@@ -20,7 +20,13 @@ impl<'a> Builder<'a> {
         // lexical — so its ref is spelled qualified. The block is still
         // visited below for the refs inside it.
         let access = self.determine_access(node);
-        for (name, span, folded_from) in self.symbolic_variables(node) {
+        let sigil = match node.kind() {
+            "scalar" => Some(crate::model::conventions::Sigil::Scalar),
+            "array" => Some(crate::model::conventions::Sigil::Array),
+            "hash" => Some(crate::model::conventions::Sigil::Hash),
+            _ => None,
+        };
+        for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
             let idx = self.refs.len();
             self.add_ref(RefKind::Variable, span, name, access);
             self.refs[idx].folded_from = folded_from;
@@ -75,14 +81,6 @@ impl<'a> Builder<'a> {
             return;
         }
 
-        // If this scalar is inside a block-deref, infer the type from the outer sigil.
-        // Parent chain: scalar → expression_statement → block → varname → outer_node
-        if node.kind() == "scalar" {
-            if let Some((deref_type, context)) = self.block_deref_context(node) {
-                self.push_var_type_constraint(node, context, deref_type);
-            }
-        }
-
         // `${name}` IS `$name`: key the ref on the canonical spelling and
         // anchor it on the bare name token, so rename rewrites inside the
         // braces and a string's `"${name}s"` keeps them.
@@ -104,13 +102,12 @@ impl<'a> Builder<'a> {
             // record it as an open-switching KeyWrite at the escape span,
             // and the mutation-extension pass widens the shape from that
             // point on — temporal, so reads BEFORE the first escape keep
-            // their closed shape. One site per var suffices.
+            // their closed shape. One site per variable suffices.
             if access == AccessKind::Read
                 && text.starts_with('$')
                 && !crate::cst::is_element_access_base(node)
-                && !self.escape_recorded.contains(text)
+                && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
-                self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
             // Write with the variable itself as assignment target =
@@ -118,21 +115,17 @@ impl<'a> Builder<'a> {
             // scalar is the access base and the Write came from the
             // grandparent rule) is a shape mutation instead — modeled by
             // the mutation-extension pass, not a trust break.
-            if access == AccessKind::Write
+            let reassigns = access == AccessKind::Write
                 && (text.starts_with('$') || text.starts_with('%'))
-                && !crate::cst::is_element_access_base(node)
-            {
-                self.reassigned_scalars.insert(text.to_string());
-            }
+                && !crate::cst::is_element_access_base(node);
             // Hash variables escape only by reference-taking (`\%h`):
             // a bare `%h` in a call or list FLATTENS TO COPIES — the
             // callee can't add keys to the original, so it's not an
             // escape (unlike a scalar, whose value IS the shared ref).
             if text.starts_with('%')
                 && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
-                && !self.escape_recorded.contains(text)
+                && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
-                self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
             // Fully-qualified read (`$Foo::Bar::x`): the span is the bare
@@ -140,6 +133,9 @@ impl<'a> Builder<'a> {
             // survives, mirroring the FQ-call narrowing. The full
             // `target_name` keeps the path; `qualified_var_target()` decodes
             // `(pkg, sigil+basename)` for cross-package resolution.
+            if reassigns {
+                self.reassigning_refs.push(self.refs.len());
+            }
             self.add_ref(
                 RefKind::Variable,
                 ref_span,
@@ -156,27 +152,11 @@ impl<'a> Builder<'a> {
     /// rename skips, and a single-literal fold carries the literal as
     /// `folded_from` for rename to rewrite instead. Unqualified names belong
     /// to the package in force, as Perl resolves them.
-    fn symbolic_variables(&self, node: Node<'a>) -> Vec<(String, Span, Option<Span>)> {
-        use crate::cst::NodeExt;
+    fn symbolic_variables(&self, node: Node<'a>, sigil: crate::model::conventions::Sigil) -> Vec<(String, Span, Option<Span>)> {
         use crate::model::conventions::{
             is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
         };
-        let sigil = match node.kind() {
-            "scalar" => '$',
-            "array" => '@',
-            "hash" => '%',
-            _ => return Vec::new(),
-        };
-        let Some(expr) = crate::cst::varname_child(node)
-            .and_then(|vn| vn.named().find(|c| c.kind() == "block"))
-            .and_then(|block| {
-                let mut stmts = block.elements();
-                let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
-                let mut exprs = stmt.elements();
-                let expr = exprs.next()?;
-                (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
-            })
-        else {
+        let Some(expr) = crate::cst::deref_operand_expr(node) else {
             return Vec::new();
         };
         let (names, span, folded_from) = match expr.kind() {
@@ -199,7 +179,7 @@ impl<'a> Builder<'a> {
                 let (pkg, base) = split_qualified(&name, &PERL_SPELLINGS);
                 if base.is_empty()
                     || !base.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    || is_special_variable(&format!("{sigil}{base}"))
+                    || is_special_variable(&format!("{}{base}", sigil.char()))
                 {
                     return None;
                 }
@@ -207,7 +187,7 @@ impl<'a> Builder<'a> {
                     Some(pkg) => PERL_SPELLINGS.qualifier_package(pkg),
                     None => self.current_package.as_deref().unwrap_or_else(|| PERL_SPELLINGS.qualifier_package("")),
                 };
-                Some((qualify_var(sigil, pkg, base, &PERL_SPELLINGS), span, folded_from))
+                Some((qualify_var(sigil.char(), pkg, base, &PERL_SPELLINGS), span, folded_from))
             })
             .collect()
     }
@@ -254,36 +234,10 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// Walk up from a scalar to detect block-deref context.
-    /// Returns the inferred type and a context node (for constraint span) if inside
-    /// @{$x}, %{$y}, or &{$z}.
-    ///
-    /// Parent chain: scalar → expression_statement → block → varname → outer_node
-    /// where outer_node.kind() is "array" (@{}), "hash" (%{}), or "function" (&{}).
-    pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(InferredType, Node<'a>)> {
-        let stmt = node.parent()?;
-        if stmt.kind() != "expression_statement" { return None; }
-        let block = stmt.parent()?;
-        if block.kind() != "block" { return None; }
-        let varname = block.parent()?;
-        if varname.kind() != "varname" { return None; }
-        let outer = varname.parent()?;
-        match outer.kind() {
-            "array" => Some((InferredType::ArrayRef, outer)),
-            "hash" => Some((InferredType::HashRef, outer)),
-            "function" => {
-                if let Ok(text) = outer.utf8_text(self.source) {
-                    if text.starts_with("&{") {
-                        return Some((InferredType::CodeRef { return_edge: None }, outer));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn visit_container_ref(&mut self, node: Node<'a>) {
+        if self.visit_deref_container(node) {
+            return;
+        }
         // Container variables: $hash{key}, @arr[0], etc.
         // The container itself is a ref to the underlying variable
         if let Ok(text) = node.utf8_text(self.source) {
@@ -299,11 +253,36 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// An element/slice/`$#` access through a deref (`${EXPR}[0]`,
+    /// `@$x{..}`, `$#{EXPR}`) names no variable of its own: the operand is
+    /// visited for its refs, and a constant name (`${"abel"}[0]`) is the
+    /// package aggregate it names. `false` = a named container, not a deref.
+    fn visit_deref_container(&mut self, node: Node<'a>) -> bool {
+        let Some(operand) = crate::cst::deref_operand(node) else { return false };
+        if let Some(sigil) = crate::cst::container_sigil(node) {
+            let access = self.determine_access(node);
+            for (name, span, folded_from) in self.symbolic_variables(node, sigil) {
+                let idx = self.refs.len();
+                self.add_ref(RefKind::ContainerAccess, span, name, access);
+                self.refs[idx].folded_from = folded_from;
+            }
+        }
+        if operand.kind() == "block" {
+            self.queue_children(operand);
+        } else {
+            self.queue_node(operand);
+        }
+        true
+    }
+
     /// `$#foo` — arraylen. TSP gives us a distinct `arraylen` node
     /// with a `varname` child; the access resolves to `@foo`. We emit
     /// a ContainerAccess ref so goto-def and rename treat it like
     /// any other indirect access into the array.
     pub(super) fn visit_arraylen_ref(&mut self, node: Node<'a>) {
+        if self.visit_deref_container(node) {
+            return;
+        }
         let bare = match find_varname_child(node).and_then(|v| v.utf8_text(self.source).ok()) {
             Some(b) => b,
             None => return,
@@ -391,9 +370,9 @@ impl<'a> Builder<'a> {
                     self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
                 // Push type constraints on arguments of known builtins
-                if let Some(arg_type) = crate::model::builtins::builtin_first_arg_type(name) {
+                if let Some(obs) = crate::model::builtins::builtin_first_arg_use(name) {
                     if let Some(first_arg) = self.first_call_arg(node) {
-                        self.push_var_type_constraint(first_arg, node, arg_type);
+                        self.observe(first_arg, node, obs);
                     }
                 }
                 // `bless $self, $class` promotes $self to ClassName($class)

@@ -407,8 +407,8 @@ fn completion_items_native(
     let mut suppress_firehose = false;
     if let Some(call_ctx) = cursor_context::find_call_context(tree, source.as_bytes(), point) {
         if call_ctx.is_method {
-            let dispatch_class = analysis.invocant_text_to_class(call_ctx.invocant.as_deref(), point);
-            let has_any_handlers = dispatch_class.as_ref().is_some_and(|c|
+            let dispatch_class = analysis.invocant_text_classes(call_ctx.invocant.as_deref(), point);
+            let has_any_handlers = dispatch_class.iter().any(|c|
                 class_has_dispatch_handlers(analysis, module_index, c, &call_ctx.name)
             );
             // Debug line for dispatch completion — one-shot diagnoses
@@ -485,15 +485,12 @@ fn completion_items_native(
             // languages, which mint no lexical subs).
             let mut member_cands = analysis.complete_lexical_methods_at(point);
             member_cands.extend(if let Some(ref ty) = receiver.receiver_type {
-                // `class_name_lenient` peels `Optional<Foo>` to `Foo` so an
-                // unguarded optional receiver still offers its methods — the
-                // same lenient receiver projection goto/hover/refs now use.
-                if let Some(cn) = ty.class_name_lenient() {
+                // An unguarded optional receiver still offers its methods,
+                // a union the ones every arm has. Ref types get deref
+                // snippet completions (handled below).
+                analysis.shared_members(&analysis.dispatch_classes_of(ty, Some(module_index)), |cn| {
                     analysis.complete_methods_for_class(cn, Some(module_index))
-                } else {
-                    // Ref types get deref snippet completions (handled below)
-                    Vec::new()
-                }
+                })
             } else {
                 let invocant_text = receiver.receiver_text.as_deref().unwrap_or("");
                 analysis.complete_methods(invocant_text, point, Some(module_index))
@@ -721,18 +718,18 @@ fn ref_type_snippet_completions(ty: &InferredType) -> Vec<CompletionItem> {
 /// cursor on a def directly, or on a call/ref to the local def it names.
 /// The Perl `hover_info` renderer is Perl-specific (```perl fences,
 /// method-resolution prose); pack languages get this instead.
-/// Member completion for a pack language: the members of `class` (the
-/// type of the `.`/`->` receiver, resolved by the sentinel) as items. The
+/// Member completion for a pack language: the members of the `.`/`->`
+/// receiver's type (resolved by the sentinel) as items. The
 /// tree work (sentinel reparse → receiver → type, incl. chains) happens in
-/// the backend; this is the tree-free class → members → items half.
+/// the backend; this is the tree-free type → members → items half.
 /// `op_fix = Some((operator_span, correct_operator))` attaches an
 /// `additionalTextEdit` to every item that swaps the typed `.`/`->` for the
 /// one the receiver's pointer depth requires (Mode A — accepting `width` on
 /// `p.` yields `p->width`). `None` leaves the items untouched (operator
 /// already correct, or DEEP receiver shown-only).
-pub fn member_completion_for_class(
+pub fn member_completion_for_type(
     analysis: &FileAnalysis,
-    class: &str,
+    receiver: &crate::model::file_analysis::InferredType,
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     op_fix: Option<(crate::model::file_analysis::Span, String)>,
     point: Point,
@@ -743,9 +740,9 @@ pub fn member_completion_for_class(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
-    let candidates = analysis.complete_members_for_class(
-        class, Some(module_index), requesting_class.as_deref(),
-    );
+    let candidates = analysis.shared_members(&analysis.dispatch_classes_of(receiver, Some(module_index)), |class| {
+        analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref())
+    });
     if candidates.is_empty() {
         return None;
     }
