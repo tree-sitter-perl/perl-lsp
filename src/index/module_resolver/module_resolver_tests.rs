@@ -749,7 +749,7 @@ fn perls_map_is_inc_with_the_project_libs_first() {
     expected.extend(discover_inc_paths());
     assert_eq!(inc.search_roots(), expected.as_slice());
     assert_eq!(inc.roots(), [dir.join("local")]);
-    assert_eq!(inc.inputs(), [dir.join("local/lib/perl5"), dir.join("cpanfile.snapshot")]);
+    assert_eq!(inc.inputs(), [dir.join("cpanfile.snapshot")]);
     // The cpanfile's requires are declared, for a prefetching session.
     use crate::build::language_driver::Declared;
     assert_eq!(inc.declared_demand(), [Declared::Listed("Outer".into()), Declared::Listed("Twin".into())]);
@@ -809,10 +809,9 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
     let dir = std::fs::canonicalize(&dir).unwrap();
     let idx = crate::index::module_index::ModuleIndex::new_for_cli();
     idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    // The indexer asks what the project uses, as the pack indexer does: no
+    // caller asks again.
     index_workspace_with_index(&dir, &idx, None, None);
-    assert!(idx.get_cached("Outer").is_none(), "indexing asks nothing for a Perl project");
-
-    idx.request_dependency_demand();
     idx.wait_idle();
     let outer = dir.join("local/lib/perl5/Outer.pm");
     assert_eq!(idx.get_cached("Outer").map(|c| c.path.clone()), Some(outer.clone()));
@@ -830,10 +829,42 @@ fn the_resolver_thread_lands_a_file_under_every_package_it_declares() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A one-shot run descends as a server does: a landed file asks for the
+/// classes its subs return (a chain walks through them, and nothing the
+/// project names would land them), never for everything it uses.
+#[test]
+fn a_one_shot_run_lands_the_classes_a_landed_file_returns() {
+    let dir = std::env::temp_dir().join(format!("perl-returns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Outer;\n1;\n"),
+        (
+            "local/lib/perl5/Outer.pm",
+            "package Outer;\nuse Outer::Helper;\nsub routes { return Outer::Routes->new }\n1;\n",
+        ),
+        ("local/lib/perl5/Outer/Routes.pm", "package Outer::Routes;\nsub new { bless {}, shift }\nsub get { 1 }\n1;\n"),
+        ("local/lib/perl5/Outer/Helper.pm", "package Outer::Helper;\nsub help { 1 }\n1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    idx.set_workspace_root(Some(&format!("file://{}", dir.display())));
+    index_workspace_with_index(&dir, &idx, None, None);
+    idx.wait_idle();
+    assert!(idx.get_cached("Outer").is_some());
+    assert!(idx.get_cached("Outer::Routes").is_some(), "the returned class did not land");
+    assert!(idx.get_cached("Outer::Helper").is_none(), "a landed file's own `use` is not demand");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A landed file registers under every package it declares, and each of
-/// them exports only what its own `@EXPORT`/`@EXPORT_OK` names (or, with
-/// none, what its first exporting parent does). DBI.pm declares
-/// `DBD::Switch::dr`; that name exports nothing.
+/// them exports only what its own `@EXPORT`/`@EXPORT_OK` names: DBI.pm
+/// declares `DBD::Switch::dr`, and that name exports nothing. `Outer::Kid`
+/// inherits Exporter's `import`, which reads the lists of the class it is
+/// called on, so it exports nothing either (`inherited_import_lists`).
 #[test]
 fn a_landed_file_exports_only_from_the_package_that_declares_the_list() {
     let dir = std::env::temp_dir().join(format!("perl-land-exports-{}", std::process::id()));
@@ -858,7 +889,7 @@ fn a_landed_file_exports_only_from_the_package_that_declares_the_list() {
     idx.request_dependency_demand();
     idx.wait_idle();
     assert!(idx.get_cached("Outer::Inner").is_some(), "the declared package landed");
-    assert_eq!(idx.find_exporters("hi"), vec!["Outer", "Outer::Kid"]);
+    assert_eq!(idx.find_exporters("hi"), vec!["Outer"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

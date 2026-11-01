@@ -297,17 +297,17 @@ impl IndexCore {
         snap.generation
     }
 
-    /// Land `whole` — the files the map placed for an asked name (none:
-    /// its always-loaded files), parsed under `generation`, in the map's
-    /// precedence order — under the asked name for the files `asked`
-    /// says answer it, and under every name each file declares. One
+    /// Land `whole` — the files the map placed for `asked`, parsed under
+    /// `generation`, in the map's precedence order — under `asked` for the
+    /// files `answers` indexes, and under every name each file declares. One
     /// stored copy per file serves all its names; a name nobody asked for
     /// only fills a slot nothing answers yet, since an ask's own answer
     /// outranks a file that happens to declare the name too. Returns the
     /// asked name's stored providers; `None` is a miss.
     pub(crate) fn land_dependency(
         &self,
-        asked: Option<(&str, &[usize])>,
+        asked: &str,
+        answers: &[usize],
         generation: u64,
         whole: Providers,
         persisted: bool,
@@ -324,7 +324,7 @@ impl IndexCore {
         // Name → the files answering it, in precedence order: the asked
         // name first, so its answer lands before any by-product, then
         // every name a file declares.
-        let mut declared: Vec<(String, Vec<usize>)> = asked.map(|(a, at)| (a.to_string(), at.to_vec())).into_iter().collect();
+        let mut declared: Vec<(String, Vec<usize>)> = vec![(asked.to_string(), answers.to_vec())];
         for (i, m) in whole.iter().enumerate() {
             for (name, _) in st.driver.registration_names(&m.analysis) {
                 match declared.iter_mut().find(|(n, _)| *n == name) {
@@ -336,7 +336,6 @@ impl IndexCore {
         }
         // `persisted` covers the asked name's providers — the rows the
         // caller wrote; any other file stays whole, its bag unrecoverable.
-        let answers: &[usize] = asked.map_or(&[], |(_, at)| at);
         let stored: Providers = whole
             .iter()
             .enumerate()
@@ -344,7 +343,7 @@ impl IndexCore {
             .collect();
         let mut out = None;
         for (name, at) in declared {
-            let claim = asked.is_some_and(|(a, _)| a == name);
+            let claim = name == asked;
             if at.is_empty() {
                 self.insert_resolved(&name, None, persisted, strip);
                 continue;

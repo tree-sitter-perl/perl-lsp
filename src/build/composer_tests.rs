@@ -145,7 +145,7 @@ return array(
 #[test]
 fn the_generated_classmap_reads_both_anchors_and_skips_any_other_spelling() {
     let (vendor, base) = (Path::new("/p/vendor"), Path::new("/p"));
-    let map = read_classmap(php(), CLASSMAP, vendor, base);
+    let map = read_classmap(php(), CLASSMAP_DOCUMENT, CLASSMAP, vendor, base).unwrap();
     let got = |c: &str| map.get(c).cloned();
     assert_eq!(got("Acme\\Model\\Base"), Some(vendor.join("acme/model/src/Base.php")));
     assert_eq!(got("Legacy_Widget"), Some(vendor.join("old/lib/legacy/anything.php")));
@@ -155,6 +155,17 @@ fn the_generated_classmap_reads_both_anchors_and_skips_any_other_spelling() {
     assert_eq!(got("Chained\\One"), None);
     assert_eq!(got("Computed\\One"), None);
     assert_eq!(map.len(), 5);
+}
+
+/// A capture the classmap vocabulary does not hold fails the read: a
+/// renamed or misspelt `@classmap.*` would otherwise drop every entry it
+/// spells and leave the classmap silently empty.
+#[test]
+fn a_classmap_document_capture_outside_the_vocabulary_fails_the_read() {
+    let (vendor, base) = (Path::new("/p/vendor"), Path::new("/p"));
+    let misspelt = CLASSMAP_DOCUMENT.replace("@classmap.path.vendor", "@classmap.path.vendr");
+    let err = read_classmap(php(), &misspelt, CLASSMAP, vendor, base).unwrap_err();
+    assert!(err.contains("classmap.path.vendr"), "{err}");
 }
 
 /// No generated classmap: a package's `classmap` directories are never

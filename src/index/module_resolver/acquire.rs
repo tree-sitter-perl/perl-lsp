@@ -1,8 +1,9 @@
 //! The one acquisition, for every served language: locate a name through
 //! the dependency map, parse what it places, persist where the process has
 //! a store, and land it. Only the resolver thread runs it; every asker —
-//! a didOpen's imports, the bulk indexer's demand, an invalidated save,
-//! descent from a landed file — reaches it through `request_resolve`.
+//! a didOpen, the bulk indexer, an invalidated save, a CLI query, each
+//! asking what a file uses (`used_identities`), and descent from a landed
+//! file — reaches it through `request_resolve`.
 
 use super::*;
 use crate::build::language_driver::{LanguageDriver, Located, LocatedBy};
@@ -60,39 +61,101 @@ fn parse_one(snap: &MapSnapshot, canon: &std::path::Path, cap: u64, attributed: 
     Some(Arc::new(CachedModule::new(canon.to_path_buf(), Arc::new(fa))))
 }
 
+/// What an acquisition landed: nothing, or the asked name's providers and
+/// what they ask for next (`descent`, read off the whole copies before any
+/// strip).
+pub(super) enum Landed {
+    Miss,
+    Hit { providers: usize, asks: Vec<String> },
+}
+
+/// Land `name` from the store when it holds a current landing for the
+/// name (`module_cache::warm_module`); `None` when it does not, and the
+/// name is placed and parsed instead. `strip_warm` is how a warm copy is
+/// kept (`land_warm`).
+pub(super) fn acquire_warm(
+    core: &IndexCore,
+    snap: &MapSnapshot,
+    name: &str,
+    db: Option<&rusqlite::Connection>,
+    strip_warm: bool,
+) -> Option<Result<Landed, MapMoved>> {
+    let warm = db.and_then(|conn| module_cache::warm_module(conn, name))?;
+    Some(land_warm(core, snap, name, warm, strip_warm))
+}
+
 /// Resolve `name` from what `snap`'s map `placed` for it (located and
 /// parsed with no lock held, `locate_and_parse`): persist, then land.
-/// Returns the WHOLE providers (descent reads what a strip drops); `Err`
-/// when the map moved since `snap`.
+/// `Err` when the map moved since `snap`.
 pub(super) fn acquire(
     core: &IndexCore,
     snap: &MapSnapshot,
     name: &str,
     placed: Vec<Placed>,
     db: Option<&rusqlite::Connection>,
-) -> Result<Option<Providers>, MapMoved> {
-    let answers = answering(snap.driver, name, &placed);
-    let whole: Providers = placed.into_iter().map(|p| p.file).collect();
-    let rows: Providers = answers.iter().map(|&i| Arc::clone(&whole[i])).collect();
+) -> Result<Landed, MapMoved> {
+    // Only the files that answer land: one that does not (an enclosing
+    // package's file declaring other names) lands when its own name is
+    // asked, so a warm start, which stores only answers, fills the same
+    // slots a cold one does.
+    let whole: Providers = answering(snap.driver, name, &placed).into_iter().map(|i| Arc::clone(&placed[i].file)).collect();
+    let answers: Vec<usize> = (0..whole.len()).collect();
     // Per FILE: each provider gets its own row, so a shadowed twin
-    // survives the warm start too.
-    let persisted = db.is_some_and(|conn| save_module_generation(conn, name, &(!rows.is_empty()).then_some(rows)));
-    core.land_dependency(Some((name, &answers)), snap.generation, whole.clone(), persisted, eviction_enabled())?;
-    Ok((!whole.is_empty()).then_some(whole))
+    // survives the warm start too. A miss is never persisted: no map's
+    // inputs see every install (a pip or cpanm into a search root), so a
+    // remembered miss would outlive the install that answers it, and
+    // locating one again is a stat per search root.
+    let persisted = !whole.is_empty() && db.is_some_and(|conn| save_module_generation(conn, name, &Some(whole.clone())));
+    let asks = descent(snap.driver, whole.iter().map(|m| &*m.analysis));
+    core.land_dependency(name, &answers, snap.generation, whole.clone(), persisted, eviction_enabled())?;
+    Ok(if whole.is_empty() { Landed::Miss } else { Landed::Hit { providers: whole.len(), asks } })
 }
 
-/// What a landed file asks for next. Parents and re-exports always: the
-/// MRO and a module's export surface read them at query time. With
-/// `prefetch` (a server's, never a one-shot run's), everything it uses
-/// (`used_identities`) and the classes its subs return — the chain a
-/// session walks before anyone asks for it.
-pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<String> {
+/// Land the store's whole copies of `name` (`module_cache::warm_module`):
+/// descent reads them first, exactly as it reads a fresh parse, so a warm
+/// start asks for what a cold one does. Kept as the one-shot run keeps a
+/// warm copy — bag-evicted, rehydrated on demand — unless `strip`.
+fn land_warm(
+    core: &IndexCore,
+    snap: &MapSnapshot,
+    name: &str,
+    warm: Vec<(PathBuf, crate::model::file_analysis::FileAnalysis)>,
+    strip: bool,
+) -> Result<Landed, MapMoved> {
+    let asks = descent(snap.driver, warm.iter().map(|(_, fa)| fa));
+    let n = warm.len();
+    let providers: Providers = warm
+        .into_iter()
+        .map(|(path, mut fa)| {
+            if !strip {
+                fa.evict_witness_bag();
+            }
+            Arc::new(CachedModule::new(path, Arc::new(fa)))
+        })
+        .collect();
+    // Every persisted row answered the name it is filed under.
+    let answers: Vec<usize> = (0..n).collect();
+    core.land_dependency(name, &answers, snap.generation, providers, true, strip)?;
+    Ok(Landed::Hit { providers: n, asks })
+}
+
+/// What a landed file asks for next, in every session alike: its parents
+/// and re-exports (the MRO and a module's export surface read them at query
+/// time) and, for the Perl hub, the classes its subs return — `has routes
+/// => sub { Mojolicious::Routes->new }` is a class a chain walks through
+/// that nothing the project names would land. Never everything the file
+/// uses: on FHEM (2026-11-01) that closure landed 1,173 names where the
+/// project's own demand placed 303, and cost a cold `--check` 30 s.
+/// A pack's return-class descent waits on a measurement of its own.
+pub(super) fn descent<'a>(
+    driver: &dyn LanguageDriver,
+    providers: impl IntoIterator<Item = &'a crate::model::file_analysis::FileAnalysis>,
+) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();
     // Every provider's, not just the winner's: a shadowed twin has its own
     // `use` list and `@ISA`, and a class only it names must still resolve.
-    for m in providers {
-        let fa = &m.analysis;
+    for fa in providers {
         for (_pkg, parents) in fa.package_parent_edges() {
             asks.extend(parents.iter().cloned());
         }
@@ -100,10 +163,9 @@ pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<St
         // producers' surfaces transitively, so those producers must land
         // even when no file `use`s them directly.
         asks.extend(fa.reexport_modules().cloned());
-        if !prefetch {
+        if !driver.caps().hub_enrichment {
             continue;
         }
-        asks.extend(fa.used_identities());
         // `has foo => sub { Bar->new }`, plugin-emitted typed subs, return
         // annotations: classes a chain walks through at query time.
         for sym in fa.symbols() {
