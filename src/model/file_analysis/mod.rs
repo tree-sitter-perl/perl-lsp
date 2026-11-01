@@ -38,9 +38,10 @@ mod surface_feed;
 pub use surface_feed::*;
 mod ancestry;
 pub use ancestry::*;
+mod deferral;
+pub use deferral::*;
 mod queries;
 mod enrichment;
-pub use enrichment::{declare_enrichment_profile, enrichment_profile, EnrichmentProfile};
 mod class_queries;
 mod cursor_queries;
 mod invocants;
@@ -191,6 +192,10 @@ pub struct FileAnalysis {
     #[serde(skip, default)]
     pub stamped_at: Option<u64>,
 
+    /// This copy's identity — what the session's receiver memo keys on.
+    #[serde(skip, default)]
+    pub(crate) instance: AnalysisInstance,
+
     /// Witness-bag baseline — `enrich_imported_types_with_keys`
     /// truncates back to this length before re-deriving so repeat
     /// calls stay idempotent.
@@ -235,7 +240,8 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub attr_projections: Vec<AttrProjection>,
 
-    /// Scalars reassigned after declaration (`$v = …` with the
+    /// Variables (by declaring symbol) reassigned after declaration
+    /// (`$v = …` with the
     /// variable itself as assignment target — element writes are NOT
     /// reassignment, they're modeled as shape mutations). A closed
     /// shape on a reassigned scalar isn't trustworthy: the other
@@ -243,7 +249,7 @@ pub struct FileAnalysis {
     /// conditional-reassignment lattice disagreement is the modeled
     /// fix; this set is its trust-gate stand-in.
     #[serde(default)]
-    pub reassigned_scalars: HashSet<String>,
+    pub reassigned_vars: HashSet<SymbolId>,
 
     /// Hash-key writes, in walk order. Input to the mutation-extension
     /// pass — see [`KeyWrite`].
@@ -338,7 +344,7 @@ pub struct FileAnalysis {
 /// serde default for `FileAnalysis::language` — the native builder's id,
 /// also what pre-field cache blobs deserialize as.
 fn default_language() -> String {
-    "perl".to_string()
+    crate::model::conventions::PERL_LANGUAGE.to_string()
 }
 
 /// What one package in this file declares about itself. Keyed by package
@@ -644,7 +650,7 @@ pub struct FileAnalysisParts {
     pub arrow_deref_sites: Vec<ArrowDerefSite>,
     pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
     pub attr_projections: Vec<AttrProjection>,
-    pub reassigned_scalars: HashSet<String>,
+    pub reassigned_vars: HashSet<SymbolId>,
     pub key_writes: Vec<KeyWrite>,
     pub dbic_source_name: Option<String>,
     pub column_keyed_verbs: HashSet<String>,

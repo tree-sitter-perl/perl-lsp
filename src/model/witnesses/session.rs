@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::model::file_analysis::{CachedModule, CrossFileLookup};
+use crate::model::file_analysis::{CachedModule, CrossFileLookup, ReceiverClasses, ReceiverSource};
 
 /// Which view of a candidate file the answer came from is NOT part of the
 /// key: `candidate_answer` memoizes the candidate's WHOLE contribution
@@ -91,13 +91,6 @@ struct SessionState {
     index_id: usize,
     /// `resolution_epoch()` when the memo was last known good.
     epoch: u64,
-    /// What this walk's verb READS out of enrichment.
-    ///
-    /// A server serves many verbs from one process, so the process-wide
-    /// declaration cell cannot express it — a partial profile set there would
-    /// outlive the verb that wanted it and answer the next one. The session is
-    /// the natural scope: it is opened per walk by the verb that knows.
-    profile: Option<crate::model::file_analysis::EnrichmentProfile>,
     /// The store generation of the FIRST conclusions row this walk consumed
     /// — an audit mark, not a gate.
     ///
@@ -116,6 +109,12 @@ struct SessionState {
     /// `visible_def_candidates` is a clone + sort of the whole candidate
     /// vec per call; one walk asks for the same class millions of times.
     candidates: HashMap<String, Arc<Vec<Arc<CachedModule>>>>,
+    /// Receiver answers by (analysis copy, ref index), switched on by
+    /// `enter_with_receivers`: a publish stamps a file and then lints it,
+    /// and both read the receiver of every member access. `None` keeps a
+    /// long walk (references, a sweep) from collecting one entry per member
+    /// access of every file it enriches.
+    receivers: Option<HashMap<(u64, usize), (ReceiverClasses, ReceiverSource)>>,
     /// Consult budget for the whole walk. Even memoized, some query at
     /// some scale exceeds any bound; a capped, marked-incomplete answer
     /// beats one that never returns.
@@ -213,11 +212,11 @@ impl ResolutionSession {
             *slot = Some(SessionState {
                 index_id: id,
                 epoch,
-                profile: None,
                 conclusion_generation: None,
                 paths: HashMap::new(),
                 memo: HashMap::new(),
                 candidates: HashMap::new(),
+                receivers: None,
                 fuel,
                 deadline: match default_budget_ms() {
                     0 => None,
@@ -228,6 +227,41 @@ impl ResolutionSession {
             });
             ResolutionSession { owns: true }
         })
+    }
+
+    /// `enter`, with the receiver memo switched on for the session — the
+    /// open one when this nests. For a walk that stamps a file and then
+    /// reads its receivers again (enrich, then lint).
+    pub fn enter_with_receivers(idx: &dyn CrossFileLookup) -> ResolutionSession {
+        let session = Self::enter(Some(idx));
+        with_session(idx, |st| {
+            st.receivers.get_or_insert_with(HashMap::new);
+        });
+        session
+    }
+
+    /// The remembered receiver of ref `ref_idx` in analysis copy
+    /// `instance`, resolved under `idx`.
+    pub fn receiver_answer(
+        idx: &dyn CrossFileLookup,
+        instance: u64,
+        ref_idx: usize,
+    ) -> Option<(ReceiverClasses, ReceiverSource)> {
+        with_session(idx, |st| st.receivers.as_ref()?.get(&(instance, ref_idx)).cloned()).flatten()
+    }
+
+    /// Remember a receiver answer, when the memo is on.
+    pub fn remember_receiver(
+        idx: &dyn CrossFileLookup,
+        instance: u64,
+        ref_idx: usize,
+        answer: &(ReceiverClasses, ReceiverSource),
+    ) {
+        with_session(idx, |st| {
+            if let Some(receivers) = st.receivers.as_mut() {
+                receivers.insert((instance, ref_idx), answer.clone());
+            }
+        });
     }
 
     /// Did this walk run out of consult budget? Test-only: the budget pins
@@ -252,24 +286,6 @@ impl ResolutionSession {
     #[cfg(test)]
     pub fn stats() -> Option<SessionStats> {
         SESSION.with(|s| s.borrow().as_ref().map(|st| st.stats))
-    }
-
-    /// Declare what this walk's verb reads out of enrichment. Test-only:
-    /// no server verb declares a profile yet (every server walk enriches
-    /// `full()`); the pins hold the mechanism until one does.
-    #[cfg(test)]
-    pub fn declare_profile(profile: crate::model::file_analysis::EnrichmentProfile) {
-        SESSION.with(|s| {
-            if let Some(st) = s.borrow_mut().as_mut() {
-                st.profile = Some(profile);
-            }
-        });
-    }
-
-    /// The profile the open walk declared, if any. `None` means no walk, or a
-    /// walk that declared nothing — both resolve to the process cell.
-    pub fn declared_profile() -> Option<crate::model::file_analysis::EnrichmentProfile> {
-        SESSION.with(|s| s.borrow().as_ref().and_then(|st| st.profile))
     }
 
     /// Record that this walk read a conclusions row published at
@@ -357,6 +373,9 @@ fn with_session<R>(
             st.memo.clear();
             st.candidates.clear();
             st.paths.clear();
+            if let Some(receivers) = st.receivers.as_mut() {
+                receivers.clear();
+            }
         }
         Some(f(st))
     })

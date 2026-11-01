@@ -350,15 +350,6 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         module_index.rebuild_reverse_index_from_cache()
     });
 
-    // Ancestry is now fully populated: materialize deferred cross-file
-    // `ClassIsa` plugin emissions (DBIC column/relationship accessors reached
-    // through a cross-file base) into the whole resident cached copies, so
-    // cross-file goto-def / references see them via `whole_present`. See
-    // `ModuleIndex::materialize_gated_emissions` / `GatedEmission`.
-    timings::phase("cli::materialize_gated", || {
-        module_index.materialize_gated_emissions()
-    });
-
     (ws, module_index)
 }
 
@@ -403,25 +394,25 @@ pub(crate) fn cli_gc_cache(root: &str) {
         eprintln!("No cache database for {root}");
         exit_with(1, "exit");
     };
-    let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(-1) };
-    let before = n("SELECT COUNT(*) FROM strings");
+    use module_cache::sql;
+    let n = |count: sql::Sql| -> i64 {
+        conn.query_row(count.registered(), [], |r| r.get(0)).unwrap_or(-1)
+    };
+    let before = n(sql::GC_COUNT_STRINGS);
     // Report the whole derived store, not just the table being swept: a
     // `strings` sweep that reclaims nothing because DEAD FILE rows are still
     // holding their names looks identical to a store with no garbage in it,
     // and those are very different situations.
     eprintln!(
-        "before: files={} refs={} syms={} strings={} (of which {} orphaned)",
-        n("SELECT COUNT(*) FROM files"),
-        n("SELECT COUNT(*) FROM refs"),
-        n("SELECT COUNT(*) FROM syms"),
+        "before: files={} refs={} syms={} held={} strings={} (of which {} orphaned)",
+        n(sql::GC_COUNT_FILES),
+        n(sql::GC_COUNT_REFS),
+        n(sql::GC_COUNT_SYMS),
+        n(sql::GC_COUNT_HELD),
         before,
-        n("SELECT COUNT(*) FROM strings s WHERE NOT EXISTS(SELECT 1 FROM refs r WHERE r.name_id=s.str_id) \
-             AND NOT EXISTS(SELECT 1 FROM syms y WHERE y.name_id=s.str_id OR y.key_id=s.str_id \
-                            OR y.container_id=s.str_id)"),
+        n(sql::GC_COUNT_ORPHANED_STRINGS),
     );
-    let missing = n(
-        "SELECT COUNT(*) FROM files f WHERE f.source='workspace'",
-    );
+    let missing = n(sql::GC_COUNT_WORKSPACE_FILES);
     let reclaimed = module_cache::gc_strings(&conn);
     eprintln!(
         "Reclaimed {reclaimed} of {before} interned strings ({:.1}%); {missing} workspace file rows remain",

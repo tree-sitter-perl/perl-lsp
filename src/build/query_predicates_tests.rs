@@ -63,3 +63,11 @@ fn an_unknown_predicate_or_kind_fails_the_check() {
     assert!(compile("((scalar) @s (#has-parent? @s))").is_err(), "no kind");
     assert!(compile("((scalar) @s (#receiver-isa? @s \"X\"))").is_ok(), "a deferred predicate");
 }
+
+#[test]
+fn is_kind_tests_the_captured_node_itself() {
+    // `$a = $b` and `$c = $d`: the left side of each is a scalar, the
+    // statement around it is not.
+    assert_eq!(admitted("(assignment_expression left: (_) @s (#is-kind? @s scalar))"), ["$a", "$c"]);
+    assert!(admitted("(assignment_expression left: (_) @s (#not-is-kind? @s scalar))").is_empty());
+}

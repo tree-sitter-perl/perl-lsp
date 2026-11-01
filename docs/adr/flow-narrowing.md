@@ -30,8 +30,14 @@ enrichment truncation.
 
 A span-extent witness would shadow a *later* reassignment's temporal
 witness, so the region is truncated at the first op that could disturb
-the subject (`first_subject_write` / `first_place_invalidation`).
-Conservative by construction — it under-narrows, never lies. The bias is
+the subject. Both cutoffs are lookups in an index built once per file,
+never a search per fact — every use observes, so a per-fact scan is a
+scan per use (Znuny `PDF.t`: a whole-block CST scan per place use took
+one file's build to 100 s). A variable's cutoff is its first rebind
+(`RebindIndex`, from the FlowEdges, shared with the pack narrowing and the
+pack observations); a place's is its first disturbance
+(`PlaceDisturbanceIndex`, one pass over the file's trees, `s///e` code
+included). Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
@@ -108,10 +114,13 @@ never answers with the outer's), and consumers ask the value
 
 A rebind that may not run is old-or-new no matter what its RHS is, and
 lands as `Unknown` outright. "May not run" is asked at two granularities,
-both spelled once in `cst.rs` (one climb, two boundaries):
+both spelled once in `cst.rs` (`cst::conditional_arm`, one climb, two
+`ArmBound`s). The climb is exact: a condition, a loop list, a `for`
+initialiser and a short-circuit's left operand run whenever their construct
+does, so only the arm that may be skipped counts.
 
 - **Relative to the block the witness lands on**
-  (`is_conditionally_executed_in_block`): a statement modifier, a
+  (`ArmBound::Block`): a statement modifier, a
   ternary arm, a short-circuit. `$x = undef if COND` anchors at the
   statement start, so the guard's own condition reads no value the write
   has not produced, and the successor reads no value it may never
@@ -128,6 +137,22 @@ both spelled once in `cst.rs` (one climb, two boundaries):
   **This is an approximation of a join and is deleted when Epic 16's
   `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
   is in that epic's table.
+
+An **observation** is the other half of the same question: a use of a
+variable or place that reveals what it holds — any deref (`@$x`, `$$x{k}`,
+`$x->[0]`, `&$x`), a numeric, string or regex operator, a builtin's
+argument. It is no write, so it mints no marker and resets nothing; it says
+what the subject holds on the paths that reach it. Every use reaches the
+bag through one producer, `Builder::observe`, as a `TypeObservation` —
+evidence, which a value and a class identity outrank, never a proof. Its
+region is the narrowing rule's: from the use to the end of the
+conditionally-run arm around it (`cst::conditional_arm`: the statement a
+postfix modifier guards, a ternary branch, a short-circuit RHS), else to
+the end of its block, cut at the subject's next rebind
+(`RegionFact::Observe`, sharing `PendingNarrow`'s cutoffs, place subjects
+included). Past an arm the value is a join of the arm and its bypass,
+which `JoinFold` will answer; until then the arm says nothing outside
+itself.
 
 Declarations do not mint a marker, and that is placement rather than
 principle: a declaration's companions may legitimately sit before it (a
@@ -148,7 +173,7 @@ keyed by the subject's **source spelling** on the same `Variable`
 attachment, so the reducer, scope-walk, and narrow-filter are untouched —
 a place witness is just a span-scoped slot witness. The place-vs-variable
 distinction lives in exactly two spots: the truncation rule and the one
-`method_call_invocant_class` query seam (which fires for any invocant
+`method_call_invocant_classes` query seam (which fires for any invocant
 carrying a subscript — `->` / `{` / `[`). Truncation generalizes to
 multi-hop as "an opaque use of any **proper prefix** of the place (root,
 intermediate element, or — for a dynamic-key place — a key scalar)
@@ -177,6 +202,76 @@ too — non-representable negations (`isa`) contribute nothing, making the
 cross-condition intersection automatic. General negation stays parked
 (see `optional-types.md`).
 
+A condition is read through its connectives before any atom is
+(`facts_for_region(cond, holds)`, the one reader every arm, fall-through
+and chain calls). `!X` / `not X` read X at the flipped polarity. `A && B`
+(or `and`) proves both sides only where it holds, and `A || B` (or `or`)
+proves both sides false only where it fails; the other outcome of each
+proves nothing about either side alone, so `return if (defined($x) && $y)`
+leaves `$x` as it was rather than `Undef`. D3/D4 judge each guard literal
+(an atom with the negations applied directly to it) at its own span and
+polarity, since a verdict on one conjunct is not a verdict on the
+condition.
+
+A statement modifier is a one-arm region: `STMT if G` narrows STMT by G
+TRUE, `STMT unless G` by G FALSE, exit or not. A ternary's branches and a
+logical operator's right side are arms the same way: `G ? A : B` narrows A
+by G TRUE and B by G FALSE, `G && R` / `G and R` narrow R by G TRUE, and
+`G || R` / `G or R` by G FALSE (`narrow_arm`, the one spelling).
+A loop tests its condition before every run of its body, so the body is
+an arm too: `while (G)`, `STMT while G` and a C-style `for (…; G; …)`
+narrow by G TRUE, `until` by G FALSE. `do BLOCK while G` is the one
+exception — perlsyn runs the block once before the first test. Nothing
+narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
+rest of the block is the fall-through and takes the opposite polarity.
+Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
+diagnostics see each statement-level guard once, as before.
+
+A pack guard states its region one way: the pattern that recognizes the
+guard tags the arm it enters `@narrow.arm` (an `if`/`elif` body, a
+ternary's consequence, the right of `&&`/`and`), and the extractor attaches
+the refinement in the guard's own scope over that arm, cut at the
+subject's next rebind. The guard and its arm join by match, so neither
+needs to be a scope. Pack guards (`isinstance`, `dynamic_cast`, optional
+engagement) have no complement, so no arm narrows on a false test; the
+early-exit fall-through (`if not isinstance(x, T): return`) waits on a
+pack-side negation (TODO(pack-exit-guard)).
+
+## A tag is a value: `ref` names its subject
+
+`ref $x`, `reftype $x` and `blessed $x` return a string that says what
+`$x` held — so their `Expr` witness is `RefTagOf { subject, site, via }`,
+a `String` to every consumer (`is_string()`, `String` on the Surface and
+on the wire) that also names the variable it was asked of. It flows like
+any value: `my $ref = ref $x` reaches `$ref` by its ordinary flow edge,
+with no fold table and no name lookup.
+
+`ref` is a builtin and core knows it; `reftype` and `blessed` are
+Scalar::Util's, declared by `frameworks/scalar-util.rhai`'s
+`ref_tag_functions()` and recognised only where the file imported the
+name from that module or called it fully qualified. A file's own
+`sub blessed` is just a sub. The same gate decides the `blessed $x`
+strip below.
+
+So `ref($x) eq 'HASH'` and `$ref eq 'HASH'` are one guard, read two ways:
+an inline call is its own tag; a variable is whatever tag its value is.
+The variable form resolves in the fold (`emit_tag_narrowing_witnesses`,
+clear-and-emit on `tag_narrowing`), since `$ref`'s value is a fold
+answer. A tag guards its subject only while it is still true:
+
+- **Same sub.** A tag returned from another sub names that sub's
+  variable; the caller's namesake is a different binding.
+- **No rebind since the tag.** A write to the subject between the `ref`
+  and the guard voids it; the region also truncates at the next write,
+  as every narrowing does.
+
+`via` says what the literal can prove: `ref` a reftype token or a class,
+`reftype` only a token, `blessed` only a class. A string-context use of
+the tag (`$ref eq 'HASH'`) is an observation, which the tag — a value —
+outranks. Two tags that disagree join to
+plain `String`. Under unions the same rule holds arm-wise: a guard reads
+a subject only when every arm of `$ref`'s value names the same one.
+
 ## `defined`/`blessed` strip via a re-emittable fold pass
 
 `StripOptional` can't resolve at walk time: the subject's `Optional`
@@ -203,7 +298,7 @@ where a guard narrows the variable (SSA's π), and a read edges to its
 reaching writes' value attachments instead of to `Variable@point`. Each
 write's value is then computed once per fold iteration, and the chase
 needs no temporal rule at all. A loop makes the reaching set plural, which
-is the same join as `TODO(union-join)`. Until then, `TODO(def-use)` marks
+is the one join (`docs/adr/union-types.md`). Until then, `TODO(def-use)` marks
 the query-time window.
 
 ## Forward work

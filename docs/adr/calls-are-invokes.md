@@ -34,7 +34,9 @@ then a pack's linkage-visible definitions gated by include-closure
 reachability. `query_sub_return_type` walks the same ladder for a bare
 name, so a call and a name probe cannot disagree. The ladder shares the
 query's `QueryState`, so a call chain that crosses back into a file already
-on the path stops at the cycle guard.
+on the path stops at the cycle guard, and one that reaches the same name's
+fan-out again from another file stops at the bag-free fan-out node
+(`docs/adr/resolution-session.md`).
 
 A bake has no index, so an unresolved `Function` is an exit no conclusion
 key can name. The bake records it and poisons, and the file's answer for
