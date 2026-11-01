@@ -136,10 +136,7 @@ impl<'a> ClassLadder<'a> {
 }
 
 fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
-    let point = match q.attachment {
-        WitnessAttachment::Variable { .. } => q.point,
-        _ => None,
-    };
+    let point = q.point.filter(|_| q.attachment.is_temporal());
     (
         bag as *const _ as usize,
         q.attachment.clone(),

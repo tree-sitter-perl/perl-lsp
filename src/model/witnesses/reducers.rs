@@ -184,7 +184,7 @@ impl LiveWindow {
     pub(crate) fn at(ws: &[&Witness], q: &ReducerQuery) -> Self {
         let point = q
             .point
-            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
+            .filter(|_| q.attachment.is_temporal());
         let in_window = |w: &&&Witness| point.is_none_or(|p| w.span.start <= p);
         let reset_at = ws
             .iter()
@@ -232,7 +232,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
     fn claims(&self, w: &Witness) -> bool {
         matches!(
             w.attachment,
-            WitnessAttachment::Variable { .. } | WitnessAttachment::Expression(_)
+            WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_) | WitnessAttachment::Expression(_)
         ) && matches!(
             w.payload,
             WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) | WitnessPayload::Reset
@@ -1057,8 +1057,8 @@ impl WitnessReducer for ReturnExprReducer {
         // fold: a bless mid-body types the variable only PAST the bless
         // site — a query before it keeps the rep answer (HashRef pre-,
         // instance post-bless).
-        let temporal_gate = |w: &&Witness| match (&w.attachment, q.point) {
-            (WitnessAttachment::Variable { .. }, Some(p)) => {
+        let temporal_gate = |w: &&Witness| match (w.attachment.is_temporal(), q.point) {
+            (true, Some(p)) => {
                 let s = w.span.start;
                 (s.row, s.column) <= (p.row, p.column)
             }

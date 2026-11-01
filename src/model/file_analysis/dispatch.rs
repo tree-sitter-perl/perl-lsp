@@ -848,6 +848,7 @@ pub struct DerefSite {
     pub span: Span,
     /// Receiver spelling (`$x`).
     pub receiver: String,
+    pub subject: Subject,
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
     pub form: DerefForm,
@@ -881,8 +882,9 @@ pub enum GuardPredicate {
 /// (in the guard, before any narrowed region).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardSite {
-    /// Subject's source spelling (`$x`, or a place key).
-    pub subject: String,
+    pub subject: Subject,
+    /// The subject as written, for the rendered message.
+    pub spelling: String,
     pub scope: ScopeId,
     pub predicate: GuardPredicate,
     /// Whether the predicate holds where the guard EXPRESSION is true (`!`

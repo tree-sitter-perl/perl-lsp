@@ -4,7 +4,9 @@
 
 use crate::model::file_analysis::ReceiverPolicy;
 use super::*;
-use crate::model::file_analysis::{FileAnalysis, InferredType, TypeProvenance};
+use crate::model::file_analysis::{
+    Binding, FileAnalysis, InferredType, PathStep, Place, Slot, Slots, TypeProvenance,
+};
 use tree_sitter::Point;
 
 // ── Flow-sensitive narrowing (docs/adr/flow-narrowing.md) ──
@@ -439,13 +441,23 @@ fn invocant_class_of(fa: &FileAnalysis, method: &str) -> Option<String> {
     fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)
 }
 
+/// The place under the lexical `root` (declared once in the source) at `path`.
+fn lexical_place(fa: &FileAnalysis, root: &str, path: Vec<PathStep>) -> Place {
+    let sym = fa.symbols().iter().find(|s| s.name == root).unwrap_or_else(|| panic!("no symbol {root}"));
+    Place { root: Binding::Lexical(sym.id), path }
+}
+
+fn key(k: &str) -> PathStep {
+    PathStep::Hash(Slots::One(Slot::Const(k.to_string())))
+}
+
 #[test]
 fn narrow_place_block_if_isa() {
     let fa = build_fa(
         "package P;\nsub f {\n    my ($self) = @_;\n    if ($self->{h}->isa('Foo')) {\n        $self->{h}->go;\n    }\n}",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$self->{h}", Point::new(4, 8)),
+        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("h")]), Point::new(4, 8), None),
         Some(InferredType::ClassName("Foo".into())),
         "place isa guard narrows the slot inside the block",
     );
@@ -499,7 +511,7 @@ fn narrow_place_truncated_by_opaque_root_op() {
 
 #[test]
 fn narrow_place_dynamic_key() {
-    // A plain-scalar key is a stable place keyed by its spelling
+    // A plain-scalar key names one slot while the scalar is unchanged
     // (`$self->{$k}`), so it narrows like a constant-key place.
     let fa = build_fa(
         "package P;\nsub f {\n    my ($self, $k) = @_;\n    return unless $self->{$k}->isa('Foo');\n    $self->{$k}->go;\n}",
@@ -528,7 +540,7 @@ fn narrow_place_dynamic_key_truncated_by_key_reassign() {
 
 #[test]
 fn narrow_place_dynamic_key_truncated_by_slot_write() {
-    // Writing the same dynamic slot truncates (exact-spelling match).
+    // Writing the same dynamic slot truncates.
     let fa = build_fa(
         "package P;\nsub f {\n    my ($self, $k) = @_;\n    return unless $self->{$k}->isa('Foo');\n    $self->{$k}->before;\n    $self->{$k} = other();\n    $self->{$k}->after;\n}",
     );
@@ -592,10 +604,74 @@ fn narrow_place_ref_eq() {
         "package P;\nsub f {\n    my ($self) = @_;\n    return unless ref($self->{cfg}) eq 'HASH';\n    my $v = $self->{cfg};\n}",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$self->{cfg}", Point::new(4, 12)),
+        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("cfg")]), Point::new(4, 12), None),
         Some(InferredType::HashRef),
         "ref(place) eq 'HASH' narrows the slot",
     );
+}
+
+// ── Place identity: a place is its root's binding plus its path ──
+
+#[test]
+fn narrow_place_package_alias_spellings_share_the_place() {
+    // `our %h` in `P` and `%P::h` are one variable, so a guard on one
+    // spelling narrows a use through the other, and a write through either
+    // disturbs it.
+    let fa = build_fa(
+        "package P;\nour %h;\nsub f {\n    return unless $P::h{cfg}->isa('Cfg');\n    $h{cfg}->load;\n    %P::h = ();\n    $h{cfg}->after;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "load").as_deref(), Some("Cfg"));
+    assert_ne!(
+        invocant_class_of(&fa, "after").as_deref(),
+        Some("Cfg"),
+        "a write through the qualified spelling disturbs the place",
+    );
+}
+
+#[test]
+fn narrow_place_implicit_and_explicit_arrow_are_one_place() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{a}{b}->isa('Foo');\n    $self->{a}->{b}->go;\n    $$self{a}{b}->again;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+    assert_eq!(invocant_class_of(&fa, "again").as_deref(), Some("Foo"), "a sigil deref is the arrow");
+}
+
+#[test]
+fn narrow_place_quoted_and_bare_keys_are_one_key() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{'cfg'}->isa('Cfg');\n    $self->{cfg}->load;\n    $self->{\"cfg\"}->again;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "load").as_deref(), Some("Cfg"));
+    assert_eq!(invocant_class_of(&fa, "again").as_deref(), Some("Cfg"));
+}
+
+#[test]
+fn narrow_place_slice_disturbs_only_the_slots_it_names() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my %h = @_;\n    return unless $h{a}->isa('Foo');\n    @h{qw(b c)} = (1, 2);\n    $h{a}->kept;\n    @h{'a', 'b'} = (1, 2);\n    $h{a}->gone;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "kept").as_deref(), Some("Foo"), "a slice of sibling slots keeps the slot");
+    assert_ne!(invocant_class_of(&fa, "gone").as_deref(), Some("Foo"), "a slice naming the slot disturbs it");
+}
+
+#[test]
+fn narrow_place_shadowing_variable_is_another_place() {
+    // The inner `$self` is another variable: writing its slot leaves the
+    // outer one narrowed.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self) = @_;\n    return unless $self->{x}->isa('Foo');\n    {\n        my $self = {};\n        $self->{x} = 1;\n    }\n    $self->{x}->after;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "after").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn narrow_place_truncated_by_computed_key_write() {
+    // A computed key may name any slot.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self, $k) = @_;\n    return unless $self->{x}->isa('Foo');\n    $self->{$k . 'y'} = 1;\n    $self->{x}->after;\n}",
+    );
+    assert_ne!(invocant_class_of(&fa, "after").as_deref(), Some("Foo"));
 }
 
 // ── Place narrowing: direct element form (`$h{k}` / `$a[0]`) ──
@@ -607,7 +683,7 @@ fn narrow_place_direct_hash_isa() {
         "package P;\nsub f {\n    my %h = @_;\n    return unless $h{cfg}->isa('Cfg');\n    $h{cfg}->load;\n}",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$h{cfg}", Point::new(4, 4)),
+        fa.place_type_at(&lexical_place(&fa, "%h", vec![key("cfg")]), Point::new(4, 4), None),
         Some(InferredType::ClassName("Cfg".into())),
         "direct hash-element isa guard narrows the slot",
     );

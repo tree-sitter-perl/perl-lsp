@@ -1213,7 +1213,8 @@ fn remap_spans(
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
-        | WitnessAttachment::Param { .. } => {}
+        | WitnessAttachment::Param { .. }
+        | WitnessAttachment::Place(_) => {}
     };
     for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);

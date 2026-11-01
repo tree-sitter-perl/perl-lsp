@@ -40,6 +40,8 @@ mod ancestry;
 pub use ancestry::*;
 mod deferral;
 pub use deferral::*;
+mod place;
+pub use place::*;
 mod queries;
 mod enrichment;
 mod class_queries;

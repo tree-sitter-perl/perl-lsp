@@ -578,7 +578,7 @@ pub fn collect_diagnostics(
         if options.deref_shape {
             if let Some(demanded) = site.form.demands_rep() {
                 if let Some(rep) = analysis
-                    .guard_narrowed_rep(&site.receiver, site.span.start)
+                    .guard_narrowed_rep(&site.subject, site.span.start)
                     .and_then(|t| crate::model::file_analysis::RepKind::of(&t))
                 {
                     if rep != demanded {

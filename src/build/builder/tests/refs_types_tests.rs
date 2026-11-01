@@ -502,7 +502,13 @@ fn every_use_observes_on_one_rule() {
     assert_eq!(at("$n", 2, 18), Some(InferredType::Numeric), "inside the arm");
     assert_eq!(at("$n", 6, 0), None, "past the arm");
     assert_eq!(at("$s", 6, 0), None, "past the short-circuit");
-    assert_eq!(at("$self->{items}", 6, 0), Some(InferredType::ArrayRef));
+    use crate::model::file_analysis::{Binding, PathStep, Place, Slot, Slots};
+    let self_sym = fa.symbols().iter().find(|s| s.name == "$self").expect("$self");
+    let items = Place {
+        root: Binding::Lexical(self_sym.id),
+        path: vec![PathStep::Deref, PathStep::Hash(Slots::One(Slot::Const("items".into())))],
+    };
+    assert_eq!(fa.place_type_at(&items, Point::new(6, 0), None), Some(InferredType::ArrayRef));
     assert_eq!(at("$v", 6, 0).as_ref().and_then(|t| t.class_name()), Some("Foo"));
 }
 

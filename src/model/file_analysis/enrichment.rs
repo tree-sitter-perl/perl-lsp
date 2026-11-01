@@ -903,7 +903,7 @@ impl FileAnalysis {
         use crate::model::conventions::InvocantText;
         let mut out = Vec::new();
         for r in self.refs() {
-            let (receiver, form) = match &r.kind {
+            let (receiver, form, place) = match &r.kind {
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     // Only a scalar invocant can be undef/Optional; a
                     // bareword/`__PACKAGE__`/chain/bridged receiver never
@@ -912,22 +912,26 @@ impl FileAnalysis {
                     if !matches!(name.classify(), InvocantText::Scalar(_)) {
                         continue;
                     }
-                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()))
+                    let place = invocant.place().cloned();
+                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()), place)
                 }
                 // A scalar `var_text` is the arrow form `$x->{k}`; the direct
                 // `$h{k}` form's base is the named hash, which can't be an
                 // undef *receiver* (and won't type as Undef/Optional anyway).
                 RefKind::HashKeyAccess { var_text, .. } if var_text.starts_with('$') => {
-                    (var_text.clone(), DerefForm::HashKey)
+                    (var_text.clone(), DerefForm::HashKey, None)
                 }
                 _ => continue,
             };
-            if let Some(ty) =
-                self.inferred_type_via_bag_ctx(&receiver, r.span.start, module_index)
-            {
+            let subject = match place {
+                Some(place) => Subject::Place(place),
+                None => Subject::Variable(receiver.clone()),
+            };
+            if let Some(ty) = self.subject_type_at(&subject, r.span.start, module_index) {
                 out.push(DerefSite {
                     span: r.span,
                     receiver,
+                    subject,
                     receiver_ty: ty,
                     form,
                 });
@@ -942,6 +946,7 @@ impl FileAnalysis {
                 out.push(DerefSite {
                     span: s.span,
                     receiver: s.receiver.clone(),
+                    subject: Subject::Variable(s.receiver.clone()),
                     receiver_ty: ty,
                     form: s.form.clone(),
                 });
@@ -985,7 +990,7 @@ impl FileAnalysis {
         let mut out = Vec::new();
         for g in &self.guard_sites {
             let Some(prior) = self
-                .inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+                .subject_type_at(&g.subject, g.before_point, module_index)
                 .filter(InferredType::is_known)
             else {
                 continue;
@@ -1028,7 +1033,7 @@ impl FileAnalysis {
             out.push(GuardRedundancy {
                 span: g.span,
                 verdict,
-                subject: g.subject.clone(),
+                subject: g.spelling.clone(),
                 predicate: g.predicate.clone(),
                 satisfied,
             });
@@ -1044,12 +1049,16 @@ impl FileAnalysis {
     /// directly. Innermost (narrowest) containing region wins. `None` when no
     /// guard narrows the subject here (so D6 fires only on guard-narrowed
     /// reps, per the plan).
-    pub fn guard_narrowed_rep(&self, subject: &str, point: Point) -> Option<InferredType> {
+    pub fn guard_narrowed_rep(&self, subject: &Subject, point: Point) -> Option<InferredType> {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
         let mut best: Option<&crate::model::witnesses::Witness> = None;
         for w in self.witnesses.filter(|w| {
             matches!(&w.source, WitnessSource::Builder(s) if s == "narrowing" || s == "defined_narrowing")
-                && matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == subject)
+                && match (&w.attachment, subject) {
+                    (WitnessAttachment::Variable { name, .. }, Subject::Variable(v)) => name == v,
+                    (WitnessAttachment::Place(p), Subject::Place(q)) => **p == *q,
+                    _ => false,
+                }
         }) {
             if !contains_point(&w.span, point) {
                 continue;
