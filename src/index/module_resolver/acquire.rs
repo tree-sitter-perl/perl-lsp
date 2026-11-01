@@ -123,8 +123,9 @@ pub(super) fn land_placed(
 
 /// What a landed file asks for next. Parents and re-exports always: the
 /// MRO and a module's export surface read them at query time. With
-/// `prefetch`, everything it uses (`used_identities`) and the classes its
-/// subs return — the chain a session walks before anyone asks for it.
+/// `prefetch` (a server's, never a one-shot run's), everything it uses
+/// (`used_identities`) and the classes its subs return — the chain a
+/// session walks before anyone asks for it.
 pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<String> {
     use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
     let mut asks: Vec<String> = Vec::new();
