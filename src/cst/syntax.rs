@@ -41,11 +41,15 @@ struct Entry<'t> {
 /// The structure of one parse.
 pub(crate) struct Structure<'t> {
     entries: Vec<Entry<'t>>,
+    /// Each node's kind id, a column of its own: a kind scan reads two
+    /// bytes per node instead of a 48-byte entry.
+    kinds: Vec<u16>,
 }
 
 impl<'t> Structure<'t> {
     fn build(root: Node<'t>) -> Self {
         let mut entries: Vec<Entry<'t>> = Vec::with_capacity(root.descendant_count());
+        let mut kinds: Vec<u16> = Vec::with_capacity(root.descendant_count());
         let mut cursor = root.walk();
         // Explicit stack, like every tree pass here: a recursive descent
         // costs one frame per CST level.
@@ -59,6 +63,7 @@ impl<'t> Structure<'t> {
                 start_byte: node.start_byte() as u32,
                 end_byte: node.end_byte() as u32,
             });
+            kinds.push(node.kind_id());
             let id = entries.len() - 1;
             if cursor.goto_first_child() {
                 open.push(id as u32);
@@ -70,7 +75,7 @@ impl<'t> Structure<'t> {
                     break;
                 }
                 if !cursor.goto_parent() {
-                    return Structure { entries };
+                    return Structure { entries, kinds };
                 }
                 if let Some(closed) = open.pop() {
                     entries[closed as usize].end = entries.len() as u32;
@@ -225,6 +230,26 @@ impl<'a, 't> SyntaxNode<'a, 't> {
     }
     pub(crate) fn kind(&self) -> &'static str {
         self.entry().ts.kind()
+    }
+    pub(crate) fn kind_id(&self) -> u16 {
+        self.tree.kinds[self.id.0 as usize]
+    }
+    /// Every node strictly under this one whose kind id is in `kinds`, in
+    /// preorder: a scan of the kind column over the subtree's interval.
+    pub(crate) fn descendants_of_kind<'k>(
+        &self,
+        kinds: &'k [u16],
+    ) -> impl Iterator<Item = SyntaxNode<'a, 't>> + 'k
+    where
+        'a: 'k,
+    {
+        let tree = self.tree;
+        let ids = self.id.0 as usize + 1..self.entry().end as usize;
+        tree.kinds[ids.clone()]
+            .iter()
+            .zip(ids)
+            .filter(|(k, _)| kinds.contains(k))
+            .map(move |(_, id)| SyntaxNode { tree, id: NodeId(id as u32) })
     }
     pub(crate) fn parent(&self) -> Option<SyntaxNode<'a, 't>> {
         let p = self.entry().parent;
