@@ -3,6 +3,30 @@
 
 use super::*;
 
+/// A reference its match names by `@ref.spelled`, placed at the token the
+/// `spelled` walk reaches from the node the document tagged. The scopes the
+/// walk passed are its qualifier, minted here, where the levels are in hand.
+pub(super) fn flatten_spelled<'t>(
+    node: tree_sitter::Node<'t>,
+    cap: Capture,
+    links: &super::links::Links<'t>,
+    pack: &LangPack,
+    source: &[u8],
+    match_id: usize,
+) -> Flattened<'t> {
+    let Some((leaf, scopes)) = links.spelled_leaf(node, source) else {
+        return Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id);
+    };
+    let event = Event::at(leaf, cap, leaf.utf8_text(source).unwrap_or("").to_string(), match_id);
+    match scopes {
+        Some(scopes) => {
+            let qualifier = scopes.join(pack.names.sep().unwrap_or_default());
+            with(event, Payload::Qualifier((pack.shape_name)(&qualifier)))
+        }
+        None => event,
+    }
+}
+
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let Capture::Ref(ref_kind) = e.cap else { return };
     let pack = st.pack;
@@ -30,6 +54,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let simple = matches!(invocant, Some((_, crate::model::conventions::Invocant::Name(_))));
     let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
     let arg_count = super::members::call_args(ad, e.match_id).map(|a| a.len());
+    let qualifier = match e.payload.as_deref() {
+        Some(Payload::Qualifier(q)) => Some(q.clone()),
+        _ => None,
+    };
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         // `@ref.spelled`: the name as the match spells it, where that is
@@ -41,5 +69,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         invocant,
         member_op,
         arg_count,
+        qualifier,
     });
 }

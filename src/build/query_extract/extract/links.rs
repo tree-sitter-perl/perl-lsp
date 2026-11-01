@@ -98,6 +98,37 @@ impl<'t> Links<'t> {
         Some((owner, node))
     }
 
+    /// The `spelled` walk: a reference named by its whole spelling, from the
+    /// node its `@ref.<kind>` tags down each level's `name` (and a templated
+    /// name's `base`) to the token the reference rewrites. The scopes the
+    /// qualified levels name on the way come with it, outermost first
+    /// (`a::b::f` → `f`, `[a, b]`; `::f` → `f`, `[]`), or `None` when no
+    /// level was qualified. `None` when the node has no level below it: the
+    /// document already put the reference on its token.
+    pub(super) fn spelled_leaf(
+        &self,
+        mut node: tree_sitter::Node<'t>,
+        src: &[u8],
+    ) -> Option<(tree_sitter::Node<'t>, Option<Vec<String>>)> {
+        const W: LinkWalk = LinkWalk::Spelled;
+        let tagged = node.id();
+        let mut scopes: Option<Vec<String>> = None;
+        loop {
+            if let Some(name) = self.get(W, node, LinkCap::Name) {
+                let level = scopes.get_or_insert_with(Vec::new);
+                if let Some(scope) = self.get(W, node, LinkCap::Scope) {
+                    level.push(scope.utf8_text(src).unwrap_or("").to_string());
+                }
+                node = name;
+            } else if let Some(base) = self.get(W, node, LinkCap::Base) {
+                node = base;
+            } else {
+                break;
+            }
+        }
+        (node.id() != tagged).then_some((node, scopes))
+    }
+
     /// The `deref` walk: a declarator chain from its `@nested.target` to the
     /// leaf the document marked, one step per pointer or reference level,
     /// each carrying the cv-qualifiers marked among its children. `None` when

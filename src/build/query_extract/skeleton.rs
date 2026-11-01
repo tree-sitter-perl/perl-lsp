@@ -71,10 +71,14 @@ pub struct SkelRef {
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
     /// so operator-correctness is a ref query, not a separate walk.
     pub member_op: Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>,
-    /// Written argument count at a call ref (`call`/`qcall`/`member.call`),
+    /// Written argument count at a call ref (`call`/`member.call`),
     /// counted from the argument list the same match captured. Flows to
     /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
+    /// The scopes a spelled reference is qualified by (`a::b` in
+    /// `a::b::f(...)`), as the `spelled` walk read them off its levels;
+    /// `None` for a reference written unqualified.
+    pub qualifier: Option<String>,
 }
 
 /// One `@expr.call` site.
@@ -1092,25 +1096,16 @@ impl SkeletonAnalysis {
             .filter_map(|r| {
                 use crate::model::file_analysis::{RefBinding, RefKind};
                 use super::vocab::RefCap;
-                let mut span = Span { start: r.start, end: r.end };
+                let span = Span { start: r.start, end: r.end };
                 let mut binding = None;
                 let kind = match r.kind {
-                    RefCap::Call => RefKind::FunctionCall,
-                    // Qualified call (`fmt::format_to(...)`): Perl parity —
-                    // the full path rides `target_name`, the qualifier the
-                    // `Function` binding, and the span narrows to the bare
+                    // A qualified call (`fmt::format_to(...)`): Perl parity —
+                    // the whole spelling rides `target_name`, the qualifier
+                    // the `Function` binding, and the ref sits on the bare
                     // name token (the rename/highlight unit; also what
-                    // suppresses the `@expr.read.var` duplicate at the same
-                    // start). The tail segment is an identifier, so it never
-                    // spans rows — the end-anchored column math is safe.
-                    RefCap::QCall => {
-                        let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
-                        let pkg = pkg?;
-                        span.start = tree_sitter::Point {
-                            row: r.end.row,
-                            column: r.end.column.saturating_sub(bare.len()),
-                        };
-                        binding = Some(RefBinding::Function { package: pkg.to_string() });
+                    // claims the `@expr.read.var` at the same start).
+                    RefCap::Call => {
+                        binding = r.qualifier.clone().map(|package| RefBinding::Function { package });
                         RefKind::FunctionCall
                     }
                     // `recv.field` / `recv->field`: a value read. The

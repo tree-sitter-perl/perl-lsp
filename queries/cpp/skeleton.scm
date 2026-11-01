@@ -682,13 +682,20 @@
   function: (identifier) @ref.call
   arguments: (argument_list) @arity.args) @expr.call
 
-; qualified calls (`fmt::format_to(...)`, `detail::vformat_to(...)`,
-; `Widget::create(...)`): the whole path is captured; extraction narrows the
-; ref span to the bare name token and carries the qualifier as
-; `resolved_package` — the namespace-participation half of gr identity.
+; qualified calls (`fmt::format_to(...)`, `a::b::f(...)`,
+; `Widget::create(...)`, `ns::f<T>(...)`) are named by their whole spelling
+; and rewritten at the name token; the scopes they pass are the qualifier the
+; ref resolves in — the namespace-participation half of gr identity.
 (call_expression
-  function: (qualified_identifier) @ref.qcall
+  function: (qualified_identifier) @ref.call @ref.spelled
   arguments: (argument_list) @arity.args) @expr.call
+; The `spelled` walk, rooted at each @ref.spelled: a qualifier nests per
+; segment (`a::b::f` is `a::(b::f)`), each level naming its scope, and a
+; template call's name sits under its argument list (`f` in `f<T>`).
+(qualified_identifier scope: (_) @link.scope) @link.from.spelled
+(qualified_identifier name: (_) @link.name) @link.from.spelled
+(template_function name: (_) @link.base) @link.from.spelled
+(template_method name: (_) @link.base) @link.from.spelled
 
 (function_declarator parameters: (parameter_list) @arity.sig)
 ; each declared parameter of a signature is required, defaulted, or takes

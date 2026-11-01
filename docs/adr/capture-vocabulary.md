@@ -285,8 +285,12 @@ So the document states each level once, as a link: `@link.from.<walk>` on
 a node and `@link.<rel>` on the node one level away, by a closed set of
 relations (`inner`, `declares`, `scope`, `name`, `base`). The `<walk>` suffix
 names the walk the link belongs to, from a closed set (`ool`, `qualifier`,
-`deref`), and each walk has a root capture (`@ool.def`, `@qualifier`,
-`@nested.target`). The `deref` walk also reads `@deref.*` marks, which say
+`deref`, `spelled`), and each walk has a root capture (`@ool.def`,
+`@qualifier`, `@nested.target`, `@ref.spelled`). The `spelled` walk carries
+a reference its match names by the whole spelling from the node the
+document tagged down to the token it rewrites (`f` in `a::b::f<T>`), and
+mints the scopes it passes as the reference's qualifier, so no consumer
+splits the spelling to recover them. The `deref` walk also reads `@deref.*` marks, which say
 what a level is rather than where it leads (`docs/adr/pointer-stack.md`). The driver
 records every link while it flattens the matches, keyed by walk and node id.
 A walk starts at its root's node and follows only its own links

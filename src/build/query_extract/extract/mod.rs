@@ -41,6 +41,9 @@ enum Payload {
     Deref(Vec<crate::model::file_analysis::DerefStep>),
     /// A `@member.recv`'s invocant: a written name, or an expression.
     Recv(crate::model::conventions::Invocant),
+    /// A spelled reference's qualifier: the scopes the `spelled` walk
+    /// passed on the way to its token (`a::b` for `a::b::f`).
+    Qualifier(String),
 }
 
 /// A capture before it is placed: the live node it tags, and the event.
@@ -468,8 +471,13 @@ pub fn extract_in(
     // everything else becomes an event carrying its text.
     let mut flat: Vec<Flattened<'_>> = Vec::new();
     let match_count = captured.last().map_or(0, |&(_, _, mid)| mid);
+    let spelled: std::collections::HashSet<usize> =
+        captured.iter().filter(|&&(_, cap, _)| cap == Capture::RefSpelled).map(|&(_, _, mid)| mid).collect();
     for (node, cap, match_id) in captured {
         match cap {
+            Capture::Ref(_) if spelled.contains(&match_id) => {
+                flat.push(refs::flatten_spelled(node, cap, &links, pack, source, match_id))
+            }
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut flat),
             Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut flat),
             Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {

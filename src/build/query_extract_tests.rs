@@ -2830,6 +2830,36 @@ fn cpp_out_of_line_arbitrary_declarator_nesting_and_qualifier_depth() {
     assert_eq!(m.package.as_deref(), Some("Inner"));
 }
 
+/// A qualified call nests a qualifier per segment and a template call's name
+/// sits under its arguments; the `spelled` walk puts the ref on the name
+/// token either way and mints the scopes it passed as the qualifier.
+#[test]
+fn cpp_qualified_call_ref_sits_on_its_name_token() {
+    let src = "int main() {\n  a::b::f(1);\n  ns::g<std::pair<int, int>>(2);\n  ::h();\n}\n";
+    let fa = cpp_fa(src);
+    let call = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == name && matches!(r.kind, crate::model::file_analysis::RefKind::FunctionCall))
+            .unwrap_or_else(|| panic!("a call ref named {name}"))
+    };
+    let token = |r: &crate::model::file_analysis::Ref| {
+        let line = src.lines().nth(r.span.start.row).unwrap();
+        assert_eq!(r.span.start.row, r.span.end.row);
+        line[r.span.start.column..r.span.end.column].to_string()
+    };
+    let package = |r: &crate::model::file_analysis::Ref| match &r.binding {
+        Some(crate::model::file_analysis::RefBinding::Function { package }) => package.clone(),
+        other => panic!("a Function binding, got {other:?}"),
+    };
+    let f = call("a::b::f");
+    assert_eq!((token(f), package(f)), ("f".to_string(), "a::b".to_string()));
+    let g = call("ns::g<std::pair<int, int>>");
+    assert_eq!((token(g), package(g)), ("g".to_string(), "ns".to_string()));
+    let h = call("::h");
+    assert_eq!((token(h), package(h)), ("h".to_string(), String::new()));
+}
+
 /// F8: an out-of-line method whose owning class is declared in a HEADER (absent
 /// here) is NOT a truncation fall-through — the `::` qualifier is authoritative,
 /// so re-anchoring must leave `RE2::Init`'s package as `RE2`, not upgrade it to

@@ -84,8 +84,6 @@ spelled! {
     /// What a `@ref.<kind>` refers through.
     pub enum RefCap {
         Call = "call",
-        /// A `::`-qualified call (`fmt::format_to(...)`).
-        QCall = "qcall",
         Method = "method",
         /// A member token READ as a value (`recv.field` / `recv->field`);
         /// joins `@member.recv` by match.
@@ -294,6 +292,9 @@ spelled! {
         Qualifier = "qualifier",
         /// A `@nested.target` declarator chain, level by level to its leaf.
         Deref = "deref",
+        /// A `@ref.spelled` reference, down its spelling's levels to the
+        /// token it rewrites.
+        Spelled = "spelled",
     }
 }
 
@@ -304,6 +305,7 @@ impl LinkWalk {
             LinkWalk::Ool => Capture::OolDef,
             LinkWalk::Qualifier => Capture::Qualifier,
             LinkWalk::Deref => Capture::NestedTarget,
+            LinkWalk::Spelled => Capture::RefSpelled,
         }
     }
 }
@@ -365,7 +367,9 @@ pub enum Capture {
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
-    /// resolves by the spelling and rewrites only the leaf.
+    /// resolves by the spelling and rewrites only the leaf. Where the
+    /// spelling nests (`a::b::f` is `a::(b::f)`), the `spelled` walk carries
+    /// the reference from the node the document tagged down to that leaf.
     RefSpelled,
     Scope(ScopeCap),
     Context(ContextKind),

@@ -155,7 +155,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // f(..)` flow edge targets it. A member call (`recv.m(..)`)
             // carries its receiver, the `@member.recv` of the same match.
             let in_match = |cap: Capture| ad.in_match(e.match_id, cap);
+            // A callee named by its spelling (`ns::f(..)`) resolves by
+            // that spelling, which a free callee's lookup does not read
+            // yet: it mints no call value (`docs/adr/calls-are-invokes.md`).
             let callee = in_match(Capture::Ref(RefCap::Call))
+                .filter(|_| in_match(Capture::RefSpelled).is_none())
                 .map(|x| (x.text.clone(), None))
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;

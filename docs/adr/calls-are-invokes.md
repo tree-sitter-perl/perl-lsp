@@ -69,7 +69,8 @@ extra, whatever the pattern.
 ## Current state
 
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
-  qualified pack call (`@ref.qcall`) mints no call value yet.
+  qualified pack call (`@ref.call` named by its `@ref.spelled`) mints
+  no call value yet.
 - A body elides its receiver where the document marks its scope
   `@scope.sub.implicit_receiver` and the body belongs to a method. There a
   bare call carries `member_of`, and a bare read the file can't resolve to
