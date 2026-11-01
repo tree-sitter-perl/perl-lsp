@@ -126,6 +126,7 @@ impl FileAnalysis {
             language: super::default_language(),
             scope_starts: Vec::new(),
             export_lookup: HashSet::new(),
+            exports_declared: false,
         };
         fa.build_indices();
         fa.referenced_identities = fa.mint_referenced_identities();
@@ -194,8 +195,8 @@ impl FileAnalysis {
     /// analysis keeps the full vec; enumeration (workspace/symbol) reads
     /// rows, detail reads rehydrate. Registration feeds were extracted
     /// BEFORE this runs. Touches no other pinned field
-    /// (`export`/`export_ok`/`export_lookup` derive from export lists, not
-    /// symbols, and stay). Idempotent.
+    /// (`export_lookup` derives from the per-package export lists, not
+    /// symbols, and stays). Idempotent.
     pub fn evict_symbols(&mut self) {
         self.symbols.evict();
     }
@@ -924,6 +925,7 @@ impl FileAnalysis {
             .flat_map(|p| p.exports.export.iter().chain(&p.exports.export_ok))
             .cloned()
             .collect();
+        self.exports_declared = self.packages.values().any(|p| !p.exports.is_empty());
     }
 
     /// True if ANY package of this file has `name` in its `@EXPORT` or
@@ -936,6 +938,9 @@ impl FileAnalysis {
     /// What `package` itself exports, as written in this file. `None`: it
     /// declares no export list here.
     pub fn package_exports(&self, package: &str) -> Option<&PackageExports> {
+        if !self.exports_declared {
+            return None;
+        }
         self.packages.get(package).map(|p| &p.exports).filter(|e| !e.is_empty())
     }
 
@@ -1043,7 +1048,7 @@ impl FileAnalysis {
         };
         let reexports: &[String] = own.map_or(&[], |e| &e.reexport_modules);
         if reexports.is_empty() && inherited.is_none() {
-            return self.export_surface(module);
+            return ExportSurface { own, default_set: None, optional_set: None, tags: None, all_names: None };
         }
 
         let (mut default_set, mut optional_set) = inherited

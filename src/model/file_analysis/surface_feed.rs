@@ -139,6 +139,7 @@ impl FileAnalysis {
             // ---- Derived indices, rebuilt from the tables above.
             scope_starts: _scope_starts,
             export_lookup: _export_lookup,
+            exports_declared: _exports_declared,
         } = self;
         SurfaceFeed {
             symbols: symbols.as_slice(),

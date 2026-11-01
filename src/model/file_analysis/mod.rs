@@ -318,6 +318,12 @@ pub struct FileAnalysis {
     /// and `after_deserialize`).
     #[serde(skip, default)]
     export_lookup: HashSet<String>,
+    /// Some package of this file declares an export list or a re-export
+    /// edge. Most files declare none, and `package_exports` is asked once
+    /// per candidate file per unresolved call — this keeps that a branch,
+    /// not a hash.
+    #[serde(skip, default)]
+    exports_declared: bool,
 }
 
 /// serde default for `FileAnalysis::language` — the native builder's id,
