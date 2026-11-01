@@ -160,16 +160,19 @@ impl ModuleIndex {
             crate::util::timings::record_cached(module_name);
             return; // fresh and cached
         }
-        if is_stale {
+        if !is_stale {
+            // The one dedup'ing enqueue: a name asked per keystroke is
+            // queued once between drains.
+            self.core.queue.ask([module_name.to_string()]);
+            return;
+        }
+        {
             let mut priority = self.core.queue.priority.lock().unwrap();
             if !priority.contains(&module_name.to_string()) {
                 priority.push(module_name.to_string());
             }
-        } else {
-            let mut pending = self.core.queue.pending.lock().unwrap();
-            pending.push(module_name.to_string());
         }
-        // Both guards are out of scope here — `notify_new_work` takes
+        // The guard is out of scope here — `notify_new_work` takes
         // `pending`, and the drain's lock order forbids holding `priority`
         // across it.
         self.core.queue.notify_new_work();
