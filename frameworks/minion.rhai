@@ -355,7 +355,7 @@ fn on_signature_help(ctx) {
     // Delegate to the core to resolve the task Handler + render its
     // signature. We've identified WHICH handler (by name + owner +
     // dispatcher) and the active slot; the core does the param lookup
-    // (local + cross-file via handlers_for_owner) and invocant strip.
+    // (local + cross-file via for_each_dispatch_handler_on_class) and invocant strip.
     #{
         ShowHandler: #{
             owner_class: "Minion",

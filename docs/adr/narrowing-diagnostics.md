@@ -112,7 +112,7 @@ source**, not by language name:
 | D2 `optional-deref` | `deref_receiver_sites` + surviving `Optional` | ⬜ needs cpp-narrowing layer |
 | D3 `redundant-guard` / D4 `contradictory-guard` | `guard_sites` + prior narrowed type | ⬜ needs cpp-narrowing layer |
 | D6 `deref-shape-mismatch` | `deref_receiver_sites` + `ref…eq`-proved rep | ⬜ needs cpp-narrowing layer |
-| D8 `unresolved-method` (cross-file) | method resolution (`method_call_invocant_class` + MRO) | ⬜ parked on a macro-cleanliness valve |
+| D8 `unresolved-method` (cross-file) | method resolution (`receiver_classes` + MRO) | ⬜ parked on a macro-cleanliness valve |
 
 **D1/D2/D3/D4/D6 have no cpp facts.** The whole narrowing tier is a child
 of `builder` (`src/builder/narrowing.rs`) — the single tree-sitter

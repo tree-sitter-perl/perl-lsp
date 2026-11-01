@@ -264,7 +264,7 @@ const SET_FIELDS: &[&str] = &[
     "column_keyed_verbs",
     "export_lookup",
     "framework_imports",
-    "reassigned_scalars",
+    "reassigned_vars",
 ];
 
 /// Sort the arrays named in `SET_FIELDS`, everywhere they appear.

@@ -1,6 +1,6 @@
 # The scaling corpus
 
-Eight large open-source Perl applications, kept because each one measures
+Nine large open-source Perl applications, kept because each one measures
 something the others do not. Reconstruct on any box with `corpus/bootstrap.sh`.
 
 ```
@@ -35,7 +35,7 @@ FHEM's resolved-module count from **125 to 195** while the workspace stays at
 to resolve systematically understates resolution load, which is exactly how a
 5,004-distribution pile produced a "cliff" that no real codebase has.
 
-## The eight, and what each is for
+## The nine, and what each is for
 
 | repo | files | measures |
 |---|---:|---|
@@ -47,6 +47,7 @@ to resolve systematically understates resolution load, which is exactly how a
 | [Webmin](https://github.com/webmin/webmin) | 1,383 | **Control: path-based `require`.** 101 package declarations across 1,383 files; lowest hit rate (95.95%). A genuinely different resolution shape. |
 | [BMO](https://github.com/mozilla-bteam/bmo) | 739 | **Control: healthy reference.** 206 attempts/file at 99.90% hit. |
 | [openfoodfacts](https://github.com/openfoodfacts/openfoodfacts-server) | 537 | **Control: densest static graph, near-zero fan-out.** A dense import graph does not imply expensive resolution. |
+| [Conch](https://github.com/joyent/conch) | 226 | **DBIC on a cross-file base.** All 35 result classes `use base 'Conch::DB::Result'`, which reaches `DBIx::Class::Core` in another file, so every column and relationship accessor is a deferred (gated) plugin emission. None of the other eight has more than two files mentioning `DBIx::Class`. |
 
 Deliberately excluded: `perl5` (44% vendored `cpan/` — a distribution pile
 wearing a repo's clothes), and MovableType / Freeside (30% / 28% vendored).
@@ -55,7 +56,7 @@ attempts/file and 98–99.9% hit, telling us nothing the four controls do not.
 
 ## Dependency manifests
 
-Six of the eight ship **no machine-readable manifest** — they are applications
+Six of the nine ship **no machine-readable manifest** — they are applications
 distributed as packages, not CPAN dists. `derive-cpanfile.pl` reconstructs one
 by scanning for `use`/`require` targets, subtracting what the repo defines and
 what is core for the running perl.
