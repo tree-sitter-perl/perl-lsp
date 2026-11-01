@@ -88,7 +88,7 @@ impl IndexCore {
         driver: &'static dyn LanguageDriver,
         root: Option<&std::path::Path>,
     ) -> bool {
-        let root = root.map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.to_path_buf()));
+        let root = root.map(|r| crate::util::canonical_path::CanonicalPath::resolve(r).into_path_buf());
         let mut guard = self.dependency_state();
         if let Some(st) = guard.as_ref() {
             if st.driver.id() == driver.id() && st.root == root && stamps(st.locator.inputs()) == st.stamps {
@@ -317,7 +317,7 @@ impl ModuleIndex {
     /// spells its entries, so a walk's skip is a prefix test, not a
     /// canonicalize per entry. A root outside the walk needs no skip.
     pub fn dependency_roots_under(&self, root: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let canon_root = crate::util::canonical_path::CanonicalPath::resolve(root);
         self.dependency_roots()
             .iter()
             .filter_map(|r| r.strip_prefix(&canon_root).ok().map(|rel| root.join(rel)))
@@ -332,12 +332,12 @@ impl ModuleIndex {
 
     /// Is `path` a manifest the current map was read from?
     pub fn is_dependency_input(&self, path: &std::path::Path) -> bool {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.core.dependency_state().as_ref().is_some_and(|s| {
             s.locator
                 .inputs()
                 .iter()
-                .any(|i| i == path || std::fs::canonicalize(i).is_ok_and(|c| c == canon))
+                .any(|i| i == path || crate::util::canonical_path::CanonicalPath::resolve(i) == canon)
         })
     }
 

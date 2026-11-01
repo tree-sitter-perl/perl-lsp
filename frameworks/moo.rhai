@@ -89,7 +89,9 @@ fn patterns() {
 // third-party plugin's) is the whole set; the builder bakes
 // module → (flavor, keywords) at plugin load. `flavor` selects which of
 // core's rule sets applies ("Moo" / "Moose"); Mojo::Base is absent by
-// design — its `-base` gate is structural, not a name match.
+// design — its `-base` gate is structural, not a name match. `base` is the
+// class a consuming class inherits until it `extends` another, so `->new`
+// resolves to the real constructor; role makers name none.
 fn moo_keywords() { ["has", "with", "extends", "around", "before", "after"] }
 fn moose_keywords() {
     moo_keywords() + ["override", "super", "inner", "augment", "confess", "blessed"]
@@ -97,7 +99,7 @@ fn moose_keywords() {
 
 fn framework_mode_makers() {
     [
-        #{ "module": "Moo", flavor: "Moo", imports: moo_keywords() },
+        #{ "module": "Moo", flavor: "Moo", imports: moo_keywords(), base: "Moo::Object" },
         // `requires` is role-only sugar; a plain class never calls it.
         #{ "module": "Moo::Role", flavor: "Moo", imports: moo_keywords() + ["requires"] },
         // Dancer2::Plugin re-exports Moo's `has`/`with`/... into the consuming
@@ -113,10 +115,10 @@ fn framework_mode_makers() {
         // it routes through the shared `has` path at the call site, gated on
         // the `option` keyword being in this import surface.
         #{ "module": "MooX::Options", flavor: "Moo", imports: moo_keywords() + ["option"] },
-        #{ "module": "Moose", flavor: "Moose", imports: moose_keywords() },
+        #{ "module": "Moose", flavor: "Moose", imports: moose_keywords(), base: "Moose::Object" },
         #{ "module": "Moose::Role", flavor: "Moose", imports: moose_keywords() + ["requires"] },
         // Mouse mimics Moose's keyword and `has` surface.
-        #{ "module": "Mouse", flavor: "Moose", imports: moose_keywords() },
+        #{ "module": "Mouse", flavor: "Moose", imports: moose_keywords(), base: "Mouse::Object" },
         #{ "module": "Mouse::Role", flavor: "Moose", imports: moose_keywords() + ["requires"] },
     ]
 }
