@@ -864,9 +864,10 @@ fn test_shift_params() {
         }
         ",
     );
-    // signature_for_call strips $self when first param is $self
+    // signatures_for_call strips $self when first param is $self
     let sig = fa
-        .signature_for_call("process", false, None, Point::new(0, 0), None)
+        .signatures_for_call("process", false, None, Point::new(0, 0), None)
+        .pop()
         .unwrap();
     assert!(sig.is_method, "should detect method from $self first param");
     assert_eq!(sig.params.len(), 2);
@@ -898,7 +899,8 @@ fn test_shift_then_list_assign() {
         ",
     );
     let sig = fa
-        .signature_for_call("process", false, None, Point::new(0, 0), None)
+        .signatures_for_call("process", false, None, Point::new(0, 0), None)
+        .pop()
         .unwrap();
     assert!(sig.is_method);
     assert_eq!(
@@ -931,7 +933,8 @@ fn test_shift_with_double_pipe_default() {
         ",
     );
     let sig = fa
-        .signature_for_call("handler", false, None, Point::new(0, 0), None)
+        .signatures_for_call("handler", false, None, Point::new(0, 0), None)
+        .pop()
         .unwrap();
     assert_eq!(sig.params.len(), 1, "stripped $self");
     assert_eq!(sig.params[0].name, "$timeout");
@@ -949,7 +952,8 @@ fn test_shift_with_defined_or_default() {
         ",
     );
     let sig = fa
-        .signature_for_call("handler", false, None, Point::new(0, 0), None)
+        .signatures_for_call("handler", false, None, Point::new(0, 0), None)
+        .pop()
         .unwrap();
     assert_eq!(sig.params.len(), 1, "stripped $self");
     assert_eq!(sig.params[0].name, "$verbose");
@@ -967,7 +971,8 @@ fn test_subscript_param() {
         ",
     );
     let sig = fa
-        .signature_for_call("handler", false, None, Point::new(0, 0), None)
+        .signatures_for_call("handler", false, None, Point::new(0, 0), None)
+        .pop()
         .unwrap();
     assert_eq!(sig.params.len(), 1, "stripped $self");
     assert_eq!(sig.params[0].name, "$data");
@@ -984,7 +989,8 @@ fn test_legacy_at_params_still_work() {
         ",
     );
     let sig = fa
-        .signature_for_call("process", false, None, Point::new(0, 0), None)
+        .signatures_for_call("process", false, None, Point::new(0, 0), None)
+        .pop()
         .unwrap();
     assert_eq!(sig.params.len(), 3);
     assert_eq!(sig.params[0].name, "$first");

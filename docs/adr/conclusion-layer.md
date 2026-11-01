@@ -521,14 +521,9 @@ because the repair is a re-bake and a re-bake wants the blob.
   let the exit poison only when it could really find something. Small
   and well-sized (recovers on the order of 2,000 consults concentrated
   in a handful of classes) but not built.
-- **Verb-declared partial enrichment** (`EnrichmentProfile`, e.g.
-  `--check`'s profile omitting the `MethodCall` dispatch-target
-  re-stamp) is landed for the CLI, where one process serves exactly one
-  verb and the overlay is resident, not persisted, so a partial copy
-  cannot outlive the process. Extending it to a server verb needs the
-  profile folded into the shared `enriched_snapshot` cache key — a
-  profile-blind key would let a partial copy leak to a fuller-reading
-  verb as a silently missing answer. Not built; the reason is recorded
-  so its absence doesn't read as an oversight. `PERL_LSP_FULL_ENRICHMENT`
-  forces the full profile back everywhere, and is the load-bearing
-  control for measuring the partial profile at all.
+- **No verb-declared partial enrichment.** Enrichment always re-stamps
+  member-access receivers: diagnostics, navigation and hover all read the
+  frozen receiver (`receiver_classes`), so no verb has a product it can
+  skip. A future partial profile would need its own consumer audit, and
+  its profile folded into the `enriched_snapshot` key so a partial copy
+  never reaches a fuller-reading verb as a silently missing answer.

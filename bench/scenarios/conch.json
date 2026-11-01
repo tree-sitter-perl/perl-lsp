@@ -1,0 +1,68 @@
+{
+  "project": {
+    "repo": "https://github.com/joyent/conch",
+    "root_subdir": "",
+    "note": "DBIC result classes on a cross-file base (Conch::DB::Result): every column/relationship accessor is a gated plugin emission. Validation subclasses reach them through typed has-accessors."
+  },
+  "readiness": {
+    "file": "lib/Conch/Validation/RamTotal.pm",
+    "line": 18,
+    "character": 27
+  },
+  "steps": [
+    {
+      "action": "open",
+      "file": "lib/Conch/Validation/RamTotal.pm"
+    },
+    {
+      "action": "definition",
+      "file": "lib/Conch/Validation/RamTotal.pm",
+      "line": 18,
+      "character": 45,
+      "name": "def-gated-column"
+    },
+    {
+      "action": "hover",
+      "file": "lib/Conch/Validation/RamTotal.pm",
+      "line": 18,
+      "character": 45,
+      "name": "hover-gated-column"
+    },
+    {
+      "action": "completion",
+      "file": "lib/Conch/Validation/RamTotal.pm",
+      "line": 18,
+      "character": 45,
+      "name": "completion-gated-columns"
+    },
+    {
+      "action": "references",
+      "file": "lib/Conch/Validation/RamTotal.pm",
+      "line": 18,
+      "character": 45,
+      "name": "refs-gated-column"
+    },
+    {
+      "action": "open",
+      "file": "lib/Conch/Validation/DeviceProductName.pm"
+    },
+    {
+      "action": "definition",
+      "file": "lib/Conch/Validation/DeviceProductName.pm",
+      "line": 32,
+      "character": 36,
+      "name": "def-gated-relationship"
+    },
+    {
+      "action": "definition",
+      "file": "lib/Conch/Validation/DeviceProductName.pm",
+      "line": 32,
+      "character": 54,
+      "name": "def-gated-chain"
+    },
+    {
+      "action": "rss",
+      "name": "post-nav"
+    }
+  ]
+}

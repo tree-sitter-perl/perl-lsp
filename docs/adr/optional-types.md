@@ -8,8 +8,9 @@ one story — `Optional` creates the
 imprecision, a `defined`/`blessed` guard resolves it, the negative side
 knows it's `Undef`.
 
-Scoped to `Optional<T>` and a bottom `Undef`, **not** arbitrary unions:
-`Foo | Bar` stays `None` until a motivating case lands. Both variants are
+Scoped to `Optional<T>` and a bottom `Undef`; general `Foo | Bar` is
+`Union` (`union-types.md`), and a maybe-undef union is spelled
+`Optional(Union)`, so everything here holds for it. Both variants are
 appended at the **END** of the enum for bincode variant-index stability
 (bump `EXTRACT_VERSION`); exhaustive matches are confined to
 `file_analysis.rs` and use `_ =>`, so the blast radius is small.
@@ -28,7 +29,7 @@ Two projections, deliberately split:
   the discriminant fallback (`(Undef, Undef) → true`, else `false`).
 
 - **`class_name_lenient()` peels `Optional`** — the consumer-side
-  receiver projection that `method_call_invocant_class` (and thus
+  receiver projection that `method_call_invocant_classes` (and thus
   goto-def / hover / references / rename / completion) uses. An
   `Optional<Foo>` receiver resolves its methods on `Foo` *without* a
   guard: type-silence on a half-written value reads as a broken IDE, not
@@ -44,7 +45,7 @@ strictly, ahead of the lenient peel.
 ## The undef arm is a marker, not a lattice value
 
 `undef` has no rvalue type to ride an `Edge`, and a private `Undef`
-*return* type would leak into every `resolve_return_type` consumer. So an
+*return* type would leak into every return-arm join. So an
 undef arm — `return undef`, bare `return;`, an `undef` ternary branch —
 is marked with a `Builder("undef_arm")` Fact on the
 `SymbolReturnArm` / `BranchArm` attachment. `join_return_arms(value_arms,

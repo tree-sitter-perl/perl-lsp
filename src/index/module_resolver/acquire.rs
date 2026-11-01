@@ -153,6 +153,14 @@ pub(super) fn descent(providers: &[Arc<CachedModule>], prefetch: bool) -> Vec<St
                 asks.push(c);
             }
         }
+        // A gated emission's accessors name classes too (a `belongs_to` its
+        // target); asked as candidates, like every other feed of gated
+        // content.
+        for w in fa.gated_candidates().witnesses {
+            if let crate::model::witnesses::WitnessPayload::InferredType(InferredType::ClassName(c)) = w.payload {
+                asks.push(c);
+            }
+        }
     }
     asks.retain(|n| !n.is_empty());
     asks
