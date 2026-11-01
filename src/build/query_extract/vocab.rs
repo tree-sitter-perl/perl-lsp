@@ -514,6 +514,31 @@ impl fmt::Display for UnknownCapture {
     }
 }
 
+spelled! {
+    /// A capture of `queries/php/composer-classmap.scm`, the classmap
+    /// `composer dump-autoload` generates: read beside the extraction
+    /// (`document_matches`), never part of a pack's skeleton.
+    pub enum ClassmapCap {
+        /// The class identity, a single-quoted string.
+        Class = "classmap.class",
+        /// The variable a path is anchored at; only the document's
+        /// predicates read it.
+        Anchor = "classmap.anchor",
+        /// A path under `$vendorDir`.
+        VendorPath = "classmap.path.vendor",
+        /// A path under `$baseDir`.
+        BasePath = "classmap.path.base",
+        /// A path under neither, spelled whole.
+        AbsolutePath = "classmap.path.absolute",
+    }
+}
+
+impl super::DocumentVocab for ClassmapCap {
+    fn from_capture(name: &str) -> Option<Self> {
+        Self::parse(name)
+    }
+}
+
 impl Capture {
     pub fn parse(name: &str) -> Result<Capture, UnknownCapture> {
         Self::parse_segments(name).ok_or_else(|| UnknownCapture(name.to_string()))
