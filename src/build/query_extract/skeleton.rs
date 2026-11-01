@@ -958,8 +958,8 @@ impl SkeletonAnalysis {
                 Some(map.resolve(written).identity(map.sep))
             };
             // A receiver token that names a class has that class as its
-            // value, and a call on it dispatches there.
-            let mut receiver_class: std::collections::HashMap<Span, String> = Default::default();
+            // value; a call on it dispatches on that value like on any
+            // receiver's.
             for r in &self.receiver_sites {
                 let class = match r.names {
                     super::vocab::ReceiverCap::Enclosing => method_class.get(r.scope.0 as usize).cloned().flatten(),
@@ -971,10 +971,9 @@ impl SkeletonAnalysis {
                 bag.push(Witness {
                     attachment: WA::Expr(r.span),
                     source: WitnessSource::Builder("receiver_class".into()),
-                    payload: WP::InferredType(InferredType::ClassName(class.clone())),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
                     span: r.span,
                 });
-                receiver_class.insert(r.span, class);
             }
             let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
@@ -1028,10 +1027,7 @@ impl SkeletonAnalysis {
                     Some(recv) => (
                         crate::model::witnesses::Callee::Method {
                             name: name.clone(),
-                            lookup: match receiver_class.get(&recv) {
-                                Some(class) => crate::model::witnesses::Lookup::Named(class.clone()),
-                                None => crate::model::witnesses::Lookup::Receiver,
-                            },
+                            lookup: crate::model::witnesses::Lookup::Receiver,
                             constructs: false,
                         },
                         Some(WA::Expr(recv)),

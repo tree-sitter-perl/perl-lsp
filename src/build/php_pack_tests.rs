@@ -916,8 +916,9 @@ class Timer {
 
 /// A member call is a call ref on the method's name token and an `Invoke`
 /// on its receiver; a property read is a value ref and the receiver's
-/// slot. A receiver that names its class (`$this`, `self`, `Timer`)
-/// dispatches on that class.
+/// slot. Every member call dispatches on its receiver's value, and a
+/// receiver that names its class (`$this`, `self`, `Timer`) has that class
+/// as its value.
 #[test]
 fn member_calls_and_reads_name_their_member_on_the_receiver() {
     use crate::model::file_analysis::RefKind;
@@ -953,12 +954,17 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, .. }, args, .. } => Some((
+            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, .. }, receiver, args } => Some((
                 w.span.start.row,
                 name.clone(),
-                match lookup {
-                    Lookup::Named(class) => Some(class.clone()),
-                    _ => None,
+                {
+                    assert_eq!(*lookup, Lookup::Receiver);
+                    match receiver {
+                        Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => {
+                            fa.expr_type_at_span(*recv, None).and_then(|t| t.class_name().map(str::to_string))
+                        }
+                        _ => None,
+                    }
                 },
                 args.iter().flatten().map(|a| matches!(a, CallArg::Spread(_))).collect(),
             )),
@@ -967,13 +973,14 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
         .collect();
     calls.sort();
     let timer = || Some("App\\Timer".to_string());
+    let clock = || Some("App\\Clock".to_string());
     let call = |row: usize, name: &str, named: Option<String>, args: &[bool]| (row, name.to_string(), named, args.to_vec());
     assert_eq!(
         calls,
         [
-            call(11, "start", None, &[false, true]),
-            call(12, "name", None, &[]),
-            call(14, "start", None, &[]),
+            call(11, "start", clock(), &[false, true]),
+            call(12, "name", timer(), &[]),
+            call(14, "start", clock(), &[]),
             call(15, "name", timer(), &[]),
             call(16, "make", timer(), &[]),
             call(17, "make", timer(), &[]),
@@ -1462,6 +1469,28 @@ fn this_is_typed_once() {
     let this = Span { start: Point::new(2, 24), end: Point::new(2, 29) };
     let typed: Vec<_> = fa.witnesses.for_attachment(&WA::Expr(this)).into_iter().map(|w| w.source.clone()).collect();
     assert_eq!(typed.len(), 1, "one witness types `$this`: {typed:?}");
+}
+
+/// A call on a receiver that names a class dispatches on the receiver's
+/// value, the one store of that class: no second, span-keyed copy picks a
+/// named lookup.
+#[test]
+fn a_class_receiver_dispatches_on_its_value() {
+    use crate::model::witnesses::{Callee, Lookup, WitnessAttachment as WA, WitnessPayload as WP};
+    let fa = php("<?php\nclass A {\n  static function m() { return 1; }\n  function f() { return self::m(); }\n}\n");
+    let call = Span { start: Point::new(3, 24), end: Point::new(3, 33) };
+    let lookups: Vec<_> = fa
+        .witnesses
+        .for_attachment(&WA::Expr(call))
+        .into_iter()
+        .filter_map(|w| match &w.payload {
+            WP::Invoke { callee: Callee::Method { lookup, .. }, .. } => Some(lookup.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lookups, [Lookup::Receiver]);
+    let recv = Span { start: Point::new(3, 24), end: Point::new(3, 28) };
+    assert_eq!(fa.expr_type_at_span(recv, None), Some(InferredType::ClassName("A".into())));
 }
 
 #[test]
