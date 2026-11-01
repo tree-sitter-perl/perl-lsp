@@ -395,7 +395,7 @@ static RETRIEVAL_MEMO: std::sync::RwLock<Option<RetrievalMemo>> = std::sync::RwL
 pub struct RetrievalMemoGuard(());
 
 impl RetrievalMemoGuard {
-    pub fn open() -> Self {
+    pub(in crate::index) fn open() -> Self {
         let off = std::env::var("PERL_LSP_NO_RETRIEVAL_MEMO").as_deref() == Ok("1");
         if !off {
             if let Ok(mut slot) = RETRIEVAL_MEMO.write() {
