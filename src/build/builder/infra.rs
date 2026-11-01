@@ -336,7 +336,6 @@ impl<'a> Builder<'a> {
             access,
             binding,
             folded_from: None,
-            import_name: false,
             arg_count: None,
         });
     }

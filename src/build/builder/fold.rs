@@ -28,27 +28,17 @@ impl<'a> Builder<'a> {
     // ---- Post-passes ----
 
     pub(super) fn resolve_variable_refs(&mut self) {
-        // Build a temporary scope-to-symbols map for efficient lookup.
-        //
-        // `gating_package` is `Some(pkg)` for `our` decls — they're
-        // package-globals with a lexical alias, so a use site only
-        // resolves to them when the use's enclosing package matches
-        // (`$Calculator::version` is reachable as bare `$version`
-        // only inside `package Calculator;`). It's `None` for `my` /
-        // `state` / `field`, which are pure-lexical: they resolve
-        // wherever the lexical scope chain reaches them, regardless
-        // of which `package X;` section the use sits under.
+        // The declarations each scope holds (`Symbol::variable_decl`). An
+        // `our` is gated: a package-global with a lexical alias, reached as
+        // bare `$version` only inside its own package; `my` / `state` /
+        // `field` are pure-lexical.
         let mut scope_symbols: std::collections::HashMap<
             ScopeId,
-            Vec<(String, SymbolId, Point, Option<String>)>,
+            Vec<(&str, crate::model::file_analysis::VariableDecl<'_, SymbolId>)>,
         > = std::collections::HashMap::new();
         for sym in &self.symbols {
-            if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
-                let gating_package = our_gate(sym).map(str::to_string);
-                scope_symbols
-                    .entry(sym.scope)
-                    .or_default()
-                    .push((sym.name.clone(), sym.id, sym.span.start, gating_package));
+            if let Some(d) = sym.variable_decl() {
+                scope_symbols.entry(sym.scope).or_default().push((sym.name.as_str(), d));
             }
         }
 
@@ -81,9 +71,7 @@ impl<'a> Builder<'a> {
                 use_pkg,
                 &crate::model::conventions::PERL_SPELLINGS,
                 |scope| {
-                    scope_symbols.get(&scope).into_iter().flatten().filter_map(|(name, id, at, gate)| {
-                        (name == &r.target_name).then_some((*id, *at, gate.as_deref()))
-                    })
+                    scope_symbols.get(&scope).into_iter().flatten().filter_map(|(name, d)| (*name == r.target_name).then_some(*d))
                 },
             );
             match outcome {
@@ -906,7 +894,6 @@ impl<'a> Builder<'a> {
                     sym: None,
                 }),
                 folded_from: None,
-                import_name: false,
                 arg_count: None,
             });
         }

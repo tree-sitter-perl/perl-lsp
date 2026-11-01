@@ -1578,10 +1578,12 @@ fn init_is_the_constructor_a_class_inherits() {
 }
 
 /// A name `from m import` binds is a reference to the def it names, pinned
-/// as a call to it is, but the extractor marks it an import:
-/// it calls nothing, so it never constructs the class it names.
+/// as a call to it is, but its kind says it is an import: it calls
+/// nothing, so no call lane reads it and it never constructs the class
+/// it names.
 #[test]
-fn an_imported_name_is_marked_and_pinned_like_a_call() {
+fn an_imported_name_is_its_own_kind_pinned_like_a_call() {
+    use crate::model::file_analysis::RefKind;
     let m = module(&["app"], false);
     let fa = py_in("from lib.model import Model
 m = Model()
@@ -1589,10 +1591,10 @@ m = Model()
     let sites: Vec<(usize, bool, Option<&str>)> = fa
         .refs()
         .iter()
-        .filter(|r| r.target_name == "Model" && matches!(r.kind, crate::model::file_analysis::RefKind::FunctionCall))
-        .map(|r| (r.span.start.row, r.import_name, r.resolved_package()))
+        .filter(|r| r.target_name == "Model" && matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName))
+        .map(|r| (r.span.start.row, matches!(r.kind, RefKind::FunctionCall), r.resolved_package()))
         .collect();
-    assert_eq!(sites.iter().map(|&(row, import, _)| (row, import)).collect::<Vec<_>>(), [(0, true), (1, false)]);
+    assert_eq!(sites.iter().map(|&(row, call, _)| (row, call)).collect::<Vec<_>>(), [(0, false), (1, true)]);
     assert_eq!(sites[0].2, sites[1].2, "the import is pinned as the call is");
 }
 

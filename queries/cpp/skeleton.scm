@@ -730,7 +730,8 @@
  (#not-is-kind? @member.recv identifier))
 
 ; `this` is the object the enclosing method runs on, an instance of the
-; method's class (out-of-line bodies included).
+; method's class (out-of-line bodies included), never a name to spell a
+; class.
 (this) @receiver.enclosing
 
 ; which operator a member access wrote, so op-DX can name the other one. A
@@ -841,8 +842,12 @@
 (type_identifier) @ref.type
 
 ; ---- literals + variable reads (the edge-chase substrate) ----
-; Parentheses hold the value they wrap.
-(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
+; Parentheses hold the value they wrap, and so, for the class a member
+; access dispatches on, do `*p` and `&o` (pointer-ness is the declarator
+; stack's, not the type's).
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
+(pointer_expression argument: (_) @expr.wrapper.inner) @expr.wrapper
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool
@@ -854,9 +859,6 @@
 (binary_expression
   operator: ["==" "!=" "<" ">" "<=" ">=" "&&" "||"]) @expr.lit.bool
 (identifier) @expr.read.var
-; `this` is the receiver of the method around it: an object of that
-; method's class, never a name to spell a class.
-(this) @receiver
 
 ; `return EXPR;` — the returned expression's OWN span already carries
 ; whatever witness the general rules above minted for its shape (a literal,
