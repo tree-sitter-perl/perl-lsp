@@ -187,3 +187,32 @@ fn cpp_has_no_root() {
     assert!(crate::model::roots::installed().surface("cpp").is_none());
     assert!(unresolved_methods(&fa, &idx).is_empty());
 }
+
+#[test]
+fn moo_new_resolves_through_its_base() {
+    let src = "package Foo;\nuse Moo;\nhas x => (is => 'ro');\nsub go {}\npackage main;\nmy $f = Foo->new(x => 1);\n$f->go;\nFoo->nope;\n1;\n";
+    let fa = parse_analysis(src);
+    // Moo installed: `new` is Moo::Object's, and a real miss still fires.
+    let idx = moo_installed_index();
+    assert!(matches!(
+        fa.resolve_method_in_ancestors("Foo", "new", Some(&idx)),
+        Some(MethodResolution::CrossFile { ref class, .. }) if class == "Moo::Object"
+    ));
+    let um = unresolved_methods(&fa, &idx);
+    assert_eq!(um.len(), 1, "{um:?}");
+    assert!(um[0].contains("'nope'"), "{um:?}");
+    // Moo uninstalled: the chain is incomplete, so nothing is guessed.
+    let bare = crate::index::module_index::ModuleIndex::new_for_test();
+    assert!(unresolved_methods(&fa, &bare).is_empty());
+}
+
+#[test]
+fn perl_new_is_no_longer_silenced() {
+    // A plain package with methods and no constructor anywhere in its MRO.
+    let src = "package Foo;\nsub go {}\npackage main;\nFoo->new;\n1;\n";
+    let fa = parse_analysis(src);
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let um = unresolved_methods(&fa, &idx);
+    assert_eq!(um.len(), 1, "{um:?}");
+    assert!(um[0].contains("'new'"), "{um:?}");
+}

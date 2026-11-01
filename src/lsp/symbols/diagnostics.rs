@@ -447,14 +447,11 @@ pub fn collect_diagnostics(
     //
     // Built once as a set, not scanned per ref: the loop below runs per
     // method-call ref (it carries its own ghost-stats region for that
-    // reason), and the plugin half is an OPEN set — a third-party plugin can
-    // declare as many meta-methods as it likes, so a linear scan here
-    // degrades with the plugin roster rather than staying bounded.
+    // reason), and it is an OPEN set — a third-party plugin can declare as
+    // many meta-methods as it likes, so a linear scan here degrades with
+    // the plugin roster rather than staying bounded.
     let implicitly_answered: std::collections::HashSet<&str> =
-        ["new"]
-            .into_iter()
-            .chain(analysis.plugin.meta_methods.iter().map(|s| s.as_str()))
-            .collect();
+        analysis.plugin.meta_methods.iter().map(|s| s.as_str()).collect();
     // True only when `class_name` is a class we can fully see and nothing in
     // its MRO answers `method_name`.
     let class_lacks_method = |class_name: &str, member: crate::model::file_analysis::MemberKey<'_>| -> bool {
