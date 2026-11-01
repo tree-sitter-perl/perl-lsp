@@ -3225,11 +3225,28 @@ fn cpp_call_arg_count_skips_comments() {
 // The receiver stays an expression: the parens are how it was written.
 #[test]
 fn cpp_receiver_peel_skips_comments() {
-    let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
-    let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
-    let (span, invocant) = call.invocant.as_ref().unwrap();
-    assert_eq!(*invocant, crate::model::conventions::Invocant::expr("w"));
-    assert_eq!(span.start, Point::new(1, 25));
+    let fa = cpp_fa("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
+    let call = fa.refs().iter().find(|r| r.target_name == "spin" && r.member_site().is_some()).expect("spin member ref");
+    assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())));
+}
+
+// A receiver in parentheses (or behind `*` / `&`) is the wrapper node
+// itself, read through the wrapper's edge to what it holds: the document
+// states which nodes hold their content's value, and no Rust table peels
+// them a second time. Every pack places the receiver on the same node.
+#[test]
+fn a_wrapped_receiver_is_read_through_its_wrapper() {
+    let fa = cpp_fa("struct W { void spin(); };\nvoid g() { W w; W* p; (w).spin(); (*p).spin(); (&w)->spin(); }\n");
+    let calls: Vec<_> = fa.refs().iter().filter(|r| r.target_name == "spin" && r.member_site().is_some()).collect();
+    assert_eq!(calls.len(), 3);
+    for (call, col) in calls.iter().zip([22, 34, 47]) {
+        assert_eq!(call.member_site().unwrap().invocant_span.unwrap().start, Point::new(1, col), "the wrapper is the receiver");
+        assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())), "col {col}");
+    }
+    let (fa, _) = python_fa("class W:\n    def spin(self):\n        pass\n\nw = W()\n(w).spin()\n");
+    let call = fa.refs().iter().find(|r| r.target_name == "spin" && r.member_site().is_some()).expect("spin");
+    assert_eq!(call.member_site().unwrap().invocant_span.unwrap().start, Point::new(5, 0), "the wrapper is the receiver");
+    assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())));
 }
 
 // `this` is the object of the class whose body it is in, not a class named
@@ -3244,6 +3261,19 @@ fn cpp_this_reads_the_enclosing_class() {
         let r = fa.ref_at(at).expect("member call");
         assert_eq!(fa.method_call_invocant_type(r, None), Some(InferredType::ClassName("Status".into())), "{at:?}");
     }
+}
+
+// One system types `this`: the token is stated once (`@receiver.enclosing`)
+// and its class is the method-class table's, so its value is one witness.
+#[test]
+fn cpp_this_is_typed_once() {
+    use crate::model::witnesses::WitnessAttachment as WA;
+    let src = "class S {\n void f() { this->g(); }\n void g();\n};\n";
+    let fa = cpp_fa(src);
+    let this = crate::model::file_analysis::Span { start: Point::new(1, 12), end: Point::new(1, 16) };
+    let typed: Vec<_> = fa.witnesses.for_attachment(&WA::Expr(this)).into_iter().map(|w| w.source.clone()).collect();
+    assert_eq!(typed.len(), 1, "one witness types `this`: {typed:?}");
+    assert_eq!(fa.expr_type_at_span(this, None), Some(InferredType::ClassName("S".into())));
 }
 
 // A comment inside a Python argument list is not an argument.
