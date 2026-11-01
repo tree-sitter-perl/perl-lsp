@@ -122,6 +122,47 @@ pub fn identity_prefix_at(tree: &Tree, source: &str, pack: &LangPack, at: usize)
 }
 
 mod cond;
+
+/// The closed capture vocabulary of a query document read beside the
+/// extraction — a manifest a tool generated, not source the project wrote
+/// (`ClassmapCap`). Each capture name is read once, when the document
+/// compiles.
+pub trait DocumentVocab: Copy {
+    fn from_capture(name: &str) -> Option<Self>;
+}
+
+/// Every match of `document` over `source` in `driver`'s grammar, each as
+/// its captures and their text, in match order. A capture name `V` does
+/// not hold fails the compile, so a document and its reader cannot drift
+/// apart in silence.
+pub fn document_matches<'s, V: DocumentVocab>(
+    driver: &dyn crate::build::language_driver::LanguageDriver,
+    document: &str,
+    source: &'s str,
+) -> Result<Vec<Vec<(V, &'s str)>>, String> {
+    let mut parser = driver.make_parser();
+    let language: Language = parser.language().map(|l| (*l).clone()).ok_or("no grammar")?;
+    let query = Query::new(&language, document).map_err(|e| format!("query: {e}"))?;
+    let vocab: Vec<V> = query
+        .capture_names()
+        .iter()
+        .map(|n| V::from_capture(n).ok_or_else(|| format!("query: @{n} is not in the document's vocabulary")))
+        .collect::<Result<_, _>>()?;
+    let tree = parser.parse(source, None).ok_or("no parse")?;
+    let mut out = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
+        out.push(
+            m.captures
+                .iter()
+                .filter_map(|c| Some((vocab[c.index as usize], c.node.utf8_text(source.as_bytes()).ok()?)))
+                .collect(),
+        );
+    }
+    Ok(out)
+}
+
 mod extract;
 mod packs;
 mod skeleton;
