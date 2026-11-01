@@ -142,29 +142,27 @@ pub(super) fn finish(st: &mut ExtractState) {
     let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
     let mut narrowed = Vec::new();
     for (name, refined, region, scope) in pending {
-        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
-        if (region.start.row, region.start.column) >= (end.row, end.column) {
+        let Some(held) = crate::model::file_analysis::cut_region(region, [rebinds.earliest_in(&name, region)]) else {
             continue; // rebound before the region even opens — nothing holds
-        }
+        };
         let refined = written_type_at(out, &st.pack.names, refined, region.start);
         narrowed.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
             payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
-            span: Span { start: region.start, end },
+            span: held,
         });
     }
     out.witnesses.extend(narrowed);
     for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
-        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
-        if (region.start.row, region.start.column) >= (end.row, end.column) {
+        let Some(held) = crate::model::file_analysis::cut_region(region, [rebinds.earliest_in(&name, region)]) else {
             continue;
-        }
+        };
         out.witnesses.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
             payload: crate::model::witnesses::WitnessPayload::Observation(obs),
-            span: Span { start: region.start, end },
+            span: held,
         });
     }
     // std::move sites → moved-from facts. The qualifier/name verify the

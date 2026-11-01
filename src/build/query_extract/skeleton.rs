@@ -1215,19 +1215,15 @@ impl SkeletonAnalysis {
                     Binding::Receiver(_) => None,
                     Binding::Package(..) => continue,
                 };
-                let end = [disturbances.earliest_in(&place, n.region), rebound]
-                    .into_iter()
-                    .flatten()
-                    .min()
-                    .unwrap_or(n.region.end);
-                if end <= n.region.start {
+                let cuts = [disturbances.earliest_in(&place, n.region), rebound];
+                let Some(held) = crate::model::file_analysis::cut_region(n.region, cuts) else {
                     continue;
-                }
+                };
                 bag.push(Witness {
                     attachment: WA::Place(Box::new(place)),
                     source: WitnessSource::Builder("skeleton-narrow".into()),
                     payload: WP::InferredType(n.refined),
-                    span: Span { start: n.region.start, end },
+                    span: held,
                 });
             }
         }

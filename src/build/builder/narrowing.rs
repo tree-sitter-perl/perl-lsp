@@ -17,7 +17,7 @@ use crate::cst::node_to_span;
 use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span, Subject};
 
 use super::extract::ListSlot;
-use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Builder};
+use super::{connector_keyword_between, raw_leading_op, raw_mid_op, Builder};
 
 /// The subject a guard narrows — a plain scalar, or a part of a variable
 /// (`$self->{x}`, `$h{k}`, `$self->{$k}`) named by its `Place`. `key_vars`
@@ -213,14 +213,6 @@ fn tag_string_to_type(via: crate::model::file_analysis::RefTagFn, s: &str) -> Op
         RefTagFn::Ref => ref_string_to_type(s),
         RefTagFn::RefType => ref_string_to_type(s).filter(|t| !t.is_object()),
         RefTagFn::Blessed => (!s.is_empty()).then(|| InferredType::ClassName(s.to_string())),
-    }
-}
-
-/// The earlier of two optional truncation points (`None` = no bound).
-fn earliest_point(a: Option<Point>, b: Option<Point>) -> Option<Point> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(if point_lt(x, y) { x } else { y }),
-        (some, None) | (None, some) => some,
     }
 }
 
@@ -809,9 +801,9 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
-            let end = rebinds.earliest_in(&subject, g.region).unwrap_or(g.region.end);
-            if point_lt(g.region.start, end) {
-                emits.push((subject, g.scope, ty, Span { start: g.region.start, end }));
+            let cut = rebinds.earliest_in(&subject, g.region);
+            if let Some(region) = crate::model::file_analysis::cut_region(g.region, [cut]) {
+                emits.push((subject, g.scope, ty, region));
             }
         }
         for (name, scope, ty, region) in emits {
@@ -874,21 +866,17 @@ impl<'a> Builder<'a> {
                 });
                 continue;
             }
-            let end = match &pn.subject {
-                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => rebinds.earliest_in(var, pn.region),
+            let cuts: Vec<Option<Point>> = match &pn.subject {
+                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => vec![rebinds.earliest_in(var, pn.region)],
                 NarrowSubject::Place { place, key_vars, .. } => {
-                    let mut end = places.as_ref().and_then(|idx| idx.earliest_in(place, pn.region));
-                    for kv in key_vars {
-                        end = earliest_point(end, rebinds.earliest_in(kv, pn.region));
-                    }
-                    end
+                    std::iter::once(places.as_ref().and_then(|idx| idx.earliest_in(place, pn.region)))
+                        .chain(key_vars.iter().map(|kv| rebinds.earliest_in(kv, pn.region)))
+                        .collect()
                 }
             };
-            let end = end.unwrap_or(pn.region.end);
-            if !point_lt(pn.region.start, end) {
+            let Some(region) = crate::model::file_analysis::cut_region(pn.region, cuts) else {
                 continue; // truncated to nothing
-            }
-            let region = Span { start: pn.region.start, end };
+            };
             let subject = pn.subject.subject();
             match pn.fact {
                 RegionFact::Guard(NarrowOp::To(ty)) => {
