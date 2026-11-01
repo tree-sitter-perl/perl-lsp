@@ -591,7 +591,7 @@ impl FileAnalysis {
         }
         if !binding_by_var.is_empty() {
             for r in &mut self.refs {
-                if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+                if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                     if r.hash_key_owner()
                         .is_some_and(|o| !matches!(o, HashKeyOwner::Variable { .. }))
                     {
@@ -901,7 +901,7 @@ impl FileAnalysis {
         use crate::model::conventions::InvocantText;
         let mut out = Vec::new();
         for r in self.refs() {
-            let (receiver, form, place) = match &r.kind {
+            let (receiver, form, place, dies_on_undef) = match &r.kind {
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     // Only a scalar invocant can be undef/Optional; a
                     // bareword/`__PACKAGE__`/chain/bridged receiver never
@@ -911,13 +911,13 @@ impl FileAnalysis {
                         continue;
                     }
                     let place = invocant.place().cloned();
-                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()), place)
+                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()), place, true)
                 }
                 // A scalar `var_text` is the arrow form `$x->{k}`; the direct
                 // `$h{k}` form's base is the named hash, which can't be an
                 // undef *receiver* (and won't type as Undef/Optional anyway).
-                RefKind::HashKeyAccess { var_text, .. } if var_text.starts_with('$') => {
-                    (var_text.clone(), DerefForm::HashKey, None)
+                RefKind::HashKeyAccess { var_text, dies_on_undef } if var_text.starts_with('$') => {
+                    (var_text.clone(), DerefForm::HashKey, None, *dies_on_undef)
                 }
                 _ => continue,
             };
@@ -932,6 +932,7 @@ impl FileAnalysis {
                     subject,
                     receiver_ty: ty,
                     form,
+                    dies_on_undef,
                 });
             }
         }
@@ -946,6 +947,7 @@ impl FileAnalysis {
                     subject,
                     receiver_ty: ty,
                     form: s.form.clone(),
+                    dies_on_undef: s.dies_on_undef,
                 });
             }
         }

@@ -124,21 +124,58 @@ pub struct Scope {
     /// so a language states the rule once.
     #[serde(default)]
     pub direct: bool,
-    /// Where this scope switches "every variable must be declared" on or
-    /// off (Perl's `use strict 'vars'` / `no strict 'vars'`), in source
-    /// order. Lexical: a nested scope inherits the switch in force where it
-    /// opens, and its own switches end with it.
+    /// The lexical pragma switches made in this scope, in source order
+    /// (`use strict 'vars'`, `no autovivification`). A nested scope
+    /// inherits each hint in force where it opens, and its own switches
+    /// end with it.
     #[serde(default)]
-    pub declaration_rules: Vec<DeclarationRule>,
+    pub hints: Vec<HintSwitch>,
 }
 
-/// One switch of a scope's declaration rule: from `at` on, an undeclared
-/// variable is (`required`) or is not an error.
+/// One switch of a lexical hint: from `at` on, `hint` is on or off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeclarationRule {
+pub struct HintSwitch {
     #[serde(with = "PointDef")]
     pub at: Point,
-    pub required: bool,
+    pub hint: LexicalHint,
+    pub on: bool,
+}
+
+/// A compile-time pragma bit, lexically scoped the way `$^H` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LexicalHint {
+    /// Every variable must be declared (`strict 'vars'`).
+    RequireDeclaration,
+    /// Accesses of this kind through undef don't autovivify
+    /// (`no autovivification` and its categories).
+    NoVivify(VivifyAccess),
+    /// A vivification an on `NoVivify` category avoids dies instead
+    /// (`no autovivification 'strict'`).
+    VivifyStrict,
+}
+
+/// An autovivification category: how an element access reaches through
+/// its receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VivifyAccess {
+    /// An rvalue read (`$y = $x->{k}`).
+    Fetch,
+    /// An lvalue (`$x->{k} = v`, a sub argument, a `foreach` list).
+    Store,
+    /// Under `exists`.
+    Exists,
+    /// Under `delete`.
+    Delete,
+}
+
+/// The category an element access falls in, as far as its syntax says.
+/// Perl decides lvalue-ness per op (a sub's arguments and `sprintf`'s are
+/// lvalues, `join`'s are not), so a context the syntax can't place is
+/// either, and dies only where both would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VivifyContext {
+    Is(VivifyAccess),
+    FetchOrStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2062,6 +2099,10 @@ pub enum RefKind {
     /// linked `HashKeyDef`) lives in `Ref::binding` (`RefBinding::HashKey`).
     HashKeyAccess {
         var_text: String,
+        /// The access dies on an undef receiver instead of vivifying it,
+        /// under the `autovivification` hints in force here.
+        #[serde(default)]
+        dies_on_undef: bool,
     },
     /// The container variable in `$hash{key}`, `@arr[0]`, etc.
     ContainerAccess,

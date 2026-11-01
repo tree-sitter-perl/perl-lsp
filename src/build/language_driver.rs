@@ -910,7 +910,7 @@ fn inject_member_blocks(
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {

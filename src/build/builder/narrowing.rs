@@ -967,11 +967,13 @@ impl<'a> Builder<'a> {
                     let read = crate::cst::read_place(receiver, self.source, &mut binder)
                         .filter(|r| r.exact && !r.place.is_variable());
                     if let (Some(read), Ok(text)) = (read, receiver.utf8_text(self.source)) {
+                        let dies_on_undef = self.deref_dies_on_undef(node, &form);
                         sites.push(crate::model::file_analysis::ArrowDerefSite {
                             receiver: text.to_string(),
                             place: Some(Box::new(read.place)),
                             span: node_to_span(node),
                             form,
+                            dies_on_undef,
                         });
                     }
                 }

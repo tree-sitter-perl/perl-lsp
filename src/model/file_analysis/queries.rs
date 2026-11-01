@@ -21,19 +21,15 @@ impl FileAnalysis {
         }
     }
 
-    /// Whether every variable must be declared at `at` in `scope`: the
-    /// latest switch on the scope chain, innermost first. Off by default —
-    /// Perl without `strict` creates globals on first mention.
+    /// Whether `hint` is on at `at` in `scope`.
+    pub fn hint_at(&self, scope: ScopeId, at: Point, hint: LexicalHint) -> bool {
+        hint_in(&self.scopes, scope, at, hint)
+    }
+
+    /// Whether every variable must be declared at `at` in `scope` — Perl
+    /// without `strict` creates globals on first mention.
     pub fn declaration_required_at(&self, scope: ScopeId, at: Point) -> bool {
-        let mut current = Some(scope);
-        while let Some(id) = current {
-            let s = self.scope(id);
-            if let Some(rule) = s.declaration_rules.iter().rev().find(|r| r.at <= at) {
-                return rule.required;
-            }
-            current = s.parent;
-        }
-        false
+        self.hint_at(scope, at, LexicalHint::RequireDeclaration)
     }
 
     /// Every use of a variable no declaration reaches that `use strict
@@ -1043,4 +1039,34 @@ impl FileAnalysis {
             .unwrap_or(TypeProvenance::Inferred)
     }
 
+}
+
+/// Whether `hint` is on at `at` in `scope`: the latest switch of it on the
+/// scope chain, innermost first. Every hint is off by default. Over bare
+/// scopes, so the builder asks it mid-walk the way a query does after.
+pub fn hint_in(scopes: &[Scope], scope: ScopeId, at: Point, hint: LexicalHint) -> bool {
+    let mut current = Some(scope);
+    while let Some(id) = current {
+        let s = &scopes[id.0 as usize];
+        if let Some(sw) = s.hints.iter().rev().find(|h| h.hint == hint && h.at <= at) {
+            return sw.on;
+        }
+        current = s.parent;
+    }
+    false
+}
+
+/// Whether an element access in `context` through an undef receiver dies
+/// at `at`, rather than autovivifying or yielding undef: a store whose
+/// vivification is off dies (perl can't store into nothing), any other
+/// access only under `'strict'`.
+pub fn vivify_dies_in(scopes: &[Scope], scope: ScopeId, at: Point, context: VivifyContext) -> bool {
+    let dies = |access| {
+        hint_in(scopes, scope, at, LexicalHint::NoVivify(access))
+            && (access == VivifyAccess::Store || hint_in(scopes, scope, at, LexicalHint::VivifyStrict))
+    };
+    match context {
+        VivifyContext::Is(access) => dies(access),
+        VivifyContext::FetchOrStore => dies(VivifyAccess::Fetch) && dies(VivifyAccess::Store),
+    }
 }

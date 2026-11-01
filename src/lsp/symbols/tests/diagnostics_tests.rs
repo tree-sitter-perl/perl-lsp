@@ -305,6 +305,56 @@ sub f {
     assert!(undef_deref_diags(src).is_empty(), "an element deref autovivifies");
 }
 
+/// `sub f { my ($self, $x) = @_; return if defined $x; BODY }` under the
+/// `autovivification` pragma line `PRAGMA`: the undef-deref count.
+fn vivify_undef_derefs(pragma: &str, body: &str) -> usize {
+    let src = format!(
+        "package P;\n{pragma}\nsub g {{ 1 }}\nsub f {{\n    my ($self, $x, $k) = @_;\n    return if defined $x;\n    {body}\n}}\n1;\n"
+    );
+    undef_deref_diags(&src).len()
+}
+
+#[test]
+fn d1_element_deref_dies_under_strict_no_autovivification() {
+    // Each answer was checked against perl with autovivification 0.18.
+    let strict_fetch = "no autovivification qw(strict fetch);";
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->{host};"), 1);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->[0];"), 1);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->{$k};"), 1, "a dynamic key dies too");
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->{a}{b};"), 1, "the inner access dies first");
+    // Not a fetch: a store vivifies, `exists` is its own category.
+    assert_eq!(vivify_undef_derefs(strict_fetch, "$x->{host} = 1;"), 0);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return exists $x->{host};"), 0);
+    // A sub's arguments are lvalues: fetch or store, so both must die.
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return g($x->{host});"), 0);
+    assert_eq!(vivify_undef_derefs("no autovivification qw(strict fetch store);", "return g($x->{host});"), 1);
+    // A store dies once its vivification is off, strict or not.
+    assert_eq!(vivify_undef_derefs("no autovivification 'store';", "$x->{host} = 1;"), 1);
+    assert_eq!(vivify_undef_derefs("no autovivification qw(strict exists);", "return exists $x->{host};"), 1);
+}
+
+#[test]
+fn d1_element_deref_vivifies_without_strict_categories() {
+    // Bare `no autovivification` yields undef instead of dying, and
+    // `'strict'` alone names no category.
+    assert_eq!(vivify_undef_derefs("no autovivification;", "return $x->{host};"), 0);
+    assert_eq!(vivify_undef_derefs("no autovivification 'strict';", "return $x->{host};"), 0);
+    // `no autovivification; no autovivification 'strict';` adds up.
+    assert_eq!(vivify_undef_derefs("no autovivification; no autovivification 'strict';", "return $x->{host};"), 1);
+}
+
+#[test]
+fn d1_autovivification_hints_are_lexical() {
+    let strict_fetch = "no autovivification qw(strict fetch);";
+    // A block's pragma ends with the block.
+    assert_eq!(vivify_undef_derefs(&format!("{{ {strict_fetch} }}"), "return $x->{host};"), 0);
+    // `use autovivification` turns the named bits back off, every bit
+    // when it names none.
+    assert_eq!(vivify_undef_derefs(strict_fetch, "use autovivification; return $x->{host};"), 0);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "use autovivification 'strict'; return $x->{host};"), 0);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "use autovivification 'store'; return $x->{host};"), 1);
+}
+
 #[test]
 fn d1_no_undef_deref_in_guarded_branch() {
     // The defined branch strips Optional / leaves a live value — no warning.

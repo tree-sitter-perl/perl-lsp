@@ -36,11 +36,21 @@ shape and trust-gate semantics), and the adapter only renders the
 
 `undef-deref` is always-on `WARNING`: the lattice says the receiver *is*
 `Undef` (the negative side of a `defined`/`blessed` guard), not *may be*,
-so its confidence is maximal. Only a form that dies on undef fires D1 or D2
-(`DerefForm::dies_on_undef`): a method call or a code call. Every receiver
-in the stream is a variable or a part of one, and an element access through
-one autovivifies it (`my $x; $x->{a}` leaves `$x = {}`), so `->{…}` and
-`->[…]` never die there; they stay in the stream for D6.
+so its confidence is maximal. Only a site that dies on undef fires D1 or D2
+(`DerefSite::dies_on_undef`): a method call or a code call always does.
+Every receiver in the stream is a variable or a part of one, and an element
+access through one autovivifies it (`my $x; $x->{a}` leaves `$x = {}`), so
+`->{…}` and `->[…]` die only where the CPAN `autovivification` pragma says
+so. Its bits are lexical hints on the scope lane (`LexicalHint`, switched by
+`frameworks/autovivification.rhai`, the lane `strict 'vars'` uses): a store
+whose vivification is off dies, and a fetch, `exists` or `delete` dies when
+its category is off and `'strict'` is on. Which category an access falls in
+is read off its syntax (`cst::vivify_context`, the outermost access of its
+chain); perl decides lvalue-ness per op (a sub's arguments are lvalues,
+`join`'s are not), so a context the syntax can't place counts as fetch or
+store and dies only where both would. The builder decides it where the
+hints are in force and mints it on the site; elsewhere the element derefs
+stay in the stream for D6.
 Everything else ships behind a default-off `DiagnosticOptions` flag
 (`optionalDeref`, `redundantGuard`, `derefShape`,
 `unresolvedMethodCrossFile`), mirrored as `--…` CLI flags. They graduate

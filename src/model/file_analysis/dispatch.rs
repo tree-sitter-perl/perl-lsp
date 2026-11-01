@@ -795,10 +795,11 @@ impl DerefForm {
         }
     }
 
-    /// Whether the form dies on an undef receiver. Every receiver here is a
-    /// variable or a part of one, and an element access through one
-    /// autovivifies it (`my $x; $x->{a}` leaves `$x = {}`); a call has
-    /// nothing to call.
+    /// Whether the form dies on an undef receiver whatever the lexical
+    /// hints say. Every receiver here is a variable or a part of one, and
+    /// an element access through one autovivifies it (`my $x; $x->{a}`
+    /// leaves `$x = {}`) unless `no autovivification` says otherwise; a
+    /// call has nothing to call.
     pub fn dies_on_undef(&self) -> bool {
         match self {
             DerefForm::HashKey | DerefForm::ArrayIndex => false,
@@ -863,6 +864,8 @@ pub struct DerefSite {
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
     pub form: DerefForm,
+    /// An undef receiver dies here (D1/D2 fire) rather than vivifying.
+    pub dies_on_undef: bool,
 }
 
 /// A builder-recorded deref receiver for the forms that carry no typed
@@ -877,6 +880,10 @@ pub struct ArrowDerefSite {
     pub place: Option<Box<Place>>,
     pub span: Span,
     pub form: DerefForm,
+    /// An undef receiver dies here rather than vivifying, decided where
+    /// the hints in force are known.
+    #[serde(default)]
+    pub dies_on_undef: bool,
 }
 
 impl ArrowDerefSite {

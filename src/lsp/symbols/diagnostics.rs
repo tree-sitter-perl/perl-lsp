@@ -535,7 +535,7 @@ pub fn collect_diagnostics(
     // not "is" → opt-in, INFORMATION, with a guard-insertion quick-fix.
     for site in analysis.deref_receiver_sites(Some(module_index)) {
         match &site.receiver_ty {
-            InferredType::Undef if site.form.dies_on_undef() => {
+            InferredType::Undef if site.dies_on_undef => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -549,7 +549,7 @@ pub fn collect_diagnostics(
                     ..Default::default()
                 });
             }
-            InferredType::Optional(_) if options.optional_deref && site.form.dies_on_undef() => {
+            InferredType::Optional(_) if options.optional_deref && site.dies_on_undef => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::INFORMATION),

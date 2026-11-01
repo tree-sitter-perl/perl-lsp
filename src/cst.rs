@@ -758,6 +758,48 @@ pub(crate) fn deref_of_part(node: Node) -> Option<(Node, crate::model::file_anal
     (!is_plain_scalar(receiver)).then_some((receiver, form))
 }
 
+/// The autovivification category of an element access: the context of
+/// the outermost access in its chain, since `$x->{a}{b} = 1` stores
+/// through `$x->{a}` too, and `exists $x->{a}{b}` probes through it.
+pub(crate) fn vivify_context(node: Node) -> crate::model::file_analysis::VivifyContext {
+    use crate::model::file_analysis::{VivifyAccess, VivifyContext};
+    let mut n = node;
+    let parent = loop {
+        let Some(p) = n.parent() else { return VivifyContext::Is(VivifyAccess::Fetch) };
+        let through = matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+            && access_base(p).is_some_and(|(base, _)| base == n);
+        if through || p.kind() == "parenthesized_expression" {
+            n = p;
+            continue;
+        }
+        break p;
+    };
+    let is_left = parent.child_by_field_name("left") == Some(n);
+    let is_condition = parent.child_by_field_name("condition") == Some(n);
+    match parent.kind() {
+        "assignment_expression" if is_left => VivifyContext::Is(VivifyAccess::Store),
+        "assignment_expression" => VivifyContext::Is(VivifyAccess::Fetch),
+        "func1op_call_expression" => match parent.child(0).map(|c| c.kind()) {
+            Some("exists") => VivifyContext::Is(VivifyAccess::Exists),
+            Some("delete") => VivifyContext::Is(VivifyAccess::Delete),
+            _ => VivifyContext::FetchOrStore,
+        },
+        "conditional_statement" | "loop_statement" | "conditional_expression" if is_condition => {
+            VivifyContext::Is(VivifyAccess::Fetch)
+        }
+        "expression_statement"
+        | "binary_expression"
+        | "equality_expression"
+        | "relational_expression"
+        | "unary_expression"
+        | "anonymous_array_expression"
+        | "anonymous_hash_expression"
+        | "string_content"
+        | "return_expression" => VivifyContext::Is(VivifyAccess::Fetch),
+        _ => VivifyContext::FetchOrStore,
+    }
+}
+
 /// The variable a place hangs off, bound; a deref spelling's operand
 /// leads to it.
 fn place_root(node: Node, src: &[u8], binder: &mut impl PlaceBinder) -> Option<Place> {

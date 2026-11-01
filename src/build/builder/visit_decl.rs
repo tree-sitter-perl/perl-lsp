@@ -22,7 +22,7 @@ impl<'a> Builder<'a> {
             "use_version_statement" => {
                 if let Some(version) = node.child_by_field_name("version").and_then(|v| v.utf8_text(self.source).ok()) {
                     if crate::model::conventions::version_enables_strict(version) {
-                        self.switch_declaration_rule(node_to_span(node), true);
+                        self.switch_hint(node_to_span(node), crate::model::file_analysis::LexicalHint::RequireDeclaration, true);
                     }
                 }
             }

@@ -591,7 +591,16 @@ impl<'a> Builder<'a> {
             .map(|c| c.kind() == "method_call_expression")
             .unwrap_or(false);
 
+        // An arrow access through a plain variable is a deref site: through
+        // its key ref, or, with no static key to ref, its own site — kept
+        // only where it can die, since without a ref it feeds nothing else.
+        let arrow_receiver =
+            crate::cst::element_deref_base(node).filter(|b| crate::cst::is_plain_scalar(*b));
+        let dies_on_undef = arrow_receiver.is_some()
+            && self.deref_dies_on_undef(node, &crate::model::file_analysis::DerefForm::HashKey);
+
         // Record the key access
+        let mut key_ref = false;
         if !container_is_method_call {
             if let Some(key_node) = node.child_by_field_name("key") {
                 if let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) {
@@ -600,14 +609,19 @@ impl<'a> Builder<'a> {
                         self.add_ref(
                             RefKind::HashKeyAccess {
                                 var_text: var_text.clone().unwrap_or_default(),
+                                dies_on_undef,
                             },
                             node_to_span(key_node),
                             key_text,
                             element_access,
                         );
+                        key_ref = true;
                     }
                 }
             }
+        }
+        if let (Some(receiver), false, true) = (arrow_receiver, key_ref, dies_on_undef) {
+            self.record_arrow_deref(node, receiver, crate::model::file_analysis::DerefForm::HashKey);
         }
 
         // Visit children for the container variable ref

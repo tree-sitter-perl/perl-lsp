@@ -624,6 +624,12 @@ pub enum EmitAction {
     /// importer (`frameworks/strict.rhai`).
     RequireDeclaration { required: bool, span: Span },
 
+    /// From the end of `span` to the end of its enclosing scope, the
+    /// lexical pragma bit `hint` is on (or off): `no autovivification`'s
+    /// categories (`frameworks/autovivification.rhai`). `RequireDeclaration`
+    /// is the same switch for `strict 'vars'`.
+    Hint { hint: crate::model::file_analysis::LexicalHint, on: bool, span: Span },
+
     /// Declare a type for a variable inside a scope. Plugins use this
     /// when they know a framework-provided variable's type that the
     /// builder can't infer — the classic case being callback arguments:

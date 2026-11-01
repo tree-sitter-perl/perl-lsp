@@ -43,6 +43,7 @@ pub use deferral::*;
 mod place;
 pub use place::*;
 mod queries;
+pub use queries::{hint_in, vivify_dies_in};
 mod enrichment;
 mod class_queries;
 mod cursor_queries;

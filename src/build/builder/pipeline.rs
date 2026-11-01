@@ -187,7 +187,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -938,7 +938,7 @@ impl<'a> Builder<'a> {
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
-            if let (RefKind::HashKeyAccess { var_text }, AccessKind::Write) =
+            if let (RefKind::HashKeyAccess { var_text, .. }, AccessKind::Write) =
                 (&r.kind, r.access)
             {
                 let resolved_owner = match r.hash_key_owner() {
