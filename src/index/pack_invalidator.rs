@@ -49,6 +49,7 @@ use crate::index::open_docs::OpenDocs;
 use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
+use crate::util::canonical_path::CanonicalPath;
 
 /// One change, as the consumer rule reads it.
 struct Change<'a> {
@@ -79,10 +80,6 @@ fn consumes(path: impl FnOnce() -> Option<PathBuf>, analysis: &FileAnalysis, cha
         }
     }
     analysis.pack.include_closure.contains(change.canon_str).then_some(Consumes::Closure)
-}
-
-fn canonical(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// What a `file_changed` call decided, for the caller to act on. The
@@ -234,7 +231,7 @@ impl PackInvalidator {
         path: &Path,
         deleted: bool,
     ) -> InvalidationOutcome {
-        let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canon = CanonicalPath::resolve(path).into_path_buf();
         if self.coord.note_change(&canon, deleted) {
             return InvalidationOutcome::deferred();
         }
@@ -289,7 +286,7 @@ impl PackInvalidator {
         let gathers = self.driver.caps().context_gather;
         let mut out: Vec<Url> = Vec::new();
         open_docs.for_each_open(|u, doc| {
-            let doc_path = || u.to_file_path().ok().map(|p| canonical(&p));
+            let doc_path = || u.to_file_path().ok().map(|_| doc.canonical_path.to_path_buf());
             let is_self = gathers && !deleted && doc_path().is_some_and(|p| p == canon);
             let stale = match consumes(doc_path, &doc.analysis, &change) {
                 Some(Consumes::Refile) => true,
@@ -314,7 +311,7 @@ impl PackInvalidator {
     /// register: they would revert a fresher copy.
     pub(crate) fn claim_source_gen(&self, path: &Path, gen: i64) -> bool {
         use dashmap::mapref::entry::Entry;
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = CanonicalPath::resolve(path).into_path_buf();
         match self.registered_source_gen.entry(canon) {
             Entry::Occupied(mut e) => {
                 if gen >= *e.get() {
@@ -334,7 +331,7 @@ impl PackInvalidator {
     /// Forget `path`'s source generation (H9-1) — a genuine delete, so a later
     /// recreation claims from the baseline again.
     fn forget_source_gen(&self, path: &Path) {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canon = CanonicalPath::resolve(path).into_path_buf();
         self.registered_source_gen.remove(&canon);
     }
 
@@ -362,7 +359,7 @@ impl PackInvalidator {
             return Swept::default();
         }
         let lang = driver.id();
-        let canon = canonical(path);
+        let canon = CanonicalPath::resolve(path);
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
         let refiled = driver
@@ -391,8 +388,8 @@ impl PackInvalidator {
             None => module_cache::file_mtime_nanos(&canon).unwrap_or_else(now),
         };
 
-        let mut consumers: Vec<PathBuf> = Vec::new();
-        let mut refile: Vec<PathBuf> = Vec::new();
+        let mut consumers: Vec<CanonicalPath> = Vec::new();
+        let mut refile: Vec<CanonicalPath> = Vec::new();
         // Closures ride along for the Unchanged case: the consumers' persisted
         // deps_stamps must be recomputed (the edited header's mtime moved) or
         // the next warm scan rejects every consumer row and the cold storm the
@@ -400,10 +397,10 @@ impl PackInvalidator {
         let mut consumer_closures: Vec<(PathBuf, crate::model::file_analysis::path_intern::ClosureList)> =
             Vec::new();
         pack.for_each_registered_file(&mut |cm| {
-            match consumes(|| Some(canonical(&cm.path)), &cm.analysis, &change) {
+            match consumes(|| Some(cm.path.to_path_buf()), &cm.analysis, &change) {
                 Some(Consumes::Closure) => {
                     consumers.push(cm.path.clone());
-                    consumer_closures.push((cm.path.clone(), cm.analysis.pack.include_closure.clone()));
+                    consumer_closures.push((cm.path.to_path_buf(), cm.analysis.pack.include_closure.clone()));
                 }
                 Some(Consumes::Refile) => refile.push(cm.path.clone()),
                 None => {}
@@ -414,7 +411,7 @@ impl PackInvalidator {
             // The departed file's own header/macro/closure caches go too — a
             // consumer re-gather resolving the deleted header from its
             // still-warm entry would make the deletion invisible.
-            crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.clone()).collect());
+            crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.to_path_buf()).collect());
             pack.unregister_file(&canon);
             pack.remove_surface(&canon);
             self.forget_source_gen(&canon);
@@ -430,7 +427,7 @@ impl PackInvalidator {
         let mut changed_verdict = crate::model::surface::SurfaceVerdict::Changed;
         let mut changed_fa: Option<Arc<FileAnalysis>> = None;
         if !deleted {
-            crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.clone()).collect());
+            crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.to_path_buf()).collect());
             if let Ok(source) = std::fs::read_to_string(&canon) {
                 let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     driver.analyze_with_path(&source, Some(&canon))
@@ -452,7 +449,7 @@ impl PackInvalidator {
         if !consumers.is_empty() {
             // The changed file's own caches were evicted before the probe and are
             // fresh — evict only the consumers' so they re-gather.
-            crate::build::cpp_reparse::evict_analysis_caches(&consumers.iter().cloned().collect());
+            crate::build::cpp_reparse::evict_analysis_caches(&consumers.iter().map(|p| p.to_path_buf()).collect());
         }
 
         // Re-analyze the changed file (unless deleted) + every consumer
@@ -460,7 +457,7 @@ impl PackInvalidator {
         // the new version no longer defines don't linger in `all_defs` / the
         // cache winner slot. Consumers re-analyze on delete too — their splices
         // and closures baked the departed header.
-        let mut targets: Vec<PathBuf> = Vec::with_capacity(consumers.len() + 1);
+        let mut targets: Vec<CanonicalPath> = Vec::with_capacity(consumers.len() + 1);
         if !deleted && changed_fa.is_none() {
             targets.push(canon.clone());
         }
@@ -468,7 +465,7 @@ impl PackInvalidator {
         targets.sort();
         targets.dedup();
         targets.retain(|p| changed_fa.is_none() || *p != canon);
-        let mut results: Vec<(PathBuf, Arc<FileAnalysis>)> = targets
+        let mut results: Vec<(CanonicalPath, Arc<FileAnalysis>)> = targets
             .par_iter()
             .filter_map(|p| {
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -518,7 +515,7 @@ impl PackInvalidator {
                 // Paths whose blob row actually landed. Read by the committed
                 // lane only — the fallback lane's transaction is gone, so
                 // nothing in it landed whatever the per-file verdict said.
-                let landed: std::cell::RefCell<std::collections::HashSet<PathBuf>> =
+                let landed: std::cell::RefCell<std::collections::HashSet<CanonicalPath>> =
                     Default::default();
                 let (tx, rx) = std::sync::mpsc::channel();
                 for (p, arc) in &results {
@@ -529,7 +526,7 @@ impl PackInvalidator {
                     rx,
                     Some(conn),
                     "pack swap persist",
-                    |conn, batch: &[(PathBuf, Arc<FileAnalysis>)]| {
+                    |conn, batch: &[(CanonicalPath, Arc<FileAnalysis>)]| {
                         for (p, arc) in batch {
                             let p_str = p.to_string_lossy();
                             let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
@@ -550,11 +547,11 @@ impl PackInvalidator {
                             landed.borrow_mut().insert(p.clone());
                         }
                     },
-                    |(p, arc): (PathBuf, Arc<FileAnalysis>)| {
+                    |(p, arc): (CanonicalPath, Arc<FileAnalysis>)| {
                         let ok = landed.borrow().contains(&p);
                         self.register_after_swap(pack, &p, &arc, ok, event_gen);
                     },
-                    |(p, arc): (PathBuf, Arc<FileAnalysis>)| {
+                    |(p, arc): (CanonicalPath, Arc<FileAnalysis>)| {
                         self.register_after_swap(pack, &p, &arc, false, event_gen);
                     },
                 );

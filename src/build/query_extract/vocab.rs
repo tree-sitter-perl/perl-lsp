@@ -259,7 +259,17 @@ impl MemberOpCap {
 }
 
 spelled! {
-    pub enum ArityCap { Args = "args", Arg = "arg", Sig = "sig", Spread = "spread" }
+    pub enum ArityCap {
+        Args = "args",
+        Arg = "arg",
+        Sig = "sig",
+        Spread = "spread",
+        /// A declared parameter of the `@arity.sig` it sits in: a required
+        /// one, one with a default, or one that takes any number of values.
+        Required = "required",
+        Optional = "optional",
+        Variadic = "variadic",
+    }
 }
 
 spelled! {

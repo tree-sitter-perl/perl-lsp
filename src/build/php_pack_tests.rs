@@ -257,10 +257,10 @@ fn a_class_renames_across_files_through_its_identity() {
 
     let user = idx.workspace_file_for_test(&p_user).unwrap();
     let on_extends = tree_sitter::Point { row: 3, column: 21 };
-    let cs = resolve(&store, &user, FileKey::Path(p_user.clone()), on_extends, Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &user, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p_user.clone())), on_extends, Some(&idx), OverrideScope::default());
     let defs = cs.definitions();
     assert!(
-        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == p_model) && d.span.start.row == 2),
+        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&p_model)) && d.span.start.row == 2),
         "gd lands on the declaration: {defs:?}"
     );
 
@@ -379,7 +379,7 @@ fn a_rename_stays_in_the_section_that_imports_the_class() {
 
     let edits_from = |row: usize| {
         let at = tree_sitter::Point { row, column: 19 };
-        let cs = resolve(&store, &user, FileKey::Path(p_user.clone()), at, Some(&idx), OverrideScope::default());
+        let cs = resolve(&store, &user, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p_user.clone())), at, Some(&idx), OverrideScope::default());
         let mut sites: Vec<(String, usize, usize)> = cs
             .rename_edits("Entity")
             .unwrap()
@@ -588,7 +588,7 @@ fn a_property_hovers_by_its_listed_name() {
     let file = idx.workspace_file_for_test(&path).unwrap();
     let store = OpenDocs::new();
     let at = tree_sitter::Point { row: 6, column: 17 };
-    let cs = resolve(&store, &file, FileKey::Path(path), at, Some(&idx), OverrideScope::default()).with_source(MEMBERS);
+    let cs = resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path)), at, Some(&idx), OverrideScope::default()).with_source(MEMBERS);
     let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap();
     assert!(hover.contains("\n$total: "), "{hover}");
 }
@@ -608,7 +608,7 @@ fn a_property_renames_from_its_declaration() {
     let file = idx.workspace_file_for_test(&path).unwrap();
     let edits_from = |row: usize, column: usize| {
         let at = tree_sitter::Point { row, column };
-        let cs = resolve(&store, &file, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+        let cs = resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at, Some(&idx), OverrideScope::default());
         let mut sites: Vec<(usize, usize, usize, String)> = cs
             .rename_edits("$label")
             .unwrap()
@@ -638,7 +638,7 @@ fn renames_in(file: &str, src: &str, row: usize, column: usize) -> Vec<(usize, u
     let store = OpenDocs::new();
     let file = idx.workspace_file_for_test(&path).unwrap();
     let at = tree_sitter::Point { row, column };
-    let cs = resolve(&store, &file, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at, Some(&idx), OverrideScope::default());
     let mut sites: Vec<(usize, usize, usize)> = cs
         .rename_edits("renamed")
         .unwrap()
@@ -806,12 +806,12 @@ class Job {
     let store = OpenDocs::new();
     let clock = idx.workspace_file_for_test(&p_clock).unwrap();
     let at = tree_sitter::Point { row: 2, column: 7 };
-    let cs = resolve(&store, &clock, FileKey::Path(p_clock.clone()), at, Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &clock, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(p_clock.clone())), at, Some(&idx), OverrideScope::default());
     let mut sites: Vec<(usize, usize)> = cs
         .rename_edits("Timer")
         .unwrap()
         .into_iter()
-        .filter(|(loc, _)| matches!(&loc.key, FileKey::Path(p) if *p == p_user))
+        .filter(|(loc, _)| matches!(&loc.key, FileKey::Path(p) if p.as_path() == p_user.as_path()))
         .map(|(loc, _)| (loc.span.start.row, loc.span.start.column))
         .collect();
     sites.sort();
@@ -841,7 +841,8 @@ fn calling_a_class_name_is_a_function_call() {
         query_source: concat!(
             include_str!("../../queries/php/skeleton.scm"),
             "\n(function_call_expression function: (name) @ref.call",
-            " arguments: (arguments ((_) @arity.arg \",\"?)*) @arity.args) @expr.call\n",
+            " arguments: (arguments) @arity.args) @expr.call\n",
+            "(arguments (_) @arity.arg) @arity.args\n",
         ),
         ..php_pack()
     };
@@ -870,7 +871,7 @@ fn calling_a_class_name_is_a_function_call() {
     idx.insert_workspace_for_test(path.clone(), fa);
     let fa = idx.workspace_file_for_test(&path).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(path), Point::new(3, 19), Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path)), Point::new(3, 19), Some(&idx), OverrideScope::default());
     let mut rows: Vec<usize> = cs.rename_edits("Baz").unwrap().into_iter().map(|(l, _)| l.span.start.row).collect();
     rows.sort();
     assert_eq!(rows, [2, 3]);
@@ -902,10 +903,10 @@ fn php_landing(
     let p = std::path::PathBuf::from(path);
     let fa = idx.workspace_file_for_test(&p).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(p), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p)), at, Some(idx), OverrideScope::default());
     let short = |k: &FileKey| match k {
         FileKey::Path(p) => p.strip_prefix("/fake/php").unwrap().display().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     (
         cs.definitions().iter().map(|d| (short(&d.key), d.span.start.row, d.label.clone())).collect(),

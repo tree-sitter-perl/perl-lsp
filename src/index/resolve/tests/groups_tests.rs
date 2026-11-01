@@ -131,7 +131,7 @@ my $val = $p->x;
     let locs = group_refs(
         &store,
         Some(&idx),
-        &FileKey::Path(point_path.clone()),
+        &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(point_path.clone())),
         &local_spans,
         &pinned_spans,
         &members,
@@ -139,7 +139,7 @@ my $val = $p->x;
     );
     let in_user: Vec<_> = locs
         .iter()
-        .filter(|l| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .filter(|l| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&user_path)))
         .map(|l| (l.span.start.row, l.span.start.column))
         .collect();
     assert!(
@@ -174,7 +174,7 @@ class Point {
     idx.insert_cache(
         "Point",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            class_path.clone(),
+            crate::util::canonical_path::CanonicalPath::resolve(class_path.clone()),
             std::sync::Arc::new(parse(point_src)),
         ))),
     );
@@ -190,7 +190,7 @@ class Point {
     assert!(local_spans.is_empty(), "remote mint: no origin spans");
     assert_eq!(members.len(), 2, "reader + ctor-key members");
     assert!(
-        pinned_spans.iter().all(|(p, _)| p == &class_path),
+        pinned_spans.iter().all(|(p, _)| *p == crate::util::canonical_path::CanonicalPath::resolve(&class_path)),
         "pinned to the class file: {:?}",
         pinned_spans,
     );
@@ -240,7 +240,7 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
     let edits = group_rename_edits(
         &store,
         Some(&idx),
-        &FileKey::Path(class_path.clone()),
+        &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(class_path.clone())),
         &local_spans,
         &pinned_spans,
         &members,
@@ -250,7 +250,7 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
     .expect("no union sites");
     let user_edits: Vec<_> = edits
         .iter()
-        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &user_path))
+        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&user_path)))
         .map(|(l, t)| (l.span.start.row, l.span.start.column, t.clone()))
         .collect();
     assert!(
@@ -287,7 +287,7 @@ fn moo_explicit_string_accessor_renames_its_defining_string() {
         panic!("expected Group, got {:?}", resolved);
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "dim",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "dim",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -349,7 +349,7 @@ fn package_var_our_renames_cross_file() {
     assert!(t.supports_cross_file_rename());
 
     let refs = refs_to(&store, Some(&idx), &t, RoleMask::EDITABLE);
-    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
+    let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)));
     assert!(hit(&lib), "reaches the decl file. refs: {:?}", refs);
     assert!(hit(&app), "reaches the cross-file $Cfg::debug accesses. refs: {:?}", refs);
     // Both qualified accesses in app.pl + decl + unqualified in lib.
@@ -411,7 +411,7 @@ fn package_var_array_hash_globals_rename_name_tail_only() {
     // starting on the `$`/`@` sigil or the `Pkg::` qualifier.
     let app_edits: Vec<_> = refs
         .iter()
-        .filter(|r| matches!(&r.key, FileKey::Path(p) if p == &app))
+        .filter(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app)))
         .collect();
     assert_eq!(app_edits.len(), 2, "both element + slice accesses: {:?}", app_edits);
     for e in &app_edits {
@@ -440,7 +440,7 @@ fn package_var_rename_writes_the_name_past_a_typed_sigil() {
     idx.insert_workspace_for_test(app.clone(), parse(app_src));
     let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
     let at = tree_sitter::Point { row: 1, column: 6 };
-    let cs = crate::index::resolve::resolve(&store, &lib_fa, FileKey::Path(lib.clone()), at, Some(&idx), OverrideScope::default());
+    let cs = crate::index::resolve::resolve(&store, &lib_fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(lib.clone())), at, Some(&idx), OverrideScope::default());
     let edits = cs.rename_edits("$verbose").unwrap();
     assert_eq!(edits.len(), 3, "{edits:?}");
     assert!(edits.iter().all(|(_, text)| text == "verbose"), "{edits:?}");
@@ -487,12 +487,12 @@ fn package_var_main_global_does_not_cross_scripts() {
         panic!("main global should be a file-local Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(a.clone()), &local_spans, &pinned_spans, &members, "settings",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(a.clone())), &local_spans, &pinned_spans, &members, "settings",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
     assert!(
-        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &a)),
+        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&a))),
         "rename must stay in a.pl, never touch b.pl: {edits:?}",
     );
     assert_eq!(edits.len(), 2, "a.pl decl + bare read only: {edits:?}");
@@ -534,7 +534,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     );
     let hrefs = refs_to(&store, Some(&idx), &h, RoleMask::EDITABLE);
     assert!(
-        hrefs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p == &child)),
+        hrefs.iter().any(|r| matches!(&r.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&child))),
         "hierarchy rename must reach the Child override: {:?}",
         hrefs,
     );
@@ -573,7 +573,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
     idx.insert_workspace_for_test(cons.clone(), parse(cons_src));
 
     let hit = |refs: &[RefLocation], p: &PathBuf| {
-        refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p))
+        refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if *x == crate::util::canonical_path::CanonicalPath::resolve(p)))
     };
 
     // Source rename reaches the consumer's REMOTE `beta` token.
@@ -642,7 +642,7 @@ fn dbic_column_rename_reaches_single_arg_call_keys() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "RENAMED",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -676,7 +676,7 @@ fn dbic_column_rename_multiarg_search_excludes_attrs_hash() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -714,7 +714,7 @@ fn dbic_column_rename_reaches_fluent_resultset_chain() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "RENAMED",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -759,7 +759,7 @@ sub go {\n\
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -804,13 +804,13 @@ fn moo_attr_group_includes_cross_file_constructor_key() {
         panic!("expected a Moo attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(lib.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(lib.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
     // app.pl row 1 is the `Widget->new(name => …)` ctor key.
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app)) && l.span.start.row == 1),
         "attr rename must reach the cross-file constructor key: {edits:?}",
     );
 }
@@ -860,12 +860,12 @@ fn inherited_attr_rename_reaches_subclass_constructor_key() {
         panic!("expected a Moo attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(animal.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(animal.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app)) && l.span.start.row == 1),
         "base attr rename must reach the subclass `Dog->new(name => …)` ctor key: {edits:?}",
     );
 }
@@ -896,12 +896,12 @@ fn corinna_field_subclass_does_not_bleed_to_ancestor() {
         panic!("expected a field Group, got {resolved:?}")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(deriv.clone()), &local_spans, &pinned_spans, &members, "vol",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(deriv.clone())), &local_spans, &pinned_spans, &members, "vol",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
     assert!(
-        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &deriv)),
+        edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&deriv))),
         "Corinna field rename must stay in the subclass, never touch the ancestor: {edits:?}",
     );
 }
@@ -933,14 +933,14 @@ fn overridden_attr_renames_whole_family_symmetrically() {
             panic!("expected Group, got {r:?}")
         };
         let mut got: Vec<String> = group_rename_edits(
-            &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+            &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "X",
             RoleMask::EDITABLE,
         )
         .expect("no union sites")
         .iter()
         .map(|(l, _)| match &l.key {
             FileKey::Path(p) => format!("{}:{}", p.file_name().unwrap().to_string_lossy(), l.span.start.row),
-            FileKey::Url(u) => format!("{u}:{}", l.span.start.row),
+            FileKey::Url(u, _) => format!("{u}:{}", l.span.start.row),
         })
         .collect();
         got.sort();
@@ -978,7 +978,7 @@ fn dbic_multi_key_hashref_links_all_columns() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -1077,7 +1077,7 @@ fn dbic_custom_sub_shadowing_verb_is_not_column_keyed() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -1107,7 +1107,7 @@ fn dbic_scalar_cond_does_not_column_key_attrs_hash() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
@@ -1142,12 +1142,12 @@ fn dbic_column_rename_reaches_cross_file_consumer_arg_key() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(lib.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(lib.clone())), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     )
     .expect("no union sites");
     assert!(
-        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app)),
+        edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&app))),
         "column rename reaches the cross-file `User->search({{ name }})` arg key: {edits:?}",
     );
 }
@@ -1196,26 +1196,26 @@ fn dbic_column_rename_owner_gated_excludes_framework_and_siblings() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(widget.clone()), &local_spans, &pinned_spans,
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(widget.clone())), &local_spans, &pinned_spans,
         &members, "renamed", RoleMask::EDITABLE,
     )
     .expect("no union sites");
-    let touched: std::collections::BTreeSet<&PathBuf> = edits
+    let touched: std::collections::BTreeSet<&std::path::Path> = edits
         .iter()
-        .filter_map(|(l, _)| match &l.key { FileKey::Path(p) => Some(p), _ => None })
+        .filter_map(|(l, _)| match &l.key { FileKey::Path(p) => Some(p.as_path()), _ => None })
         .collect();
     assert!(
-        !touched.contains(&base),
+        !touched.contains(base.as_path()),
         "framework ancestor's real `sub id` must be untouched: {touched:?}",
     );
     assert!(
-        !touched.contains(&gadget),
+        !touched.contains(gadget.as_path()),
         "unrelated sibling class's own `id` column must be untouched: {touched:?}",
     );
     // The owner's decl + its typed `$self->id` call both edit.
     let widget_rows: std::collections::BTreeSet<usize> = edits
         .iter()
-        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &widget))
+        .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&widget)))
         .map(|(l, _)| l.span.start.row)
         .collect();
     assert!(widget_rows.contains(&2), "owner column decl (row 2) edits: {edits:?}");
@@ -1397,7 +1397,7 @@ fn test_internal_slot_pokes_join_group_cross_file() {
     let edits = group_rename_edits(
         &store,
         Some(&idx),
-        &FileKey::Path(class_path.clone()),
+        &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(class_path.clone())),
         &local_spans,
         &pinned_spans,
         &members,
@@ -1407,7 +1407,7 @@ fn test_internal_slot_pokes_join_group_cross_file() {
     .expect("no union sites");
     assert!(
         edits.iter().any(|(l, t)| {
-            matches!(&l.key, FileKey::Path(p) if p == &sub_path) && t == "extent"
+            matches!(&l.key, FileKey::Path(p) if *p == crate::util::canonical_path::CanonicalPath::resolve(&sub_path)) && t == "extent"
         }),
         "subclass slot poke renamed; edits: {:?}",
         edits,
@@ -1446,7 +1446,7 @@ fn rename_from_bless_key_reaches_self_slot_accesses() {
         members,
     );
     let edits = group_rename_edits(
-        &store, Some(&idx), &FileKey::Path(path.clone()),
+        &store, Some(&idx), &FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())),
         &local_spans, &pinned_spans, &members, "log",
         RoleMask::EDITABLE,
     )
@@ -1470,7 +1470,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         idx.insert_cache(
             name,
             Some(Arc::new(CachedModule::new(
-                PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
+                crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/")))),
                 analysis,
             ))),
         );
@@ -1500,7 +1500,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
@@ -1531,7 +1531,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         idx.insert_cache(
             name,
             Some(Arc::new(CachedModule::new(
-                PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
+                crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/")))),
                 analysis,
             ))),
         );
@@ -1553,7 +1553,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
@@ -1601,7 +1601,7 @@ fn refs_to_package_verb_reaches_cross_file_call_sites() {
     let cs = resolve(
         &store,
         &origin,
-        FileKey::Path(comp_path.clone()),
+        FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(comp_path.clone())),
         tree_sitter::Point { row: 1, column: decl_col },
         Some(&idx),
         OverrideScope::default(),
@@ -1611,7 +1611,7 @@ fn refs_to_package_verb_reaches_cross_file_call_sites() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.file_name().unwrap().to_str().unwrap().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
 
@@ -1644,7 +1644,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         idx.insert_cache(
             name,
             Some(Arc::new(CachedModule::new(
-                PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
+                crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/")))),
                 analysis,
             ))),
         );
@@ -1663,7 +1663,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
@@ -1716,7 +1716,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/vis/use.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/vis/use.c"))),
             tree_sitter::Point { row: 1, column: 16 }, // on OP_VIS_A
             Some(&idx),
             OverrideScope::default(),
@@ -1766,7 +1766,7 @@ mod pack_symmetry {
         let cs2 = resolve(
             &store,
             &origin2.analysis,
-            FileKey::Path(PathBuf::from("/fake/vis/use2.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/vis/use2.c"))),
             tree_sitter::Point { row: 1, column: 16 },
             Some(&idx),
             OverrideScope::default(),
@@ -1803,7 +1803,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &fa,
-            FileKey::Path(PathBuf::from("/fake/dd/one.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/dd/one.c"))),
             tree_sitter::Point { row: 0, column: 11 }, // on the decl's name
             None,
             OverrideScope::default(),
@@ -1832,7 +1832,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/dd/state.h")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/dd/state.h"))),
             tree_sitter::Point { row: 0, column: 18 }, // on `g_state`
             Some(&idx),
             OverrideScope::default(),
@@ -1893,7 +1893,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/mt/writer.cc")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/mt/writer.cc"))),
             tree_sitter::Point { row: 1, column: 12 }, // on `Add`
             Some(&idx),
             OverrideScope::default(),
@@ -1921,7 +1921,7 @@ mod pack_symmetry {
         let cs2 = resolve(
             &store,
             &hdr_origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/mt/memtable.h")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/mt/memtable.h"))),
             tree_sitter::Point { row: 1, column: 7 }, // on `Add` in the decl
             Some(&idx),
             OverrideScope::default(),
@@ -1972,7 +1972,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(PathBuf::from("/fake/inc/lib.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/inc/lib.c"))),
             tree_sitter::Point { row: 0, column: 4 }, // on the def's name
             Some(&idx),
             OverrideScope::default(),
@@ -2025,7 +2025,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(dir.join("use.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(dir.join("use.c"))),
             tree_sitter::Point { row: 1, column: 16 }, // on OP_HOV_A
             Some(&idx),
             OverrideScope::default(),
@@ -2045,7 +2045,7 @@ mod pack_symmetry {
         let cs_blank = resolve(
             &store,
             &origin.analysis,
-            FileKey::Path(dir.join("use.c")),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(dir.join("use.c"))),
             tree_sitter::Point { row: 2, column: 0 }, // the closing `}` line
             Some(&idx),
             OverrideScope::default(),
@@ -2121,7 +2121,7 @@ mod pack_symmetry {
         let cs = resolve(
             &store,
             &origin,
-            FileKey::Path(hpath),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(hpath)),
             tree_sitter::Point::new(0, 24),
             Some(&idx),
             OverrideScope::default(),
@@ -2193,6 +2193,66 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn function_like_delegation_skips_a_same_named_bare_read() {
+        // `WRAP` not followed by `(` is not a use of `#define WRAP(x)`: the
+        // preprocessor leaves it alone, so it is no reference to `real`.
+        let fa = cpp("int real(int x);\n#define WRAP(x) real(x)\nint g(int WRAP) { return WRAP(WRAP); }\n");
+        let at = |col: usize| {
+            fa.refs()
+                .iter()
+                .position(|r| r.target_name == "WRAP" && r.span.start == tree_sitter::Point::new(2, col))
+                .unwrap_or_else(|| panic!("WRAP ref at col {col}: {:?}", fa.refs()))
+        };
+        assert_eq!(fa.ref_delegates(at(25)), ["real".to_string()], "the call expands");
+        assert!(fa.ref_delegates(at(30)).is_empty(), "the bare argument read does not");
+    }
+
+    #[test]
+    fn delegation_through_an_included_header_reaches_every_config_variant() {
+        // The delegating `#define` lives in a header, in two config variants
+        // forwarding to different callees. The using file's build sees both
+        // through its include closure and mints the edge on the use site, so
+        // gr on either callee lists `WRAP(1)` with no query-time macro scan.
+        // Per-process dir: the header cache is keyed by stamp, so a stale
+        // `wrap.h` from a concurrent or older run must never be read.
+        let dir = std::env::temp_dir().join(format!("perl_lsp_delegation_header_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let header_src = "int real(int x);\nint real_t(int x);\n#ifdef THREADED\n#define WRAP(x) real_t(x)\n#else\n#define WRAP(x) real(x)\n#endif\n";
+        std::fs::write(dir.join("wrap.h"), header_src).unwrap();
+        let use_src = "#include \"wrap.h\"\nvoid f() { WRAP(1); }\n";
+        let use_path = dir.join("use.c");
+        std::fs::write(&use_path, use_src).unwrap();
+        let fa = crate::build::language_driver::LanguageRegistry::compiled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze_with_path(use_src, Some(&use_path));
+        let wrap = fa
+            .refs()
+            .iter()
+            .position(|r| r.target_name == "WRAP" && r.span.start == tree_sitter::Point::new(1, 11))
+            .unwrap_or_else(|| panic!("WRAP use minted: {:?}", fa.refs()));
+        let mut delegates = fa.ref_delegates(wrap).to_vec();
+        delegates.sort();
+        assert_eq!(delegates, vec!["real".to_string(), "real_t".to_string()]);
+
+        let header = cpp(header_src);
+        let store = OpenDocs::new();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        idx.insert_workspace_for_test(use_path, fa);
+        for (row, name) in [(0, "real"), (1, "real_t")] {
+            let target = match resolve_symbol(&header, tree_sitter::Point::new(row, 5), None) {
+                Some(ResolvedTarget::Target(t)) => t,
+                other => panic!("{name} target: {other:?}"),
+            };
+            let results = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
+            assert!(
+                results.iter().any(|r| r.span.start == tree_sitter::Point::new(1, 11) && r.rewrite == SiteRewrite::ThroughMacro),
+                "WRAP(1) is a non-rewritable reference to {name}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = OpenDocs::new();
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -2246,7 +2306,7 @@ fn test_implementations_on_primary_enumerates_specialization_family() {
         .iter()
         .map(|r| match &r.key {
             FileKey::Path(p) => p.display().to_string(),
-            FileKey::Url(u) => u.to_string(),
+            FileKey::Url(u, _) => u.to_string(),
         })
         .collect();
     assert_eq!(
