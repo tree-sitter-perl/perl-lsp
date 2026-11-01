@@ -8,6 +8,8 @@ pub fn r_pack() -> LangPack {
         id: "r",
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         names: NameSpellings::NONE,
+        // A logical is a number in arithmetic (`TRUE + 1` is 2).
+        lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,

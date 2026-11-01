@@ -35,7 +35,7 @@ pub(crate) mod point_opt_serde {
 
 // ---- Shared types ----
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     #[serde(with = "PointDef")]
     pub start: Point,
@@ -87,7 +87,7 @@ pub enum FoldKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ScopeId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct SymbolId(pub u32);
 
 // ---- Scope ----
@@ -1033,22 +1033,36 @@ impl FlowEdge {
     }
 }
 
-/// The earliest FlowEdge that rebinds `var` within `region` — the
-/// LANGUAGE-AGNOSTIC narrowing cutoff. A rebind is a value flowing into the
-/// subject (a `@flow` edge), so this one truncation is shared by the Perl
-/// narrowing pass (`first_subject_write_via_edges`) and the query-engine
-/// (cpp/python) narrowing. `None` ⇒ no rebind in the region, narrowing runs to
-/// the region's end. The grammar scan it replaced lived in one language;
-/// reading the edge set, every LangPack feeding `@flow` gets the cutoff.
-pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> Option<Point> {
-    let key = |p: &Point| (p.row, p.column);
-    let (lo, hi) = (key(&region.start), key(&region.end));
-    flow_edges
-        .iter()
-        .filter(|fe| fe.target_name == var)
-        .map(|fe| fe.target_at)
-        .filter(|p| lo <= key(p) && key(p) < hi)
-        .min_by_key(key)
+/// Every FlowEdge target site, by name, sorted — the LANGUAGE-AGNOSTIC
+/// narrowing cutoff. A rebind is a value flowing into the subject (a `@flow`
+/// edge), so this one truncation is shared by the Perl narrowing pass and the
+/// query-engine (cpp/python) narrowing. Built once per cutoff pass: a region
+/// fact per use made a linear scan over every edge per fact the measured cost
+/// (FHEM `--check` +6%).
+pub struct RebindIndex<'e> {
+    by_name: HashMap<&'e str, Vec<Point>>,
+}
+
+impl<'e> RebindIndex<'e> {
+    pub fn new(flow_edges: &'e [FlowEdge]) -> Self {
+        let mut by_name: HashMap<&'e str, Vec<Point>> = HashMap::new();
+        for fe in flow_edges {
+            by_name.entry(fe.target_name.as_str()).or_default().push(fe.target_at);
+        }
+        for sites in by_name.values_mut() {
+            sites.sort_unstable_by_key(|p| (p.row, p.column));
+        }
+        RebindIndex { by_name }
+    }
+
+    /// The earliest rebind of `var` within `region` (start inclusive, end
+    /// exclusive). `None` ⇒ no rebind, the fact runs to the region's end.
+    pub fn earliest_in(&self, var: &str, region: Span) -> Option<Point> {
+        let key = |p: &Point| (p.row, p.column);
+        let sites = self.by_name.get(var)?;
+        let i = sites.partition_point(|p| key(p) < key(&region.start));
+        sites.get(i).copied().filter(|p| key(p) < key(&region.end))
+    }
 }
 
 impl Symbol {
@@ -1139,6 +1153,12 @@ impl Symbol {
     /// this; the verdict is stamped on `presentation` at synthesis.
     pub fn hidden_in_outline(&self) -> bool {
         self.presentation.hide_in_outline
+    }
+
+    /// A global this file only mentions (`DeclKind::Mention`): its uses
+    /// bind to it, but it declares nothing here.
+    pub fn is_mention(&self) -> bool {
+        matches!(self.detail, SymbolDetail::Variable { decl_kind: DeclKind::Mention, .. })
     }
 }
 
@@ -1317,6 +1337,11 @@ pub enum DeclKind {
     /// creates on first mention (`$x = 1` in `main` is `$main::x`). The
     /// builder mints the symbol at the first use in the file.
     Implicit,
+    /// A global the file only names through a qualified spelling
+    /// (`%Foswiki::cfg`) or that Perl forces into `main` (`%ENV`, `$_`):
+    /// the identity its uses bind to, but neither a declaration nor this
+    /// file's own global, so it is no definition and no outline entry.
+    Mention,
 }
 
 impl DeclKind {
@@ -1337,7 +1362,7 @@ impl DeclKind {
             DeclKind::Field => "field",
             DeclKind::Param => "param",
             DeclKind::ForVar => "for",
-            DeclKind::Implicit => "global",
+            DeclKind::Implicit | DeclKind::Mention => "global",
         }
     }
 }
@@ -1489,10 +1514,17 @@ impl Ref {
         }
     }
 
-    /// The frozen dispatch target of a `MethodCall` ref.
+    /// The frozen dispatch target of a member access whose receiver is
+    /// one class. `None` for a union, a classless receiver, or an
+    /// unstamped ref — `FileAnalysis::receiver_classes` reads those.
     pub fn method_target(&self) -> Option<&MethodTarget> {
+        self.frozen_receiver()?.single()
+    }
+
+    /// The stamp's whole receiver answer; `None` when never stamped.
+    pub fn frozen_receiver(&self) -> Option<&FrozenReceiver> {
         match self.binding.as_ref()? {
-            RefBinding::Method(t) => Some(t),
+            RefBinding::Method(f) => Some(f),
             _ => None,
         }
     }
@@ -1534,7 +1566,7 @@ impl Ref {
     /// Whether matching this ref against a target consults only the frozen
     /// build-time verdict on the ref itself. `false` means the matcher's
     /// fallback arm re-derives the verdict at query time through this FILE's
-    /// witness bag (`method_call_invocant_class` on an unstamped method
+    /// witness bag (`resolve_receiver` on an unstamped method
     /// call / `deferred_hash_key_owner` on an unowned or variable-owned
     /// key), so a bag-stripped `refs_present` view could silently drop the
     /// site — the caller upgrades that file to `whole_present` instead.
@@ -1555,8 +1587,8 @@ impl Ref {
         self.binding = Some(RefBinding::Symbol(sym));
     }
 
-    pub fn bind_method(&mut self, target: MethodTarget) {
-        self.binding = Some(RefBinding::Method(target));
+    pub fn bind_receiver(&mut self, receiver: FrozenReceiver) {
+        self.binding = Some(RefBinding::Method(receiver));
     }
 
     pub fn bind_function_package(&mut self, package: String) {
@@ -1647,6 +1679,15 @@ impl Ref {
     }
 }
 
+/// One file's whole relational shred: its refs and symbols, and the names
+/// its gated emissions could add (`held`, their own candidate rows).
+#[derive(Debug, Clone, Default)]
+pub struct RowSeeds {
+    pub refs: Vec<RefRowSeed>,
+    pub syms: Vec<SymRowSeed>,
+    pub held: Vec<String>,
+}
+
 /// One symbol's projection into the relational store — the enumeration
 /// surface: workspace/symbol answers from these rows, declaration-only
 /// files become backward-walk candidates through them, and a future
@@ -1720,10 +1761,207 @@ pub fn sym_kind_code(k: &SymKind) -> u8 {
     }
 }
 
+/// The classes a member access may dispatch on — one per value its
+/// receiver may be, deduplicated in arm order. A union receiver has
+/// several; nothing pins an empty one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiverClasses(Vec<String>);
+
+impl ReceiverClasses {
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, class: &str) -> bool {
+        self.0.iter().any(|c| c == class)
+    }
+
+    /// The class, when the receiver can only be one. For a consumer whose
+    /// answer IS one class (a frozen edge, an owner key); each caller says
+    /// why at its call. A union has none.
+    pub fn single(&self) -> Option<&str> {
+        match self.0.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    pub fn push(&mut self, class: String) {
+        if !self.contains(&class) {
+            self.0.push(class);
+        }
+    }
+}
+
+impl FromIterator<String> for ReceiverClasses {
+    fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Self {
+        let mut out = ReceiverClasses::default();
+        for c in it {
+            out.push(c);
+        }
+        out
+    }
+}
+
+impl IntoIterator for ReceiverClasses {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// What a reader takes as a receiver's classes: which freezes answer it,
+/// and whether the enclosing-class guess counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverPolicy {
+    /// The frozen dispatch edge: a single-class freeze answers however it
+    /// was stamped, so a call that resolved at build stays matched (the
+    /// NAV unification the references matcher and hover read).
+    Edge,
+    /// Navigation wanting the answer its own view resolves: only a freeze
+    /// stamped under that view answers. A conventional invocant
+    /// (`$self`) whose value names no class dispatches on the enclosing
+    /// class.
+    Navigate,
+    /// `Navigate` without the enclosing-class guess: a diagnostic must not
+    /// warn about a class the code never named.
+    Stated,
+}
+
+/// Where a receiver's classes came from — what lets one frozen answer
+/// serve every `ReceiverPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverSource {
+    /// The receiver's value (or a qualified method token) names them.
+    Stated,
+    /// A conventional invocant whose value names no class, dispatched on
+    /// the enclosing class. `ReceiverPolicy::Stated` reads this as empty.
+    EnclosingClass,
+}
+
+/// What a receiver resolution could see. Answers differ by view — an
+/// index reaches classes a file alone cannot, and a scoped lookup ranks
+/// and gates providers by the asker's own visibility — so a freeze answers
+/// only a reader holding the view it was stamped under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverView {
+    /// No index: this file alone.
+    Local,
+    /// The whole index, unscoped.
+    Index,
+    /// The index through one asker's `ScopedLookup`.
+    Scoped,
+}
+
+impl ReceiverView {
+    pub fn of(module_index: Option<&dyn CrossFileLookup>) -> Self {
+        match module_index {
+            None => ReceiverView::Local,
+            Some(idx) if idx.is_scoped() => ReceiverView::Scoped,
+            Some(_) => ReceiverView::Index,
+        }
+    }
+}
+
+/// One arm per class the receiver may be. `One` is the dispatch edge
+/// `Ref::method_target` projects; a union's arms are only ever read as a
+/// set, so they never pose as one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReceiverArms {
+    None,
+    One(MethodTarget),
+    /// Two or more arms.
+    Union(Vec<MethodTarget>),
+}
+
+/// A member access's receiver as the stamp (`stamp_method_call_targets`)
+/// froze it on the ref. The build-time (`Local`) stamp freezes the whole
+/// answer — every arm, an empty one, its source — because it is a function
+/// of the file alone. A stamp holding an index freezes only the
+/// single-class dispatch edge: a cross-file answer stored on the ref goes
+/// stale with nothing tracking its providers, so the rest of that answer
+/// lives in the resolution session's receiver memo instead
+/// (`FileAnalysis::resolve_receiver_shared`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrozenReceiver {
+    pub arms: ReceiverArms,
+    pub source: ReceiverSource,
+    /// What the stamp could see — see `answers_for`.
+    pub view: ReceiverView,
+}
+
+impl FrozenReceiver {
+    pub fn from_arms(arms: Vec<MethodTarget>, source: ReceiverSource, view: ReceiverView) -> Self {
+        let mut arms = arms;
+        let arms = match arms.len() {
+            0 => ReceiverArms::None,
+            1 => ReceiverArms::One(arms.pop().expect("one arm")),
+            _ => ReceiverArms::Union(arms),
+        };
+        FrozenReceiver { arms, source, view }
+    }
+
+    /// The dispatch edge when the receiver is one class.
+    pub fn single(&self) -> Option<&MethodTarget> {
+        match &self.arms {
+            ReceiverArms::One(t) => Some(t),
+            ReceiverArms::None | ReceiverArms::Union(_) => None,
+        }
+    }
+
+    pub fn targets(&self) -> &[MethodTarget] {
+        match &self.arms {
+            ReceiverArms::None => &[],
+            ReceiverArms::One(t) => std::slice::from_ref(t),
+            ReceiverArms::Union(ts) => ts,
+        }
+    }
+
+    /// Does this freeze answer a reader holding `view` under `policy`? One
+    /// stamped under the reader's own view is the answer it would resolve.
+    /// Under any other view only `Edge`'s single-class dispatch edge
+    /// answers: a call that resolved stays resolved.
+    pub fn answers_for(&self, view: ReceiverView, policy: ReceiverPolicy) -> bool {
+        self.view == view || (policy == ReceiverPolicy::Edge && matches!(self.arms, ReceiverArms::One(_)))
+    }
+}
+
+/// One in-memory analysis copy's identity, for sessional memos keyed on
+/// "this copy" rather than on its file: enrichment clones an analysis and
+/// enriches the clone, and two copies of one file answer differently.
+/// Minted fresh on construction AND on clone; never serialized.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct AnalysisInstance(u64);
+
+impl AnalysisInstance {
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for AnalysisInstance {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        AnalysisInstance(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Clone for AnalysisInstance {
+    /// A clone is another copy, so it gets its own identity.
+    fn clone(&self) -> Self {
+        AnalysisInstance::default()
+    }
+}
+
 /// Build-time-resolved dispatch target for a `MethodCall` ref.
 /// `invocant_class` is the class the invocant resolved to at build time
 /// (frozen); it drives the inheritance rename-chain match in `refs_to`,
-/// replacing the query-time `method_call_invocant_class` re-derivation.
+/// replacing the query-time `resolve_receiver` re-derivation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MethodTarget {
     /// Method found on a local symbol in this file (via the ancestor walk).
@@ -1771,7 +2009,7 @@ pub enum RefBinding {
     /// time, so they can never disagree (the NAV unification — a call
     /// that resolved at build time stays matched regardless of query-time
     /// inference flakiness).
-    Method(MethodTarget),
+    Method(FrozenReceiver),
     /// `HashKeyAccess` resolution: which hash this key belongs to, plus
     /// the linked `HashKeyDef` symbol once `build_indices` / enrichment
     /// finds one for `(target_name, owner)`.
@@ -1814,7 +2052,7 @@ pub enum RefKind {
     /// Method call site `$obj->m(...)` / `Class->m(...)` /
     /// `chain()->m(...)`. **Invocant class is NOT cached on the
     /// variant** — it's resolved on demand via
-    /// `FileAnalysis::method_call_invocant_class(ref, module_index)`,
+    /// `FileAnalysis::receiver_classes(ref, module_index, policy)`,
     /// which dispatches by invocant shape (variable / chain receiver /
     /// function-call receiver / bareword / `__PACKAGE__` / `shift` /
     /// `$_[0]`) and queries the witness bag. This is intentional:
@@ -1829,7 +2067,7 @@ pub enum RefKind {
     MethodCall {
         invocant: crate::model::conventions::Invocant,
         /// Span of the invocant node. Used by
-        /// `method_call_invocant_class` to find an inner-receiver
+        /// `resolve_receiver` to find an inner-receiver
         /// ref via `RefTable::call_at_start` (chain dispatch).
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).

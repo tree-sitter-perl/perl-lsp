@@ -22,6 +22,7 @@
 
 use tree_sitter::Node;
 
+use crate::model::conventions::Sigil;
 use crate::model::file_analysis::Span;
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
@@ -589,23 +590,80 @@ pub(crate) fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<St
 /// node + its parent's shape to the *declared* variable's sigil + bare name.
 /// `None` = not a container-element access (caller keeps the raw text).
 pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
-    let parent = node.parent()?;
+    if deref_operand(node).is_some() {
+        return None;
+    }
     let bare = varname_child(node)?.text(src)?;
-    let target_sigil: char = match parent.kind() {
-        "array_element_expression" => '@',
-        "hash_element_expression" => '%',
+    Some(format!("{}{}", container_sigil(node)?.char(), bare))
+}
+
+/// The sigil of the aggregate a container access reads — `@` for `$a[0]`,
+/// `@a[..]`, `%a[..]`, `$#a`; `%` for `$h{k}`, `@h{..}`, `%h{..}`. The
+/// access node's own sigil never says it: a slice is always `@`.
+pub(crate) fn container_sigil(node: Node) -> Option<Sigil> {
+    if node.kind() == "arraylen" {
+        return Some(Sigil::Array);
+    }
+    let parent = node.parent()?;
+    match parent.kind() {
+        "array_element_expression" => Some(Sigil::Array),
+        "hash_element_expression" => Some(Sigil::Hash),
         "slice_expression" | "keyval_expression" => {
             if parent.child_by_field_name("array").is_some_and(|c| c == node) {
-                '@'
+                Some(Sigil::Array)
             } else if parent.child_by_field_name("hash").is_some_and(|c| c == node) {
-                '%'
+                Some(Sigil::Hash)
             } else {
-                return None;
+                None
             }
         }
-        _ => return None,
+        _ => None,
+    }
+}
+
+/// What a deref node dereferences its operand as: `${..}` / `$$x` a
+/// scalar, `@{..}` / `@$x` an array, `%{..}` / `%$x` a hash, an element,
+/// slice or `$#` access the aggregate it reads, `&{..}` / `&$x` code,
+/// `*{..}` a glob.
+pub(crate) fn deref_sigil(node: Node) -> Option<Sigil> {
+    match node.kind() {
+        "scalar" => Some(Sigil::Scalar),
+        "array" => Some(Sigil::Array),
+        "hash" => Some(Sigil::Hash),
+        "function" | "code_deref_expression" => Some(Sigil::Code),
+        "glob" | "glob_deref_expression" => Some(Sigil::Glob),
+        "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
+            container_sigil(node)
+        }
+        _ => None,
+    }
+}
+
+/// What a deref spelling dereferences: the `block` of `@{EXPR}` /
+/// `${EXPR}[0]` / `$#{EXPR}` / `&{EXPR}`, or the inner `scalar` of `@$x` /
+/// `$$x[0]` / `$#$x` / `&$x`. `None` for a named variable — its `varname`
+/// is a bare leaf.
+pub(crate) fn deref_operand<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let holder = match node.kind() {
+        "code_deref_expression" | "glob_deref_expression" => node,
+        _ => varname_child(node)?,
     };
-    Some(format!("{}{}", target_sigil, bare))
+    holder.named().find(|c| matches!(c.kind(), "block" | "scalar"))
+}
+
+/// The expression a deref dereferences: the inner scalar of `@$x`, or the
+/// lone expression of `@{EXPR}`. `None` for a named variable or a block
+/// that is more than one expression.
+pub(crate) fn deref_operand_expr<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let operand = deref_operand(node)?;
+    if operand.kind() != "block" {
+        return Some(operand);
+    }
+    let mut stmts = operand.elements();
+    let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
+    let mut exprs = stmt.elements();
+    let expr = exprs.next()?;
+    (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
 }
 
 /// Canonical access-path key for a place subject — a chain of constant
@@ -666,14 +724,21 @@ fn is_stable_subscript(sub: Node, src: &[u8]) -> bool {
     }
 }
 
-/// The plain-scalar key/index variables along a place path
-/// (`$self->{$k}` → `[$k]`, `$self->{$k}{$j}` → `[$k, $j]`). These are
-/// the dynamic stability dependencies of the place: reassigning any of
-/// them breaks its identity, so the narrowing region must truncate
-/// there. Empty for a fully-constant place. Assumes `node` already
-/// passed `canonical_place_path` (every subscript is stable).
-pub(crate) fn place_dynamic_key_vars<'a>(node: Node<'a>, src: &'a [u8]) -> Vec<String> {
-    let mut vars = Vec::new();
+/// What a place path's identity hangs on, read off its chain once.
+pub(crate) struct PlaceDeps {
+    /// The plain-scalar key/index variables along the path
+    /// (`$self->{$k}{$j}` → `[$k, $j]`): reassigning one breaks the place's
+    /// identity, so its narrowing truncates there.
+    pub key_vars: Vec<String>,
+    /// The keys of the path's proper element prefixes (`$self->{a}` of
+    /// `$self->{a}{b}`): an opaque use of one can disturb the slot.
+    pub prefixes: Vec<String>,
+}
+
+/// The dependencies of a place that passed `canonical_place_path` (every
+/// subscript is stable, so every prefix is a place of its own).
+pub(crate) fn place_deps<'a>(node: Node<'a>, src: &'a [u8]) -> PlaceDeps {
+    let mut deps = PlaceDeps { key_vars: Vec::new(), prefixes: Vec::new() };
     let mut cur = node;
     loop {
         let sub = match cur.kind() {
@@ -681,10 +746,15 @@ pub(crate) fn place_dynamic_key_vars<'a>(node: Node<'a>, src: &'a [u8]) -> Vec<S
             "array_element_expression" => cur.child_by_field_name("index"),
             _ => break,
         };
+        if cur != node {
+            if let Some(text) = cur.text(src) {
+                deps.prefixes.push(text.to_string());
+            }
+        }
         if let Some(sub) = sub {
             if sub.kind() == "scalar" {
                 if let Some(v) = canonical_var_name(sub, src) {
-                    vars.push(v);
+                    deps.key_vars.push(v);
                 }
             }
         }
@@ -693,7 +763,7 @@ pub(crate) fn place_dynamic_key_vars<'a>(node: Node<'a>, src: &'a [u8]) -> Vec<S
             None => break,
         }
     }
-    vars
+    deps
 }
 
 /// Per-word `(text, span)` pairs of a `quoted_word_list`, multi-line
@@ -1016,50 +1086,94 @@ pub(crate) fn string_list_with_residue(
     (results, residue)
 }
 
-/// True when `node` sits in a conditionally-executed position within
-/// its enclosing sub: under an if/unless block, a postfix modifier, a
-/// ternary arm, a loop, or a short-circuit chain (`and`/`or`; the
-/// `binary_expression` arm over-claims `&&`-and-friends' left operands
-/// too — over-marking is the safe direction, it only widens a shape to
-/// open). Climbs to the nearest sub/file boundary; scope-crossing
-/// conditionality (a write inside a block or closure relative to an
-/// outer variable's scope) is the caller's check — this answers only
-/// what the syntax between here and the boundary says.
-pub(crate) fn is_conditionally_executed(node: Node) -> bool {
-    conditional_before_boundary(node, false)
-}
-
-/// The same question relative to the enclosing BLOCK: a postfix modifier,
-/// ternary arm or short-circuit chain between `node` and its block counts;
-/// the block's own `if`/loop does not. For a fact that lands on the block's
-/// own scope — inside the block the block has, by construction, run.
-pub(crate) fn is_conditionally_executed_in_block(node: Node) -> bool {
-    conditional_before_boundary(node, true)
-}
-
-fn conditional_before_boundary(node: Node, stop_at_block: bool) -> bool {
+/// The block (or file) `node` runs in: the extent a fact observed at
+/// `node` can hold over when no conditional arm bounds it.
+pub(crate) fn enclosing_block(node: Node) -> Option<Node> {
     let mut cur = node.parent();
     while let Some(p) = cur {
-        match p.kind() {
-            "subroutine_declaration_statement"
-            | "method_declaration_statement"
-            | "anonymous_subroutine_expression"
-            | "source_file" => return false,
-            "block" if stop_at_block => return false,
-            "conditional_statement"
-            | "postfix_conditional_expression"
-            | "conditional_expression"
-            | "lowprec_logical_expression"
-            | "binary_expression"
-            | "loop_statement"
-            | "for_statement"
-            | "postfix_for_expression"
-            | "postfix_loop_expression" => return true,
-            _ => {}
+        if matches!(p.kind(), "block" | "source_file") {
+            return Some(p);
         }
         cur = p.parent();
     }
-    false
+    None
+}
+
+/// How far [`conditional_arm`] climbs: to the enclosing sub (or file), or
+/// only to the enclosing block. A fact that lands on the block's own scope
+/// asks `Block` — inside the block, the block has, by construction, run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArmBound {
+    Sub,
+    Block,
+}
+
+/// A call on a variable or place whose callee `tag_of` names as reporting
+/// what a reference is: which function, and the operand. A call or deref
+/// operand (`ref(f($x))`) names nothing a guard could narrow.
+pub(crate) fn ref_tag_call<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
+) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+    let (name, operand) = match node.kind() {
+        "func1op_call_expression" => {
+            (node.child(0)?.utf8_text(src).ok()?, node.named().find(|c| c.kind() != "comment")?)
+        }
+        "function_call_expression" | "ambiguous_function_call_expression" => {
+            (node.field_text("function", src)?, node.child_by_field_name("arguments")?)
+        }
+        _ => return None,
+    };
+    let via = tag_of(name)?;
+    let operand = peel_groups(operand);
+    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
+        .then_some((via, operand))
+}
+
+/// The arm of a conditionally-run construct, between `node` and `bound`,
+/// that holds `node`: an `if`/`elsif`/`else` body or a later branch, a loop
+/// body, a C-style `for`'s iterator, the statement a postfix
+/// `if`/`unless`/`for`/`while` modifies, a ternary branch, the right
+/// operand of a short-circuit. A condition, a loop list, a `for`
+/// initialiser and a non-short-circuit operand run whenever their
+/// construct does, so the climb passes through them. `None` = `node` runs
+/// whenever its bound does. Scope-crossing conditionality (a write inside
+/// a closure relative to an outer variable's scope) is the caller's check.
+pub(crate) fn conditional_arm<'a>(node: Node<'a>, bound: ArmBound) -> Option<Node<'a>> {
+    let mut child = node;
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        let is_field = |f: &str| p.child_by_field_name(f).is_some_and(|c| c == child);
+        let arm = match p.kind() {
+            "subroutine_declaration_statement"
+            | "method_declaration_statement"
+            | "anonymous_subroutine_expression"
+            | "source_file" => return None,
+            "block" if bound == ArmBound::Block => return None,
+            "conditional_statement"
+            | "loop_statement"
+            | "postfix_conditional_expression"
+            | "postfix_loop_expression"
+            | "conditional_expression" => !is_field("condition"),
+            "cstyle_for_statement" => !is_field("initialiser") && !is_field("condition"),
+            "for_statement" | "postfix_for_expression" => !is_field("list") && !is_field("variable"),
+            "lowprec_logical_expression" => is_field("right"),
+            "binary_expression" => {
+                is_field("right")
+                    && (0..p.child_count())
+                        .filter_map(|i| p.child(i))
+                        .any(|c| !c.is_named() && matches!(c.kind(), "&&" | "||" | "//"))
+            }
+            _ => false,
+        };
+        if arm {
+            return Some(child);
+        }
+        child = p;
+        cur = p.parent();
+    }
+    None
 }
 
 /// The scalar wrapped by a container node's deref varname (`@$h{…}` —

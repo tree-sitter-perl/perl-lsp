@@ -26,7 +26,7 @@ pub(super) struct State {
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, String>,
     /// Flags the document states about the def whose name token sits at a
-    /// span (`@mark.<flag>`, and `@param.receiver` → `RECEIVER`). Joined by
+    /// span (`@mark.<flag>`). Joined by
     /// span because the stating pattern is not the def's match.
     marks: HashMap<(Point, Point), crate::model::file_analysis::SymbolFlags>,
     /// `@sym.attr` — a token whose TEXT rides onto the match's def symbol as
@@ -159,9 +159,6 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::RetType => {
             d.rettype_by_match.insert(e.match_id, e.text.clone());
         }
-        Capture::ParamReceiver => {
-            *d.marks.entry((e.start, e.end)).or_default() |= crate::model::file_analysis::SymbolFlags::RECEIVER;
-        }
         Capture::Mark(m) => {
             *d.marks.entry((e.start, e.end)).or_default() |= m.flag();
         }
@@ -277,31 +274,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
         None => st.out.symbols.push(symbol),
     }
-}
-
-/// A method's receiver parameter (`@param.receiver`) holds an instance of
-/// the class the method is declared in: its value, stated at its binding
-/// site, so a member written or read through it dispatches on that class.
-pub(super) fn emit_receiver_types(st: &mut ExtractState) {
-    use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-    let typed: Vec<Witness> = st
-        .out
-        .symbols
-        .iter()
-        .filter(|s| s.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER))
-        .filter_map(|s| {
-            let class = s.package.clone()?;
-            Some(Witness {
-                attachment: WitnessAttachment::Variable { name: s.name.clone(), scope: s.scope },
-                source: WitnessSource::Builder("receiver".into()),
-                payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
-                // zero-width at the binding: a local's value holds from
-                // its binding on, as every flow-typed local's does
-                span: Span { start: s.name_start, end: s.name_start },
-            })
-        })
-        .collect();
-    st.out.witnesses.extend(typed);
 }
 
 /// Template params joined to their owner class — the owner shaped like a

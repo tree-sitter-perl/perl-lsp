@@ -54,7 +54,7 @@ isa-check runs at **query time**:
   (`FileAnalysis::dispatch_at`) both route through it, so a call site in a
   NON-open workspace/dependency file surfaces exactly like an open one.
 - The receiver class comes from the existing invocant resolution
-  (build-time `ClassName` hint, else `method_call_invocant_class`, bag-
+  (build-time `ClassName` hint, else `method_call_invocant_classes`, bag-
   routed and cross-file aware) — gate *input*, distinct from gated
   *content*. Only the handler-link payload (name, owner) is protected.
 
@@ -123,11 +123,14 @@ records the syntactically-matched-but-ungated `on_match` emission as a
 `file_analysis::GatedEmission` (file-analysis-native `GatedSymbol`/`GatedRef`
 + the unfired `ClassIsa` prefixes), and two index-aware consumers re-fire it
 once `class_isa_prefix` resolves the ancestry: `enrich_imported_types_with_keys`
-(open docs + enriched overlay) and `ModuleIndex::materialize_gated_emissions`
-(post-index, so `whole_present` carries it for cross-file goto-def /
-references). Idempotent (truncate-to-baseline / dedup) and deterministic. See
+(open docs + enriched overlay) and the index's view seam
+(`ModuleIndex::gated_view`, so every `*_present` view of a closed file carries
+it). Both ask `FileAnalysis::gate_verdicts`, which decides each emission's
+`Question`; the producer feeds (the `held` presence rows, reverse index,
+bridges, Surface) index the emission ungated, as a candidate.
+Idempotent (truncate-to-baseline / dedup) and deterministic. See
 `docs/prompt-enrichment-inheritance-residual.md` and the cross-file visibility
-fork in `docs/open-forks.md`.
+fork in `docs/forks-resolved.md`.
 
 Still deferred:
 

@@ -187,6 +187,47 @@ pub enum Bridge {
     Class(String),
 }
 
+/// Every class this file's entities are reachable from: each namespace
+/// bridge, and the owner of each class-owned Handler. Owning a handler IS
+/// bridging it to the owner — one stored fact, read as both.
+pub(crate) fn bridge_classes<'a>(
+    symbols: &'a [Symbol],
+    namespaces: &'a [PluginNamespace],
+) -> impl Iterator<Item = &'a str> {
+    let bridged = namespaces.iter().flat_map(|ns| ns.bridges.iter().map(|Bridge::Class(c)| c.as_str()));
+    let owners = symbols.iter().filter_map(|s| match &s.detail {
+        SymbolDetail::Handler { owner: HandlerOwner::Class(c), .. } => Some(c.as_str()),
+        _ => None,
+    });
+    bridged.chain(owners)
+}
+
+/// The entities this file makes visible from `class`, each once: the
+/// entities of namespaces bridged to it, and the Handlers it owns.
+pub(crate) fn for_each_entity_bridged_to<'a>(
+    symbols: &'a [Symbol],
+    namespaces: &'a [PluginNamespace],
+    class: &str,
+    mut visit: impl FnMut(&'a Symbol) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    let mut seen: HashSet<SymbolId> = HashSet::new();
+    for ns in namespaces {
+        if !ns.bridges.iter().any(|Bridge::Class(c)| c == class) { continue; }
+        for id in &ns.entities {
+            let Some(sym) = symbols.get(id.0 as usize) else { continue };
+            if seen.insert(*id) { visit(sym)?; }
+        }
+    }
+    for sym in symbols {
+        if matches!(&sym.detail, SymbolDetail::Handler { owner: HandlerOwner::Class(c), .. } if c == class)
+            && seen.insert(sym.id)
+        {
+            visit(sym)?;
+        }
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
 /// Fictional "app surface" class — the synthetic ancestor that the
 /// Mojolicious app / controller / command classes (the manifest-declared
 /// consumer set, see `FrameworkPlugin::app_surface_consumers`) all
@@ -244,12 +285,12 @@ impl LookupChain {
     /// Every symbol a scope on the chain binds, innermost scope first and
     /// in declaration order within one. A key — of a hash, or an
     /// instance's slot (`self.x = …`) — is reached through its container
-    /// and binds no name.
+    /// and binds no name, and a mention declares nothing.
     pub fn bindings(self, symbols: &SymbolTable) -> impl Iterator<Item = &Symbol> {
         self.0
             .into_iter()
             .flat_map(move |scope| symbols.declared_directly_in(scope).iter().map(move |sid| &symbols[sid.0 as usize]))
-            .filter(|s| s.kind != SymKind::HashKeyDef)
+            .filter(|s| s.kind != SymKind::HashKeyDef && !s.is_mention())
     }
 }
 
@@ -284,6 +325,69 @@ pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
     let mut chain = scope_chain_of(scopes, from);
     chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
     LookupChain(chain)
+}
+
+/// What a Perl variable use names. THE binding rule: the builder's binder
+/// mints from it and `FileAnalysis::variable_binding` answers from it, so a
+/// by-name ask and a bound ref agree on identity by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableUse {
+    /// A declaration the lookup chain reaches.
+    Declared(SymbolId),
+    /// The package global the name reaches: a qualified spelling names its
+    /// package, a special variable lives in `main`, any other undeclared
+    /// name in the package the use is written in.
+    Global { package: String, name: String },
+    /// An `our` of another package is in lexical view: the name is
+    /// declared, so it is no implicit global, but the use can't reach it.
+    GatedOur,
+}
+
+/// Resolve the variable use `name` written at `at`. `decls_in(scope)`
+/// lists the variables `scope` declares under `name` as `(id, start,
+/// gate)`, the gate being the package an `our` is visible from.
+pub fn variable_use<'a, I>(
+    name: &str,
+    at: Point,
+    chain: LookupChain,
+    use_package: Option<&str>,
+    names: &NameSpellings,
+    decls_in: impl Fn(ScopeId) -> I,
+) -> VariableUse
+where
+    I: IntoIterator<Item = (SymbolId, Point, Option<&'a str>)>,
+{
+    // The qualifier names the package directly, so the lexical chain is
+    // irrelevant and a `my` of the same name is never the answer.
+    if let Some((package, name)) = crate::model::conventions::split_qualified_var(name, names) {
+        return VariableUse::Global { package: package.to_string(), name };
+    }
+    let mut gated_our = false;
+    for scope in chain.scopes() {
+        let mut found = None;
+        for (id, start, gate) in decls_in(scope) {
+            if start > at {
+                continue;
+            }
+            match gate {
+                Some(pkg) if pkg != use_package.unwrap_or("main") => gated_our = true,
+                _ => found = Some(id),
+            }
+        }
+        if let Some(id) = found {
+            return VariableUse::Declared(id);
+        }
+    }
+    if gated_our {
+        return VariableUse::GatedOur;
+    }
+    // Perl forces the special variables into `main` from every package.
+    let package = if crate::model::conventions::is_special_variable(name) {
+        "main"
+    } else {
+        use_package.unwrap_or("main")
+    };
+    VariableUse::Global { package: package.to_string(), name: name.to_string() }
 }
 
 /// Three-way outcome of resolving a [`ReceiverGated`] value against a
@@ -368,7 +472,7 @@ impl<T> ReceiverGated<T> {
 
 // ---- Hash key owner (for scope graph) ----
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub enum HashKeyOwner {
     Class(String),
     /// A plugin-owned COLUMN namespace bridged to a class (DBIC /
@@ -554,15 +658,16 @@ impl ProvisionalDispatch {
 /// The build records the already-computed emission (tree-free,
 /// file-analysis-native — the `on_match` result translated in
 /// `pattern_dispatch`, which speaks `EmitAction`) plus the gate prefixes.
-/// `enrich_imported_types_with_keys` re-fires it when the package's ancestry
-/// resolves ANY gate prefix CROSS-FILE (`class_isa_prefix`, the same MRO
-/// seam as every other ancestry walk). Idempotent by construction: the
-/// re-fired symbols/refs land ABOVE the symbol/ref tables' baselines
-/// and are truncated + re-derived every enrichment cycle, so a file whose
-/// ancestry resolves late converges to the same analysis as one built with
-/// it known — the same discipline as `ReceiverGated` dispatch, but for
-/// symbol emission (which feeds every symbol-table consumer, so it can't be
-/// gated at one query seam — it must materialize into the analysis).
+/// The gate is a [`Question`] (`GatedEmission::question`), decided in
+/// exactly two places, both through `FileAnalysis::gate_verdicts`: an open
+/// document's enrichment, and the index's view seam
+/// (`ModuleIndex::gated_view`), which hands every reader of a closed file
+/// the copy with its firing emissions applied. The applied content sits
+/// above the symbol/ref baselines, so a file whose ancestry resolves late
+/// converges to one built with it known. The producer feeds index every
+/// emission ungated, as candidates (`FileAnalysis::gated_candidates`):
+/// the reverse index and Surface by name, the row store in its own `held`
+/// presence table, never in the base `refs`/`syms` rows every view shows.
 /// See `docs/adr/receiver-gated-dispatch.md` (Phase 2) and
 /// `docs/prompt-enrichment-inheritance-residual.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,6 +690,13 @@ pub struct GatedEmission {
     /// Refs the pattern produced (dispatch-call / method-call / hash-key
     /// access sites) so cross-file references reach the re-fired symbols.
     pub refs: Vec<GatedRef>,
+}
+
+impl GatedEmission {
+    /// What the emission waits on.
+    pub fn question(&self) -> Question {
+        Question::ClassIsaPrefix { package: self.package.clone(), prefixes: self.gate_prefixes.clone() }
+    }
 }
 
 /// One symbol inside a [`GatedEmission`] — the file-analysis-native
@@ -624,6 +736,16 @@ pub struct GatedRef {
     pub access: AccessKind,
     #[serde(default)]
     pub binding: Option<RefBinding>,
+}
+
+/// What a set of [`GatedEmission`]s adds to a file, minted file-native
+/// (`FileAnalysis::gated_candidates`). Not stored: a view applies it, a
+/// producer feed indexes it.
+#[derive(Debug, Default)]
+pub struct GatedMint {
+    pub symbols: Vec<Symbol>,
+    pub refs: Vec<Ref>,
+    pub witnesses: Vec<crate::model::witnesses::Witness>,
 }
 
 /// A confirmed dispatch — a gated candidate whose receiver isa-resolved at
@@ -766,7 +888,8 @@ pub struct GuardSite {
     /// Whether the predicate holds where the guard EXPRESSION is true (`!`
     /// flips it) — lets D3/D4 resolve always-true vs always-false.
     pub asserts_when_true: bool,
-    /// Diagnostic range (the guard condition).
+    /// Diagnostic range: the guard literal (the predicate plus the `!`s
+    /// applied directly to it), not the whole condition around it.
     pub span: Span,
     /// Where to read the subject's prior (un-narrowed) type.
     #[serde(with = "PointDef")]
@@ -797,6 +920,11 @@ pub struct GuardRedundancy {
     /// The predicate the guard tested — the renderer names the concrete type
     /// (`IsType`) or definedness (`Defined`) as the message needs.
     pub predicate: GuardPredicate,
+    /// Whether the subject's prior type satisfies `predicate`. Under a
+    /// negation (`!defined $x`) this is the opposite of the verdict, so the
+    /// message states the subject's fact from this and the guard's from
+    /// `verdict`.
+    pub satisfied: bool,
 }
 
 /// A read of a hash key that the base's CLOSED structural shape does not
@@ -817,3 +945,41 @@ pub struct KeyTypoSite {
     pub spelling: Option<String>,
 }
 
+
+impl FileAnalysis {
+    /// Every class this file's entities are reachable from, deduped
+    /// (see [`bridge_classes`]), the owners its gated emissions' handlers
+    /// would have included as candidates.
+    pub fn bridge_classes(&self) -> Vec<String> {
+        let gated = self.gated_candidates();
+        let mut out: Vec<String> = bridge_classes(self.symbols.as_slice(), &self.plugin.namespaces)
+            .chain(bridge_classes(&gated.symbols, &[]))
+            .map(str::to_string)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The entities this file makes visible from `class`, each once
+    /// (see [`for_each_entity_bridged_to`]).
+    pub fn for_each_entity_bridged_to<'a>(
+        &'a self,
+        class: &str,
+        visit: impl FnMut(&'a Symbol) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
+        for_each_entity_bridged_to(self.symbols.as_slice(), &self.plugin.namespaces, class, visit)
+    }
+
+    /// Does this file bridge a Sub/Method named `name` onto `class`?
+    pub fn bridges_callable(&self, class: &str, name: &str) -> bool {
+        self.for_each_entity_bridged_to(class, |s| {
+            if matches!(s.kind, SymKind::Sub | SymKind::Method) && s.name == name {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        })
+        .is_break()
+    }
+}

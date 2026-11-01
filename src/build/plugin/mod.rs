@@ -919,6 +919,18 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
 }
 
+/// A library function that reports what a reference is (Scalar::Util's
+/// `reftype` / `blessed`): its result is a `RefTagOf` tag, so comparing it
+/// to a literal guards the operand. Fires only where the file imported the
+/// name from `module` or called it fully qualified — a `sub blessed` of
+/// one's own is just a sub.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefTagFunction {
+    pub module: String,
+    pub name: String,
+    pub tag: crate::model::file_analysis::RefTagFn,
+}
+
 /// A plugin-asserted return type for a known sub/method. Plugins ship
 /// these as a static manifest (`overrides()` on the trait, `fn
 /// overrides()` at the top of a `.rhai` script) for cases where
@@ -1194,6 +1206,12 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
+    /// Library functions whose result names what a reference is — see
+    /// [`RefTagFunction`]. Default empty.
+    fn ref_tag_functions(&self) -> &[RefTagFunction] {
+        &[]
+    }
+
     /// Method verbs whose FIRST hashref arg is keyed by the receiver class's
     /// COLUMN names (DBIC `search(\%cond, …)` / `create(\%cols)` etc.). Core
     /// links those keys to the class's columns for rename/references and walks
@@ -1391,7 +1409,7 @@ pub enum PluginSigHelpAnswer {
     /// Delegate to the core: "render the sig for this Handler". The
     /// plugin has already resolved which Handler the cursor points at
     /// and which param slot is active; the core does the param lookup
-    /// (including cross-file via `handlers_for_owner`) and invocant
+    /// (including cross-file via `for_each_dispatch_handler_on_class`) and invocant
     /// stripping. Same delegation pattern as completion's
     /// `dispatch_targets_for`.
     ShowHandler {
@@ -1671,6 +1689,11 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.framework_mode_makers().iter())
+    }
+
+    /// Union of ref-tag functions across the registry.
+    pub fn ref_tag_functions<'a>(&'a self) -> impl Iterator<Item = &'a RefTagFunction> + 'a {
+        self.plugins.iter().flat_map(|p| p.ref_tag_functions().iter())
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose

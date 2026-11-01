@@ -63,11 +63,12 @@ pub struct SkelRef {
     pub start: Point,
     pub end: Point,
     pub scope: crate::model::file_analysis::ScopeId,
-    /// For a member access (`recv.field`) — the receiver subtree's (span,
-    /// text), so `into_file_analysis` mints a `RefKind::MethodCall` whose
-    /// invocant types query-time via `expr_type_at_span(span)` (text → the
-    /// `InvocantName`). `None` for plain calls / var refs.
-    pub invocant: Option<(crate::model::file_analysis::Span, String)>,
+    /// For a member access (`recv.field`) — the receiver subtree's span and
+    /// its `Invocant`, minted by the extractor that saw whether the receiver
+    /// is a written name or an expression. `into_file_analysis` puts it on a
+    /// `RefKind::MethodCall`/`FieldAccess`, whose invocant types query-time
+    /// via `expr_type_at_span(span)`. `None` for plain calls / var refs.
+    pub invocant: Option<(crate::model::file_analysis::Span, crate::model::conventions::Invocant)>,
     /// The written member operator (`.`/`->`) + its span, mapped from the
     /// `@member.op.<which>` capture on the operator token, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
@@ -219,6 +220,10 @@ pub struct SkeletonAnalysis {
     /// (join to the owning callable, chain it when the callable declares no
     /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
+    /// Nodes naming the receiver of the method around them (`@receiver`):
+    /// (enclosing scope, span). `into_file_analysis` types each as that
+    /// method's class, once the scopes know their callables.
+    pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
     pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
@@ -700,6 +705,40 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // A receiver is an object of the class of the method it belongs to:
+        // the nearest enclosing callable's, so a lambda (no owner) is
+        // transparent and a free function (a `Sub`) has none. A declared
+        // receiver is a parameter, flagged and typed from its binding on in
+        // the scope it binds in (a header parameter binds in the body); an
+        // undeclared one (`this`) is a value at its own read.
+        let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+        {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            for &(site_scope, span) in &self.receivers {
+                let declared = symbols.iter().position(|s| s.selection_span == span);
+                let scope = declared.map_or(site_scope, |i| symbols[i].scope);
+                let class = owning_callable(&self.scopes, scope)
+                    .and_then(|sid| symbols.get(sid.0 as usize))
+                    .filter(|s| matches!(s.kind, SymKind::Method))
+                    .and_then(|s| s.package.clone());
+                let (attachment, at) = match declared {
+                    Some(i) => {
+                        let sym = &mut symbols[i];
+                        sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+                        let at = Span { start: span.start, end: span.start };
+                        (WA::Variable { name: sym.name.clone(), scope: sym.scope }, at)
+                    }
+                    None => (WA::Expr(span), span),
+                };
+                let Some(class) = class else { continue };
+                receiver_witnesses.push(Witness {
+                    attachment,
+                    source: WitnessSource::Builder("receiver".into()),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
+                    span: at,
+                });
+            }
+        }
         // The class whose method each scope is the body of, or sits inside:
         // the nearest callable that declares one names it, in-class and
         // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
@@ -839,6 +878,9 @@ impl SkeletonAnalysis {
                 // method reads a member declared below it.
                 let span = self.scopes.get(sym.scope.0 as usize).map_or(sym.span, |sc| sc.span);
                 bag.push(mk(WA::Field { owner: class.clone(), name: sym.name.clone() }, pay, span));
+            }
+            for w in receiver_witnesses.drain(..) {
+                bag.push(w);
             }
             // A class VIEWED AS A CALLABLE (a functional cast / constructor,
             // `Widget(x)`) produces an instance of itself. Its `Symbol` answers
@@ -1177,9 +1219,9 @@ impl SkeletonAnalysis {
                     // invocant types query-time via
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
-                        let (inv_span, inv_text) = r.invocant.clone()?;
+                        let (inv_span, invocant) = r.invocant.clone()?;
                         RefKind::FieldAccess {
-                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant,
                             invocant_span: Some(inv_span),
                             member_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
@@ -1189,9 +1231,9 @@ impl SkeletonAnalysis {
                     // Perl `$obj->m`; `find_definition`/`refs_to`/hover all
                     // flow from it.
                     RefCap::MemberCall => {
-                        let (inv_span, inv_text) = r.invocant.clone()?;
+                        let (inv_span, invocant) = r.invocant.clone()?;
                         RefKind::MethodCall {
-                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant,
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
@@ -1336,10 +1378,14 @@ impl SkeletonAnalysis {
                         // in-body use lands on `sym_id` — no query-time invocant
                         // typing (the receiver is an untypeable macro parameter).
                         binding: Some(crate::model::file_analysis::RefBinding::Method(
-                            crate::model::file_analysis::MethodTarget::Local {
-                                sym_id: *sym_id,
-                                invocant_class: class.to_string(),
-                            },
+                            crate::model::file_analysis::FrozenReceiver::from_arms(
+                                vec![crate::model::file_analysis::MethodTarget::Local {
+                                    sym_id: *sym_id,
+                                    invocant_class: class.to_string(),
+                                }],
+                                crate::model::file_analysis::ReceiverSource::Stated,
+                                crate::model::file_analysis::ReceiverView::Local,
+                            ),
                         )),
                         folded_from: None,
                         arg_count: None,
@@ -1437,10 +1483,7 @@ impl SkeletonAnalysis {
             // would read, so the first arm would block every later one.
             let mut undeclared: std::collections::HashMap<SymbolId, bool> = Default::default();
             for (ret_scope, ret_span) in &self.return_sites {
-                let owner = crate::model::file_analysis::scope_chain_of(&self.scopes, *ret_scope)
-                    .into_iter()
-                    .find_map(|sc| self.scopes.get(sc.0 as usize).and_then(|s| s.owner));
-                let Some(sid) = owner else { continue };
+                let Some(sid) = owning_callable(&self.scopes, *ret_scope) else { continue };
                 let first = !undeclared.contains_key(&sid);
                 let open = *undeclared
                     .entry(sid)
@@ -1564,6 +1607,17 @@ fn function_identity(
 
 /// A file's free functions by (namespace, leaf); the global namespace is `""`.
 type FreeFunctions<'a> = std::collections::HashMap<(&'a str, &'a str), crate::model::file_analysis::SymbolId>;
+
+/// The callable whose body a scope sits in: the nearest scope up the chain
+/// that names its callable.
+fn owning_callable(
+    scopes: &[crate::model::file_analysis::Scope],
+    scope: crate::model::file_analysis::ScopeId,
+) -> Option<crate::model::file_analysis::SymbolId> {
+    crate::model::file_analysis::scope_chain_of(scopes, scope)
+        .into_iter()
+        .find_map(|sc| scopes.get(sc.0 as usize).and_then(|s| s.owner))
+}
 
 /// Settle each write through a receiver. Its owner is the class the
 /// receiver is typed as at the write, asked of the assembled analysis's own
