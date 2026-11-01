@@ -292,7 +292,7 @@ fn perl_hover_named(
     }
 
     let r = analysis.ref_at(point)?;
-    if !matches!(r.kind, RefKind::FunctionCall { .. }) {
+    if !matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
         return None;
     }
     if crate::model::builtins::is_builtin(&r.target_name) {
