@@ -15,17 +15,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // A map an indexer already read stands; otherwise the served
     // language's, for the workspace root.
     core.ensure_dependency_map(served, root_path.as_deref());
-    let (hub, search_roots) = core
-        .map_snapshot()
-        .map(|s| (s.driver.caps().hub_enrichment, s.locator.search_roots().to_vec()))
-        .unwrap_or_default();
+    let hub = core.map_snapshot().is_some_and(|s| s.driver.caps().hub_enrichment);
 
-    // The unparsed name list is the Perl hub's: no other language lists its
-    // names yet.
-    if hub {
-        scan_inc_module_names(&search_roots, &core.available_modules);
-        log::info!("@INC scan: {} modules available", core.available_modules.len());
-    }
+    let mut listed = core.list_available();
     let db = open_store(&core, server.as_ref(), ws_root.as_deref(), hub);
 
     // Track which extract version each module was resolved at.
@@ -134,6 +126,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             // What the old map landed retired with it; its rows go too.
             if let (Some(conn), Some(snap)) = (db.as_ref(), core.map_snapshot()) {
                 let _ = module_cache::validate_dependency_fingerprint(conn, snap.fingerprint);
+            }
+            if generation != listed {
+                listed = core.list_available();
             }
         }
 

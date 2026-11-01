@@ -50,9 +50,10 @@ pub(crate) struct IndexCore {
     /// `perlfunc.pod` on first cold-cache miss). Empty until the
     /// resolver has run its warmup path.
     pub(crate) builtins: DashMap<String, String>,
-    /// Known module names from @INC scan. Name → the @INC-order-winning
-    /// path. No exports until resolved.
-    pub(crate) available_modules: DashMap<String, std::path::PathBuf>,
+    /// Every identity the dependency map can place, by name only: what
+    /// completion offers as available before anything parses it. Published
+    /// whole per map generation (`list_available`).
+    pub(crate) available: std::sync::RwLock<Arc<std::collections::HashSet<String>>>,
     /// ALL cross-file candidates per name, not just the winner in `cache` —
     /// the honest relation for every tier, because a name maps to a SET of
     /// files. Pack: C's flat linkage lets unrelated files each define
@@ -161,7 +162,7 @@ impl IndexCore {
             repair_pushed: DashMap::new(),
             stale_modules: DashMap::new(),
             builtins: DashMap::new(),
-            available_modules: DashMap::new(),
+            available: Default::default(),
             all_defs: DashMap::new(),
             leaf_defs: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),

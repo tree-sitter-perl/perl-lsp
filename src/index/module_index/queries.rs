@@ -378,9 +378,9 @@ impl ModuleIndex {
             }
         }
 
-        // Tier 2: @INC scan (name only, no analysis yet)
-        for entry in self.core.available_modules.iter() {
-            let name = entry.key();
+        // Tier 2: what the dependency map can place (name only, no analysis yet)
+        let available = Arc::clone(&self.core.available.read().unwrap_or_else(|e| e.into_inner()));
+        for name in available.iter() {
             if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.clone()) {
                 results.push((name.clone(), false));
             }

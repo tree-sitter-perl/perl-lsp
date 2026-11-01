@@ -823,3 +823,25 @@ fn a_file_at_the_asked_path_answers_the_asked_name_whatever_it_declares() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Perl's module completion is the map's listing: every `.pm` under the
+/// search roots by path, the project's `lib/` and carton's `local/`
+/// included, unparsed ("available") until something resolves it.
+#[test]
+fn perl_module_completion_lists_the_search_roots_unparsed() {
+    let root = std::env::temp_dir().join(format!("perl-names-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for rel in ["lib/My/App.pm", "local/lib/perl5/Avail/Thing.pm", "local/lib/perl5/Avail/Thing/Deep.pm", "local/lib/perl5/Avail/README"] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "1;\n").unwrap();
+    }
+    let root = std::fs::canonicalize(&root).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.refresh_dependency_map(&PerlDriver, Some(&root));
+    idx.wait_idle();
+    let mut avail = idx.complete_module_names("avail::");
+    avail.sort();
+    assert_eq!(avail, [("Avail::Thing".to_string(), false), ("Avail::Thing::Deep".to_string(), false)]);
+    assert_eq!(idx.complete_module_names("My::A"), [("My::App".to_string(), false)]);
+}

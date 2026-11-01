@@ -164,6 +164,20 @@ impl IndexCore {
         self.dependency_state().as_ref().map_or(0, |s| s.generation)
     }
 
+    /// List the map's names and publish them whole, replacing the previous
+    /// generation's. Walks directories with no lock held, so it is the
+    /// resolver thread's. Returns the generation listed.
+    pub(crate) fn list_available(&self) -> u64 {
+        let Some(snap) = self.map_snapshot() else { return 0 };
+        let mut names = std::collections::HashSet::new();
+        snap.locator.for_each_name(snap.root.as_deref(), &mut |n| {
+            names.insert(n.to_string());
+        });
+        log::info!("dependency map: {} names available", names.len());
+        *self.available.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(names);
+        snap.generation
+    }
+
     /// Land `whole` — the files the map placed for an asked name (none:
     /// its always-loaded files), parsed under `generation`, in the map's
     /// precedence order — under the asked name for the files `asked`

@@ -17,6 +17,7 @@ pub fn perl_pack() -> LangPack {
         },
         annot_type: |_| None,
         module_paths: crate::model::conventions::perl_module_paths,
+        module_of: crate::model::conventions::perl_module_of,
         narrow_guard: |_, _| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,

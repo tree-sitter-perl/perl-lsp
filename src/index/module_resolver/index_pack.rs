@@ -45,7 +45,7 @@ pub fn index_pack_language(
     let cap = driver.caps().file_cap;
     let walked = source_files::walk(
         root,
-        &source_files::Walk { extensions: driver.extensions(), cap, skip: &skip_roots, ignores: true },
+        &source_files::Walk { extensions: driver.extensions(), cap, skip: &skip_roots, ignores: true, follow_links: false },
     );
     source_files::report_oversize(&walked.oversize, cap);
     let paths = walked.files;

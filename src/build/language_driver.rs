@@ -159,7 +159,7 @@ pub trait LanguageDriver: Send + Sync {
     /// How this language spells a module as a file under a search root.
     /// `None` = it names no module by path.
     fn module_spelling(&self) -> Option<ModuleSpelling> {
-        self.lang_pack().map(|p| ModuleSpelling { names: p.names, module_paths: p.module_paths })
+        self.lang_pack().map(|p| ModuleSpelling { names: p.names, module_paths: p.module_paths, module_of: p.module_of })
     }
     /// Where this project keeps the dependencies the workspace walk does
     /// not own (php: Composer's `vendor/`), and which of their files
@@ -202,6 +202,7 @@ pub trait LanguageDriver: Send + Sync {
 pub struct ModuleSpelling {
     pub names: NameSpellings,
     pub module_paths: fn(&str) -> Vec<String>,
+    pub module_of: fn(&str) -> Option<String>,
 }
 
 /// The dependency tier's map for one project: a name nothing in the
@@ -221,6 +222,10 @@ pub trait DependencyLocator: Send + Sync {
     fn search_roots(&self) -> &[std::path::PathBuf] {
         &[]
     }
+    /// Every identity this map can place, named without parsing: what
+    /// completion offers before anything asks for a body. A directory the
+    /// workspace sits in is never walked (`build::search_path::listable`).
+    fn for_each_name(&self, _workspace: Option<&std::path::Path>, _visit: &mut dyn FnMut(&str)) {}
 }
 
 /// A file a dependency map places for a name, and how it got there.
@@ -334,6 +339,7 @@ impl LanguageDriver for PerlDriver {
         Some(ModuleSpelling {
             names: crate::model::conventions::PERL_SPELLINGS,
             module_paths: crate::model::conventions::perl_module_paths,
+            module_of: crate::model::conventions::perl_module_of,
         })
     }
     fn dependency_locator(&'static self, root: Option<&Path>) -> Option<std::sync::Arc<dyn DependencyLocator>> {

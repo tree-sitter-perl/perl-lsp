@@ -34,6 +34,8 @@ pub fn php_pack() -> LangPack {
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.
         module_paths: |_| Vec::new(),
+        // Composer's map lists php's names (`ComposerLocator::for_each_name`).
+        module_of: |_| None,
         narrow_guard: |_, _| None,
         entrypoint_symbols: &[],
         brace_scoped_members: true,

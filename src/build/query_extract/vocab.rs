@@ -503,7 +503,31 @@ impl fmt::Display for UnknownCapture {
     }
 }
 
+/// How a capture's token spells an identity a dependency map can place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentitySpelling {
+    /// An import names its module or class outright.
+    Import,
+    /// A class reference names one only when written absolute: a relative
+    /// spelling resolves against the file first.
+    Reference,
+}
+
 impl Capture {
+    /// Whether this capture's token spells a module or class identity, and
+    /// how. The cursor's module-path slot reads it.
+    pub fn identity_spelling(&self) -> Option<IdentitySpelling> {
+        match self {
+            Capture::Import(ImportCap::Name | ImportCap::Module | ImportCap::Prefix | ImportCap::Path | ImportCap::Arg) => {
+                Some(IdentitySpelling::Import)
+            }
+            Capture::Ref(RefCap::Type) | Capture::Receiver(ReceiverCap::Class) | Capture::Parent | Capture::ParentSuper => {
+                Some(IdentitySpelling::Reference)
+            }
+            _ => None,
+        }
+    }
+
     pub fn parse(name: &str) -> Result<Capture, UnknownCapture> {
         Self::parse_segments(name).ok_or_else(|| UnknownCapture(name.to_string()))
     }

@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::Client;
@@ -76,8 +75,6 @@ mod acquire;
 #[cfg(test)]
 pub(crate) use acquire::{parse_from_inc, perl_snapshot};
 use acquire::*;
-mod inc;
-use inc::*;
 mod index_pack;
 pub use index_pack::*;
 mod index_perl;

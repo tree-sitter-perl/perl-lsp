@@ -209,3 +209,36 @@ fn psr_4_answers_by_the_longest_prefix_and_psr_0_keeps_the_whole_identity() {
     assert_eq!(at("Acme\\Model\\Base"), [v("acme/model/src/Base.php")]);
     assert_eq!(loc.roots(), [root.join("vendor")]);
 }
+
+/// The listing names what `locate` answers: the classmap's classes, every
+/// PSR-4 file by prefix + path, and a PSR-0 file in each spelling carrying
+/// its prefix.
+#[test]
+fn the_name_listing_spells_what_locate_answers() {
+    let root = project(
+        "names",
+        &[
+            ("composer.json", ROOT_JSON),
+            ("vendor/composer/installed.json", V2),
+            ("vendor/acme/model/src/Base.php", "<?php"),
+            ("vendor/acme/model/src/Sub/Leaf.php", "<?php"),
+            ("vendor/acme/model/deep/Thing.php", "<?php"),
+            ("vendor/old/lib/lib/Old/Tool/Hammer.php", "<?php"),
+            ("vendor/composer/autoload_classmap.php", CLASSMAP),
+            ("src/Http/Kernel.php", "<?php"),
+        ],
+    );
+    let loc = locator(&root, php());
+    let mut got = Vec::new();
+    loc.for_each_name(Some(&root), &mut |n| got.push(n.to_string()));
+    let mapped = ["Acme\\Model\\Base", "Acme\\Model\\Sub\\Leaf", "Acme\\Model\\Deep\\Thing", "Old_Tool_Hammer", "App\\Http\\Kernel"];
+    for want in mapped.iter().chain(&["Legacy_Widget"]) {
+        assert!(got.iter().any(|g| g == want), "{want} not listed in {got:?}");
+    }
+    // a prefix-mapped name is one `locate` places
+    for name in mapped {
+        assert!(!loc.locate(name).is_empty(), "{name} listed but not located");
+    }
+    // `Old\Tool\Hammer` does not carry the `Old_` prefix its directory serves.
+    assert!(!got.iter().any(|g| g == "Old\\Tool\\Hammer"));
+}

@@ -100,7 +100,7 @@ not the slot logic. Sources now on the set: in-scope names
 lists, OPEN — the dep cache only enriches detail), imported modules'
 remaining export surfaces and the unimported auto-import firehose
 (DEPENDENCY), and loadable module names (`complete_modules`, DEPENDENCY —
-resolved cache + @INC availability behind
+resolved cache + every language's dependency-map name listing behind
 `CrossFileLookup::complete_module_names`). The qualified-path drill takes
 both of its sub-package sources from the set.
 

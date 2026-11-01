@@ -20,6 +20,11 @@ pub fn cmake_pack() -> LangPack {
                 vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
             }
         },
+        module_of: |p| {
+            p.strip_suffix("/CMakeLists.txt")
+                .map(str::to_string)
+                .or_else(|| p.ends_with(".cmake").then(|| p.to_string()))
+        },
         narrow_guard: |_, _| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,

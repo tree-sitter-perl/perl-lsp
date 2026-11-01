@@ -222,6 +222,16 @@ pub fn receiver_at_incremental(
     if cursor_in_skip(old, src, cursor, cfg) {
         return None;
     }
+    let (patched, tree) = reparse_patched(parser, src, old, cursor)?;
+    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
+    let member = climb_to_member(node, cfg)?;
+    receiver_of(member, &patched, cursor)
+}
+
+/// The sentinel spliced in at `cursor` and the buffer re-parsed from the
+/// cached `old` tree. The splice is a pure insertion, so the edit is exact
+/// and only the region around the cursor re-parses.
+fn reparse_patched(parser: &mut Parser, src: &str, old: &Tree, cursor: usize) -> Option<(String, Tree)> {
     let patched = patch(src, cursor);
     let mut edited = old.clone();
     let pos = byte_to_point(src, cursor);
@@ -234,9 +244,25 @@ pub fn receiver_at_incremental(
         new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
     });
     let tree = parser.parse(&patched, Some(&edited))?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
-    receiver_of(member, &patched, cursor)
+    Some((patched, tree))
+}
+
+/// The identity being typed at `cursor` where the document spells one a
+/// dependency map places (`query_extract::identity_prefix_at`): `use
+/// Vendor\Pa|`, `new \Vend|`, `import os.pa|`. The sentinel completes the
+/// token, so the half-typed spelling parses into the capture it will be.
+pub fn identity_prefix_incremental(
+    parser: &mut Parser,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    old: &Tree,
+    cursor: usize,
+) -> Option<String> {
+    if cursor_in_skip(old, src, cursor, cfg) {
+        return None;
+    }
+    let (patched, tree) = reparse_patched(parser, src, old, cursor)?;
+    crate::build::query_extract::identity_prefix_at(&tree, &patched, cfg, cursor)
 }
 
 /// The completion context at a dangling member access: the receiver's type
@@ -269,18 +295,7 @@ pub fn member_completion_ctx_incremental(
     if cursor_in_skip(old, src, cursor, cfg) {
         return None;
     }
-    let patched = patch(src, cursor);
-    let mut edited = old.clone();
-    let pos = byte_to_point(src, cursor);
-    edited.edit(&InputEdit {
-        start_byte: cursor,
-        old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
-        start_position: pos,
-        old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
-    });
-    let tree = parser.parse(&patched, Some(&edited))?;
+    let (patched, tree) = reparse_patched(parser, src, old, cursor)?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
     let member = climb_to_member(node, cfg)?;
     let receiver = member.named_child(0)?;
@@ -321,18 +336,7 @@ pub fn domain_compare_ctx_incremental(
     if cursor_in_skip(old, src, cursor, cfg) {
         return None;
     }
-    let patched = patch(src, cursor);
-    let mut edited = old.clone();
-    let pos = byte_to_point(src, cursor);
-    edited.edit(&InputEdit {
-        start_byte: cursor,
-        old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
-        start_position: pos,
-        old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
-    });
-    let tree = parser.parse(&patched, Some(&edited))?;
+    let (patched, tree) = reparse_patched(parser, src, old, cursor)?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
     let cmp = climb_to_domain_compare(node, cfg, &patched)?;
     let slot = domain_slot_operand(cmp, cfg, cursor)?;
