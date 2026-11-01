@@ -75,6 +75,14 @@
   left: (_) @flow.place
   right: (_) @flow.source) @flow.assign
 
+; An augmented assignment and a `del` write the member or element they name
+; too: neither leaves it holding the value a guard proved.
+(augmented_assignment
+  left: [(attribute) (subscript)] @flow.place)
+(delete_statement [(attribute) (subscript)] @flow.place)
+(delete_statement
+  (expression_list [(attribute) (subscript)] @flow.place))
+
 (parameters
   (identifier) @def.var.name @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
