@@ -92,8 +92,7 @@ pub fn load_conclusions_stamped(
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .ok()?;
-    let bin = zstd::decode_all(blob.as_slice()).ok()?;
-    let map = bincode::deserialize(&bin).ok()?;
+    let map = decode_blob(&blob)?;
     Some((map, RowStamp { source_fingerprint: fp as u64, flush_generation: Generation(gen) }))
 }
 
@@ -134,10 +133,7 @@ pub fn save_conclusions(
     map: &ConclusionMap,
     stamp: RowStamp,
 ) -> bool {
-    let Ok(bin) = bincode::serialize(map) else {
-        return false;
-    };
-    let Ok(blob) = zstd::encode_all(bin.as_slice(), ZSTD_LEVEL) else {
+    let Some(blob) = encode_blob(map) else {
         return false;
     };
     conn.execute(

@@ -18,6 +18,7 @@ use super::*;
 /// references" — see `docs/adr/relational-ref-index.md`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RefTable {
+    #[serde(deserialize_with = "crate::model::trusted_decode::vec")]
     refs: Vec<Ref>,
 
     /// Enrichment baseline: `enrich_imported_types_with_keys` re-derives

@@ -42,18 +42,16 @@ pub fn encode_stub(
     surface: &crate::model::surface::Surface,
     skeleton: &FileAnalysis,
 ) -> Option<Vec<u8>> {
-    let bin = bincode::serialize(&(feed, specs, surface, skeleton)).ok()?;
-    zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()
+    encode_blob(&(feed, specs, surface, skeleton))
 }
 
 pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
-    let bin = zstd::decode_all(blob).ok()?;
     let (feed, specs, surface, mut skeleton): (
         Vec<(String, bool)>,
         Vec<(String, String)>,
         crate::model::surface::Surface,
         FileAnalysis,
-    ) = bincode::deserialize(&bin).ok()?;
+    ) = decode_blob(blob)?;
     skeleton.after_deserialize();
     // The eviction flags are `#[serde(skip)]` because a decoded BLOB is
     // whole; the stub's skeleton is the opposite — stripped on all three

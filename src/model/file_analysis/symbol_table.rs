@@ -18,6 +18,7 @@ use super::*;
 /// disk", never "no symbols" — see `docs/adr/relational-ref-index.md`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SymbolTable {
+    #[serde(deserialize_with = "crate::model::trusted_decode::vec")]
     symbols: Vec<Symbol>,
 
     /// Enrichment baseline: `enrich_imported_types_with_keys` re-derives

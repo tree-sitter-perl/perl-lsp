@@ -8,6 +8,39 @@ use super::*;
 /// 3 is zstd's default and gives a solid space/speed tradeoff.
 pub(super) const ZSTD_LEVEL: i32 = 3;
 
+/// A frame-header content size past this is corruption, not a blob: the
+/// largest real analysis decompresses to a few tens of MB.
+const MAX_FRAME_BYTES: u64 = 1 << 30;
+
+/// The derived-store codec every blob here uses: bincode, then a zstd frame
+/// that records its decompressed size, so [`decode_blob`] can decompress
+/// into one exact allocation instead of a doubling stream.
+pub(super) fn encode_blob<T: serde::Serialize + ?Sized>(v: &T) -> Option<Vec<u8>> {
+    compress(&bincode::serialize(v).ok()?)
+}
+
+pub(super) fn compress(bin: &[u8]) -> Option<Vec<u8>> {
+    zstd::bulk::compress(bin, ZSTD_LEVEL).ok()
+}
+
+/// Rows written before frames recorded their size stream-decode.
+pub(super) fn decompress(blob: &[u8]) -> Option<Vec<u8>> {
+    match zstd::zstd_safe::get_frame_content_size(blob) {
+        Ok(Some(n)) if n <= MAX_FRAME_BYTES => zstd::bulk::decompress(blob, n as usize).ok(),
+        _ => zstd::decode_all(blob).ok(),
+    }
+}
+
+/// bincode over bytes [`decompress`] produced: the large lanes reserve
+/// their exact length (`model::trusted_decode`).
+pub(super) fn deserialize_trusted<T: serde::de::DeserializeOwned>(bin: &[u8]) -> Option<T> {
+    crate::model::trusted_decode::with_input_len(bin.len(), || bincode::deserialize(bin)).ok()
+}
+
+pub(super) fn decode_blob<T: serde::de::DeserializeOwned>(blob: &[u8]) -> Option<T> {
+    deserialize_trusted(&decompress(blob)?)
+}
+
 /// Discriminated rehydration failure — the honest replacement for the
 /// collapsed "loader returned None". Every arm names a distinct on-disk
 /// reality so the strict-residency panic points at a mechanism, not a
@@ -164,8 +197,7 @@ impl EncodedAnalysis {
     /// The baked map, decoded.
     #[allow(dead_code)] // decodes the encoded map; the flush takes `bake_conclusion_map` instead
     pub fn conclusion_map(&self) -> Option<crate::model::witnesses::ConclusionMap> {
-        let bin = zstd::decode_all(self.conclusions.as_slice()).ok()?;
-        bincode::deserialize(&bin).ok()
+        decode_blob(&self.conclusions)
     }
 }
 
@@ -187,10 +219,8 @@ pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
         let bag = std::mem::take(&mut owned.witnesses);
         (&owned, bag)
     };
-    let bin = bincode::serialize(bagless).ok()?;
-    let analysis = zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()?;
-    let bag_bin = bincode::serialize(&bag).ok()?;
-    let bag_blob = zstd::encode_all(bag_bin.as_slice(), ZSTD_LEVEL).ok()?;
+    let analysis = encode_blob(bagless)?;
+    let bag_blob = encode_blob(&bag)?;
     debug_assert!(
         !bag_blob.is_empty(),
         "an empty bag blob would read as a pre-split row"
@@ -238,10 +268,7 @@ pub fn bake_conclusions_blob(
     bag: &crate::model::witnesses::WitnessBag,
 ) -> Vec<u8> {
     let map = bake_conclusion_map(fa, bag);
-    bincode::serialize(&map)
-        .ok()
-        .and_then(|b| zstd::encode_all(b.as_slice(), ZSTD_LEVEL).ok())
-        .unwrap_or_default()
+    encode_blob(&map).unwrap_or_default()
 }
 
 /// The bake itself, before encoding.
@@ -328,12 +355,10 @@ pub fn decode_analysis_parts(
     let mut fa = decode_analysis(blob)?;
     match bag {
         Some(b) => {
-            let bin = crate::util::ghost_stats::timed("decode.2_zstd_bag", || zstd::decode_all(b))
-                .ok()?;
+            let bin = crate::util::ghost_stats::timed("decode.2_zstd_bag", || decompress(b))?;
             fa.witnesses = crate::util::ghost_stats::timed("decode.3_bincode_bag", || {
-                bincode::deserialize(&bin)
-            })
-            .ok()?;
+                deserialize_trusted(&bin)
+            })?;
         }
         None => {
             if want_bag {
@@ -359,11 +384,9 @@ pub fn decode_analysis(blob: &[u8]) -> Option<FileAnalysis> {
     // and if `after_deserialize` dominates then none of them help — the fix
     // is to stop asking for a fully-indexed analysis per lookup.
     let t = std::time::Instant::now();
-    let bin = crate::util::ghost_stats::timed("decode.2_zstd", || zstd::decode_all(blob)).ok()?;
-    let mut fa: FileAnalysis = crate::util::ghost_stats::timed("decode.3_bincode", || {
-        bincode::deserialize(&bin)
-    })
-    .ok()?;
+    let bin = crate::util::ghost_stats::timed("decode.2_zstd", || decompress(blob))?;
+    let mut fa: FileAnalysis =
+        crate::util::ghost_stats::timed("decode.3_bincode", || deserialize_trusted(&bin))?;
     crate::util::ghost_stats::timed("decode.4_after_deser", || fa.after_deserialize());
     // The mean describes two populations: a 512 us average against ~260 ms
     // for the giant blobs the thrash chews on is a 500x spread, and a fix
@@ -698,8 +721,7 @@ pub fn save_blob_to_db_stamped(
 /// the cost we had before this layer existed.
 /// bincode + zstd, the same codec every other derived blob here uses.
 pub fn encode_surface(s: &crate::model::surface::Surface) -> Option<Vec<u8>> {
-    let bin = bincode::serialize(s).ok()?;
-    zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()
+    encode_blob(s)
 }
 
 /// Store one file's projected surface at the CURRENT projection version.
@@ -747,8 +769,7 @@ pub fn load_surface(conn: &Connection, path: &str) -> Option<crate::model::surfa
             |row| row.get(0),
         )
         .ok()?;
-    let bin = zstd::decode_all(blob.as_slice()).ok()?;
-    bincode::deserialize(&bin).ok()
+    decode_blob(&blob)
 }
 
 fn persist_conclusions(conn: &Connection, path: &str, enc: &EncodedAnalysis) {
@@ -1022,8 +1043,8 @@ pub(super) mod bag_share_probe {
                 continue;
             };
             let (Some(cz), Some(bz)) = (
-                zstd::encode_all(cb.as_slice(), super::ZSTD_LEVEL).ok(),
-                zstd::encode_all(bb.as_slice(), super::ZSTD_LEVEL).ok(),
+                super::compress(&cb),
+                super::compress(&bb),
             ) else {
                 continue;
             };

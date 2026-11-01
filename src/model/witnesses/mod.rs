@@ -77,6 +77,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
         // is recomputed). The derived impl would expect both fields.
         #[derive(Deserialize)]
         struct WitnessBagOnDisk {
+            #[serde(deserialize_with = "crate::model::trusted_decode::vec")]
             witnesses: Vec<Witness>,
         }
         let on_disk = WitnessBagOnDisk::deserialize(deserializer)?;
@@ -164,6 +165,7 @@ impl WitnessBag {
         for (i, w) in self.witnesses.iter().enumerate() {
             self.index.entry(w.attachment.clone()).or_default().push(i);
         }
+        crate::util::ghost_stats::count_by("bag.rebuild_index_attachments", self.index.len() as u64);
     }
 
     /// Drop every witness past `baseline` and rebuild the index. Lets
