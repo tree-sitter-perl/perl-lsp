@@ -41,9 +41,9 @@
  (#any-of? @_class "self" "static"))
 
 ; ---- callables ----
-; A declared return is the callable's value at every call.
-(function_definition name: (name) @def.sub.name return_type: (_)? @rettype) @def.sub
-(method_declaration name: (name) @def.method.name return_type: (_)? @rettype) @def.method
+; A declared return (a single type) is the callable's value at every call.
+(function_definition name: (name) @def.sub.name return_type: [(named_type) (primitive_type) (optional_type)]? @rettype) @def.sub
+(method_declaration name: (name) @def.method.name return_type: [(named_type) (primitive_type) (optional_type)]? @rettype) @def.method
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own.
 (function_definition) @scope.sub

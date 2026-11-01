@@ -1228,6 +1228,8 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(ret("full"), clock, "a fully qualified class");
     assert_eq!(ret("count"), Some(T::Numeric));
     assert_eq!(ret("either"), None, "a union has no single type");
+    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
+    assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
     assert_eq!(ret("nothing"), None);
     assert_eq!(ret("bare"), None);
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
