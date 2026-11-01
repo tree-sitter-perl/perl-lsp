@@ -16,6 +16,8 @@
 
 use std::path::PathBuf;
 
+use crate::util::canonical_path::CanonicalPath;
+
 use tower_lsp::lsp_types::Url;
 
 use crate::model::file_analysis::{
@@ -124,10 +126,7 @@ pub fn resolve<'a>(
     // The per-origin closure scope is a construction fact: forward
     // resolutions see the names THIS file's preprocessor would (C's flat
     // linkage), and Perl origins pass through untouched (empty closure).
-    let self_path = match &origin_key {
-        FileKey::Path(p) => Some(p.clone()),
-        FileKey::Url(u) => u.to_file_path().ok(),
-    };
+    let self_path = origin_key.canonical_path().cloned();
     // The routing fact names the scope's AXIS, and `for_origin` owns the
     // derivation — a use-map pack scopes by its use-map, another pack by
     // its include closure, Perl by the asker's own search path (`use lib`
@@ -144,7 +143,7 @@ pub fn resolve<'a>(
         crate::model::file_analysis::ScopedLookup::new(
             idx,
             &origin.pack.include_closure,
-            self_path.as_deref(),
+            self_path.as_ref(),
             axis,
         )
     });

@@ -50,6 +50,12 @@ pub struct Macro {
     /// 0-based line of the `#define` — the variant's def site.
     #[serde(default)]
     pub def_line: usize,
+    /// The delegates of every OTHER `#define` of this name that a merge
+    /// shadowed (`absorb_variant`): a table keeps one body per name, but a
+    /// use forwards to each config variant's callee, and the references
+    /// see-through must count all of them.
+    #[serde(default)]
+    pub variant_delegates: Vec<String>,
 }
 
 /// One source replacement: original `[start,end)` → `replacement`.

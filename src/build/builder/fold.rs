@@ -511,7 +511,7 @@ impl<'a> Builder<'a> {
             // the write has not produced yet. Block-relative on purpose: inside
             // the block, the block has run; whether it ran at all is the
             // binding-scope question below.
-            let conditional = is_rebind && crate::cst::conditional_arm(node, crate::cst::ArmBound::Block).is_some();
+            let conditional = is_rebind && crate::cst::conditional_arm(self.syntax, node, crate::cst::ArmBound::Block).is_some();
             // Innermost scope containing this assignment.
             let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
             let scope_idx = self
