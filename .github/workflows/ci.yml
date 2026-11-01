@@ -90,8 +90,20 @@ jobs:
           neovim: true
           version: v0.11.0
 
+      # The role suite's fixtures are Moo classes, and a Moo class inherits
+      # Moo::Object: with that base off @INC the ancestry is incomplete and the
+      # role-requires check stays silent by design. Install Moo at the version
+      # gold-corpus/cpanfile.snapshot pins.
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: "5.38"
+          install-modules-with: cpm
+
+      - name: Install Moo
+        run: cpm install -L "$RUNNER_TEMP/e2e-perl" Moo@2.005005
+
       - name: Run e2e tests
-        run: ./e2e/run.sh
+        run: PERL5LIB="$PWD/test_files/lib:$RUNNER_TEMP/e2e-perl/lib/perl5" ./e2e/run.sh
 
   pack-e2e-tests:
     name: Pack E2E tests (headless nvim)

@@ -405,6 +405,7 @@ impl<'a> Builder<'a> {
                 if name == "extends" {
                     if let Some(pkg) = self.current_package.clone() {
                         if self.framework_modes.contains_key(&pkg) {
+                            self.extended_packages.insert(pkg.clone());
                             self.visit_extends_call(node, &pkg);
                         }
                     }
@@ -429,9 +430,10 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-                // push @EXPORT, 'foo', 'bar' / push @EXPORT_OK, 'foo'
-                if name == "push" {
-                    self.visit_push_call(node);
+                // push @EXPORT, 'foo', 'bar' / push @EXPORT_OK, 'foo';
+                // push / unshift / splice @ISA, ...
+                if matches!(name, "push" | "unshift" | "splice") {
+                    self.visit_array_edit_call(node, name);
                 }
 
                 // Call-wrapped `%EXPORT_TAGS` table:
@@ -584,8 +586,10 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// Handle `push @EXPORT, 'foo', 'bar'` — append to export lists.
-    pub(super) fn visit_push_call(&mut self, node: Node<'a>) {
+    /// Handle `push` / `unshift` / `splice` on an array: `@ISA` edits
+    /// extend the package's parents; `push @EXPORT, 'foo', 'bar'` appends
+    /// to the export lists.
+    pub(super) fn visit_array_edit_call(&mut self, node: Node<'a>, verb: &str) {
         let args = match node.child_by_field_name("arguments") {
             Some(a) => a,
             None => return,
@@ -604,6 +608,23 @@ impl<'a> Builder<'a> {
             Ok(t) => t,
             Err(_) => return,
         };
+        let rest = &children[1..];
+        let edit = match verb {
+            "push" => super::visit_use::IsaEdit::Append,
+            "unshift" => super::visit_use::IsaEdit::Prepend,
+            _ => {
+                let operand = |i: usize| {
+                    rest.get(i).map(|n| n.utf8_text(self.source).ok().and_then(|t| t.trim().parse::<i64>().ok()))
+                };
+                super::visit_use::IsaEdit::Splice { offset: operand(0), length: operand(1) }
+            }
+        };
+        let values = match edit {
+            super::visit_use::IsaEdit::Splice { .. } => rest.get(2..).unwrap_or_default(),
+            _ => rest,
+        };
+        self.record_isa_write(arr_name, first, edit, values);
+        if verb != "push" { return; }
         // Generic array contribution — `push @arr, X, Y` extends
         // `@arr`'s `Sequence` shape. Walk-time projection: resolve
         // each X / Y through `emit_expr_witness + bag_query_expr_span`,
@@ -1071,7 +1092,7 @@ impl<'a> Builder<'a> {
         uses.iter().any(|m| {
             self.framework_mode_modules
                 .get(m)
-                .is_some_and(|(_, kws)| kws.iter().any(|k| k == kw))
+                .is_some_and(|g| g.imports.iter().any(|k| k == kw))
         })
     }
 

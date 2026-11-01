@@ -936,12 +936,19 @@ pub enum Trigger {
 /// `visit_use` looks modules up — core holds no module list. Mojo::Base
 /// is deliberately not declarable here: its `-base` gate is structural,
 /// not a name match.
+///
+/// `base` is the class the module makes the consumer inherit from
+/// (`Moo` → `Moo::Object`): a real parent edge, appended after the walk
+/// unless the package `extends` something, which replaces it as it does
+/// at runtime. A role maker names none.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FrameworkModeMaker {
     pub module: String,
     pub flavor: String,
     #[serde(default)]
     pub imports: Vec<String>,
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 /// A library function that reports what a reference is (Scalar::Util's
