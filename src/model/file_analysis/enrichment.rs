@@ -1040,26 +1040,26 @@ impl FileAnalysis {
         out
     }
 
-    /// The rep a `ref…eq` / `isa` GUARD established for `subject` at `point`,
-    /// read from **narrowing-sourced witnesses only**. Distinct from
-    /// `inferred_type_via_bag`: a `$x->{k}` deref pushes a zero-extent
-    /// `HashRef` belief sitting exactly at the use point, which would mask the
-    /// guard's rep under the merged query — so D6 reads the guard's assertion
-    /// directly. Innermost (narrowest) containing region wins. `None` when no
-    /// guard narrows the subject here (so D6 fires only on guard-narrowed
-    /// reps, per the plan).
+    /// The rep a value fact holding over a REGION around `point` gives
+    /// `subject` — a `ref…eq` / `isa` guard's narrowed arm. A witness's span is
+    /// the site of the fact it states (rule #14), so a region-spanning
+    /// `InferredType` is a fact that holds across that region, while a
+    /// deref's own demanded-rep belief is a point at its use and would mask
+    /// the guard under the merged query. Innermost region wins. `None` when
+    /// no region fact types the subject here, so D6 fires only on narrowed
+    /// reps.
     pub fn guard_narrowed_rep(&self, subject: &Subject, point: Point) -> Option<InferredType> {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
         let mut best: Option<&crate::model::witnesses::Witness> = None;
         for w in self.witnesses.filter(|w| {
-            matches!(&w.source, WitnessSource::Builder(s) if s == "narrowing" || s == "defined_narrowing")
-                && match (&w.attachment, subject) {
-                    (WitnessAttachment::Variable { name, .. }, Subject::Variable(v)) => name == v,
-                    (WitnessAttachment::Place(p), Subject::Place(q)) => **p == *q,
-                    _ => false,
-                }
+            match (&w.attachment, subject) {
+                (WitnessAttachment::Variable { name, .. }, Subject::Variable(v)) => name == v,
+                (WitnessAttachment::Place(p), Subject::Place(q)) => **p == *q,
+                _ => false,
+            }
         }) {
-            if !contains_point(&w.span, point) {
+            let region = (w.span.start.row, w.span.start.column) < (w.span.end.row, w.span.end.column);
+            if !region || !contains_point(&w.span, point) {
                 continue;
             }
             if !matches!(&w.payload, WitnessPayload::InferredType(_)) {
