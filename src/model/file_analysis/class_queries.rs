@@ -303,7 +303,9 @@ impl FileAnalysis {
     /// The MRO's tail: what the language guarantees every class
     /// (`crate::model::roots`), after every declared method shadowed it. A
     /// real root class's own declarations come first; a member reached only
-    /// by role is no name to type.
+    /// by role is no name to type. A name nothing declares is no class, and
+    /// gets no tail: callers read an empty list as "not a receiver I know"
+    /// and fall back.
     fn collect_root_methods(
         &self,
         class_name: &str,
@@ -311,6 +313,9 @@ impl FileAnalysis {
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
     ) {
+        if !self.class_is_known(class_name, module_index) {
+            return;
+        }
         let roots = crate::model::roots::installed();
         let Some(surface) = roots.surface(&self.language) else { return };
         if let Some(root_class) = surface.class.as_deref() {

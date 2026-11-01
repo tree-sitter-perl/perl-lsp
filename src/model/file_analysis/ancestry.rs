@@ -1076,6 +1076,30 @@ impl FileAnalysis {
         })
     }
 
+    /// Does anything declare `name` as a class: this file, the index, the
+    /// app surface, or the language itself (its root class)?
+    pub(crate) fn class_is_known(&self, name: &str, module_index: Option<&dyn CrossFileLookup>) -> bool {
+        let roots = crate::model::roots::installed();
+        // `class Foo(object)` names the root, which is always there.
+        if name == APP_SURFACE_CLASS || roots.is_root_class(&self.language, name) {
+            return true;
+        }
+        let local = self.symbols.iter().any(|s| {
+            matches!(s.kind, SymKind::Class | SymKind::Package | SymKind::Module) && s.name == name
+        });
+        if local {
+            return true;
+        }
+        if module_index.is_some_and(|idx| idx.get_cached(name).is_some()) {
+            return true;
+        }
+        // A use-map language spells an unbound `object` in the file's own
+        // namespace; the leaf widening every undeclared class gets
+        // (`ScopedLookup::use_map_candidates`) reaches the root.
+        self.names().use_map_sep().is_some()
+            && roots.is_root_class(&self.language, &name_match_key(name, self.names()))
+    }
+
     /// Does `class` (or any ancestor we CAN reach) name a parent that
     /// resolves to nothing — not a package/class defined in this file,
     /// not a cached module in `module_index`/@INC, and not the synthetic
@@ -1094,28 +1118,6 @@ impl FileAnalysis {
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
-        let roots = crate::model::roots::installed();
-        let class_is_known = |name: &str| -> bool {
-            // `class Foo(object)` names the root, which is always there.
-            if name == APP_SURFACE_CLASS || roots.is_root_class(&self.language, name) {
-                return true;
-            }
-            let local = self.symbols.iter().any(|s| {
-                matches!(s.kind, SymKind::Class | SymKind::Package | SymKind::Module)
-                    && s.name == name
-            });
-            if local {
-                return true;
-            }
-            if module_index.is_some_and(|idx| idx.get_cached(name).is_some()) {
-                return true;
-            }
-            // A use-map language spells an unbound `object` in the file's own
-            // namespace; the leaf widening every undeclared class gets
-            // (`ScopedLookup::use_map_candidates`) reaches the root.
-            self.names().use_map_sep().is_some()
-                && roots.is_root_class(&self.language, &name_match_key(name, self.names()))
-        };
 
         let mut incomplete = false;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
@@ -1142,7 +1144,7 @@ impl FileAnalysis {
                 &self.plugin.app_surface_consumers,
             );
             for p in &parents {
-                if !class_is_known(p) {
+                if !self.class_is_known(p, module_index) {
                     incomplete = true;
                     return std::ops::ControlFlow::Break(());
                 }

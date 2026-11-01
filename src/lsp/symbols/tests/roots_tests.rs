@@ -216,3 +216,36 @@ fn perl_new_is_no_longer_silenced() {
     assert_eq!(um.len(), 1, "{um:?}");
     assert!(um[0].contains("'new'"), "{um:?}");
 }
+
+#[test]
+fn a_name_nothing_declares_gets_no_root_tail() {
+    let fa = parse_analysis(PERL_UNIVERSAL);
+    assert!(fa.complete_methods_for_class("Nowhere", None).is_empty());
+    assert!(fa.complete_methods_for_class("$x", None).is_empty());
+}
+
+#[test]
+fn completion_before_an_invocant_is_not_a_root_member_list() {
+    let src = "\
+package C;
+sub cookie { 1 }
+sub go {
+  my $url = C->new;
+  my $path = $url->path;
+}
+1;
+";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let analysis = crate::build::builder::build(&tree, src.as_bytes());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let (row, line) = src.lines().enumerate().find(|(_, l)| l.contains("$url->path")).unwrap();
+    let pos = Position { line: row as u32, character: line.find("$url->").unwrap() as u32 };
+    let labels: Vec<_> = completion_items_for_test(&analysis, &tree, src, pos, &idx, None)
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+    assert!(labels.iter().any(|l| l == "cookie"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "can"), "{labels:?}");
+}
