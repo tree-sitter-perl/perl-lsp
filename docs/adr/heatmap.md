@@ -153,7 +153,13 @@ the dated numbers). The gather is one independent `references()` walk per
 declaration, fanned out over the Rayon pool per file and collected in entry
 order, so the report is byte-identical to the serial one (its sorts are
 stable and the dead-code list is unsorted — gather order reaches the
-output). The knobs, each measured on BMO (739 files, 12k walks):
+output). The sweep is a `CorpusSweep` (`index/sweep.rs`): opening it sizes
+the rehydration cache and opens the sweep memos, and the corpus is reachable
+only through it, so nothing decodes a file before the cache can keep it.
+Decoding first held the corpus twice — the up-front whole copies pinned
+outside a stock-capped cache, then re-decoded into the raised one (FHEM,
+2026-11-01: 3.77 GB peak and 2,483 decodes before, 2.37 GB and 1,062 after).
+The knobs, each measured on BMO (739 files, 12k walks):
 
 - **`RAYON_NUM_THREADS`** bounds the workers. Wall trades against peak RSS
   — each worker holds its own in-flight rehydrated candidates — so a

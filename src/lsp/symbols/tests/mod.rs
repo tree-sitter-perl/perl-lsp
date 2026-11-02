@@ -5,7 +5,7 @@
 use super::*;
 
 mod diagnostics_tests;
-use diagnostics_tests::{fake_cached, parse_analysis};
+use diagnostics_tests::{fake_cached, moo_installed_index, parse_analysis};
 mod actions_tests;
 mod dispatch_tests;
 mod chain_tests;
