@@ -19,6 +19,33 @@ use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDis
 use super::extract::ListSlot;
 use super::{connector_keyword_between, raw_leading_op, raw_mid_op, Builder};
 
+/// One `@flow` match, read through the capture vocabulary. `source` is
+/// optional: a clear (`@flow.clear`) carries no inflowing value.
+pub(super) struct FlowMatch<'t> {
+    target: Option<Node<'t>>,
+    clear: Option<Node<'t>>,
+    rebind: Option<Node<'t>>,
+    source: Option<Node<'t>>,
+}
+
+impl<'t> FlowMatch<'t> {
+    /// A match's captures; `None` when it binds nothing.
+    pub(super) fn of(caps: impl IntoIterator<Item = (Option<crate::build::query_extract::Capture>, Node<'t>)>) -> Option<Self> {
+        use crate::build::query_extract::{Capture, FlowCap};
+        let mut m = FlowMatch { target: None, clear: None, rebind: None, source: None };
+        for (cap, node) in caps {
+            match cap {
+                Some(Capture::Flow(FlowCap::Target)) => m.target = Some(node),
+                Some(Capture::Flow(FlowCap::Clear)) => m.clear = Some(node),
+                Some(Capture::Flow(FlowCap::Rebind)) => m.rebind = Some(node),
+                Some(Capture::Flow(FlowCap::Source)) => m.source = Some(node),
+                other => unreachable!("flow_query admits only the captures read here, not {other:?}"),
+            }
+        }
+        m.target.or(m.clear).or(m.rebind).is_some().then_some(m)
+    }
+}
+
 /// The subject a guard narrows — a variable or a part of one (`$x`,
 /// `$self->{x}`, `$h{k}`, `$self->{$k}`), named by its `Place`. `key_vars`
 /// spell the place's key variables (`$k` in `$self->{$k}`): rebinding one
@@ -1019,38 +1046,12 @@ impl<'a> Builder<'a> {
     /// function start of Perl-on-the-query-engine. Provenance-only for now
     /// (no lowering): the shapes' types still come from the walk.
     pub(super) fn mint_flow_edges_via_query(&mut self, tree: &'a Tree) {
-        use tree_sitter::{QueryCursor, StreamingIterator};
-        use crate::build::query_extract::{Capture, FlowCap};
-        let (query, caps_of) = super::flow_query();
-        // Collect captures per match FIRST — the cursor borrows `self.source`,
-        // so we can't mutate until it drops. `source` is optional: a clear
-        // (`@flow.clear`) carries no inflowing value.
-        struct FlowCaps<'t> {
-            target: Option<Node<'t>>,
-            clear: Option<Node<'t>>,
-            rebind: Option<Node<'t>>,
-            source: Option<Node<'t>>,
-        }
-        let mut pending: Vec<FlowCaps> = Vec::new();
-        {
-            let mut cursor = QueryCursor::new();
-            let mut matches = cursor.matches(query, tree.root_node(), self.source);
-            while let Some(m) = matches.next() {
-                let mut caps = FlowCaps { target: None, clear: None, rebind: None, source: None };
-                for c in m.captures {
-                    match caps_of[c.index as usize] {
-                        Capture::Flow(FlowCap::Target) => caps.target = Some(c.node),
-                        Capture::Flow(FlowCap::Clear) => caps.clear = Some(c.node),
-                        Capture::Flow(FlowCap::Rebind) => caps.rebind = Some(c.node),
-                        Capture::Flow(FlowCap::Source) => caps.source = Some(c.node),
-                        other => unreachable!("flow_query admits only the captures read here, not {other}"),
-                    }
-                }
-                if caps.target.or(caps.clear).or(caps.rebind).is_some() {
-                    pending.push(caps);
-                }
-            }
-        }
+        // The plugin walk carries the document's matches when it ran; a
+        // build with no walk patterns traverses for them here.
+        let pending = match self.flow_matches.take() {
+            Some(m) => m,
+            None => self.collect_flow_matches(tree.root_node()),
+        };
         for caps in pending {
             // Bind shapes: no inflowing value. A bare `my`/`local` CLEARS to
             // undef (`Cleared`); a `foreach` var rebinds per element (`Rebind`,
@@ -1162,6 +1163,20 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+    }
+
+    /// The `@flow` document's matches, by its own traversal.
+    fn collect_flow_matches(&self, root: Node<'a>) -> Vec<FlowMatch<'a>> {
+        use tree_sitter::{QueryCursor, StreamingIterator};
+        crate::util::ghost_stats::count("flow.own_walk");
+        let (query, caps_of) = super::flow_query();
+        let mut out = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, root, self.source);
+        while let Some(m) = matches.next() {
+            out.extend(FlowMatch::of(m.captures.iter().map(|c| (Some(caps_of[c.index as usize]), c.node))));
+        }
+        out
     }
 
     /// The variable name(s) a clear (`@flow.clear`) targets — a

@@ -521,6 +521,9 @@ struct Builder<'a> {
     /// Value-flow edges minted at assignment sites — the provenance tier; each
     /// lowers to the same type witness the builder used to push inline.
     flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
+    /// The `@flow` document's matches, when the plugin pattern walk
+    /// collected them; the minter reads them after the walk.
+    flow_matches: Option<Vec<narrowing::FlowMatch<'a>>>,
     /// Rules from `param_types()` with `method: None` — applied to every sub
     /// declaration in a matching class, regardless of method name. The
     /// "every action in a controller" case (Catalyst `$c`).

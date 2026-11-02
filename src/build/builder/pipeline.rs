@@ -228,7 +228,6 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
 pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::build::query_extract::Capture]) {
     use crate::build::query_extract::Capture;
     use std::sync::OnceLock;
-    static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
     static FLOW_QUERY: OnceLock<(tree_sitter::Query, Vec<Capture>)> = OnceLock::new();
     let (query, caps) = FLOW_QUERY.get_or_init(|| {
         let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
@@ -237,6 +236,14 @@ pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::bui
         (query, caps)
     });
     (query, caps)
+}
+
+static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
+
+/// The `@flow` document's text, for the walk that concatenates it with the
+/// plugin patterns (`pattern_dispatch::walk_queries`).
+pub(super) fn flow_source() -> &'static str {
+    FLOW_SCM
 }
 
 /// The flow minter's capture table: each capture id's parsed `Capture`, or
@@ -440,6 +447,7 @@ fn build_once(
         plugin_loads: Vec::new(),
         loader_config_params: Vec::new(),
         flow_edges: Vec::new(),
+        flow_matches: None,
         any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
         gated_emissions: Vec::new(),

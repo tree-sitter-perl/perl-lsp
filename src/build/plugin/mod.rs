@@ -1538,7 +1538,7 @@ pub struct PluginRegistry {
     /// per-spec traversal is an always-correct fallback (and proven
     /// equivalent), "not compiled yet" is simply another reason to take it.
     combined_walk: std::sync::Arc<
-        std::sync::OnceLock<Option<(&'static tree_sitter::Query, Vec<usize>)>>,
+        std::sync::OnceLock<Option<crate::build::builder::pattern_dispatch::CombinedParts>>,
     >,
     /// Whether the background compile has been kicked off. Separate from the
     /// `OnceLock` because the lock is only *set* when the compile finishes.
@@ -1600,11 +1600,11 @@ impl PluginRegistry {
     /// registry; the builder side closes over owned spec sources.
     pub(crate) fn combined_walk(
         &self,
-        derive: impl FnOnce() -> Option<(&'static tree_sitter::Query, Vec<usize>)> + Send + 'static,
-    ) -> Option<(&'static tree_sitter::Query, &[usize])> {
+        derive: impl FnOnce() -> Option<crate::build::builder::pattern_dispatch::CombinedParts> + Send + 'static,
+    ) -> Option<&crate::build::builder::pattern_dispatch::CombinedParts> {
         use std::sync::atomic::Ordering;
         if let Some(v) = self.combined_walk.get() {
-            return v.as_ref().map(|(q, s)| (*q, s.as_slice()));
+            return v.as_ref();
         }
         if combined_walk_is_synchronous() {
             // `get_or_init`, not `set`: under Rayon several threads arrive
@@ -1614,8 +1614,7 @@ impl PluginRegistry {
             return self
                 .combined_walk
                 .get_or_init(derive)
-                .as_ref()
-                .map(|(q, s)| (*q, s.as_slice()));
+                .as_ref();
         }
         if !self.combined_walk_started.swap(true, Ordering::Relaxed) {
             let slot = std::sync::Arc::clone(&self.combined_walk);
