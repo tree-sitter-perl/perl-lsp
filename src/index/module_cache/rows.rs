@@ -219,14 +219,16 @@ fn shred_derived_rows_inner(
 /// the delete below; what the generation bump protects is the memo a writer
 /// built in an EARLIER transaction.
 pub fn gc_strings(conn: &Connection) -> usize {
-    let deleted = conn.execute(sql::STRINGS_GC.registered(), []);
-    match deleted {
-        Ok(n) if n > 0 => {
-            let _ = crate::index::module_cache::bump_strings_generation(conn);
-            n
+    // The delete and its bump commit together: between two autocommits a
+    // writer could read the old generation and keep handing out freed ids.
+    in_immediate_txn(conn, || {
+        let n = conn.execute(sql::STRINGS_GC.registered(), [])?;
+        if n > 0 {
+            bump_strings_generation(conn)?;
         }
-        _ => 0,
-    }
+        Ok(n)
+    })
+    .unwrap_or(0)
 }
 
 /// Drop one file's whole persisted generation — blob row AND derived ref
