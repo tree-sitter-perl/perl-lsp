@@ -118,7 +118,8 @@
         ],
         "none": []
       },
-      "status": "gold"
+      "status": "xfail",
+      "note": "`my $uniq = $self->{uniq}` inside `unless (...) { }` shadows the file-scope `my $uniq = 1` (`$uniq++`, Numeric). The row held because a read walked out past the inner declaration, which types nothing, to the outer `$uniq`: the right answer for the wrong variable. Since variables bind by declaration (docs/adr/flow-narrowing.md \u00a7Variables are bindings) the inner `$uniq` answers from its own value, `$self->{uniq}`, which nothing types: the slot is written as `$params{uniq} = $uniq++` on the hash later blessed (`bless \\%params, $class`), and that write is not a slot write of Type::Tiny. The gap is the bless-of-a-shaped-hash carrying its keys into the class's fields."
     },
     {
       "id": "ti-11",
