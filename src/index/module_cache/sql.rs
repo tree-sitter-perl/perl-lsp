@@ -112,6 +112,9 @@ registry! {
     TXN_BEGIN_IMMEDIATE => NoScratch, "BEGIN IMMEDIATE";
     TXN_COMMIT => NoScratch, "COMMIT";
     TXN_ROLLBACK => NoScratch, "ROLLBACK";
+    SAVEPOINT_UNIT => NoScratch, "SAVEPOINT unit";
+    RELEASE_UNIT => NoScratch, "RELEASE unit";
+    ROLLBACK_TO_UNIT => NoScratch, "ROLLBACK TO unit";
     PRAGMA_JOURNAL_WAL => NoScratch, "PRAGMA journal_mode=WAL";
     PRAGMA_SYNC_OFF => NoScratch, "PRAGMA synchronous=OFF";
     PRAGMA_SYNC_NORMAL => NoScratch, "PRAGMA synchronous=NORMAL";

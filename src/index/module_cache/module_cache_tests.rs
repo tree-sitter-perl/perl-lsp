@@ -1253,7 +1253,20 @@ fn refresh_deps_stamp_revalidates_consumer_rows() {
     let blob = encode_analysis(&fa).unwrap();
     let consumer_str = consumer.to_string_lossy().into_owned();
     let stamp = file_stamp(&consumer).unwrap_or((0, 0));
-    save_blob_to_db_stamped(&conn, &consumer_str, &consumer, &fa.pack.include_closure, &blob, "workspace", stamp);
+    let seeds = fa.row_seeds();
+    assert!(save_generation(
+        &conn,
+        &PersistedGeneration {
+            module_name: &consumer_str,
+            path: &consumer,
+            include_closure: &fa.pack.include_closure,
+            blob: &blob,
+            seeds: &seeds,
+            source: "workspace",
+            stamp,
+            stub: None,
+        },
+    ));
     let stored: i64 = conn
         .query_row("SELECT deps_stamp FROM modules WHERE path=?1", params![consumer_str], |r| r.get(0))
         .unwrap();
@@ -2608,4 +2621,65 @@ fn an_old_row_format_upgrades_without_recreating_the_file() {
     assert!(has_ref_rows(&conn, "/ws/Upgraded.pm"));
     drop(conn);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A COMMIT that fails must not leave its transaction open: the gates run on
+/// the connection that later persists, and an open transaction there holds
+/// the write lock and fails every later BEGIN. A deferred foreign key is the
+/// one way to make COMMIT itself fail.
+#[test]
+fn a_failed_commit_leaves_no_transaction_open() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON;
+         CREATE TABLE parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE child (pid INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);",
+    )
+    .unwrap();
+    let r = in_immediate_txn(&conn, || conn.execute("INSERT INTO child VALUES (7)", []).map(|_| ()));
+    assert!(r.is_err(), "the dangling key must fail the commit");
+    assert!(conn.is_autocommit(), "the failed commit left its transaction open");
+    in_immediate_txn(&conn, || Ok(())).expect("the next gate opens cleanly");
+}
+
+/// A file whose rows fail partway, inside a chunk that still commits, keeps
+/// its PREVIOUS generation whole: old blob, old rows. Without the savepoint
+/// the chunk committed the new blob and the `files` marker over a partial
+/// row set, and the next warm trusted the marker.
+#[test]
+fn a_half_saved_generation_leaves_the_previous_one_intact() {
+    let conn = test_db();
+    let pm = std::env::temp_dir().join(format!("half_saved_{}.pm", std::process::id()));
+    let path_str = pm.to_string_lossy().into_owned();
+    let save = |src: &str| {
+        std::fs::write(&pm, src).unwrap();
+        let cached = parse_source_to_cached(src, &pm);
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let landed = save_to_db(&conn, &path_str, &Some(cached), "workspace");
+        conn.execute_batch("COMMIT").unwrap();
+        landed
+    };
+    let blob = || -> Vec<u8> {
+        conn.query_row("SELECT analysis FROM modules WHERE path=?1", params![path_str], |r| r.get(0))
+            .unwrap()
+    };
+
+    assert!(save("package Half;\nsub alpha { 1 }\nalpha();\n1;\n"));
+    let before = blob();
+    assert_eq!(ref_candidate_files(&conn, &["alpha".to_string()]), vec![path_str.clone()]);
+
+    conn.execute_batch(
+        "CREATE TRIGGER kill_refs BEFORE INSERT ON refs BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    assert!(!save("package Half;\nsub beta { 1 }\nbeta();\n1;\n"), "the failed rows must fail the save");
+
+    assert_eq!(blob(), before, "the new blob landed beside rows that did not");
+    assert_eq!(
+        ref_candidate_files(&conn, &["alpha".to_string()]),
+        vec![path_str.clone()],
+        "the previous generation's rows must survive"
+    );
+    assert!(ref_candidate_files(&conn, &["beta".to_string()]).is_empty());
+    let _ = std::fs::remove_file(&pm);
 }

@@ -521,29 +521,10 @@ impl PackInvalidator {
                     rx,
                     Some(conn),
                     "pack swap persist",
-                    |conn, batch: &[(CanonicalPath, Arc<FileAnalysis>)]| {
-                        batch
-                            .iter()
-                            .map(|(p, arc)| {
-                                let p_str = p.to_string_lossy();
-                                let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
-                                if !module_cache::save_to_db(conn, &p_str, &Some(cached), "workspace") {
-                                    // Shredding now would pair a new generation's
-                                    // rows with a blob that isn't there — the same
-                                    // write invariant `save_module_generation` holds.
-                                    return false;
-                                }
-                                match module_cache::shred_derived_rows(
-                                    conn, &p_str, "workspace", &arc.row_seeds(),
-                                ) {
-                                    Ok(()) => true,
-                                    Err(e) => {
-                                        log::error!("Failed to shred derived rows for {:?}: {}", p, e);
-                                        false
-                                    }
-                                }
-                            })
-                            .collect()
+                    |_conn| (),
+                    |conn, (), (p, arc): &(CanonicalPath, Arc<FileAnalysis>)| {
+                        let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
+                        module_cache::save_to_db(conn, &p.to_string_lossy(), &Some(cached), "workspace")
                     },
                     |(p, arc): (CanonicalPath, Arc<FileAnalysis>)| {
                         self.register_after_swap(pack, &p, &arc, true, event_gen);
