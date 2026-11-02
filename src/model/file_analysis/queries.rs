@@ -977,7 +977,7 @@ impl FileAnalysis {
 
     fn variable_use_in(&self, name: &str, at: Point, scope: ScopeId) -> VariableUse {
         variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
-            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(|s| {
+            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(move |s| {
                 // An implicit global is minted from uses, not declared: the
                 // `Global` arm reaches it by its package.
                 let declared = match &s.detail {
@@ -988,7 +988,10 @@ impl FileAnalysis {
                     SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
                     _ => None,
                 };
-                (declared && s.name == name).then_some((s.id, s.span.start, gate))
+                // A member is in force throughout its class, wherever it is
+                // declared.
+                let from = if s.kind == SymKind::Field { self.scopes[scope.0 as usize].span.start } else { s.span.start };
+                (declared && s.name == name).then_some((s.id, from, gate))
             })
         })
     }
