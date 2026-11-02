@@ -6,6 +6,7 @@
       "difficulty": "tricky",
       "semantic_area": "roles",
       "root": "gold-corpus/role-fixture",
+      "incRoots": ["gold-corpus/local/lib/perl5"],
       "file": "",
       "expect": {
         "all": [
@@ -19,7 +20,7 @@
         ]
       },
       "status": "gold",
-      "note": "Composer-mismatch contract check: Broken composes the role without providing fetch (WARNING — Perl dies at compose time). Composer/Deep provide real defs; Dynamic has a runtime-generated parent (with RoleGen(...)) so its ancestry is incomplete and it must stay honest-silent."
+      "note": "Composer-mismatch contract check: Broken composes the role without providing fetch (WARNING — Perl dies at compose time). Composer/Deep provide real defs; Dynamic has a runtime-generated parent (with RoleGen(...)) so its ancestry is incomplete and it must stay honest-silent. Moo is installed (incRoots): a Moo class inherits Moo::Object, and an uninstalled base would leave every Moo class's ancestry incomplete, silencing the check."
     }
   ]
 }

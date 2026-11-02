@@ -497,7 +497,8 @@ fn calling_a_class_name_is_a_function_call() {
         query_source: concat!(
             include_str!("../../queries/php/skeleton.scm"),
             "\n(function_call_expression function: (name) @ref.call",
-            " arguments: (arguments ((_) @arity.arg \",\"?)*) @arity.args) @expr.call\n",
+            " arguments: (arguments) @arity.args) @expr.call\n",
+            "(arguments (_) @arity.arg) @arity.args\n",
         ),
         ..php_pack()
     };

@@ -930,7 +930,7 @@ with map \"My::Roles::$_\", qw/Alpha Beta/;
     let parents = fa.declared_parents("My::Class");
     assert_eq!(
         parents,
-        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string()],
+        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string(), "Moo::Object".to_string()],
     );
 }
 
@@ -950,7 +950,7 @@ with map { \"My::Roles::$_\" } qw/Alpha Beta/;
     let fa = build_fa(src);
     assert_eq!(
         fa.declared_parents("My::Class"),
-        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string()],
+        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string(), "Moo::Object".to_string()],
     );
 
     let src = "\
@@ -961,7 +961,7 @@ with map { my $n = \"My::Roles::$_\"; $n } qw/Alpha Beta/;
     let fa = build_fa(src);
     assert_eq!(
         fa.declared_parents("My::Stmt"),
-        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string()],
+        &["My::Roles::Alpha".to_string(), "My::Roles::Beta".to_string(), "Moo::Object".to_string()],
     );
 
     let src = "\
@@ -970,8 +970,9 @@ use Moo;
 with map { my $n = \"My::Roles::$_\"; $n = lc $n; $n } qw/Alpha Beta/;
 ";
     let fa = build_fa(src);
-    assert!(
-        fa.declared_parents("My::Reassigned").is_empty(),
+    assert_eq!(
+        fa.declared_parents("My::Reassigned"),
+        &["Moo::Object".to_string()],
         "re-assigned tail binding must not fold to a wrong parent",
     );
 }

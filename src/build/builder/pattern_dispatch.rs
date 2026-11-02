@@ -170,11 +170,12 @@ pub(crate) fn verify_pattern_expects(spec: &PatternSpec) -> Result<(), String> {
             .ok_or_else(|| format!("pattern `{}` expect `{}`: parse failed", spec.name, ex.src))?;
         let mut count = 0usize;
         let mut texts: HashMap<String, String> = HashMap::new();
+        let syntax = std::cell::OnceCell::new();
         {
             let mut cursor = QueryCursor::new();
             let mut it = cursor.matches(query, tree.root_node(), ex.src.as_bytes());
             while let Some(m) = it.next() {
-                if !admits(query, m, tree.root_node()) {
+                if !admits(query, m, || syntax.get_or_init(|| crate::cst::SyntaxForest::new([tree.root_node()]))) {
                     continue;
                 }
                 count += 1;
@@ -452,7 +453,7 @@ impl<'a> Builder<'a> {
             {
                 let mut it = cursor.matches(c.query, root, self.source);
                 while let Some(m) = it.next() {
-                    if !admits(c.query, m, root) {
+                    if !admits(c.query, m, || self.syntax) {
                         continue;
                     }
                     let caps: Vec<(u32, Node<'a>)> =
@@ -484,7 +485,7 @@ impl<'a> Builder<'a> {
                 {
                     let mut it = cursor.matches(*q, root, self.source);
                     while let Some(m) = it.next() {
-                        if !admits(q, m, root) {
+                        if !admits(q, m, || self.syntax) {
                             continue;
                         }
                         let caps: Vec<(u32, Node<'a>)> =
@@ -862,7 +863,7 @@ impl<'a> Builder<'a> {
                     let mut cursor = QueryCursor::new();
                     let mut it = cursor.matches(query, root, self.source);
                     while let Some(m) = it.next() {
-                        if !admits(query, m, root) {
+                        if !admits(query, m, || self.syntax) {
                             continue;
                         }
                         let caps: Vec<(u32, Node<'a>)> =

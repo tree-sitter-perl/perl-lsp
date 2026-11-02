@@ -575,7 +575,7 @@ impl<'a> Builder<'a> {
     }
 
     fn place_read(&self, node: Node<'a>) -> Option<crate::cst::PlaceRead> {
-        let read = crate::cst::read_place(node, self.source, &mut WalkBinder(self))?;
+        let read = crate::cst::read_place(self.syntax, node, self.source, &mut WalkBinder(self))?;
         (read.exact && !read.place.is_variable()).then_some(read)
     }
 
@@ -783,10 +783,10 @@ impl<'a> Builder<'a> {
     ) {
         let mut stmt = stmt_expr;
         while stmt.kind() != "expression_statement" {
-            let Some(p) = stmt.parent() else { return };
+            let Some(p) = self.syntax.parent(stmt) else { return };
             stmt = p;
         }
-        let Some(block) = stmt.parent() else { return };
+        let Some(block) = self.syntax.parent(stmt) else { return };
         if block.kind() != "block" {
             return;
         }
@@ -804,7 +804,7 @@ impl<'a> Builder<'a> {
     pub(super) fn observe_deref(&mut self, node: Node<'a>) {
         use crate::model::conventions::Sigil;
         use crate::model::witnesses::TypeObservation;
-        let Some(sigil) = crate::cst::deref_sigil(node) else { return };
+        let Some(sigil) = crate::cst::deref_sigil(self.syntax, node) else { return };
         let Some(operand) = crate::cst::deref_operand_expr(node) else { return };
         let obs = match sigil {
             Sigil::Array => TypeObservation::ArrayRefAccess,
@@ -835,8 +835,8 @@ impl<'a> Builder<'a> {
             return;
         }
         let Some(subject) = self.narrow_subject_of(operand) else { return };
-        let extent = crate::cst::conditional_arm(context, crate::cst::ArmBound::Block)
-            .or_else(|| crate::cst::enclosing_block(context));
+        let extent = crate::cst::conditional_arm(self.syntax, context, crate::cst::ArmBound::Block)
+            .or_else(|| crate::cst::enclosing_block(self.syntax, context));
         let Some(extent) = extent else { return };
         let region = Span { start: context.start_position(), end: extent.end_position() };
         self.emit_region_fact(&subject, RegionFact::Observe(obs), region);
@@ -946,7 +946,7 @@ impl<'a> Builder<'a> {
     /// Deferred from the walk so the scalar-rebind truncation can read edges
     /// (minted post-walk). The place index walks the injected `s///e` trees
     /// too: their code runs, so a write there disturbs a place.
-    pub(super) fn apply_narrowing_cutoffs(&mut self, tree: &'a Tree) {
+    pub(super) fn apply_narrowing_cutoffs(&mut self) {
         use crate::model::witnesses::{Witness, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
         let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
@@ -958,8 +958,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         let places = (!wanted.is_empty()).then(|| {
-            let roots = std::iter::once(tree.root_node()).chain(self.eval_injections.values().copied());
-            self.place_disturbances(roots, &wanted)
+            self.place_disturbances(self.syntax.roots(), &wanted)
         });
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
@@ -1056,8 +1055,8 @@ impl<'a> Builder<'a> {
                     return;
                 }
                 // Preorder reaches an access before what it reads through,
-                // so the outer access marks the inner one (`node.parent()`
-                // walks down from the root: asking upward costs the depth).
+                // so the outer access marks the inner one: a deref's operand
+                // sits below the access, not as its direct child.
                 if let Some(inner) = crate::cst::place_inner(node) {
                     read_through.insert(inner.id());
                 }
@@ -1066,7 +1065,7 @@ impl<'a> Builder<'a> {
                 }
                 // Binding first: most accesses hang off a root no subject
                 // names, and classifying the access is the costly half.
-                let Some(read) = crate::cst::read_place(node, self.source, &mut binder) else { return };
+                let Some(read) = crate::cst::read_place(self.syntax, node, self.source, &mut binder) else { return };
                 let access = match kind {
                     "hash_element_expression" | "array_element_expression" => {
                         if self.element_write_kind(node).is_some() { Access::Write } else { Access::Opaque }
@@ -1074,7 +1073,7 @@ impl<'a> Builder<'a> {
                     // A slice can write every slot it names, read or not.
                     "slice_expression" | "keyval_expression" => Access::Write,
                     _ => {
-                        if crate::cst::is_assignment_target(node) { Access::Write } else { Access::Opaque }
+                        if crate::cst::is_assignment_target(self.syntax, node) { Access::Write } else { Access::Opaque }
                     }
                 };
                 idx.add(node.start_position(), access, read.place);
@@ -1186,7 +1185,7 @@ impl<'a> Builder<'a> {
             // The write lands where `assignment_write_point` says, and a
             // compound write stores the assignment's value, not the RHS.
             let mut write_at = None;
-            if let Some(assign) = src.parent().filter(|p| p.kind() == "assignment_expression") {
+            if let Some(assign) = self.syntax.parent(src).filter(|p| p.kind() == "assignment_expression") {
                 write_at = Some(crate::cst::assignment_write_point(assign));
                 if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
                     source_span = node_to_span(assign);
@@ -1200,8 +1199,9 @@ impl<'a> Builder<'a> {
                     let elem_nodes = self.list_element_nodes(src);
                     let at = write_at.unwrap_or_else(|| lhs_node.start_position());
                     let reassigns = lhs_node.kind() != "variable_declaration";
-                    let plain = src
-                        .parent()
+                    let plain = self
+                        .syntax
+                        .parent(src)
                         .filter(|p| p.kind() == "assignment_expression")
                         .map_or(true, |a| crate::cst::assign_op(a) == Some(crate::cst::AssignOp::Plain));
                     for slot in slots {
