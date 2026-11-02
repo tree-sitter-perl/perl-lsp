@@ -547,12 +547,14 @@ impl<'a> Builder<'a> {
             // A rebind is a RESET at its site: the flow lane's reassign edge
             // is the marker on the write's own scope, and every belief before
             // it dies there (`FrameworkAwareTypeFold`'s cutoff), whatever the
-            // RHS turns out to be. A write inside a nested block is invisible
-            // to reads after the block, which never walk the block's scope,
-            // so the variable's BINDING scope gets a marker too, standing in
-            // for the join (`old ⊔ new`, which no reducer can compute from
-            // one attachment; `JoinFold`, `docs/epics/16-cfg-tier.md` Phase
-            // C, answers natively and this marker goes with it).
+            // RHS turns out to be. A write inside a nested block holds only
+            // until the block ends; where each block between the write and
+            // the binding rejoins its parent (the end of the statement that
+            // holds it), a marker stands in for the join (`old ⊔ new`, which
+            // no reducer can compute from one attachment; `JoinFold`,
+            // `docs/epics/16-cfg-tier.md` Phase C, answers natively and these
+            // markers go with it). One per level, so a sibling arm never
+            // sees it and a read later in the outer arm still does.
             if is_rebind {
                 let binding_scope = var_ref_at
                     .get(&left.start_position())
@@ -560,7 +562,24 @@ impl<'a> Builder<'a> {
                     .map(|sym| self.symbols[sym.0 as usize].scope)
                     .filter(|b| *b != sid);
                 if let Some(bsid) = binding_scope {
-                    markers.push((var.clone(), bsid, at));
+                    let mut level = sid;
+                    while let Some(parent) = self.scopes[level.0 as usize].parent {
+                        let span = self.scopes[level.0 as usize].span;
+                        let join = self
+                            .syntax
+                            .ancestors(node)
+                            .find(|a| {
+                                a.kind().ends_with("_statement")
+                                    && a.start_position() <= span.start
+                                    && a.end_position() >= span.end
+                            })
+                            .map_or(span.end, |a| a.end_position());
+                        markers.push((var.clone(), parent, join));
+                        if parent == bsid {
+                            break;
+                        }
+                        level = parent;
+                    }
                 }
             }
 
@@ -1022,7 +1041,7 @@ impl<'a> Builder<'a> {
             });
         }
         for w in edges {
-            self.bag.push(w);
+            self.push_witness(w);
         }
     }
 
@@ -1387,7 +1406,7 @@ impl<'a> Builder<'a> {
             );
         }
         for w in to_push {
-            self.bag.push(w);
+            self.push_witness(w);
         }
     }
 
@@ -1727,7 +1746,7 @@ impl<'a> Builder<'a> {
             }
         }
         for w in writeback_witnesses {
-            self.bag.push(w);
+            self.push_witness(w);
         }
     }
 
@@ -1774,13 +1793,11 @@ impl<'a> Builder<'a> {
                 .cloned()
                 .or_else(|| crate::model::builtins::builtin_return_type(&binding.func_name));
             if let Some(rt) = rt {
-                let att = WitnessAttachment::Variable {
-                    name: binding.variable.clone(),
-                    scope: binding.scope,
-                };
-                to_remove.push((att.clone(), binding.span.start));
-                to_push.push(Witness {
-                    attachment: att,
+                let w = self.bound_witness(Witness {
+                    attachment: WitnessAttachment::Variable {
+                        name: binding.variable.clone(),
+                        scope: binding.scope,
+                    },
                     source: WitnessSource::Builder("call_binding".into()),
                     payload: WitnessPayload::InferredType(rt),
                     span: Span {
@@ -1788,6 +1805,8 @@ impl<'a> Builder<'a> {
                         end: binding.span.start,
                     },
                 });
+                to_remove.push((w.attachment.clone(), binding.span.start));
+                to_push.push(w);
             }
         }
         self.bag.remove_attachment_sources_at(&to_remove, "call_binding");
@@ -1973,7 +1992,7 @@ impl<'a> Builder<'a> {
                 plugin::OverrideReturn::Expr(e) => WitnessPayload::ReturnExpr(e.clone()),
             };
             if let plugin::OverrideTarget::Method { class, name } = &ov.target {
-                self.bag.push(Witness {
+                self.push_witness(Witness {
                     attachment: WitnessAttachment::PackageSymbol {
                         package: class.clone(),
                         name: name.clone(),
@@ -2006,7 +2025,7 @@ impl<'a> Builder<'a> {
                 // Zero-extent span — core-synthesized witness, no
                 // user-visible "because: …" anchor needed beyond the
                 // provenance entry below.
-                self.bag.push(Witness {
+                self.push_witness(Witness {
                     attachment: WitnessAttachment::Symbol(sym_id),
                     source: WitnessSource::Plugin(plugin_id.clone()),
                     payload: payload.clone(),

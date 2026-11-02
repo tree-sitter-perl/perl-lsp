@@ -753,12 +753,15 @@ impl FileAnalysis {
     pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
-        self.witnesses.push(Witness {
+        let binding = self.variable_binding_scope(&variable, span.start, scope);
+        let mut w = Witness {
             attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder("type_constraint".into()),
             payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
-        });
+        };
+        bind_variable_witness(&mut w, binding, &self.scopes);
+        self.witnesses.push(w);
     }
 
     /// Resolve one gated dispatch candidate against its receiver, AT QUERY

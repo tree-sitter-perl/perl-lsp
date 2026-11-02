@@ -174,8 +174,7 @@ the region decides where a fact holds. A member access carries its
 receiver's place on its invocant (`Invocant::Place`), and a deref with no
 ref of its own carries it on its `ArrowDerefSite`, so the receiver query
 and the deref diagnostics read it without re-reading the spelling. Plain
-variables stay on `Variable { name, scope }` until the variable lane moves
-onto bindings.
+variables are `Variable { name, scope }` keyed to their binding (below).
 
 A pack builds the same places from its captures at skeleton assembly
 (`query_extract/places.rs`): a member read whose receivers lead down to a
@@ -202,11 +201,42 @@ method call on the slot's value leaves the slot narrowed. A read that
 steps further in is not an access. Two steps overlap when they can reach
 one slot: distinct constants never do, a key variable may hold anything.
 Rebinding a key variable moves the place, so its narrowing ends there
-(`RebindIndex`, by name, until variables move onto bindings).
+(`RebindIndex`, by name).
 
 Accessor places (`$self->name`) are out: an accessor isn't a stable slot
 (it can return a different object per call, with side effects), so
 soundness needs a stricter no-call-between-guard-and-use model.
+
+## Variables are bindings
+
+Every fact about a variable is keyed, when it is pushed, to the scope that
+binds the name where the fact is made: the scope declaring the lexical it
+reaches, else the outermost scope, where every package variable and every
+undeclared pack name lives. The builder keys at push (`Builder::push_witness`);
+a pack keys the assembled analysis once, before the seal
+(`FileAnalysis::bind_variable_witnesses`); enrichment keys its own pushes. One
+rule serves all three (`bind_variable_witness`), and the two binders answer
+the binding by the same `variable_use`.
+
+A read is then name resolution, never a merge: the binding is the innermost
+scope on the lookup chain holding a fact about the name made at or before
+the read (`variable_binding_scope`, through the bag's per-name scope index),
+and the read queries that one attachment. A shadowing declaration is its own
+binding, so an inner `my $x` never sees the outer one's facts.
+
+**A fact made in a nested block is a region.** It holds from where it is made
+to the end of the block it was made in, so the else arm never sees the then
+arm's write, and past the `if` the write is gone. What the variable holds
+after the `if` is the join of "the write ran" and "it did not": a write in a
+nested block also mints a reset marker on each enclosing level, at the end
+of the statement holding that level, up to the binding. With no join of
+values, that marker reads `Unknown` after a write that may have run, the
+same answer the flat walk gave. A join that keeps the value both arms agree
+on is `JoinFold`'s job (`docs/prompt-cfg-tier.md`).
+
+A key write (`$h->{k} = …`) in a nested block extends the shape on the
+binding with no end: it opens the shape instead (`mutation_extension`), which
+already says the write may not have run.
 
 ## Polarity and the negative lattice
 

@@ -839,19 +839,43 @@ impl<'a> Builder<'a> {
     /// it. Idempotent per site, so the worklist fold can mint it each round.
     pub(crate) fn push_reset_marker(&mut self, variable: String, scope: ScopeId, at: Point) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let attachment = WitnessAttachment::Variable { name: variable, scope };
-        let already = self.bag.for_attachment(&attachment).iter().any(|w| {
-            w.span.start == at && w.span.end == at && matches!(w.payload, WitnessPayload::Reset)
-        });
-        if already {
-            return;
-        }
-        self.bag.push(Witness {
-            attachment,
+        let w = self.bound_witness(Witness {
+            attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
             payload: WitnessPayload::Reset,
             span: Span { start: at, end: at },
         });
+        let already = self.bag.iter_attachment(&w.attachment).any(|have| {
+            have.span == w.span && matches!(have.payload, WitnessPayload::Reset)
+        });
+        if !already {
+            self.bag.push(w);
+        }
+    }
+
+    /// Push a witness, a variable's keyed to its binding (`bound_witness`).
+    pub(crate) fn push_witness(&mut self, w: crate::model::witnesses::Witness) -> usize {
+        let w = self.bound_witness(w);
+        self.bag.push(w)
+    }
+
+    /// A variable's facts live on its binding: the scope that declares the
+    /// name a write in `scope` reaches, or the outermost scope for a
+    /// package variable (`bind_variable_witness`).
+    pub(crate) fn bound_witness(&self, mut w: crate::model::witnesses::Witness) -> crate::model::witnesses::Witness {
+        if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
+            let binding = self.binding_scope_of(name, w.span.start, *scope);
+            crate::model::file_analysis::bind_variable_witness(&mut w, binding, &self.scopes);
+        }
+        w
+    }
+
+    /// The scope `name`, written at `at` in `scope`, is bound in.
+    pub(crate) fn binding_scope_of(&self, name: &str, at: Point, scope: ScopeId) -> ScopeId {
+        match self.binding_key_in(name, at, scope) {
+            crate::model::file_analysis::Binding::Lexical(sym) => self.symbols[sym.0 as usize].scope,
+            _ => crate::model::file_analysis::outermost_scope(&self.scopes, scope),
+        }
     }
 
     pub(super) fn push_type_constraint_from(
@@ -861,7 +885,7 @@ impl<'a> Builder<'a> {
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Variable { name: variable, scope },
             source,
             payload: WitnessPayload::InferredType(ty),

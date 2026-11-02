@@ -241,6 +241,32 @@ pub(crate) fn for_each_entity_bridged_to<'a>(
 /// the walk beyond contributing its bridge.
 pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 
+/// The scope every other scope of the file nests in.
+pub fn outermost_scope(scopes: &[Scope], from: ScopeId) -> ScopeId {
+    let mut cur = from;
+    while let Some(p) = scopes[cur.0 as usize].parent {
+        cur = p;
+    }
+    cur
+}
+
+/// Key a variable fact made in `scope` to `binding`, the scope that binds
+/// the name there. A fact made in a block nested inside the binding holds
+/// only until that block ends, so its span becomes the region from the
+/// fact to the block's end (`docs/adr/flow-narrowing.md` §Variables are
+/// bindings).
+pub fn bind_variable_witness(w: &mut crate::model::witnesses::Witness, binding: ScopeId, scopes: &[Scope]) {
+    let crate::model::witnesses::WitnessAttachment::Variable { scope, .. } = &mut w.attachment else { return };
+    if *scope == binding {
+        return;
+    }
+    let end = scopes[scope.0 as usize].span.end;
+    if w.span.start == w.span.end || w.span.end > end {
+        w.span.end = end;
+    }
+    *scope = binding;
+}
+
 /// The containment chain `[start, parent, …, file]` over a bare
 /// `&[Scope]` slice: what a scope is INSIDE (its class, its callable, its
 /// package), never what it can see. It is plain ids and lists no names;

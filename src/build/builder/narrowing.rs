@@ -768,7 +768,7 @@ impl<'a> Builder<'a> {
             }
         }
         for (attachment, inner, region) in emits {
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment,
                 source: WitnessSource::Builder("defined_narrowing".into()),
                 payload: WitnessPayload::InferredType(inner),
@@ -807,7 +807,7 @@ impl<'a> Builder<'a> {
             }
         }
         for (name, scope, ty, region) in emits {
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Variable { name, scope },
                 source: WitnessSource::Builder("tag_narrowing".into()),
                 payload: WitnessPayload::InferredType(ty),
@@ -852,6 +852,7 @@ impl<'a> Builder<'a> {
             Some(idx)
         };
         let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
+        let mut facts = Vec::new();
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
@@ -879,7 +880,7 @@ impl<'a> Builder<'a> {
             let subject = pn.subject.subject();
             match pn.fact {
                 RegionFact::Guard(NarrowOp::To(ty)) => {
-                    self.bag.push(Witness {
+                    facts.push(Witness {
                         attachment: subject_attachment(subject, pn.scope),
                         source: WitnessSource::Builder("narrowing".into()),
                         payload: WitnessPayload::InferredType(ty),
@@ -896,7 +897,7 @@ impl<'a> Builder<'a> {
                 }
                 RegionFact::Guard(NarrowOp::TagEq(_)) => {}
                 RegionFact::Observe(obs) => {
-                    self.bag.push(Witness {
+                    facts.push(Witness {
                         attachment: subject_attachment(subject, pn.scope),
                         source: WitnessSource::Builder("usage_observation".into()),
                         payload: WitnessPayload::Observation(obs),
@@ -904,6 +905,10 @@ impl<'a> Builder<'a> {
                     });
                 }
             }
+        }
+        drop(rebinds);
+        for w in facts {
+            self.push_witness(w);
         }
     }
 
@@ -1221,7 +1226,7 @@ impl<'a> Builder<'a> {
             }) {
                 return;
             }
-            self.bag.push(w);
+            self.push_witness(w);
         }
         self.flow_edges.push(fe);
     }

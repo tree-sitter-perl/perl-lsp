@@ -1983,7 +1983,12 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> Vec<Witness> {
-        let raw = bag.for_attachment(q.attachment);
+        let mut raw = bag.for_attachment(q.attachment);
+        // A variable's fact made in a nested block is a region that ends
+        // with the block: past it, the fact is not there at all.
+        if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
+            raw.retain(|w| w.span.start == w.span.end || (w.span.start <= p && p <= w.span.end));
+        }
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -2013,10 +2018,9 @@ impl ReducerRegistry {
                                 WitnessAttachment::Expr(span) => span.start,
                                 _ => scope_point(ctx.scopes, *scope),
                             };
-                            // Opaque: the scope walk defers a rep-only answer
-                            // and lets an outer class identity beat it, so the
-                            // value is chosen ACROSS scopes rather than taken
-                            // from the first that answers.
+                            // Opaque: the read's point picks the binding and the
+                            // regions that hold there, so the answer is not the
+                            // edge target's alone.
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
@@ -2097,9 +2101,9 @@ impl ReducerRegistry {
                     // the value-side mirror of the build-time
                     // `invocant_type_at_node` drill, run where the index is
                     // in hand so imported structural types project too.
-                    // A Variable base scope-walks like the Edge arm above
-                    // (`$h{k}` projects off `%h`, whose witnesses live on
-                    // the decl scope, not the access scope).
+                    // A Variable base resolves its binding like the Edge arm
+                    // above (`$h{k}` projects off `%h`, whose witnesses live
+                    // on the decl scope, not the access scope).
                     // Opaque throughout: this frame returns a value drilled OUT
                     // of the sub-chase's answer, never the answer itself, so no
                     // exit key beneath it names what this frame produces.
@@ -2734,98 +2738,53 @@ impl ReducerRegistry {
             .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
             .and_then(|pkg| ctx.package_framework.framework_of(pkg))
             .unwrap_or(FrameworkFact::Plain);
-        // A scope that only OBSERVES rep use of the variable (`$self->{k}`
-        // inside a nested block → HashRefAccess) yields a bare `HashRef`,
-        // but the variable's identity — an invocant's ClassName seeded on
-        // the sub scope — lives further out the chain. Class identity
-        // anywhere dominates such a rep-only projection: the same
-        // identity-over-rep rule `FrameworkAwareTypeFold` applies within a
-        // scope, lifted across the scope walk. A scope that actually BINDS
-        // the variable (explicit type / edge / class-or-bless observation)
-        // is authoritative and returned immediately, so genuine shadowing
-        // (`my $x = {}`) still wins. Defer the weak answer until the chain
-        // is exhausted.
-        let mut weak: Option<InferredType> = None;
-        for sid in chain.scopes() {
-            let att = WitnessAttachment::Variable {
-                name: var.to_string(),
-                scope: sid,
-            };
-            let q = ReducerQuery {
-                attachment: &att,
-                point: Some(point),
-                framework,
-                arity_hint: None,
-                // Threaded from the chasing query so a deferred
-                // `ReturnExpr::ReceiverOr` on the variable (a statement-
-                // position `bless $obj, $class`) substitutes the CALL
-                // SITE's class — the hop that makes an inherited
-                // `$class->new; ...; return $object` ctor type to the
-                // subclass it was called on.
-                receiver: receiver.cloned(),
-                args: Vec::new(),
-                context: Some(ctx),
-            };
-            match &*self.query_rec(bag, &q, state) {
-                ReducedValue::Type(t) => {
-                    let t = t.clone();
-                    if t.class_name().is_some() || scope_binds_variable(bag, var, sid, point) {
-                        return Some(t);
-                    }
-                    if weak.is_none() {
-                        weak = Some(t);
-                    }
-                }
-                ReducedValue::FactMap(_) | ReducedValue::None => {}
-            }
+        let Some(binding) = variable_binding_scope(bag, ctx.scopes, var, scope, point) else {
+            return None;
+        };
+        let att = WitnessAttachment::Variable { name: var.to_string(), scope: binding };
+        let q = ReducerQuery {
+            attachment: &att,
+            point: Some(point),
+            framework,
+            arity_hint: None,
+            // Threaded from the chasing query so a deferred
+            // `ReturnExpr::ReceiverOr` on the variable (a statement-
+            // position `bless $obj, $class`) substitutes the CALL
+            // SITE's class — the hop that makes an inherited
+            // `$class->new; ...; return $object` ctor type to the
+            // subclass it was called on.
+            receiver: receiver.cloned(),
+            args: Vec::new(),
+            context: Some(ctx),
+        };
+        match &*self.query_rec(bag, &q, state) {
+            ReducedValue::Type(t) => Some(t.clone()),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
-        weak
     }
 }
 
-/// Does this scope *bind* the variable — establish its value/identity via
-/// an explicit type, an assignment edge, or a class/bless observation — as
-/// opposed to merely OBSERVING rep use (`$v->{k}` → `HashRefAccess`)? A
-/// binding scope's reduced type is authoritative; a rep-only scope's is a
-/// weak projection an outer class identity dominates (see the caller). A
-/// binding after the query point doesn't count. New value-carrying payload
-/// variants count as bindings by default — only the bare rep/scalar
-/// observations are the weak case.
-fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
-    binds_variable_where(bag, var, scope, |w| w.span.start <= point)
-}
-
-/// The scope a read of `var` from `scope` at `point` takes its value from:
-/// the first scope out the chain that binds it, with its index on the
-/// chain (0 = `scope` itself). A write through the variable lands its
-/// shape there, so every read that binds the same value sees it.
+/// The binding a read of `var` from `scope` at `point` takes its value
+/// from: the innermost scope on the lookup chain that holds a fact about
+/// the name made at or before the point. Every fact about a variable is
+/// keyed to its binding when it is pushed, so this is name resolution
+/// over the scopes the name has facts in, never a merge of their facts.
 pub(crate) fn variable_binding_scope(
     bag: &WitnessBag,
     scopes: &[Scope],
     var: &str,
     scope: ScopeId,
     point: Point,
-) -> Option<(usize, ScopeId)> {
-    crate::model::file_analysis::lookup_chain(scopes, scope)
-        .scopes()
-        .enumerate()
-        .find(|&(_, sid)| scope_binds_variable(bag, var, sid, point))
-}
-
-fn binds_variable_where(
-    bag: &WitnessBag,
-    var: &str,
-    scope: ScopeId,
-    at: impl Fn(&Witness) -> bool,
-) -> bool {
-    let att = WitnessAttachment::Variable {
-        name: var.to_string(),
-        scope,
-    };
-    bag.for_attachment(&att).iter().any(|w| {
-        at(w)
-            && (w.payload.binds_value()
-                || !matches!(&w.payload, WitnessPayload::Observation(_) | WitnessPayload::Reset))
+) -> Option<ScopeId> {
+    let held = bag.variable_scopes(var);
+    if held.is_empty() {
+        return None;
+    }
+    crate::model::file_analysis::lookup_chain(scopes, scope).scopes().find(|&sid| {
+        held.contains(&sid)
+            && bag
+                .iter_attachment(&WitnessAttachment::Variable { name: var.to_string(), scope: sid })
+                .any(|w| w.span.start <= point)
     })
 }
 

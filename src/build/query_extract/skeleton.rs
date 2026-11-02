@@ -1623,6 +1623,9 @@ impl SkeletonAnalysis {
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
+        // The extractor keys a variable's facts to the scope they were made
+        // in; the assembled analysis knows each name's binding.
+        fa.bind_variable_witnesses();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.

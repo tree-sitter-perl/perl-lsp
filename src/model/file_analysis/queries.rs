@@ -854,22 +854,7 @@ impl FileAnalysis {
     /// with the binding on every ref of that spelling there.
     pub fn variable_binding(&self, name: &str, at: Point) -> Option<SymbolId> {
         let scope = self.scope_at(at)?;
-        let outcome = variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
-            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(|s| {
-                // An implicit global is minted from uses, not declared: the
-                // `Global` arm reaches it by its package.
-                let declared = match &s.detail {
-                    SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => false,
-                    _ => matches!(s.kind, SymKind::Variable | SymKind::Field),
-                };
-                let gate = match &s.detail {
-                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
-                    _ => None,
-                };
-                (declared && s.name == name).then_some((s.id, s.span.start, gate))
-            })
-        });
-        match outcome {
+        match self.variable_use_in(name, at, scope) {
             VariableUse::Declared(id) => Some(id),
             VariableUse::GatedOur => None,
             VariableUse::Global { package, name } => {
@@ -889,6 +874,57 @@ impl FileAnalysis {
                 global(false).or_else(|| global(true)).map(|s| s.id)
             }
         }
+    }
+
+    /// The scope a fact about `name`, made at `at` in `scope`, is keyed
+    /// to: the scope declaring the lexical it reaches, else the outermost
+    /// scope, where every package variable's facts live. The builder's
+    /// `binding_scope_of` by the same rule.
+    pub(crate) fn variable_binding_scope(&self, name: &str, at: Point, scope: ScopeId) -> ScopeId {
+        match self.variable_use_in(name, at, scope) {
+            VariableUse::Declared(id) => {
+                let sym = &self.symbols[id.0 as usize];
+                match &sym.detail {
+                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => {
+                        outermost_scope(&self.scopes, scope)
+                    }
+                    _ => sym.scope,
+                }
+            }
+            VariableUse::GatedOur | VariableUse::Global { .. } => outermost_scope(&self.scopes, scope),
+        }
+    }
+
+    /// Key every variable fact in the bag to its binding
+    /// (`bind_variable_witness`), for an analysis whose facts were minted
+    /// against the scope they were made in.
+    pub(crate) fn bind_variable_witnesses(&mut self) {
+        let mut bag = std::mem::take(&mut self.witnesses);
+        bag.rewrite(|w| {
+            if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
+                let binding = self.variable_binding_scope(name, w.span.start, *scope);
+                bind_variable_witness(w, binding, &self.scopes);
+            }
+        });
+        self.witnesses = bag;
+    }
+
+    fn variable_use_in(&self, name: &str, at: Point, scope: ScopeId) -> VariableUse {
+        variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
+            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(|s| {
+                // An implicit global is minted from uses, not declared: the
+                // `Global` arm reaches it by its package.
+                let declared = match &s.detail {
+                    SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => false,
+                    _ => matches!(s.kind, SymKind::Variable | SymKind::Field),
+                };
+                let gate = match &s.detail {
+                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
+                    _ => None,
+                };
+                (declared && s.name == name).then_some((s.id, s.span.start, gate))
+            })
+        })
     }
 
     /// Closed-shape hash-key typo sites: a READ of `$config->{typo}` where

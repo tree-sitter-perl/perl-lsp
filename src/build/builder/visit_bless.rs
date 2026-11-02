@@ -93,7 +93,7 @@ impl<'a> Builder<'a> {
             }
             None => crate::model::witnesses::ReturnExpr::Receiver,
         };
-        self.bag.push(crate::model::witnesses::Witness {
+        self.push_witness(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable {
                 name: var_name.to_string(),
                 scope: self.current_scope(),

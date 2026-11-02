@@ -15,8 +15,7 @@ use super::*;
 ///   scope (nested block / closure — execution unknowable) → push the
 ///   same keys with `open: true`.
 ///
-/// Witnesses attach to the scope the variable's existing witnesses
-/// live on (so the read-side scope walk finds them) with a zero-width
+/// Witnesses attach to the variable's binding with a zero-width
 /// span at the write position — the same temporal contract as TC
 /// mirrors: invisible to reads before the write, latest-wins after
 /// (`HashWithKeys` subsumption is equality-only, so a different shape
@@ -45,12 +44,10 @@ pub(crate) fn emit_mutation_extension_witnesses(
         // block's own `$v->{k}` access would hide the shape from every read
         // after the block). Climbing past the write's own scope means the
         // write may not have run by read time.
-        let Some((depth, attach_sid)) =
-            variable_binding_scope(bag, ctx.scopes, &w.var_text, w.scope, w.span.start)
-        else {
+        let Some(attach_sid) = variable_binding_scope(bag, ctx.scopes, &w.var_text, w.scope, w.span.start) else {
             continue;
         };
-        let scope_crossed = depth > 0;
+        let scope_crossed = attach_sid != w.scope;
         let Some(base) = query_variable_type(bag, ctx, &w.var_text, w.scope, w.span.start)
         else {
             continue;

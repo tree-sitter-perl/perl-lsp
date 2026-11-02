@@ -1271,7 +1271,7 @@ impl<'a> Builder<'a> {
             // query point outside the span.
             let last = *spans.last().expect("non-empty by construction");
             let zero = Span { start: last.end, end: last.end };
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Variable { name, scope },
                 source: WitnessSource::Builder("array_push".into()),
                 payload: WitnessPayload::InferredType(InferredType::Sequence(resolved)),
