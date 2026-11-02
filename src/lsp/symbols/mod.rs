@@ -8,7 +8,7 @@ use tree_sitter::{Point, Tree};
 use crate::lsp::cursor_context;
 use crate::lsp::cursor_slot::Slot;
 use crate::model::file_analysis::{
-    format_inferred_type, CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
+    CompletionCandidate, CrossFileLookup, FileAnalysis, FoldKind,
     GuardVerdict, HandlerOwner, InferredType, OutlineSymbol, ParamInfo, ReceiverPolicy, RefKind, Span,
     SymKind as FaSymKind, SymbolDetail,
 };
