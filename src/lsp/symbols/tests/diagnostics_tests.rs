@@ -29,7 +29,7 @@ pub(super) fn fake_cached(
     }
     source.push_str("1;\n");
     std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-        std::path::PathBuf::from(path),
+        crate::util::canonical_path::CanonicalPath::resolve(std::path::PathBuf::from(path)),
         std::sync::Arc::new(parse_analysis(&source)),
     ))
 }
@@ -291,7 +291,8 @@ sub f {
 }
 
 #[test]
-fn d1_undef_deref_hash_form() {
+fn d1_element_deref_on_undef_autovivifies() {
+    // `$x->{host}` on an undef `$x` makes `$x` a hash ref; nothing dies.
     let src = r#"
 package P;
 sub f {
@@ -301,9 +302,57 @@ sub f {
 }
 1;
 "#;
-    let diags = undef_deref_diags(src);
-    assert_eq!(diags.len(), 1, "hash deref on undef fires");
-    assert!(diags[0].message.contains("hash deref"), "{}", diags[0].message);
+    assert!(undef_deref_diags(src).is_empty(), "an element deref autovivifies");
+}
+
+/// `sub f { my ($self, $x) = @_; return if defined $x; BODY }` under the
+/// `autovivification` pragma line `PRAGMA`: the undef-deref count.
+fn vivify_undef_derefs(pragma: &str, body: &str) -> usize {
+    let src = format!(
+        "package P;\n{pragma}\nsub g {{ 1 }}\nsub f {{\n    my ($self, $x, $k) = @_;\n    return if defined $x;\n    {body}\n}}\n1;\n"
+    );
+    undef_deref_diags(&src).len()
+}
+
+#[test]
+fn d1_element_deref_dies_under_strict_no_autovivification() {
+    // Each answer was checked against perl with autovivification 0.18.
+    let strict_fetch = "no autovivification qw(strict fetch);";
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->{host};"), 1);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->[0];"), 1);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->{$k};"), 1, "a dynamic key dies too");
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return $x->{a}{b};"), 1, "the inner access dies first");
+    // Not a fetch: a store vivifies, `exists` is its own category.
+    assert_eq!(vivify_undef_derefs(strict_fetch, "$x->{host} = 1;"), 0);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return exists $x->{host};"), 0);
+    // A sub's arguments are lvalues: fetch or store, so both must die.
+    assert_eq!(vivify_undef_derefs(strict_fetch, "return g($x->{host});"), 0);
+    assert_eq!(vivify_undef_derefs("no autovivification qw(strict fetch store);", "return g($x->{host});"), 1);
+    // A store dies once its vivification is off, strict or not.
+    assert_eq!(vivify_undef_derefs("no autovivification 'store';", "$x->{host} = 1;"), 1);
+    assert_eq!(vivify_undef_derefs("no autovivification qw(strict exists);", "return exists $x->{host};"), 1);
+}
+
+#[test]
+fn d1_element_deref_vivifies_without_strict_categories() {
+    // Bare `no autovivification` yields undef instead of dying, and
+    // `'strict'` alone names no category.
+    assert_eq!(vivify_undef_derefs("no autovivification;", "return $x->{host};"), 0);
+    assert_eq!(vivify_undef_derefs("no autovivification 'strict';", "return $x->{host};"), 0);
+    // `no autovivification; no autovivification 'strict';` adds up.
+    assert_eq!(vivify_undef_derefs("no autovivification; no autovivification 'strict';", "return $x->{host};"), 1);
+}
+
+#[test]
+fn d1_autovivification_hints_are_lexical() {
+    let strict_fetch = "no autovivification qw(strict fetch);";
+    // A block's pragma ends with the block.
+    assert_eq!(vivify_undef_derefs(&format!("{{ {strict_fetch} }}"), "return $x->{host};"), 0);
+    // `use autovivification` turns the named bits back off, every bit
+    // when it names none.
+    assert_eq!(vivify_undef_derefs(strict_fetch, "use autovivification; return $x->{host};"), 0);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "use autovivification 'strict'; return $x->{host};"), 0);
+    assert_eq!(vivify_undef_derefs(strict_fetch, "use autovivification 'store'; return $x->{host};"), 1);
 }
 
 #[test]
@@ -344,14 +393,22 @@ sub f {
 // D8 — extend `unresolved-method` to cross-file-resolvable classes. A
 // cached module whose internal package name IS the class queried (so
 // resolution keys line up), unlike `fake_cached`'s always-`Fake` package.
-fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::module_index::CachedModule> {
+/// An index where Moo is installed: a Moo class's chain ends at a
+/// resolvable `Moo::Object` instead of an unresolved ancestor.
+pub(super) fn moo_installed_index() -> crate::index::module_index::ModuleIndex {
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_cache("Moo::Object", Some(cached_class("Moo::Object", &["new", "BUILDARGS", "does"])));
+    idx
+}
+
+pub(super) fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::module_index::CachedModule> {
     let mut src = format!("package {};\n", module);
     for m in methods {
         src.push_str(&format!("sub {} {{}}\n", m));
     }
     src.push_str("1;\n");
     std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-        std::path::PathBuf::from(format!("/fake/{}.pm", module.replace("::", "/"))),
+        crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{}.pm", module.replace("::", "/")))),
         std::sync::Arc::new(parse_analysis(&src)),
     ))
 }
@@ -823,12 +880,35 @@ sub f {
 1;
 "#;
     let diags = undef_deref_diags(src);
-    assert_eq!(diags.len(), 2, "array + code deref on undef both fire: {:?}",
+    assert_eq!(diags.len(), 1, "the code deref fires; the array deref autovivifies: {:?}",
         diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+    assert!(diags[0].message.contains("call"), "{}", diags[0].message);
 }
 
 #[test]
-fn d2_optional_array_deref() {
+fn d1_undef_deref_through_a_place() {
+    // The receiver is a part of a variable: the narrowing on that place
+    // reaches its derefs, and only the call dies (the element derefs
+    // autovivify).
+    let src = r#"
+package P;
+sub f {
+    my ($self) = @_;
+    return if defined $self->{cb};
+    $self->{cb}->();
+    $self->{cb}->[0];
+    $self->{cb}{k};
+    $self->{other}{k};
+}
+1;
+"#;
+    let diags = undef_deref_diags(src);
+    let messages: Vec<_> = diags.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(messages, ["'$self->{cb}' is undef here; a `->(...)` call on it dies at runtime"]);
+}
+
+#[test]
+fn d2_optional_array_deref_autovivifies() {
     let src = r#"
 package Foo;
 sub new { bless [], shift }
@@ -852,7 +932,7 @@ sub use_it {
         .into_iter()
         .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "optional-deref"))
         .count();
-    assert_eq!(n, 1, "unguarded Optional array deref fires");
+    assert_eq!(n, 0, "an array deref of a maybe-undef variable autovivifies; nothing dies");
 }
 
 #[test]
@@ -1013,7 +1093,7 @@ fn pragma_index() -> crate::index::module_index::ModuleIndex {
         module_index.insert_cache(
             name,
             Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
                 std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
             ))),
         );
@@ -1086,7 +1166,7 @@ fn missing_declaration_respects_declarations_and_imports() {
         module_index.insert_cache(
             name,
             Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
                 std::sync::Arc::new(parse_analysis(src)),
             ))),
         );
@@ -1126,7 +1206,7 @@ fn missing_declaration_knows_use_english() {
     module_index.insert_cache(
         "English",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from("/fake/English.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/English.pm")),
             std::sync::Arc::new(parse_analysis("package English;\nsub import {}\n1;\n")),
         ))),
     );
@@ -1149,7 +1229,7 @@ fn missing_declaration_knows_use_env() {
     module_index.insert_cache(
         "Env",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from("/fake/Env.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/Env.pm")),
             std::sync::Arc::new(parse_analysis("package Env;\nsub import {}\n1;\n")),
         ))),
     );
@@ -1174,7 +1254,7 @@ fn log4perl_tags_declare_their_exports() {
         module_index.insert_cache(
             name,
             Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
                 std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
             ))),
         );

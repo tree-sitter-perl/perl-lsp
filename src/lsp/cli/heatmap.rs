@@ -2,6 +2,7 @@
 //! `--refs-parity` A/B net over the same eligible-symbol walk.
 
 use super::*;
+use crate::util::canonical_path::CanonicalPath;
 
 /// Which symbols a usage heatmap lists: nameable callables and packages.
 /// A listing policy, not an identity decision — identity is minted by the
@@ -45,7 +46,7 @@ fn heatmap_symbol_eligible(sym: &file_analysis::Symbol) -> bool {
 fn heatmap_symbol_row(
     ws: &open_docs::OpenDocs,
     routing_idx: &dyn file_analysis::CrossFileLookup,
-    path: &std::path::Path,
+    path: &CanonicalPath,
     analysis: &file_analysis::FileAnalysis,
     sym: &file_analysis::Symbol,
     visibility: resolve::RoleMask,
@@ -80,7 +81,7 @@ fn heatmap_symbol_row(
             let mut cs = crate::util::ghost_stats::timed("heatmap.mint", || resolve::resolve(
                 ws,
                 analysis,
-                open_docs::FileKey::Path(path.to_path_buf()),
+                open_docs::FileKey::Path(path.clone()),
                 sym.selection_span.start,
                 Some(routing_idx),
                 scope,
@@ -210,7 +211,8 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     let (ws, idx) = cli_full_startup(root);
     let scope = override_scope_from_env();
 
-    let entries = registered_whole(&idx);
+    let sweep = crate::index::sweep::CorpusSweep::open(&idx);
+    let entries = sweep.registered_whole();
 
 
     let normalize = |locs: &[resolve::RefLocation]| -> Vec<String> {
@@ -246,7 +248,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     let mut mismatched = 0usize;
     let mut check = |ws: &open_docs::OpenDocs,
                      routing: &dyn file_analysis::CrossFileLookup,
-                     path: &std::path::Path,
+                     path: &CanonicalPath,
                      analysis: &file_analysis::FileAnalysis,
                      visibility: resolve::RoleMask,
                      checked: &mut usize,
@@ -265,7 +267,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
             let mut cs = resolve::resolve(
                 ws,
                 analysis,
-                open_docs::FileKey::Path(path.to_path_buf()),
+                open_docs::FileKey::Path(path.clone()),
                 sym.selection_span.start,
                 Some(routing),
                 scope,
@@ -310,23 +312,6 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     }
 }
 
-/// Every registered project file, refs-present (index copies are
-/// refs-evicted; fan-out scans + set minting read refs), path-sorted for a
-/// deterministic report. Batch-CLI-sized cost, not a query path.
-fn registered_whole(
-    idx: &crate::index::module_index::ModuleIndex,
-) -> Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> {
-    let mut entries = Vec::new();
-    idx.for_each_registered_file(&mut |cached| {
-        entries.push((
-            cached.path.clone(),
-            file_analysis::CrossFileLookup::whole_present(idx, cached),
-        ));
-    });
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    entries
-}
-
 /// The relational pre-prune a tier hands its items: the DISTINCT ref-name
 /// key set (a name absent here has a provably-empty references projection)
 /// and the unused-export keys, `(path, name, row, col)`.
@@ -341,7 +326,7 @@ type PruneIndex = (
 /// here, never as a family flag in the row builder.
 struct HeatmapItem<'a> {
     routing: &'a (dyn file_analysis::CrossFileLookup + Sync),
-    path: &'a std::path::Path,
+    path: &'a CanonicalPath,
     analysis: &'a file_analysis::FileAnalysis,
     sym: &'a file_analysis::Symbol,
     prune: Option<&'a PruneIndex>,
@@ -435,8 +420,11 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
 
     let (ws, idx) = cli_full_startup(root);
 
-    // Stable file order so output is deterministic across runs.
-    let entries = registered_whole(&idx);
+    let sweep = crate::index::sweep::CorpusSweep::open(&idx);
+    if let Some(cap) = sweep.cache_cap() {
+        eprintln!("Rehydration cache: {} MiB for the sweep", cap / (1024 * 1024));
+    }
+    let entries = sweep.registered_whole();
 
     // Workspace-level soundness gate. Any dynamic method dispatch makes the
     // static call graph an under-approximation of method reachability, so a
@@ -509,19 +497,6 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     } else {
         None
     };
-
-    // One walk per declaration over a frozen index: memoize the relational
-    // retrieval for the sweep (same-named declarations share their
-    // candidate set; the shredded-path set is fetched once, not per walk),
-    // and size the rehydration LRU to the corpus — the sweep's working set
-    // by construction (`cache_policy::sweep_bag_cache_cap`).
-    let _retrieval = resolve::RetrievalMemoGuard::open();
-    // Every walk's ancestry prefilter re-asks the same row probes, each under
-    // SQLite's process-global mutexes — memoized for the sweep (#195).
-    let _probes = crate::index::module_index::SweepProbeGuard::open();
-    if let Some(cap) = idx.size_bag_cache_for_sweep() {
-        eprintln!("Rehydration cache: {} MiB for the sweep", cap / (1024 * 1024));
-    }
 
     // One work item per eligible declaration, through `heatmap_symbol_row`
     // — the one place fan-in/fan-out/dead are computed, so Perl and pack

@@ -150,6 +150,10 @@ async fn main() {
             cli_clear_cache(args.get(2).map(|s| s.as_str()));
             return;
         }
+        Some("--equiv-dump") if args.len() >= 4 => {
+            cli_equiv_dump(&args[2], &args[3..]);
+            return;
+        }
         Some("--parse") if args.len() == 3 => {
             cli_parse(&args[2]);
             return;
@@ -179,7 +183,7 @@ async fn main() {
                 args.join(" ")
             );
             eprintln!("(a valid flag with the wrong argument count lands here; run `perl-lsp` with no args for the LSP server)");
-            std::process::exit(2);
+            lsp::cli::exit_with(2, "exit");
         }
         _ => {}
     }
@@ -221,9 +225,5 @@ async fn main() {
     // work (workspace indexing does `rt.block_on(client.send_request(..))`,
     // which parks forever once the client is gone) can otherwise keep the
     // runtime — and the process — alive, orphaning a 40-thread server to init.
-    // An LSP server has nothing to flush after the connection closes —
-    // except the report-only ghost-stats trail, which is inert unless
-    // PERL_LSP_GHOST_STATS is set and must land before the hard exit.
-    util::ghost_stats::emit_all("eof");
-    std::process::exit(0);
+    util::ghost_stats::exit_flushed(0, "eof");
 }

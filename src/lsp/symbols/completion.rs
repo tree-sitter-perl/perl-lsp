@@ -329,7 +329,7 @@ pub fn completion_items_for_test(
     stable_packages: Option<&[(String, usize)]>,
 ) -> Vec<CompletionItem> {
     let files = crate::index::open_docs::OpenDocs::new();
-    let key = crate::index::open_docs::FileKey::Path(std::path::PathBuf::from("/test/origin.pl"));
+    let key = crate::index::open_docs::FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/test/origin.pl")));
     completion_items(&files, &key, analysis, tree, source, pos, module_index, stable_packages).0
 }
 

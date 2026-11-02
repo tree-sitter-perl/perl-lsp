@@ -795,6 +795,18 @@ impl DerefForm {
         }
     }
 
+    /// Whether the form dies on an undef receiver whatever the lexical
+    /// hints say. Every receiver here is a variable or a part of one, and
+    /// an element access through one autovivifies it (`my $x; $x->{a}`
+    /// leaves `$x = {}`) unless `no autovivification` says otherwise; a
+    /// call has nothing to call.
+    pub fn dies_on_undef(&self) -> bool {
+        match self {
+            DerefForm::HashKey | DerefForm::ArrayIndex => false,
+            DerefForm::Call | DerefForm::Method(_) => true,
+        }
+    }
+
     /// Human phrase for diagnostics ("a hash deref", …).
     pub fn access_phrase(&self) -> &'static str {
         match self {
@@ -848,19 +860,39 @@ pub struct DerefSite {
     pub span: Span,
     /// Receiver spelling (`$x`).
     pub receiver: String,
+    pub subject: Subject,
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
     pub form: DerefForm,
+    /// An undef receiver dies here (D1/D2 fire) rather than vivifying.
+    pub dies_on_undef: bool,
 }
 
-/// A builder-recorded arrow-deref receiver for the forms that carry no
-/// typed ref of their own (`$x->[i]`, `$x->()`) — the array/code analog of
+/// A builder-recorded deref receiver for the forms that carry no typed
+/// ref of their own (`$x->[i]`, `$x->()`, `$x->{a}{k}`) — the analog of
 /// the method-call and hash-deref refs `deref_receiver_sites` reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrowDerefSite {
+    /// The receiver as written: a variable's canonical name, or a part of
+    /// one's spelling for the rendered message.
     pub receiver: String,
+    /// The receiver's place, when it is a part of a variable.
+    pub place: Option<Box<Place>>,
     pub span: Span,
     pub form: DerefForm,
+    /// An undef receiver dies here rather than vivifying, decided where
+    /// the hints in force are known.
+    #[serde(default)]
+    pub dies_on_undef: bool,
+}
+
+impl ArrowDerefSite {
+    pub fn subject(&self) -> Subject {
+        match &self.place {
+            Some(place) => Subject::Place((**place).clone()),
+            None => Subject::Variable(self.receiver.clone()),
+        }
+    }
 }
 
 /// What a recorded guard tests about its subject — the build-time
@@ -881,8 +913,9 @@ pub enum GuardPredicate {
 /// (in the guard, before any narrowed region).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardSite {
-    /// Subject's source spelling (`$x`, or a place key).
-    pub subject: String,
+    pub subject: Subject,
+    /// The subject as written, for the rendered message.
+    pub spelling: String,
     pub scope: ScopeId,
     pub predicate: GuardPredicate,
     /// Whether the predicate holds where the guard EXPRESSION is true (`!`
