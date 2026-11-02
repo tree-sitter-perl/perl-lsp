@@ -75,6 +75,15 @@
   left: (_) @flow.place
   right: (_) @flow.source) @flow.assign
 
+; An augmented assignment and a `del` leave what they name without the
+; value a guard proved, whatever it is: a name rebinds (to the operator's
+; result, or to nothing), a member or element is written.
+(augmented_assignment
+  left: [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement
+  (expression_list [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place]))
+
 (parameters
   (identifier) @def.var.name @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
@@ -162,11 +171,15 @@
   left: (identifier) @flow.rebind)
 
 ; ---- calls: a call's value is an Invoke of its callee on its arguments. The
-; argument list rides the callee's match, and a starred argument spreads. A
+; argument list rides the callee's match, its arguments are the @arity.arg
+; tags in it, and a starred argument spreads. A
 ; generator argument (`f(x for x in xs)`) is one value, not a list. ----
 (call
   function: (identifier) @ref.call
-  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+  arguments: [(argument_list) @arity.args (generator_expression)]) @expr.call
+; every argument of every list, the list tagged too so a list nested in an
+; argument holds its own
+(argument_list (_) @arity.arg) @arity.args
 (argument_list [(list_splat) (dictionary_splat)] @arity.spread)
 (call
   function: (attribute attribute: (identifier) @ref.method))
@@ -192,12 +205,12 @@
   function: (attribute
     object: (identifier) @member.recv.name
     attribute: (identifier) @ref.member.call)
-  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+  arguments: [(argument_list) @arity.args (generator_expression)]) @expr.call
 ((call
   function: (attribute
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
-  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+  arguments: [(argument_list) @arity.args (generator_expression)]) @expr.call
  (#not-is-kind? @member.recv identifier))
 ; A bare name read. An attribute's name (`count` in `o.count`) is the member
 ; read above, never a bare name; its receiver is.
@@ -216,15 +229,16 @@
 ; expression yields when the test holds, the right of `and`. The pack's
 ; narrow_guard maps the guard + type token to the refinement; core attaches
 ; it in the guard's scope over the arm (an `if` body is no scope in Python).
+; A member subject (`self.x`) narrows the place it denotes.
 (if_statement
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (elif_clause
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (conditional_expression
   (_) @narrow.arm
@@ -233,11 +247,11 @@
   .
   (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type)))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type)))
 (boolean_operator
   left: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   operator: "and"
   right: (_) @narrow.arm)
 

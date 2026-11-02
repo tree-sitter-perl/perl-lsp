@@ -84,7 +84,7 @@ pub fn index_pack_language(
                 // keyed decode matches regardless of which form the caller holds.
                 // The discriminated helper survives the readonly-open
                 // CANTOPEN/WAL race and names every other miss cause.
-                let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
                 let mut spellings = vec![canon.to_string_lossy().into_owned()];
                 let raw = path.to_string_lossy().into_owned();
                 if raw != spellings[0] {
@@ -132,7 +132,7 @@ pub fn index_pack_language(
         // CURRENT walk no longer includes are dropped, not resurrected.
         let canon_members: std::collections::HashSet<PathBuf> = paths
             .iter()
-            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .map(|p| crate::util::canonical_path::CanonicalPath::resolve(p.as_path()).into_path_buf())
             .collect();
         let mut warmed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         if let Some(ref conn) = conn {
@@ -384,7 +384,7 @@ pub fn index_pack_language(
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                     cb(d, grand_total);
                 }
-                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
                 if warmed.contains(&canon) {
                     return; // valid cache hit
                 }

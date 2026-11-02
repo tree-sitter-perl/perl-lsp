@@ -171,6 +171,7 @@ impl<'a> Builder<'a> {
             crate::cst::canonical_var_name(n, self.source)
                 .or_else(|| n.text(self.source).map(|s| s.to_string()))
         });
+        let receiver_place = invocant_node.and_then(|n| self.place_subject(n));
         let invocant = invocant_text.as_ref().map(|s| {
             // Resolve __PACKAGE__ to enclosing package name. This is THE
             // canonical producer for ref invocants — varname spelling
@@ -179,6 +180,11 @@ impl<'a> Builder<'a> {
                 crate::model::conventions::Invocant::assume_canonical(
                     self.current_package.clone().unwrap_or_else(|| s.to_string()),
                 )
+            } else if let Some(place) = receiver_place.clone() {
+                crate::model::conventions::Invocant::Place {
+                    name: crate::model::conventions::InvocantName::assume_canonical(s),
+                    place: Box::new(place),
+                }
             } else {
                 crate::model::conventions::Invocant::assume_canonical(s)
             }
@@ -231,6 +237,7 @@ impl<'a> Builder<'a> {
                                 method_name_span,
                                 member_op: None,
                                 named_by_string: false,
+
                             },
                             node_to_span(node),
                             rname,
@@ -253,6 +260,7 @@ impl<'a> Builder<'a> {
                         method_name_span,
                         member_op: None,
                         named_by_string: false,
+
                     },
                     node_to_span(node),
                     name.clone(),
@@ -545,7 +553,7 @@ impl<'a> Builder<'a> {
         // canonical name so the key ref, the shape witness, and the
         // KeyWrite all key the same variable.
         let var_text = match node.child_by_field_name("hash") {
-            Some(c) => crate::cst::canonical_container_name(c, self.source)
+            Some(c) => crate::cst::canonical_container_name(self.syntax, c, self.source)
                 .or_else(|| self.get_hash_var_from_element(node)),
             None => self.get_hash_var_from_element(node),
         };
@@ -583,7 +591,16 @@ impl<'a> Builder<'a> {
             .map(|c| c.kind() == "method_call_expression")
             .unwrap_or(false);
 
+        // An arrow access through a plain variable is a deref site: through
+        // its key ref, or, with no static key to ref, its own site — kept
+        // only where it can die, since without a ref it feeds nothing else.
+        let arrow_receiver =
+            crate::cst::element_deref_base(node).filter(|b| crate::cst::is_plain_scalar(*b));
+        let dies_on_undef = arrow_receiver.is_some()
+            && self.deref_dies_on_undef(node, &crate::model::file_analysis::DerefForm::HashKey);
+
         // Record the key access
+        let mut key_ref = false;
         if !container_is_method_call {
             if let Some(key_node) = node.child_by_field_name("key") {
                 if let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) {
@@ -592,14 +609,19 @@ impl<'a> Builder<'a> {
                         self.add_ref(
                             RefKind::HashKeyAccess {
                                 var_text: var_text.clone().unwrap_or_default(),
+                                dies_on_undef,
                             },
                             node_to_span(key_node),
                             key_text,
                             element_access,
                         );
+                        key_ref = true;
                     }
                 }
             }
+        }
+        if let (Some(receiver), false, true) = (arrow_receiver, key_ref, dies_on_undef) {
+            self.record_arrow_deref(node, receiver, crate::model::file_analysis::DerefForm::HashKey);
         }
 
         // Visit children for the container variable ref
@@ -641,13 +663,13 @@ impl<'a> Builder<'a> {
     /// ancestors)? Mirrors `detect_anon_hash_owner`'s bless branch — bless
     /// keys are instance slots; `return { ... }` keys are not.
     pub(super) fn anon_hash_is_blessed(&self, anon_hash: Node<'a>) -> bool {
-        let mut ancestor = anon_hash.parent();
+        let mut ancestor = self.syntax.parent(anon_hash);
         for _ in 0..5 {
             let Some(a) = ancestor else { return false };
             if self.is_bless_call(a) {
                 return true;
             }
-            ancestor = a.parent();
+            ancestor = self.syntax.parent(a);
         }
         false
     }
