@@ -275,7 +275,7 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
     // (var_name, type, scope, span). The bag is canonical;
     // `push_type_constraint` mirrors every TC into a variable witness,
     // so plugin-emitted TCs land here regardless.
-    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    use crate::model::witnesses::WitnessPayload;
     let var_type_key = |fa: &crate::model::file_analysis::FileAnalysis, w: &crate::model::witnesses::Witness| -> Option<String> {
         let (name, scope) = fa.binding_label(w.attachment.variable_binding()?);
         let WitnessPayload::InferredType(t) = &w.payload else { return None };

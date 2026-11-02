@@ -930,8 +930,11 @@ impl FileAnalysis {
                 _ => continue,
             };
             let subject = match place {
-                Some(place) => Subject::Place(place),
-                None => Subject::Variable(receiver.clone()),
+                Some(place) => place,
+                None => {
+                    let scope = self.scope_at(r.span.start).unwrap_or(ScopeId(0));
+                    Place::variable(self.variable_binding_of(&receiver, r.span.start, scope).0)
+                }
             };
             if let Some(ty) = self.subject_type_at(&subject, r.span.start, module_index) {
                 out.push(DerefSite {
@@ -947,7 +950,7 @@ impl FileAnalysis {
         // Derefs with no typed ref naming their receiver; the builder
         // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
-            let subject = s.subject();
+            let subject = (*s.place).clone();
             if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
                 out.push(DerefSite {
                     span: s.span,
@@ -1056,15 +1059,9 @@ impl FileAnalysis {
     /// the guard under the merged query. Innermost region wins. `None` when
     /// no region fact types the subject here, so D6 fires only on narrowed
     /// reps.
-    pub fn guard_narrowed_rep(&self, subject: &Subject, point: Point) -> Option<InferredType> {
+    pub fn guard_narrowed_rep(&self, subject: &Place, point: Point) -> Option<InferredType> {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-        let place = match subject {
-            Subject::Variable(v) => {
-                let scope = self.scope_at(point).unwrap_or(ScopeId(0));
-                Place::variable(self.variable_binding_of(v, point, scope).0)
-            }
-            Subject::Place(q) => q.clone(),
-        };
+        let place = subject.clone();
         let mut best: Option<&crate::model::witnesses::Witness> = None;
         for w in self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))) {
             let region = (w.span.start.row, w.span.start.column) < (w.span.end.row, w.span.end.column);

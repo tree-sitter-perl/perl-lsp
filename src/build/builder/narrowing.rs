@@ -14,38 +14,36 @@
 use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::node_to_span;
-use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span, Subject};
+use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span};
 
 use super::extract::ListSlot;
 use super::{connector_keyword_between, raw_leading_op, raw_mid_op, Builder};
 
-/// The subject a guard narrows — a plain scalar, or a part of a variable
-/// (`$self->{x}`, `$h{k}`, `$self->{$k}`) named by its `Place`. `key_vars`
+/// The subject a guard narrows — a variable or a part of one (`$x`,
+/// `$self->{x}`, `$h{k}`, `$self->{$k}`), named by its `Place`. `key_vars`
 /// spell the place's key variables (`$k` in `$self->{$k}`): rebinding one
 /// moves the place, so the narrowing ends there. `spelling` is for display.
 #[derive(Clone)]
 pub(super) enum NarrowSubject {
-    Variable(String),
     Place { place: Place, spelling: String, key_vars: Vec<String> },
     /// A variable holding a `ref`/`reftype`/`blessed` result (`$ref` in
     /// `$ref eq 'ARRAY'`): the guard is on whatever that tag names, which
     /// only the bag can say once `$ref`'s value has folded.
-    TagOf(String),
+    TagOf(Place),
 }
 
 impl NarrowSubject {
     /// The subject's identity, for dedup across arms and the guard record.
-    fn subject(&self) -> Subject {
+    fn subject(&self) -> &Place {
         match self {
-            NarrowSubject::Variable(v) | NarrowSubject::TagOf(v) => Subject::Variable(v.clone()),
-            NarrowSubject::Place { place, .. } => Subject::Place(place.clone()),
+            NarrowSubject::Place { place, .. } | NarrowSubject::TagOf(place) => place,
         }
     }
 
     fn spelling(&self) -> &str {
         match self {
-            NarrowSubject::Variable(v) | NarrowSubject::TagOf(v) => v,
             NarrowSubject::Place { spelling, .. } => spelling,
+            NarrowSubject::TagOf(_) => "",
         }
     }
 }
@@ -141,7 +139,7 @@ impl GuardFact {
 /// is re-derived each fold iteration once the subject type converges.
 #[derive(Clone)]
 pub(super) struct DefinedNarrowing {
-    subject: Subject,
+    subject: Place,
     scope: ScopeId,
     region: Span,
     query_point: Point,
@@ -151,7 +149,7 @@ pub(super) struct DefinedNarrowing {
 /// since what `var` holds is a fold answer.
 #[derive(Clone)]
 pub(super) struct TagNarrowing {
-    var: String,
+    var: Place,
     scope: ScopeId,
     region: Span,
     lit: String,
@@ -179,15 +177,6 @@ pub(super) struct PendingNarrow {
     scope: ScopeId,
 }
 
-/// Where a fact about `subject` attaches: a variable on its name in the
-/// scope the fact was made in, a place on itself.
-fn subject_attachment(subject: Subject, scope: ScopeId) -> crate::model::witnesses::WitnessAttachment {
-    use crate::model::witnesses::WitnessAttachment;
-    match subject {
-        Subject::Variable(name) => WitnessAttachment::Variable { name, scope },
-        Subject::Place(place) => WitnessAttachment::Place(Box::new(place)),
-    }
-}
 
 /// Map a `ref(...) eq STRING` right-hand string to the type it proves.
 /// The builtin reftype tokens are a fixed Perl language constant (reading
@@ -410,7 +399,9 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
         if var.kind() != "scalar" {
             return None;
         }
-        Some((crate::cst::canonical_var_name(var, source)?, crate::cst::plain_string_literal_text(lit, source)?))
+        let name = crate::cst::canonical_var_name(var, source)?;
+        let place = Place::variable(builder.binding_key_here(&name, var.start_position()));
+        Some((place, crate::cst::plain_string_literal_text(lit, source)?))
     };
     let (var, lit) = tagged(left, right).or_else(|| tagged(right, left))?;
     Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true })
@@ -446,7 +437,8 @@ impl<'a> Builder<'a> {
     /// subscript names its slot (`Place`).
     fn narrow_subject_of(&self, node: Node<'a>) -> Option<NarrowSubject> {
         if let Some(v) = crate::cst::canonical_var_name(node, self.source) {
-            return Some(NarrowSubject::Variable(v));
+            let place = Place::variable(self.binding_key_here(&v, node.start_position()));
+            return Some(NarrowSubject::Place { place, spelling: v, key_vars: Vec::new() });
         }
         let read = self.place_read(node)?;
         Some(NarrowSubject::Place {
@@ -509,13 +501,13 @@ impl<'a> Builder<'a> {
             let region = node_to_span(blk);
             // The arm's own guard is the more direct statement about a
             // subject; a prior arm's negation must not override it.
-            let mut covered: Vec<Subject> = Vec::new();
+            let mut covered: Vec<Place> = Vec::new();
             if let Some(c) = own_cond {
                 // Record the arm's own guard once (not the priors re-walked
                 // for cumulative negation) — D3/D4 want each condition once.
                 self.record_guard_sites(c);
                 for (subject, op) in facts_for_region(self, c, enter) {
-                    covered.push(subject.subject());
+                    covered.push(subject.subject().clone());
                     self.emit_narrowing_fact(&subject, op, region);
                 }
             }
@@ -524,7 +516,7 @@ impl<'a> Builder<'a> {
                 // A prior arm not taken means its condition held at the
                 // opposite of its enter polarity.
                 for (subject, op) in facts_for_region(self, prior_cond, !prior_enter) {
-                    let key = subject.subject();
+                    let key = subject.subject().clone();
                     if covered.contains(&key) {
                         continue;
                     }
@@ -556,7 +548,7 @@ impl<'a> Builder<'a> {
                 NarrowOp::TagEq(_) => continue,
             };
             self.guard_sites.push(GuardSite {
-                subject: fact.subject.subject(),
+                subject: fact.subject.subject().clone(),
                 spelling: fact.subject.spelling().to_string(),
                 scope,
                 predicate,
@@ -760,11 +752,11 @@ impl<'a> Builder<'a> {
         let mut emits: Vec<(WitnessAttachment, InferredType, Span)> = Vec::new();
         for g in &guards {
             if let Some(inner) = self
-                .bag_query_subject(&g.subject, g.scope, g.query_point)
+                .bag_query_place(&g.subject, g.scope, g.query_point)
                 .as_ref()
                 .and_then(InferredType::optional_inner)
             {
-                emits.push((subject_attachment(g.subject.clone(), g.scope), inner.clone(), g.region));
+                emits.push((WitnessAttachment::Place(Box::new(g.subject.clone())), inner.clone(), g.region));
             }
         }
         for (attachment, inner, region) in emits {
@@ -788,7 +780,7 @@ impl<'a> Builder<'a> {
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
         for g in &self.tag_narrowings {
             let Some(InferredType::RefTagOf { subject, site, via }) =
-                self.bag_query_variable(&g.var, g.scope, g.region.start)
+                self.bag_query_place(&g.var, g.scope, g.region.start)
             else {
                 continue;
             };
@@ -840,8 +832,8 @@ impl<'a> Builder<'a> {
         let wanted: std::collections::HashSet<String> = pending
             .iter()
             .filter_map(|pn| match &pn.subject {
-                NarrowSubject::Place { place, .. } => Some(self.binding_name(&place.root).to_string()),
-                NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
+                NarrowSubject::Place { place, .. } if !place.is_variable() => Some(self.binding_name(&place.root).to_string()),
+                NarrowSubject::Place { .. } | NarrowSubject::TagOf(_) => None,
             })
             .collect();
         let places = if wanted.is_empty() {
@@ -871,7 +863,8 @@ impl<'a> Builder<'a> {
                 self.rebinds.earliest_in(&var, pn.region)
             };
             let cuts: Vec<Option<Point>> = match &pn.subject {
-                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => vec![rebound(var)],
+                NarrowSubject::TagOf(var) => vec![self.rebinds.earliest_in(var, pn.region)],
+                NarrowSubject::Place { place, .. } if place.is_variable() => vec![self.rebinds.earliest_in(place, pn.region)],
                 NarrowSubject::Place { place, key_vars, .. } => {
                     std::iter::once(places.as_ref().and_then(|idx| idx.earliest_in(place, pn.region)))
                         .chain(key_vars.iter().map(|kv| rebound(kv)))
@@ -881,11 +874,11 @@ impl<'a> Builder<'a> {
             let Some(region) = crate::model::file_analysis::cut_region(pn.region, cuts) else {
                 continue; // truncated to nothing
             };
-            let subject = pn.subject.subject();
+            let subject = pn.subject.subject().clone();
             match pn.fact {
                 RegionFact::Guard(NarrowOp::To(ty)) => {
                     facts.push(Witness {
-                        attachment: subject_attachment(subject, pn.scope),
+                        attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),
                         source: WitnessSource::Builder("narrowing".into()),
                         payload: WitnessPayload::InferredType(ty),
                         span: region,
@@ -902,7 +895,7 @@ impl<'a> Builder<'a> {
                 RegionFact::Guard(NarrowOp::TagEq(_)) => {}
                 RegionFact::Observe(obs) => {
                     facts.push(Witness {
-                        attachment: subject_attachment(subject, pn.scope),
+                        attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),
                         source: WitnessSource::Builder("usage_observation".into()),
                         payload: WitnessPayload::Observation(obs),
                         span: region,
@@ -978,7 +971,7 @@ impl<'a> Builder<'a> {
                         let dies_on_undef = self.deref_dies_on_undef(node, &form);
                         sites.push(crate::model::file_analysis::ArrowDerefSite {
                             receiver: text.to_string(),
-                            place: Some(Box::new(read.place)),
+                            place: Box::new(read.place),
                             span: node_to_span(node),
                             form,
                             dies_on_undef,

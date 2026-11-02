@@ -350,18 +350,7 @@ impl FileAnalysis {
     ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
         let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
-        if let Some(t) = crate::model::witnesses::query_variable_place(
-            &self.witnesses,
-            &self.bag_context(module_index),
-            &place,
-            point,
-        ) {
-            return Some(t);
-        }
-        // Role-contract param types are gated on the enclosing package's
-        // cross-file ancestry, so they resolve here (index in hand), not in
-        // the bag the index-free builder seeded.
-        self.gated_param_type_for(var_name, scope, point, module_index)
+        self.subject_type_at(&place, point, module_index)
     }
 
     /// What `place` holds at `point`: the narrowings and use evidence its
@@ -379,14 +368,21 @@ impl FileAnalysis {
     /// What a narrowing subject holds at `point`.
     pub fn subject_type_at(
         &self,
-        subject: &Subject,
+        subject: &Place,
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        match subject {
-            Subject::Variable(name) => self.inferred_type_via_bag_ctx(name, point, module_index),
-            Subject::Place(place) => self.place_type_at(place, point, module_index),
+        if let Some(t) = self.place_type_at(subject, point, module_index) {
+            return Some(t);
         }
+        if !subject.path.is_empty() {
+            return None;
+        }
+        // Role-contract param types are gated on the enclosing package's
+        // cross-file ancestry, so they resolve here (index in hand), not in
+        // the bag the index-free builder seeded.
+        let scope = self.scope_at(point)?;
+        self.gated_param_type_for(self.binding_label(&subject.root).0, scope, point, module_index)
     }
 
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
@@ -973,6 +969,31 @@ impl FileAnalysis {
         let mut bag = std::mem::take(&mut self.witnesses);
         bag.rewrite(|w| bind_variable_witness(w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc)));
         self.witnesses = bag;
+    }
+
+    /// Bind facts that hold over a region to their places, each cut at the
+    /// first rebind of its binding inside the region; one rebound before
+    /// its region opens holds nowhere.
+    pub(crate) fn bind_variable_regions(&mut self, facts: Vec<crate::model::witnesses::Witness>) {
+        use crate::model::witnesses::WitnessAttachment;
+        if facts.is_empty() {
+            return;
+        }
+        let rebinds = self.rebind_index();
+        let mut held = Vec::with_capacity(facts.len());
+        for mut w in facts {
+            bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc));
+            let cut = match &w.attachment {
+                WitnessAttachment::Place(p) => rebinds.earliest_in(p, w.span),
+                _ => None,
+            };
+            let Some(span) = cut_region(w.span, [cut]) else { continue };
+            w.span = span;
+            held.push(w);
+        }
+        for w in held {
+            self.witnesses.push(w);
+        }
     }
 
     fn variable_use_in(&self, name: &str, at: Point, scope: ScopeId) -> VariableUse {

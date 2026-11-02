@@ -222,6 +222,10 @@ pub struct SkeletonAnalysis {
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
     pub place_narrowings: Vec<PlaceNarrowing>,
+    /// Facts about a variable that hold over a region (a guard's
+    /// narrowing, a use's observation), uncut: once the assembled analysis
+    /// binds them, each ends at the first rebind of its binding.
+    pub variable_regions: Vec<crate::model::witnesses::Witness>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -1615,6 +1619,7 @@ impl SkeletonAnalysis {
         // The extractor keys a variable's facts to the scope they were made
         // in; the assembled analysis knows each name's binding.
         fa.bind_variable_witnesses();
+        fa.bind_variable_regions(std::mem::take(&mut self.variable_regions));
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.

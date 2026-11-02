@@ -33,11 +33,11 @@ witness, so the region is truncated at the first op that could disturb
 the subject. Both cutoffs are lookups in an index built once per file,
 never a search per fact — every use observes, so a per-fact scan is a
 scan per use (Znuny `PDF.t`: a whole-block CST scan per place use took
-one file's build to 100 s). A variable's cutoff is its first rebind
-(`RebindIndex`, from the FlowEdges, shared with the pack narrowing and the
-pack observations); a place's is its first disturbance
-(`PlaceDisturbanceIndex`, one pass over the file's trees, `s///e` code
-included). Conservative by construction — it under-narrows, never lies. The bias is
+one file's build to 100 s). A variable's cutoff is its first rebind, a
+write of its whole place in the same index (`rebind_index`, from the
+FlowEdges, shared with the pack narrowing and the pack observations); a
+place's is its first disturbance (`PlaceDisturbanceIndex`, one pass over the
+file's trees, `s///e` code included). Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
@@ -201,7 +201,7 @@ method call on the slot's value leaves the slot narrowed. A read that
 steps further in is not an access. Two steps overlap when they can reach
 one slot: distinct constants never do, a key variable may hold anything.
 Rebinding a key variable moves the place, so its narrowing ends there
-(`RebindIndex`, by name).
+(at a rebind of the key variable's binding).
 
 Accessor places (`$self->name`) are out: an accessor isn't a stable slot
 (it can return a different object per call, with side effects), so
@@ -236,9 +236,10 @@ member's declared type) asks at the end of the scope the binding lives in.
 A rebind cuts a fact about the variable it binds, not every variable of the
 name: each FlowEdge target is a write of the whole variable in the place
 disturbance index (`rebind_index`), so a write to a shadowing `$x` leaves
-the outer `$x`'s narrowing standing.
-TODO(pack-narrowing-bindings): a pack's variable narrowing is still cut at
-extract time, where no binding exists, by name.
+the outer `$x`'s narrowing standing. A pack's variable regions are cut
+the same way once its analysis is assembled and bound
+(`FileAnalysis::bind_variable_regions`), since the extractor has no
+bindings to key them by.
 
 **A fact made in a nested block is a region.** It holds from where it is made
 to the end of the block it was made in, so the else arm never sees the then

@@ -1138,19 +1138,13 @@ impl<'a> Builder<'a> {
     }
 
     /// What a narrowing subject holds at `point`, asked from `scope`.
-    pub(super) fn bag_query_subject(
+    pub(super) fn bag_query_place(
         &self,
-        subject: &crate::model::file_analysis::Subject,
+        place: &crate::model::file_analysis::Place,
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
-        use crate::model::file_analysis::Subject;
-        match subject {
-            Subject::Variable(name) => self.bag_query_variable(name, scope, point),
-            Subject::Place(place) => {
-                crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point)
-            }
-        }
+        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point)
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through

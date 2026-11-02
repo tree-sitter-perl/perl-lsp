@@ -926,7 +926,7 @@ pub struct DerefSite {
     pub span: Span,
     /// Receiver spelling (`$x`).
     pub receiver: String,
-    pub subject: Subject,
+    pub subject: Place,
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
     pub form: DerefForm,
@@ -940,25 +940,16 @@ pub struct DerefSite {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrowDerefSite {
     /// The receiver as written: a variable's canonical name, or a part of
-    /// one's spelling for the rendered message.
+    /// one's spelling, for the rendered message.
     pub receiver: String,
-    /// The receiver's place, when it is a part of a variable.
-    pub place: Option<Box<Place>>,
+    /// The receiver's place: the variable's binding, or a part of it.
+    pub place: Box<Place>,
     pub span: Span,
     pub form: DerefForm,
     /// An undef receiver dies here rather than vivifying, decided where
     /// the hints in force are known.
     #[serde(default)]
     pub dies_on_undef: bool,
-}
-
-impl ArrowDerefSite {
-    pub fn subject(&self) -> Subject {
-        match &self.place {
-            Some(place) => Subject::Place((**place).clone()),
-            None => Subject::Variable(self.receiver.clone()),
-        }
-    }
 }
 
 /// What a recorded guard tests about its subject — the build-time
@@ -979,7 +970,7 @@ pub enum GuardPredicate {
 /// (in the guard, before any narrowed region).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardSite {
-    pub subject: Subject,
+    pub subject: Place,
     /// The subject as written, for the rendered message.
     pub spelling: String,
     pub scope: ScopeId,

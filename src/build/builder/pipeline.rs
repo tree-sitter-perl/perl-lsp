@@ -746,7 +746,9 @@ fn build_once(
                 _ => None,
             })
             .collect();
-        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        // A variable's value reaches it through edges as well, so only a
+        // part of one needs a value fact of its own to be worth keeping.
+        b.arrow_deref_sites.retain(|s| s.place.path.is_empty() || valued.contains(&*s.place));
         b.arrow_deref_sites.shrink_to_fit();
         for r in &mut b.refs {
             if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {

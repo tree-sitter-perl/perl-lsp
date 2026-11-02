@@ -95,6 +95,9 @@ pub fn query_place_type(
     scope: ScopeId,
     point: Point,
 ) -> Option<InferredType> {
+    if place.path.is_empty() {
+        return query_variable_place(bag, ctx, place, point);
+    }
     let framework = crate::model::file_analysis::lookup_chain(ctx.scopes, scope)
         .scopes()
         .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())

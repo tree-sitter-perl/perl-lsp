@@ -1219,9 +1219,10 @@ impl<'a> Builder<'a> {
         }
         let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
         let dies_on_undef = self.deref_dies_on_undef(node, &form);
+        let place = crate::model::file_analysis::Place::variable(self.binding_key_here(&name, receiver.start_position()));
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
             receiver: name,
-            place: None,
+            place: Box::new(place),
             span: node_to_span(node),
             form,
             dies_on_undef,
