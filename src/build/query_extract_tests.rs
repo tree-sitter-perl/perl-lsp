@@ -372,7 +372,7 @@ fn resolve_imports_with_pack(
             idx.insert_cache(
                 module,
                 Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                    path,
+                    crate::util::canonical_path::CanonicalPath::resolve(path),
                     std::sync::Arc::new(fa),
                 ))),
             );
@@ -460,7 +460,7 @@ fn python_cross_file_function_refs_through_refs_to() {
                 crate::index::open_docs::FileKey::Path(p) => {
                     p.file_name().unwrap().to_string_lossy().to_string()
                 }
-                crate::index::open_docs::FileKey::Url(u) => u.to_string(),
+                crate::index::open_docs::FileKey::Url(u, _) => u.to_string(),
             };
             (f, l.access)
         })
@@ -634,7 +634,7 @@ fn python_workspace_rename_for_free() {
         [(pa.clone(), src_a.to_string()), (pb.clone(), src_b.to_string())].into();
     for loc in &locs {
         let crate::index::open_docs::FileKey::Path(p) = &loc.key else { panic!() };
-        let text = texts.get_mut(p).unwrap();
+        let text = texts.get_mut(p.as_path()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         let line = lines[loc.span.start.row];
         let mut new_line = line.to_string();
@@ -1194,6 +1194,25 @@ fn cpp_declarator_leaf_names_its_def() {
     assert_eq!(kind("l"), Some(DefCap::Local));
 }
 
+/// A parameter list's arity is read off its own captures: each parameter
+/// required, defaulted or variadic, and a comment between two parameters
+/// no parameter at all.
+#[test]
+fn cpp_param_arity_reads_each_parameter() {
+    let skel = cpp_skel(
+        "void a(int x, int y);\nvoid b(int x, /* c */ int y = 2, ...);\ntemplate<class... T> void c(T... xs);\nvoid d(void (*cb)(int, int));\n",
+    );
+    let arity = |row: usize| {
+        // the row's outermost list: the callable's own, not a callback's
+        let (_, a) = skel.param_sigs.iter().filter(|(span, _)| span.start.row == row).min_by_key(|(span, _)| span.start.column).unwrap();
+        (a.total, a.required, a.variadic)
+    };
+    assert_eq!(arity(0), (2, 2, false));
+    assert_eq!(arity(1), (2, 1, true), "a comment is no parameter; `...` makes it variadic");
+    assert_eq!(arity(2), (0, 0, true), "a template pack takes any number, counting none");
+    assert_eq!(arity(3), (1, 1, false), "the callback's own list is a separate signature");
+}
+
 #[test]
 fn cpp_tier1_extraction_report() {
     use cpp_obstacle::SAMPLES;
@@ -1653,6 +1672,87 @@ void f() {
 }
 
 #[test]
+fn cpp_member_move_flags_only_reads_of_the_moved_part() {
+    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` is a use of the
+    // moved part until `p.msg` is written again. A read of all of `p` hands
+    // the whole on (a copy, a log line) and reads none of the moved state
+    // itself.
+    let src = "\
+struct Msg {};
+struct Packet { Msg msg; int id; };
+void f() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p.id);
+  use(p.msg);
+  p.msg = Msg();
+  use(p.msg);
+}
+void g() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    reads.sort();
+    assert_eq!(reads, vec![("p.msg".to_string(), 6)]);
+}
+
+#[test]
+fn cpp_move_of_an_implicit_member_flags_its_reads() {
+    // A bare `name_` in a member function is `this->name_`: rooted at the
+    // body's receiver, so its move and its reads are one place.
+    let src = "\
+class C {
+  Name name_;
+  Name other_;
+  void f();
+  void g();
+};
+void C::f() {
+  sink(std::move(name_));
+  use(other_);
+  use(name_);
+}
+void C::g() {
+  sink(std::move(name_));
+  name_ = Name();
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    // Assigning `name_` gives it a value again (fmt's `args.h` list push).
+    assert_eq!(reads, vec![("name_".to_string(), 9)]);
+}
+
+#[test]
+fn cpp_reset_past_the_move_scope_does_not_stretch_it() {
+    // spdlog's `user_chars`: the move sits in an `if` arm; the read and the
+    // reassignment are in the `else` arm, outside the move's scope.
+    let src = "\
+class C {
+  Name name_;
+  void f(bool c);
+};
+void C::f(bool c) {
+  if (c) {
+    sink(std::move(name_));
+  } else {
+    use(name_);
+    name_ = Name();
+  }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    assert!(fa.use_after_move_reads().is_empty(), "{:?}", fa.use_after_move_reads());
+}
+
+#[test]
 fn cpp_conditional_move_does_not_flag_sibling_arm() {
     // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
     // `if` arm bounds its moved-from region to that arm — the read of `x` in the
@@ -1907,6 +2007,91 @@ void f(Base* b) {
         Some(InferredType::ClassName("Derived".into())),
         "dynamic_cast narrows b to Derived inside the guard",
     );
+}
+
+#[test]
+fn cpp_dynamic_cast_narrows_a_member() {
+    // A member subject narrows the place it denotes: `h.b` is Derived inside
+    // the guard and its declared Base outside.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder { Base* b; };
+void f(Holder h) {
+    if (dynamic_cast<Derived*>(h.b)) {
+        h.b->run();
+    }
+    h.b->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    assert_eq!(classes, vec![(5, Some("Derived".to_string())), (7, Some("Base".to_string()))]);
+}
+
+#[test]
+fn cpp_dynamic_cast_narrows_a_member_of_this() {
+    // `this->b` and a bare `b` in a member function are one place: either
+    // spelling's guard reaches the other's uses.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder {
+    Base* b;
+    void f();
+    void g();
+};
+void Holder::f() {
+    if (dynamic_cast<Derived*>(this->b)) {
+        this->b->run();
+        b->run();
+    }
+    this->b->run();
+}
+void Holder::g() {
+    if (dynamic_cast<Derived*>(b)) {
+        this->b->run();
+    }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    let derived = Some("Derived".to_string());
+    assert_eq!(
+        classes,
+        vec![(9, derived.clone()), (10, derived.clone()), (12, Some("Base".to_string())), (16, derived)]
+    );
+}
+
+#[test]
+fn cpp_move_through_this_is_the_members_move() {
+    let src = "\
+class C {
+  Name name_;
+  void f();
+};
+void C::f() {
+  sink(std::move(this->name_));
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].1, 6);
 }
 
 #[test]

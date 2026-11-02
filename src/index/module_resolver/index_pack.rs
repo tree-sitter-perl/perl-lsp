@@ -84,7 +84,7 @@ pub fn index_pack_language(
                 // keyed decode matches regardless of which form the caller holds.
                 // The discriminated helper survives the readonly-open
                 // CANTOPEN/WAL race and names every other miss cause.
-                let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+                let canon = crate::util::canonical_path::CanonicalPath::resolve(path).into_path_buf();
                 let mut spellings = vec![canon.to_string_lossy().into_owned()];
                 let raw = path.to_string_lossy().into_owned();
                 if raw != spellings[0] {
@@ -132,7 +132,7 @@ pub fn index_pack_language(
         // CURRENT walk no longer includes are dropped, not resurrected.
         let canon_members: std::collections::HashSet<PathBuf> = paths
             .iter()
-            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .map(|p| crate::util::canonical_path::CanonicalPath::resolve(p.as_path()).into_path_buf())
             .collect();
         let mut warmed: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
         if let Some(ref conn) = conn {
@@ -245,7 +245,7 @@ pub fn index_pack_language(
                         "workspace",
                         seeds,
                     ) {
-                        log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
+                        log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
                     }
                 },
             );
@@ -313,32 +313,24 @@ pub fn index_pack_language(
                         // Chunk-scoped: a concurrent different-generation
                         // process may wipe/restamp the stubs table mid-run.
                         let stubs_writable = module_cache::stub_version_current(conn);
-                        for e in batch {
-                            let path_str = e.path.to_string_lossy();
-                            module_cache::save_blob_to_db_stamped(
-                                conn,
-                                &path_str,
-                                &e.path,
-                                &e.arc.pack.include_closure,
-                                &e.blob,
-                                "workspace",
-                                e.stamp,
-                            );
-                            if let Err(err) = module_cache::shred_derived_rows(
-                                conn, &path_str, "workspace", &e.seeds,
-                            ) {
-                                log::warn!(
-                                    "Failed to shred derived rows for {:?}: {}",
-                                    e.path,
-                                    err
+                        batch
+                            .iter()
+                            .map(|e| {
+                                let landed = module_cache::save_generation_stamped(
+                                    conn,
+                                    &e.path,
+                                    &e.arc.pack.include_closure,
+                                    &e.blob,
+                                    &e.seeds,
+                                    "workspace",
+                                    e.stamp,
                                 );
-                            }
-                            if let Some(sb) = &e.stub_blob {
-                                if stubs_writable {
-                                    module_cache::save_stub(conn, &path_str, sb);
+                                if let (true, true, Some(sb)) = (landed, stubs_writable, &e.stub_blob) {
+                                    module_cache::save_stub(conn, &e.path.to_string_lossy(), sb);
                                 }
-                            }
-                        }
+                                landed
+                            })
+                            .collect()
                     },
                     |e: FreshEntry| {
                         // Stale-pin clear BEFORE the stripped copy is
@@ -384,7 +376,7 @@ pub fn index_pack_language(
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                     cb(d, grand_total);
                 }
-                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let canon = crate::util::canonical_path::CanonicalPath::resolve(path.as_path()).into_path_buf();
                 if warmed.contains(&canon) {
                     return; // valid cache hit
                 }

@@ -118,7 +118,7 @@ fn render_candidate_hover(
     let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     // The candidate's own analysis: the scoped index caches every pack file
     // a projection can answer from.
-    let found = module_index.and_then(|midx| midx.cached_by_path(&path));
+    let found = module_index.zip(loc.key.canonical_path()).and_then(|(midx, p)| midx.cached_by_path(p));
     if let Some(cached) = &found {
         let whole = module_index
             .map(|midx| midx.whole_present(cached))

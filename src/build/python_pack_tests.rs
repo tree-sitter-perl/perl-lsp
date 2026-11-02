@@ -233,7 +233,7 @@ fn a_class_resolves_across_modules_by_identity() {
     let store = OpenDocs::new();
     let name_of = |k: &FileKey| match k {
         FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     let want_edits: Vec<(String, usize, usize)> =
         [("models.py", 0, 6), ("views.py", 0, 23), ("views.py", 2, 12), ("views.py", 5, 4)]
@@ -243,7 +243,7 @@ fn a_class_resolves_across_modules_by_identity() {
     // the parent clause, the import's name, the constructing call
     for (row, column) in [(2, 12), (0, 23), (5, 4)] {
         let at = Point { row, column };
-        let cs = resolve(&store, &fa, FileKey::Path(p_views.clone()), at, Some(&idx), OverrideScope::default());
+        let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p_views.clone())), at, Some(&idx), OverrideScope::default());
         let defs: Vec<(String, usize)> = cs.definitions().iter().map(|d| (name_of(&d.key), d.span.start.row)).collect();
         assert_eq!(defs, [("models.py".to_string(), 0)], "goto-def from {at:?}");
         let mut edits: Vec<(String, usize, usize)> = cs
@@ -303,7 +303,7 @@ fn calling_a_class_names_it() {
     idx.insert_workspace_for_test(path.clone(), fa);
     let fa = idx.workspace_file_for_test(&path).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(path), Point::new(2, 11), Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path)), Point::new(2, 11), Some(&idx), OverrideScope::default());
     let mut rows: Vec<usize> = cs.rename_edits("Baz").unwrap().into_iter().map(|(l, _)| l.span.start.row).collect();
     rows.sort();
     assert_eq!(rows, [0, 2, 4]);
@@ -338,11 +338,11 @@ fn landing(
     use crate::index::resolve::{resolve, OverrideScope};
     let name_of = |k: &FileKey| match k {
         FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
-        FileKey::Url(u) => u.to_string(),
+        FileKey::Url(u, _) => u.to_string(),
     };
     let fa = idx.workspace_file_for_test(path).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(path.to_path_buf()), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.to_path_buf())), at, Some(idx), OverrideScope::default());
     let defs = cs.definitions();
     (
         defs.iter().map(|d| (name_of(&d.key), d.span.start.row)).collect(),
@@ -730,7 +730,7 @@ class Audit(Comment.Meta):
     assert_eq!(defs, [("models.py".to_string(), 1)]);
     let store = OpenDocs::new();
     let edits_from = |at: Point| {
-        let cs = resolve(&store, &fa, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+        let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), at, Some(&idx), OverrideScope::default());
         let mut e: Vec<(usize, usize)> =
             cs.rename_edits("Options").unwrap().into_iter().map(|(l, _)| (l.span.start.row, l.span.start.column)).collect();
         e.sort();
@@ -786,14 +786,14 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
         Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "pkg.models.Outer.Inner"
     ));
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(views.clone()), Point::new(2, 14), Some(&idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(views.clone())), Point::new(2, 14), Some(&idx), OverrideScope::default());
     let mut edits: Vec<(String, usize, usize)> = cs
         .rename_edits("Nested")
         .unwrap()
         .into_iter()
         .map(|(l, _)| match &l.key {
             FileKey::Path(p) => (p.file_name().unwrap().to_string_lossy().to_string(), l.span.start.row, l.span.start.column),
-            FileKey::Url(u) => (u.to_string(), l.span.start.row, l.span.start.column),
+            FileKey::Url(u, _) => (u.to_string(), l.span.start.row, l.span.start.column),
         })
         .collect();
     edits.sort();
@@ -1030,7 +1030,7 @@ fn renamed_at(
     use crate::index::resolve::{resolve, OverrideScope};
     let fa = idx.workspace_file_for_test(path).unwrap();
     let store = OpenDocs::new();
-    let cs = resolve(&store, &fa, FileKey::Path(path.to_path_buf()), at, Some(idx), OverrideScope::default());
+    let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.to_path_buf())), at, Some(idx), OverrideScope::default());
     let mut e: Vec<(usize, usize)> = cs
         .rename_edits(new)
         .unwrap_or_default()
@@ -1120,7 +1120,7 @@ class Sub(Base):
         let path = t.0.join(file);
         let fa = idx.workspace_file_for_test(&path).unwrap();
         let store = OpenDocs::new();
-        let cs = resolve(&store, &fa, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+        let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone())), at, Some(&idx), OverrideScope::default());
         let mut e: Vec<(String, usize, usize)> = cs
             .rename_edits("total")
             .unwrap_or_default()
@@ -1128,7 +1128,7 @@ class Sub(Base):
             .map(|(l, _)| {
                 let name = match &l.key {
                     FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
-                    FileKey::Url(u) => u.to_string(),
+                    FileKey::Url(u, _) => u.to_string(),
                 };
                 (name, l.span.start.row, l.span.start.column)
             })
@@ -1192,7 +1192,7 @@ def f(c: Counter):
     let tree = parser.parse(src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let (items, _) =
-        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&path), &idx);
+        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&crate::util::canonical_path::CanonicalPath::resolve(path.clone())), &idx);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     for name in ["n", "count", "bump", "__init__"] {
         assert!(labels.contains(&name), "{name} in {labels:?}");
@@ -1502,4 +1502,137 @@ def f(self):
     assert!(!receiver("self", 10), "a free function has no receiver");
     assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
     assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
+}
+
+#[test]
+fn a_member_receiver_down_to_a_variable_is_its_place() {
+    use crate::model::file_analysis::{Binding, PathStep, Place, RefKind};
+    // Only a place a narrowing gives a value rides on its receiver.
+    let fa = py_in(
+        "class B:\n    pass\nclass A:\n    def go(self):\n        if isinstance(self.a.b, B):\n            self.a.b.run()\n        f().x.run()\n        if isinstance(self.c, B):\n            self.c.run()\n        self.d.run()\n",
+        None,
+    );
+    let me = fa.symbols().iter().find(|s| s.name == "self" && s.kind == SymKind::Variable).expect("self param").id;
+    let places: Vec<Option<Place>> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| r.member_site().unwrap().invocant.place().cloned())
+        .collect();
+    let member = |m: &str| PathStep::Member(m.to_string());
+    assert_eq!(
+        places,
+        vec![
+            Some(Place { root: Binding::Lexical(me), path: vec![member("a"), member("b")] }),
+            None,
+            Some(Place { root: Binding::Lexical(me), path: vec![member("c")] }),
+            None,
+        ],
+        "a value-rooted receiver is no place, and an unnarrowed one carries none"
+    );
+}
+
+/// The class each `run()` call's receiver types as, by row.
+fn run_receivers(src: &str) -> Vec<(usize, Option<String>)> {
+    use crate::model::file_analysis::RefKind;
+    let fa = py_in(src, None);
+    let mut out: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| {
+            let t = fa.method_call_invocant_type(r, None);
+            (r.span.start.row, t.and_then(|t| t.class_name().map(str::to_string)))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn an_augmented_assignment_or_del_ends_a_member_narrowing() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.pet += 1
+            self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            del self.pet
+            self.pet.run()
+    def both(self):
+        if isinstance(self.pet, Foo):
+            del self.other, self.pet
+            self.pet.run()
+";
+    assert_eq!(run_receivers(src), vec![(6, Some("Foo".to_string())), (8, None), (12, None), (16, None)]);
+}
+
+#[test]
+fn an_augmented_assignment_or_del_ends_a_variable_narrowing() {
+    // A variable and a member end the same way. The rebind ends only what a
+    // guard proved: a declared value (`y = Foo()`) still stands, and an
+    // unnarrowed `x` answers as the untyped parameter in `k` does.
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+def f(x):
+    if isinstance(x, Foo):
+        x.run()
+        x += 1
+        x.run()
+def g(x):
+    if isinstance(x, Foo):
+        del x
+        x.run()
+def k(x):
+    x.run()
+def h():
+    y = Foo()
+    y.run()
+    y += 1
+    y.run()
+";
+    let receivers = run_receivers(src);
+    let untyped = receivers.iter().find(|(row, _)| *row == 13).unwrap().1.clone();
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        receivers,
+        vec![(5, foo.clone()), (7, untyped.clone()), (11, untyped.clone()), (13, untyped), (16, foo.clone()), (18, foo)]
+    );
+}
+
+#[test]
+fn isinstance_narrows_a_member_until_it_is_disturbed() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.other = 1
+            self.pet.run()
+            self.pet = make()
+            self.pet.run()
+        self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            self.reset()
+            self.pet.run()
+";
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        run_receivers(src),
+        vec![(6, foo.clone()), (8, foo), (10, None), (11, None), (15, None)],
+        "a sibling write leaves the narrowing; a write to the member, the arm's end, and the receiver handed \
+         whole to a call end it"
+    );
 }

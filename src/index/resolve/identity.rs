@@ -172,7 +172,7 @@ pub fn resolve_symbol_scoped(
             // group a program's files (docs/prompt-entrypoint-analysis.md — the
             // same root as multi-app Mojo instance brands).
             let mut locs = Vec::new();
-            collect_package_var(&FileKey::Path(PathBuf::new()), analysis, &package, &name, &mut locs);
+            collect_package_var(&FileKey::Path(CanonicalPath::default()), analysis, &package, &name, &mut locs);
             // A group's spans are all rewritten, so a site with no name
             // token of its own (`${$n}`) is represented by its literal.
             let mut spans: Vec<Span> = locs.into_iter().filter(|l| l.rewrite.rewrites()).map(|l| l.span).collect();
@@ -425,13 +425,13 @@ pub(super) fn class_member_bare_constant(
                 let Some(memo) = memo else {
                     return check(&i.whole_present(c));
                 };
-                if let Some(v) = memo.bare_constant_by_candidate.borrow().get(&c.path) {
+                if let Some(v) = memo.bare_constant_by_candidate.borrow().get(c.path.as_path()) {
                     return *v;
                 }
                 let v = check(&i.whole_present(c));
                 memo.bare_constant_by_candidate
                     .borrow_mut()
-                    .insert(c.path.clone(), v);
+                    .insert(c.path.to_path_buf(), v);
                 v
             })
         })

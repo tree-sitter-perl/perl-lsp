@@ -1110,7 +1110,7 @@ impl LanguageServer for Backend {
                     doc.text.clone(),
                     doc.tree.clone(),
                     doc.language,
-                    doc.path.clone(),
+                    doc.path.as_ref().map(|_| doc.canonical_path.clone()),
                     doc.stable_outline.package_lines().to_vec(),
                 ),
                 None => return self.not_ready_or_null(uri),
@@ -1130,7 +1130,7 @@ impl LanguageServer for Backend {
                         &tree,
                         point,
                         language,
-                        path.as_deref(),
+                        path.as_ref(),
                         cx.index(),
                     )
                 })
@@ -1150,7 +1150,7 @@ impl LanguageServer for Backend {
         // Both halves are load-bearing: the gather runs through `run_query`
         // so it cannot stall the shared serve task, and it returns the cap
         // flag that decides `isIncomplete` below.
-        let key = FileKey::Url(uri.clone());
+        let key = self.open_docs.key_of(&uri);
         let (items, capped) = self
             .run_query(move |cx| {
                 symbols::completion_items(
@@ -1425,6 +1425,7 @@ impl LanguageServer for Backend {
             let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
             let mut visit = |uri: Url,
+                             canon: &crate::util::canonical_path::CanonicalPath,
                              analysis: &crate::model::file_analysis::FileAnalysis,
                              gated: &[crate::model::file_analysis::Symbol]| {
                 if !analysis.symbols_are_evicted() {
@@ -1432,9 +1433,7 @@ impl LanguageServer for Backend {
                         // Claim the canonical spelling too: rows are keyed
                         // canonical, and an open doc reached through a
                         // symlinked root must shadow its own persisted rows.
-                        if let Ok(canon) = std::fs::canonicalize(&p) {
-                            covered.insert(canon);
-                        }
+                        covered.insert(canon.to_path_buf());
                         covered.insert(p);
                     }
                 }
@@ -1456,13 +1455,13 @@ impl LanguageServer for Backend {
                 }
             };
             cx.open_docs().for_each_open(|url, doc| {
-                if let Ok(p) = url.to_file_path() {
-                    open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
+                if url.to_file_path().is_ok() {
+                    open_paths.insert(doc.canonical_path.to_path_buf());
                 }
-                visit(url.clone(), &doc.analysis, &[]);
+                visit(url.clone(), &doc.canonical_path, &doc.analysis, &[]);
             });
             cx.index().for_each_registered_file(&mut |cached| {
-                if open_paths.contains(&cached.path) {
+                if open_paths.contains(cached.path.as_path()) {
                     return;
                 }
                 let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
@@ -1470,7 +1469,7 @@ impl LanguageServer for Backend {
                 });
                 // The stored copy holds no gated content, and neither do
                 // its rows; the gates that fire now add theirs.
-                visit(uri, &cached.analysis, &cx.index().shown_gated_symbols(cached, &query));
+                visit(uri, &cached.path, &cached.analysis, &cx.index().shown_gated_symbols(cached, &query));
             });
 
             // Rows pass: symbol-evicted copies (the served language's

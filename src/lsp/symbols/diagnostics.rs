@@ -518,9 +518,10 @@ pub fn collect_diagnostics(
         });
     }
 
-    // 5g: undef-deref (D1) — a method call or hash deref on a receiver the
+    // 5g: undef-deref (D1) — a method or code call on a receiver the
     // lattice proves is `Undef` at that point (the `else` of `if defined`,
-    // the fall-through after `return if defined`, an `unless defined` body).
+    // the fall-through after `return if defined`, an `unless defined` body);
+    // an element deref autovivifies instead.
     // Runtime is a hard die. Maximal confidence — the type *is* undef, not
     // *may be* — so this is always-on `WARNING`, the one narrowing diagnostic
     // that doesn't wait behind an opt-in flag (rule #10: it reads the type
@@ -532,7 +533,7 @@ pub fn collect_diagnostics(
     // not "is" → opt-in, INFORMATION, with a guard-insertion quick-fix.
     for site in analysis.deref_receiver_sites(Some(module_index)) {
         match &site.receiver_ty {
-            InferredType::Undef => {
+            InferredType::Undef if site.dies_on_undef => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -546,7 +547,7 @@ pub fn collect_diagnostics(
                     ..Default::default()
                 });
             }
-            InferredType::Optional(_) if options.optional_deref => {
+            InferredType::Optional(_) if options.optional_deref && site.dies_on_undef => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::INFORMATION),
@@ -576,7 +577,7 @@ pub fn collect_diagnostics(
         if options.deref_shape {
             if let Some(demanded) = site.form.demands_rep() {
                 if let Some(rep) = analysis
-                    .guard_narrowed_rep(&site.receiver, site.span.start)
+                    .guard_narrowed_rep(&site.subject, site.span.start)
                     .and_then(|t| crate::model::file_analysis::RepKind::of(&t))
                 {
                     if rep != demanded {

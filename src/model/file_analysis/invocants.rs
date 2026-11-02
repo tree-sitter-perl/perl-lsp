@@ -467,7 +467,10 @@ impl FileAnalysis {
         // Perl ignores the invocant's class for the lookup, so the token
         // wins ahead of invocant resolution. (A plugin-bridged token is
         // never method-qualified; the ladder's bridged arm owns it.)
-        if matches!(site.invocant, crate::model::conventions::Invocant::Name(_)) {
+        if matches!(
+            site.invocant,
+            crate::model::conventions::Invocant::Name(_) | crate::model::conventions::Invocant::Place { .. }
+        ) {
             use crate::model::conventions::MethodToken;
             match MethodToken::parse(&r.target_name) {
                 MethodToken::Super(name) => {
@@ -782,6 +785,7 @@ impl FileAnalysis {
     ) -> Option<InferredType> {
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
+        let receiver_place = site.invocant.place();
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self
@@ -793,7 +797,9 @@ impl FileAnalysis {
                     )
                     .map(InferredType::ClassName);
             }
-            crate::model::conventions::Invocant::Name(n) | crate::model::conventions::Invocant::Expr(n) => n,
+            crate::model::conventions::Invocant::Name(n)
+            | crate::model::conventions::Invocant::Expr(n)
+            | crate::model::conventions::Invocant::Place { name: n, .. } => n,
         };
         let spelled_class_possible = matches!(site.invocant, crate::model::conventions::Invocant::Name(_));
         if invocant.is_empty() {
@@ -808,14 +814,11 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
-        // Flow-narrowing place invocant.
-        if let Some(span) = invocant_span {
-            if InvocantText::parse(invocant).is_element_place() {
-                if let Some(t) = self.inferred_type_via_bag_ctx(invocant, span.start, module_index)
-                {
-                    if !self.dispatch_classes_of(&t, module_index).is_empty() {
-                        return Some(t);
-                    }
+        // A narrowed place receiver.
+        if let (Some(place), Some(span)) = (receiver_place, invocant_span) {
+            if let Some(t) = self.place_type_at(place, span.start, module_index) {
+                if !self.dispatch_classes_of(&t, module_index).is_empty() {
+                    return Some(t);
                 }
             }
         }

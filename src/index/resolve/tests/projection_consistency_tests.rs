@@ -67,7 +67,7 @@ fn check_cursor_contracts(
     idx: &crate::index::module_index::ModuleIndex,
 ) -> Vec<String> {
     let mut violations = Vec::new();
-    let key = FileKey::Path(path.to_path_buf());
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.to_path_buf()));
     let cs = resolve(
         store,
         fa,
@@ -502,7 +502,7 @@ fn requires_round_trip_holds_on_the_contract_fixtures() {
         resolve(
             &store,
             fa,
-            FileKey::Path(p.clone()),
+            FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(p.clone())),
             pt,
             Some(&idx),
             OverrideScope::default(),
@@ -510,7 +510,7 @@ fn requires_round_trip_holds_on_the_contract_fixtures() {
     };
     let covers = |locs: &[RefLocation], p: &PathBuf, pt: tree_sitter::Point| {
         locs.iter().any(|l| {
-            matches!(&l.key, FileKey::Path(q) if q == p)
+            matches!(&l.key, FileKey::Path(q) if *q == crate::util::canonical_path::CanonicalPath::resolve(p))
                 && l.span.start.row == pt.row
                 && l.span.start.column <= pt.column
                 && pt.column < l.span.end.column
@@ -528,7 +528,7 @@ fn requires_round_trip_holds_on_the_contract_fixtures() {
         );
         for l in &impls {
             let FileKey::Path(lp) = &l.key else { continue };
-            let back = cs_at(lp, l.span.start).references();
+            let back = cs_at(&lp.to_path_buf(), l.span.start).references();
             assert!(
                 covers(&back, &ap, apt),
                 "leg 1: implementations({atom_file}) reached {}:{}:{} but references from \
@@ -549,7 +549,7 @@ fn requires_round_trip_holds_on_the_contract_fixtures() {
                 FileKey::Path(p)
                     if p.ends_with("Role.pm") || p.ends_with("SubRole.pm") =>
                 {
-                    Some((p.clone(), l.span.start))
+                    Some((p.to_path_buf(), l.span.start))
                 }
                 _ => None,
             })

@@ -77,7 +77,7 @@ sub new {
     );
 
     let core = IndexCore::new();
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/x/Demo/Has/Event.pm"), analysis));
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
     core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
@@ -94,11 +94,11 @@ sub new {
     // protects against None-over-Some).
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
-    let cached2 = Arc::new(CachedModule::new(PathBuf::from("/y/Demo/Has/Event.pm"), analysis2));
+    let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
     core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
-        PathBuf::from("/y/Demo/Has/Event.pm"),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
     );
 }
 
@@ -223,7 +223,7 @@ fn import_tier_strip_gates_on_persistence() {
     let fa = crate::build::builder::build(&tree, source.as_bytes());
     assert!(!fa.witnesses.is_empty());
     let cm = Arc::new(CachedModule::new(
-        PathBuf::from("/inc/Strip.pm"),
+        crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/inc/Strip.pm")),
         Arc::new(fa),
     ));
 
@@ -315,7 +315,7 @@ fn inc_resolution_enumerates_every_providing_root_in_inc_order() {
     let found = resolve_module_paths(&[a.clone(), b.clone()], "Twin");
     assert_eq!(
         found,
-        vec![a.join("Twin.pm"), b.join("Twin.pm")],
+        vec![crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")), crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm"))],
         "both roots provide Twin; the relation must hold both, @INC order first",
     );
     // The winner is still exactly what `require` would load.
@@ -365,11 +365,11 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     let owner = idx
         .candidate_defining_sub("Twin", "only_in_b")
         .expect("only_in_b is defined by the shadowed provider");
-    assert_eq!(owner.path, b.join("Twin.pm"));
+    assert_eq!(owner.path, crate::util::canonical_path::CanonicalPath::resolve(b.join("Twin.pm")));
     let owner_a = idx
         .candidate_defining_sub("Twin", "only_in_a")
         .expect("only_in_a is defined by the winning provider");
-    assert_eq!(owner_a.path, a.join("Twin.pm"));
+    assert_eq!(owner_a.path, crate::util::canonical_path::CanonicalPath::resolve(a.join("Twin.pm")));
 }
 
 #[test]
@@ -401,11 +401,11 @@ fn a_workspace_file_still_shadows_an_inc_provider_of_the_same_name() {
     let inc_fa = build(inc_src);
     let ws_fa = build(ws_src);
 
-    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(inc_pm.clone(), inc_fa))));
+    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(inc_pm.clone()), inc_fa))));
     idx.register_workspace_module(ws_pm.clone(), ws_fa);
 
     assert_eq!(
-        idx.get_cached("Shadowed").map(|c| c.path.clone()),
+        idx.get_cached("Shadowed").map(|c| c.path.to_path_buf()),
         Some(std::fs::canonicalize(&ws_pm).unwrap_or(ws_pm.clone())),
         "the workspace file must hold the name slot",
     );
@@ -448,7 +448,9 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     // visibility rules, decided at CandidateSet construction so every
     // projection inherits it.
     use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
-    let base = std::env::temp_dir().join(format!("perl-lsp-asker-{}", std::process::id()));
+    // Fixed-width pid: the path is spelled into an analyzed source, and the
+    // equivalence dump compares that source's spans across two test runs.
+    let base = std::env::temp_dir().join(format!("perl-lsp-asker-{:010}", std::process::id()));
     let (applib, testlib) = (base.join("lib"), base.join("t").join("lib"));
     std::fs::create_dir_all(&applib).unwrap();
     std::fs::create_dir_all(&testlib).unwrap();
@@ -483,7 +485,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
 
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
         let scoped = ScopedLookup::for_origin(&idx, fa, None, crate::model::file_analysis::PackVisibility::Host);
-        scoped.get_cached("Twin").map(|c| c.path.clone())
+        scoped.get_cached("Twin").map(|c| c.path.to_path_buf())
     };
 
     assert_eq!(
@@ -592,7 +594,7 @@ fn the_writer_drains_more_entries_than_the_queue_holds() {
     // No connection: the harness drains unregistered, which is enough to
     // prove the producer/consumer pairing. The committed lane is exercised by
     // the persist-lane tests in `pack_invalidator_tests`.
-    run_persist_writer(rx, None, "test", |_c, _b: &[usize]| {}, |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
+    run_persist_writer(rx, None, "test", |_c, b: &[usize]| vec![true; b.len()], |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
     producer.join().unwrap();
     assert_eq!(committed.load(O::SeqCst), 0, "no connection ⇒ drained unregistered");
 }
@@ -668,4 +670,53 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose own blob fails to save inside a chunk that still commits
+/// must stay WHOLE: a copy stripped against a blob that is not on disk
+/// answers empty. Its chunk siblings landed and must strip. The failure is
+/// injected with a statement-scoped `RAISE(ABORT)` trigger, so the
+/// transaction commits with the siblings' rows.
+#[test]
+fn a_workspace_file_whose_save_failed_in_a_committed_chunk_stays_whole() {
+    let base = std::env::temp_dir().join(format!("ws-perfile-strip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (root, cache) = (base.join("root"), base.join("cache"));
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["Alpha", "Beta", "Gamma"] {
+        std::fs::write(
+            root.join(format!("{name}.pm")),
+            format!("package {name};\nsub run {{ my $self = shift; return {{ k => 1 }}; }}\n1;\n"),
+        )
+        .unwrap();
+    }
+    let failing = std::fs::canonicalize(root.join("Beta.pm")).unwrap();
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    crate::index::module_cache::with_test_cache_dir(&cache, std::time::Duration::from_secs(10), || {
+        {
+            let conn = crate::index::module_cache::open_cache_db(None, "perl").expect("test cache db");
+            let target = failing.to_string_lossy().replace('\'', "''");
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER kill_one BEFORE INSERT ON modules \
+                 WHEN NEW.path = '{target}' \
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+            ))
+            .unwrap();
+        }
+        index_workspace_with_index(&root, &idx, None, None);
+    });
+
+    let mut seen = 0;
+    idx.for_each_registered_file(&mut |cm| {
+        seen += 1;
+        let stripped = cm.analysis.symbols_are_evicted() || cm.analysis.bag_is_evicted();
+        if cm.path.as_path() == failing.as_path() {
+            assert!(!stripped, "{:?} was stripped though its blob never landed", cm.path);
+        } else {
+            assert!(stripped, "{:?} landed but was not stripped", cm.path);
+        }
+    });
+    assert_eq!(seen, 3, "every file must stay registered");
+    let _ = std::fs::remove_dir_all(&base);
 }

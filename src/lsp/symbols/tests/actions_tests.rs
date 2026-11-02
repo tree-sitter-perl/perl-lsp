@@ -515,7 +515,7 @@ fn test_hover_on_builtin_uses_module_index() {
     let cs = crate::index::resolve::resolve(
         &files,
         &analysis,
-        crate::index::open_docs::FileKey::Url(Url::parse("file:///test.pl").unwrap()),
+        crate::index::open_docs::FileKey::Url(Url::parse("file:///test.pl").unwrap(), Default::default()),
         Point::new(0, 0),
         Some(idx),
         crate::index::resolve::OverrideScope::default(),

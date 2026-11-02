@@ -21,7 +21,7 @@ pub fn pack_completion(
     tree: &tree_sitter::Tree,
     point: tree_sitter::Point,
     language: &str,
-    path: Option<&std::path::Path>,
+    path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &ModuleIndex,
 ) -> (Vec<CompletionItem>, bool) {
     let base_idx: &dyn crate::model::file_analysis::CrossFileLookup = module_index;
@@ -60,9 +60,7 @@ pub fn pack_completion(
         let cs = crate::index::resolve::resolve(
             open_docs,
             analysis,
-            crate::index::open_docs::FileKey::Path(
-                path.map(|p| p.to_path_buf()).unwrap_or_default(),
-            ),
+            crate::index::open_docs::FileKey::Path(path.cloned().unwrap_or_default()),
             point,
             Some(base_idx),
             crate::index::resolve::OverrideScope::default(),
@@ -152,7 +150,7 @@ fn closure_symbol_completion(
     analysis: &crate::model::file_analysis::FileAnalysis,
     source: &str,
     point: tree_sitter::Point,
-    path: Option<&std::path::Path>,
+    path: Option<&crate::util::canonical_path::CanonicalPath>,
     module_index: &ModuleIndex,
     items: &mut Vec<CompletionItem>,
 ) -> bool {
@@ -173,7 +171,7 @@ fn closure_symbol_completion(
     let cs = crate::index::resolve::resolve(
         open_docs,
         analysis,
-        crate::index::open_docs::FileKey::Path(path.map(|p| p.to_path_buf()).unwrap_or_default()),
+        crate::index::open_docs::FileKey::Path(path.cloned().unwrap_or_default()),
         point,
         Some(module_index),
         crate::index::resolve::OverrideScope::default(),
@@ -207,7 +205,7 @@ fn macro_completion(
     source: &str,
     point: tree_sitter::Point,
     language: &str,
-    path: Option<&std::path::Path>,
+    path: Option<&crate::util::canonical_path::CanonicalPath>,
     items: &mut Vec<CompletionItem>,
 ) -> bool {
     if !crate::build::language_driver::LanguageRegistry::has_preprocessor_macros(language) {
