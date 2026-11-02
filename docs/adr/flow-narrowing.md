@@ -212,8 +212,11 @@ soundness needs a stricter no-call-between-guard-and-use model.
 Every fact about a variable is keyed, when it is pushed, to the scope that
 binds the name where the fact is made: the scope declaring the lexical it
 reaches, else the outermost scope, where every package variable and every
-undeclared pack name lives. The builder keys at push (`Builder::push_witness`);
-a pack keys the assembled analysis once, before the seal
+undeclared pack name lives. The builder keys the walk's facts once the walk
+is done, since a fact can precede the declaration it is about
+(`bind_walk_witnesses`), and every later push as it goes
+(`Builder::push_witness`); a pack keys the assembled analysis once, before
+the seal
 (`FileAnalysis::bind_variable_witnesses`); enrichment keys its own pushes. One
 rule serves all three (`bind_variable_witness`), and the two binders answer
 the binding by the same `variable_use`.
@@ -221,8 +224,10 @@ the binding by the same `variable_use`.
 A read is then name resolution, never a merge: the binding is the innermost
 scope on the lookup chain holding a fact about the name made at or before
 the read (`variable_binding_scope`, through the bag's per-name scope index),
-and the read queries that one attachment. A shadowing declaration is its own
-binding, so an inner `my $x` never sees the outer one's facts.
+and the read queries that one attachment. A shadowing declaration is its
+own binding, so an inner `my $x` never sees the outer one's facts. On the
+assembled analysis, a fact made in the scope declaring the name stays there
+wherever it sits in it (a member's declared type spans its class).
 
 **A fact made in a nested block is a region.** It holds from where it is made
 to the end of the block it was made in, so the else arm never sees the then
