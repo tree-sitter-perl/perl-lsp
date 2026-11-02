@@ -1237,12 +1237,11 @@ impl<'a> Builder<'a> {
         if let Some(w) = fe.lower_to_witness() {
             // The walk mints a single-target write's edge as it passes;
             // the `@flow` pass reaches the same write again.
-            if self.bag.for_attachment(&w.attachment).iter().any(|o| {
-                o.span == w.span && o.payload == w.payload
-            }) {
+            let w = self.bound_witness(w);
+            if self.bag.iter_attachment(&w.attachment).any(|o| o.span == w.span && o.payload == w.payload) {
                 return;
             }
-            self.push_witness(w);
+            self.bag.push(w);
         }
         self.flow_edges.push(fe);
     }

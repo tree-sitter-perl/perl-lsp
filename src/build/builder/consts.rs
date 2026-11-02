@@ -97,7 +97,17 @@ impl<'a> Builder<'a> {
             if let Some(decls) = by_scope.get(&sid) {
                 let hit = decls.iter().rev().find(|&&id| {
                     let sym = &self.symbols[id.0 as usize];
-                    sym.span.start <= at
+                    // A global minted from its uses declares nothing: its
+                    // uses bind by package, as `FileAnalysis::variable_use`
+                    // binds them.
+                    let minted = matches!(
+                        &sym.detail,
+                        crate::model::file_analysis::SymbolDetail::Variable {
+                            decl_kind: crate::model::file_analysis::DeclKind::Implicit | crate::model::file_analysis::DeclKind::Mention,
+                            ..
+                        }
+                    );
+                    !minted && sym.span.start <= at
                         && super::fold::our_gate_admits(super::fold::our_gate(sym), use_pkg)
                 });
                 if let Some(&id) = hit {
