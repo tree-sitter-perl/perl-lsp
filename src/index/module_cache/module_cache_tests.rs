@@ -2484,3 +2484,128 @@ fn held_names_are_candidates_of_their_own() {
     assert!(ref_candidate_files(&conn, &["accessor".to_string()]).is_empty());
     assert_eq!(sym_name_row_exists(&conn, "/ws/Held.pm", &names, "accessor"), Some(false));
 }
+
+/// A fresh, unique cache dir for one open-path test round.
+fn fresh_cache_dir(tag: &str) -> PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("perl_lsp_{tag}_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// Two writers (the resolver thread and the workspace indexer) open the same
+/// fresh DB at once. Both must end on ONE working file: if either opener's
+/// init failed and recreated the file, the other is left writing into an
+/// unlinked inode and the run persists nothing, silently.
+#[test]
+fn concurrent_openers_on_a_fresh_db_share_one_schema() {
+    for round in 0..32 {
+        let dir = fresh_cache_dir("open_race");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let openers: Vec<_> = (0..2)
+            .map(|_| {
+                let (dir, barrier) = (dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    open_cache_db_at(&dir, "perl", WRITER_BUSY_TIMEOUT)
+                })
+            })
+            .collect();
+        let conns: Vec<Connection> = openers
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap_or_else(|| panic!("round {round}: an opener got no connection")))
+            .collect();
+
+        // Each writer's rows must be visible to the other and to a fresh
+        // open of the path — the proof neither is on a deleted file.
+        for (i, c) in conns.iter().enumerate() {
+            shred_rows(c, &format!("/ws/W{i}.pm"), "workspace", &[], &[])
+                .unwrap_or_else(|e| panic!("round {round}: writer {i} cannot shred: {e}"));
+        }
+        let fresh = Connection::open(db_path_for(&dir, "perl")).unwrap();
+        for c in conns.iter().chain(std::iter::once(&fresh)) {
+            for i in 0..2 {
+                assert!(
+                    has_ref_rows(c, &format!("/ws/W{i}.pm")),
+                    "round {round}: writer {i}'s rows are not in the shared file"
+                );
+            }
+        }
+        drop(conns);
+        drop(fresh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Real corruption still recreates: a file of garbage bytes is not a
+/// database, and the open replaces it with a working one. Two openers race
+/// on it, and both must end on the SAME new file — the second must not
+/// delete the file the first just created.
+#[test]
+fn a_corrupt_cache_file_is_recreated() {
+    for round in 0..16 {
+        let dir = fresh_cache_dir("open_corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = db_path_for(&dir, "perl");
+        std::fs::write(&db, vec![0xA5u8; 8192]).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let openers: Vec<_> = (0..2)
+            .map(|_| {
+                let (dir, barrier) = (dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    open_cache_db_at(&dir, "perl", WRITER_BUSY_TIMEOUT)
+                })
+            })
+            .collect();
+        let conns: Vec<Connection> = openers
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap_or_else(|| panic!("round {round}: corrupt file was not recreated")))
+            .collect();
+        for (i, c) in conns.iter().enumerate() {
+            shred_rows(c, &format!("/ws/W{i}.pm"), "workspace", &[], &[]).unwrap();
+        }
+        let fresh = Connection::open(&db).unwrap();
+        for i in 0..2 {
+            assert!(has_ref_rows(&fresh, &format!("/ws/W{i}.pm")), "round {round}: writer {i} is on a deleted file");
+        }
+        let header = std::fs::read(&db).unwrap();
+        assert!(header.starts_with(b"SQLite format 3\0"), "the garbage file was not replaced");
+        drop((conns, fresh));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A DB whose derived tables carry an older row format is upgraded in place
+/// by the row-version gate. The open must not fail on the old shape, and
+/// must never recreate the file over it: the blob rows survive.
+#[test]
+fn an_old_row_format_upgrades_without_recreating_the_file() {
+    let dir = fresh_cache_dir("open_old_rows");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = db_path_for(&dir, "perl");
+    {
+        let c = Connection::open(&db).unwrap();
+        init_schema(&c).unwrap();
+        save_to_db(&c, "Keep::Me", &None, NAME_KEYED_SOURCE);
+        // An older `syms`: no `key_id`/`flags`, so none of today's indexes.
+        c.execute_batch(
+            "DROP TABLE syms;
+             CREATE TABLE syms (file_id INTEGER NOT NULL, name_id INTEGER NOT NULL);
+             UPDATE meta SET value = '1' WHERE key = 'ref_rows_version';",
+        )
+        .unwrap();
+    }
+
+    let conn = open_cache_db_at(&dir, "perl", WRITER_BUSY_TIMEOUT).expect("an old row format must open");
+    let kept: i64 = conn
+        .query_row("SELECT COUNT(*) FROM modules WHERE module_name = 'Keep::Me'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "the open recreated the file and dropped the blob rows");
+    shred_rows(&conn, "/ws/Upgraded.pm", "workspace", &[], &[]).unwrap();
+    assert!(has_ref_rows(&conn, "/ws/Upgraded.pm"));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
