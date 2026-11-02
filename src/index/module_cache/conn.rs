@@ -137,7 +137,11 @@ pub(super) fn open_cache_db_at(
     let db_path = db_path_for(dir, lang);
     log::info!("Module cache: {:?}", db_path);
 
-    match open_writer(&db_path, busy) {
+    let opened = {
+        let _open = OPENING.read().unwrap_or_else(|p| p.into_inner());
+        open_writer(&db_path, busy)
+    };
+    match opened {
         Ok(conn) => Some(conn),
         Err(e) if is_corruption(&e) => recreate_corrupt(&db_path, busy, &e),
         Err(e) => {
@@ -146,6 +150,13 @@ pub(super) fn open_cache_db_at(
         }
     }
 }
+
+/// Every writer open holds this shared; replacing a corrupt file holds it
+/// exclusively. An opener mid-open while the file and its `-wal`/`-shm` are
+/// unlinked ends up on a deleted inode or a WAL that vanishes under it
+/// (`SQLITE_READONLY_DBMOVED`, or no connection at all). In-process only: a
+/// second process on the same corrupt file can still race.
+static OPENING: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 fn open_writer(db_path: &std::path::Path, busy: std::time::Duration) -> rusqlite::Result<Connection> {
     let conn = open_db(db_path, rusqlite::OpenFlags::default())?;
@@ -161,18 +172,17 @@ fn is_corruption(e: &rusqlite::Error) -> bool {
     )
 }
 
-/// Replace a corrupt cache file. Serialized in-process, and the open is
-/// retried under the lock first: two openers that both saw the corrupt file
-/// must not both delete, or the second deletes the first one's fresh file.
-/// The `-wal`/`-shm` go with it, since SQLite would replay a leftover WAL
-/// into the new file.
+/// Replace a corrupt cache file, holding `OPENING` exclusively so no other
+/// open is in flight. The open is retried under the lock first: two openers
+/// that both saw the corrupt file must not both delete, or the second deletes
+/// the first one's fresh file. The `-wal`/`-shm` go with it, since SQLite
+/// would replay a leftover WAL into the new file.
 fn recreate_corrupt(
     db_path: &std::path::Path,
     busy: std::time::Duration,
     first: &rusqlite::Error,
 ) -> Option<Connection> {
-    static RECREATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _serial = RECREATE.lock().unwrap_or_else(|p| p.into_inner());
+    let _exclusive = OPENING.write().unwrap_or_else(|p| p.into_inner());
     match open_writer(db_path, busy) {
         Ok(conn) => return Some(conn),
         Err(e) if !is_corruption(&e) => {

@@ -2539,19 +2539,21 @@ fn concurrent_openers_on_a_fresh_db_share_one_schema() {
 }
 
 /// Real corruption still recreates: a file of garbage bytes is not a
-/// database, and the open replaces it with a working one. Two openers race
-/// on it, and both must end on the SAME new file — the second must not
-/// delete the file the first just created.
+/// database, and the open replaces it with a working one. Several openers
+/// race on it, and all must end on the SAME new file: none may delete the
+/// file another just created, and none may be mid-open while the old file
+/// and its `-wal`/`-shm` are unlinked.
 #[test]
 fn a_corrupt_cache_file_is_recreated() {
+    const OPENERS: usize = 4;
     for round in 0..16 {
         let dir = fresh_cache_dir("open_corrupt");
         std::fs::create_dir_all(&dir).unwrap();
         let db = db_path_for(&dir, "perl");
         std::fs::write(&db, vec![0xA5u8; 8192]).unwrap();
 
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let openers: Vec<_> = (0..2)
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(OPENERS));
+        let openers: Vec<_> = (0..OPENERS)
             .map(|_| {
                 let (dir, barrier) = (dir.clone(), barrier.clone());
                 std::thread::spawn(move || {
@@ -2568,7 +2570,7 @@ fn a_corrupt_cache_file_is_recreated() {
             shred_rows(c, &format!("/ws/W{i}.pm"), "workspace", &[], &[]).unwrap();
         }
         let fresh = Connection::open(&db).unwrap();
-        for i in 0..2 {
+        for i in 0..OPENERS {
             assert!(has_ref_rows(&fresh, &format!("/ws/W{i}.pm")), "round {round}: writer {i} is on a deleted file");
         }
         let header = std::fs::read(&db).unwrap();
