@@ -3363,3 +3363,41 @@ struct H {
     assert_eq!(ty("a"), Some(InferredType::ClassName("Bar".into())), "an undeclared member takes its write");
     assert_eq!(ty("b"), Some(InferredType::ClassName("Foo".into())), "a declared member keeps its type");
 }
+
+/// A write whose value retypes its own receiver settles: `lp` names both
+/// the struct member and its field, so writing `o->ptr` (a `zset`) into
+/// `it->lp.lp` makes `it->lp` a `zset`, whose `lp` the same write then
+/// fills. The write keeps both owners rather than trading one for the
+/// other every round.
+#[test]
+fn cpp_a_write_that_retypes_its_own_receiver_keeps_both_owners() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+    let p = std::path::PathBuf::from("/x/retype.c");
+    let src = "\
+typedef struct redisObject { void *ptr; } robj;
+typedef struct zset { int n; } zset;
+typedef struct { union _iterset { struct { unsigned char *lp; } lp; } set; } iter_t;
+typedef union _iterset iterset;
+void g(robj *z, zset *zs) { z->ptr = zs; }
+void f(robj *o, iter_t *op) {
+    iterset *it = &op->set;
+    it->lp.lp = o->ptr;
+}
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let mut owners: Vec<String> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "member_write"))
+        .filter(|w| matches!(&w.payload, WP::Edge(WA::Expr(sp)) if sp.start.row == 7))
+        .map(|w| match &w.attachment {
+            WA::Variable { name, .. } => format!("declared {name}"),
+            WA::Field { owner, name } => format!("{owner}.{name}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    owners.sort();
+    assert_eq!(owners, vec!["declared lp".to_string(), "zset.lp".to_string()]);
+}

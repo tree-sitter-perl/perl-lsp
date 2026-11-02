@@ -1600,17 +1600,22 @@ fn settle_member_writes(
     use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     // A receiver can be a member another write fills (`self.a.b = v` reads
     // `a`, which `self.a = A()` writes), so the writes settle to a fixed
-    // point, clear-and-emit: each round re-derives every write against the
-    // bag the last round left. Each round that moves settles a write it
-    // could not before or retypes one, so the writes' count bounds it.
+    // point: each round re-derives every write against the bag the rounds
+    // before it left, and keeps only what no earlier round stated. The
+    // rounds accumulate rather than clear-and-emit: a write whose value
+    // retypes its own receiver (redis `it->lp.lp = o->ptr`, where `lp`
+    // names both the struct member and its field) flips its owner every
+    // round, and a replacing pass never settles. A write a later round
+    // retypes keeps the owner an earlier one gave it too, an
+    // over-approximation that ends once no round adds a fact.
     if writes.is_empty() {
         return;
     }
     let _t = crate::util::ghost_stats::ScopedNs::start("member_write::settle");
-    crate::util::ghost_stats::count_by("member_write::writes", writes.len() as u64);
-    let mut settled: Vec<Witness> = Vec::new();
+    let mut stated: std::collections::HashSet<(WA, Span)> = Default::default();
+    let mut rounds = 0u64;
     for _ in 0..=writes.len() {
-        crate::util::ghost_stats::count("member_write::rounds");
+        rounds += 1;
         let mut values = Vec::new();
         for w in &writes {
             let Some(class) =
@@ -1632,6 +1637,9 @@ fn settle_member_writes(
                     class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
                 ),
             };
+            if !stated.insert((attachment.clone(), w.value)) {
+                continue;
+            }
             values.push(Witness {
                 attachment,
                 source: WitnessSource::Builder(MEMBER_WRITE.into()),
@@ -1639,15 +1647,16 @@ fn settle_member_writes(
                 span: scope.map_or(w.value, |scope| fa.scope(scope).span),
             });
         }
-        let same = |a: &[Witness], b: &[Witness]| {
-            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.attachment == y.attachment && x.span == y.span)
-        };
-        if same(&values, &settled) {
-            return;
+        if values.is_empty() {
+            break;
         }
-        fa.witnesses.remove_by_source_tag(MEMBER_WRITE);
-        settled = values.clone();
         fa.adopt_witnesses(values);
+    }
+    // Once per file, so attributing to the file is cheap: which file pays
+    // the rounds is the question the counters answer.
+    for (tag, n) in [("member_write::writes", writes.len() as u64), ("member_write::rounds", rounds)] {
+        crate::util::ghost_stats::count_by(tag, n);
+        crate::util::ghost_stats::count_for_file(tag, n);
     }
 }
 
