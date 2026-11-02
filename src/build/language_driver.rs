@@ -910,7 +910,7 @@ fn inject_member_blocks(
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {
@@ -1098,6 +1098,9 @@ fn remap_spans(
         names: _,
         slot_writes,
         member_writes,
+        member_reads,
+        place_narrowings,
+        place_writes,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1178,6 +1181,19 @@ fn remap_spans(
         *receiver = rspan(*receiver);
         *value = rspan(*value);
     }
+    for w in place_writes.iter_mut() {
+        *w = rspan(*w);
+    }
+    for n in place_narrowings.iter_mut() {
+        let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;
+        *subject = rspan(*subject);
+        *region = rspan(*region);
+    }
+    for m in member_reads.iter_mut() {
+        let crate::build::query_extract::MemberRead { span, receiver, member: _ } = m;
+        *span = rspan(*span);
+        *receiver = rspan(*receiver);
+    }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
         sc.span.end = r(sc.span.end);
@@ -1213,7 +1229,8 @@ fn remap_spans(
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
-        | WitnessAttachment::Param { .. } => {}
+        | WitnessAttachment::Param { .. }
+        | WitnessAttachment::Place(_) => {}
     };
     for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);
@@ -1237,8 +1254,10 @@ fn remap_spans(
     for (_, _, span) in label_refs.iter_mut() {
         *span = rspan(*span);
     }
-    for (_, span, _) in moved_from.iter_mut() {
-        *span = rspan(*span);
+    for m in moved_from.iter_mut() {
+        let crate::build::query_extract::MoveCall { spelling: _, subject, call, scope: _ } = m;
+        *subject = rspan(*subject);
+        *call = rspan(*call);
     }
     for span in control_regions.iter_mut() {
         *span = rspan(*span);

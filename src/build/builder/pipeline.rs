@@ -187,7 +187,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -725,6 +725,37 @@ fn build_once(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());
 
+    // A deref site's diagnostics read a value on its receiver (undef,
+    // optional, a guard-proved rep), and a place holds a value only where a
+    // guard narrowed it: the deref's own rep observation can't fire one. A
+    // place site nothing narrows is dropped here rather than carried per
+    // file — FHEM minted 73k of them and paid +3% peak RSS for none firing
+    // (2026-10-30). A method receiver's place is read for the same value
+    // (a class to dispatch on), so one nothing narrows goes back to its name.
+    {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let valued: std::collections::HashSet<&crate::model::file_analysis::Place> = b
+            .bag
+            .all()
+            .iter()
+            .filter_map(|w| match (&w.attachment, &w.payload) {
+                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_)) => Some(&**p),
+                _ => None,
+            })
+            .collect();
+        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        b.arrow_deref_sites.shrink_to_fit();
+        for r in &mut b.refs {
+            if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {
+                if let crate::model::conventions::Invocant::Place { name, place } = invocant {
+                    if !valued.contains(&**place) {
+                        *invocant = crate::model::conventions::Invocant::Name(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let packages = b.package_facts();
     let mut fa = FileAnalysis::new(crate::model::file_analysis::FileAnalysisParts {
         scopes: b.scopes,
@@ -922,7 +953,7 @@ impl<'a> Builder<'a> {
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
-            if let (RefKind::HashKeyAccess { var_text }, AccessKind::Write) =
+            if let (RefKind::HashKeyAccess { var_text, .. }, AccessKind::Write) =
                 (&r.kind, r.access)
             {
                 let resolved_owner = match r.hash_key_owner() {

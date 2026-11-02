@@ -1151,7 +1151,7 @@ impl<'a> Builder<'a> {
     /// force, `@Pkg::ISA` in `Pkg`.
     fn isa_package(&self, var: &str, at: Node<'a>) -> Option<String> {
         match self.binding_key_here(var, at.start_position()) {
-            super::consts::BindingKey::Package(pkg, base) if crate::model::conventions::is_isa_var(&base) => Some(pkg),
+            crate::model::file_analysis::Binding::Package(pkg, base) if crate::model::conventions::is_isa_var(&base) => Some(pkg),
             _ => None,
         }
     }

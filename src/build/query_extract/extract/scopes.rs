@@ -107,7 +107,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
                 direct: scope_cap == ScopeCap::Direct,
-                declaration_rules: Vec::new(),
+                hints: Vec::new(),
             });
             st.scope_stack.push((st.adorned.end_byte(e), id));
             st.out.scope_count += 1;

@@ -18,7 +18,7 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         ..Default::default()
     });
@@ -135,7 +135,7 @@ fn test_resolve_sub_return_type() {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),
@@ -2731,7 +2731,7 @@ fn a_fluent_chain_past_the_resolve_cap_does_not_abort() {
 #[test]
 fn binding_owner_restamp_drops_stale_symbol_link() {
     let mut r = Ref {
-        kind: RefKind::HashKeyAccess { var_text: "$cfg".to_string() },
+        kind: RefKind::HashKeyAccess { var_text: "$cfg".to_string(), dies_on_undef: false },
         span: Span { start: Point { row: 0, column: 0 }, end: Point { row: 0, column: 4 } },
         scope: ScopeId(0),
         target_name: "host".to_string(),

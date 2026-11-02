@@ -151,23 +151,58 @@ plugin's parameter assertion is minted at the sub's start, ahead of the
 every binding witness sits at or after its binding site, declarations can
 mark too and the rule needs no syntax at all.
 
-## Subjects: variables and places, one keying
+## Subjects: variables and places
 
-A guard subject is a variable (`$x`) or a **place** — a chain of stable
-hash/array projections (`cst::canonical_place_path`). A projection is
-stable when its subscript pins one slot: a constant key/index (`{a}`,
-`[0]`) or a plain scalar (`{$k}`, `[$i]`), off a scalar root
-(`$self->{a}{b}`, arrow form) or the named container itself
-(`$h{a}`/`$h[0]`, direct form, root `%h`/`@h`). Both subject kinds are
-keyed by the subject's **source spelling** on the same `Variable`
-attachment, so the reducer, scope-walk, and narrow-filter are untouched —
-a place witness is just a span-scoped slot witness. The place-vs-variable
-distinction lives in exactly two spots: the truncation rule and the one
-`method_call_invocant_classes` query seam (which fires for any invocant
-carrying a subscript — `->` / `{` / `[`). Truncation generalizes to
-multi-hop as "an opaque use of any **proper prefix** of the place (root,
-intermediate element, or — for a dynamic-key place — a key scalar)
-disturbs it, unless that prefix is the base of a longer access (a read)."
+A guard subject is a variable (`$x`) or a **place**: a part of a
+variable's value, named by what its root binds and the steps from it
+(`model/file_analysis/place.rs`, cfg-tier §3.3). `cst::read_place` reads
+the steps off the spelling — `Deref`, `Hash(slots)`, `Array(slots)` — and
+the builder binds the root and every key variable where they are written
+(`binding_key_here`), so the spelling never keys a fact:
+
+- `$self->{a}{b}`, `$self->{a}->{b}`, `$$self{a}{b}` and `${$self}{a}{b}`
+  are one place; `{'a'}`, `{"a"}` and `{a}` are one key.
+- `our %h; $h{a}` in package `P` and `$P::h{a}` are one place; an inner
+  `my $self` is another place from the outer one.
+- A subject's every subscript names its slot: a constant, or a plain
+  scalar (`{$k}`). A computed subscript is no subject, and as a
+  disturbance it reaches every slot.
+
+Place facts attach to `WitnessAttachment::Place`, temporal like
+`Variable` but with no scope walk: the place is its own identity, and
+the region decides where a fact holds. A member access carries its
+receiver's place on its invocant (`Invocant::Place`), and a deref with no
+ref of its own carries it on its `ArrowDerefSite`, so the receiver query
+and the deref diagnostics read it without re-reading the spelling. Plain
+variables stay on `Variable { name, scope }` until the variable lane moves
+onto bindings.
+
+A pack builds the same places from its captures at skeleton assembly
+(`query_extract/places.rs`): a member read whose receivers lead down to a
+resolved variable read is that variable's declaration plus a `Member` step
+per read. A guard whose subject is a member read (`isinstance(self.x, T)`,
+`dynamic_cast<D*>(o.b)`) narrows that place, cut by the same index: a
+member write is a write of its place, and a variable or member read that no
+further member read reads through is an opaque use. A bare member name in
+a member function is rooted at the body's elided receiver
+(`Binding::Receiver`), and so is a spelled receiver (`@receiver`, C++'s
+`this`) in that body, so `this->x` and a bare `x` are one place. A guard
+on a bare name records both a variable and a place narrowing; assembly
+keeps the place only when the name roots at the receiver. A receiver carries its place (`Invocant::Place`) only
+where a narrowing gives that place a value; elsewhere the place would
+answer nothing, so the ref keeps its plain receiver.
+
+Truncation is `Place::disturbed_by`: a **write** disturbs the place and
+everything under it — the place itself, a proper prefix, or an
+overlapping slice (a slice may write every slot it names, so it is a
+write wherever it appears; `delete`, `undef` and `local` on a slot are
+writes too, since each leaves it without the guarded value); an **opaque use** (a call, an argument, a
+whole-container op) disturbs only what lies strictly under it, so a
+method call on the slot's value leaves the slot narrowed. A read that
+steps further in is not an access. Two steps overlap when they can reach
+one slot: distinct constants never do, a key variable may hold anything.
+Rebinding a key variable moves the place, so its narrowing ends there
+(`RebindIndex`, by name, until variables move onto bindings).
 
 Accessor places (`$self->name`) are out: an accessor isn't a stable slot
 (it can return a different object per call, with side effects), so
