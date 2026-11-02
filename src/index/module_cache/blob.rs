@@ -343,7 +343,7 @@ pub fn decode_analysis_parts(
                      (types for this file are incomplete until it is rewritten)"
                 );
             }
-            fa.evict_witness_bag();
+            fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
         }
     }
     Some(fa)

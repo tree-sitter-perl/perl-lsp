@@ -13,7 +13,8 @@ use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
-/// replacement parse) shares. Lives in the builder layer: the resolver
+/// replacement parse, `isa` strings, cpanfiles, plugin pattern examples)
+/// shares (`layering_tests::perl_parsers_come_from_create_parser`). Lives in the builder layer: the resolver
 /// calling down is fine, the builder reaching up was not.
 pub fn create_parser() -> tree_sitter::Parser {
     let mut parser = tree_sitter::Parser::new();
