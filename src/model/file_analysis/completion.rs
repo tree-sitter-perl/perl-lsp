@@ -145,7 +145,7 @@ pub struct SignatureInfo {
     /// End of the sub body — used to query inferred types for params.
     pub body_end: Point,
     /// Pre-resolved param types (for cross-file subs where body_end is meaningless).
-    pub param_types: Option<Vec<Option<String>>>,
+    pub param_types: Option<Vec<Option<InferredType>>>,
 }
 
 // ---- Completion query methods ----
@@ -843,10 +843,7 @@ impl FileAnalysis {
                 ..
             } => {
                 let mut params: Vec<ParamInfo> = cross_params;
-                let mut param_types: Vec<Option<String>> = cross_param_types
-                    .into_iter()
-                    .map(|t| t.as_ref().map(inferred_type_to_tag))
-                    .collect();
+                let mut param_types: Vec<Option<InferredType>> = cross_param_types;
 
                 let is_method = is_method
                     || cf_is_method
@@ -1335,46 +1332,6 @@ pub(super) fn display_handler_params(params: &[ParamInfo]) -> Vec<String> {
 
 pub(super) fn source_line_at(source: &str, row: usize) -> &str {
     source.lines().nth(row).unwrap_or("")
-}
-
-/// Serialize an InferredType to a simple string tag.
-/// Used by signature help's `param_types` field, which piggy-backs on the
-/// pre-unification string representation for backwards-compatible JSON output.
-pub fn inferred_type_to_tag(ty: &InferredType) -> String {
-    match ty {
-        InferredType::ClassName(name) => format!("Object:{}", name),
-        InferredType::FirstParam { package } => format!("Object:{}", package),
-        InferredType::HashRef => "HashRef".to_string(),
-        // Structurally-typed hashes read as plain HashRef on the wire —
-        // the per-key detail drives narrowing, not display (yet).
-        InferredType::HashWithKeys { .. } => "HashRef".to_string(),
-        InferredType::ArrayRef => "ArrayRef".to_string(),
-        InferredType::CodeRef { .. } => "CodeRef".to_string(),
-        InferredType::Regexp => "Regexp".to_string(),
-        InferredType::Numeric => "Numeric".to_string(),
-        InferredType::String | InferredType::RefTagOf { .. } => "String".to_string(),
-        // Method dispatch on a Parametric uses its `class_name()`
-        // (= the flavor's dispatch class), so the tag follows.
-        // Type-arg detail lives in the richer
-        // `format_inferred_type` rendering.
-        InferredType::Parametric(p) => match p.class_name() {
-            Some(c) => format!("Object:{}", c),
-            None => "Parametric".to_string(),
-        },
-        InferredType::Sequence(_) => "Sequence".to_string(),
-        // A constraint is a Type::Tiny object; method dispatch (deferred)
-        // routes there, so tag it as such rather than as its inner type.
-        InferredType::TypeConstraintOf(_) => "Object:Type::Tiny".to_string(),
-        // Marks never change dispatch: tag the base.
-        InferredType::Branded { base, .. } => inferred_type_to_tag(base),
-        // Optional dispatches nowhere until narrowed; tag the inner so the
-        // wire format stays backward-compatible, prefixed Maybe.
-        InferredType::Optional(inner) => format!("Maybe:{}", inferred_type_to_tag(inner)),
-        InferredType::Undef => "Undef".to_string(),
-        InferredType::Bool => "Bool".to_string(),
-        InferredType::Unknown => "Unknown".to_string(),
-        InferredType::Union(arms) => arms.iter().map(inferred_type_to_tag).collect::<Vec<_>>().join("|"),
-    }
 }
 
 /// Format a cross-file method signature from a SubInfo view.

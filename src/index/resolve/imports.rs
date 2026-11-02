@@ -15,7 +15,7 @@ pub(super) fn import_candidates(
     out: &mut Vec<CompletionCandidate>,
 ) {
     use crate::model::file_analysis::{
-        format_inferred_type, SymKind as FaSymKind, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
+        SymKind as FaSymKind, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
         PRIORITY_EXPLICIT_IMPORT,
     };
     let mut seen = std::collections::HashSet::new();
@@ -95,7 +95,7 @@ pub(super) fn import_candidates(
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
                     .filter(crate::model::file_analysis::InferredType::is_known)
-                    .map(|rt| format!("→ {} ", format_inferred_type(&rt)))
+                    .map(|rt| format!("→ {} ", origin.render_type(&rt)))
                     .unwrap_or_default();
 
                 // The FACT: this name can join the existing qw() list at
@@ -195,11 +195,10 @@ pub(super) fn completion_detail_for_import(
     whole: Option<&crate::model::file_analysis::FileAnalysis>,
     module_name: &str,
 ) -> String {
-    use crate::model::file_analysis::format_inferred_type;
     if let Some(whole) = whole {
         if let Some(sub_info) = whole.sub_info_view(name) {
             if let Some(rt) = sub_info.return_type(None).filter(crate::model::file_analysis::InferredType::is_known) {
-                return format!("→ {} ({})", format_inferred_type(&rt), module_name);
+                return format!("→ {} ({})", whole.render_type(&rt), module_name);
             }
         }
     }
