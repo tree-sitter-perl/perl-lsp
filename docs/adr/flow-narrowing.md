@@ -209,25 +209,36 @@ soundness needs a stricter no-call-between-guard-and-use model.
 
 ## Variables are bindings
 
-Every fact about a variable is keyed, when it is pushed, to the scope that
-binds the name where the fact is made: the scope declaring the lexical it
-reaches, else the outermost scope, where every package variable and every
-undeclared pack name lives. The builder keys the walk's facts once the walk
-is done, since a fact can precede the declaration it is about
-(`bind_walk_witnesses`), and every later push as it goes
-(`Builder::push_witness`); a pack keys the assembled analysis once, before
-the seal
-(`FileAnalysis::bind_variable_witnesses`); enrichment keys its own pushes. One
-rule serves all three (`bind_variable_witness`), and the two binders answer
-the binding by the same `variable_use`.
+Every fact about a variable attaches to the place its name binds to where
+the fact is made, `Place{root, []}`: a lexical is its declaration
+(`Binding::Lexical`), a package variable its package and name
+(`Binding::Package`), and `@_` the arguments of the callable it is read in
+(`Binding::Arguments`), never a symbol, since `@_` cannot be declared. A
+token that declares two symbols in one scope (python's class-body binding,
+`Symbol::declared_with`) binds one value. The builder binds the walk's
+facts once the walk is done, since a fact can precede the declaration it is
+about (`bind_walk_witnesses`), and every later push as it goes
+(`Builder::push_witness`); a pack binds the assembled analysis once, before
+the seal (`FileAnalysis::bind_variable_witnesses`); enrichment binds its own
+pushes. One rule serves all three (`bind_variable_witness`), over the two
+binders `Builder::binding_of` and `FileAnalysis::variable_binding_of`.
 
-A read is then name resolution, never a merge: the binding is the innermost
-scope on the lookup chain holding a fact about the name made at or before
-the read (`variable_binding_scope`, through the bag's per-name scope index),
-and the read queries that one attachment. A shadowing declaration is its
-own binding, so an inner `my $x` never sees the outer one's facts. On the
-assembled analysis, a fact made in the scope declaring the name stays there
-wherever it sits in it (a member's declared type spans its class).
+A read is then name resolution, never a merge: the reader binds the name
+where it reads it and queries that one place. A shadowing declaration is its
+own binding, so an inner `my $x` never sees the outer one's facts, and a
+redeclaration in the same scope is a fresh binding too: a read after it sees
+only the new variable's value. On the assembled analysis, a fact made in the
+scope declaring the name belongs to that declaration wherever it sits in the
+scope (a member's declared type spans its class). An edge that reaches a
+variable from a read takes the read's point; one with no read position (a
+member's declared type) asks at the end of the scope the binding lives in.
+
+A rebind cuts a fact about the variable it binds, not every variable of the
+name: each FlowEdge target is a write of the whole variable in the place
+disturbance index (`rebind_index`), so a write to a shadowing `$x` leaves
+the outer `$x`'s narrowing standing.
+TODO(pack-narrowing-bindings): a pack's variable narrowing is still cut at
+extract time, where no binding exists, by name.
 
 **A fact made in a nested block is a region.** It holds from where it is made
 to the end of the block it was made in, so the else arm never sees the then

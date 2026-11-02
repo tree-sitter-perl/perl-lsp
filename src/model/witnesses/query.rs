@@ -116,6 +116,18 @@ pub fn query_place_type(
     }
 }
 
+/// What the variable `place` holds at `point`.
+pub fn query_variable_place(
+    bag: &WitnessBag,
+    ctx: &BagContext,
+    place: &crate::model::file_analysis::Place,
+    point: Point,
+) -> Option<InferredType> {
+    let reg = ReducerRegistry::with_defaults();
+    let mut state = QueryState::new();
+    reg.query_variable_place(bag, ctx, place, Some(point), None, &mut state)
+}
+
 /// Walk the scope chain from `scope` upward, folding every Variable
 /// witness for `var`; returns the first scope that produces a typed
 /// answer, else `None`.

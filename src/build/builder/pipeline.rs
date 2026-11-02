@@ -445,6 +445,7 @@ fn build_once(
         defined_narrowings: Vec::new(),
         tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
+        rebinds: Default::default(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
@@ -869,36 +870,33 @@ impl<'a> Builder<'a> {
     pub(super) fn bind_walk_witnesses(&mut self) {
         let mut bag = std::mem::take(&mut self.bag);
         bag.rewrite(|w| {
-            if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
-                let binding = self.binding_scope_of(name, w.span.start, *scope);
-                crate::model::file_analysis::bind_variable_witness(w, binding, &self.scopes);
-            }
+            crate::model::file_analysis::bind_variable_witness(w, &self.scopes, |n, at, sc| self.binding_of(n, at, sc));
         });
         self.bag = bag;
         self.vars_bound = true;
     }
 
-    /// A variable's facts live on its binding: the scope that declares the
-    /// name a write in `scope` reaches, or the outermost scope for a
-    /// package variable (`bind_variable_witness`). During the walk a fact
-    /// stays where it was made (`bind_walk_witnesses`).
+    /// A variable's facts live on the place its name binds to
+    /// (`bind_variable_witness`). During the walk a fact stays where it was
+    /// made (`bind_walk_witnesses`).
     pub(crate) fn bound_witness(&self, mut w: crate::model::witnesses::Witness) -> crate::model::witnesses::Witness {
-        if !self.vars_bound {
-            return w;
-        }
-        if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
-            let binding = self.binding_scope_of(name, w.span.start, *scope);
-            crate::model::file_analysis::bind_variable_witness(&mut w, binding, &self.scopes);
+        if self.vars_bound {
+            crate::model::file_analysis::bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.binding_of(n, at, sc));
         }
         w
     }
 
-    /// The scope `name`, written at `at` in `scope`, is bound in.
-    pub(crate) fn binding_scope_of(&self, name: &str, at: Point, scope: ScopeId) -> ScopeId {
-        match self.binding_key_in(name, at, scope) {
-            crate::model::file_analysis::Binding::Lexical(sym) => self.symbols[sym.0 as usize].scope,
-            _ => crate::model::file_analysis::outermost_scope(&self.scopes, scope),
-        }
+    /// What `name`, written at `at` in `scope`, binds to, and the scope
+    /// that binding lives in.
+    pub(crate) fn binding_of(&self, name: &str, at: Point, scope: ScopeId) -> (crate::model::file_analysis::Binding, ScopeId) {
+        use crate::model::file_analysis::Binding;
+        let binding = self.binding_key_in(name, at, scope);
+        let home = match &binding {
+            Binding::Lexical(sym) | Binding::Receiver(sym) => self.symbols[sym.0 as usize].scope,
+            Binding::Arguments(callable) => *callable,
+            Binding::Package(..) => crate::model::file_analysis::outermost_scope(&self.scopes, scope),
+        };
+        (binding, home)
     }
 
     pub(super) fn push_type_constraint_from(
@@ -939,11 +937,10 @@ impl<'a> Builder<'a> {
     fn seed_arg_windows(&mut self) {
         use crate::model::witnesses::WitnessAttachment;
         let facts = self.package_facts();
-        let seeded: std::collections::HashSet<ScopeId> = self.bag.all().iter().filter_map(|w| match &w.attachment {
-            WitnessAttachment::Variable { name, scope } if name == "@_"
-                && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
-            _ => None,
-        }).collect();
+        let seeded = |scope: &crate::model::file_analysis::Scope| {
+            let args = crate::model::file_analysis::Place::variable(crate::model::file_analysis::Binding::Arguments(scope.id));
+            self.bag.iter_attachment(&WitnessAttachment::Place(Box::new(args))).any(|w| w.span.start == scope.span.start)
+        };
         let method_names = self.method_call_names();
         let mut heads = Vec::new();
         for i in 0..self.scopes.len() {
@@ -957,7 +954,7 @@ impl<'a> Builder<'a> {
             // The class a sub belongs to is its symbol's (`sub Foo::bar`
             // is `Foo`'s), not the package in force around it.
             let owner_pkg = scope.owner.and_then(|o| self.symbols[o.0 as usize].package.clone());
-            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded.contains(&scope.id)) else { continue };
+            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded(scope)) else { continue };
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             // A named sub of a class package is a method unless the file
             // only ever calls it as a plain function.

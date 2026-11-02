@@ -786,7 +786,6 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("tag_narrowing");
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
-        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for g in &self.tag_narrowings {
             let Some(InferredType::RefTagOf { subject, site, via }) =
                 self.bag_query_variable(&g.var, g.scope, g.region.start)
@@ -797,11 +796,12 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let since_tag = Span { start: site.end, end: g.region.start };
-            if rebinds.earliest_in(&subject, since_tag).is_some() {
+            let rebound = Place::variable(self.binding_of(&subject, g.region.start, g.scope).0);
+            if self.rebinds.earliest_in(&rebound, since_tag).is_some() {
                 continue;
             }
             let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
-            let cut = rebinds.earliest_in(&subject, g.region);
+            let cut = self.rebinds.earliest_in(&rebound, g.region);
             if let Some(region) = crate::model::file_analysis::cut_region(g.region, [cut]) {
                 emits.push((subject, g.scope, ty, region));
             }
@@ -851,7 +851,7 @@ impl<'a> Builder<'a> {
             self.arrow_deref_sites.extend(sites);
             Some(idx)
         };
-        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
+        self.rebinds = self.rebind_index();
         let mut facts = Vec::new();
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
@@ -866,11 +866,15 @@ impl<'a> Builder<'a> {
                 });
                 continue;
             }
+            let rebound = |var: &str| {
+                let var = Place::variable(self.binding_of(var, pn.region.start, pn.scope).0);
+                self.rebinds.earliest_in(&var, pn.region)
+            };
             let cuts: Vec<Option<Point>> = match &pn.subject {
-                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => vec![rebinds.earliest_in(var, pn.region)],
+                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => vec![rebound(var)],
                 NarrowSubject::Place { place, key_vars, .. } => {
                     std::iter::once(places.as_ref().and_then(|idx| idx.earliest_in(place, pn.region)))
-                        .chain(key_vars.iter().map(|kv| rebinds.earliest_in(kv, pn.region)))
+                        .chain(key_vars.iter().map(|kv| rebound(kv)))
                         .collect()
                 }
             };
@@ -906,18 +910,30 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        drop(rebinds);
         for w in facts {
             self.push_witness(w);
         }
     }
 
+    /// Every FlowEdge target as a write of the whole variable it binds:
+    /// what cuts a fact about that variable short.
+    fn rebind_index(&self) -> PlaceDisturbanceIndex {
+        let mut idx = PlaceDisturbanceIndex::default();
+        for fe in &self.flow_edges {
+            let (binding, _) = self.binding_of(&fe.target_name, fe.target_at, fe.target_scope);
+            idx.add(fe.target_at, Access::Write, Place::variable(binding));
+        }
+        idx.seal();
+        idx
+    }
+
     /// The unqualified, sigiled name a binding was declared or written
     /// with: what every spelling of it shares.
-    fn binding_name<'b>(&'b self, binding: &'b Binding) -> &'b str {
+    pub(super) fn binding_name<'b>(&'b self, binding: &'b Binding) -> &'b str {
         match binding {
             Binding::Lexical(sid) => &self.symbols[sid.0 as usize].name,
             Binding::Package(_, name) => name,
+            Binding::Arguments(_) => crate::model::conventions::ARGUMENT_ARRAY,
             // Perl has no elided receiver: `$self` is a lexical.
             Binding::Receiver(_) => "",
         }

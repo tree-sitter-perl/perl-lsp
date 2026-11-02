@@ -688,6 +688,9 @@ struct Builder<'a> {
     /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
     /// truncation that replaced the `cst::rebinds_scalar` grammar scan.
     pending_narrowings: Vec<narrowing::PendingNarrow>,
+    /// Every rebind, as a write of the whole variable it binds; built with
+    /// the narrowing cutoffs, once the FlowEdges are minted.
+    rebinds: crate::model::file_analysis::PlaceDisturbanceIndex,
 
     /// Recognized guard conditions, for the redundant/contradictory-guard
     /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into

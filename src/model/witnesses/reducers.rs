@@ -50,6 +50,9 @@ pub struct ReducerQuery<'a> {
 /// `None`/empty for in-file callers.
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
+    /// The bag's file's symbols: a variable place's binding names its
+    /// declaration. Empty for a copy whose symbols were evicted.
+    pub symbols: &'a [crate::model::file_analysis::Symbol],
     pub package_framework: &'a dyn crate::model::file_analysis::PackageFrameworks,
     pub module_index: Option<&'a dyn crate::model::file_analysis::CrossFileLookup>,
     pub package_parents: &'a dyn crate::model::file_analysis::LocalParents,
@@ -1060,6 +1063,7 @@ impl WitnessReducer for ReturnExprReducer {
                 | WitnessAttachment::PackageSymbol { .. }
                 | WitnessAttachment::Expr(_)
                 | WitnessAttachment::Variable { .. }
+                | WitnessAttachment::Place(_)
                 | WitnessAttachment::Field { .. }
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))
     }

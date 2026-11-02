@@ -1340,6 +1340,7 @@ impl ReducerRegistry {
                  state: &mut _| {
                     let cached_ctx = BagContext {
                         scopes: &full.scopes,
+                        symbols: full.symbols(),
                         package_framework: &full.packages,
                         module_index: Some(idx),
                         package_parents: &full.packages,
@@ -1724,6 +1725,7 @@ impl ReducerRegistry {
                     let full = idx.bag_present(cached);
                     let local_ctx = BagContext {
                         scopes: &full.scopes,
+                        symbols: full.symbols(),
                         package_framework: &full.packages,
                         module_index: None,
                         package_parents: &full.packages,
@@ -2026,6 +2028,17 @@ impl ReducerRegistry {
                                 q.receiver.as_ref(), state,
                             )
                         }),
+                        (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
+                            state.in_opaque_frame(|state| {
+                                // A read recorded at `Expr(span)` holds what the
+                                // variable holds at the read.
+                                let point = match q.attachment {
+                                    WitnessAttachment::Expr(span) => Some(span.start),
+                                    _ => binding_scope_end(ctx, &place.root),
+                                };
+                                self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
+                            })
+                        }
                         _ => {
                             // A `PackageSymbol{package,..}` reached through an edge is
                             // a fresh method dispatch: its receiver is that call's
@@ -2118,6 +2131,13 @@ impl ReducerRegistry {
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
                             )
+                        }
+                        (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
+                            let point = match q.attachment {
+                                WitnessAttachment::Expr(span) => Some(span.start),
+                                _ => binding_scope_end(ctx, &place.root),
+                            };
+                            self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                         }
                         _ => {
                             let sub_q = ReducerQuery {
@@ -2596,6 +2616,7 @@ impl ReducerRegistry {
             state.pins.push(Arc::clone(full));
             let cached_ctx = BagContext {
                 scopes: &full.scopes,
+                symbols: full.symbols(),
                 package_framework: &full.packages,
                 module_index: Some(idx),
                 package_parents: &full.packages,
@@ -2762,6 +2783,70 @@ impl ReducerRegistry {
             ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
     }
+}
+
+impl ReducerRegistry {
+    /// What the variable `place` holds at `point`, under the framework of
+    /// the package its binding lives in.
+    pub(super) fn query_variable_place(
+        &self,
+        bag: &WitnessBag,
+        ctx: &BagContext,
+        place: &crate::model::file_analysis::Place,
+        point: Option<Point>,
+        receiver: Option<&InferredType>,
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        let att = WitnessAttachment::Place(Box::new(place.clone()));
+        let q = ReducerQuery {
+            attachment: &att,
+            point,
+            framework: binding_framework(ctx, &place.root),
+            arity_hint: None,
+            // Threaded so a deferred `ReturnExpr::ReceiverOr` on the
+            // variable (a statement-position `bless $obj, $class`)
+            // substitutes the CALL SITE's class.
+            receiver: receiver.cloned(),
+            args: Vec::new(),
+            context: Some(ctx),
+        };
+        match &*self.query_rec(bag, &q, state) {
+            ReducedValue::Type(t) => Some(t.clone()),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        }
+    }
+}
+
+/// Where an edge with no read position asks a binding from: the end of the
+/// scope the binding lives in, so every fact made in that scope holds; a
+/// package variable's is the file's.
+fn binding_scope_end(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> Option<Point> {
+    use crate::model::file_analysis::Binding;
+    let home = match binding {
+        Binding::Package(..) => return ctx.scopes.first().map(|s| s.span.end),
+        Binding::Lexical(sid) | Binding::Receiver(sid) => ctx.symbols.get(sid.0 as usize)?.scope,
+        Binding::Arguments(callable) => *callable,
+    };
+    ctx.scopes.get(home.0 as usize).map(|s| s.span.end)
+}
+
+/// The framework of the package a binding lives in: a package variable's
+/// own package, else the package around the scope its declaration (or
+/// callable) sits in.
+fn binding_framework(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> FrameworkFact {
+    use crate::model::file_analysis::Binding;
+    let home = match binding {
+        Binding::Package(pkg, _) => return ctx.package_framework.framework_of(pkg).unwrap_or(FrameworkFact::Plain),
+        Binding::Lexical(sid) | Binding::Receiver(sid) => ctx.symbols.get(sid.0 as usize).map(|s| s.scope),
+        Binding::Arguments(callable) => Some(*callable),
+    };
+    home.and_then(|home| {
+        crate::model::file_analysis::lookup_chain(ctx.scopes, home)
+            .scopes()
+            .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
+            .and_then(|pkg| ctx.package_framework.framework_of(pkg))
+    })
+    .unwrap_or(FrameworkFact::Plain)
 }
 
 /// The binding a read of `var` from `scope` at `point` takes its value

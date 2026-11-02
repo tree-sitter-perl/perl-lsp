@@ -283,6 +283,7 @@ pub fn bake_conclusion_map(
         // the bake could not walk even a local parent chain.
         let local_ctx = crate::model::witnesses::BagContext {
             scopes: &fa.scopes,
+            symbols: fa.symbols(),
             package_framework: &fa.packages,
             module_index: None,
             package_parents: &fa.packages,
@@ -1146,6 +1147,7 @@ mod bake_probe {
                 .collect();
             let local_ctx = crate::model::witnesses::BagContext {
                 scopes: &fa.scopes,
+                symbols: fa.symbols(),
                 package_framework: &fa.packages,
                 module_index: None,
                 package_parents: &fa.packages,

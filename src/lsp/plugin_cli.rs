@@ -271,13 +271,13 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         }))
         .collect();
 
-    // type_constraints — diff Variable+InferredType witnesses by
+    // type_constraints — diff variable-place InferredType witnesses by
     // (var_name, type, scope, span). The bag is canonical;
-    // `push_type_constraint` mirrors every TC into a Variable witness,
+    // `push_type_constraint` mirrors every TC into a variable witness,
     // so plugin-emitted TCs land here regardless.
     use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-    let var_type_key = |w: &crate::model::witnesses::Witness| -> Option<String> {
-        let WitnessAttachment::Variable { name, scope } = &w.attachment else { return None };
+    let var_type_key = |fa: &crate::model::file_analysis::FileAnalysis, w: &crate::model::witnesses::Witness| -> Option<String> {
+        let (name, scope) = fa.binding_label(w.attachment.variable_binding()?);
         let WitnessPayload::InferredType(t) = &w.payload else { return None };
         Some(format!(
             "{}|{:?}|{}|{}:{}",
@@ -288,16 +288,16 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         .witnesses
         .all()
         .iter()
-        .filter_map(var_type_key)
+        .filter_map(|w| var_type_key(&baseline, w))
         .collect();
     let type_constraints: Vec<Value> = with_plugin
         .witnesses
         .all()
         .iter()
         .filter_map(|w| {
-            let key = var_type_key(w)?;
+            let key = var_type_key(&with_plugin, w)?;
             if baseline_tc.contains(&key) { return None; }
-            let WitnessAttachment::Variable { name, scope } = &w.attachment else { return None };
+            let (name, scope) = with_plugin.binding_label(w.attachment.variable_binding()?);
             let WitnessPayload::InferredType(t) = &w.payload else { return None };
             Some(json!({
                 "var": name,

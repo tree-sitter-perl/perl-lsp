@@ -193,6 +193,15 @@ pub fn strip_variable_sigils(name: &str) -> &str {
     name.trim_start_matches(['$', '@', '%'])
 }
 
+/// Perl's `@_`: each call's own arguments, so it names a different array
+/// in every callable rather than one package variable.
+pub fn is_argument_array(name: &str) -> bool {
+    name == ARGUMENT_ARRAY
+}
+
+/// The argument array's spelling.
+pub const ARGUMENT_ARRAY: &str = "@_";
+
 /// A variable Perl itself defines (perlvar): punctuation (`$_`, `$@`, `@_`),
 /// digit (`$0`, `$1`), caret (`${^W}`) and the identifiers Perl forces into
 /// `main` (`%ENV`, `@ARGV`, `%SIG`, ...). Such a name never needs a

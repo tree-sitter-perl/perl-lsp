@@ -73,6 +73,10 @@ impl<'a> Builder<'a> {
         }
         let use_pkg = self.package_at_pos(at);
         if name.starts_with(|c| PERL_SPELLINGS.is_sigil(c)) {
+            // `@_` cannot be declared; a symbol for it is a mention.
+            if crate::model::conventions::is_argument_array(name) {
+                return crate::model::file_analysis::unbound_variable(&self.scopes, name, use_pkg.unwrap_or("main"), scope).0;
+            }
             if let Some(sym) = self.visible_variable_decl(name, at, scope, use_pkg) {
                 let sym = &self.symbols[sym.0 as usize];
                 return match super::fold::our_gate(sym) {
@@ -80,6 +84,7 @@ impl<'a> Builder<'a> {
                     None => Binding::Lexical(sym.id),
                 };
             }
+            return crate::model::file_analysis::unbound_variable(&self.scopes, name, use_pkg.unwrap_or("main"), scope).0;
         }
         Binding::Package(use_pkg.unwrap_or("main").to_string(), name.to_string())
     }

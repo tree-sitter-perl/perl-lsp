@@ -107,6 +107,10 @@ pub(super) fn finish(st: &mut ExtractState) {
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
+    // TODO(pack-narrowing-bindings): no binding exists at extract time, so
+    // these cut at a rebind of the NAME; a shadowing write cuts too early
+    // (it under-narrows). Moving the cut to `into_file_analysis`, beside the
+    // place narrowings, keys it by binding like Perl's.
     let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
     let mut narrowed = Vec::new();
     for (name, refined, region, scope) in pending {

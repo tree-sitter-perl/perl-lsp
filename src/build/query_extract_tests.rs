@@ -586,12 +586,12 @@ fn operator_evidence_ends_at_a_rebind() {
     let fa = extract(&tree, src.as_bytes(), &perl_pack())
         .unwrap()
         .into_file_analysis();
-    use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+    use crate::model::witnesses::{WitnessPayload, WitnessSource};
     let obs: Vec<_> = fa
         .witnesses
         .all()
         .iter()
-        .filter(|w| matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == "$x"))
+        .filter(|w| matches!(w.attachment.variable_binding(), Some(crate::model::file_analysis::Binding::Lexical(sid)) if fa.symbol(*sid).name == "$x"))
         .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "skeleton-obs"))
         .filter(|w| matches!(w.payload, WitnessPayload::Observation(_)))
         .collect();

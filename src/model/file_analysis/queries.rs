@@ -127,7 +127,7 @@ impl FileAnalysis {
     /// and before it is given a value again — a use-after-move bug. The
     /// moved-from region runs from the move call to the earliest FlowEdge
     /// rebinding the root (the SAME edge-driven cutoff narrowing uses,
-    /// `RebindIndex`) or write of the moved part, or the enclosing scope's
+    /// `rebind_index`) or write of the moved part, or the enclosing scope's
     /// end. The reads are the move's own (`MoveSite::reads`): keyed by the
     /// root's declaration, so a same-named var elsewhere never matches, and
     /// by path, so a sibling member of a moved member is no read of it.
@@ -157,7 +157,10 @@ impl FileAnalysis {
             key(&outer.start) <= key(&inner.start) && key(&inner.end) <= key(&outer.end)
         };
         let mut out = Vec::new();
-        let rebinds = RebindIndex::new(&self.flow_edges);
+        if self.pack.moved_from.is_empty() {
+            return out;
+        }
+        let rebinds = self.rebind_index();
         for m in &self.pack.moved_from {
             let (move_span, move_scope) = (&m.call, &m.scope);
             let scope_span = self.scope(*move_scope).span;
@@ -201,22 +204,22 @@ impl FileAnalysis {
             // LOCALS are flagged. This is what clears the last real-header FPs.
             // A member of the elided receiver is no parameter, and nothing
             // in the body rebinds the receiver.
-            let root_name = match &m.place.root {
+            let root = match &m.place.root {
                 Binding::Lexical(root) => {
                     let decl = self.symbol(*root);
                     if self.pack.param_regions.iter().any(|pr| contains(pr, &decl.selection_span)) {
                         continue;
                     }
-                    Some(decl.name.as_str())
+                    Some(Place::variable(m.place.root.clone()))
                 }
                 Binding::Receiver(_) => None,
-                Binding::Package(..) => continue,
+                Binding::Package(..) | Binding::Arguments(_) => continue,
             };
             // The moved-from state holds over the rest of the move's scope, up
             // to a rebind of its root or a reset of the moved place there.
             let region = Span { start: move_span.end, end: scope_span.end };
             let reset = m.resets.iter().map(|s| s.start).filter(|p| key(p) > key(&move_span.end)).min_by_key(key);
-            let cuts = [root_name.and_then(|n| rebinds.earliest_in(n, region)), reset];
+            let cuts = [root.and_then(|r| rebinds.earliest_in(&r, region)), reset];
             let Some(held) = cut_region(region, cuts) else { continue };
             for read in &m.reads {
                 let p = read.start;
@@ -280,8 +283,8 @@ impl FileAnalysis {
         }
     }
 
-    /// Raw Variable+InferredType lookup — returns the latest in-scope
-    /// witness for `var_name` before `point`, with no framework rules,
+    /// Raw place+InferredType lookup — returns the latest witness on the
+    /// binding `var_name` names at `point`, before `point`, with no framework rules,
     /// no branch fold, no narrowing.
     ///
     /// **NOT the canonical type query — test-only** (`#[cfg(test)]`
@@ -292,12 +295,10 @@ impl FileAnalysis {
     #[cfg(test)]
     pub fn inferred_type(&self, var_name: &str, point: Point) -> Option<&InferredType> {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let scope = self.scope_at(point)?;
+        let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
         let mut best: Option<(&InferredType, Point)> = None;
-        for w in self.witnesses.all() {
-            let WitnessAttachment::Variable { name, scope } = &w.attachment else { continue };
-            if name != var_name { continue; }
-            let scope_obj = &self.scopes[scope.0 as usize];
-            if !contains_point(&scope_obj.span, point) { continue; }
+        for w in self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))) {
             if w.span.start > point { continue; }
             let WitnessPayload::InferredType(t) = &w.payload else { continue };
             if best.is_none() || w.span.start > best.unwrap().1 {
@@ -332,6 +333,7 @@ impl FileAnalysis {
     ) -> crate::model::witnesses::BagContext<'a> {
         crate::model::witnesses::BagContext {
             scopes: &self.scopes,
+            symbols: self.symbols(),
             package_framework: &self.packages,
             module_index,
             package_parents: &self.packages,
@@ -347,11 +349,11 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
-        if let Some(t) = crate::model::witnesses::query_variable_type(
+        let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
+        if let Some(t) = crate::model::witnesses::query_variable_place(
             &self.witnesses,
             &self.bag_context(module_index),
-            var_name,
-            scope,
+            &place,
             point,
         ) {
             return Some(t);
@@ -876,46 +878,100 @@ impl FileAnalysis {
         }
     }
 
-    /// The scope a fact about `name`, made at `at` in `scope`, is keyed
-    /// to: the scope declaring the lexical it reaches, else the outermost
-    /// scope, where every package variable's facts live. The builder's
-    /// `binding_scope_of` by the same rule.
-    pub(crate) fn variable_binding_scope(&self, name: &str, at: Point, scope: ScopeId) -> ScopeId {
+    /// What `name`, used at `at` in `scope`, binds to, and the scope that
+    /// binding lives in: the builder's `binding_of` by the same rule
+    /// (`variable_use`).
+    pub(crate) fn variable_binding_of(&self, name: &str, at: Point, scope: ScopeId) -> (Binding, ScopeId) {
+        // `@_` cannot be declared; a symbol for it is a mention.
+        if crate::model::conventions::is_argument_array(name) {
+            return unbound_variable(&self.scopes, name, self.package_at(at).unwrap_or("main"), scope);
+        }
         // A fact made in the scope declaring the name is that binding's,
         // wherever in the scope it sits: a member's declared type spans its
         // class from the class's start.
-        let declares = self.symbols.declared_directly_in(scope).iter().any(|sid| {
-            let s = &self.symbols[sid.0 as usize];
-            s.name == name && matches!(s.kind, SymKind::Variable | SymKind::Field)
+        let mut declared = self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter(|s| {
+            s.name == name
+                && matches!(s.kind, SymKind::Variable | SymKind::Field)
+                && !matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() || matches!(decl_kind, DeclKind::Mention))
         });
-        if declares {
-            return scope;
+        if let Some(first) = declared.next() {
+            let sym = std::iter::once(first).chain(declared).filter(|s| s.span.start <= at).last().unwrap_or(first);
+            return (Binding::Lexical(self.binding_symbol(sym.id)), scope);
         }
+        let use_pkg = self.package_at(at).unwrap_or("main");
         match self.variable_use_in(name, at, scope) {
             VariableUse::Declared(id) => {
                 let sym = &self.symbols[id.0 as usize];
                 match &sym.detail {
-                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => {
-                        outermost_scope(&self.scopes, scope)
-                    }
-                    _ => sym.scope,
+                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => (
+                        Binding::Package(sym.package.as_deref().unwrap_or("main").to_string(), name.to_string()),
+                        outermost_scope(&self.scopes, scope),
+                    ),
+                    _ => (Binding::Lexical(self.binding_symbol(id)), sym.scope),
                 }
             }
-            VariableUse::GatedOur | VariableUse::Global { .. } => outermost_scope(&self.scopes, scope),
+            VariableUse::Global { package, name } => unbound_variable(&self.scopes, &name, &package, scope),
+            VariableUse::GatedOur => unbound_variable(&self.scopes, name, use_pkg, scope),
         }
     }
 
-    /// Key every variable fact in the bag to its binding
+    /// The name a binding was declared or written with, and the scope it
+    /// lives in.
+    pub fn binding_label<'a>(&'a self, binding: &'a Binding) -> (&'a str, ScopeId) {
+        match binding {
+            Binding::Lexical(sid) | Binding::Receiver(sid) => {
+                let s = &self.symbols[sid.0 as usize];
+                (&s.name, s.scope)
+            }
+            Binding::Package(_, name) => (name, ScopeId(0)),
+            Binding::Arguments(callable) => (crate::model::conventions::ARGUMENT_ARRAY, *callable),
+        }
+    }
+
+    /// Every FlowEdge target as a write of the whole variable it binds:
+    /// what cuts a fact about that variable short.
+    pub(crate) fn rebind_index(&self) -> PlaceDisturbanceIndex {
+        let mut idx = PlaceDisturbanceIndex::default();
+        for fe in &self.flow_edges {
+            let (binding, _) = self.variable_binding_of(&fe.target_name, fe.target_at, fe.target_scope);
+            idx.add(fe.target_at, Access::Write, Place::variable(binding));
+        }
+        idx.seal();
+        idx
+    }
+
+    /// The variables `scope` itself declares.
+    pub fn variables_declared_in(&self, scope: ScopeId) -> impl Iterator<Item = SymbolId> + '_ {
+        self.symbols
+            .declared_directly_in(scope)
+            .iter()
+            .copied()
+            .filter(|&v| matches!(self.symbols[v.0 as usize].kind, SymKind::Variable))
+    }
+
+    /// The place the variable or member `sym` declares.
+    pub fn declared_place(&self, sym: SymbolId) -> Place {
+        let s = &self.symbols[sym.0 as usize];
+        Place::variable(self.variable_binding_of(&s.name, s.span.start, s.scope).0)
+    }
+
+    /// The one symbol a binding is named by. A token that declares two
+    /// symbols in one scope (python's class-body binding: the member and
+    /// the name the body reads, `Symbol::declared_with`) binds one value.
+    fn binding_symbol(&self, id: SymbolId) -> SymbolId {
+        let sym = &self.symbols[id.0 as usize];
+        match sym.declared_with {
+            Some(twin) if self.symbols[twin.0 as usize].scope == sym.scope => id.min(twin),
+            _ => id,
+        }
+    }
+
+    /// Key every variable fact in the bag to the place its name binds to
     /// (`bind_variable_witness`), for an analysis whose facts were minted
     /// against the scope they were made in.
     pub(crate) fn bind_variable_witnesses(&mut self) {
         let mut bag = std::mem::take(&mut self.witnesses);
-        bag.rewrite(|w| {
-            if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
-                let binding = self.variable_binding_scope(name, w.span.start, *scope);
-                bind_variable_witness(w, binding, &self.scopes);
-            }
-        });
+        bag.rewrite(|w| bind_variable_witness(w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc)));
         self.witnesses = bag;
     }
 
@@ -1013,7 +1069,7 @@ impl FileAnalysis {
                 continue;
             }
             // A base that is a bare variable read (its Expr attachment
-            // edges to a Variable) is `closed_shape_key_typos`'s territory —
+            // edges to a variable) is `closed_shape_key_typos`'s territory —
             // it carries the whole-story gate this walk deliberately
             // doesn't. Materializing it here would bypass the gate
             // (the Compiler.pm conditional-reassignment FP).
@@ -1022,10 +1078,7 @@ impl FileAnalysis {
                 .for_attachment(&WitnessAttachment::Expr(base_span))
                 .iter()
                 .any(|bw| {
-                    matches!(
-                        bw.payload,
-                        WitnessPayload::Edge(WitnessAttachment::Variable { .. })
-                    )
+                    matches!(&bw.payload, WitnessPayload::Edge(target) if target.variable_binding().is_some())
                 });
             if base_is_variable {
                 continue;

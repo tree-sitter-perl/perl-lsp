@@ -167,6 +167,14 @@ impl WitnessAttachment {
     pub fn is_temporal(&self) -> bool {
         matches!(self, WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_))
     }
+
+    /// The binding whose whole value this attachment states facts about.
+    pub fn variable_binding(&self) -> Option<&crate::model::file_analysis::Binding> {
+        match self {
+            WitnessAttachment::Place(p) if p.is_variable() => Some(&p.root),
+            _ => None,
+        }
+    }
 }
 
 /// Index into `FileAnalysis::refs`.

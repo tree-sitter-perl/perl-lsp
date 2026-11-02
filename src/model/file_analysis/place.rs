@@ -24,6 +24,9 @@ pub enum Binding {
     /// The object a method body elides (C++'s `this`): its method's
     /// symbol. A bare member name in that body is a step from it.
     Receiver(SymbolId),
+    /// Perl's `@_` in a callable: each call's own arguments, keyed by the
+    /// callable's body scope.
+    Arguments(super::ScopeId),
 }
 
 /// A root binding plus the steps from it. An empty path is the variable

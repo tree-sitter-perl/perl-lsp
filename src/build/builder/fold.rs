@@ -265,8 +265,14 @@ impl<'a> Builder<'a> {
             // passes so call-binding-propagated shapes are visible.
             {
                 let _t = crate::util::ghost_stats::ScopedNs::start("fold::mutation_ext");
+                let bindings: Vec<_> = self
+                    .key_writes
+                    .iter()
+                    .map(|w| self.binding_of(&w.var_text, w.span.start, w.scope))
+                    .collect();
                 let ctx = crate::model::witnesses::BagContext {
                     scopes: &self.scopes,
+                    symbols: &self.symbols,
                     package_framework: &self.package_framework,
                     module_index: None,
                     package_parents: &self.package_parents,
@@ -278,6 +284,7 @@ impl<'a> Builder<'a> {
                     &ctx,
                     &self.key_writes,
                     true,
+                    &bindings,
                 );
             }
             let cur = crate::util::ghost_stats::timed("fold::snapshot", || {
@@ -407,18 +414,16 @@ impl<'a> Builder<'a> {
         // snapshot: the RHS typer takes `&self`, and this pass's own pushes
         // land only after the loop, so the bag cannot change mid-loop.
         let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
-        let mut typed_at: std::collections::HashMap<(String, Point), Vec<usize>> =
+        let mut typed_at: std::collections::HashMap<(crate::model::file_analysis::Binding, Point), Vec<usize>> =
             std::collections::HashMap::new();
         {
             let _t = crate::util::ghost_stats::ScopedNs::start("chain::already_index");
             for (i, w) in self.bag.all().iter().enumerate() {
-                if let (
-                    crate::model::witnesses::WitnessAttachment::Variable { name, .. },
-                    crate::model::witnesses::WitnessPayload::InferredType(_),
-                ) = (&w.attachment, &w.payload)
+                if let (Some(binding), crate::model::witnesses::WitnessPayload::InferredType(_)) =
+                    (w.attachment.variable_binding(), &w.payload)
                 {
                     typed_at
-                        .entry((name.clone(), w.span.start))
+                        .entry((binding.clone(), w.span.start))
                         .or_default()
                         .push(i);
                 }
@@ -491,7 +496,7 @@ impl<'a> Builder<'a> {
                     let sid = self.innermost_scope_id_at(span.start);
                     for name in list_scalars {
                         let already = typed_at
-                            .get(&(name.clone(), at))
+                            .get(&(self.binding_of(&name, at, sid).0, at))
                             .is_some_and(|idxs| {
                                 idxs.iter().any(|&i| {
                                     let crate::model::witnesses::WitnessPayload::InferredType(t) =
@@ -590,7 +595,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let ty = InferredType::Unknown;
-            let already_typed = typed_at.get(&(var.clone(), at)).is_some_and(|idxs| {
+            let already_typed = typed_at.get(&(self.binding_of(&var, at, sid).0, at)).is_some_and(|idxs| {
                 idxs.iter().any(|&i| {
                     matches!(&self.bag.all()[i].payload,
                         crate::model::witnesses::WitnessPayload::InferredType(t) if t.subsumes_narrowing(&ty))
@@ -1110,6 +1115,7 @@ impl<'a> Builder<'a> {
     pub(super) fn bag_context(&self) -> crate::model::witnesses::BagContext<'_> {
         crate::model::witnesses::BagContext {
             scopes: &self.scopes,
+            symbols: &self.symbols,
             package_framework: &self.package_framework,
             module_index: None,
             package_parents: &self.package_parents,
@@ -1124,6 +1130,10 @@ impl<'a> Builder<'a> {
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
+        if self.vars_bound {
+            let place = crate::model::file_analysis::Place::variable(self.binding_of(name, point, scope).0);
+            return crate::model::witnesses::query_variable_place(&self.bag, &self.bag_context(), &place, point);
+        }
         crate::model::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
     }
 
@@ -2046,15 +2056,15 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::WitnessAttachment;
         // Names the bag types at all — the measurement below separates a
         // known name the scope walk missed from an unattributable one.
-        let typed_names: std::collections::HashSet<String> = self
-            .bag
-            .all()
-            .iter()
-            .filter_map(|w| match &w.attachment {
-                WitnessAttachment::Variable { name, .. } => Some(name.clone()),
-                _ => None,
-            })
-            .collect();
+        let typed_names: std::collections::HashSet<String> = if crate::util::ghost_stats::enabled() {
+            self.bag
+                .attachments()
+                .filter_map(WitnessAttachment::variable_binding)
+                .map(|b| self.binding_name(b).to_string())
+                .collect()
+        } else {
+            Default::default()
+        };
 
         // Build variable def lookup
         let mut var_defs: std::collections::HashMap<String, Vec<(ScopeId, SymbolId)>> =

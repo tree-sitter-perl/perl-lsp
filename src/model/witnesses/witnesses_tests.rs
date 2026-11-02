@@ -935,6 +935,7 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
     let consumers: Vec<String> = Vec::new();
     let ctx = BagContext {
         scopes: &scopes,
+        symbols: &[],
         package_framework: &package_framework,
         module_index: None,
         package_parents: &package_parents,
@@ -1441,6 +1442,7 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
     ];
     let ctx = BagContext {
         scopes: &scopes,
+        symbols: &[],
         package_framework: &packages,
         module_index: None,
         package_parents: &packages,
