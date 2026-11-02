@@ -94,30 +94,30 @@ impl<'a> Builder<'a> {
     /// assignment target, or a container deref Perl autovivifies through
     /// (`push @{$h->{k}}, …`, `@{$h->{k}} = …`).
     pub(super) fn element_written_in_place(&self, elem: Node<'a>) -> bool {
-        if crate::cst::is_element_access_base(elem) {
+        if crate::cst::is_element_access_base(self.syntax, elem) {
             return false;
         }
-        if elem.parent().is_some_and(|p| matches!(p.kind(), "postinc_expression" | "preinc_expression")) {
+        if self.syntax.parent(elem).is_some_and(|p| matches!(p.kind(), "postinc_expression" | "preinc_expression")) {
             return true;
         }
-        if crate::cst::list_assignment_target_of(elem).is_some() {
+        if crate::cst::list_assignment_target_of(self.syntax, elem).is_some() {
             return true;
         }
-        let Some(container) = crate::cst::deref_container_of(elem) else { return false };
-        if let Some(p) = container.parent() {
+        let Some(container) = crate::cst::deref_container_of(self.syntax, elem) else { return false };
+        if let Some(p) = self.syntax.parent(container) {
             if p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(container) {
                 return true;
             }
         }
-        if crate::cst::list_assignment_target_of(container).is_some() {
+        if crate::cst::list_assignment_target_of(self.syntax, container).is_some() {
             return true;
         }
-        let call = match container.parent() {
+        let call = match self.syntax.parent(container) {
             Some(list) if crate::cst::is_list_literal(list) => {
                 if crate::cst::nth_element(list, 0) != Some(container) {
                     return false;
                 }
-                list.parent()
+                self.syntax.parent(list)
             }
             other => other,
         };
@@ -165,9 +165,9 @@ impl<'a> Builder<'a> {
     /// they are the write's path, not reads of keys the shape must have.
     pub(super) fn on_write_path(&self, elem: Node<'a>) -> bool {
         let mut top = elem;
-        while let Some(p) = top.parent().filter(|p| {
+        while let Some(p) = self.syntax.parent(top).filter(|p| {
             matches!(p.kind(), "hash_element_expression" | "array_element_expression")
-                && crate::cst::is_element_access_base(top)
+                && crate::cst::is_element_access_base(self.syntax, top)
         }) {
             top = p;
         }
@@ -176,7 +176,7 @@ impl<'a> Builder<'a> {
 
     /// How a write targets `elem`, if one does.
     pub(super) fn element_write_kind(&self, elem: Node<'a>) -> Option<ElementWrite> {
-        if let Some(p) = elem.parent().filter(|p| {
+        if let Some(p) = self.syntax.parent(elem).filter(|p| {
             p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(elem)
         }) {
             // An operator `assign_op` doesn't know still writes; reading
@@ -193,7 +193,7 @@ impl<'a> Builder<'a> {
     /// list binder's (`mint_flow_edges_via_query`), which gives it its slot's
     /// value the way it does a variable target's.
     pub(super) fn record_in_place_write(&mut self, elem: Node<'a>) {
-        if crate::cst::list_assignment_target_of(elem).is_none() {
+        if crate::cst::list_assignment_target_of(self.syntax, elem).is_none() {
             self.record_key_write(elem, None, None, self.current_scope());
         }
     }
@@ -228,7 +228,7 @@ impl<'a> Builder<'a> {
         // `$arr[N]` stays unmodeled: there is no tuple on `@arr` to extend.
         let var_text: String = match (innermost.kind(), container.kind()) {
             ("hash_element_expression", "container_variable") => {
-                match crate::cst::canonical_container_name(container, self.source) {
+                match crate::cst::canonical_container_name(self.syntax, container, self.source) {
                     Some(n) => n,
                     None => return,
                 }
@@ -267,7 +267,7 @@ impl<'a> Builder<'a> {
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
-            conditional: crate::cst::conditional_arm(left, crate::cst::ArmBound::Sub).is_some(),
+            conditional: crate::cst::conditional_arm(self.syntax, left, crate::cst::ArmBound::Sub).is_some(),
         });
     }
 
@@ -294,7 +294,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn determine_access(&self, node: Node<'a>) -> AccessKind {
-        if let Some(parent) = node.parent() {
+        if let Some(parent) = self.syntax.parent(node) {
             match parent.kind() {
                 "variable_declaration" => return AccessKind::Declaration,
                 "assignment_expression" => {
@@ -310,7 +310,7 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
             // Check grandparent for assignment
-            if let Some(grandparent) = parent.parent() {
+            if let Some(grandparent) = self.syntax.parent(parent) {
                 if grandparent.kind() == "assignment_expression" {
                     if let Some(left) = grandparent.child_by_field_name("left") {
                         if node.start_byte() >= left.start_byte()
@@ -342,7 +342,7 @@ impl<'a> Builder<'a> {
     /// name comes from the `varname` child so forms like `@{$ref}[0]`
     /// (ERROR/block-varname) don't produce garbage.
     pub(super) fn canonicalize_container(&self, node: Node<'a>, text: &str) -> String {
-        crate::cst::canonical_container_name(node, self.source)
+        crate::cst::canonical_container_name(self.syntax, node, self.source)
             .unwrap_or_else(|| text.to_string())
     }
 
@@ -572,7 +572,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn detect_anon_hash_owner(&self, anon_hash: Node<'a>) -> Option<HashKeyOwner> {
-        let mut ancestor = anon_hash.parent()?;
+        let mut ancestor = self.syntax.parent(anon_hash)?;
         for _ in 0..5 {
             // Check if this is inside a bless call
             if self.is_bless_call(ancestor) {
@@ -613,7 +613,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            ancestor = ancestor.parent()?;
+            ancestor = self.syntax.parent(ancestor)?;
         }
         None
     }
@@ -864,7 +864,7 @@ impl<'a> Builder<'a> {
 
     /// Check if a node is the last statement in a sub/method body block.
     pub(super) fn is_last_statement_in_sub(&self, node: Node<'a>) -> bool {
-        let parent = match node.parent() {
+        let parent = match self.syntax.parent(node) {
             Some(p) => p,
             None => return false,
         };
@@ -872,7 +872,7 @@ impl<'a> Builder<'a> {
         if parent.kind() != "block" {
             return false;
         }
-        if let Some(grandparent) = parent.parent() {
+        if let Some(grandparent) = self.syntax.parent(parent) {
             if !matches!(grandparent.kind(),
                 "subroutine_declaration_statement" | "method_declaration_statement"
                 | "anonymous_subroutine_expression"

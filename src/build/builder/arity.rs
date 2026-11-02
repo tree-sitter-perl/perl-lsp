@@ -16,10 +16,14 @@ use super::*;
 ///   - `return X if @_;`            (arity >= 1 narrowing)
 ///   - `return X if @_ == N;`       (exact N)
 ///   - `return X if scalar @_ …;`   (scalar wrapper)
-pub(super) fn classify_arity_branch(return_node: tree_sitter::Node, source: &[u8]) -> Option<ArityBranch> {
-    let Some(parent) = return_node.parent() else { return None };
+pub(super) fn classify_arity_branch<'t>(
+    syn: &crate::cst::SyntaxForest<'t>,
+    return_node: tree_sitter::Node<'t>,
+    source: &[u8],
+) -> Option<ArityBranch> {
+    let Some(parent) = syn.parent(return_node) else { return None };
     match parent.kind() {
-        "expression_statement" => classify_bare_return_or_if_arm(parent, source),
+        "expression_statement" => classify_bare_return_or_if_arm(syn, parent, source),
         "postfix_conditional_expression" => {
             let cond = parent.child_by_field_name("condition")?;
             let keyword = connector_keyword_between(return_node, cond, source)?;
@@ -32,15 +36,16 @@ pub(super) fn classify_arity_branch(return_node: tree_sitter::Node, source: &[u8
 /// `expression_statement` parent → either a bare `return X` at sub
 /// body level (Default), OR inside an `if (@_ == N) { return X }` arm
 /// where the conditional_statement's condition is an arity test (Exact).
-pub(super) fn classify_bare_return_or_if_arm(
-    expr_stmt: tree_sitter::Node,
+pub(super) fn classify_bare_return_or_if_arm<'t>(
+    syn: &crate::cst::SyntaxForest<'t>,
+    expr_stmt: tree_sitter::Node<'t>,
     source: &[u8],
 ) -> Option<ArityBranch> {
-    let Some(block) = expr_stmt.parent() else { return None };
+    let Some(block) = syn.parent(expr_stmt) else { return None };
     if block.kind() != "block" {
         return None;
     }
-    let Some(outer) = block.parent() else { return None };
+    let Some(outer) = syn.parent(block) else { return None };
     match outer.kind() {
         "subroutine_declaration_statement"
         | "method_declaration_statement"
