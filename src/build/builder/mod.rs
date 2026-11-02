@@ -436,6 +436,10 @@ struct Builder<'a> {
     /// push directly here. Moved into `FileAnalysis.witnesses` when
     /// the analysis is constructed — no second seeding pass.
     bag: crate::model::witnesses::WitnessBag,
+    /// Whether the walk is done, so every declaration exists and a variable
+    /// fact can be keyed to its binding as it is pushed
+    /// (`bind_walk_witnesses`).
+    vars_bound: bool,
     /// Nodes that `emit_expr_witness` couldn't resolve at walk time.
     /// Two common shapes:
     ///   * **Forward-defined sub call** — `sub a { b() } sub b {…}`

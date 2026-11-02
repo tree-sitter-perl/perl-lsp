@@ -100,7 +100,9 @@ impl<'a> Builder<'a> {
             },
             source: crate::model::witnesses::WitnessSource::Builder("bless_receiver".into()),
             payload: crate::model::witnesses::WitnessPayload::ReturnExpr(re),
-            span: node_to_span(bless_node),
+            // A write: zero-width at its site, so it holds from there on
+            // rather than only inside the call.
+            span: Span { start: bless_node.start_position(), end: bless_node.start_position() },
         });
         true
     }

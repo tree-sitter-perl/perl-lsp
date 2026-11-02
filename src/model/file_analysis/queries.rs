@@ -881,6 +881,16 @@ impl FileAnalysis {
     /// scope, where every package variable's facts live. The builder's
     /// `binding_scope_of` by the same rule.
     pub(crate) fn variable_binding_scope(&self, name: &str, at: Point, scope: ScopeId) -> ScopeId {
+        // A fact made in the scope declaring the name is that binding's,
+        // wherever in the scope it sits: a member's declared type spans its
+        // class from the class's start.
+        let declares = self.symbols.declared_directly_in(scope).iter().any(|sid| {
+            let s = &self.symbols[sid.0 as usize];
+            s.name == name && matches!(s.kind, SymKind::Variable | SymKind::Field)
+        });
+        if declares {
+            return scope;
+        }
         match self.variable_use_in(name, at, scope) {
             VariableUse::Declared(id) => {
                 let sym = &self.symbols[id.0 as usize];

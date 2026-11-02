@@ -386,6 +386,7 @@ fn build_once(
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::model::witnesses::WitnessBag::new(),
+        vars_bound: false,
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
         blessing_packages: std::collections::HashSet::new(),
@@ -540,6 +541,7 @@ fn build_once(
 
     b.pop_scope();
     let _ = file_scope;
+    b.bind_walk_witnesses();
 
     // Flush plugin-emitted VarType constraints now that every scope
     // has been pushed. Each uses scope_at on the declared anchor point
@@ -859,10 +861,31 @@ impl<'a> Builder<'a> {
         self.bag.push(w)
     }
 
+    /// The walk keys a variable's facts by the scope they are made in: a
+    /// fact can precede the declaration it is about (a sub's invocant is
+    /// typed before its `my ($self) = @_` is visited). Once the walk is
+    /// done every declaration exists, so its facts move onto their
+    /// bindings here, and every later push binds as it goes.
+    pub(super) fn bind_walk_witnesses(&mut self) {
+        let mut bag = std::mem::take(&mut self.bag);
+        bag.rewrite(|w| {
+            if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
+                let binding = self.binding_scope_of(name, w.span.start, *scope);
+                crate::model::file_analysis::bind_variable_witness(w, binding, &self.scopes);
+            }
+        });
+        self.bag = bag;
+        self.vars_bound = true;
+    }
+
     /// A variable's facts live on its binding: the scope that declares the
     /// name a write in `scope` reaches, or the outermost scope for a
-    /// package variable (`bind_variable_witness`).
+    /// package variable (`bind_variable_witness`). During the walk a fact
+    /// stays where it was made (`bind_walk_witnesses`).
     pub(crate) fn bound_witness(&self, mut w: crate::model::witnesses::Witness) -> crate::model::witnesses::Witness {
+        if !self.vars_bound {
+            return w;
+        }
         if let crate::model::witnesses::WitnessAttachment::Variable { name, scope } = &w.attachment {
             let binding = self.binding_scope_of(name, w.span.start, *scope);
             crate::model::file_analysis::bind_variable_witness(&mut w, binding, &self.scopes);
