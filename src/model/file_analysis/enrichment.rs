@@ -590,7 +590,7 @@ impl FileAnalysis {
         }
         if !binding_by_var.is_empty() {
             for r in &mut self.refs {
-                if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+                if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                     if r.hash_key_owner()
                         .is_some_and(|o| !matches!(o, HashKeyOwner::Variable { .. }))
                     {
@@ -891,10 +891,8 @@ impl FileAnalysis {
     /// covered: method (`$x->m`) and hash (`$x->{k}`) carry a receiver-typed
     /// ref; array (`$x->[i]`) and code (`$x->()`) carry none, so the builder
     /// records them as `arrow_deref_sites` and this query merges the two
-    /// sources. The residual is the receiver *shape*, not the arrow form: only
-    /// a plain scalar operand is recorded, so a chain receiver (`f()->[0]`,
-    /// `$x->{k}->()`) is skipped — only a plain scalar can be provably
-    /// `Undef`/`Optional`.
+    /// sources. A receiver is a variable or a part of one (`$x->{k}->()`);
+    /// a value receiver (`f()->[0]`) is skipped, since nothing narrows it.
     pub fn deref_receiver_sites(
         &self,
         module_index: Option<&dyn CrossFileLookup>,
@@ -902,7 +900,7 @@ impl FileAnalysis {
         use crate::model::conventions::InvocantText;
         let mut out = Vec::new();
         for r in self.refs() {
-            let (receiver, form) = match &r.kind {
+            let (receiver, form, place, dies_on_undef) = match &r.kind {
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     // Only a scalar invocant can be undef/Optional; a
                     // bareword/`__PACKAGE__`/chain/bridged receiver never
@@ -911,38 +909,44 @@ impl FileAnalysis {
                     if !matches!(name.classify(), InvocantText::Scalar(_)) {
                         continue;
                     }
-                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()))
+                    let place = invocant.place().cloned();
+                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()), place, true)
                 }
                 // A scalar `var_text` is the arrow form `$x->{k}`; the direct
                 // `$h{k}` form's base is the named hash, which can't be an
                 // undef *receiver* (and won't type as Undef/Optional anyway).
-                RefKind::HashKeyAccess { var_text, .. } if var_text.starts_with('$') => {
-                    (var_text.clone(), DerefForm::HashKey)
+                RefKind::HashKeyAccess { var_text, dies_on_undef } if var_text.starts_with('$') => {
+                    (var_text.clone(), DerefForm::HashKey, None, *dies_on_undef)
                 }
                 _ => continue,
             };
-            if let Some(ty) =
-                self.inferred_type_via_bag_ctx(&receiver, r.span.start, module_index)
-            {
+            let subject = match place {
+                Some(place) => Subject::Place(place),
+                None => Subject::Variable(receiver.clone()),
+            };
+            if let Some(ty) = self.subject_type_at(&subject, r.span.start, module_index) {
                 out.push(DerefSite {
                     span: r.span,
                     receiver,
+                    subject,
                     receiver_ty: ty,
                     form,
+                    dies_on_undef,
                 });
             }
         }
-        // Array (`$x->[i]`) / code (`$x->()`) derefs have no typed ref; the
-        // builder records them so they join the same stream.
+        // Derefs with no typed ref naming their receiver; the builder
+        // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
-            if let Some(ty) =
-                self.inferred_type_via_bag_ctx(&s.receiver, s.span.start, module_index)
-            {
+            let subject = s.subject();
+            if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
                 out.push(DerefSite {
                     span: s.span,
                     receiver: s.receiver.clone(),
+                    subject,
                     receiver_ty: ty,
                     form: s.form.clone(),
+                    dies_on_undef: s.dies_on_undef,
                 });
             }
         }
@@ -984,7 +988,7 @@ impl FileAnalysis {
         let mut out = Vec::new();
         for g in &self.guard_sites {
             let Some(prior) = self
-                .inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+                .subject_type_at(&g.subject, g.before_point, module_index)
                 .filter(InferredType::is_known)
             else {
                 continue;
@@ -1027,7 +1031,7 @@ impl FileAnalysis {
             out.push(GuardRedundancy {
                 span: g.span,
                 verdict,
-                subject: g.subject.clone(),
+                subject: g.spelling.clone(),
                 predicate: g.predicate.clone(),
                 satisfied,
             });
@@ -1035,22 +1039,26 @@ impl FileAnalysis {
         out
     }
 
-    /// The rep a `ref…eq` / `isa` GUARD established for `subject` at `point`,
-    /// read from **narrowing-sourced witnesses only**. Distinct from
-    /// `inferred_type_via_bag`: a `$x->{k}` deref pushes a zero-extent
-    /// `HashRef` belief sitting exactly at the use point, which would mask the
-    /// guard's rep under the merged query — so D6 reads the guard's assertion
-    /// directly. Innermost (narrowest) containing region wins. `None` when no
-    /// guard narrows the subject here (so D6 fires only on guard-narrowed
-    /// reps, per the plan).
-    pub fn guard_narrowed_rep(&self, subject: &str, point: Point) -> Option<InferredType> {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+    /// The rep a value fact holding over a REGION around `point` gives
+    /// `subject` — a `ref…eq` / `isa` guard's narrowed arm. A witness's span is
+    /// the site of the fact it states (rule #14), so a region-spanning
+    /// `InferredType` is a fact that holds across that region, while a
+    /// deref's own demanded-rep belief is a point at its use and would mask
+    /// the guard under the merged query. Innermost region wins. `None` when
+    /// no region fact types the subject here, so D6 fires only on narrowed
+    /// reps.
+    pub fn guard_narrowed_rep(&self, subject: &Subject, point: Point) -> Option<InferredType> {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
         let mut best: Option<&crate::model::witnesses::Witness> = None;
         for w in self.witnesses.filter(|w| {
-            matches!(&w.source, WitnessSource::Builder(s) if s == "narrowing" || s == "defined_narrowing")
-                && matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == subject)
+            match (&w.attachment, subject) {
+                (WitnessAttachment::Variable { name, .. }, Subject::Variable(v)) => name == v,
+                (WitnessAttachment::Place(p), Subject::Place(q)) => **p == *q,
+                _ => false,
+            }
         }) {
-            if !contains_point(&w.span, point) {
+            let region = (w.span.start.row, w.span.start.column) < (w.span.end.row, w.span.end.column);
+            if !region || !contains_point(&w.span, point) {
                 continue;
             }
             if !matches!(&w.payload, WitnessPayload::InferredType(_)) {

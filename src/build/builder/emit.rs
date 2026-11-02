@@ -191,7 +191,7 @@ impl<'a> Builder<'a> {
                 // walks Variable bases the same as Edge(Variable)).
                 if let Some(container) = node.child_by_field_name("hash") {
                     let name =
-                        crate::cst::canonical_container_name(container, self.source)?;
+                        crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                     let scope = self.scope_stack.last().copied()
                         .unwrap_or_else(|| self.scope_at_point(node.start_position()));
                     return Some(WitnessPayload::Projected {
@@ -446,7 +446,7 @@ impl<'a> Builder<'a> {
                 let container = node.child_by_field_name("array")?;
                 let idx: i32 =
                     node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
-                let name = crate::cst::canonical_container_name(container, self.source)?;
+                let name = crate::cst::canonical_container_name(self.syntax, container, self.source)?;
                 Some(WitnessPayload::Projected {
                     base: WitnessAttachment::Variable {
                         name,
@@ -1195,24 +1195,49 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
-    /// scalar, for the deref diagnostics (the array/code analog of the
-    /// method-call / hash-deref refs). Only a scalar operand can be undef /
-    /// Optional / rep-narrowed; a chain receiver (`f()->[0]`) is skipped.
-    pub(super) fn record_arrow_deref(&mut self, node: Node<'a>, form: crate::model::file_analysis::DerefForm) {
-        let Some(operand) = node.named_child(0) else { return };
-        if operand.kind() != "scalar" {
+    /// Record a `$x->[i]` / `$x->()` deref whose receiver is a plain
+    /// variable, for the deref diagnostics (the array/code analog of the
+    /// method-call / hash-deref refs). A receiver that is a part of a
+    /// variable is recorded by the place survey (`place_disturbances`),
+    /// only when a narrowing names its root; a value (`f()->[0]`) is never
+    /// narrowed, so it is skipped.
+    pub(super) fn record_arrow_deref(
+        &mut self,
+        node: Node<'a>,
+        receiver: Node<'a>,
+        form: crate::model::file_analysis::DerefForm,
+    ) {
+        if !crate::cst::is_plain_scalar(receiver) {
             return;
         }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        if !text.starts_with('$') {
-            return;
-        }
+        let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
+        let dies_on_undef = self.deref_dies_on_undef(node, &form);
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
-            receiver: text.to_string(),
+            receiver: name,
+            place: None,
             span: node_to_span(node),
             form,
+            dies_on_undef,
         });
+    }
+
+    /// Whether the deref at `node` dies on an undef receiver: a call
+    /// always does; an element access does where the `autovivification`
+    /// hints in force forbid vivifying its receiver, and vivifies it
+    /// otherwise.
+    pub(super) fn deref_dies_on_undef(&self, node: Node<'a>, form: &crate::model::file_analysis::DerefForm) -> bool {
+        use crate::model::file_analysis::{hint_in, vivify_dies_in, LexicalHint, VivifyAccess};
+        if form.dies_on_undef() {
+            return true;
+        }
+        let at = node.start_position();
+        let scope = self.scope_at_point(at);
+        // Most files never say `no autovivification`; asking the scopes
+        // first spares every element access its climb to its context.
+        let any_off = [VivifyAccess::Fetch, VivifyAccess::Store, VivifyAccess::Exists, VivifyAccess::Delete]
+            .into_iter()
+            .any(|a| hint_in(&self.scopes, scope, at, LexicalHint::NoVivify(a)));
+        any_off && vivify_dies_in(&self.scopes, scope, at, crate::cst::vivify_context(self.syntax, node))
     }
 
     /// Infer types from binary operator expressions.

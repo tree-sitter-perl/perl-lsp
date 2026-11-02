@@ -22,16 +22,27 @@ pub struct WarmStub {
 const STUB_VERSION: &str = "11";
 
 /// Gate the `stubs` table on the current stub generation — call once
-/// before a stub-consuming warm scan.
+/// before a stub-consuming warm scan. Check-and-clear is one IMMEDIATE
+/// transaction, like every generation gate: two gates both reading a stale
+/// stamp would both clear, the second deleting stubs written in between.
 pub fn validate_stub_version(conn: &Connection) {
+    if let Err(e) = in_immediate_txn(conn, || validate_stub_version_in_txn(conn)) {
+        log::warn!("stub generation gate failed: {e}");
+    }
+}
+
+/// The gate's body, for a caller already holding the write transaction
+/// (`init_schema`).
+pub(super) fn validate_stub_version_in_txn(conn: &Connection) -> rusqlite::Result<()> {
     let cur: Option<String> = conn
         .query_row(sql::META_GET.registered(), params!["stub_version"], |r| r.get(0))
         .ok();
     if cur.as_deref() == Some(STUB_VERSION) {
-        return;
+        return Ok(());
     }
-    let _ = conn.execute(sql::STUBS_CLEAR.registered(), []);
-    let _ = conn.execute(sql::META_SET.registered(), params!["stub_version", STUB_VERSION]);
+    conn.execute(sql::STUBS_CLEAR.registered(), [])?;
+    conn.execute(sql::META_SET.registered(), params!["stub_version", STUB_VERSION])?;
+    Ok(())
 }
 
 /// Encode by reference (`&[T]` and `Vec<T>` share a bincode encoding) so

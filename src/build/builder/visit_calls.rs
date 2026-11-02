@@ -7,7 +7,7 @@ use crate::cst::LiteralShape;
 impl<'a> Builder<'a> {
     pub(super) fn visit_var_ref(&mut self, node: Node<'a>) {
         // Skip if parent is a variable_declaration (handled by visit_variable_decl)
-        if let Some(parent) = node.parent() {
+        if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "variable_declaration" { return; }
             // Skip if inside a signature param
             if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter") {
@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
             // their closed shape. One site per variable suffices.
             if access == AccessKind::Read
                 && text.starts_with('$')
-                && !crate::cst::is_element_access_base(node)
+                && !crate::cst::is_element_access_base(self.syntax, node)
                 && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
                 self.record_escape_write(text.to_string(), node);
@@ -117,13 +117,13 @@ impl<'a> Builder<'a> {
             // the mutation-extension pass, not a trust break.
             let reassigns = access == AccessKind::Write
                 && (text.starts_with('$') || text.starts_with('%'))
-                && !crate::cst::is_element_access_base(node);
+                && !crate::cst::is_element_access_base(self.syntax, node);
             // Hash variables escape only by reference-taking (`\%h`):
             // a bare `%h` in a call or list FLATTENS TO COPIES — the
             // callee can't add keys to the original, so it's not an
             // escape (unlike a scalar, whose value IS the shared ref).
             if text.starts_with('%')
-                && node.parent().is_some_and(|p| p.kind() == "refgen_expression")
+                && self.syntax.parent(node).is_some_and(|p| p.kind() == "refgen_expression")
                 && self.escape_recorded.insert(self.binding_key_here(text, node.start_position()))
             {
                 self.record_escape_write(text.to_string(), node);
@@ -259,7 +259,7 @@ impl<'a> Builder<'a> {
     /// package aggregate it names. `false` = a named container, not a deref.
     fn visit_deref_container(&mut self, node: Node<'a>) -> bool {
         let Some(operand) = crate::cst::deref_operand(node) else { return false };
-        if let Some(sigil) = crate::cst::container_sigil(node) {
+        if let Some(sigil) = crate::cst::container_sigil(self.syntax, node) {
             let access = self.determine_access(node);
             for (name, span, folded_from) in self.symbolic_variables(node, sigil) {
                 let idx = self.refs.len();
@@ -405,6 +405,7 @@ impl<'a> Builder<'a> {
                 if name == "extends" {
                     if let Some(pkg) = self.current_package.clone() {
                         if self.framework_modes.contains_key(&pkg) {
+                            self.extended_packages.insert(pkg.clone());
                             self.visit_extends_call(node, &pkg);
                         }
                     }
@@ -429,9 +430,10 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-                // push @EXPORT, 'foo', 'bar' / push @EXPORT_OK, 'foo'
-                if name == "push" {
-                    self.visit_push_call(node);
+                // push @EXPORT, 'foo', 'bar' / push @EXPORT_OK, 'foo';
+                // push / unshift / splice @ISA, ...
+                if matches!(name, "push" | "unshift" | "splice") {
+                    self.visit_array_edit_call(node, name);
                 }
 
                 // Call-wrapped `%EXPORT_TAGS` table:
@@ -563,7 +565,7 @@ impl<'a> Builder<'a> {
             return false;
         }
         // Parent must be a print-family verb, with `node` in its argument slot.
-        let parent = match node.parent() {
+        let parent = match self.syntax.parent(node) {
             Some(p) => p,
             None => return false,
         };
@@ -584,8 +586,10 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// Handle `push @EXPORT, 'foo', 'bar'` — append to export lists.
-    pub(super) fn visit_push_call(&mut self, node: Node<'a>) {
+    /// Handle `push` / `unshift` / `splice` on an array: `@ISA` edits
+    /// extend the package's parents; `push @EXPORT, 'foo', 'bar'` appends
+    /// to the export lists.
+    pub(super) fn visit_array_edit_call(&mut self, node: Node<'a>, verb: &str) {
         let args = match node.child_by_field_name("arguments") {
             Some(a) => a,
             None => return,
@@ -604,6 +608,23 @@ impl<'a> Builder<'a> {
             Ok(t) => t,
             Err(_) => return,
         };
+        let rest = &children[1..];
+        let edit = match verb {
+            "push" => super::visit_use::IsaEdit::Append,
+            "unshift" => super::visit_use::IsaEdit::Prepend,
+            _ => {
+                let operand = |i: usize| {
+                    rest.get(i).map(|n| n.utf8_text(self.source).ok().and_then(|t| t.trim().parse::<i64>().ok()))
+                };
+                super::visit_use::IsaEdit::Splice { offset: operand(0), length: operand(1) }
+            }
+        };
+        let values = match edit {
+            super::visit_use::IsaEdit::Splice { .. } => rest.get(2..).unwrap_or_default(),
+            _ => rest,
+        };
+        self.record_isa_write(arr_name, first, edit, values);
+        if verb != "push" { return; }
         // Generic array contribution — `push @arr, X, Y` extends
         // `@arr`'s `Sequence` shape. Walk-time projection: resolve
         // each X / Y through `emit_expr_witness + bag_query_expr_span`,
@@ -1040,7 +1061,7 @@ impl<'a> Builder<'a> {
         uses.iter().any(|m| {
             self.framework_mode_modules
                 .get(m)
-                .is_some_and(|(_, kws)| kws.iter().any(|k| k == kw))
+                .is_some_and(|g| g.imports.iter().any(|k| k == kw))
         })
     }
 

@@ -102,7 +102,7 @@ impl<'a> CandidateSet<'a> {
                         // enum) reads the whole view — the resident copy may
                         // be symbol-evicted.
                         let whole = whole_memo
-                            .entry(cached.path.clone())
+                            .entry(cached.path.to_path_buf())
                             .or_insert_with(|| idx.whole_present(&cached))
                             .clone();
                         let Some(sym) = whole

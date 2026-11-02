@@ -40,7 +40,10 @@ mod ancestry;
 pub use ancestry::*;
 mod deferral;
 pub use deferral::*;
+mod place;
+pub use place::*;
 mod queries;
+pub use queries::{hint_in, vivify_dies_in};
 mod enrichment;
 mod class_queries;
 mod cursor_queries;
@@ -49,6 +52,7 @@ mod hover;
 mod sym_index;
 mod completion;
 pub use completion::*;
+mod equiv_dump;
 
 // ---- FileAnalysis ----
 
@@ -589,6 +593,8 @@ pub struct FileAnalysisParts {
     pub scopes: Vec<Scope>,
     pub symbols: Vec<Symbol>,
     pub refs: Vec<Ref>,
+    /// The build's per-site macro delegation column over `refs`.
+    pub ref_delegates: RefDelegates,
     pub fold_ranges: Vec<FoldRange>,
     pub imports: Vec<Import>,
     pub call_bindings: Vec<CallBinding>,

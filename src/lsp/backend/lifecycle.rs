@@ -425,8 +425,7 @@ impl DiagCtx {
             }
             doc.baseline_surface.clone()?
         };
-        let path = uri.to_file_path().ok()?;
-        let canon = std::fs::canonicalize(&path).unwrap_or(path);
+        let canon = self.open_docs.file_path_of(uri)?;
         Some(self.module_index.record_and_dirty_value(
             &canon,
             surface,
@@ -445,12 +444,9 @@ impl DiagCtx {
             return;
         }
         let mut to_refresh: Vec<Url> = Vec::new();
-        self.open_docs.for_each_open(|u, _doc| {
-            if let Ok(p) = u.to_file_path() {
-                let c = std::fs::canonicalize(&p).unwrap_or(p);
-                if dirty.contains(&c) {
-                    to_refresh.push(u.clone());
-                }
+        self.open_docs.for_each_open(|u, doc| {
+            if u.to_file_path().is_ok() && dirty.contains(doc.canonical_path.as_path()) {
+                to_refresh.push(u.clone());
             }
         });
         for u in to_refresh {
@@ -698,11 +694,11 @@ pub(super) fn spawn_parent_liveness_monitor(process_id: Option<u32>) {
         loop {
             tokio::time::sleep(PARENT_LIVENESS_POLL).await;
             if !parent_process_alive(pid) {
-                // Client gone; nothing to flush after the connection drops.
-                // Exit hard so background `spawn_blocking` indexing (which parks
-                // on `send_request` once the client vanishes) can't keep the
-                // runtime — and a multi-GB workspace index — alive.
-                std::process::exit(0);
+                // Client gone. Exit hard so background `spawn_blocking`
+                // indexing (which parks on `send_request` once the client
+                // vanishes) can't keep the runtime — and a multi-GB workspace
+                // index — alive; the instrumentation still lands first.
+                crate::util::ghost_stats::exit_flushed(0, "parent-gone");
             }
         }
     });
