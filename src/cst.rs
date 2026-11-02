@@ -786,11 +786,11 @@ pub(crate) fn deref_of_part(node: Node) -> Option<(Node, crate::model::file_anal
 /// The autovivification category of an element access: the context of
 /// the outermost access in its chain, since `$x->{a}{b} = 1` stores
 /// through `$x->{a}` too, and `exists $x->{a}{b}` probes through it.
-pub(crate) fn vivify_context(node: Node) -> crate::model::file_analysis::VivifyContext {
+pub(crate) fn vivify_context<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> crate::model::file_analysis::VivifyContext {
     use crate::model::file_analysis::{VivifyAccess, VivifyContext};
     let mut n = node;
     let parent = loop {
-        let Some(p) = n.parent() else { return VivifyContext::Is(VivifyAccess::Fetch) };
+        let Some(p) = syn.parent(n) else { return VivifyContext::Is(VivifyAccess::Fetch) };
         let through = matches!(p.kind(), "hash_element_expression" | "array_element_expression")
             && access_base(p).is_some_and(|(base, _)| base == n);
         if through || p.kind() == "parenthesized_expression" {

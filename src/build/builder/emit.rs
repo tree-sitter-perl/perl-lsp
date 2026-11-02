@@ -1244,7 +1244,7 @@ impl<'a> Builder<'a> {
         let any_off = [VivifyAccess::Fetch, VivifyAccess::Store, VivifyAccess::Exists, VivifyAccess::Delete]
             .into_iter()
             .any(|a| hint_in(&self.scopes, scope, at, LexicalHint::NoVivify(a)));
-        any_off && vivify_dies_in(&self.scopes, scope, at, crate::cst::vivify_context(node))
+        any_off && vivify_dies_in(&self.scopes, scope, at, crate::cst::vivify_context(self.syntax, node))
     }
 
     /// Infer types from binary operator expressions.
