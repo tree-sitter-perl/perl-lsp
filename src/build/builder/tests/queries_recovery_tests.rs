@@ -1073,3 +1073,18 @@ sub transform { }
         panic!("fetch_data should be a Sub");
     }
 }
+
+// The Perl `@flow` document speaks the shared capture vocabulary: the shipped
+// document's every capture is one the minter reads, and a misspelt or
+// unread capture is refused instead of extracting nothing.
+#[test]
+fn flow_document_captures_are_the_minters_vocabulary() {
+    use crate::build::builder::pipeline::flow_capture_table;
+    let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+    let shipped = tree_sitter::Query::new(&lang, include_str!("../../../../queries/perl/flow.scm")).unwrap();
+    assert!(flow_capture_table(&shipped).is_ok());
+    for bad in ["(scalar) @flow.lhs", "(scalar) @flow.place", "(scalar) @flow.targte"] {
+        let q = tree_sitter::Query::new(&lang, bad).unwrap();
+        assert!(flow_capture_table(&q).is_err(), "{bad} must be refused");
+    }
+}
