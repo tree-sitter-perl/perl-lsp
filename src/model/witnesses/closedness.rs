@@ -161,7 +161,7 @@ impl ClosednessCertificate {
             // provider. Same fail-open direction as a conclusions row on an
             // unrecorded path: decline, never trust.
             let fp = idx.surface_fingerprint_of(&c.path)?;
-            out.push((c.path.clone(), fp));
+            out.push((c.path.to_path_buf(), fp));
         }
         out.sort();
         Some(out)

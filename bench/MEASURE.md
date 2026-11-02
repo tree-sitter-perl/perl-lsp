@@ -19,8 +19,17 @@ that cannot install DuckDB can still collect and ship the files.
 ## What is recorded
 
 Per corpus × rep × phase (cold/warm): `--check` wall, peak RSS, CPU
-utilization, `modules.db` size, **every** ghost counter, and **every** file's
-parse and build time. Nothing is aggregated or rounded at collection.
+utilization, `modules.db` size, and **every** file's parse and build time.
+Then one more cold+warm pass per corpus, `rep` 0, with the ghost gate on:
+**every** ghost counter, the per-file check lanes and the heap composition.
+Nothing is aggregated or rounded at collection.
+
+**Timed reps never run with `PERL_LSP_GHOST_STATS`.** The gate costs ~25%
+wall on a witness-heavy build (`util/ghost_stats.rs::BuildScope`), so a KPI
+taken with it on is not the number a user sees. The counter pass's own wall,
+RSS, CPU, store size and outcome land as `instrumented_timing`,
+`instrumented_rss`, ... — readable, never a KPI sample. `--no-instrumented`
+skips the pass.
 
 The `run` line carries provenance once: run id, timestamp, git SHA, **dirty
 flag**, **build features**, host, kernel, nproc, MemTotal, load average.

@@ -198,11 +198,8 @@ pub(super) fn equivalence_check_enabled() -> bool {
 /// Panic unless the iterative and recursive walks produced the same
 /// `FileAnalysis`, naming the first field that differs.
 ///
-/// Compares the serde projection rather than bincode bytes: `serde_json`
-/// renders maps through a `BTreeMap`, so `HashMap` iteration order — which
-/// differs between two builds in one thread, since each map gets its own
-/// `RandomState` seed — cannot manufacture a false difference. Sequence
-/// order, which is what emission order actually means, is preserved exactly.
+/// Compares `FileAnalysis::canonical_value`, the projection the across-build
+/// equivalence dump also reads (`model/file_analysis/equiv_dump.rs`).
 #[cfg(test)]
 pub(super) fn assert_walks_agree(
     iterative: &FileAnalysis,
@@ -221,10 +218,8 @@ pub(super) fn assert_analyses_agree(
     build_recursive: impl FnOnce() -> FileAnalysis,
 ) {
     let recursive = build_recursive();
-    let mut a = serde_json::to_value(iterative).expect("FileAnalysis serializes");
-    let mut b = serde_json::to_value(&recursive).expect("FileAnalysis serializes");
-    canonicalize_sets(&mut a);
-    canonicalize_sets(&mut b);
+    let a = iterative.canonical_value();
+    let b = recursive.canonical_value();
     if a == b {
         return;
     }
@@ -245,47 +240,6 @@ pub(super) fn assert_analyses_agree(
         truncate(&at_path(&a, &elem)),
         truncate(&at_path(&b, &elem)),
     );
-}
-
-/// `HashSet` fields reachable from `FileAnalysis`. They serialize as JSON
-/// arrays in iteration order, which differs between two builds in one thread
-/// (every map gets its own `RandomState` seed) — so comparing them as
-/// sequences reports a difference that does not exist. Sorted before the
-/// compare; every OTHER array keeps its order, because sequence order is
-/// exactly what this check is for.
-///
-/// Listed by name rather than detected structurally: an array of scalars is
-/// indistinguishable from a set once serialized, and order genuinely matters
-/// for some of them (`package_parents` values carry MRO). A new `HashSet`
-/// field on the model belongs here — the check fails loudly and points at it
-/// if one is missed.
-#[cfg(test)]
-const SET_FIELDS: &[&str] = &[
-    "column_keyed_verbs",
-    "export_lookup",
-    "framework_imports",
-    "reassigned_vars",
-];
-
-/// Sort the arrays named in `SET_FIELDS`, everywhere they appear.
-#[cfg(test)]
-fn canonicalize_sets(v: &mut serde_json::Value) {
-    use serde_json::Value;
-    match v {
-        Value::Object(map) => {
-            for (k, child) in map.iter_mut() {
-                if SET_FIELDS.contains(&k.as_str()) {
-                    if let Value::Array(items) = child {
-                        items.sort_by_key(|i| i.to_string());
-                        continue;
-                    }
-                }
-                canonicalize_sets(child);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(canonicalize_sets),
-        _ => {}
-    }
 }
 
 /// Descend into the first mismatching child, recording the JSON path.
