@@ -66,6 +66,24 @@ Result over spdlog/fmt/onednn: 17 → 0 FP, with the canonical true positives
 (a straight-line local moved then `x.use()`d, cleared by reassignment or a
 reset method) still flagged.
 
+## Moves of places
+
+A move's subject is a `Place` (`model/file_analysis/place.rs`): `x`, or a
+member of a local (`std::move(p.msg)`), rooted at the local's declaration
+when the skeleton assembles (`query_extract/places.rs`). A bare member name
+in a member function (`std::move(name_)`) is rooted at the body's elided
+receiver (`Binding::Receiver`, the method), which nothing in the body
+rebinds. The assembly also mints the move's own accesses on its `MoveSite`:
+the reads that read into the moved part (`p.msg`, `p.msg.size()`; not
+`p.id`, and not `p` handed on whole, which reads none of the moved state
+itself — the false positive is the costlier error here) and the
+place writes that give it a value again (`p.msg = …`, `p.msg.clear()`). So
+the check matches reads by declaration and path, never by spelling, and a
+sibling member of a moved member is never flagged. Gate E still applies to
+a part of a parameter: the base-subobject move of class 2 moves `other`
+whole, and which part it feeds is decided by the callee's parameter type,
+which no capture states.
+
 ## Why gates, not a smarter analysis
 
 Classes 2–4 are exactly the cases that need path-sensitivity + subobject +

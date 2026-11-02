@@ -9,12 +9,12 @@ use super::*;
 /// its source. Shared by reference-count so async handlers don't deep-copy.
 #[derive(Debug)]
 pub struct CachedModule {
-    pub path: std::path::PathBuf,
+    pub path: crate::util::canonical_path::CanonicalPath,
     pub analysis: std::sync::Arc<FileAnalysis>,
 }
 
 impl CachedModule {
-    pub fn new(path: std::path::PathBuf, analysis: std::sync::Arc<FileAnalysis>) -> Self {
+    pub fn new(path: crate::util::canonical_path::CanonicalPath, analysis: std::sync::Arc<FileAnalysis>) -> Self {
         CachedModule { path, analysis }
     }
 
@@ -788,7 +788,7 @@ pub trait CrossFileLookup {
     /// rehydrates these and runs the one matcher over them. Default: empty
     /// (impls without a row store contribute no candidates; the resident
     /// sweep still covers their files).
-    fn ref_candidate_paths(&self, _keys: &[String]) -> Vec<std::path::PathBuf> {
+    fn ref_candidate_paths(&self, _keys: &[String]) -> Vec<crate::util::canonical_path::CanonicalPath> {
         Vec::new()
     }
     /// Every path this index has SHREDDED into the relational row store
@@ -799,7 +799,7 @@ pub trait CrossFileLookup {
     /// it. Empty (default, or no row store) ⇒ no narrowing; the resident
     /// sweep whole-views every gate-passing file as before. `docs/adr/
     /// relational-ref-index.md`.
-    fn ref_indexed_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
+    fn ref_indexed_paths(&self) -> std::collections::HashSet<crate::util::canonical_path::CanonicalPath> {
         std::collections::HashSet::new()
     }
     /// Warm the rows views of `paths` before a walk reads them one by one:
@@ -807,13 +807,13 @@ pub trait CrossFileLookup {
     /// can decode in parallel does it here and the walk hits its LRU.
     /// Default: nothing (a lookup without a decode cache has nothing to
     /// warm).
-    fn prefetch_refs(&self, _paths: &[std::path::PathBuf]) {}
+    fn prefetch_refs(&self, _paths: &[crate::util::canonical_path::CanonicalPath]) {}
     /// Path-keyed cached-module lookup — the retrieval above hands back
     /// paths; this maps them onto the resident registration (for the
     /// visibility gate + whole-copy rehydration). Default `None`.
     fn cached_by_path(
         &self,
-        _path: &std::path::Path,
+        _path: &crate::util::canonical_path::CanonicalPath,
     ) -> Option<std::sync::Arc<CachedModule>> {
         None
     }
@@ -854,7 +854,7 @@ pub trait CrossFileLookup {
     /// visible to references but never rewritten by rename; every other
     /// file the lookup holds is WORKSPACE. The default (no front door, so
     /// everything held came from elsewhere) is the conservative answer.
-    fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
+    fn is_dependency_path(&self, _path: &crate::util::canonical_path::CanonicalPath) -> bool {
         true
     }
     /// The workspace root, for resolving an origin's relative `use lib`
@@ -865,7 +865,7 @@ pub trait CrossFileLookup {
     }
     /// The on-disk path a module name resolves to (Perl module goto-def).
     /// Default `None` for impls without a path map.
-    fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, _module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         None
     }
     /// Whether this lookup is bound to one asker's visibility
@@ -907,7 +907,7 @@ pub trait CrossFileLookup {
         let mut seen: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
         self.for_each_cached(&mut |_n, cached| {
-            if seen.insert(cached.path.clone()) {
+            if seen.insert(cached.path.to_path_buf()) {
                 f(cached);
             }
         });
@@ -1239,20 +1239,19 @@ impl VisibilityAxis {
 
 impl<'a> ScopedLookup<'a> {
     /// Build the visibility set from a querying file's include closure plus its
-    /// own path (a file always sees the classes it declares itself). Canonicalize
-    /// the self path so it matches the candidates' canonical `CachedModule.path`.
+    /// own path (a file always sees the classes it declares itself). The self
+    /// path is canonical so it matches the candidates' `CachedModule.path`.
     pub fn new(
         inner: &'a dyn CrossFileLookup,
         include_closure: &path_intern::ClosureList,
-        self_path: Option<&std::path::Path>,
+        self_path: Option<&crate::util::canonical_path::CanonicalPath>,
         axis: VisibilityAxis,
     ) -> Self {
         let mut visible: std::collections::HashSet<String> =
             include_closure.iter_strs().map(|a| a.as_ref().to_owned()).collect();
         let self_path = self_path.map(|p| {
-            let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            visible.insert(canon.to_string_lossy().into_owned());
-            canon
+            visible.insert(p.to_string_lossy().into_owned());
+            p.to_path_buf()
         });
         ScopedLookup { inner, visible, self_path, axis }
     }
@@ -1338,7 +1337,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
     }
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+    fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
         self.inner.is_dependency_path(path)
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
@@ -1486,7 +1485,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // Same delegation rule as `symbols_present`.
         self.inner.refs_present(cached)
     }
-    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+    fn prefetch_refs(&self, paths: &[crate::util::canonical_path::CanonicalPath]) {
         self.inner.prefetch_refs(paths)
     }
     fn candidate_may_declare(
@@ -1511,18 +1510,18 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // every scoped (pack) sweep.
         self.inner.candidate_bag_may_answer(cached, name, class, attributed)
     }
-    fn ref_candidate_paths(&self, keys: &[String]) -> Vec<std::path::PathBuf> {
+    fn ref_candidate_paths(&self, keys: &[String]) -> Vec<crate::util::canonical_path::CanonicalPath> {
         // Unscoped by design, like `def_candidates`: the backward walk applies
         // its own per-file closure gate; pre-narrowing here would hide sites
         // in files the textual-inclusion extension admits.
         self.inner.ref_candidate_paths(keys)
     }
-    fn ref_indexed_paths(&self) -> std::collections::HashSet<std::path::PathBuf> {
+    fn ref_indexed_paths(&self) -> std::collections::HashSet<crate::util::canonical_path::CanonicalPath> {
         self.inner.ref_indexed_paths()
     }
     fn cached_by_path(
         &self,
-        path: &std::path::Path,
+        path: &crate::util::canonical_path::CanonicalPath,
     ) -> Option<std::sync::Arc<CachedModule>> {
         self.inner.cached_by_path(path)
     }
@@ -1541,7 +1540,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String> {
         self.inner.module_declaring_method_in_package(name, class)
     }
-    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, module_name: &str) -> Option<crate::util::canonical_path::CanonicalPath> {
         // Scope-aware: the path must name the same candidate the scoped
         // `get_cached` answers with, or a consumer that pairs this path with a
         // scoped range splices two different files (wrong file at a
@@ -1644,7 +1643,7 @@ pub struct WidenedClassRef {
 /// A same-leaf class standing in for `identity` in a file `index` holds.
 #[derive(Debug, Clone)]
 pub struct WidenedStandIn {
-    pub path: std::path::PathBuf,
+    pub path: crate::util::canonical_path::CanonicalPath,
     pub span: Span,
     pub class: String,
 }

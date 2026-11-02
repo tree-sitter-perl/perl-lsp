@@ -1458,7 +1458,7 @@ fn a_closed_gated_file_is_viewed_with_its_firing_emissions() {
     );
     assert!(!leaf.plugin.gated_emissions.is_empty(), "the gate is cross-file: deferred");
     assert!(leaf.symbols().iter().all(|s| s.name != "name"));
-    let leaf = Arc::new(CachedModule::new(PathBuf::from("/fake/Leaf.pm"), Arc::new(leaf)));
+    let leaf = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/fake/Leaf.pm")), Arc::new(leaf)));
     idx.insert_cache("Leaf", Some(leaf.clone()));
 
     let has_accessor = |fa: &crate::model::file_analysis::FileAnalysis| {

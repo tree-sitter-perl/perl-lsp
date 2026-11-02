@@ -24,7 +24,7 @@ impl<'a> Builder<'a> {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -35,13 +35,12 @@ impl<'a> Builder<'a> {
         self.scope_stack.pop()
     }
 
-    /// Switch the declaration rule from the end of `span` on, in the scope
-    /// `span` sits in.
-    pub(super) fn switch_declaration_rule(&mut self, span: Span, required: bool) {
+    /// Switch `hint` from the end of `span` on, in the scope `span` sits in.
+    pub(super) fn switch_hint(&mut self, span: Span, hint: crate::model::file_analysis::LexicalHint, on: bool) {
         let scope = self.scope_at_point(span.start);
         self.scopes[scope.0 as usize]
-            .declaration_rules
-            .push(crate::model::file_analysis::DeclarationRule { at: span.end, required });
+            .hints
+            .push(crate::model::file_analysis::HintSwitch { at: span.end, hint, on });
     }
 
     pub(super) fn current_scope(&self) -> ScopeId {
@@ -76,7 +75,7 @@ impl<'a> Builder<'a> {
     /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
-        let conditional = crate::cst::conditional_arm(node, crate::cst::ArmBound::Sub).is_some();
+        let conditional = crate::cst::conditional_arm(self.syntax, node, crate::cst::ArmBound::Sub).is_some();
         let tail = match self.arg_window_at(node) {
             Some(InferredType::Sequence(v)) if !conditional => v.into_iter().skip(1).collect(),
             _ => Vec::new(),
@@ -236,7 +235,7 @@ impl<'a> Builder<'a> {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         if matches!(kind, SymKind::Variable | SymKind::Field) {
-            self.var_decls.entry((scope, name.clone())).or_default().push(id);
+            self.var_decls.entry(name.clone()).or_default().entry(scope).or_default().push(id);
         }
         // Perl says "this constructs" with a name and nothing else, so the
         // convention is read here, at the mint, and consumers ask the flag.
@@ -462,5 +461,44 @@ impl<'a> Builder<'a> {
             }
         }
         None
+    }
+}
+
+/// `scope_at_point` for a run of points in document order — a tree
+/// survey's — as one pass over the scopes instead of a scan per point.
+pub(super) struct ScopeCursor<'s> {
+    order: Vec<&'s crate::model::file_analysis::Scope>,
+    next: usize,
+    open: Vec<&'s crate::model::file_analysis::Scope>,
+}
+
+impl<'s> ScopeCursor<'s> {
+    pub(super) fn new(scopes: &'s [crate::model::file_analysis::Scope]) -> Self {
+        let mut order: Vec<_> = scopes.iter().collect();
+        // An enclosing scope opens before what it holds; of two with one
+        // span the later-minted is innermost, as `scope_at_point` picks.
+        order.sort_by(|a, b| {
+            (a.span.start.row, a.span.start.column)
+                .cmp(&(b.span.start.row, b.span.start.column))
+                .then((b.span.end.row, b.span.end.column).cmp(&(a.span.end.row, a.span.end.column)))
+                .then(a.id.0.cmp(&b.id.0))
+        });
+        ScopeCursor { order, next: 0, open: Vec::new() }
+    }
+
+    /// The innermost scope holding `p`; `p` never moves backwards.
+    pub(super) fn at(&mut self, p: Point) -> ScopeId {
+        use crate::model::file_analysis::contains_point;
+        while let Some(s) = self.order.get(self.next).filter(|s| !point_lt(p, s.span.start)) {
+            while self.open.last().is_some_and(|o| !contains_point(&o.span, s.span.start)) {
+                self.open.pop();
+            }
+            self.open.push(s);
+            self.next += 1;
+        }
+        while self.open.last().is_some_and(|o| !contains_point(&o.span, p)) {
+            self.open.pop();
+        }
+        self.open.last().map_or(ScopeId(0), |s| s.id)
     }
 }

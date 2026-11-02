@@ -271,7 +271,7 @@ connection serialized every rehydrate in the process: a 20-worker
 callers still see one connection.
 
 **A batch sweep memoizes retrieval.** `RetrievalMemoGuard` (opened by
-`--heatmap`, closed on drop) caches `ref_candidate_paths` per
+`CorpusSweep`, closed on drop) caches `ref_candidate_paths` per
 (index, epoch, keys) and `ref_indexed_paths` per (index, epoch) for the
 sweep: every declaration of `new` probes the same key, and the
 shredded-path set was otherwise re-fetched once per declaration. Keyed on

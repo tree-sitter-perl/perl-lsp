@@ -187,7 +187,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -340,6 +340,7 @@ pub(super) fn build_with_plugins_inner(
             })
         });
     }
+    crate::build::equiv_dump::record(source, None, &fa);
     fa
 }
 
@@ -362,11 +363,15 @@ fn build_once(
         return too_deep_analysis(tree, depth);
     }
     let eval_trees = parse_eval_replacements(evals, source);
+    let syntax = crate::cst::SyntaxForest::new(
+        std::iter::once(tree.root_node()).chain(eval_trees.iter().map(|(_, t)| t.root_node())),
+    );
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
         eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
+        syntax: &syntax,
         scopes: Vec::new(),
         symbols: Vec::new(),
         owner_scope: std::collections::HashMap::new(),
@@ -446,6 +451,8 @@ fn build_once(
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
+        framework_bases: std::collections::HashMap::new(),
+        extended_packages: std::collections::HashSet::new(),
         role_packages: std::collections::HashSet::new(),
         dbic_source_name: None,
         topic_group_spans: Vec::new(),
@@ -499,7 +506,10 @@ fn build_once(
         .plugins
         .framework_mode_makers()
         .filter_map(|m| match FrameworkMode::from_flavor(&m.flavor) {
-            Some(mode) => Some((m.module.clone(), (mode, m.imports.clone()))),
+            Some(mode) => Some((
+                m.module.clone(),
+                FrameworkModeGrant { mode, imports: m.imports.clone(), base: m.base.clone() },
+            )),
             None => {
                 log::error!(
                     "framework_mode_makers: unknown flavor `{}` for module `{}` — entry dropped",
@@ -548,6 +558,9 @@ fn build_once(
     // named-sub flushes below so pattern emissions ride the same
     // machinery as walk-interleaved hook emissions.
     bphase!("pattern_dispatch", b.dispatch_pattern_plugins(tree.root_node()));
+    // After every walk- and pattern-time parent, so the framework base
+    // is the MRO's last stop, behind the package's roles.
+    b.apply_framework_bases();
 
     b.pop_scope();
     let _ = file_scope;
@@ -600,7 +613,7 @@ fn build_once(
     // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
     // narrowed region at the first edge that rebinds its subject (the
     // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
-    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs(tree));
+    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
 
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
@@ -736,11 +749,43 @@ fn build_once(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());
 
+    // A deref site's diagnostics read a value on its receiver (undef,
+    // optional, a guard-proved rep), and a place holds a value only where a
+    // guard narrowed it: the deref's own rep observation can't fire one. A
+    // place site nothing narrows is dropped here rather than carried per
+    // file — FHEM minted 73k of them and paid +3% peak RSS for none firing
+    // (2026-10-30). A method receiver's place is read for the same value
+    // (a class to dispatch on), so one nothing narrows goes back to its name.
+    {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let valued: std::collections::HashSet<&crate::model::file_analysis::Place> = b
+            .bag
+            .all()
+            .iter()
+            .filter_map(|w| match (&w.attachment, &w.payload) {
+                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_)) => Some(&**p),
+                _ => None,
+            })
+            .collect();
+        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        b.arrow_deref_sites.shrink_to_fit();
+        for r in &mut b.refs {
+            if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {
+                if let crate::model::conventions::Invocant::Place { name, place } = invocant {
+                    if !valued.contains(&**place) {
+                        *invocant = crate::model::conventions::Invocant::Name(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let packages = b.package_facts();
     let mut fa = FileAnalysis::new(crate::model::file_analysis::FileAnalysisParts {
         scopes: b.scopes,
         symbols: b.symbols,
         refs: b.refs,
+        ref_delegates: Default::default(),
         fold_ranges: b.fold_ranges,
         imports: b.imports,
         call_bindings: b.call_bindings,
@@ -886,7 +931,10 @@ impl<'a> Builder<'a> {
                 ScopeKind::Sub { name } => (false, Some(name.as_str())),
                 _ => continue,
             };
-            let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
+            // The class a sub belongs to is its symbol's (`sub Foo::bar`
+            // is `Foo`'s), not the package in force around it.
+            let owner_pkg = scope.owner.and_then(|o| self.symbols[o.0 as usize].package.clone());
+            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded.contains(&scope.id)) else { continue };
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             // A named sub of a class package is a method unless the file
             // only ever calls it as a plain function.
@@ -929,7 +977,7 @@ impl<'a> Builder<'a> {
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
-            if let (RefKind::HashKeyAccess { var_text }, AccessKind::Write) =
+            if let (RefKind::HashKeyAccess { var_text, .. }, AccessKind::Write) =
                 (&r.kind, r.access)
             {
                 let resolved_owner = match r.hash_key_owner() {
