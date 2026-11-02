@@ -75,13 +75,14 @@
   left: (_) @flow.place
   right: (_) @flow.source) @flow.assign
 
-; An augmented assignment and a `del` write the member or element they name
-; too: neither leaves it holding the value a guard proved.
+; An augmented assignment and a `del` leave what they name without the
+; value a guard proved, whatever it is: a name rebinds (to the operator's
+; result, or to nothing), a member or element is written.
 (augmented_assignment
-  left: [(attribute) (subscript)] @flow.place)
-(delete_statement [(attribute) (subscript)] @flow.place)
+  left: [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
 (delete_statement
-  (expression_list [(attribute) (subscript)] @flow.place))
+  (expression_list [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place]))
 
 (parameters
   (identifier) @def.var.name @def.var)

@@ -1574,6 +1574,41 @@ class A:
 }
 
 #[test]
+fn an_augmented_assignment_or_del_ends_a_variable_narrowing() {
+    // A variable and a member end the same way. The rebind ends only what a
+    // guard proved: a declared value (`y = Foo()`) still stands, and an
+    // unnarrowed `x` answers as the untyped parameter in `k` does.
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+def f(x):
+    if isinstance(x, Foo):
+        x.run()
+        x += 1
+        x.run()
+def g(x):
+    if isinstance(x, Foo):
+        del x
+        x.run()
+def k(x):
+    x.run()
+def h():
+    y = Foo()
+    y.run()
+    y += 1
+    y.run()
+";
+    let receivers = run_receivers(src);
+    let untyped = receivers.iter().find(|(row, _)| *row == 13).unwrap().1.clone();
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        receivers,
+        vec![(5, foo.clone()), (7, untyped.clone()), (11, untyped.clone()), (13, untyped), (16, foo.clone()), (18, foo)]
+    );
+}
+
+#[test]
 fn isinstance_narrows_a_member_until_it_is_disturbed() {
     let src = "\
 class Foo:
