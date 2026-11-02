@@ -29,7 +29,7 @@ pub(super) fn fake_cached(
     }
     source.push_str("1;\n");
     std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-        std::path::PathBuf::from(path),
+        crate::util::canonical_path::CanonicalPath::resolve(std::path::PathBuf::from(path)),
         std::sync::Arc::new(parse_analysis(&source)),
     ))
 }
@@ -344,14 +344,22 @@ sub f {
 // D8 — extend `unresolved-method` to cross-file-resolvable classes. A
 // cached module whose internal package name IS the class queried (so
 // resolution keys line up), unlike `fake_cached`'s always-`Fake` package.
-fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::module_index::CachedModule> {
+/// An index where Moo is installed: a Moo class's chain ends at a
+/// resolvable `Moo::Object` instead of an unresolved ancestor.
+pub(super) fn moo_installed_index() -> crate::index::module_index::ModuleIndex {
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_cache("Moo::Object", Some(cached_class("Moo::Object", &["new", "BUILDARGS", "does"])));
+    idx
+}
+
+pub(super) fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::module_index::CachedModule> {
     let mut src = format!("package {};\n", module);
     for m in methods {
         src.push_str(&format!("sub {} {{}}\n", m));
     }
     src.push_str("1;\n");
     std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-        std::path::PathBuf::from(format!("/fake/{}.pm", module.replace("::", "/"))),
+        crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{}.pm", module.replace("::", "/")))),
         std::sync::Arc::new(parse_analysis(&src)),
     ))
 }
@@ -1013,7 +1021,7 @@ fn pragma_index() -> crate::index::module_index::ModuleIndex {
         module_index.insert_cache(
             name,
             Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
                 std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
             ))),
         );
@@ -1086,7 +1094,7 @@ fn missing_declaration_respects_declarations_and_imports() {
         module_index.insert_cache(
             name,
             Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
                 std::sync::Arc::new(parse_analysis(src)),
             ))),
         );
@@ -1126,7 +1134,7 @@ fn missing_declaration_knows_use_english() {
     module_index.insert_cache(
         "English",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from("/fake/English.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/English.pm")),
             std::sync::Arc::new(parse_analysis("package English;\nsub import {}\n1;\n")),
         ))),
     );
@@ -1149,7 +1157,7 @@ fn missing_declaration_knows_use_env() {
     module_index.insert_cache(
         "Env",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-            std::path::PathBuf::from("/fake/Env.pm"),
+            crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/Env.pm")),
             std::sync::Arc::new(parse_analysis("package Env;\nsub import {}\n1;\n")),
         ))),
     );
@@ -1174,7 +1182,7 @@ fn log4perl_tags_declare_their_exports() {
         module_index.insert_cache(
             name,
             Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
-                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(format!("/fake/{name}.pm"))),
                 std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
             ))),
         );

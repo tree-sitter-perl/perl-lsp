@@ -205,6 +205,9 @@ pub(crate) fn print_usage() {
     eprintln!("  perl-lsp --plugin-test <plugin-dir> [--update]         Snapshot-test a plugin dir");
     eprintln!();
     eprintln!("DEBUG:");
+    eprintln!("  perl-lsp --equiv-dump <out-dir> <file|dir>...          Canonical analysis dump of every");
+    eprintln!("                                                         file, for base-vs-head diffs");
+    eprintln!("                                                         (scripts/equiv/README.md)");
     eprintln!("  perl-lsp --dump-package <root> <package>               Dump every sub in <package>");
     eprintln!("                                                         with derived type info");
     eprintln!("  perl-lsp --gc-cache <root>                             Reclaim unreferenced interned");
@@ -566,6 +569,58 @@ pub(crate) fn cli_clear_cache(root: Option<&str>) {
             exit_with(1, "exit");
         }
     }
+}
+
+/// `--equiv-dump <out-dir> <file|dir>...`: build every file of the served
+/// language under the given paths and write each analysis's canonical dump
+/// to `<out-dir>` (`build/equiv_dump.rs`). Builds only — no index, no cache,
+/// no enrichment — so the dump is a function of the inputs and the binary.
+/// Directories are walked whole, ignore files included: a dependency tree
+/// such as the gold substrate is usually git-ignored.
+pub(crate) fn cli_equiv_dump(out: &str, paths: &[String]) {
+    use rayon::prelude::*;
+    if let Err(e) = crate::build::equiv_dump::enable(std::path::PathBuf::from(out)) {
+        eprintln!("perl-lsp: --equiv-dump: {e}");
+        exit_with(2, "exit");
+    }
+    let served = language_driver::LanguageRegistry::served();
+    let claims = |p: &std::path::Path| {
+        language_driver::LanguageRegistry::compiled()
+            .for_path(p)
+            .is_some_and(|d| d.id() == served.id())
+    };
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for root in paths {
+        let root = std::path::Path::new(root);
+        if root.is_file() {
+            files.push(root.to_path_buf());
+            continue;
+        }
+        for entry in ignore::WalkBuilder::new(root).standard_filters(false).build().flatten() {
+            let p = entry.path();
+            if entry.file_type().is_some_and(|t| t.is_file()) && claims(p) {
+                files.push(p.to_path_buf());
+            }
+        }
+    }
+    files.sort();
+    let unreadable: usize = files
+        .par_iter()
+        .map(|path| {
+            // Non-UTF-8 is skipped, as the workspace walk skips it.
+            let Ok(src) = std::fs::read_to_string(path) else { return 1 };
+            let _file = timings::current_file_scope(Some(path));
+            served.analyze_with_path(&src, Some(path));
+            0
+        })
+        .sum();
+    eprintln!(
+        "equiv-dump: {} {} files built, {} unreadable -> {}",
+        files.len() - unreadable,
+        served.id(),
+        unreadable,
+        out
+    );
 }
 
 /// Pretty-print the tree-sitter parse tree for a Perl source file.

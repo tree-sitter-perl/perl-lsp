@@ -242,6 +242,15 @@ struct DeferredNamedSubParamType {
     plugin_id: String,
 }
 
+/// What `use MODULE` grants a package under a `framework_mode_makers()`
+/// entry, baked at plugin load.
+#[derive(Debug, Clone)]
+struct FrameworkModeGrant {
+    mode: FrameworkMode,
+    imports: Vec<String>,
+    base: Option<String>,
+}
+
 /// One way a sub leaves by falling off its end.
 ///
 /// Perl yields the value of the body's last statement, so that statement is
@@ -268,6 +277,10 @@ struct Builder<'a> {
     // typing index) miss replacement code; the fix is a file tree type that
     // yields injected trees transparently, not a roots list each pass loops.
     eval_injections: std::collections::HashMap<usize, Node<'a>>,
+    /// Every parse this build reads (the main tree and each injection),
+    /// navigable by node identity — upward reads go through it, never
+    /// through `Node::parent`, which rescans from the root.
+    syntax: &'a crate::cst::SyntaxForest<'a>,
 
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,
@@ -592,8 +605,16 @@ struct Builder<'a> {
     /// in `frameworks/moo.rhai`), flavor-validated at bake. Core holds no
     /// module list; `visit_use` looks consumers up here. Mojo::Base is
     /// not in this map — its `-base` gate is structural, not a name match.
-    framework_mode_modules:
-        std::collections::HashMap<String, (FrameworkMode, Vec<String>)>,
+    framework_mode_modules: std::collections::HashMap<String, FrameworkModeGrant>,
+
+    /// Package → the base class its framework `use` names
+    /// (`FrameworkModeMaker::base`), wired as a parent by
+    /// `apply_framework_bases` unless the package is in
+    /// `extended_packages`.
+    framework_bases: std::collections::HashMap<String, String>,
+    /// Packages that called `extends`: their declared parent replaces the
+    /// framework base, as Moo's and Moose's `extends` reset `@ISA`.
+    extended_packages: std::collections::HashSet<String>,
 
     /// Per-file verdict: packages that ARE roles. Flushed into
     /// `FileAnalysis.role_packages`; `is_role_package` reads the baked
