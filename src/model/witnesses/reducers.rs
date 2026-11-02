@@ -254,12 +254,25 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
         if let Some(point) = narrow_point {
+            // A region holds its value until something later says otherwise:
+            // a write's reset or a fact stated at a point after the region
+            // opened (a key write extending the shape the region holds).
+            let latest_point_fact = ws
+                .iter()
+                .filter(|w| span_is_zero(&w.span) && window.admits(w))
+                .filter(|w| matches!(w.payload, WitnessPayload::InferredType(_)))
+                .map(|w| w.span.start)
+                .max();
             // Source priority first (an annotation outranks a flow guess
             // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
-                    if span_contains(&w.span, point) && !span_is_zero(&w.span) {
+                    if span_contains(&w.span, point)
+                        && !span_is_zero(&w.span)
+                        && window.admits(w)
+                        && latest_point_fact.is_none_or(|p| p <= w.span.start)
+                    {
                         let area = span_area(&w.span);
                         let prio = w.source.priority();
                         let better = narrow.is_none_or(|(nw, a)| {
