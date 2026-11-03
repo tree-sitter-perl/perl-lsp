@@ -27,14 +27,12 @@ pub mod codes {
 /// lookup is the file's own scope, so only a use-map language reaches it.
 pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
     use crate::build::language_driver::LanguageRegistry;
-    use crate::model::file_analysis::{CrossFileLookup, PackVisibility, ScopedLookup, VisibilityAxis};
-    let visibility = LanguageRegistry::pack_visibility(&analysis.language);
-    if visibility != PackVisibility::NameKeyed {
+    use crate::model::file_analysis::{CrossFileLookup, PackVisibility};
+    if LanguageRegistry::pack_visibility(&analysis.language) != PackVisibility::NameKeyed {
         return Vec::new();
     }
     let base: &dyn CrossFileLookup = module_index;
-    let axis = VisibilityAxis::for_origin(analysis, None, base, visibility);
-    let scoped = ScopedLookup::new(base, &analysis.pack.include_closure, None, axis);
+    let scoped = crate::index::resolve::origin_scope(base, analysis, None);
     analysis
         .widened_class_references(&scoped)
         .into_iter()
