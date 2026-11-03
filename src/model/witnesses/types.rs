@@ -248,7 +248,7 @@ impl WitnessPayload {
         match self {
             WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
-            WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| f(t)),
+            WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| t.for_each_attachment_mut(f)),
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
                     Callee::Value(t) => f(t),
@@ -450,11 +450,11 @@ pub struct KeyExtension {
     /// The keys the write goes through, outermost first (`$v->{a}{b}` is
     /// `[a, b]`).
     pub hops: Vec<crate::model::file_analysis::WriteKey>,
-    /// The written value, an `Expr` read when the place is: the value a
-    /// later read drills back typed.
-    pub value: Option<WitnessAttachment>,
-    /// A list-assignment slot: the value is element N of `value`.
-    pub slot: Option<i32>,
+    /// The written value's type, read BEFORE the write as Perl evaluates
+    /// it: a right-hand side that reads the place it writes
+    /// (`$s->{self} = $s`) sees the shape without this key. A list
+    /// assignment's slot is already taken.
+    pub value: Option<InferredType>,
     /// The write may not have run (conditional, or reached across a scope
     /// boundary): it opens the shape instead of growing it.
     pub widen: bool,

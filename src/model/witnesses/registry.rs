@@ -2036,30 +2036,11 @@ impl ReducerRegistry {
             }
             prev = Some(at);
             let Some(base) = current.as_mut() else { continue };
-            let vtype = x.value.as_ref().and_then(|v| {
-                let sub_q = ReducerQuery {
-                    attachment: v,
-                    point: None,
-                    framework: FrameworkFact::Plain,
-                    arity_hint: None,
-                    receiver: None,
-                    args: Vec::new(),
-                    context: q.context,
-                };
-                let t = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
-                    ReducedValue::Type(t) => Some(t.clone()),
-                    ReducedValue::FactMap(_) | ReducedValue::None => None,
-                })?;
-                match x.slot {
-                    Some(n) => t.element_at(n).cloned(),
-                    None => Some(t),
-                }
-            });
             let changed = if temporal {
-                super::extend_in_place(base, &x.hops, vtype.as_ref(), x.widen)
+                super::extend_in_place(base, &x.hops, x.value.as_ref(), x.widen)
             } else {
                 let mut next = base.clone();
-                super::extend_in_place(&mut next, &x.hops, vtype.as_ref(), x.widen) && {
+                super::extend_in_place(&mut next, &x.hops, x.value.as_ref(), x.widen) && {
                     *base = crate::model::file_analysis::join(base, &next, class_order(q));
                     true
                 }

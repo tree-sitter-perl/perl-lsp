@@ -1,8 +1,8 @@
 //! The mutation-extension pass: a write through a variable extends the
 //! shape it lands in (`docs/adr/structural-shapes.md`).
 //!
-//! A write is a DELTA (`WitnessPayload::Extend`): the key it adds and an
-//! edge to the value it writes. The shape a read sees is the value standing
+//! A write is a DELTA (`WitnessPayload::Extend`): the key it adds and the
+//! type of the value it writes. The shape a read sees is the value standing
 //! at each write with that write's delta laid over it, folded when the place
 //! is read (`ReducerRegistry::lower_extensions`) — never a copy of the grown
 //! shape per write, which is N² keys for N writes to one hash.
@@ -27,11 +27,12 @@ use crate::model::file_analysis::{KeyWrite, WriteKey};
 /// `bindings[i]` is `key_writes[i]`'s variable binding and its home scope,
 /// resolved by the caller's binder before the bag is borrowed.
 ///
-/// The fold passes `clear = true` (clear-and-emit per iteration, tag
-/// `mutation_extension`: the object-slot routing reads the root's type).
-/// Enrichment passes `false` — post-finalize the bag is append-only — and
-/// adds only the object-slot deltas: a place's deltas are already in the bag
-/// and fold onto whatever imported value stands under them at read time.
+/// Re-emittable: the fold passes `clear = true` (clear-and-emit per
+/// iteration, tag `mutation_extension`) since a write's value and its
+/// object-slot route read types the fold is still settling. Enrichment
+/// passes `false` — post-finalize the bag is append-only — so values and
+/// routes that imported types sharpen land as later deltas at the same
+/// sites, which re-type what the build's deltas said.
 pub(crate) fn emit_mutation_extension_witnesses(
     bag: &mut WitnessBag,
     ctx: &BagContext,
@@ -43,64 +44,62 @@ pub(crate) fn emit_mutation_extension_witnesses(
     if clear {
         bag.remove_by_source_tag("mutation_extension");
     }
-    // Per-var doc order so a place's deltas land in the order they apply.
+    // Per-var doc order: each write's value is read with the earlier
+    // writes' deltas already in the bag and its own not yet, as Perl
+    // evaluates a right-hand side before it stores.
     let mut writes: Vec<(&KeyWrite, &(crate::model::file_analysis::Binding, ScopeId))> =
         key_writes.iter().zip(bindings).collect();
     writes.sort_by_key(|(w, _)| (&w.var_text, w.span.start));
-    // Route every write before pushing any delta, so the routing reads see
-    // the bag the fold handed in.
     let mut routes = SlotRoutes::default();
-    let routed: Vec<Option<String>> = writes
-        .iter()
-        .map(|(w, (binding, _))| {
-            if w.path.is_empty() || !matches!(w.key, WriteKey::Hash(_)) {
-                return None;
-            }
-            let place = crate::model::file_analysis::Place::variable(binding.clone());
-            routes.owner_at(bag, ctx, &place, w.span.start)
-        })
-        .collect();
-    for ((w, (binding, home)), owner) in writes.into_iter().zip(routed) {
+    for (w, (binding, home)) in writes {
+        let place = crate::model::file_analysis::Place::variable(binding.clone());
+        let owner = match &w.key {
+            WriteKey::Hash(_) if !w.path.is_empty() => routes.owner_at(bag, ctx, &place, w.span.start),
+            _ => None,
+        };
         // Attach where the value the write extends is bound — the scope a
         // read takes it from — never where the write merely uses it (a
         // block's own `$v->{k}` access would hide the shape from every read
         // after the block). Climbing past the write's own scope means the
         // write may not have run by read time.
         let widen = w.conditional || *home != w.scope;
-        let value = w.rhs_span.map(WitnessAttachment::Expr);
-        let span = Span { start: w.span.start, end: w.span.start };
-        let source = WitnessSource::Builder("mutation_extension".into());
-        match (owner, &w.key) {
+        let value = w.rhs_span.and_then(|s| rhs_type(bag, ctx, s)).and_then(|t| match w.rhs_slot {
+            Some(n) => t.element_at(n).cloned(),
+            None => Some(t),
+        });
+        let (attachment, hops) = match (owner, &w.key) {
             (Some(owner), WriteKey::Hash(slot)) => {
-                bag.push(Witness {
-                    attachment: WitnessAttachment::Field { owner, name: slot.clone() },
-                    source,
-                    payload: WitnessPayload::Extend(KeyExtension {
-                        hops: w.path.clone(),
-                        value,
-                        slot: w.rhs_slot,
-                        widen,
-                    }),
-                    span,
-                });
+                (WitnessAttachment::Field { owner, name: slot.clone() }, w.path.clone())
             }
-            _ if clear => {
-                bag.push(Witness {
-                    attachment: WitnessAttachment::Place(Box::new(
-                        crate::model::file_analysis::Place::variable(binding.clone()),
-                    )),
-                    source,
-                    payload: WitnessPayload::Extend(KeyExtension {
-                        hops: std::iter::once(w.key.clone()).chain(w.path.iter().cloned()).collect(),
-                        value,
-                        slot: w.rhs_slot,
-                        widen,
-                    }),
-                    span,
-                });
-            }
-            _ => {}
-        }
+            _ => (
+                WitnessAttachment::Place(Box::new(place)),
+                std::iter::once(w.key.clone()).chain(w.path.iter().cloned()).collect(),
+            ),
+        };
+        bag.push(Witness {
+            attachment,
+            source: WitnessSource::Builder("mutation_extension".into()),
+            payload: WitnessPayload::Extend(KeyExtension { hops, value, widen }),
+            span: Span { start: w.span.start, end: w.span.start },
+        });
+    }
+}
+
+fn rhs_type(bag: &WitnessBag, ctx: &BagContext, s: Span) -> Option<InferredType> {
+    let reg = ReducerRegistry::with_defaults();
+    let att = WitnessAttachment::Expr(s);
+    let q = ReducerQuery {
+        attachment: &att,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context: Some(ctx),
+    };
+    match reg.query(bag, &q) {
+        ReducedValue::Type(t) => Some(t),
+        ReducedValue::FactMap(_) | ReducedValue::None => None,
     }
 }
 
