@@ -33,11 +33,11 @@ witness, so the region is truncated at the first op that could disturb
 the subject. Both cutoffs are lookups in an index built once per file,
 never a search per fact — every use observes, so a per-fact scan is a
 scan per use (Znuny `PDF.t`: a whole-block CST scan per place use took
-one file's build to 100 s). A variable's cutoff is its first rebind
-(`RebindIndex`, from the FlowEdges, shared with the pack narrowing and the
-pack observations); a place's is its first disturbance
-(`PlaceDisturbanceIndex`, one pass over the file's trees, `s///e` code
-included). Conservative by construction — it under-narrows, never lies. The bias is
+one file's build to 100 s). A variable's cutoff is its first rebind, a
+write of its whole place in the same index (`rebind_index`, from the
+FlowEdges, shared with the pack narrowing and the pack observations); a
+place's is its first disturbance (`PlaceDisturbanceIndex`, one pass over the
+file's trees, `s///e` code included). Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
@@ -174,8 +174,7 @@ the region decides where a fact holds. A member access carries its
 receiver's place on its invocant (`Invocant::Place`), and a deref with no
 ref of its own carries it on its `ArrowDerefSite`, so the receiver query
 and the deref diagnostics read it without re-reading the spelling. Plain
-variables stay on `Variable { name, scope }` until the variable lane moves
-onto bindings.
+variables are `Variable { name, scope }` keyed to their binding (below).
 
 A pack builds the same places from its captures at skeleton assembly
 (`query_extract/places.rs`): a member read whose receivers lead down to a
@@ -202,11 +201,59 @@ method call on the slot's value leaves the slot narrowed. A read that
 steps further in is not an access. Two steps overlap when they can reach
 one slot: distinct constants never do, a key variable may hold anything.
 Rebinding a key variable moves the place, so its narrowing ends there
-(`RebindIndex`, by name, until variables move onto bindings).
+(at a rebind of the key variable's binding).
 
 Accessor places (`$self->name`) are out: an accessor isn't a stable slot
 (it can return a different object per call, with side effects), so
 soundness needs a stricter no-call-between-guard-and-use model.
+
+## Variables are bindings
+
+Every fact about a variable attaches to the place its name binds to where
+the fact is made, `Place{root, []}`: a lexical is its declaration
+(`Binding::Lexical`), a package variable its package and name
+(`Binding::Package`), and `@_` the arguments of the callable it is read in
+(`Binding::Arguments`), never a symbol, since `@_` cannot be declared. A
+token that declares two symbols in one scope (python's class-body binding,
+`Symbol::declared_with`) binds one value. The builder binds the walk's
+facts once the walk is done, since a fact can precede the declaration it is
+about (`bind_walk_witnesses`), and every later push as it goes
+(`Builder::push_witness`); a pack binds the assembled analysis once, before
+the seal (`FileAnalysis::bind_variable_witnesses`); enrichment binds its own
+pushes. One rule serves all three (`bind_variable_witness`), over the two
+binders `Builder::binding_of` and `FileAnalysis::variable_binding_of`.
+
+A read is then name resolution, never a merge: the reader binds the name
+where it reads it and queries that one place. A shadowing declaration is its
+own binding, so an inner `my $x` never sees the outer one's facts, and a
+redeclaration in the same scope is a fresh binding too: a read after it sees
+only the new variable's value. On the assembled analysis, a fact made in the
+scope declaring the name belongs to that declaration wherever it sits in the
+scope (a member's declared type spans its class). An edge that reaches a
+variable from a read takes the read's point; one with no read position (a
+member's declared type) asks at the end of the scope the binding lives in.
+
+A rebind cuts a fact about the variable it binds, not every variable of the
+name: each FlowEdge target is a write of the whole variable in the place
+disturbance index (`rebind_index`), so a write to a shadowing `$x` leaves
+the outer `$x`'s narrowing standing. A pack's variable regions are cut
+the same way once its analysis is assembled and bound
+(`FileAnalysis::bind_variable_regions`), since the extractor has no
+bindings to key them by.
+
+**A fact made in a nested block is a region.** It holds from where it is made
+to the end of the block it was made in, so the else arm never sees the then
+arm's write, and past the `if` the write is gone. What the variable holds
+after the `if` is the join of "the write ran" and "it did not": a write in a
+nested block also mints a reset marker on each enclosing level, at the end
+of the statement holding that level, up to the binding. With no join of
+values, that marker reads `Unknown` after a write that may have run, the
+same answer the flat walk gave. A join that keeps the value both arms agree
+on is `JoinFold`'s job (`docs/prompt-cfg-tier.md`).
+
+A key write (`$h->{k} = …`) in a nested block extends the shape on the
+binding with no end: it opens the shape instead (`mutation_extension`), which
+already says the write may not have run.
 
 ## Polarity and the negative lattice
 

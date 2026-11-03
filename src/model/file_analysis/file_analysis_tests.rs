@@ -1386,8 +1386,8 @@ sub name {
         .all()
         .iter()
         .filter(|w| {
-            matches!(&w.attachment,
-                crate::model::witnesses::WitnessAttachment::Variable { name, .. } if name == "$self")
+            matches!(w.attachment.variable_binding(),
+                Some(crate::model::file_analysis::Binding::Lexical(sid)) if fa.symbol(*sid).name == "$self")
         })
         .collect();
     assert!(

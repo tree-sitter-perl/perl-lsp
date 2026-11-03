@@ -156,7 +156,6 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
 pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::build::query_extract::Capture]) {
     use crate::build::query_extract::Capture;
     use std::sync::OnceLock;
-    static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
     static FLOW_QUERY: OnceLock<(tree_sitter::Query, Vec<Capture>)> = OnceLock::new();
     let (query, caps) = FLOW_QUERY.get_or_init(|| {
         let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
@@ -165,6 +164,14 @@ pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::bui
         (query, caps)
     });
     (query, caps)
+}
+
+static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
+
+/// The `@flow` document's text, for the walk that concatenates it with the
+/// plugin patterns (`pattern_dispatch::walk_queries`).
+pub(super) fn flow_source() -> &'static str {
+    FLOW_SCM
 }
 
 /// The flow minter's capture table: each capture id's parsed `Capture`, or
@@ -345,6 +352,7 @@ fn build_once(
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::model::witnesses::WitnessBag::new(),
+        vars_bound: false,
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
         blessing_packages: std::collections::HashSet::new(),
@@ -374,6 +382,7 @@ fn build_once(
         plugin_loads: Vec::new(),
         loader_config_params: Vec::new(),
         flow_edges: Vec::new(),
+        flow_matches: None,
         any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
         gated_emissions: Vec::new(),
@@ -403,6 +412,7 @@ fn build_once(
         defined_narrowings: Vec::new(),
         tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
+        rebinds: Default::default(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
@@ -499,6 +509,7 @@ fn build_once(
 
     b.pop_scope();
     let _ = file_scope;
+    b.bind_walk_witnesses();
 
     // Flush plugin-emitted VarType constraints now that every scope
     // has been pushed. Each uses scope_at on the declared anchor point
@@ -700,7 +711,9 @@ fn build_once(
                 _ => None,
             })
             .collect();
-        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        // A variable's value reaches it through edges as well, so only a
+        // part of one needs a value fact of its own to be worth keeping.
+        b.arrow_deref_sites.retain(|s| s.place.path.is_empty() || valued.contains(&*s.place));
         b.arrow_deref_sites.shrink_to_fit();
         for r in &mut b.refs {
             if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {
@@ -796,19 +809,61 @@ impl<'a> Builder<'a> {
     /// it. Idempotent per site, so the worklist fold can mint it each round.
     pub(crate) fn push_reset_marker(&mut self, variable: String, scope: ScopeId, at: Point) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let attachment = WitnessAttachment::Variable { name: variable, scope };
-        let already = self.bag.for_attachment(&attachment).iter().any(|w| {
-            w.span.start == at && w.span.end == at && matches!(w.payload, WitnessPayload::Reset)
-        });
-        if already {
-            return;
-        }
-        self.bag.push(Witness {
-            attachment,
+        let w = self.bound_witness(Witness {
+            attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
             payload: WitnessPayload::Reset,
             span: Span { start: at, end: at },
         });
+        let already = self.bag.iter_attachment(&w.attachment).any(|have| {
+            have.span == w.span && matches!(have.payload, WitnessPayload::Reset)
+        });
+        if !already {
+            self.bag.push(w);
+        }
+    }
+
+    /// Push a witness, a variable's keyed to its binding (`bound_witness`).
+    pub(crate) fn push_witness(&mut self, w: crate::model::witnesses::Witness) -> usize {
+        let w = self.bound_witness(w);
+        self.bag.push(w)
+    }
+
+    /// The walk keys a variable's facts by the scope they are made in: a
+    /// fact can precede the declaration it is about (a sub's invocant is
+    /// typed before its `my ($self) = @_` is visited). Once the walk is
+    /// done every declaration exists, so its facts move onto their
+    /// bindings here, and every later push binds as it goes.
+    pub(super) fn bind_walk_witnesses(&mut self) {
+        let mut bag = std::mem::take(&mut self.bag);
+        bag.rewrite(|w| {
+            crate::model::file_analysis::bind_variable_witness(w, &self.scopes, |n, at, sc| self.binding_of(n, at, sc));
+        });
+        self.bag = bag;
+        self.vars_bound = true;
+    }
+
+    /// A variable's facts live on the place its name binds to
+    /// (`bind_variable_witness`). During the walk a fact stays where it was
+    /// made (`bind_walk_witnesses`).
+    pub(crate) fn bound_witness(&self, mut w: crate::model::witnesses::Witness) -> crate::model::witnesses::Witness {
+        if self.vars_bound {
+            crate::model::file_analysis::bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.binding_of(n, at, sc));
+        }
+        w
+    }
+
+    /// What `name`, written at `at` in `scope`, binds to, and the scope
+    /// that binding lives in.
+    pub(crate) fn binding_of(&self, name: &str, at: Point, scope: ScopeId) -> (crate::model::file_analysis::Binding, ScopeId) {
+        use crate::model::file_analysis::Binding;
+        let binding = self.binding_key_in(name, at, scope);
+        let home = match &binding {
+            Binding::Lexical(sym) | Binding::Receiver(sym) => self.symbols[sym.0 as usize].scope,
+            Binding::Arguments(callable) => *callable,
+            Binding::Package(..) => crate::model::file_analysis::outermost_scope(&self.scopes, scope),
+        };
+        (binding, home)
     }
 
     pub(super) fn push_type_constraint_from(
@@ -818,7 +873,7 @@ impl<'a> Builder<'a> {
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Variable { name: variable, scope },
             source,
             payload: WitnessPayload::InferredType(ty),
@@ -849,11 +904,10 @@ impl<'a> Builder<'a> {
     fn seed_arg_windows(&mut self) {
         use crate::model::witnesses::WitnessAttachment;
         let facts = self.package_facts();
-        let seeded: std::collections::HashSet<ScopeId> = self.bag.all().iter().filter_map(|w| match &w.attachment {
-            WitnessAttachment::Variable { name, scope } if name == "@_"
-                && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
-            _ => None,
-        }).collect();
+        let seeded = |scope: &crate::model::file_analysis::Scope| {
+            let args = crate::model::file_analysis::Place::variable(crate::model::file_analysis::Binding::Arguments(scope.id));
+            self.bag.iter_attachment(&WitnessAttachment::Place(Box::new(args))).any(|w| w.span.start == scope.span.start)
+        };
         let method_names = self.method_call_names();
         let mut heads = Vec::new();
         for i in 0..self.scopes.len() {
@@ -867,7 +921,7 @@ impl<'a> Builder<'a> {
             // The class a sub belongs to is its symbol's (`sub Foo::bar`
             // is `Foo`'s), not the package in force around it.
             let owner_pkg = scope.owner.and_then(|o| self.symbols[o.0 as usize].package.clone());
-            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded.contains(&scope.id)) else { continue };
+            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded(scope)) else { continue };
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             // A named sub of a class package is a method unless the file
             // only ever calls it as a plain function.

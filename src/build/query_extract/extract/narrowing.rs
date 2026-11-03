@@ -100,37 +100,23 @@ pub(super) fn finish(st: &mut ExtractState) {
             pending.push((subject, refined, arm.span(), scope));
         }
     }
-    // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
-    // at the first FlowEdge that rebinds the subject — the SAME edge-driven
-    // cutoff the Perl narrowing uses (`RebindIndex`). Deferred to here so
-    // the edges exist. The witness gets a REAL region span [start, cutoff], so
-    // point-containment ends the narrowing at the rebind — the soundness Perl
-    // got from its cutoff, now generic. Every LangPack that narrows (python
-    // isinstance, cpp dynamic_cast + optional engagement) gets it free.
-    let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
-    let mut narrowed = Vec::new();
+    // Each region ends at the first rebind of its subject's binding, which
+    // only the assembled analysis knows (`bind_variable_regions`).
     for (name, refined, region, scope) in pending {
-        let Some(held) = crate::model::file_analysis::cut_region(region, [rebinds.earliest_in(&name, region)]) else {
-            continue; // rebound before the region even opens — nothing holds
-        };
         let refined = written_type_at(out, &st.pack.names, refined, region.start);
-        narrowed.push(crate::model::witnesses::Witness {
+        out.variable_regions.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
             payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
-            span: held,
+            span: region,
         });
     }
-    out.witnesses.extend(narrowed);
     for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
-        let Some(held) = crate::model::file_analysis::cut_region(region, [rebinds.earliest_in(&name, region)]) else {
-            continue;
-        };
-        out.witnesses.push(crate::model::witnesses::Witness {
+        out.variable_regions.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
             payload: crate::model::witnesses::WitnessPayload::Observation(obs),
-            span: held,
+            span: region,
         });
     }
     // std::move sites → moved-from facts. The qualifier/name verify the

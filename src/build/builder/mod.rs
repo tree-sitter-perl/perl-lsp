@@ -433,6 +433,10 @@ struct Builder<'a> {
     /// push directly here. Moved into `FileAnalysis.witnesses` when
     /// the analysis is constructed — no second seeding pass.
     bag: crate::model::witnesses::WitnessBag,
+    /// Whether the walk is done, so every declaration exists and a variable
+    /// fact can be keyed to its binding as it is pushed
+    /// (`bind_walk_witnesses`).
+    vars_bound: bool,
     /// Nodes that `emit_expr_witness` couldn't resolve at walk time.
     /// Two common shapes:
     ///   * **Forward-defined sub call** — `sub a { b() } sub b {…}`
@@ -514,6 +518,9 @@ struct Builder<'a> {
     /// Value-flow edges minted at assignment sites — the provenance tier; each
     /// lowers to the same type witness the builder used to push inline.
     flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
+    /// The `@flow` document's matches, when the plugin pattern walk
+    /// collected them; the minter reads them after the walk.
+    flow_matches: Option<Vec<narrowing::FlowMatch<'a>>>,
     /// Rules from `param_types()` with `method: None` — applied to every sub
     /// declaration in a matching class, regardless of method name. The
     /// "every action in a controller" case (Catalyst `$c`).
@@ -678,6 +685,9 @@ struct Builder<'a> {
     /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
     /// truncation that replaced the `cst::rebinds_scalar` grammar scan.
     pending_narrowings: Vec<narrowing::PendingNarrow>,
+    /// Every rebind, as a write of the whole variable it binds; built with
+    /// the narrowing cutoffs, once the FlowEdges are minted.
+    rebinds: crate::model::file_analysis::PlaceDisturbanceIndex,
 
     /// Recognized guard conditions, for the redundant/contradictory-guard
     /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into

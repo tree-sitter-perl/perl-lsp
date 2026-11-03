@@ -192,7 +192,7 @@ fn render_symbol_hover(
             let display = module_index
                 .and_then(|midx| {
                     analysis
-                        .type_name_edge_of(&sym.name, sym.scope)
+                        .type_name_edge_of(sym.id)
                         .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
                 })
                 .unwrap_or_else(|| analysis.display_type_of(sym, &ty));

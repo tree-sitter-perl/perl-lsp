@@ -161,7 +161,7 @@ impl<'a> Builder<'a> {
         drop: Vec<String>,
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Expr(at),
             source: WitnessSource::Plugin(plugin_id.clone()),
             payload: WitnessPayload::BrandOverlay { ns: plugin_id, on_class, set, drop },
@@ -291,7 +291,7 @@ impl<'a> Builder<'a> {
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id.clone()),
                         payload: WitnessPayload::InferredType(rt),
@@ -313,7 +313,7 @@ impl<'a> Builder<'a> {
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id),
                         payload: WitnessPayload::Edge(target),
@@ -501,7 +501,7 @@ impl<'a> Builder<'a> {
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id),
                         payload: WitnessPayload::InferredType(rt),

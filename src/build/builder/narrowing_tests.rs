@@ -136,7 +136,7 @@ fn narrow_truncated_at_reassignment() {
 // Truncation must recognize EVERY way Perl rebinds a scalar, not just
 // `$x = …` / `my $x` — else a stale narrowing leaks past the rebind (an
 // always-on false `undef-deref` for the `defined`-guard flavor). One test
-// per binding shape; the cutoff (`RebindIndex`) reads the
+// per binding shape; the cutoff (`rebind_index`) reads the
 // FlowEdge set, so each shape must mint a `@flow` edge targeting the subject.
 
 #[test]
@@ -965,13 +965,14 @@ fn a_declaration_nothing_can_type_stays_absent() {
 }
 
 #[test]
-fn a_declaration_is_a_write_and_resets_too() {
-    // A redeclaration retires the earlier belief exactly as a plain
-    // assignment does — there is one kind of write.
+fn a_redeclaration_is_a_fresh_binding() {
+    // A redeclaration binds a new variable: a read after it sees only the
+    // new one's value, and an untypable one is absence, as for any first
+    // binding.
     let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $x = 'str';\n  my $o = $x;\n}\n1;\n");
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::String));
     let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $x = unknown_fn();\n  my $o = $x;\n}\n1;\n");
-    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::Unknown));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), None);
 }
 
 #[test]

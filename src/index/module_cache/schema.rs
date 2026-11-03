@@ -10,7 +10,7 @@ const SCHEMA_VERSION: &str = "10";
 /// Bumped when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 300;
+pub const EXTRACT_VERSION: i64 = 303;
 
 /// Bumped when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
@@ -482,17 +482,36 @@ fn validate_input_fingerprint_inner(conn: &Connection, fingerprint: u64) -> rusq
 /// Run `body` inside `BEGIN IMMEDIATE`, committing on `Ok` and rolling back
 /// on `Err`. IMMEDIATE takes the write lock up front, so a check-and-stamp
 /// validator's read cannot race the other writer's clear.
+///
+/// A failed COMMIT rolls back too: the gates run on the connection that later
+/// becomes the persist writer, and a transaction left open there holds the
+/// write lock and fails every later chunk's BEGIN.
 pub(crate) fn in_immediate_txn<T>(
     conn: &Connection,
     body: impl FnOnce() -> rusqlite::Result<T>,
 ) -> rusqlite::Result<T> {
     conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered())?;
-    let result = body();
-    match &result {
-        Ok(_) => conn.execute_batch(sql::TXN_COMMIT.registered())?,
-        Err(_) => {
-            let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
-        }
+    let finished = body().and_then(|v| conn.execute_batch(sql::TXN_COMMIT.registered()).map(|()| v));
+    if finished.is_err() {
+        let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
     }
-    result
+    finished
+}
+
+/// Run `body` as one savepoint: every write it makes lands, or none does.
+/// Nests inside the caller's transaction (a persist chunk) or another unit —
+/// SQLite resolves the shared name to the innermost — and is its own
+/// transaction outside one, so a single-file writer gets the same unit.
+pub(crate) fn in_savepoint<T>(
+    conn: &Connection,
+    body: impl FnOnce() -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch(sql::SAVEPOINT_UNIT.registered())?;
+    let finished =
+        body().and_then(|v| conn.execute_batch(sql::RELEASE_UNIT.registered()).map(|()| v));
+    if finished.is_err() {
+        let _ = conn.execute_batch(sql::ROLLBACK_TO_UNIT.registered());
+        let _ = conn.execute_batch(sql::RELEASE_UNIT.registered());
+    }
+    finished
 }
