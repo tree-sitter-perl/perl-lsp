@@ -509,7 +509,7 @@ fn instanceof_expression_is_a_type_constraint_not_the_class() {
         "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nmy $t = InstanceOf['My::Thing'];\n1;\n",
     );
     let ty = fa
-        .inferred_type_via_bag("$t", Point::new(3, 20))
+        .inferred_type_via_bag("$t", Point::new(4, 0))
         .expect("$t should carry a type");
     assert!(
         matches!(&ty, InferredType::TypeConstraintOf(Some(inner))

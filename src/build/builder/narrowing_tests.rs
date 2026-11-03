@@ -976,6 +976,26 @@ fn a_redeclaration_is_a_fresh_binding() {
 }
 
 #[test]
+fn a_declaration_is_in_force_after_its_statement() {
+    // `my $x = $x` reads the `$x` the new one shadows; the new one is in
+    // force from the next statement on, and holds the value it was given.
+    let fa = build_fa("package P;\nsub m {\n  my $r = [];\n  {\n    my $r = $r;\n    my $o = $r;\n  }\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(4, 13)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 13)), Some(InferredType::ArrayRef));
+    // The same in one scope: a redeclaration's RHS reads the first binding.
+    let fa = build_fa("package P;\nsub m {\n  my $x = {};\n  my $x = $x->{k};\n  my $o = $x;\n}\n1;\n");
+    assert!(matches!(fa.inferred_type_via_bag("$x", Point::new(3, 11)), Some(InferredType::HashWithKeys { .. })));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), None);
+    // The read binds to the outer declaration, so goto-def agrees.
+    let outer = fa.symbols().iter().find(|s| s.name == "$x").unwrap().id;
+    let rhs = fa.refs().iter().find(|r| r.target_name == "$x" && r.span.start == Point::new(3, 10)).unwrap();
+    assert_eq!(rhs.resolved_symbol(), Some(outer));
+    // A control header's declaration is in force from its block on.
+    let fa = build_fa("package P;\nsub m {\n  my $l = [];\n  while (my $l = $l->[0]) {\n    my $o = $l;\n  }\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$l", Point::new(3, 17)), Some(InferredType::ArrayRef));
+}
+
+#[test]
 fn a_parameter_assertion_survives_its_own_declaration() {
     // The first-param claim is anchored at the `$self` token, so the
     // declaration's marker (which retires what lies strictly before it)

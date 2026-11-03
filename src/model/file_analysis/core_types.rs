@@ -777,6 +777,12 @@ pub struct Symbol {
     /// `param_arity()`, which reads both sources).
     #[serde(default)]
     pub arity: Option<ParamArity>,
+    /// Where a lexical comes into force, when that is later than where it
+    /// is declared: Perl introduces a `my` after its statement, so
+    /// `my $x = $x` reads the outer `$x`. Minted by the producer that sees
+    /// the statement; `None` is "from the declaration on" (`in_force_from`).
+    #[serde(default, with = "point_opt_serde")]
+    pub in_force: Option<Point>,
 }
 
 /// A callable's declared parameter shape, as a set of counts — the fuel for
@@ -1058,6 +1064,16 @@ pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -
 }
 
 impl Symbol {
+    /// The first point a use of this name can see the declaration.
+    pub fn in_force_from(&self) -> Point {
+        self.in_force.unwrap_or(self.span.start)
+    }
+
+    /// Where a use of this name sees the declaration (`InView`).
+    pub fn in_view(&self) -> InView {
+        InView { from: self.span.start, shadowed: (self.span.end, self.in_force_from()) }
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
@@ -1242,6 +1258,27 @@ pub enum SymKind {
     /// search as a navigable entry. Outline entity — not backed by a
     /// Perl symbol, so most queries (gd/gr/rename) don't hit it.
     Namespace,
+}
+
+/// Where a declaration is in view: from `from` on, except strictly inside
+/// `shadowed` (the rest of the declaring statement, past the declaration),
+/// where a use reads the binding the declaration shadows. The declaration's
+/// own facts sit on it, so they stay its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InView {
+    pub from: Point,
+    pub shadowed: (Point, Point),
+}
+
+impl InView {
+    /// In view from `from` on, nothing shadowed.
+    pub fn from(from: Point) -> Self {
+        InView { from, shadowed: (from, from) }
+    }
+
+    pub fn at(&self, at: Point) -> bool {
+        self.from <= at && !(self.shadowed.0 < at && at < self.shadowed.1)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

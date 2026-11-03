@@ -410,7 +410,7 @@ pub enum VariableUse {
 }
 
 /// Resolve the variable use `name` written at `at`. `decls_in(scope)`
-/// lists the variables `scope` declares under `name` as `(id, start,
+/// lists the variables `scope` declares under `name` as `(id, in_view,
 /// gate)`, the gate being the package an `our` is visible from.
 pub fn variable_use<'a, I>(
     name: &str,
@@ -421,7 +421,7 @@ pub fn variable_use<'a, I>(
     decls_in: impl Fn(ScopeId) -> I,
 ) -> VariableUse
 where
-    I: IntoIterator<Item = (SymbolId, Point, Option<&'a str>)>,
+    I: IntoIterator<Item = (SymbolId, InView, Option<&'a str>)>,
 {
     // The qualifier names the package directly, so the lexical chain is
     // irrelevant and a `my` of the same name is never the answer.
@@ -431,8 +431,8 @@ where
     let mut gated_our = false;
     for scope in chain.scopes() {
         let mut found = None;
-        for (id, start, gate) in decls_in(scope) {
-            if start > at {
+        for (id, in_view, gate) in decls_in(scope) {
+            if !in_view.at(at) {
                 continue;
             }
             match gate {

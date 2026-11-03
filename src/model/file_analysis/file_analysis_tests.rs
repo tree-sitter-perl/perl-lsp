@@ -166,6 +166,7 @@ fn test_resolve_sub_return_type() {
             flags: Default::default(),
             declared_with: None,
             arity: None,
+            in_force: None,
         }],
         ..Default::default()
     });
@@ -1398,7 +1399,7 @@ sub name {
 
     // Find the body of `sub name` and pick a point inside it.
     // The `$self->{name} unless @_;` line is row 5 (0-indexed).
-    let point_in_body = Point { row: 5, column: 15 };
+    let point_in_body = Point { row: 6, column: 4 };
     let t = fa.inferred_type_via_bag("$self", point_in_body);
     assert!(
         matches!(t, Some(InferredType::ClassName(ref n)) if n == "Mojolicious::Routes::Route"),
@@ -1731,17 +1732,17 @@ my $x = $c ? 10 : "oops";
     );
 
     // $n: both arms Numeric.
-    let p_n = Point { row: 2, column: 22 };
+    let p_n = Point { row: 3, column: 0 };
     let t_n = fa.inferred_type_via_bag("$n", p_n);
     assert_eq!(t_n, Some(InferredType::Numeric), "agreeing numeric arms");
 
     // $s: both arms String.
-    let p_s = Point { row: 3, column: 22 };
+    let p_s = Point { row: 4, column: 0 };
     let t_s = fa.inferred_type_via_bag("$s", p_s);
     assert_eq!(t_s, Some(InferredType::String), "agreeing string arms");
 
     // $x: disagreeing arms join to their union.
-    let p_x = Point { row: 4, column: 22 };
+    let p_x = Point { row: 5, column: 0 };
     let t_x = fa.inferred_type_via_bag("$x", p_x);
     assert_eq!(
         t_x,

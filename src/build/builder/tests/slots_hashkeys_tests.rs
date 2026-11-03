@@ -555,7 +555,7 @@ my $open = { %$config, extra => 'x' };
 
     // Spread → open shape.
     let open = fa
-        .inferred_type_via_bag("$open", Point::new(4, 9))
+        .inferred_type_via_bag("$open", Point::new(5, 0))
         .expect("$open typed");
     assert!(
         matches!(open, InferredType::HashWithKeys { open: true, .. }),
@@ -882,7 +882,7 @@ my $id = $obj->{users}->[0]->{id};
         "heterogeneous tuple projects per index",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(2, 8)),
+        fa.inferred_type_via_bag("$s", Point::new(3, 0)),
         Some(InferredType::String),
     );
     assert_eq!(
@@ -891,7 +891,7 @@ my $id = $obj->{users}->[0]->{id};
         "mixed drill end-to-end",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$id", Point::new(5, 30)),
+        fa.inferred_type_via_bag("$id", Point::new(6, 0)),
         Some(InferredType::Numeric),
     );
 }
@@ -912,7 +912,7 @@ my $mixed = [1, some_call()];
         None,
         "out-of-range projection stays honest",
     );
-    let m = fa.inferred_type_via_bag("$mixed", Point::new(2, 10));
+    let m = fa.inferred_type_via_bag("$mixed", Point::new(3, 0));
     assert_eq!(m, Some(InferredType::ArrayRef), "untypable element degrades whole literal");
 }
 

@@ -1513,6 +1513,7 @@ impl<'a> Builder<'a> {
                 *var_span,
                 detail,
             );
+            self.symbols[sym_id.0 as usize].in_force = Some(crate::cst::declaration_in_force_from(self.syntax, node));
             // A field's declaration facts ride the closed flag set (rule
             // #12): the attribute spellings become flags here, once, and
             // stay on the symbol as display text.

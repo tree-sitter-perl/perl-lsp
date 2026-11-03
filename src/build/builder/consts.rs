@@ -107,7 +107,7 @@ impl<'a> Builder<'a> {
                             ..
                         }
                     );
-                    !minted && sym.span.start <= at
+                    !minted && sym.in_view().at(at)
                         && super::fold::our_gate_admits(super::fold::our_gate(sym), use_pkg)
                 });
                 if let Some(&id) = hit {
