@@ -816,6 +816,30 @@ sub get_config { return { host => 'h', port => 1 }; }
 /// completion, while the never-called import leaves zero artifacts (no TC,
 /// no owner stamp — there is no receiver variable a completion or rename
 /// could even start from, so nothing user-visible can depend on scanning it).
+/// A delta enrichment adds sits after the build's in the bag, whatever its
+/// line: the shapes a read folds are in source order, so the closed shape
+/// an imported value retypes at line 3 does not outrank the shape the
+/// dynamic write at line 4 opened (BMO Serialize.pm's `changes`).
+#[test]
+fn an_enrichment_time_delta_does_not_outrank_a_later_write() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let mut fa = build_fa_from_source(
+        "use TestExporter qw(get_config);\nmy $e = { user => 1 };\n$e->{cfg} = get_config();\n$e->{$ENV{K}} = 1;\nprint $e->{changes};\n",
+    );
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/TestExporter.pm"),
+        Arc::new(build_fa_from_source(
+            "package TestExporter;\nuse Exporter 'import';\nour @EXPORT_OK = qw(get_config);\nsub get_config { return { host => 'h' }; }\n1;\n",
+        )),
+    );
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let typos: Vec<String> = fa.closed_shape_key_typos(Some(&idx)).into_iter().map(|t| t.key).collect();
+    assert!(typos.is_empty(), "{:?}", typos);
+}
+
 #[test]
 fn enrichment_scan_is_call_binding_keyed_uncalled_imports_contribute_nothing() {
     use crate::index::module_index::ModuleIndex;
