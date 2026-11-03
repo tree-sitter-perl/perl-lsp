@@ -996,6 +996,20 @@ fn a_declaration_is_in_force_after_its_statement() {
 }
 
 #[test]
+fn a_signature_parameter_is_in_force_past_its_own_default() {
+    // A default reads earlier parameters, and its own name reads the
+    // binding the parameter shadows.
+    let fa = build_fa("use v5.36;\nmy $x = 'outer';\nsub f ($x, $y = $x) { return $y }\nsub h ($x = $x) { return $x }\n");
+    let def = |row, col| {
+        fa.refs().iter().find(|r| r.target_name == "$x" && r.span.start == Point::new(row, col)).and_then(|r| r.resolved_symbol())
+    };
+    let decl = |row, col| fa.symbols().iter().find(|s| s.name == "$x" && s.span.start == Point::new(row, col)).map(|s| s.id);
+    assert_eq!(def(2, 16), decl(2, 7), "a default reads the earlier parameter");
+    assert_eq!(def(3, 12), decl(1, 0), "a parameter's own default reads the outer binding");
+    assert_eq!(def(3, 25), decl(3, 7), "the body reads the parameter");
+}
+
+#[test]
 fn a_parameter_assertion_survives_its_own_declaration() {
     // The first-param claim is anchored at the `$self` token, so the
     // declaration's marker (which retires what lies strictly before it)
