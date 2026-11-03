@@ -1494,6 +1494,24 @@ sub s10 { my $d = {}; run(sub { $d->{Name} = 1; }); print $d->{Name}; }
     assert_eq!(typos, vec![("Name".to_string(), 8), ("typo".to_string(), 9)]);
 }
 
+/// The fold runs until no witness changes, not until the bag's length
+/// stops: the call binding below is re-emitted at the same count when the
+/// producer's shape opens, and the `defined $q` narrowing, which ran
+/// earlier in that iteration, must see the open shape (openfoodfacts
+/// Packaging.pm's `shape`).
+#[test]
+fn the_fold_settles_on_content_not_on_bag_length() {
+    let src = "\
+package T;
+sub producer { my ($a, $b) = @_; my $r = {}; return undef if !$b; if ($a) { $r->{x} = 1; } return $r; }
+sub consumer { my ($p) = @_; my $q = producer($p, 1); if (defined $q) { if (not defined $q->{shape}) { $q->{shape} = 'u'; } } }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<String> = fa.closed_shape_key_typos(None).into_iter().map(|t| t.key).collect();
+    assert!(typos.is_empty(), "{:?}", typos);
+}
+
 /// A fallback floor written against a value nothing types says what kind
 /// of value the author expects, not that it is the empty literal: `$o->{y}
 /// // {}` may hold any keys (98_Modbus.pm, TablePlugin Core.pm).
