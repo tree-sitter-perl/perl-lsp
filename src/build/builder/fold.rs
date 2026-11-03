@@ -233,6 +233,7 @@ impl<'a> Builder<'a> {
         // across snapshot queries and seed pass is safe.
         let reg = ReducerRegistry::with_defaults();
         let mut iters = 0usize;
+        self.bag.track_content();
         let mut prev = self.fold_state_snapshot(&reg);
         loop {
             iters += 1;
@@ -294,6 +295,7 @@ impl<'a> Builder<'a> {
             }
             prev = cur;
         }
+        self.bag.untrack_content();
         {
             let _t = crate::util::ghost_stats::ScopedNs::start("fold::chain_post");
             self.run_chain_typing_reducer(sites, ChainPassMode::PostFold);
@@ -307,20 +309,19 @@ impl<'a> Builder<'a> {
     }
 
     /// Snapshot of the answers the worklist driver tracks for fixed
-    /// point detection: every Sub/Method's return type + the bag
-    /// length. Two consecutive iterations producing the same snapshot
-    /// means no fold pass changed any sub's answer AND chain typing
-    /// pushed no new witnesses — the lattice has settled.
+    /// point detection: every Sub/Method's return type + the bag's
+    /// content. Two consecutive iterations producing the same snapshot
+    /// means no fold pass changed any sub's answer or any witness — the
+    /// lattice has settled.
     ///
-    /// `bag.len()` captures chain typing's monotonic grow. The
-    /// re-emittable passes inside `resolve_return_types` (arity,
-    /// call-binding) are clear-and-emit, so their bag contribution is
-    /// stable across iterations and a flat total bag length means no
-    /// new chain-assignment pushes either.
+    /// Content, not length: a clear-and-emit pass (call-binding, mutation
+    /// extension, …) re-pushes its witnesses every iteration, so it can
+    /// swap a closed shape for an open one at the same count, and a pass
+    /// that ran earlier in the iteration read the old one.
     pub(super) fn fold_state_snapshot(
         &self,
         reg: &crate::model::witnesses::ReducerRegistry,
-    ) -> (Vec<(SymbolId, Option<InferredType>)>, usize, usize) {
+    ) -> (Vec<(SymbolId, Option<InferredType>)>, u64, usize) {
         use crate::model::witnesses::{
             FrameworkFact, ReducedValue, ReducerQuery, WitnessAttachment,
         };
@@ -359,7 +360,7 @@ impl<'a> Builder<'a> {
         // would produce the same answers/bag snapshot and the loop
         // would terminate prematurely.
         let invocant_filled = self.method_call_invocant.len();
-        (answers, self.bag.len(), invocant_filled)
+        (answers, self.bag.content_fingerprint(), invocant_filled)
     }
 
     /// Symbolically execute the rhs of every `my $X = <expr>` and

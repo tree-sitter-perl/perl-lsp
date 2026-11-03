@@ -63,6 +63,10 @@ pub struct WitnessBag {
     /// whether the bag it answered from is still the bag being asked.
     #[serde(skip)]
     generation: u64,
+    /// While the fold tracks it, the sum of every witness's hash: kept as
+    /// witnesses come and go, so the fixed-point check reads it in O(1).
+    #[serde(skip)]
+    content: Option<u64>,
 }
 
 /// One process-wide counter for every generation stamp, so two stamped
@@ -70,6 +74,25 @@ pub struct WitnessBag {
 pub(crate) fn next_generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// One witness's hash, over its serialized form (the payload types carry
+/// no `Hash`).
+fn witness_hash(w: &Witness) -> u64 {
+    use std::hash::Hasher;
+    struct HashWriter(std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut h = HashWriter(std::collections::hash_map::DefaultHasher::new());
+    let _ = bincode::serialize_into(&mut h, w);
+    h.0.finish()
 }
 
 impl<'de> Deserialize<'de> for WitnessBag {
@@ -89,6 +112,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
             index: HashMap::new(),
             var_scopes: HashMap::new(),
             generation: 0,
+            content: None,
         };
         bag.rebuild_index();
         Ok(bag)
@@ -116,6 +140,42 @@ impl WitnessBag {
         (vec_bytes, idx_bytes)
     }
 
+    /// Start keeping a fingerprint of the bag's content: equal fingerprints
+    /// mean the same witnesses (as a multiset). The fold's fixed-point check
+    /// reads it, since a clear-and-emit pass can replace a witness with a
+    /// different one and leave the length where it was.
+    pub fn track_content(&mut self) {
+        self.content = Some(self.witnesses.iter().fold(0u64, |acc, w| acc.wrapping_add(witness_hash(w))));
+    }
+
+    pub fn untrack_content(&mut self) {
+        self.content = None;
+    }
+
+    /// The fingerprint `track_content` keeps; computed on the spot when the
+    /// bag isn't tracking.
+    pub fn content_fingerprint(&self) -> u64 {
+        let whole = || self.witnesses.iter().fold(0u64, |acc, w| acc.wrapping_add(witness_hash(w)));
+        debug_assert!(self.content.is_none_or(|c| c == whole()), "content fingerprint fell out of step");
+        self.content.unwrap_or_else(whole)
+    }
+
+    /// `Vec::retain` that keeps the content fingerprint in step.
+    fn retain_witnesses(&mut self, keep: impl Fn(&Witness) -> bool) {
+        let mut gone = 0u64;
+        let tracking = self.content.is_some();
+        self.witnesses.retain(|w| {
+            let k = keep(w);
+            if !k && tracking {
+                gone = gone.wrapping_add(witness_hash(w));
+            }
+            k
+        });
+        if let Some(c) = &mut self.content {
+            *c = c.wrapping_sub(gone);
+        }
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -130,6 +190,9 @@ impl WitnessBag {
             }
         }
         slot.push(idx);
+        if let Some(c) = &mut self.content {
+            *c = c.wrapping_add(witness_hash(&w));
+        }
         self.witnesses.push(w);
         idx
     }
@@ -197,6 +260,9 @@ impl WitnessBag {
     /// Rewrite every witness in place, keeping push order.
     pub fn rewrite(&mut self, mut f: impl FnMut(&mut Witness)) {
         self.witnesses.iter_mut().for_each(&mut f);
+        if self.content.is_some() {
+            self.track_content();
+        }
         self.rebuild_index();
     }
 
@@ -206,6 +272,10 @@ impl WitnessBag {
     pub fn truncate(&mut self, baseline: usize) {
         if baseline >= self.witnesses.len() {
             return;
+        }
+        if let Some(c) = &mut self.content {
+            let gone = self.witnesses[baseline..].iter().fold(0u64, |acc, w| acc.wrapping_add(witness_hash(w)));
+            *c = c.wrapping_sub(gone);
         }
         self.witnesses.truncate(baseline);
         self.rebuild_index();
@@ -227,7 +297,7 @@ impl WitnessBag {
     pub fn remove_by_source_tag(&mut self, tag: &str) -> usize {
         let _t = crate::util::ghost_stats::ScopedNs::start("bag::remove_tag");
         let before = self.witnesses.len();
-        self.witnesses.retain(|w| match &w.source {
+        self.retain_witnesses(|w| match &w.source {
             WitnessSource::Builder(s) => s != tag,
             _ => true,
         });
@@ -249,7 +319,7 @@ impl WitnessBag {
         tag: &str,
     ) -> usize {
         let before = self.witnesses.len();
-        self.witnesses.retain(|w| {
+        self.retain_witnesses(|w| {
             !(&w.attachment == att
                 && matches!(&w.source, WitnessSource::Builder(s) if s == tag))
         });
@@ -279,7 +349,7 @@ impl WitnessBag {
         let keys: std::collections::HashSet<(&WitnessAttachment, Point)> =
             items.iter().map(|(a, p)| (a, *p)).collect();
         let before = self.witnesses.len();
-        self.witnesses.retain(|w| {
+        self.retain_witnesses(|w| {
             !(matches!(&w.source, WitnessSource::Builder(s) if s == tag)
                 && keys.contains(&(&w.attachment, w.span.start)))
         });
