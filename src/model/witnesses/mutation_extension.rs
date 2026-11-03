@@ -10,7 +10,8 @@
 use super::*;
 use crate::model::file_analysis::{KeyWrite, WriteKey};
 
-/// Push one `Extend` delta per `KeyWrite`. For each write:
+/// Push one `Extend` delta per `KeyWrite` that lands in a shape (a hash or
+/// tuple standing at the write, or an object slot's value). For each:
 ///
 /// - unconditional static-key write → the key joins the shape it lands in,
 ///   its value the RHS expression (a write to an already-known key retypes
@@ -53,9 +54,15 @@ pub(crate) fn emit_mutation_extension_witnesses(
     let mut routes = SlotRoutes::default();
     for (w, (binding, home)) in writes {
         let place = crate::model::file_analysis::Place::variable(binding.clone());
-        let owner = match &w.key {
-            WriteKey::Hash(_) if !w.path.is_empty() => routes.owner_at(bag, ctx, &place, w.span.start),
-            _ => None,
+        // A delta only grows a shape, so a write where none stands — an
+        // object's own slot, a scalar, a value nothing types — has nothing
+        // to say to the place, and its delta would be dead weight in every
+        // bag that carries it. A nested write through an object's slot
+        // lands in the slot instead.
+        let owner = match (routes.standing_at(bag, ctx, &place, w.span.start), &w.key) {
+            (Standing::Shape, _) => None,
+            (Standing::Object(class), WriteKey::Hash(_)) if !w.path.is_empty() => Some(class),
+            _ => continue,
         };
         // Attach where the value the write extends is bound — the scope a
         // read takes it from — never where the write merely uses it (a
@@ -103,11 +110,28 @@ fn rhs_type(bag: &WitnessBag, ctx: &BagContext, s: Span) -> Option<InferredType>
     }
 }
 
-/// Which class's slot a nested write through a place lands in: the class of
-/// the value standing at the write. A delta never changes whether a place
-/// holds an object (it grows a shape or does nothing), so the answer moves
-/// only where some other witness of the place does — the place is re-read
-/// at a segment boundary (`SpanIndex::boundary`), never once per write.
+/// What stands at a write: a shape the write grows, an object whose slot a
+/// nested write lands in, or neither. A delta never changes which (it grows
+/// a shape or does nothing), so the answer moves only where some other
+/// witness of the place does — the place is re-read at a segment boundary
+/// (`SpanIndex::boundary`), never once per write.
+#[derive(Clone)]
+enum Standing {
+    Shape,
+    Object(String),
+    Neither,
+}
+
+impl Standing {
+    fn of(t: Option<InferredType>) -> Standing {
+        match t {
+            Some(InferredType::HashWithKeys { .. } | InferredType::Sequence(_)) => Standing::Shape,
+            Some(t) => t.class_name().map_or(Standing::Neither, |c| Standing::Object(c.to_string())),
+            None => Standing::Neither,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SlotRoutes {
     current: Option<RouteSegment>,
@@ -117,17 +141,17 @@ struct RouteSegment {
     place: crate::model::file_analysis::Place,
     others: SpanIndex,
     at: Point,
-    owner: Option<String>,
+    standing: Standing,
 }
 
 impl SlotRoutes {
-    fn owner_at(
+    fn standing_at(
         &mut self,
         bag: &WitnessBag,
         ctx: &BagContext,
         place: &crate::model::file_analysis::Place,
         at: Point,
-    ) -> Option<String> {
+    ) -> Standing {
         let same_place = self.current.as_ref().is_some_and(|seg| seg.place == *place);
         if !same_place {
             let att = WitnessAttachment::Place(Box::new(place.clone()));
@@ -139,16 +163,15 @@ impl SlotRoutes {
                 WitnessPayload::Observation(_) => w.payload.binds_value(),
                 _ => true,
             }));
-            self.current = Some(RouteSegment { place: place.clone(), others, at, owner: None });
-            let seg = self.current.as_mut().expect("set above");
-            seg.owner = query_variable_place(bag, ctx, place, at).and_then(|t| t.class_name().map(str::to_string));
+            let standing = Standing::of(query_variable_place(bag, ctx, place, at));
+            self.current = Some(RouteSegment { place: place.clone(), others, at, standing });
         }
         let seg = self.current.as_mut().expect("set above");
         if same_place && seg.others.boundary(seg.at, at) {
-            seg.owner = query_variable_place(bag, ctx, place, at).and_then(|t| t.class_name().map(str::to_string));
+            seg.standing = Standing::of(query_variable_place(bag, ctx, place, at));
         }
         seg.at = at;
-        seg.owner.clone()
+        seg.standing.clone()
     }
 }
 
