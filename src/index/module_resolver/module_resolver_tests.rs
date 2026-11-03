@@ -447,7 +447,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     // the app file resolves it to the lib copy — one relation, two
     // visibility rules, decided at CandidateSet construction so every
     // projection inherits it.
-    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
     // Fixed-width pid: the path is spelled into an analyzed source, and the
     // equivalence dump compares that source's spans across two test runs.
     let base = std::env::temp_dir().join(format!("perl-lsp-asker-{:010}", std::process::id()));
@@ -483,10 +483,8 @@ fn two_askers_with_different_use_lib_see_different_providers() {
         testlib.display()
     ));
 
-    let empty = Default::default();
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
-        let axis = VisibilityAxis::for_origin(fa, None, &idx, crate::model::file_analysis::PackVisibility::Host);
-        let scoped = ScopedLookup::new(&idx, &empty, None, axis);
+        let scoped = ScopedLookup::for_origin(&idx, fa, None, crate::model::file_analysis::PackVisibility::Host);
         scoped.get_cached("Twin").map(|c| c.path.to_path_buf())
     };
 

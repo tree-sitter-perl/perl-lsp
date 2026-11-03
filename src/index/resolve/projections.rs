@@ -95,6 +95,11 @@ impl<'a> CandidateSet<'a> {
         // spans both so the memo and the consult budget cover the verb
         // (`docs/adr/resolution-session.md`).
         let _session = crate::model::witnesses::ResolutionSession::enter(self.module_index);
+        // "Who includes this header" — the backward mirror of the include
+        // goto-def, keyed by the same minted target.
+        if let Some(header) = self.include_target() {
+            return self.includer_sites(header);
+        }
         match self.resolution() {
             Some(ResolvedTarget::Target(t)) => {
                 let mask = self.target_visibility(t);

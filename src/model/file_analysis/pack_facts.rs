@@ -76,12 +76,11 @@ pub struct PackFacts {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
-    /// `#include "x.h"` / `<x.h>` directives and import paths as written:
-    /// (path-token span, raw path text). Goto-def on the path token
-    /// resolves the header like `use` resolves a module. A use-map
-    /// language's `use` rows are `use_rows` instead.
+    /// `#include "x.h"` / `<x.h>` directives and import paths as written,
+    /// each with the file it resolves to. A use-map language's `use` rows
+    /// are `use_rows` instead.
     #[serde(default)]
-    pub include_directives: Vec<(Span, String)>,
+    pub include_directives: Vec<IncludeDirective>,
 
     /// A use-map language's `use` rows, as the (namespace, leaf, alias)
     /// parts the extractor read them in — the table `UseMap` resolves
@@ -189,14 +188,32 @@ impl FileModule {
     }
 }
 
+/// One include/import directive: the path token, its text as written, and
+/// the file it resolves to — minted by the driver, which holds the path the
+/// resolver searches from, so no consumer re-runs the header lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncludeDirective {
+    pub span: Span,
+    pub raw: String,
+    /// Canonical path of the resolved file; `None` when nothing on the
+    /// search path answers (a system header off the toolchain roots) or the
+    /// language has no include resolver.
+    pub target: Option<String>,
+}
+
 impl PackFacts {
+    /// The directive whose path token holds `point`.
+    pub fn include_directive_at(&self, point: Point) -> Option<&IncludeDirective> {
+        self.include_directives.iter().find(|d| contains_point(&d.span, point))
+    }
+
     /// Is `span` inside an import row (a `use` row's name or an
     /// `#include` path token)? The one speller for that question: the
     /// row's leaf carries its own ref; every other segment is a namespace
     /// no by-name lookup should answer for.
     pub fn in_import_row(&self, span: &Span) -> bool {
         self.use_row_covering(span).is_some()
-            || self.include_directives.iter().any(|(row, _)| span_within(span, row))
+            || self.include_directives.iter().any(|d| span_within(span, &d.span))
     }
 
     /// The `use` row whose name token covers `span`, if any.
@@ -225,7 +242,7 @@ impl PackFacts {
             + self
                 .include_directives
                 .iter()
-                .map(|(_, s)| s.capacity())
+                .map(|d| d.raw.capacity() + d.target.as_ref().map_or(0, String::capacity))
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)

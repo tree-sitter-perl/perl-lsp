@@ -360,11 +360,11 @@ fn member_on(
     class: &str,
 ) -> Option<crate::model::file_analysis::MethodResolution> {
     use crate::build::language_driver::LanguageRegistry;
-    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
     let fa = idx.workspace_file_for_test(path).unwrap();
     let base: &dyn CrossFileLookup = idx;
     let vis = LanguageRegistry::pack_visibility(&fa.language);
-    let scoped = ScopedLookup::new(base, &fa.pack.include_closure, None, VisibilityAxis::for_origin(&fa, None, base, vis));
+    let scoped = ScopedLookup::for_origin(base, &fa, None, vis);
     fa.resolve_method_in_ancestors(class, "name", Some(&scoped))
 }
 
