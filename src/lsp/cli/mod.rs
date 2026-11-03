@@ -128,11 +128,10 @@ pub(crate) fn cli_lang_analyze(file: &str) {
     println!("# {file} [{}] — {} symbols", driver.id(), fa.symbols().len());
     for s in fa.symbols() {
         let pkg = s.package.as_deref().unwrap_or("");
-        let sep = if pkg.is_empty() { "" } else { "::" };
+        let name = crate::model::conventions::join_qualified(pkg, &s.name, fa.names().sep().unwrap_or_default());
         println!(
-            "{:<8} {pkg}{sep}{}\t{}:{}",
+            "{:<8} {name}\t{}:{}",
             format!("{:?}", s.kind),
-            s.name,
             s.span.start.row + 1,
             s.span.start.column + 1,
         );
@@ -481,14 +480,12 @@ fn severity_rank(s: &str) -> u8 {
 /// half a 300-module set orphans 34.6% of the table, deleting all orphans
 /// 100%).
 ///
-/// It is not wired into startup because `shred_derived_rows` has standalone
-/// autocommit callers — the watcher's invalidation path among them — whose
-/// intern and row-insert land in SEPARATE transactions. A sweep between the
-/// two would free a string the insert is about to reference, and the rows
-/// written after it would carry a `name_id` nothing joins to: retrieval
-/// answers EMPTY, not wrong, but silently. Making it automatic means giving
-/// the shred one transaction so intern-and-insert cannot be split; until
-/// then this runs when the caller knows nothing else is writing.
+/// It is not wired into startup. A sweep that freed a string a shred had
+/// just interned would leave rows carrying a `name_id` nothing joins to:
+/// retrieval answers EMPTY, not wrong, but silently. Every shred runs as one
+/// savepoint (`shred_derived_rows`), so such a sweep should fail the shred's
+/// insert on a stale snapshot instead; that race is untested, so this still
+/// runs only when the caller knows nothing else is writing.
 pub(crate) fn cli_gc_cache(root: &str) {
     let (_, root_uri) = canonical_root_and_uri(root);
     let Some(conn) = module_cache::open_cache_db(Some(&root_uri), "perl") else {

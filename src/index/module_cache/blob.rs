@@ -177,7 +177,23 @@ impl EncodedAnalysis {
 /// the backward-walk workloads that own this path (references, rename,
 /// documentHighlight, callHierarchy incoming, heatmap fan-in) 94.9% of
 /// decodes want no bag at all.
+///
+/// A degraded analysis (parse/extract failure, skipped gather) has no
+/// encoding: a persisted row would validate on the source file's stamp alone
+/// and re-serve the degraded blob every session (H8). Refusing it here means
+/// no writer has to remember the check.
 pub fn encode_analysis(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
+    if fa.degraded {
+        return None;
+    }
+    let enc = encode_whole(fa);
+    if enc.is_none() {
+        log::warn!("Failed to encode an analysis; its prior row, if any, stays");
+    }
+    enc
+}
+
+fn encode_whole(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
     // Split off the bag by value: `bincode` has no field-skipping hook, so
     // the alternative is serializing a clone of the whole analysis. The bag
     // goes back before this returns, so `fa` is observably unchanged.
@@ -344,7 +360,7 @@ pub fn decode_analysis_parts(
                      (types for this file are incomplete until it is rewritten)"
                 );
             }
-            fa.evict_witness_bag();
+            fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
         }
     }
     Some(fa)
@@ -644,74 +660,68 @@ pub(super) fn rehydrate_from_opens(
     Err(last)
 }
 
-/// `save_blob_to_db` with a caller-captured `file_stamp` — the bulk drains
-/// persist analyses parsed earlier, and stamping at WRITE time would blesses
-/// a stale parse with a fresh stamp when the file changed in between (the
-/// next warm would then serve the pre-edit analysis as valid). Capture the
-/// stamp at parse time; a mid-index edit makes the row invalid by
-/// construction.
-/// Returns whether the modules row landed.
-pub fn save_blob_to_db_stamped(
-    conn: &Connection,
-    module_name: &str,
-    path: &std::path::Path,
-    include_closure: &crate::model::file_analysis::path_intern::ClosureList,
-    blob: &EncodedAnalysis,
-    source: &str,
-    stamp: (i64, i64),
-) -> bool {
-    let (mtime, size) = stamp;
-    let deps = closure_stamp(include_closure, &mut std::collections::HashMap::new());
-    let r = conn.execute(
-        sql::MODULE_SAVE.registered(),
-        params![
-            module_name,
-            path.to_string_lossy(),
-            mtime,
-            size,
-            source,
-            Some(&blob.analysis),
-            Some(&blob.bag),
-            EXTRACT_VERSION,
-            deps
-        ],
-    );
-    if let Err(e) = r {
-        log::error!("Failed to save module blob for '{}': {}", module_name, e);
-        return false;
-    }
-    persist_conclusions(conn, &path.to_string_lossy(), blob);
-    persist_surface(conn, &path.to_string_lossy(), blob);
-    // A rewritten modules row orphans any prior stub for the path — a stale
-    // skeleton paired with a fresh stamp would be served as valid on the
-    // next warm. Writers that have a fresh stub re-insert it right after.
-    delete_stub(conn, &path.to_string_lossy());
-    true
+/// One file's generation as the store keeps it: the blob, its derived rows,
+/// its baked side tables and, optionally, a warm stub. Every writer persists
+/// through `save_generation`, so "blob + rows describe one generation" has
+/// one speller.
+pub struct PersistedGeneration<'a> {
+    /// The `modules` key: the path for path-keyed sources, the module name
+    /// for the @INC tier.
+    pub module_name: &'a str,
+    pub path: &'a std::path::Path,
+    pub include_closure: &'a crate::model::file_analysis::path_intern::ClosureList,
+    pub blob: &'a EncodedAnalysis,
+    pub seeds: &'a crate::model::file_analysis::RowSeeds,
+    pub source: &'a str,
+    /// The file's `(mtime, size)` when it was READ, not when it is written:
+    /// stamping at write time would bless a stale parse with a fresh stamp
+    /// when the file changed in between, and the next warm would serve the
+    /// pre-edit analysis as valid.
+    pub stamp: (i64, i64),
+    /// Written only when the caller knows the stubs table is at the current
+    /// version; otherwise the path is left with no stub.
+    pub stub: Option<&'a [u8]>,
 }
 
-/// One path-keyed generation, blob then its derived rows — the bulk
-/// writers' unit of persistence. `true` only when both landed: that verdict
-/// is the strip licence `run_persist_writer` hands out per entry. Rows are
-/// not shredded against a blob that failed, or they would describe a
-/// generation that is not on disk.
-#[allow(clippy::too_many_arguments)]
-pub fn save_generation_stamped(
-    conn: &Connection,
-    path: &std::path::Path,
-    include_closure: &crate::model::file_analysis::path_intern::ClosureList,
-    blob: &EncodedAnalysis,
-    seeds: &crate::model::file_analysis::RowSeeds,
-    source: &str,
-    stamp: (i64, i64),
-) -> bool {
-    let path_str = path.to_string_lossy();
-    if !save_blob_to_db_stamped(conn, &path_str, path, include_closure, blob, source, stamp) {
-        return false;
-    }
-    match shred_derived_rows(conn, &path_str, source, seeds) {
+/// Persist one generation as a unit. `true` only when the blob and its rows
+/// both landed: that verdict is the strip licence. On any failure the whole
+/// savepoint rolls back, so the PREVIOUS generation stays intact instead of
+/// a new blob sitting beside partial rows that the `files` marker claims are
+/// complete.
+pub fn save_generation(conn: &Connection, g: &PersistedGeneration<'_>) -> bool {
+    let path_str = g.path.to_string_lossy();
+    let r = in_savepoint(conn, || {
+        let deps = closure_stamp(g.include_closure, &mut std::collections::HashMap::new());
+        conn.execute(
+            sql::MODULE_SAVE.registered(),
+            params![
+                g.module_name,
+                path_str,
+                g.stamp.0,
+                g.stamp.1,
+                g.source,
+                Some(&g.blob.analysis),
+                Some(&g.blob.bag),
+                EXTRACT_VERSION,
+                deps
+            ],
+        )?;
+        persist_conclusions(conn, &path_str, g.blob);
+        persist_surface(conn, &path_str, g.blob);
+        // A rewritten modules row orphans any prior stub for the path — a
+        // stale skeleton paired with a fresh stamp would be served as valid
+        // on the next warm.
+        delete_stub(conn, &path_str);
+        shred_derived_rows(conn, &path_str, g.source, g.seeds)?;
+        if let Some(stub) = g.stub {
+            save_stub(conn, &path_str, stub);
+        }
+        Ok(())
+    });
+    match r {
         Ok(()) => true,
         Err(e) => {
-            log::error!("Failed to shred derived rows for {path:?}: {e}");
+            log::error!("Failed to persist '{}' ({path_str}): {e}", g.module_name);
             false
         }
     }
@@ -816,76 +826,68 @@ pub fn refresh_deps_stamp(
     let _ = conn.execute(sql::MODULE_DEPS_STAMP_UPDATE.registered(), params![deps, path]);
 }
 
-/// Returns whether the modules row landed — stripping a resident copy is
-/// only legal when its blob is actually recoverable.
+/// Persist one module result: a parsed file as a whole generation
+/// (`save_generation`), or `None` as the @INC tier's negative sentinel.
+/// Returns the strip licence: whether a generation that can rehydrate this
+/// copy is on disk.
 pub fn save_to_db(
     conn: &Connection,
     module_name: &str,
     result: &Option<Arc<CachedModule>>,
     source: &str,
 ) -> bool {
-    let (path_str, mtime, size, analysis_blob, deps_stamp) = match result {
-        Some(cached) => {
-            // Degraded analyses (parse/extract failure, skipped gather) must
-            // not be persisted: the row would validate on the source file's
-            // stamp alone and re-serve the degraded blob every session (H8).
-            if cached.analysis.degraded {
-                return false;
-            }
-            let (mtime, size) = file_stamp(&cached.path).unwrap_or((0, 0));
-            let blob = encode_analysis(&cached.analysis);
-            if blob.is_none() {
-                // Encode failure: leave the PREVIOUS row intact — replacing
-                // it with a NULL blob would destroy a good generation and
-                // warm as a terminal negative sentinel across sessions.
-                log::warn!(
-                    "Failed to encode analysis for '{}'; keeping prior row",
-                    module_name
-                );
-                return false;
-            }
-            let deps = closure_stamp(
-                &cached.analysis.pack.include_closure,
-                &mut std::collections::HashMap::new(),
-            );
-            (cached.path.to_string_lossy().to_string(), mtime, size, blob, deps)
-        }
-        None => (String::new(), 0i64, 0i64, None, 0i64),
+    let Some(cached) = result else {
+        return save_negative(conn, module_name, source);
     };
+    // A bag-evicted copy IS the already-persisted generation — re-encoding
+    // it would overwrite the good blob with a bagless one.
+    if cached.analysis.bag_is_evicted() {
+        return true;
+    }
+    // No encoding (degraded, or the codec failed): the prior row stays.
+    let Some(blob) = encode_analysis(&cached.analysis) else {
+        return false;
+    };
+    let seeds = cached.analysis.row_seeds();
+    save_generation(
+        conn,
+        &PersistedGeneration {
+            module_name,
+            path: &cached.path,
+            include_closure: &cached.analysis.pack.include_closure,
+            blob: &blob,
+            seeds: &seeds,
+            source,
+            stamp: file_stamp(&cached.path).unwrap_or((0, 0)),
+            stub: None,
+        },
+    )
+}
 
+/// A name the @INC tier looked for and found nowhere: a row with no path and
+/// no blob, so the next session doesn't search again.
+fn save_negative(conn: &Connection, module_name: &str, source: &str) -> bool {
     let r = conn.execute(
         sql::MODULE_SAVE.registered(),
         params![
             module_name,
-            path_str,
-            mtime,
-            size,
+            "",
+            0i64,
+            0i64,
             source,
-            analysis_blob.as_ref().map(|b| &b.analysis),
-            analysis_blob.as_ref().map(|b| &b.bag),
+            None::<Vec<u8>>,
+            None::<Vec<u8>>,
             EXTRACT_VERSION,
-            deps_stamp
+            0i64
         ],
     );
-    let ok = match r {
-        // A row whose blob failed to ENCODE landed as NULL — not a
-        // recoverable generation; stripping against it would lose the bag.
-        // (Negative sentinels have no blob by design and nothing to strip.)
-        Ok(_) => result.is_none() || analysis_blob.is_some(),
+    match r {
+        Ok(_) => true,
         Err(e) => {
             log::error!("Failed to save module cache for '{}': {}", module_name, e);
             false
         }
-    };
-    if !path_str.is_empty() {
-        if let Some(enc) = analysis_blob.as_ref() {
-            persist_conclusions(conn, &path_str, enc);
-            persist_surface(conn, &path_str, enc);
-        }
-        // Same stale-stub guard as `save_blob_to_db_stamped`.
-        delete_stub(conn, &path_str);
     }
-    ok
 }
 
 #[cfg(test)]
