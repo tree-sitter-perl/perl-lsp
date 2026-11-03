@@ -1029,17 +1029,9 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
-
-        for r in &self.reducers {
-            let claimed: Vec<&Witness> =
-                materialized.iter().filter(|w| r.claims(w)).collect();
-            if claimed.is_empty() {
-                continue;
-            }
-            let v = r.reduce(&claimed, q);
-            if v != ReducedValue::None {
-                return v;
-            }
+        let v = self.reduce_materialized(&materialized, q);
+        if v != ReducedValue::None {
+            return v;
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
@@ -1985,7 +1977,183 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> Vec<Witness> {
-        let mut raw = bag.for_attachment(q.attachment);
+        let raw = bag.for_attachment(q.attachment);
+        if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
+            let lowered = self.lower_extensions(bag, q, state, &raw);
+            return self.materialize_raw(bag, q, state, lowered.iter().collect());
+        }
+        self.materialize_raw(bag, q, state, raw)
+    }
+
+    /// Replace a place's `Extend` deltas with the shapes they grow: each
+    /// delta lays its key over the value standing at its site, as a read
+    /// there would see it. Consecutive deltas with nothing else of the place
+    /// between them (`segment_boundary`) form one segment, read once at its
+    /// first write and grown in place through the rest, and the segment's
+    /// grown shape stands at its last effective write — the point fact that
+    /// later reads take. Every other witness keeps its place in bag order.
+    ///
+    /// A `Field` is not temporal: its writes are arms of one value, so each
+    /// grown shape JOINS the value it grew from, as the slot's other arms do.
+    #[inline(never)]
+    fn lower_extensions(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        raw: &[&Witness],
+    ) -> Vec<Witness> {
+        let temporal = q.attachment.is_temporal();
+        let point = q.point.filter(|_| temporal);
+        let others: Vec<&Witness> =
+            raw.iter().copied().filter(|w| !matches!(w.payload, WitnessPayload::Extend(_))).collect();
+        let mut deltas: Vec<(usize, &Witness)> = raw
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, w)| matches!(w.payload, WitnessPayload::Extend(_)))
+            .filter(|(_, w)| point.is_none_or(|p| w.span.start <= p))
+            .collect();
+        deltas.sort_by_key(|(_, w)| w.span.start);
+        // Grown shapes, keyed by the raw index of the delta they stand at.
+        let mut grown: Vec<(usize, InferredType)> = Vec::new();
+        let mut current: Option<InferredType> = None;
+        let mut last_effective: Option<usize> = None;
+        let mut prev: Option<Point> = None;
+        for (i, d) in deltas {
+            let WitnessPayload::Extend(x) = &d.payload else { unreachable!("filtered above") };
+            let at = d.span.start;
+            let fresh = match prev {
+                None => true,
+                Some(prev) => temporal && super::segment_boundary(others.iter().copied(), prev, at),
+            };
+            if fresh {
+                if let (Some(t), Some(j)) = (current.take(), last_effective.take()) {
+                    grown.push((j, t));
+                }
+                current = self.extension_base(bag, q, state, raw, &grown, at);
+            }
+            prev = Some(at);
+            let Some(base) = current.as_mut() else { continue };
+            let vtype = x.value.as_ref().and_then(|v| {
+                let sub_q = ReducerQuery {
+                    attachment: v,
+                    point: None,
+                    framework: FrameworkFact::Plain,
+                    arity_hint: None,
+                    receiver: None,
+                    args: Vec::new(),
+                    context: q.context,
+                };
+                let t = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                    ReducedValue::Type(t) => Some(t.clone()),
+                    ReducedValue::FactMap(_) | ReducedValue::None => None,
+                })?;
+                match x.slot {
+                    Some(n) => t.element_at(n).cloned(),
+                    None => Some(t),
+                }
+            });
+            let changed = if temporal {
+                super::extend_in_place(base, &x.hops, vtype.as_ref(), x.widen)
+            } else {
+                let mut next = base.clone();
+                super::extend_in_place(&mut next, &x.hops, vtype.as_ref(), x.widen) && {
+                    *base = crate::model::file_analysis::join(base, &next, class_order(q));
+                    true
+                }
+            };
+            if changed {
+                last_effective = Some(i);
+            }
+        }
+        if let (Some(t), Some(j)) = (current, last_effective) {
+            grown.push((j, t));
+        }
+        Self::splice_grown(raw, grown)
+    }
+
+    /// `raw` with its deltas dropped and each grown shape standing where its
+    /// delta did.
+    fn splice_grown(raw: &[&Witness], mut grown: Vec<(usize, InferredType)>) -> Vec<Witness> {
+        grown.sort_by_key(|(i, _)| *i);
+        let mut grown = grown.into_iter().peekable();
+        let mut out = Vec::with_capacity(raw.len());
+        for (i, w) in raw.iter().enumerate() {
+            if !matches!(w.payload, WitnessPayload::Extend(_)) {
+                out.push((*w).clone());
+            } else if grown.peek().is_some_and(|(j, _)| *j == i) {
+                let (_, t) = grown.next().expect("peeked");
+                out.push(Witness {
+                    attachment: w.attachment.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::InferredType(t),
+                    span: w.span,
+                });
+            }
+        }
+        out
+    }
+
+    /// The value standing under a segment's first delta at `at`: what a read
+    /// there answers from every other witness of the place plus the shapes
+    /// earlier segments grew. A `Field` reads its whole value, the class
+    /// ladder included, since the slot's other writes may live elsewhere.
+    fn extension_base(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        raw: &[&Witness],
+        grown: &[(usize, InferredType)],
+        at: Point,
+    ) -> Option<InferredType> {
+        let grown_list = Self::splice_grown(raw, grown.to_vec());
+        let base_q = ReducerQuery {
+            attachment: q.attachment,
+            point: q.attachment.is_temporal().then_some(at).or(q.point),
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        let materialized = state.in_opaque_frame(|state| {
+            self.materialize_raw(bag, &base_q, state, grown_list.iter().collect())
+        });
+        let answer = match self.reduce_materialized(&materialized, &base_q) {
+            ReducedValue::None => ClassLadder::of(q.attachment)
+                .and_then(|ladder| state.in_opaque_frame(|state| self.class_fallback(bag, &base_q, state, &ladder))),
+            v => Some(v),
+        };
+        match answer? {
+            ReducedValue::Type(t) => Some(t),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        }
+    }
+
+    /// The first reducer's answer over an already-materialized list.
+    fn reduce_materialized(&self, materialized: &[Witness], q: &ReducerQuery) -> ReducedValue {
+        for r in &self.reducers {
+            let claimed: Vec<&Witness> = materialized.iter().filter(|w| r.claims(w)).collect();
+            if claimed.is_empty() {
+                continue;
+            }
+            let v = r.reduce(&claimed, q);
+            if v != ReducedValue::None {
+                return v;
+            }
+        }
+        ReducedValue::None
+    }
+
+    fn materialize_raw(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        mut raw: Vec<&Witness>,
+    ) -> Vec<Witness> {
         // A variable's fact made in a nested block is a region that ends
         // with the block: past it, the fact is not there at all.
         if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {

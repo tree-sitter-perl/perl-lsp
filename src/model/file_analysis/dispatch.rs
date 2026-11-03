@@ -626,7 +626,7 @@ pub struct KeyWrite {
 }
 
 /// What a `KeyWrite` lands on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WriteKey {
     /// Static hash key — extends/retypes the named entry on a
     /// `HashWithKeys` shape.

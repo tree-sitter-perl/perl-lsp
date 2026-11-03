@@ -688,12 +688,13 @@ impl FileAnalysis {
             }
         }
 
-        // Re-run the mutation-extension pass: imported shapes (a var
-        // typed by an imported sub's `HashWithKeys` return) only land
-        // with the TCs pushed above, so build-time extension found no
-        // shape to extend for them. Append-only (`clear = false`) —
-        // post-finalize removal would shift `base_witness_count`;
-        // duplicates are idempotent and truncated by the next cycle.
+        // Re-route the object-slot writes: a root typed by an imported
+        // class only lands with the TCs pushed above, so the build routed
+        // its nested writes to the place. A place's own deltas need no
+        // re-run — they fold onto whatever value stands under them when
+        // read. Append-only (`clear = false`) — post-finalize removal would
+        // shift `base_witness_count`; a slot delta already routed at build
+        // joins idempotently, and the next cycle truncates it.
         {
             let key_writes = std::mem::take(&mut self.key_writes);
             let bindings: Vec<_> = key_writes

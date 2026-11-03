@@ -1,38 +1,41 @@
 //! The mutation-extension pass: a write through a variable extends the
 //! shape it lands in (`docs/adr/structural-shapes.md`).
+//!
+//! A write is a DELTA (`WitnessPayload::Extend`): the key it adds and an
+//! edge to the value it writes. The shape a read sees is the value standing
+//! at each write with that write's delta laid over it, folded when the place
+//! is read (`ReducerRegistry::lower_extensions`) — never a copy of the grown
+//! shape per write, which is N² keys for N writes to one hash.
 
 use super::*;
+use crate::model::file_analysis::{KeyWrite, WriteKey};
 
-/// Fold `KeyWrite`s into variable shape witnesses — the mutation-
-/// extension pass. For each write on a variable whose shape at the
-/// write point is `HashWithKeys`:
+/// Push one `Extend` delta per `KeyWrite`. For each write:
 ///
-/// - unconditional static-key write → push the EXTENDED shape (key
-///   joins the list, value typed from the RHS expression, `open`
-///   preserved). A write to an already-known key retypes its value.
-/// - dynamic key, syntactically conditional write, or a write whose
-///   scope chain crosses a boundary before reaching the attachment
-///   scope (nested block / closure — execution unknowable) → push the
-///   same keys with `open: true`.
+/// - unconditional static-key write → the key joins the shape it lands in,
+///   its value the RHS expression (a write to an already-known key retypes
+///   its value);
+/// - dynamic key, syntactically conditional write, or a write whose scope
+///   chain crosses a boundary before reaching the binding's scope (nested
+///   block / closure — execution unknowable) → `widen`: the shape opens.
 ///
-/// Witnesses attach to the variable's place with a zero-width
-/// span at the write position — the same temporal contract as TC
-/// mirrors: invisible to reads before the write, latest-wins after
-/// (`HashWithKeys` subsumption is equality-only, so a different shape
-/// legitimately replaces the standing one).
+/// A nested write through an object's slot (`$self->{s}{k} = …`) lands in
+/// the slot's value, which every method shares, so its delta goes on
+/// `Field{class, s}`; every other delta goes on the variable's place, with
+/// a zero-width span at the write — invisible to reads before it.
 ///
 /// `bindings[i]` is `key_writes[i]`'s variable binding and its home scope,
 /// resolved by the caller's binder before the bag is borrowed.
 ///
-/// Re-emittable: fold callers pass `clear = true` (clear-and-emit per
-/// iteration, tag `mutation_extension`). Enrichment passes `false` —
-/// post-finalize the bag is append-only (removal would shift the
-/// sealed `base_witness_count`); duplicate pushes are idempotent under
-/// latest-wins and truncated away by the next enrichment cycle.
+/// The fold passes `clear = true` (clear-and-emit per iteration, tag
+/// `mutation_extension`: the object-slot routing reads the root's type).
+/// Enrichment passes `false` — post-finalize the bag is append-only — and
+/// adds only the object-slot deltas: a place's deltas are already in the bag
+/// and fold onto whatever imported value stands under them at read time.
 pub(crate) fn emit_mutation_extension_witnesses(
     bag: &mut WitnessBag,
     ctx: &BagContext,
-    key_writes: &[crate::model::file_analysis::KeyWrite],
+    key_writes: &[KeyWrite],
     clear: bool,
     bindings: &[(crate::model::file_analysis::Binding, ScopeId)],
 ) {
@@ -40,165 +43,210 @@ pub(crate) fn emit_mutation_extension_witnesses(
     if clear {
         bag.remove_by_source_tag("mutation_extension");
     }
-    // Per-var doc order so later writes see earlier extensions.
-    let mut writes: Vec<(&crate::model::file_analysis::KeyWrite, &(crate::model::file_analysis::Binding, ScopeId))> =
+    // Per-var doc order so a place's deltas land in the order they apply.
+    let mut writes: Vec<(&KeyWrite, &(crate::model::file_analysis::Binding, ScopeId))> =
         key_writes.iter().zip(bindings).collect();
     writes.sort_by_key(|(w, _)| (&w.var_text, w.span.start));
-    for (w, (binding, home)) in writes {
+    // Route every write before pushing any delta, so the routing reads see
+    // the bag the fold handed in.
+    let mut routes = SlotRoutes::default();
+    let routed: Vec<Option<String>> = writes
+        .iter()
+        .map(|(w, (binding, _))| {
+            if w.path.is_empty() || !matches!(w.key, WriteKey::Hash(_)) {
+                return None;
+            }
+            let place = crate::model::file_analysis::Place::variable(binding.clone());
+            routes.owner_at(bag, ctx, &place, w.span.start)
+        })
+        .collect();
+    for ((w, (binding, home)), owner) in writes.into_iter().zip(routed) {
         // Attach where the value the write extends is bound — the scope a
         // read takes it from — never where the write merely uses it (a
         // block's own `$v->{k}` access would hide the shape from every read
         // after the block). Climbing past the write's own scope means the
         // write may not have run by read time.
-        let place = crate::model::file_analysis::Place::variable(binding.clone());
-        let scope_crossed = *home != w.scope;
-        let Some(base) = query_variable_place(bag, ctx, &place, w.span.start) else {
-            continue;
-        };
-        let rhs_type = |s: Span| {
-            let reg = ReducerRegistry::with_defaults();
-            let att = WitnessAttachment::Expr(s);
-            let q = ReducerQuery {
-                attachment: &att,
-                point: None,
-                framework: FrameworkFact::Plain,
-                arity_hint: None,
-                receiver: None,
-                args: Vec::new(),
-                context: Some(ctx),
-            };
-            match reg.query(bag, &q) {
-                ReducedValue::Type(t) => Some(t),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
-            }
-        };
-        let widen = w.conditional || scope_crossed;
-        let hops: Vec<&crate::model::file_analysis::WriteKey> =
-            std::iter::once(&w.key).chain(&w.path).collect();
-        let slot_of = |t: InferredType| match w.rhs_slot {
-            Some(n) => t.element_at(n).cloned(),
-            None => Some(t),
-        };
-        let vtype = w.rhs_span.and_then(rhs_type).and_then(slot_of);
-        let shape = match base {
-            InferredType::HashWithKeys { .. } | InferredType::Sequence(_) => {
-                let Some(shape) = extend_shape(&base, &hops, vtype.as_ref(), widen) else { continue };
-                shape
-            }
-            // A nested write through an object's slot (`$self->{s}{k} = …`)
-            // lands in the slot's value, which every method shares.
-            ref obj if !w.path.is_empty() && obj.class_name().is_some() => {
-                let crate::model::file_analysis::WriteKey::Hash(ref slot) = w.key else { continue };
-                let att = WitnessAttachment::Field {
-                    owner: obj.class_name().unwrap_or_default().to_string(),
-                    name: slot.clone(),
-                };
-                let reg = ReducerRegistry::with_defaults();
-                let q = ReducerQuery {
-                    attachment: &att,
-                    point: None,
-                    framework: FrameworkFact::Plain,
-                    arity_hint: None,
-                    receiver: None,
-                    args: Vec::new(),
-                    context: Some(ctx),
-                };
-                let ReducedValue::Type(current) = reg.query(bag, &q) else { continue };
-                let hops: Vec<&crate::model::file_analysis::WriteKey> = w.path.iter().collect();
-                let Some(shape) = extend_shape(&current, &hops, vtype.as_ref(), widen) else { continue };
+        let widen = w.conditional || *home != w.scope;
+        let value = w.rhs_span.map(WitnessAttachment::Expr);
+        let span = Span { start: w.span.start, end: w.span.start };
+        let source = WitnessSource::Builder("mutation_extension".into());
+        match (owner, &w.key) {
+            (Some(owner), WriteKey::Hash(slot)) => {
                 bag.push(Witness {
-                    attachment: att,
-                    source: WitnessSource::Builder("mutation_extension".into()),
-                    payload: WitnessPayload::InferredType(shape),
-                    span: Span { start: w.span.start, end: w.span.start },
+                    attachment: WitnessAttachment::Field { owner, name: slot.clone() },
+                    source,
+                    payload: WitnessPayload::Extend(KeyExtension {
+                        hops: w.path.clone(),
+                        value,
+                        slot: w.rhs_slot,
+                        widen,
+                    }),
+                    span,
                 });
-                continue;
             }
-            _ => continue,
-        };
-        bag.push(Witness {
-            attachment: WitnessAttachment::Place(Box::new(place)),
-            source: WitnessSource::Builder("mutation_extension".into()),
-            payload: WitnessPayload::InferredType(shape),
-            span: Span { start: w.span.start, end: w.span.start },
-        });
+            _ if clear => {
+                bag.push(Witness {
+                    attachment: WitnessAttachment::Place(Box::new(
+                        crate::model::file_analysis::Place::variable(binding.clone()),
+                    )),
+                    source,
+                    payload: WitnessPayload::Extend(KeyExtension {
+                        hops: std::iter::once(w.key.clone()).chain(w.path.iter().cloned()).collect(),
+                        value,
+                        slot: w.rhs_slot,
+                        widen,
+                    }),
+                    span,
+                });
+            }
+            _ => {}
+        }
     }
 }
 
-/// `shape` after a write through `hops` (outermost key first): a static
-/// key at the end joins the shape, its value `vtype`; a key on the way
-/// extends that key's value; a dynamic or index key, or a write that may
-/// not have run (`widen`), opens the shape it lands on. `None` when the
+/// Which class's slot a nested write through a place lands in: the class of
+/// the value standing at the write. A delta never changes whether a place
+/// holds an object (it grows a shape or does nothing), so the answer moves
+/// only where some other witness of the place does — the place is re-read
+/// at a segment boundary (`segment_boundary`), never once per write.
+#[derive(Default)]
+struct SlotRoutes {
+    current: Option<RouteSegment>,
+}
+
+struct RouteSegment {
+    place: crate::model::file_analysis::Place,
+    others: Vec<Witness>,
+    at: Point,
+    owner: Option<String>,
+}
+
+impl SlotRoutes {
+    fn owner_at(
+        &mut self,
+        bag: &WitnessBag,
+        ctx: &BagContext,
+        place: &crate::model::file_analysis::Place,
+        at: Point,
+    ) -> Option<String> {
+        let reuse = self.current.as_ref().is_some_and(|seg| {
+            seg.place == *place && !segment_boundary(seg.others.iter(), seg.at, at)
+        });
+        if !reuse {
+            let att = WitnessAttachment::Place(Box::new(place.clone()));
+            let others = bag
+                .iter_attachment_indexed(&att)
+                .map(|(_, w)| w)
+                .filter(|w| !matches!(w.payload, WitnessPayload::Extend(_)))
+                .cloned()
+                .collect();
+            let owner = query_variable_place(bag, ctx, place, at)
+                .and_then(|t| t.class_name().map(str::to_string));
+            self.current = Some(RouteSegment { place: place.clone(), others, at, owner });
+        }
+        let seg = self.current.as_mut().expect("set above");
+        seg.at = at;
+        seg.owner.clone()
+    }
+}
+
+/// Did the value standing at a place move between two of its writes
+/// (`prev` < `at`) other than by the writes themselves? Some other witness
+/// of the place opens in `(prev, at]`, or a region holding at `prev` ends
+/// before `at`. A region holding at both cannot: the write at `prev` is a
+/// point fact after the region opened, and the fold lets that outrank it.
+pub(super) fn segment_boundary<'a>(others: impl Iterator<Item = &'a Witness>, prev: Point, at: Point) -> bool {
+    others.into_iter().any(|w| {
+        let starts = prev < w.span.start && w.span.start <= at;
+        let region_ends = w.span.start != w.span.end && prev <= w.span.end && w.span.end < at;
+        starts || region_ends
+    })
+}
+
+/// `shape` after a write through `hops` (outermost key first), in place: a
+/// static key at the end joins the shape, its value `vtype`; a key on the
+/// way extends that key's value; a dynamic or index key, or a write that may
+/// not have run (`widen`), opens the shape it lands on. `false` when the
 /// write says nothing new.
-fn extend_shape(
-    shape: &InferredType,
-    hops: &[&crate::model::file_analysis::WriteKey],
+///
+/// In place because the fold owns the shape it grows: a key list is copied
+/// only while it is still shared with the value it started from, so N writes
+/// copy it once, not N times.
+pub(super) fn extend_in_place(
+    shape: &mut InferredType,
+    hops: &[WriteKey],
     vtype: Option<&InferredType>,
     widen: bool,
-) -> Option<InferredType> {
-    use crate::model::file_analysis::WriteKey;
-    let (first, rest) = hops.split_first()?;
+) -> bool {
+    let Some((first, rest)) = hops.split_first() else { return false };
     match shape {
         InferredType::HashWithKeys { keys, open } => {
-            let opened = || (!*open).then(|| InferredType::HashWithKeys { keys: keys.clone(), open: true });
-            let WriteKey::Hash(k) = first else { return opened() };
-            let mut keys = keys.clone();
-            // Copy-on-write: `to_mut` clones the key list only when the
-            // allocation is shared, so the pass pays per actual divergence,
-            // never per query.
-            let keys_mut = keys.to_mut();
-            match keys_mut.iter_mut().find(|(name, _)| name == k) {
-                Some(entry) if rest.is_empty() => {
-                    if widen {
-                        return opened();
-                    }
-                    if vtype.is_none() || entry.1.as_deref() == vtype {
-                        return None;
-                    }
-                    entry.1 = vtype.cloned().map(Box::new);
+            let WriteKey::Hash(k) = first else { return open_shape(open) };
+            let Some(i) = keys.iter().position(|(name, _)| name == k) else {
+                if widen {
+                    return open_shape(open);
                 }
-                Some(entry) => {
-                    let inner = extend_shape(entry.1.as_deref()?, rest, vtype, widen)?;
-                    entry.1 = Some(Box::new(inner));
+                keys.to_mut().push((k.to_string(), vivify(rest, vtype).map(Box::new)));
+                return true;
+            };
+            if rest.is_empty() {
+                if widen {
+                    return open_shape(open);
                 }
-                None if widen => return opened(),
-                None => keys_mut.push((k.to_string(), vivify(rest, vtype).map(Box::new))),
+                if vtype.is_none() || keys[i].1.as_deref() == vtype {
+                    return false;
+                }
+                keys.to_mut()[i].1 = vtype.cloned().map(Box::new);
+                return true;
             }
-            Some(InferredType::HashWithKeys { keys, open: *open })
+            if keys[i].1.is_none() {
+                return false;
+            }
+            // Grown where it stands: a chain of writes under one key copies
+            // the inner list once, not once per write.
+            let inner = keys.to_mut()[i].1.as_deref_mut().expect("checked above");
+            extend_in_place(inner, rest, vtype, widen)
         }
         // A tuple slot: only the sound moves, retyping an in-bounds slot or
         // appending at exactly `len`. A write past `len` leaves holes, so the
         // tuple degrades to `ArrayRef`. A tuple has no open flag to widen
         // into, so a conditional or dynamic write changes nothing.
         InferredType::Sequence(elems) => {
-            let WriteKey::Index(i) = first else { return None };
+            let WriteKey::Index(i) = first else { return false };
             if widen || *i < 0 {
-                return None;
+                return false;
             }
             let i = *i as usize;
-            let mut elems = elems.clone();
             if i > elems.len() {
-                return Some(InferredType::ArrayRef);
+                *shape = InferredType::ArrayRef;
+                return true;
             }
             if !rest.is_empty() {
                 if i == elems.len() {
                     elems.push(vivify(rest, vtype).unwrap_or(InferredType::Unknown));
-                } else {
-                    let inner = extend_shape(&elems[i], rest, vtype, widen)?;
-                    elems[i] = inner;
+                    return true;
                 }
-            } else {
-                match (i.cmp(&elems.len()), vtype) {
-                    (std::cmp::Ordering::Less, None) => return None,
-                    (std::cmp::Ordering::Less, Some(vt)) if elems[i] == *vt => return None,
-                    (std::cmp::Ordering::Less, Some(vt)) => elems[i] = vt.clone(),
-                    (_, vt) => elems.push(vt.cloned().unwrap_or(InferredType::Unknown)),
+                return extend_in_place(&mut elems[i], rest, vtype, widen);
+            }
+            match (i.cmp(&elems.len()), vtype) {
+                (std::cmp::Ordering::Less, None) => false,
+                (std::cmp::Ordering::Less, Some(vt)) if elems[i] == *vt => false,
+                (std::cmp::Ordering::Less, Some(vt)) => {
+                    elems[i] = vt.clone();
+                    true
+                }
+                (_, vt) => {
+                    elems.push(vt.cloned().unwrap_or(InferredType::Unknown));
+                    true
                 }
             }
-            Some(InferredType::Sequence(elems))
         }
-        _ => None,
+        _ => false,
     }
+}
+
+fn open_shape(open: &mut bool) -> bool {
+    !std::mem::replace(open, true)
 }
 
 /// The value a write autovivifies below a missing key, as Perl does: a
@@ -210,8 +258,8 @@ fn extend_shape(
 /// TODO(element-typed-array): a tuple is only right while nothing else
 /// writes the array; these writes move to an element-typed array when the
 /// lattice has one.
-fn vivify(hops: &[&crate::model::file_analysis::WriteKey], vtype: Option<&InferredType>) -> Option<InferredType> {
-    use crate::model::file_analysis::{SharedKeys, WriteKey};
+fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>) -> Option<InferredType> {
+    use crate::model::file_analysis::SharedKeys;
     let Some((first, rest)) = hops.split_first() else { return vtype.cloned() };
     match first {
         WriteKey::Hash(k) => Some(InferredType::HashWithKeys {
