@@ -1836,6 +1836,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
         declared_with: None,
         deref_stack: s.deref_stack.clone(),
         arity: s.arity,
+        in_force: None,
     }
 }
 

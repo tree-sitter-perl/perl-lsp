@@ -371,7 +371,7 @@ sub _greet {
 "#;
     let fa = build_fa(src);
     // `$c` is declared on line 8 (`my $c = shift;`); query just after it.
-    let ty = first_param_type(&fa, "$c", 8, 14);
+    let ty = first_param_type(&fa, "$c", 8, 18);
     assert_eq!(
         ty,
         Some(InferredType::ClassName("Mojolicious::Controller".into())),
@@ -419,7 +419,7 @@ sub _greet {
 }
 "#;
     let fa = build_fa(src);
-    let ty = first_param_type(&fa, "$c", 8, 14);
+    let ty = first_param_type(&fa, "$c", 8, 18);
     assert_eq!(
         ty,
         Some(InferredType::ClassName("Mojolicious::Controller".into())),
@@ -441,7 +441,7 @@ $app->helper(greet => sub {
 });
 "#;
     let fa = build_fa(src);
-    let ty = first_param_type(&fa, "$c", 6, 14);
+    let ty = first_param_type(&fa, "$c", 6, 18);
     assert_eq!(
         ty,
         Some(InferredType::ClassName("Mojolicious::Controller".into())),

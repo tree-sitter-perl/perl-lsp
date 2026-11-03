@@ -890,9 +890,24 @@ impl FileAnalysis {
                 && matches!(s.kind, SymKind::Variable | SymKind::Field)
                 && !matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() || matches!(decl_kind, DeclKind::Mention))
         });
+        // A use inside a declaring statement reads what the declaration
+        // shadows, so it binds further out.
         if let Some(first) = declared.next() {
-            let sym = std::iter::once(first).chain(declared).filter(|s| s.span.start <= at).last().unwrap_or(first);
-            return (Binding::Lexical(self.binding_symbol(sym.id)), scope);
+            let mut shadowed = false;
+            let mut hit = None;
+            for s in std::iter::once(first).chain(declared) {
+                let view = s.in_view();
+                if view.at(at) {
+                    hit = Some(s);
+                } else if view.from <= at {
+                    shadowed = true;
+                }
+            }
+            match hit {
+                Some(sym) => return (Binding::Lexical(self.binding_symbol(sym.id)), scope),
+                None if !shadowed => return (Binding::Lexical(self.binding_symbol(first.id)), scope),
+                None => {}
+            }
         }
         let use_pkg = self.package_at(at).unwrap_or("main");
         match self.variable_use_in(name, at, scope) {
@@ -1011,8 +1026,8 @@ impl FileAnalysis {
                 };
                 // A member is in force throughout its class, wherever it is
                 // declared.
-                let from = if s.kind == SymKind::Field { self.scopes[scope.0 as usize].span.start } else { s.span.start };
-                (declared && s.name == name).then_some((s.id, from, gate))
+                let view = if s.kind == SymKind::Field { InView::from(self.scopes[scope.0 as usize].span.start) } else { s.in_view() };
+                (declared && s.name == name).then_some((s.id, view, gate))
             })
         })
     }

@@ -9,8 +9,11 @@ impl<'a> Builder<'a> {
         // Skip if parent is a variable_declaration (handled by visit_variable_decl)
         if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "variable_declaration" { return; }
-            // Skip if inside a signature param
-            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter") {
+            // A signature parameter's own variable is its declaration; its
+            // default is an ordinary read.
+            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter")
+                && parent.child_by_field_name("default") != Some(node)
+            {
                 return;
             }
         }

@@ -203,6 +203,7 @@ impl FileAnalysis {
                     declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,
+                    in_force: None,
                 });
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
