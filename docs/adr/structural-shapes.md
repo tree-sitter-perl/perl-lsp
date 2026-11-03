@@ -187,6 +187,14 @@ are excluded (a slice read copies values out). Hashes are sharper:
 bare `func(%h)` flattens to copies — the callee cannot add keys — so
 only `\%h` ref-taking escapes.
 
+An escape has a place. `\%h` (or a scalar read) escapes the whole root;
+`\$h{k}` / `\$v->{k}` escapes only that element's place
+(`Builder::element_escaped`). Taking the reference vivifies the slot, and the
+holder may store anything there, so the pass adds `k` to the container with
+an unknown value and leaves every other key closed:
+`GetOptions('help' => \$opt{'help'})` makes `help` a key and still catches
+`$opt{hlep}`.
+
 ### The whole-story gate is one clause, naming its modeled replacement
 
 `FileAnalysis::closed_shape_is_whole_story(var)` = a lexical, not

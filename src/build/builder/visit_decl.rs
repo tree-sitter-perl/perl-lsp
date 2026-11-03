@@ -129,6 +129,8 @@ impl<'a> Builder<'a> {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
                 if self.element_written_in_place(node) {
                     self.record_in_place_write(node);
+                } else if self.element_escaped(node) {
+                    self.record_place_escape(node);
                 }
                 // The direct `$arr[i]` indexes the named array; only a
                 // subscript through a reference has a receiver.
