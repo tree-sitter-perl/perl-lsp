@@ -1441,9 +1441,9 @@ sub b2 { my $q = { url => 1 }; print $q->{typo}; }
 }
 
 /// A qualified global and a special variable are variables too: their
-/// writes bind, so a reassignment opens their shape whatever package the
-/// use is written in (Foswiki's `local %Foswiki::cfg = (…)` then
-/// `%Foswiki::cfg = %$upper`).
+/// writes bind to one identity whatever package the use is written in
+/// (Foswiki's `local %Foswiki::cfg = (…)` then `%Foswiki::cfg = %$upper`).
+/// Being package variables, neither reports a missing key.
 #[test]
 fn qualified_and_special_globals_are_reassigned_by_binding() {
     let src = "\
@@ -1468,22 +1468,28 @@ sub q { my $q = { url => 1 }; print $q->{typo}; }
     assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
 }
 
-/// A reference to one element escapes that place only: the slot exists
-/// (taking `\$h{k}` vivifies it) and its value is open, while every other
-/// key stays closed. `GetOptions('help' => \$opt{'help'})` then
-/// `$opt{'help'}` is clean, and a typo beside it still reports.
+/// A package variable's shape is never the whole story: any file can write
+/// it. Webmin's bare `our %config;` is filled by `init_config` in another
+/// file, and `$Foswiki::cfg{X}` is written by `LocalSite.cfg`, so neither
+/// an `our`, an undeclared global nor a qualified spelling reports a key
+/// its literal lacks. A lexical still does.
 #[test]
-fn an_element_reference_escapes_only_its_place() {
+fn package_variables_have_no_closed_shape() {
     let src = "\
-package Foo;
-sub a { my %opt; GetOptions('help' => \\$opt{'help'}, 'cfg=s' => \\$opt{cfg}); return $opt{help} . $opt{cfg} . $opt{hlep} }
-sub b { my $o = {}; my $r = \\$o->{k}; return $o->{k}{deep} . $o->{typo} }
+package Foswiki;
+our %cfg;
+our %init = ( A => 1 );
+my %lex = ( A => 1 );
+sub a { return $cfg{Unq} . $Foswiki::cfg{Qual} . $init{B} . $Foswiki::init{C} }
+sub b { %undeclared = ( A => 1 ); return $undeclared{B} }
+sub c { our $ref = { A => 1 }; return $ref->{B} }
+sub d { return $lex{typo} }
 1;
 ";
     let fa = build_fa(src);
     let typos: Vec<(String, u32)> =
         fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
-    assert_eq!(typos, vec![("hlep".to_string(), 1), ("typo".to_string(), 2)]);
+    assert_eq!(typos, vec![("typo".to_string(), 7)], "only the lexical reports");
 }
 
 /// A write inside a nested block lands on the variable, wherever the block
@@ -1510,6 +1516,24 @@ sub s10 { my $d = {}; run(sub { $d->{Name} = 1; }); print $d->{Name}; }
     let typos: Vec<(String, u32)> =
         fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
     assert_eq!(typos, vec![("Name".to_string(), 8), ("typo".to_string(), 9)]);
+}
+
+/// A reference to one element escapes that place only: the slot exists
+/// (taking `\$h{k}` vivifies it) and its value is open, while every other
+/// key stays closed. `GetOptions('help' => \$opt{'help'})` then
+/// `$opt{'help'}` is clean, and a typo beside it still reports.
+#[test]
+fn an_element_reference_escapes_only_its_place() {
+    let src = "\
+package Foo;
+sub a { my %opt; GetOptions('help' => \\$opt{'help'}, 'cfg=s' => \\$opt{cfg}); return $opt{help} . $opt{cfg} . $opt{hlep} }
+sub b { my $o = {}; my $r = \\$o->{k}; return $o->{k}{deep} . $o->{typo} }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("hlep".to_string(), 1), ("typo".to_string(), 2)]);
 }
 
 /// A fallback floor written against a value nothing types says what kind

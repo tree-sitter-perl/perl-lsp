@@ -118,14 +118,7 @@ fn render_candidate_hover(
     let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     // The candidate's own analysis: the scoped index caches every pack file
     // a projection can answer from.
-    let mut found: Option<std::sync::Arc<crate::model::file_analysis::CachedModule>> = None;
-    if let Some(midx) = module_index {
-        midx.for_each_cached_file(&mut |cached| {
-            if found.is_none() && Some(&cached.path) == loc.key.canonical_path() {
-                found = Some(std::sync::Arc::clone(cached));
-            }
-        });
-    }
+    let found = module_index.zip(loc.key.canonical_path()).and_then(|(midx, p)| midx.cached_by_path(p));
     if let Some(cached) = &found {
         let whole = module_index
             .map(|midx| midx.whole_present(cached))
