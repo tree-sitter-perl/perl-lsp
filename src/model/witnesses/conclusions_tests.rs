@@ -424,6 +424,7 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
     let registry = ReducerRegistry::with_defaults();
     let ctx = crate::model::witnesses::reducers::BagContext {
         scopes: &fa.scopes,
+        symbols: fa.symbols(),
         package_framework: &fa.packages,
         // Withheld: this is what makes the chase EXIT rather than answer, and
         // the exit is the thing being recorded.

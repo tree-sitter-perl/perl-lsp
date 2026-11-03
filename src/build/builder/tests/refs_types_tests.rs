@@ -1882,4 +1882,3 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
-

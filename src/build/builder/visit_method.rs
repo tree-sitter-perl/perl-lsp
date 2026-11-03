@@ -315,7 +315,7 @@ impl<'a> Builder<'a> {
                 if let Some(ty) = self.extract_resultset_parametric(node) {
                     self.parametric_emitted_refs.insert(idx);
                     let r_span = self.refs[idx].span;
-                    self.bag.push(crate::model::witnesses::Witness {
+                    self.push_witness(crate::model::witnesses::Witness {
                         attachment: crate::model::witnesses::WitnessAttachment::Expression(
                             crate::model::witnesses::RefIdx(idx as u32),
                         ),
@@ -348,7 +348,7 @@ impl<'a> Builder<'a> {
                     {
                         self.parametric_emitted_refs.insert(idx);
                         let r_span = self.refs[idx].span;
-                        self.bag.push(crate::model::witnesses::Witness {
+                        self.push_witness(crate::model::witnesses::Witness {
                             attachment: crate::model::witnesses::WitnessAttachment::Expression(
                                 crate::model::witnesses::RefIdx(idx as u32),
                             ),
@@ -746,7 +746,7 @@ impl<'a> Builder<'a> {
             end: Point { row: 0, column: 0 },
         };
         for (method_name, return_expr) in p.return_method_declarations() {
-            self.bag.push(crate::model::witnesses::Witness {
+            self.push_witness(crate::model::witnesses::Witness {
                 attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
                     package: base_class.clone(),
                     name: method_name.to_string(),

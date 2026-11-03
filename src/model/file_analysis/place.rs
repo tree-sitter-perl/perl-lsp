@@ -24,6 +24,9 @@ pub enum Binding {
     /// The object a method body elides (C++'s `this`): its method's
     /// symbol. A bare member name in that body is a step from it.
     Receiver(SymbolId),
+    /// Perl's `@_` in a callable: each call's own arguments, keyed by the
+    /// callable's body scope.
+    Arguments(super::ScopeId),
 }
 
 /// A root binding plus the steps from it. An empty path is the variable
@@ -192,18 +195,9 @@ impl Place {
     }
 }
 
-/// What a narrowing or a guard is about. A plain variable keeps its
-/// scope-walked name until variables move onto their bindings
-/// (`docs/prompt-cfg-tier.md` §3.3); a part of one is its `Place`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Subject {
-    Variable(String),
-    Place(Place),
-}
-
 /// Every site that could disturb a place, per root binding in source
-/// order — the place sibling of `RebindIndex`, built in one pass over a
-/// file. Each site is an access of a place (`Place::disturbed_by`
+/// order, built in one pass over a file; a variable's rebinds are writes
+/// of its whole place (`FileAnalysis::rebind_index`). Each site is an access of a place (`Place::disturbed_by`
 /// decides what it disturbs); a read that steps further in is not one.
 /// Conservative: it under-narrows.
 #[derive(Default)]

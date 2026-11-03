@@ -241,6 +241,72 @@ pub(crate) fn for_each_entity_bridged_to<'a>(
 /// the walk beyond contributing its bridge.
 pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 
+/// The scope every other scope of the file nests in.
+pub fn outermost_scope(scopes: &[Scope], from: ScopeId) -> ScopeId {
+    let mut cur = from;
+    while let Some(p) = scopes[cur.0 as usize].parent {
+        cur = p;
+    }
+    cur
+}
+
+/// What an undeclared `name` used in `from` within `package` binds to, and
+/// the scope that binding lives in: a package variable in the outermost
+/// scope, except the argument array, which is each callable's own.
+pub fn unbound_variable(scopes: &[Scope], name: &str, package: &str, from: ScopeId) -> (Binding, ScopeId) {
+    if crate::model::conventions::is_argument_array(name) {
+        if let Some(callable) = callable_reach(scopes, from)
+            .last()
+            .filter(|&s| matches!(scopes[s.0 as usize].kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
+        {
+            return (Binding::Arguments(callable), callable);
+        }
+    }
+    let package = if crate::model::conventions::is_special_variable(name) { "main" } else { package };
+    (Binding::Package(package.to_string(), name.to_string()), outermost_scope(scopes, from))
+}
+
+/// Key a variable fact to the place its name binds to. `bind` answers a
+/// name used at a point in a scope with its binding and the scope that
+/// binding lives in. A fact made in a block nested inside that scope holds
+/// only until the block ends, so its span becomes the region from the fact
+/// to the block's end (`docs/adr/flow-narrowing.md` §Variables are
+/// bindings). A read the fact names (an edge or projection base) binds
+/// where it is read: the expression it is attached to, else the end of its
+/// scope.
+pub fn bind_variable_witness(
+    w: &mut crate::model::witnesses::Witness,
+    scopes: &[Scope],
+    bind: impl Fn(&str, tree_sitter::Point, ScopeId) -> (Binding, ScopeId),
+) {
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    let read_at = |scope: ScopeId| match &w.attachment {
+        WitnessAttachment::Expr(span) => span.start,
+        _ => scopes[scope.0 as usize].span.end,
+    };
+    let read = match &w.payload {
+        WitnessPayload::Edge(WitnessAttachment::Variable { name, scope })
+        | WitnessPayload::Projected { base: WitnessAttachment::Variable { name, scope }, .. } => {
+            Some(bind(name, read_at(*scope), *scope).0)
+        }
+        _ => None,
+    };
+    if let Some(binding) = read {
+        if let WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } = &mut w.payload {
+            *t = WitnessAttachment::Place(Box::new(Place::variable(binding)));
+        }
+    }
+    let WitnessAttachment::Variable { name, scope } = &w.attachment else { return };
+    let (binding, home) = bind(name, w.span.start, *scope);
+    if *scope != home {
+        let end = scopes[scope.0 as usize].span.end;
+        if w.span.start == w.span.end || w.span.end > end {
+            w.span.end = end;
+        }
+    }
+    w.attachment = WitnessAttachment::Place(Box::new(Place::variable(binding)));
+}
+
 /// The containment chain `[start, parent, …, file]` over a bare
 /// `&[Scope]` slice: what a scope is INSIDE (its class, its callable, its
 /// package), never what it can see. It is plain ids and lists no names;
@@ -860,7 +926,7 @@ pub struct DerefSite {
     pub span: Span,
     /// Receiver spelling (`$x`).
     pub receiver: String,
-    pub subject: Subject,
+    pub subject: Place,
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
     pub form: DerefForm,
@@ -874,25 +940,16 @@ pub struct DerefSite {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrowDerefSite {
     /// The receiver as written: a variable's canonical name, or a part of
-    /// one's spelling for the rendered message.
+    /// one's spelling, for the rendered message.
     pub receiver: String,
-    /// The receiver's place, when it is a part of a variable.
-    pub place: Option<Box<Place>>,
+    /// The receiver's place: the variable's binding, or a part of it.
+    pub place: Box<Place>,
     pub span: Span,
     pub form: DerefForm,
     /// An undef receiver dies here rather than vivifying, decided where
     /// the hints in force are known.
     #[serde(default)]
     pub dies_on_undef: bool,
-}
-
-impl ArrowDerefSite {
-    pub fn subject(&self) -> Subject {
-        match &self.place {
-            Some(place) => Subject::Place((**place).clone()),
-            None => Subject::Variable(self.receiver.clone()),
-        }
-    }
 }
 
 /// What a recorded guard tests about its subject — the build-time
@@ -913,7 +970,7 @@ pub enum GuardPredicate {
 /// (in the guard, before any narrowed region).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardSite {
-    pub subject: Subject,
+    pub subject: Place,
     /// The subject as written, for the rendered message.
     pub spelling: String,
     pub scope: ScopeId,

@@ -222,6 +222,10 @@ pub struct SkeletonAnalysis {
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
     pub place_narrowings: Vec<PlaceNarrowing>,
+    /// Facts about a variable that hold over a region (a guard's
+    /// narrowing, a use's observation), uncut: once the assembled analysis
+    /// binds them, each ends at the first rebind of its binding.
+    pub variable_regions: Vec<crate::model::witnesses::Witness>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -1206,24 +1210,13 @@ impl SkeletonAnalysis {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
             let wanted = narrowed.iter().map(|(p, _)| p.root.clone()).collect();
             let disturbances = places.disturbances(&wanted, &place_writes);
-            let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
             for (place, n) in narrowed {
-                // Nothing in the body rebinds an elided receiver.
-                let rebound = match &place.root {
-                    Binding::Lexical(root) => {
-                        let Some(root) = symbols
-                            .get(root.0 as usize)
-                            .filter(|s| s.id == *root)
-                            .or_else(|| symbols.iter().find(|s| s.id == *root))
-                        else {
-                            continue;
-                        };
-                        rebinds.earliest_in(&root.name, n.region)
-                    }
-                    Binding::Receiver(_) => None,
-                    Binding::Package(..) => continue,
-                };
-                let cuts = [disturbances.earliest_in(&place, n.region), rebound];
+                if matches!(place.root, Binding::Package(..) | Binding::Arguments(_)) {
+                    continue;
+                }
+                // A plain assignment to the root is one of `place_writes`; a
+                // declaration of the name binds a new variable.
+                let cuts = [disturbances.earliest_in(&place, n.region)];
                 let Some(held) = crate::model::file_analysis::cut_region(n.region, cuts) else {
                     continue;
                 };
@@ -1623,6 +1616,10 @@ impl SkeletonAnalysis {
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
+        // The extractor keys a variable's facts to the scope they were made
+        // in; the assembled analysis knows each name's binding.
+        fa.bind_variable_witnesses();
+        fa.bind_variable_regions(std::mem::take(&mut self.variable_regions));
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
@@ -1768,7 +1765,7 @@ fn settle_member_writes(
                 declared.is_some()
             });
             let (attachment, scope) = match declared {
-                Some(m) => (WA::Variable { name: m.name.clone(), scope: m.scope }, Some(m.scope)),
+                Some(m) => (WA::Place(Box::new(fa.declared_place(m.id))), Some(m.scope)),
                 None => (
                     WA::Field { owner: class.clone(), name: w.member.clone() },
                     class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),

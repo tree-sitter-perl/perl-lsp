@@ -15,12 +15,14 @@ use super::*;
 ///   scope (nested block / closure — execution unknowable) → push the
 ///   same keys with `open: true`.
 ///
-/// Witnesses attach to the scope the variable's existing witnesses
-/// live on (so the read-side scope walk finds them) with a zero-width
+/// Witnesses attach to the variable's place with a zero-width
 /// span at the write position — the same temporal contract as TC
 /// mirrors: invisible to reads before the write, latest-wins after
 /// (`HashWithKeys` subsumption is equality-only, so a different shape
 /// legitimately replaces the standing one).
+///
+/// `bindings[i]` is `key_writes[i]`'s variable binding and its home scope,
+/// resolved by the caller's binder before the bag is borrowed.
 ///
 /// Re-emittable: fold callers pass `clear = true` (clear-and-emit per
 /// iteration, tag `mutation_extension`). Enrichment passes `false` —
@@ -32,27 +34,25 @@ pub(crate) fn emit_mutation_extension_witnesses(
     ctx: &BagContext,
     key_writes: &[crate::model::file_analysis::KeyWrite],
     clear: bool,
+    bindings: &[(crate::model::file_analysis::Binding, ScopeId)],
 ) {
+    debug_assert_eq!(bindings.len(), key_writes.len());
     if clear {
         bag.remove_by_source_tag("mutation_extension");
     }
     // Per-var doc order so later writes see earlier extensions.
-    let mut writes: Vec<&crate::model::file_analysis::KeyWrite> = key_writes.iter().collect();
-    writes.sort_by_key(|w| (&w.var_text, w.span.start));
-    for w in writes {
+    let mut writes: Vec<(&crate::model::file_analysis::KeyWrite, &(crate::model::file_analysis::Binding, ScopeId))> =
+        key_writes.iter().zip(bindings).collect();
+    writes.sort_by_key(|(w, _)| (&w.var_text, w.span.start));
+    for (w, (binding, home)) in writes {
         // Attach where the value the write extends is bound — the scope a
         // read takes it from — never where the write merely uses it (a
         // block's own `$v->{k}` access would hide the shape from every read
         // after the block). Climbing past the write's own scope means the
         // write may not have run by read time.
-        let Some((depth, attach_sid)) =
-            variable_binding_scope(bag, ctx.scopes, &w.var_text, w.scope, w.span.start)
-        else {
-            continue;
-        };
-        let scope_crossed = depth > 0;
-        let Some(base) = query_variable_type(bag, ctx, &w.var_text, w.scope, w.span.start)
-        else {
+        let place = crate::model::file_analysis::Place::variable(binding.clone());
+        let scope_crossed = *home != w.scope;
+        let Some(base) = query_variable_place(bag, ctx, &place, w.span.start) else {
             continue;
         };
         let rhs_type = |s: Span| {
@@ -117,10 +117,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
             _ => continue,
         };
         bag.push(Witness {
-            attachment: WitnessAttachment::Variable {
-                name: w.var_text.clone(),
-                scope: attach_sid,
-            },
+            attachment: WitnessAttachment::Place(Box::new(place)),
             source: WitnessSource::Builder("mutation_extension".into()),
             payload: WitnessPayload::InferredType(shape),
             span: Span { start: w.span.start, end: w.span.start },

@@ -132,6 +132,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
     };
     let ctx = BagContext {
         scopes: &fa.scopes,
+        symbols: fa.symbols(),
         package_framework: &fa.packages,
         module_index: None,
         package_parents: &fa.packages,
