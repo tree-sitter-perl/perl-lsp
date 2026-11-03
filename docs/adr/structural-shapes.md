@@ -189,7 +189,16 @@ only `\%h` ref-taking escapes.
 
 ### The whole-story gate is one clause, naming its modeled replacement
 
-`FileAnalysis::closed_shape_is_whole_story(var)` = not reassigned.
+`FileAnalysis::closed_shape_is_whole_story(var)` = a lexical, not
+reassigned.
+
+**Lexical**: a package variable (`DeclKind::is_package_variable`: `our`,
+an undeclared global, a qualified or forced-`main` spelling) is never the
+whole story, because any file can write it. Webmin's bare `our %config;`
+is filled by `init_config` in another file, and Foswiki's `%Foswiki::cfg`
+by `LocalSite.cfg`; closing their shapes put ~2,200 false
+unknown-hash-key hints on Webmin alone. This clause stays until the
+shape of a package variable is joined across the files that write it.
 **Reassignment** (`reassigned_vars`, by declaring symbol): a Write
 targeting the variable itself (`$v = …`, `%h = …`); element writes are mutations,
 modeled above. The symbol is the ref's binding, and every variable ref has

@@ -1376,6 +1376,13 @@ impl DeclKind {
         matches!(self, DeclKind::Our | DeclKind::Implicit)
     }
 
+    /// A variable in a package's symbol table, however this file names it
+    /// (`our`, an undeclared use, a qualified or forced-`main` spelling):
+    /// any file can write it, so no one file holds all of its writes.
+    pub fn is_package_variable(self) -> bool {
+        self.is_package_global() || matches!(self, DeclKind::Mention)
+    }
+
     /// The keyword the declaration was spelled with, as outline and
     /// completion show it.
     pub fn label(self) -> &'static str {
