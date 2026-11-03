@@ -1246,13 +1246,21 @@ impl<'a> Builder<'a> {
                                 let p = &params[param_idx];
                                 let sigil = p.name.chars().next().unwrap_or('$');
                                 let decl_kind = DeclKind::Param;
-                                self.add_symbol(
+                                // The parameter's variable declares it; the
+                                // parameter is in force past its own default,
+                                // so `$x = $x` reads the outer `$x` and a
+                                // later default reads an earlier parameter.
+                                let var = crate::cst::NodeExt::elements(&param_node)
+                                    .find(|c| matches!(c.kind(), "scalar" | "array" | "hash"))
+                                    .unwrap_or(param_node);
+                                let id = self.add_symbol(
                                     p.name.clone(),
                                     SymKind::Variable,
-                                    node_to_span(param_node),
-                                    node_to_span(param_node),
+                                    node_to_span(var),
+                                    node_to_span(var),
                                     SymbolDetail::Variable { sigil, decl_kind },
                                 );
+                                self.symbols[id.0 as usize].in_force = Some(param_node.end_position());
                                 param_idx += 1;
                             }
                         }
@@ -1513,6 +1521,7 @@ impl<'a> Builder<'a> {
                 *var_span,
                 detail,
             );
+            self.symbols[sym_id.0 as usize].in_force = Some(crate::cst::declaration_in_force_from(self.syntax, node));
             // A field's declaration facts ride the closed flag set (rule
             // #12): the attribute spellings become flags here, once, and
             // stay on the symbol as display text.

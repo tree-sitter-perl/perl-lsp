@@ -1360,6 +1360,27 @@ pub(crate) fn string_list_with_residue(
     (results, residue)
 }
 
+/// Where a lexical declared at `decl` comes into force. Perl introduces a
+/// `my` once the statement declaring it is done (`my $x = $x` reads the
+/// outer `$x`); one declared in a control header (`if (my $x = …)`,
+/// `while (my $l = <$fh>)`) is in force from the header's block on.
+pub(crate) fn declaration_in_force_from<'t>(syn: &SyntaxForest<'t>, decl: Node<'t>) -> tree_sitter::Point {
+    let mut from = decl;
+    for p in syn.ancestors(decl) {
+        if p.kind() == "expression_statement" {
+            return p.end_position();
+        }
+        if let Some(block) = p.child_by_field_name("block").filter(|b| b.id() != from.id()) {
+            return block.start_position();
+        }
+        if matches!(p.kind(), "block" | "source_file") {
+            break;
+        }
+        from = p;
+    }
+    decl.end_position()
+}
+
 /// The block (or file) `node` runs in: the extent a fact observed at
 /// `node` can hold over when no conditional arm bounds it.
 pub(crate) fn enclosing_block<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> Option<Node<'t>> {

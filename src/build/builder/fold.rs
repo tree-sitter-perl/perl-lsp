@@ -40,7 +40,7 @@ impl<'a> Builder<'a> {
         // of which `package X;` section the use sits under.
         let mut scope_symbols: std::collections::HashMap<
             ScopeId,
-            Vec<(String, SymbolId, Point, Option<String>)>,
+            Vec<(String, SymbolId, crate::model::file_analysis::InView, Option<String>)>,
         > = std::collections::HashMap::new();
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
@@ -48,7 +48,7 @@ impl<'a> Builder<'a> {
                 scope_symbols
                     .entry(sym.scope)
                     .or_default()
-                    .push((sym.name.clone(), sym.id, sym.span.start, gating_package));
+                    .push((sym.name.clone(), sym.id, sym.in_view(), gating_package));
             }
         }
 
