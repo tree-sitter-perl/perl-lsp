@@ -151,19 +151,20 @@ fn parse_eval_replacements(mut ranges: Vec<tree_sitter::Range>, source: &[u8]) -
     if ranges.is_empty() {
         return out;
     }
-    let mut parser = super::create_parser();
-    while let Some(range) = ranges.pop() {
-        if parser.set_included_ranges(&[range]).is_err() {
-            continue;
-        }
-        let Some(code) = parser.parse(source, None) else { continue };
-        survey(code.root_node(), |n| {
-            if let Some(r) = crate::cst::eval_replacement(n, source) {
-                ranges.push(r.range());
+    super::with_fragment_parser(|parser| {
+        while let Some(range) = ranges.pop() {
+            if parser.set_included_ranges(&[range]).is_err() {
+                continue;
             }
-        });
-        out.push((range.start_byte, code));
-    }
+            let Some(code) = parser.parse(source, None) else { continue };
+            survey(code.root_node(), |n| {
+                if let Some(r) = crate::cst::eval_replacement(n, source) {
+                    ranges.push(r.range());
+                }
+            });
+            out.push((range.start_byte, code));
+        }
+    });
     out
 }
 
@@ -1099,11 +1100,9 @@ impl<'a> Builder<'a> {
             Err(_) => return,
         };
 
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&ts_parser_perl::LANGUAGE.into()).is_err() {
+        let Some(sub_tree) = super::with_fragment_parser(|p| p.parse(&section_text, None)) else {
             return;
-        }
-        let Some(sub_tree) = parser.parse(&section_text, None) else { return };
+        };
         let sub_src = section_text.as_bytes();
 
         // tree-sitter reports re-parse positions relative to the section text;

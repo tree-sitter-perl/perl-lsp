@@ -160,10 +160,7 @@ pub(crate) fn verify_pattern_expects(spec: &PatternSpec) -> Result<(), String> {
     }
     let query = cached_pattern_query(&spec.query)
         .map_err(|e| format!("pattern `{}`: query compile failed: {}", spec.name, e))?;
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .map_err(|e| e.to_string())?;
+    let mut parser = super::create_parser();
     for ex in &spec.expect {
         let tree = parser
             .parse(&ex.src, None)
