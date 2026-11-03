@@ -13,7 +13,8 @@ use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
-/// replacement parse) shares. Lives in the builder layer: the resolver
+/// replacement parse, `isa` strings, cpanfiles, plugin pattern examples)
+/// shares (`layering_tests::perl_parsers_come_from_create_parser`). Lives in the builder layer: the resolver
 /// calling down is fine, the builder reaching up was not.
 pub fn create_parser() -> tree_sitter::Parser {
     let mut parser = tree_sitter::Parser::new();
@@ -21,6 +22,24 @@ pub fn create_parser() -> tree_sitter::Parser {
         .set_language(&ts_parser_perl::LANGUAGE.into())
         .expect("failed to set Perl language");
     parser
+}
+
+/// Run `f` with this thread's reused Perl parser. The build parses fragments
+/// per site (every `isa => '…'` string, each `s///e` replacement, a `__DATA__`
+/// section), and a fresh parser per fragment re-allocates its stacks and
+/// lexer each time. Included ranges are reset afterwards, so a
+/// range-restricted parse never leaks into the next caller.
+pub(crate) fn with_fragment_parser<R>(f: impl FnOnce(&mut tree_sitter::Parser) -> R) -> R {
+    thread_local! {
+        static PARSER: std::cell::RefCell<tree_sitter::Parser> =
+            std::cell::RefCell::new(create_parser());
+    }
+    PARSER.with(|p| {
+        let mut p = p.borrow_mut();
+        let out = f(&mut p);
+        let _ = p.set_included_ranges(&[]);
+        out
+    })
 }
 use crate::build::plugin::{self, PluginRegistry};
 

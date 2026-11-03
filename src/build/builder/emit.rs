@@ -42,31 +42,24 @@ impl<'a> Builder<'a> {
 
     pub(super) fn hash_literal_type(&mut self, node: Node<'a>) -> InferredType {
         // A spread occupies ONE list slot but flattens to an even count
-        // at runtime, so pairing must skip it as a unit — `pair_nodes`'
-        // strict k/v alternation would mispair everything after it.
+        // at runtime, so pairing skips it as a unit.
         let mut flat: Vec<Node<'a>> = Vec::new();
         crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
-        let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
 
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
         let mut open = false;
-        let mut i = 0;
-        while i < named.len() {
-            let elem = named[i];
-            if crate::cst::is_flattening(elem) {
-                // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
-                // key set is no longer exhaustive. Arrays included:
-                // `my %h = (default => 1, @_)` is the canonical
-                // args-with-defaults idiom.
-                open = true;
-                i += 1;
-                continue;
-            }
-            let Some(v_node) = named.get(i + 1).copied() else {
-                open = true;
-                break;
+        for item in crate::cst::pair_items(&flat, crate::cst::Spreads::AsUnits) {
+            let (elem, v_node) = match item {
+                crate::cst::PairItem::Pair(k, v) => (k, v),
+                // Spread (`%other` / `%$ref` / `@_` / `@rest`): the key set
+                // is no longer exhaustive. Arrays included: `my %h =
+                // (default => 1, @_)` is the canonical args-with-defaults
+                // idiom. A dangling key leaves it open the same way.
+                crate::cst::PairItem::Spread(_) | crate::cst::PairItem::Dangling(_) => {
+                    open = true;
+                    continue;
+                }
             };
-            i += 2;
             let Some((key, is_dynamic)) = self.extract_key_text(elem) else {
                 open = true;
                 continue;
