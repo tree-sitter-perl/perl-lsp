@@ -159,7 +159,7 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
     // trailing identifier and detect the `::`.
     {
         let check = strip_trailing_identifier(trimmed);
-        if let Some(pkg_text) = check.strip_suffix("::") {
+        if let Some(pkg_text) = check.strip_suffix(crate::model::conventions::PERL_SEP) {
             let pkg = extract_package_from_prefix(pkg_text);
             if is_perl_package_name(&pkg) {
                 return CursorContext::QualifiedPath { package: pkg };
@@ -217,7 +217,7 @@ fn is_perl_package_name(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    for segment in s.split("::") {
+    for segment in s.split(crate::model::conventions::PERL_SEP) {
         let mut chars = segment.chars();
         match chars.next() {
             Some(c) if c.is_alphabetic() || c == '_' => {}
