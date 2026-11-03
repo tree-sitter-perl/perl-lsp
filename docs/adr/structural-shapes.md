@@ -140,15 +140,31 @@ reads `k` back typed. The key-typo hint skips an empty shape: a typo
 needs a key to have mistyped, and a read before the first write is
 usually a loop whose write sits later in the source.
 
-Extension witnesses use zero-width spans at the write position — the
+A write is a DELTA, never the grown shape: `WitnessPayload::Extend`
+carries the write's key path, an edge to its value (`Expr(rhs)`), and
+whether it widens, at a zero-width span at the write position — the
 same temporal contract as TC mirrors: invisible to reads before the
-write, latest-wins after. The pass is re-emittable in the worklist
-fold (clear-and-emit, tag `mutation_extension`) and append-only at
-enrichment — post-finalize removal would shift the sealed
-`base_witness_count`, and duplicate pushes are idempotent under
-latest-wins, truncated away by the next enrichment cycle. `KeyWrite`s
-persist on `FileAnalysis` precisely so enrichment can re-run the pass
-once imported shapes land.
+write, latest-wins after. The registry folds a place's deltas when the
+place is read (`ReducerRegistry::lower_extensions`): each delta lays its
+key over the value standing at its site. Consecutive deltas with no
+other witness of the place between them are one segment — the standing
+value is read once at the segment's first write and grown in place
+through the rest — and the grown shape stands where the segment's last
+effective write did. A `Field` is not temporal, so each grown shape
+joins the value it grew from, as the slot's other writes do. Snapshotting
+the grown shape per write instead held N²/2 keys for N writes to one
+hash (FHEM's `73_km200.pm`: 1,664 writes, 7.6 GB to dump one file's bag).
+
+The pass is re-emittable in the worklist fold (clear-and-emit, tag
+`mutation_extension`): the deltas themselves read nothing, but a nested
+write through an object's slot is ROUTED to `Field{class, slot}` by the
+class the root holds, which the fold is still settling. Routing re-reads
+the root only where a value-binding witness of it moves, never once per
+write. At enrichment the pass is append-only and adds only re-routed
+slot deltas — post-finalize removal would shift the sealed
+`base_witness_count` — since a place's deltas fold onto whatever
+imported value stands under them at read time. `KeyWrite`s persist on
+`FileAnalysis` so enrichment can re-route once imported classes land.
 
 ### Escapes are open-switching writes
 
@@ -186,8 +202,9 @@ of the gate.
 The key list inside `HashWithKeys` is an `Arc` (`SharedKeys`,
 `types.rs`): clone is a refcount, equality takes a pointer fast path
 (every site of one literal shares one allocation), and the one mutation
-path — shape extension in the worklist — goes through copy-on-write,
-paying O(keys) per actual divergence rather than per query. Serde
+path — folding a place's write deltas at read time — goes through
+copy-on-write on a shape the fold owns, so a segment of writes copies
+the list it started from once. Serde
 delegates to the inner `Vec`, so blobs are byte-identical to the
 unshared spelling and the wire format is not a compatibility surface.
 
