@@ -1979,8 +1979,9 @@ impl ReducerRegistry {
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
         if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
-            let lowered = self.lower_extensions(bag, q, state, &raw);
-            return self.materialize_raw(bag, q, state, lowered.iter().collect());
+            let grown = self.lower_extensions(bag, q, state, &raw);
+            let grown = Self::grown_witnesses(&raw, &grown);
+            return self.materialize_raw(bag, q, state, Self::splice_grown(&raw, &grown));
         }
         self.materialize_raw(bag, q, state, raw)
     }
@@ -2002,7 +2003,7 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
         raw: &[&Witness],
-    ) -> Vec<Witness> {
+    ) -> Vec<(usize, InferredType)> {
         let temporal = q.attachment.is_temporal();
         let point = q.point.filter(|_| temporal);
         let others = super::SpanIndex::of(
@@ -2052,26 +2053,40 @@ impl ReducerRegistry {
         if let (Some(t), Some(j)) = (current, last_effective) {
             grown.push((j, t));
         }
-        Self::splice_grown(raw, grown)
+        grown
+    }
+
+    /// Each grown shape as the witness standing at its delta's raw index,
+    /// in raw order.
+    fn grown_witnesses(raw: &[&Witness], grown: &[(usize, InferredType)]) -> Vec<(usize, Witness)> {
+        let mut out: Vec<(usize, Witness)> = grown
+            .iter()
+            .map(|(i, t)| {
+                let w = raw[*i];
+                let grown = Witness {
+                    attachment: w.attachment.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::InferredType(t.clone()),
+                    span: w.span,
+                };
+                (*i, grown)
+            })
+            .collect();
+        out.sort_by_key(|(i, _)| *i);
+        out
     }
 
     /// `raw` with its deltas dropped and each grown shape standing where its
-    /// delta did.
-    fn splice_grown(raw: &[&Witness], mut grown: Vec<(usize, InferredType)>) -> Vec<Witness> {
-        grown.sort_by_key(|(i, _)| *i);
-        let mut grown = grown.into_iter().peekable();
+    /// delta did — borrowed, so the witnesses a read takes as they are are
+    /// never copied.
+    fn splice_grown<'w>(raw: &[&'w Witness], grown: &'w [(usize, Witness)]) -> Vec<&'w Witness> {
+        let mut grown = grown.iter().peekable();
         let mut out = Vec::with_capacity(raw.len());
         for (i, w) in raw.iter().enumerate() {
             if !matches!(w.payload, WitnessPayload::Extend(_)) {
-                out.push((*w).clone());
+                out.push(*w);
             } else if grown.peek().is_some_and(|(j, _)| *j == i) {
-                let (_, t) = grown.next().expect("peeked");
-                out.push(Witness {
-                    attachment: w.attachment.clone(),
-                    source: w.source.clone(),
-                    payload: WitnessPayload::InferredType(t),
-                    span: w.span,
-                });
+                out.push(&grown.next().expect("peeked").1);
             }
         }
         out
@@ -2090,7 +2105,7 @@ impl ReducerRegistry {
         grown: &[(usize, InferredType)],
         at: Point,
     ) -> Option<InferredType> {
-        let grown_list = Self::splice_grown(raw, grown.to_vec());
+        let grown = Self::grown_witnesses(raw, grown);
         let base_q = ReducerQuery {
             attachment: q.attachment,
             point: q.attachment.is_temporal().then_some(at).or(q.point),
@@ -2101,7 +2116,7 @@ impl ReducerRegistry {
             context: q.context,
         };
         let materialized = state.in_opaque_frame(|state| {
-            self.materialize_raw(bag, &base_q, state, grown_list.iter().collect())
+            self.materialize_raw(bag, &base_q, state, Self::splice_grown(raw, &grown))
         });
         let answer = match self.reduce_materialized(&materialized, &base_q) {
             ReducedValue::None => ClassLadder::of(q.attachment)
