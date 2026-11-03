@@ -792,7 +792,7 @@ impl<'a> Builder<'a> {
     pub(super) fn upgrade_variable_hash_key_owners(&mut self) {
         let mut upgrades: Vec<(usize, HashKeyOwner)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
-            let RefKind::HashKeyAccess { ref var_text } = r.kind else {
+            let RefKind::HashKeyAccess { ref var_text, .. } = r.kind else {
                 continue;
             };
             if !matches!(r.hash_key_owner(), Some(HashKeyOwner::Variable { .. })) {
@@ -889,6 +889,7 @@ impl<'a> Builder<'a> {
             self.refs.push(Ref {
                 kind: RefKind::HashKeyAccess {
                     var_text: String::new(),
+                    dies_on_undef: false,
                 },
                 span,
                 scope: self.scope_at_point(span.start),
@@ -1098,6 +1099,22 @@ impl<'a> Builder<'a> {
         point: Point,
     ) -> Option<InferredType> {
         crate::model::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
+    }
+
+    /// What a narrowing subject holds at `point`, asked from `scope`.
+    pub(super) fn bag_query_subject(
+        &self,
+        subject: &crate::model::file_analysis::Subject,
+        scope: ScopeId,
+        point: Point,
+    ) -> Option<InferredType> {
+        use crate::model::file_analysis::Subject;
+        match subject {
+            Subject::Variable(name) => self.bag_query_variable(name, scope, point),
+            Subject::Place(place) => {
+                crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point)
+            }
+        }
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through
@@ -1850,7 +1867,7 @@ impl<'a> Builder<'a> {
             .collect();
 
         for r in &mut self.refs {
-            if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+            if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                 let new_owner = if let Some(func_name) = binding_map.get(var_text.as_str()) {
                     let resolved = walk_return_delegation_chain(
                         func_name,
@@ -2030,7 +2047,7 @@ impl<'a> Builder<'a> {
             .iter()
             .enumerate()
             .filter_map(|(i, r)| {
-                let RefKind::HashKeyAccess { var_text } = &r.kind else { return None };
+                let RefKind::HashKeyAccess { var_text, .. } = &r.kind else { return None };
                 if r.hash_key_owner().is_some() {
                     return None;
                 }
@@ -2042,7 +2059,7 @@ impl<'a> Builder<'a> {
             .collect();
 
         for (i, r) in self.refs.iter_mut().enumerate() {
-            if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+            if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                 if r.hash_key_owner().is_some() { continue; }
 
                 let vt = var_text.clone();

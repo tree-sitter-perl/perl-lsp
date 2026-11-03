@@ -1,5 +1,5 @@
-//! The capture vocabulary: every capture name a pack's query document may
-//! use, as a closed enum. `Capture::parse` is the one place a capture name
+//! The capture vocabulary: every capture name a pack's query document — and
+//! Perl's `@flow` document — may use, as a closed enum. `Capture::parse` is the one place a capture name
 //! is read as text; a pack query is checked against it when it compiles, so
 //! a name nobody handles fails the load instead of extracting nothing.
 //! `docs/adr/capture-vocabulary.md`.
@@ -180,8 +180,12 @@ spelled! {
         Assign = "assign",
         Target = "target",
         Source = "source",
-        /// A rebind with no inflowing value (loop variables).
+        /// A rebind with no direct inflowing value: a loop variable, which
+        /// takes each element of the `Source` beside it in turn.
         Rebind = "rebind",
+        /// A bind that resets the name with no value flowing in — an
+        /// uninitialized declaration (Perl's `my $x;`, `local $x;`).
+        Clear = "clear",
         /// The left side of a write: the place its own read projects
         /// takes the value (`obj.x` in `obj.x = v` is the member of the
         /// class `obj` is). A name's place is its binding, which `Target`

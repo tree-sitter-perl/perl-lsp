@@ -42,31 +42,24 @@ impl<'a> Builder<'a> {
 
     pub(super) fn hash_literal_type(&mut self, node: Node<'a>) -> InferredType {
         // A spread occupies ONE list slot but flattens to an even count
-        // at runtime, so pairing must skip it as a unit — `pair_nodes`'
-        // strict k/v alternation would mispair everything after it.
+        // at runtime, so pairing skips it as a unit.
         let mut flat: Vec<Node<'a>> = Vec::new();
         crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
-        let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
 
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
         let mut open = false;
-        let mut i = 0;
-        while i < named.len() {
-            let elem = named[i];
-            if crate::cst::is_flattening(elem) {
-                // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
-                // key set is no longer exhaustive. Arrays included:
-                // `my %h = (default => 1, @_)` is the canonical
-                // args-with-defaults idiom.
-                open = true;
-                i += 1;
-                continue;
-            }
-            let Some(v_node) = named.get(i + 1).copied() else {
-                open = true;
-                break;
+        for item in crate::cst::pair_items(&flat, crate::cst::Spreads::AsUnits) {
+            let (elem, v_node) = match item {
+                crate::cst::PairItem::Pair(k, v) => (k, v),
+                // Spread (`%other` / `%$ref` / `@_` / `@rest`): the key set
+                // is no longer exhaustive. Arrays included: `my %h =
+                // (default => 1, @_)` is the canonical args-with-defaults
+                // idiom. A dangling key leaves it open the same way.
+                crate::cst::PairItem::Spread(_) | crate::cst::PairItem::Dangling(_) => {
+                    open = true;
+                    continue;
+                }
             };
-            i += 2;
             let Some((key, is_dynamic)) = self.extract_key_text(elem) else {
                 open = true;
                 continue;
@@ -1202,24 +1195,49 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
-    /// scalar, for the deref diagnostics (the array/code analog of the
-    /// method-call / hash-deref refs). Only a scalar operand can be undef /
-    /// Optional / rep-narrowed; a chain receiver (`f()->[0]`) is skipped.
-    pub(super) fn record_arrow_deref(&mut self, node: Node<'a>, form: crate::model::file_analysis::DerefForm) {
-        let Some(operand) = node.named_child(0) else { return };
-        if operand.kind() != "scalar" {
+    /// Record a `$x->[i]` / `$x->()` deref whose receiver is a plain
+    /// variable, for the deref diagnostics (the array/code analog of the
+    /// method-call / hash-deref refs). A receiver that is a part of a
+    /// variable is recorded by the place survey (`place_disturbances`),
+    /// only when a narrowing names its root; a value (`f()->[0]`) is never
+    /// narrowed, so it is skipped.
+    pub(super) fn record_arrow_deref(
+        &mut self,
+        node: Node<'a>,
+        receiver: Node<'a>,
+        form: crate::model::file_analysis::DerefForm,
+    ) {
+        if !crate::cst::is_plain_scalar(receiver) {
             return;
         }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        if !text.starts_with('$') {
-            return;
-        }
+        let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
+        let dies_on_undef = self.deref_dies_on_undef(node, &form);
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
-            receiver: text.to_string(),
+            receiver: name,
+            place: None,
             span: node_to_span(node),
             form,
+            dies_on_undef,
         });
+    }
+
+    /// Whether the deref at `node` dies on an undef receiver: a call
+    /// always does; an element access does where the `autovivification`
+    /// hints in force forbid vivifying its receiver, and vivifies it
+    /// otherwise.
+    pub(super) fn deref_dies_on_undef(&self, node: Node<'a>, form: &crate::model::file_analysis::DerefForm) -> bool {
+        use crate::model::file_analysis::{hint_in, vivify_dies_in, LexicalHint, VivifyAccess};
+        if form.dies_on_undef() {
+            return true;
+        }
+        let at = node.start_position();
+        let scope = self.scope_at_point(at);
+        // Most files never say `no autovivification`; asking the scopes
+        // first spares every element access its climb to its context.
+        let any_off = [VivifyAccess::Fetch, VivifyAccess::Store, VivifyAccess::Exists, VivifyAccess::Delete]
+            .into_iter()
+            .any(|a| hint_in(&self.scopes, scope, at, LexicalHint::NoVivify(a)));
+        any_off && vivify_dies_in(&self.scopes, scope, at, crate::cst::vivify_context(self.syntax, node))
     }
 
     /// Infer types from binary operator expressions.

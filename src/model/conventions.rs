@@ -17,9 +17,14 @@
 
 use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
+/// Perl's namespace separator. Source-side Perl code (the builder, the CST
+/// view, the cursor detector) spells it through this; a consumer that serves
+/// every language asks the analysis's `NameSpellings` instead.
+pub const PERL_SEP: &str = "::";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
-    namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
+    namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed("main")),
@@ -110,6 +115,17 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     }
 }
 
+/// A Perl module's path relative to an `@INC` root: `Foo::Bar` → `Foo/Bar.pm`.
+pub fn perl_module_rel_path(module: &str) -> String {
+    format!("{}.pm", module.replace(PERL_SEP, "/"))
+}
+
+/// `perl_module_rel_path`'s inverse, over a root-relative path whose `.pm`
+/// the caller has already checked.
+pub fn perl_module_from_rel_path(rel: &std::path::Path) -> String {
+    rel.to_string_lossy().trim_end_matches(".pm").replace(std::path::MAIN_SEPARATOR, PERL_SEP)
+}
+
 /// `split_qualified`'s inverse: a namespace and a leaf as one qualified
 /// name. The global namespace (an empty `namespace`) yields the bare leaf,
 /// never a dangling separator, so a caller need not ask first whether the
@@ -154,6 +170,12 @@ pub fn split_qualified_var<'a>(name: &'a str, names: &'a NameSpellings) -> Optio
     }
     let (pkg, base) = split_qualified(chars.as_str(), names);
     pkg.map(|p| (names.qualifier_package(p), format!("{sigil}{base}")))
+}
+
+/// Whether a sigil-led basename (`split_qualified_var`'s, or a bare
+/// spelling) is `@ISA`, the array that holds a package's parents.
+pub fn is_isa_var(base: &str) -> bool {
+    base == "@ISA"
 }
 
 /// The qualified spelling of a variable: `('$', "Foo", "x")` → `$Foo::x`.
@@ -276,18 +298,18 @@ pub fn is_bareword_class_name(text: &str, names: &NameSpellings) -> bool {
     text.split(sep).all(is_ident)
 }
 
-/// Perl's attribute vocabulary, spelling → flag — the one table for a
-/// Corinna `field` attribute (`:param`, `:reader`, the writer family
-/// `:writer` / `:mutator` / `:accessor`), the way a pack declares its own.
-/// A spelling with no declaration fact (`:ro` style hints) is display-only.
+/// Perl's spellings of a Corinna `field` attribute, mapped onto the
+/// canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`, the one
+/// spelling → flag table) the way a pack maps its own: `:param`, `:reader`,
+/// and the writer family `:writer` / `:mutator` / `:accessor`. A spelling
+/// with no declaration fact (`:ro` style hints) is display-only.
 pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::SymbolFlags> {
-    use crate::model::file_analysis::SymbolFlags;
-    Some(match attr {
-        "param" => SymbolFlags::PARAM,
-        "reader" => SymbolFlags::READER,
-        "writer" | "mutator" | "accessor" => SymbolFlags::WRITER,
+    let canonical = match attr {
+        "param" | "reader" | "writer" => attr,
+        "mutator" | "accessor" => "writer",
         _ => return None,
-    })
+    };
+    crate::model::file_analysis::SymbolFlags::try_from(canonical).ok()
 }
 
 /// A Perl sigil: what kind of thing a name, or a deref, denotes.
@@ -418,6 +440,11 @@ pub enum Invocant {
     /// spelling, however much it looks like one (`self.x`).
     Expr(InvocantName),
     Bridged { plugin: String, token: String, match_mode: BridgedMatch },
+    /// A receiver that is a part of a variable (`$self->{a}->m`): its value
+    /// is that place's, narrowings included, and its text is never a class
+    /// spelling. The place rides here, on the receiver it describes, so
+    /// every member ref carries it at no cost to the ones without.
+    Place { name: InvocantName, place: Box<crate::model::file_analysis::Place> },
 }
 
 /// How a [`Bridged`](Invocant::Bridged) token resolves to a class. Strict
@@ -463,8 +490,16 @@ impl Invocant {
     /// `Class->`) bind through this and skip bridged tokens.
     pub fn as_name(&self) -> Option<&InvocantName> {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => Some(n),
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => Some(n),
             Invocant::Bridged { .. } => None,
+        }
+    }
+
+    /// The receiver's place, when it is a part of a variable.
+    pub fn place(&self) -> Option<&crate::model::file_analysis::Place> {
+        match self {
+            Invocant::Place { place, .. } => Some(place),
+            Invocant::Name(_) | Invocant::Expr(_) | Invocant::Bridged { .. } => None,
         }
     }
 
@@ -478,7 +513,7 @@ impl Invocant {
     /// callers match the variant instead.
     pub fn text(&self) -> &str {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => n,
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => n,
             Invocant::Bridged { token, .. } => token,
         }
     }
@@ -531,24 +566,6 @@ impl<'a> InvocantText<'a> {
             t => Self::Bareword(t),
         }
     }
-
-    /// True when the invocant is a hash/array **element place** — `$h{k}`,
-    /// `$a[0]`, `$h{a}{b}`, or the arrow forms `$x->{k}` / `$x->[0]` — i.e.
-    /// a stable slot that flow-narrowing may have refined, so the receiver
-    /// query consults a place witness for it. A scalar **deref** (`${$ref}`,
-    /// `${name}`) is NOT a place: its brace follows the sigil directly,
-    /// whereas a place's subscript follows the container name (or an arrow /
-    /// a prior subscript). Plain scalars and non-scalars are never places.
-    pub fn is_element_place(&self) -> bool {
-        let Self::Scalar(inner) = self else { return false };
-        // `inner` is the text after the `$` sigil. A deref spelling leads
-        // with the brace (`${…}` → inner `"{…}"`); a place has its container
-        // name / `->` / prior subscript before the first `{` or `[`.
-        let b = inner.as_bytes();
-        b.iter().position(|&c| c == b'{' || c == b'[').is_some_and(|i| {
-            i > 0 && !matches!(b[i - 1], b'$' | b'@' | b'%')
-        })
-    }
 }
 
 /// A method-call name token (`$obj->Foo::Bar::m`, `$self->SUPER::m`,
@@ -576,7 +593,7 @@ pub enum MethodToken<'a> {
 
 impl<'a> MethodToken<'a> {
     pub fn parse(token: &'a str) -> Self {
-        match token.rsplit_once("::") {
+        match token.rsplit_once(PERL_SEP) {
             None => Self::Bare(token),
             Some(("SUPER", tail)) => Self::Super(tail),
             Some(("", tail)) => Self::Main(tail),
@@ -674,25 +691,6 @@ mod tests {
         assert_eq!(InvocantText::parse("$_[0]"), InvocantText::PositionalReceiver);
         assert_eq!(InvocantText::parse("@_[0]"), InvocantText::PositionalReceiver);
         assert_eq!(InvocantText::parse("Foo::Bar"), InvocantText::Bareword("Foo::Bar"));
-    }
-
-    #[test]
-    fn element_place_vs_deref() {
-        // Element places: subscript follows the container name / arrow.
-        for place in ["$h{k}", "$a[0]", "$h{a}{b}", "$self->{x}", "$self->[0]"] {
-            assert!(
-                InvocantText::parse(place).is_element_place(),
-                "{place} should be an element place",
-            );
-        }
-        // Scalar derefs and plain vars are NOT places — `${...}`'s brace
-        // follows the sigil directly.
-        for not_place in ["${name}", "${$ref}", "$obj", "@list", "Foo::Bar", "shift"] {
-            assert!(
-                !InvocantText::parse(not_place).is_element_place(),
-                "{not_place} should NOT be an element place",
-            );
-        }
     }
 
     #[test]

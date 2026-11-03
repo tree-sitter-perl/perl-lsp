@@ -68,6 +68,26 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Wire each framework base (`Moo::Object`, …) as its package's last
+    /// parent, so `->new` resolves to the base's real constructor — or, with
+    /// the base uninstalled, `class_has_unresolved_ancestor` keeps the
+    /// method checks silent instead of guessing.
+    pub(super) fn apply_framework_bases(&mut self) {
+        let mut bases: Vec<(String, String)> = std::mem::take(&mut self.framework_bases)
+            .into_iter()
+            .filter(|(pkg, _)| !self.extended_packages.contains(pkg))
+            .collect();
+        // `package_parents` draws a generation per write; a stable order
+        // keeps the build deterministic.
+        bases.sort();
+        for (pkg, base) in bases {
+            if pkg == base || self.package_parents.get(&pkg).is_some_and(|ps| ps.contains(&base)) {
+                continue;
+            }
+            self.package_parents.push(pkg, base);
+        }
+    }
+
     /// Handle `__PACKAGE__->load_components('+Full::Name', 'Short::Name')` and
     /// `load_own_components`. Bare names are prefixed with `base_ns`
     /// (`DBIx::Class` for `load_components`, the CURRENT package for
@@ -1244,9 +1264,7 @@ impl<'a> Builder<'a> {
     }
 
     fn isa_type_of_string(&mut self, text: &str, mode: FrameworkMode) -> Option<InferredType> {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&ts_parser_perl::LANGUAGE.into()).ok()?;
-        let tree = parser.parse(text, None)?;
+        let tree = super::create_parser().parse(text, None)?;
         let src = text.as_bytes();
         let root = tree.root_node();
 

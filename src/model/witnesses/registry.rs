@@ -136,10 +136,7 @@ impl<'a> ClassLadder<'a> {
 }
 
 fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
-    let point = match q.attachment {
-        WitnessAttachment::Variable { .. } => q.point,
-        _ => None,
-    };
+    let point = q.point.filter(|_| q.attachment.is_temporal());
     (
         bag as *const _ as usize,
         q.attachment.clone(),
@@ -549,7 +546,7 @@ pub(super) fn sweep_candidate_may_answer(
     if fa.has_dynamic_parents(class) {
         return true;
     }
-    if fa.plugin.app_surface_consumers.iter().any(|c| c == class) {
+    if crate::model::file_analysis::app_surface_parent(class, &fa.plugin.app_surface_consumers).is_some() {
         return true;
     }
     if fa

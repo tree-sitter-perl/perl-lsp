@@ -26,16 +26,9 @@ pub(crate) use query::*;
 /// Print the languages this distribution was compiled to serve. A
 /// default build prints `perl`; a `cpp-lsp` build (`--features cpp`)
 /// prints `perl, cpp`.
-/// The ONE sanctioned CLI exit. `process::exit` skips destructors, so a bare
-/// call silently discards everything the run measured — 42 exit sites vs 13
-/// emit calls is how most verbs came to produce no instrumentation at all,
-/// and the failure rots: the next verb exits directly and is unmeasured
-/// forever. `layering_tests::cli_exits_flush_instrumentation` pins the rule.
-///
-/// `moment` labels the human report; the JSON sinks write regardless of it.
+/// A CLI verb's exit: the process-wide [`exit_flushed`](crate::util::ghost_stats::exit_flushed).
 pub(crate) fn exit_with(code: i32, moment: &str) -> ! {
-    crate::util::ghost_stats::emit_all(moment);
-    std::process::exit(code); // sanctioned-exit
+    crate::util::ghost_stats::exit_flushed(code, moment)
 }
 
 /// Lock the process to `path`'s language unless `--lang` already chose one,
@@ -135,11 +128,10 @@ pub(crate) fn cli_lang_analyze(file: &str) {
     println!("# {file} [{}] — {} symbols", driver.id(), fa.symbols().len());
     for s in fa.symbols() {
         let pkg = s.package.as_deref().unwrap_or("");
-        let sep = if pkg.is_empty() { "" } else { "::" };
+        let name = crate::model::conventions::join_qualified(pkg, &s.name, fa.names().sep().unwrap_or_default());
         println!(
-            "{:<8} {pkg}{sep}{}\t{}:{}",
+            "{:<8} {name}\t{}:{}",
             format!("{:?}", s.kind),
-            s.name,
             s.span.start.row + 1,
             s.span.start.column + 1,
         );

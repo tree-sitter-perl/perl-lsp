@@ -111,7 +111,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -143,16 +143,40 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
 /// The compiled `@flow` query (`queries/perl/flow.scm`), compiled once.
 /// `Query::new` is expensive and `build` runs per file — see `warm_flow_query`
 /// for why this is warmed at startup rather than lazily on the first build.
-pub(super) fn flow_query() -> Option<&'static tree_sitter::Query> {
+///
+/// Each capture id comes with its parsed `Capture`, so the minter matches the
+/// closed vocabulary instead of spellings. The document is compiled into the
+/// binary, so a capture outside the vocabulary — or one the minter does not
+/// read — is a constant defect: it panics here, on the first build any test
+/// runs, rather than extracting nothing.
+pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::build::query_extract::Capture]) {
+    use crate::build::query_extract::Capture;
     use std::sync::OnceLock;
     static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
-    static FLOW_QUERY: OnceLock<Option<tree_sitter::Query>> = OnceLock::new();
-    FLOW_QUERY
-        .get_or_init(|| {
-            let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
-            tree_sitter::Query::new(&lang, FLOW_SCM).ok()
+    static FLOW_QUERY: OnceLock<(tree_sitter::Query, Vec<Capture>)> = OnceLock::new();
+    let (query, caps) = FLOW_QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+        let query = tree_sitter::Query::new(&lang, FLOW_SCM).expect("queries/perl/flow.scm compiles");
+        let caps = flow_capture_table(&query).unwrap_or_else(|e| panic!("queries/perl/flow.scm: {e}"));
+        (query, caps)
+    });
+    (query, caps)
+}
+
+/// The flow minter's capture table: each capture id's parsed `Capture`, or
+/// the first capture it would not read.
+pub(super) fn flow_capture_table(
+    query: &tree_sitter::Query,
+) -> Result<Vec<crate::build::query_extract::Capture>, String> {
+    use crate::build::query_extract::{Capture, FlowCap};
+    query
+        .capture_names()
+        .iter()
+        .map(|n| match Capture::parse(n) {
+            Ok(c @ Capture::Flow(FlowCap::Target | FlowCap::Clear | FlowCap::Rebind | FlowCap::Source)) => Ok(c),
+            _ => Err(format!("`@{n}` is not a capture the flow minter reads")),
         })
-        .as_ref()
+        .collect()
 }
 
 /// Force the flow query to compile now, off the parallel per-file path.
@@ -351,6 +375,8 @@ fn build_once(
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
+        framework_bases: std::collections::HashMap::new(),
+        extended_packages: std::collections::HashSet::new(),
         role_packages: std::collections::HashSet::new(),
         dbic_source_name: None,
         topic_group_spans: Vec::new(),
@@ -404,7 +430,10 @@ fn build_once(
         .plugins
         .framework_mode_makers()
         .filter_map(|m| match FrameworkMode::from_flavor(&m.flavor) {
-            Some(mode) => Some((m.module.clone(), (mode, m.imports.clone()))),
+            Some(mode) => Some((
+                m.module.clone(),
+                FrameworkModeGrant { mode, imports: m.imports.clone(), base: m.base.clone() },
+            )),
             None => {
                 log::error!(
                     "framework_mode_makers: unknown flavor `{}` for module `{}` — entry dropped",
@@ -453,6 +482,9 @@ fn build_once(
     // named-sub flushes below so pattern emissions ride the same
     // machinery as walk-interleaved hook emissions.
     bphase!("pattern_dispatch", b.dispatch_pattern_plugins(tree.root_node()));
+    // After every walk- and pattern-time parent, so the framework base
+    // is the MRO's last stop, behind the package's roles.
+    b.apply_framework_bases();
 
     b.pop_scope();
     let _ = file_scope;
@@ -639,6 +671,37 @@ fn build_once(
     // Post-pass 5: fill in tail POD docs for subs that didn't get preceding doc
     bphase!("resolve_tail_pod_docs", b.resolve_tail_pod_docs());
 
+    // A deref site's diagnostics read a value on its receiver (undef,
+    // optional, a guard-proved rep), and a place holds a value only where a
+    // guard narrowed it: the deref's own rep observation can't fire one. A
+    // place site nothing narrows is dropped here rather than carried per
+    // file — FHEM minted 73k of them and paid +3% peak RSS for none firing
+    // (2026-10-30). A method receiver's place is read for the same value
+    // (a class to dispatch on), so one nothing narrows goes back to its name.
+    {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let valued: std::collections::HashSet<&crate::model::file_analysis::Place> = b
+            .bag
+            .all()
+            .iter()
+            .filter_map(|w| match (&w.attachment, &w.payload) {
+                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_)) => Some(&**p),
+                _ => None,
+            })
+            .collect();
+        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        b.arrow_deref_sites.shrink_to_fit();
+        for r in &mut b.refs {
+            if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {
+                if let crate::model::conventions::Invocant::Place { name, place } = invocant {
+                    if !valued.contains(&**place) {
+                        *invocant = crate::model::conventions::Invocant::Name(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let packages = b.package_facts();
     let mut fa = FileAnalysis::new(crate::model::file_analysis::FileAnalysisParts {
         scopes: b.scopes,
@@ -790,7 +853,10 @@ impl<'a> Builder<'a> {
                 ScopeKind::Sub { name } => (false, Some(name.as_str())),
                 _ => continue,
             };
-            let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
+            // The class a sub belongs to is its symbol's (`sub Foo::bar`
+            // is `Foo`'s), not the package in force around it.
+            let owner_pkg = scope.owner.and_then(|o| self.symbols[o.0 as usize].package.clone());
+            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded.contains(&scope.id)) else { continue };
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             // A named sub of a class package is a method unless the file
             // only ever calls it as a plain function.
@@ -833,7 +899,7 @@ impl<'a> Builder<'a> {
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
-            if let (RefKind::HashKeyAccess { var_text }, AccessKind::Write) =
+            if let (RefKind::HashKeyAccess { var_text, .. }, AccessKind::Write) =
                 (&r.kind, r.access)
             {
                 let resolved_owner = match r.hash_key_owner() {
@@ -955,10 +1021,7 @@ impl<'a> Builder<'a> {
             Err(_) => return,
         };
 
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&ts_parser_perl::LANGUAGE.into()).is_err() {
-            return;
-        }
+        let mut parser = super::create_parser();
         let Some(sub_tree) = parser.parse(&section_text, None) else { return };
         let sub_src = section_text.as_bytes();
 

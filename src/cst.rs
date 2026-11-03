@@ -23,10 +23,11 @@
 use tree_sitter::Node;
 
 use crate::model::conventions::Sigil;
+use crate::model::file_analysis::{Binding, PathStep, Place, Slot, Slots, Span};
+use tree_sitter::Point;
 
 mod syntax;
 pub(crate) use syntax::{kind_ids, NodeFacts, NodeId, Structure, SyntaxForest};
-use crate::model::file_analysis::Span;
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
 
@@ -102,11 +103,12 @@ pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
 /// No `::` → the node's own span. FQ identifiers are single-line tokens, so
 /// the tail column is `start.column + byte_offset_of_tail`.
 pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
-    match text.rfind("::") {
+    let sep = crate::model::conventions::PERL_SEP;
+    match text.rfind(sep) {
         Some(idx) => {
             let s = node.start_position();
             Span {
-                start: tree_sitter::Point { row: s.row, column: s.column + idx + 2 },
+                start: tree_sitter::Point { row: s.row, column: s.column + idx + sep.len() },
                 end: node.end_position(),
             }
         }
@@ -340,6 +342,16 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
     flat.into_iter().filter(|n| n.is_named()).collect()
 }
 
+/// A value's list elements: a grouping container's spliced elements, or
+/// the value itself when it is a single expression (`qw(...)`, a call).
+pub(crate) fn list_elements_or_self<'a>(node: Node<'a>) -> Vec<Node<'a>> {
+    if is_list_literal(node) {
+        list_elements(node)
+    } else {
+        vec![node]
+    }
+}
+
 /// Peel transparent grouping wrappers — a `parenthesized_expression` or a
 /// single-element `list_expression` — down to the expression inside.
 /// These are pure grouping in Perl (`($x)` IS `$x`), so descending changes
@@ -412,6 +424,34 @@ pub(crate) fn list_assignment_target_of<'t>(syn: &SyntaxForest<'t>, node: Node<'
     (assign.child_by_field_name("left")? == group).then_some(assign)
 }
 
+/// `node` is stored into: an assignment's left side, a list
+/// assignment's target, or the operand of `++` / `--`.
+pub(crate) fn is_assignment_target<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> bool {
+    syn.parent(node).is_some_and(|p| {
+        (p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(node))
+            || matches!(p.kind(), "postinc_expression" | "preinc_expression")
+    }) || list_assignment_target_of(syn, node).is_some()
+}
+
+/// `undef X`, `local X` or `delete X` (through any parens): an operator
+/// that leaves what `node` holds without its value, without assigning one.
+pub(crate) fn is_value_reset_target<'t>(syn: &SyntaxForest<'t>, node: Node<'t>, source: &[u8]) -> bool {
+    let mut cur = node;
+    let mut parent = syn.parent(node);
+    while let Some(p) = parent.filter(|p| is_list_literal(*p) && peel_groups(*p) == cur) {
+        cur = p;
+        parent = syn.parent(p);
+    }
+    parent.is_some_and(|p| match p.kind() {
+        "undef_expression" | "localization_expression" => true,
+        "func1op_call_expression" => p
+            .child(0)
+            .and_then(|k| k.utf8_text(source).ok())
+            .is_some_and(crate::model::builtins::removes_its_element_argument),
+        _ => false,
+    })
+}
+
 /// `meth Class(ARGS)` / `meth Class ARGS` / `meth Class` — the spelling Perl
 /// may read as the indirect-object method call `Class->meth(ARGS)`. The
 /// grammar parses it as a call to `meth` whose argument is a call to (or a
@@ -469,6 +509,37 @@ pub(crate) fn first_named_child_where<'a>(
 /// walking on the `fat_comma` node silently drops the plain-comma spelling
 /// (`{ 'GAMMA', 3 }` is identical to `{ GAMMA => 3 }`).
 pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
+    pair_items(children, Spreads::AsElements)
+        .into_iter()
+        .filter_map(|item| match item {
+            PairItem::Pair(k, v) => Some((k, v)),
+            PairItem::Spread(_) | PairItem::Dangling(_) => None,
+        })
+        .collect()
+}
+
+/// How [`pair_items`] treats a flattening element (`%other`, `@_`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Spreads {
+    /// An element like any other: strict key/value alternation.
+    AsElements,
+    /// One slot that flattens to an even count at runtime, skipped as a
+    /// unit so the pairs after it stay aligned.
+    AsUnits,
+}
+
+/// One position of a pair walk.
+pub(crate) enum PairItem<'a> {
+    Pair(Node<'a>, Node<'a>),
+    /// A flattening element, under [`Spreads::AsUnits`].
+    Spread(Node<'a>),
+    /// A trailing key with no value.
+    Dangling(Node<'a>),
+}
+
+/// The pair walk every positional key/value reader shares: `children` paired
+/// `elem[2k]` → key, `elem[2k+1]` → value, separators and trivia skipped.
+pub(crate) fn pair_items<'a>(children: &[Node<'a>], spreads: Spreads) -> Vec<PairItem<'a>> {
     let mut out = Vec::new();
     let count = children.len();
     let mut i = 0;
@@ -476,6 +547,10 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
         let k_node = children[i];
         i += 1;
         if !is_list_element(k_node) {
+            continue;
+        }
+        if spreads == Spreads::AsUnits && is_flattening(k_node) {
+            out.push(PairItem::Spread(k_node));
             continue;
         }
         // Skip the comma / fat comma to the next named node (the value).
@@ -486,9 +561,12 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
                 None => break None,
             }
         };
-        let Some(val) = val else { break };
+        let Some(val) = val else {
+            out.push(PairItem::Dangling(k_node));
+            break;
+        };
         i += 1; // step past the value so the next key isn't read off it
-        out.push((k_node, val));
+        out.push(PairItem::Pair(k_node, val));
     }
     out
 }
@@ -675,105 +753,291 @@ pub(crate) fn deref_operand_expr<'a>(node: Node<'a>) -> Option<Node<'a>> {
     (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
 }
 
-/// Canonical access-path key for a place subject — a chain of constant
-/// hash/array projections bottoming out at a plain scalar root
-/// (`$self->{handler}`, `$self->{a}{b}`, `$self->[0]`). Returns
-/// `(key, root)`: `key` is the place's source text (the spelling the
-/// guard and the use share, so a witness keyed on it matches the
-/// use-site invocant), `root` the base scalar (for the flow-narrowing
-/// invalidation scan). Dynamic keys and accessor projections return
-/// `None` — not a stable place identity.
-pub(crate) fn canonical_place_path<'a>(
-    syn: &SyntaxForest<'a>,
-    node: Node<'a>,
-    src: &'a [u8],
-) -> Option<(String, String)> {
-    let base = match node.kind() {
-        "hash_element_expression" => {
-            if !is_stable_subscript(node.child_by_field_name("key")?, src) {
-                return None;
-            }
-            node.named_child(0)?
-        }
-        "array_element_expression" => {
-            if !is_stable_subscript(node.child_by_field_name("index")?, src) {
-                return None;
-            }
-            node.named_child(0)?
-        }
-        _ => return None,
-    };
-    // The root is a plain scalar (arrow form `$self->{a}`), the named
-    // container itself (direct form `$h{a}` / `$h[0]`, whose base is a
-    // `container_variable` resolving to `%h` / `@h`), or a nested constant
-    // projection (`$self->{a}{b}`, `$h{a}{b}`).
-    let root = match base.kind() {
-        "scalar" => canonical_var_name(base, src)?,
-        "container_variable" => canonical_container_name(syn, base, src)?,
-        "hash_element_expression" | "array_element_expression" => {
-            canonical_place_path(syn, base, src)?.1
-        }
-        _ => return None,
-    };
-    let key = node.text(src)?.to_string();
-    Some((key, root))
+/// Binds the variable spellings a place is written with. The reader knows
+/// the shape; only the builder knows what a name denotes where it is written.
+pub(crate) trait PlaceBinder {
+    /// The root variable `spelling` written at `at`. `None` stops the read:
+    /// a root the caller has no use for.
+    fn root(&mut self, spelling: &str, at: Point) -> Option<Binding>;
+    /// A key or index variable.
+    fn key(&mut self, spelling: &str, at: Point) -> Binding;
 }
 
-/// A place subscript is stable when it pins one slot deterministically:
-/// a constant key/index (`{foo}`, `[0]`) or a **plain scalar** (`{$k}`,
-/// `[$i]`) whose identity is the variable spelling. A scalar key keeps
-/// the place stable only while that scalar is unchanged — the narrower
-/// tracks it via `place_dynamic_key_vars` and truncates on reassignment.
-/// Deref / computed keys (`{$h{x}}`, `{compute()}`, `{$obj->m}`) are not
-/// stable identities and disqualify the place.
-fn is_stable_subscript(sub: Node, src: &[u8]) -> bool {
-    match sub.kind() {
-        "autoquoted_bareword" | "string_literal" | "number" => true,
-        "scalar" => canonical_var_name(sub, src).is_some(),
-        _ => false,
-    }
-}
-
-/// What a place path's identity hangs on, read off its chain once.
-pub(crate) struct PlaceDeps {
-    /// The plain-scalar key/index variables along the path
-    /// (`$self->{$k}{$j}` → `[$k, $j]`): reassigning one breaks the place's
-    /// identity, so its narrowing truncates there.
+/// A place read off its spelling.
+pub(crate) struct PlaceRead {
+    pub place: Place,
+    /// Every subscript names its slots: a constant or a plain scalar. A
+    /// computed subscript reads as any slot, which a disturbance may be
+    /// but a narrowing subject may not.
+    pub exact: bool,
+    /// The spellings of the key variables, in path order.
     pub key_vars: Vec<String>,
-    /// The keys of the path's proper element prefixes (`$self->{a}` of
-    /// `$self->{a}{b}`): an opaque use of one can disturb the slot.
-    pub prefixes: Vec<String>,
 }
 
-/// The dependencies of a place that passed `canonical_place_path` (every
-/// subscript is stable, so every prefix is a place of its own).
-pub(crate) fn place_deps<'a>(node: Node<'a>, src: &'a [u8]) -> PlaceDeps {
-    let mut deps = PlaceDeps { key_vars: Vec::new(), prefixes: Vec::new() };
-    let mut cur = node;
-    loop {
-        let sub = match cur.kind() {
-            "hash_element_expression" => cur.child_by_field_name("key"),
-            "array_element_expression" => cur.child_by_field_name("index"),
-            _ => break,
-        };
-        if cur != node {
-            if let Some(text) = cur.text(src) {
-                deps.prefixes.push(text.to_string());
-            }
-        }
-        if let Some(sub) = sub {
-            if sub.kind() == "scalar" {
-                if let Some(v) = canonical_var_name(sub, src) {
-                    deps.key_vars.push(v);
-                }
-            }
-        }
-        match cur.named_child(0) {
-            Some(base) => cur = base,
-            None => break,
+/// The place `node` denotes: a variable, an element or slice of one, or
+/// a deref of one, through any nesting. `$x->{a}{b}`, `$x->{a}->{b}`,
+/// `$$x{a}{b}` and `${$x}{a}{b}` read the same; a value-rooted access
+/// (`f()->{a}`) is no place.
+pub(crate) fn read_place<'t>(
+    syn: &SyntaxForest<'t>,
+    node: Node<'t>,
+    src: &[u8],
+    binder: &mut impl PlaceBinder,
+) -> Option<PlaceRead> {
+    let mut read = PlaceRead { place: place_root(syn, node, src, binder)?, exact: true, key_vars: Vec::new() };
+    let mut steps = Vec::new();
+    collect_steps(node, src, binder, &mut read, &mut steps)?;
+    read.place.path = steps;
+    Some(read)
+}
+
+fn is_variable_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "scalar" | "array" | "hash" | "container_variable" | "slice_container_variable" | "keyval_container_variable"
+    )
+}
+
+/// The base of an element or slice access and whether a deref sits
+/// between it and the subscript: a named container (`$h{a}`, `@h{..}`)
+/// is subscripted directly, anything else through the reference it holds.
+fn access_base(node: Node) -> Option<(Node, bool)> {
+    for field in ["hash", "array"] {
+        if let Some(c) = node.child_by_field_name(field) {
+            return Some((c, false));
         }
     }
-    deps
+    for field in ["hashref", "arrayref"] {
+        if let Some(c) = node.child_by_field_name(field) {
+            return Some((c, true));
+        }
+    }
+    Some((node.elements().next()?, true))
+}
+
+/// The operand an element access subscripts through the reference it
+/// holds (`$x` in `$x->[0]`, `$x->{a}` in `$x->{a}[0]`); `None` for a
+/// named container (`$a[0]`, `$h{k}`).
+pub(crate) fn element_deref_base(node: Node) -> Option<Node> {
+    access_base(node).and_then(|(base, through_ref)| through_ref.then_some(base))
+}
+
+/// A scalar variable read as itself (`$x`), not through a deref (`$$x`).
+pub(crate) fn is_plain_scalar(node: Node) -> bool {
+    node.kind() == "scalar" && deref_operand(node).is_none()
+}
+
+/// A deref whose receiver is no plain variable: the receiver and the form.
+/// `$x->{a}{k}`'s receiver is `$x->{a}`; `$$x[0]`'s is `$$x`.
+pub(crate) fn deref_of_part(node: Node) -> Option<(Node, crate::model::file_analysis::DerefForm)> {
+    use crate::model::file_analysis::DerefForm;
+    let (receiver, form) = match node.kind() {
+        "hash_element_expression" => (element_deref_base(node)?, DerefForm::HashKey),
+        "array_element_expression" => (element_deref_base(node)?, DerefForm::ArrayIndex),
+        "coderef_call_expression" => (node.elements().next()?, DerefForm::Call),
+        _ => return None,
+    };
+    (!is_plain_scalar(receiver)).then_some((receiver, form))
+}
+
+/// The autovivification category of an element access: the context of
+/// the outermost access in its chain, since `$x->{a}{b} = 1` stores
+/// through `$x->{a}` too, and `exists $x->{a}{b}` probes through it.
+pub(crate) fn vivify_context<'t>(syn: &SyntaxForest<'t>, node: Node<'t>) -> crate::model::file_analysis::VivifyContext {
+    use crate::model::file_analysis::{VivifyAccess, VivifyContext};
+    let mut n = node;
+    let parent = loop {
+        let Some(p) = syn.parent(n) else { return VivifyContext::Is(VivifyAccess::Fetch) };
+        let through = matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+            && access_base(p).is_some_and(|(base, _)| base == n);
+        if through || p.kind() == "parenthesized_expression" {
+            n = p;
+            continue;
+        }
+        break p;
+    };
+    let is_left = parent.child_by_field_name("left") == Some(n);
+    let is_condition = parent.child_by_field_name("condition") == Some(n);
+    match parent.kind() {
+        "assignment_expression" if is_left => VivifyContext::Is(VivifyAccess::Store),
+        "assignment_expression" => VivifyContext::Is(VivifyAccess::Fetch),
+        "func1op_call_expression" => match parent.child(0).map(|c| c.kind()) {
+            Some("exists") => VivifyContext::Is(VivifyAccess::Exists),
+            Some("delete") => VivifyContext::Is(VivifyAccess::Delete),
+            _ => VivifyContext::FetchOrStore,
+        },
+        "conditional_statement" | "loop_statement" | "conditional_expression" if is_condition => {
+            VivifyContext::Is(VivifyAccess::Fetch)
+        }
+        "expression_statement"
+        | "binary_expression"
+        | "equality_expression"
+        | "relational_expression"
+        | "unary_expression"
+        | "anonymous_array_expression"
+        | "anonymous_hash_expression"
+        | "string_content"
+        | "return_expression" => VivifyContext::Is(VivifyAccess::Fetch),
+        _ => VivifyContext::FetchOrStore,
+    }
+}
+
+/// The variable a place hangs off, bound; a deref spelling's operand
+/// leads to it.
+fn place_root<'t>(syn: &SyntaxForest<'t>, node: Node<'t>, src: &[u8], binder: &mut impl PlaceBinder) -> Option<Place> {
+    match node.kind() {
+        "hash_element_expression" | "array_element_expression" | "slice_expression" | "keyval_expression" => {
+            place_root(syn, access_base(node)?.0, src, binder)
+        }
+        k if is_variable_kind(k) => match deref_operand(node) {
+            Some(_) => place_root(syn, deref_operand_expr(node)?, src, binder),
+            None => {
+                let spelling = match k {
+                    "scalar" | "array" | "hash" => canonical_var_name(node, src)?,
+                    _ => canonical_container_name(syn, node, src)?,
+                };
+                Some(Place::variable(binder.root(&spelling, node.start_position())?))
+            }
+        },
+        _ => None,
+    }
+}
+
+/// The steps from the root to `node`, outermost last.
+fn collect_steps(
+    node: Node,
+    src: &[u8],
+    binder: &mut impl PlaceBinder,
+    read: &mut PlaceRead,
+    steps: &mut Vec<PathStep>,
+) -> Option<()> {
+    let kind = node.kind();
+    if is_variable_kind(kind) {
+        if deref_operand(node).is_some() {
+            collect_steps(deref_operand_expr(node)?, src, binder, read, steps)?;
+            steps.push(PathStep::Deref);
+        }
+        return Some(());
+    }
+    let (base, through_ref) = access_base(node)?;
+    collect_steps(base, src, binder, read, steps)?;
+    if through_ref {
+        steps.push(PathStep::Deref);
+    }
+    let hash = match kind {
+        "hash_element_expression" | "array_element_expression" => kind == "hash_element_expression",
+        "slice_expression" | "keyval_expression" => {
+            node.child_by_field_name("hash").or_else(|| node.child_by_field_name("hashref")).is_some()
+        }
+        _ => return None,
+    };
+    let slots = match kind {
+        "hash_element_expression" => RawSlots::One(read_slot(node.child_by_field_name("key")?, src, binder, read, true)),
+        "array_element_expression" => RawSlots::One(read_slot(node.child_by_field_name("index")?, src, binder, read, false)),
+        _ => read_slice_slots(node.elements().find(|c| *c != base), src, binder, read, hash),
+    };
+    steps.push(match (hash, slots) {
+        (true, slots) => PathStep::Hash(slots.map(SlotName::into_key)),
+        (false, slots) => PathStep::Array(slots.map(SlotName::into_index)),
+    });
+    Some(())
+}
+
+/// What a place access reads through to reach its own place: the base of
+/// an element or slice (`$x` of `$x->{a}`), or the operand of a deref
+/// spelling (`$x` of `$$x{a}`, `@{$x}`). That inner node is a read of the
+/// longer place, not an access of its own.
+pub(crate) fn place_inner(node: Node) -> Option<Node> {
+    match node.kind() {
+        "hash_element_expression" | "array_element_expression" | "slice_expression" | "keyval_expression" => {
+            access_base(node).map(|(b, _)| b)
+        }
+        k if is_variable_kind(k) => deref_operand_expr(node),
+        _ => None,
+    }
+}
+
+/// A subscript before it is typed as a hash key or an array index.
+enum SlotName {
+    Const(String),
+    Var(Binding),
+    Unknown,
+}
+
+impl SlotName {
+    fn into_key(self) -> Option<Slot<String>> {
+        match self {
+            SlotName::Const(k) => Some(Slot::Const(k)),
+            SlotName::Var(b) => Some(Slot::Var(b)),
+            SlotName::Unknown => None,
+        }
+    }
+
+    fn into_index(self) -> Option<Slot<i64>> {
+        match self {
+            SlotName::Const(i) => i.parse().ok().map(Slot::Const),
+            SlotName::Var(b) => Some(Slot::Var(b)),
+            SlotName::Unknown => None,
+        }
+    }
+}
+
+/// Slots whose names are not all known yet; one unknown name widens the
+/// step to every slot.
+enum RawSlots {
+    One(SlotName),
+    Many(Vec<SlotName>),
+    All,
+}
+
+impl RawSlots {
+    fn map<T>(self, f: impl Fn(SlotName) -> Option<Slot<T>>) -> Slots<T> {
+        match self {
+            RawSlots::One(n) => f(n).map_or(Slots::All, Slots::One),
+            RawSlots::Many(ns) => ns.into_iter().map(f).collect::<Option<Vec<_>>>().map_or(Slots::All, Slots::Many),
+            RawSlots::All => Slots::All,
+        }
+    }
+}
+
+fn read_slot(sub: Node, src: &[u8], binder: &mut impl PlaceBinder, read: &mut PlaceRead, autoquotes: bool) -> SlotName {
+    let name = match sub.kind() {
+        "autoquoted_bareword" if autoquotes => sub.text(src).map(|t| SlotName::Const(t.to_string())),
+        "number" => sub.text(src).map(|t| SlotName::Const(t.to_string())),
+        "string_literal" | "interpolated_string_literal" if autoquotes => {
+            plain_string_literal_text(sub, src).map(SlotName::Const)
+        }
+        "scalar" => canonical_var_name(sub, src).map(|v| {
+            let b = binder.key(&v, sub.start_position());
+            read.key_vars.push(v);
+            SlotName::Var(b)
+        }),
+        _ => None,
+    };
+    name.unwrap_or_else(|| {
+        read.exact = false;
+        SlotName::Unknown
+    })
+}
+
+fn read_slice_slots(
+    keys: Option<Node>,
+    src: &[u8],
+    binder: &mut impl PlaceBinder,
+    read: &mut PlaceRead,
+    hash: bool,
+) -> RawSlots {
+    let Some(keys) = keys else {
+        read.exact = false;
+        return RawSlots::All;
+    };
+    if keys.kind() == "quoted_word_list" {
+        let mut words = Vec::new();
+        qw_word_spans(keys, src, &mut words);
+        return RawSlots::Many(words.into_iter().map(|(w, _)| SlotName::Const(w)).collect());
+    }
+    let elems = if is_list_literal(keys) { list_elements(keys) } else { vec![keys] };
+    RawSlots::Many(elems.into_iter().map(|e| read_slot(e, src, binder, read, hash)).collect())
 }
 
 /// Per-word `(text, span)` pairs of a `quoted_word_list`, multi-line

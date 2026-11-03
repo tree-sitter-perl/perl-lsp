@@ -6,6 +6,8 @@ set -euo pipefail
 # is keyed on the canonical root. Lets `./e2e/run.sh` work from any CWD.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# roles.lua needs Moo on @INC too (its fixtures inherit Moo::Object); CI
+# installs it and passes PERL5LIB explicitly.
 export PERL5LIB="${PERL5LIB:-$PWD/test_files/lib}"
 
 # Fail on an old nvim with the reason, not a traceback. The harness calls

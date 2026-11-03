@@ -467,7 +467,10 @@ impl FileAnalysis {
         // Perl ignores the invocant's class for the lookup, so the token
         // wins ahead of invocant resolution. (A plugin-bridged token is
         // never method-qualified; the ladder's bridged arm owns it.)
-        if matches!(site.invocant, crate::model::conventions::Invocant::Name(_)) {
+        if matches!(
+            site.invocant,
+            crate::model::conventions::Invocant::Name(_) | crate::model::conventions::Invocant::Place { .. }
+        ) {
             use crate::model::conventions::MethodToken;
             match MethodToken::parse(&r.target_name) {
                 MethodToken::Super(name) => {
@@ -555,7 +558,7 @@ impl FileAnalysis {
         schema_hint: Option<&str>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
-        if cn.contains("::") {
+        if split_qualified(&cn, self.names()).0.is_some() {
             return cn;
         }
         let Some(mi) = module_index else { return cn };
@@ -565,7 +568,7 @@ impl FileAnalysis {
         // Gather candidate result classes by basename / source_name match.
         let mut candidates: Vec<String> = Vec::new();
         mi.for_each_cached(&mut |name, cached| {
-            let basename = name.rsplit("::").next().unwrap_or(name);
+            let basename = split_qualified(name, self.names()).1;
             let hits = basename == cn
                 || cached.analysis.dbic_source_name.as_deref() == Some(cn.as_str());
             if hits && Self::class_is_dbic_result(name, mi) {
@@ -598,8 +601,8 @@ impl FileAnalysis {
         let prefixes: Vec<(String, String)> = candidates
             .iter()
             .map(|c| {
-                let parent = c.rsplit_once("::").map(|(p, _)| p).unwrap_or(c);
-                (c.clone(), format!("{parent}::"))
+                let parent = split_qualified(c, self.names()).0.unwrap_or(c);
+                (c.clone(), format!("{parent}{}", self.names().sep().unwrap_or_default()))
             })
             .collect();
         let mut fam_size: HashMap<String, usize> =
@@ -677,7 +680,8 @@ impl FileAnalysis {
         let matches = |class: &str| match match_mode {
             BridgedMatch::Exact => class == key,
             BridgedMatch::Tail => {
-                class == key || class.strip_suffix(key).is_some_and(|p| p.ends_with("::"))
+                class == key
+                    || class.strip_suffix(key).is_some_and(|p| self.names().sep().is_some_and(|sep| p.ends_with(sep)))
             }
         };
         let mut candidates: Vec<String> = self
@@ -782,6 +786,7 @@ impl FileAnalysis {
     ) -> Option<InferredType> {
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
+        let receiver_place = site.invocant.place();
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self
@@ -793,7 +798,9 @@ impl FileAnalysis {
                     )
                     .map(InferredType::ClassName);
             }
-            crate::model::conventions::Invocant::Name(n) | crate::model::conventions::Invocant::Expr(n) => n,
+            crate::model::conventions::Invocant::Name(n)
+            | crate::model::conventions::Invocant::Expr(n)
+            | crate::model::conventions::Invocant::Place { name: n, .. } => n,
         };
         let spelled_class_possible = matches!(site.invocant, crate::model::conventions::Invocant::Name(_));
         if invocant.is_empty() {
@@ -808,14 +815,11 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
-        // Flow-narrowing place invocant.
-        if let Some(span) = invocant_span {
-            if InvocantText::parse(invocant).is_element_place() {
-                if let Some(t) = self.inferred_type_via_bag_ctx(invocant, span.start, module_index)
-                {
-                    if !self.dispatch_classes_of(&t, module_index).is_empty() {
-                        return Some(t);
-                    }
+        // A narrowed place receiver.
+        if let (Some(place), Some(span)) = (receiver_place, invocant_span) {
+            if let Some(t) = self.place_type_at(place, span.start, module_index) {
+                if !self.dispatch_classes_of(&t, module_index).is_empty() {
+                    return Some(t);
                 }
             }
         }

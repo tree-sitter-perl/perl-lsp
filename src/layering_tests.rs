@@ -415,6 +415,39 @@ fn inferred_type_has_no_production_caller() {
     );
 }
 
+/// Human type labels read in the file's language: `FileAnalysis::render_type`
+/// / `display_type_of` carry the pack's vocabulary (`type_display`), so an
+/// adapter or index site rendering with the vocabulary-free engine spelling
+/// shows a PHP user Perl's words on that one surface. The engine spelling
+/// stays legal in the model (keys, `--dump-package` provenance) and in the
+/// CLI's machine-readable JSON.
+#[test]
+fn type_labels_go_through_the_language_vocabulary() {
+    let mut violations = Vec::new();
+    for (path, layer, _stem) in source_files() {
+        let in_cli = path.components().any(|c| c.as_os_str() == "cli");
+        if layer <= Layer::Model || in_cli {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        for (i, line) in text.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if t.contains("format_inferred_type") || t.contains(".display_type(") {
+                violations.push(format!("{}:{}: {}", path.display(), i + 1, t));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "render type labels through `FileAnalysis::render_type` / `display_type_of` \
+         (the language's vocabulary), not the engine spelling:\n{}",
+        violations.join("\n")
+    );
+}
+
 /// A narrow-axis view is BAG-STRIPPED. `symbols_present` / `refs_present`
 /// hand back a copy whose witness bag may be gone, so a bag-backed query on
 /// one answers `None` — not an error, not a panic, just a quietly missing
@@ -1259,37 +1292,39 @@ fn the_bake_gate_has_one_reader() {
     );
 }
 
-/// Rule: a CLI verb leaves through `cli::exit_with`, never bare
+/// Rule: the process leaves through `ghost_stats::exit_flushed`, never bare
 /// `process::exit`. A bare exit skips destructors, which silently discards
-/// everything the run measured — and the failure rots, because the next verb
-/// someone adds exits directly and is unmeasured forever. The one sanctioned
-/// site carries a `sanctioned-exit` marker.
+/// everything the run measured — and the failure rots, because the next exit
+/// someone adds (a CLI verb, a watchdog trip, a parent-death check) is
+/// unmeasured forever. Every non-test source file is scanned; the one
+/// sanctioned site carries a `sanctioned-exit` marker, and there is exactly one.
 #[test]
-fn cli_exits_flush_instrumentation() {
+fn process_exits_flush_instrumentation() {
     let mut violations = Vec::new();
-    let mut files: Vec<std::path::PathBuf> = vec!["src/lsp/plugin_cli.rs".into()];
-    for e in fs::read_dir("src/lsp/cli").expect("read cli dir") {
-        let p = e.expect("dir entry").path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            files.push(p);
-        }
-    }
-    for f in files {
-        let text = fs::read_to_string(&f).expect("read source");
+    let mut sanctioned = Vec::new();
+    for (path, _, _) in source_files() {
+        let text = fs::read_to_string(&path).expect("read source");
         for (ln, line) in text.lines().enumerate() {
-            if line.contains("process::exit")
-                && !line.contains("sanctioned-exit")
-                && !line.trim_start().starts_with("//")
-            {
-                violations.push(format!("{}:{}", f.display(), ln + 1));
+            if !line.contains("process::exit") || line.trim_start().starts_with("//") {
+                continue;
+            }
+            let site = format!("{}:{}", path.display(), ln + 1);
+            if line.contains("sanctioned-exit") {
+                sanctioned.push(site);
+            } else {
+                violations.push(site);
             }
         }
     }
     assert!(
         violations.is_empty(),
-        "bare process::exit in CLI code — route through cli::exit_with so \
-         instrumentation flushes:\n{}",
+        "bare process::exit — route through ghost_stats::exit_flushed (or \
+         cli::exit_with) so instrumentation flushes:\n{}",
         violations.join("\n")
+    );
+    assert!(
+        sanctioned.len() == 1 && sanctioned[0].contains("util/ghost_stats.rs"),
+        "exactly one sanctioned exit, in `util/ghost_stats.rs::exit_flushed`; found {sanctioned:?}"
     );
 }
 
@@ -1376,7 +1411,7 @@ fn language_spellings_have_one_home() {
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 1, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
         ("index/module_cache/sql.rs", 1, "the LIKE statement's `ESCAPE` clause — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 9, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
+        ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
         ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
@@ -1403,7 +1438,7 @@ fn language_spellings_have_one_home() {
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
         ("build/query_extract/vocab.rs", 13, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
-        ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
+        ("model/conventions.rs", 2, "Perl's own attribute spellings (`field_attribute_flag`), mapped onto the canonical names: Perl's home"),
         ("model/file_analysis/core_types.rs", 17, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
         ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
@@ -1507,6 +1542,134 @@ fn packs_do_not_borrow_perls_current_package_token() {
     );
 }
 
+/// The namespace lane is written through `OpenSections`, the one closing
+/// rule: a section minted by hand never gets cut short by the next
+/// statement form at its depth, so a builder that pushes its own disagrees
+/// with the lookup about which section is in force.
+#[test]
+fn namespace_lane_is_written_through_open_sections() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("NamespaceRange {") || l.contains("namespace_ranges.push("));
+    let allow: &[(&str, usize, &str)] = &[(
+        "model/file_analysis/core_types.rs",
+        3,
+        "the struct itself and `OpenSections`' two writers",
+    )];
+    let drift = allowlist_drift("namespace lane writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `TryFrom<&str> for SymbolFlags` is the one table from a spelling to a
+/// flag: a language maps its own spellings onto the canonical names, never
+/// onto a flag directly, so a second table cannot drift from the first (and
+/// `language_spellings_have_one_home` reads its vocabulary out of this one).
+/// A line pairing a string literal with a flag constant is a second table.
+#[test]
+fn one_table_maps_spellings_to_flags() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.trim_start().starts_with('"') && l.contains("=> SymbolFlags::")
+    });
+    let allow: &[(&str, usize, &str)] =
+        &[("model/file_analysis/core_types.rs", 16, "the canonical table itself")];
+    let drift = allowlist_drift("spelling → flag tables", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `app_surface_parent` is the one speller of the app-surface edge
+/// condition. A consumer-membership test anywhere else drops its
+/// `APP_SURFACE_CLASS` guard, and the edge it answers drifts from the one
+/// the walks take.
+#[test]
+fn app_surface_edge_has_one_speller() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.contains("consumers") && (l.contains(".any(") || l.contains(".contains("))
+    });
+    let allow: &[(&str, usize, &str)] =
+        &[("model/file_analysis/ancestry.rs", 1, "`app_surface_parent` itself")];
+    let drift = allowlist_drift("app-surface edge spellers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// The `::` separator has two homes: Perl's (`conventions::PERL_SEP`, behind
+/// `PERL_SPELLINGS`) and a pack's own declaration. Everywhere else a name is
+/// split through `split_qualified` with the spellings of its language, so a
+/// qualified-name rule decided once cannot be re-decided per site, and a
+/// language with another separator is never split on Perl's.
+#[test]
+fn qualified_names_split_through_the_spellings() {
+    let files = layer_files(&[Layer::Model, Layer::Build, Layer::Index, Layer::Lsp, Layer::Cst]);
+    let seen = count_lines(&files, &|l| l.contains("\"::\""));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/conventions.rs", 1, "`PERL_SEP`: Perl's home"),
+        ("build/packs/cpp.rs", 1, "`CPP_SEP`: the cpp pack's own declaration"),
+        (
+            "index/resolve/collect.rs",
+            1,
+            "retire: `qualifier_at_point` scans C++'s `::` OWNER operator for every pack; \
+             `NameSpellings` needs an owner-operator field (PHP's static `::`, none for Python)",
+        ),
+        (
+            "model/file_analysis/types.rs",
+            1,
+            "retire: `ParametricType::instance_from_spelling` parses a C++ template \
+             spelling in the model; it is text → structure the cpp pack should own (rule #15)",
+        ),
+    ];
+    let drift = allowlist_drift("separator literals", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `cst::pair_items` is the one key/value pair walk over Perl's CST. A
+/// hand-rolled `i += 2` stride in the builder re-decides what a separator, a
+/// comment or a spread is, and drifts from the walk every other pair reader
+/// takes. (Byte scans over source TEXT live outside the builder.)
+#[test]
+fn perl_pair_walks_go_through_pair_items() {
+    let files: Vec<(String, String)> = layer_files(&[Layer::Build, Layer::Cst])
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("build/builder/") || rel == "cst.rs")
+        .collect();
+    let seen = count_lines(&files, &|l| l.contains("+= 2"));
+    let drift = allowlist_drift("hand-rolled pair strides", &seen, &[]);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// `builder::create_parser` is the one Perl parser constructor, so a grammar
+/// upgrade or a parser setting (timeout, logger) lands on every parse.
+#[test]
+fn perl_parsers_come_from_create_parser() {
+    let files = layer_files(&[Layer::Build, Layer::Index, Layer::Lsp, Layer::Cst]);
+    let seen = count_lines(&files, &|l| l.contains("set_language(&ts_parser_perl"));
+    let allow: &[(&str, usize, &str)] =
+        &[("build/builder/mod.rs", 1, "`create_parser` itself")];
+    let drift = allowlist_drift("Perl parser constructors", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// The name-keyed winner slot (`IndexCore::cache`) is written only by
+/// `IndexCore::set_slot` / `clear_slot` / `offer_slot`, which move the
+/// enrichment epoch with the write. A direct write is a `get_cached` answer
+/// that changes under a memo still keyed on the old one.
+#[test]
+fn name_slot_writes_move_the_epoch() {
+    let files = layer_files(&[Layer::Index]);
+    let seen = count_lines(&files, &|l| {
+        [".cache.insert(", ".cache.remove(", ".cache.entry(", ".cache.clear(", ".cache.retain("]
+            .iter()
+            .any(|w| l.contains(w))
+            && !l.contains("bag_cache")
+    });
+    let allow: &[(&str, usize, &str)] = &[(
+        "index/module_index/index_core.rs",
+        3,
+        "`set_slot`, `clear_slot` and `offer_slot` themselves",
+    )];
+    let drift = allowlist_drift("name-slot writers", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A query never asks the filesystem how a path is spelled. `realpath`
 /// costs one `readlink` per path component, and re-canonicalizing an
 /// already-registered path per candidate file per `references()` call was
@@ -1563,8 +1726,6 @@ fn rendered_strings_are_not_reparsed() {
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
         ("model/conventions.rs", 4, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and a `use VERSION` number"),
-        ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
-        ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),
@@ -1655,11 +1816,11 @@ fn positional_reads_skip_grammar_extras() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/emit.rs", 13, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/emit.rs", 12, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/narrowing.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/narrowing.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_calls.rs", 41, "legacy: inside nodes that hold no extra, or kind-gated"),
@@ -1672,7 +1833,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
         ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
-        ("cst.rs", 27, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
+        ("cst.rs", 24, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
         ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
     ];
@@ -1749,7 +1910,7 @@ fn raw_scope_climbs_are_containment_only() {
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
         ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
-        ("model/file_analysis/queries.rs", 4, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable, is the read in the move's subtree; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
+        ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
     ];
     let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
