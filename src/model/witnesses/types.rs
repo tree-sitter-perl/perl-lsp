@@ -248,6 +248,7 @@ impl WitnessPayload {
         match self {
             WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
+            WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| t.for_each_attachment_mut(f)),
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
                     Callee::Value(t) => f(t),
@@ -432,6 +433,31 @@ pub enum WitnessPayload {
     /// (`docs/adr/brands.md`). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     BrandOverlay { ns: String, on_class: String, set: Vec<(String, String)>, drop: Vec<String> },
+    /// A WRITE THROUGH the attachment's value at this (zero-width) site:
+    /// the shape it lands in grows by one key or slot. A delta, never the
+    /// grown shape: the registry folds a place's extensions onto the value
+    /// standing at each one when the place is read (`docs/adr/structural-shapes.md`
+    /// §Mutation is modeled on the shape), so N writes are N witnesses of one
+    /// key each, not N copies of a shape that grows to N keys. No reducer
+    /// claims it. Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    Extend(KeyExtension),
+}
+
+/// What one write adds to the shape it lands in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyExtension {
+    /// The keys the write goes through, outermost first (`$v->{a}{b}` is
+    /// `[a, b]`).
+    pub hops: Vec<crate::model::file_analysis::WriteKey>,
+    /// The written value's type, read BEFORE the write as Perl evaluates
+    /// it: a right-hand side that reads the place it writes
+    /// (`$s->{self} = $s`) sees the shape without this key. A list
+    /// assignment's slot is already taken.
+    pub value: Option<InferredType>,
+    /// The write may not have run (conditional, or reached across a scope
+    /// boundary): it opens the shape instead of growing it.
+    pub widen: bool,
 }
 
 /// What an `Invoke` calls.
