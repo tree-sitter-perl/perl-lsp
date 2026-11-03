@@ -1468,6 +1468,24 @@ sub q { my $q = { url => 1 }; print $q->{typo}; }
     assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
 }
 
+/// A reference to one element escapes that place only: the slot exists
+/// (taking `\$h{k}` vivifies it) and its value is open, while every other
+/// key stays closed. `GetOptions('help' => \$opt{'help'})` then
+/// `$opt{'help'}` is clean, and a typo beside it still reports.
+#[test]
+fn an_element_reference_escapes_only_its_place() {
+    let src = "\
+package Foo;
+sub a { my %opt; GetOptions('help' => \\$opt{'help'}, 'cfg=s' => \\$opt{cfg}); return $opt{help} . $opt{cfg} . $opt{hlep} }
+sub b { my $o = {}; my $r = \\$o->{k}; return $o->{k}{deep} . $o->{typo} }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("hlep".to_string(), 1), ("typo".to_string(), 2)]);
+}
+
 /// A write inside a nested block lands on the variable, wherever the block
 /// is: the read after the block sees the shape the write opened (Foswiki
 /// Register.pm's `try { … $data->{$k} = … }`). The write's own access in the
