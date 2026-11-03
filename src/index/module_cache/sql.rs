@@ -112,11 +112,15 @@ registry! {
     TXN_BEGIN_IMMEDIATE => NoScratch, "BEGIN IMMEDIATE";
     TXN_COMMIT => NoScratch, "COMMIT";
     TXN_ROLLBACK => NoScratch, "ROLLBACK";
+    SAVEPOINT_UNIT => NoScratch, "SAVEPOINT unit";
+    RELEASE_UNIT => NoScratch, "RELEASE unit";
+    ROLLBACK_TO_UNIT => NoScratch, "ROLLBACK TO unit";
     PRAGMA_JOURNAL_WAL => NoScratch, "PRAGMA journal_mode=WAL";
     PRAGMA_SYNC_OFF => NoScratch, "PRAGMA synchronous=OFF";
     PRAGMA_SYNC_NORMAL => NoScratch, "PRAGMA synchronous=NORMAL";
     PRAGMA_SYNC_FULL => NoScratch, "PRAGMA synchronous=FULL";
     PRAGMA_SYNC_EXTRA => NoScratch, "PRAGMA synchronous=EXTRA";
+    PRAGMA_TEMP_STORE_MEMORY => NoScratch, "PRAGMA temp_store=MEMORY";
     WAL_CHECKPOINT_TRUNCATE => NoScratch, "PRAGMA wal_checkpoint(TRUNCATE)";
 
     // ---- schema and generation gates ----
