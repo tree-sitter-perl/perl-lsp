@@ -1055,6 +1055,34 @@ fn autoloader_via_use_base_enables_synthesis() {
 /// return type is a known class (here a blessed Config), so the `host`
 /// key is knowable and must get its own narrow HashKeyAccess ref owned
 /// by that class. Without it, references/goto-def on `host` are dropped.
+/// An `s///e` replacement is code the grammar reads as a string; the
+/// post-walk chained-key pass reads its own parse, so the key inside gets
+/// the same owned ref as one outside.
+#[test]
+fn chained_hash_key_inside_eval_replacement_is_owned() {
+    let src = "\
+package Config;
+sub new { bless { host => 'localhost' }, shift }
+package Foo;
+sub new { bless {}, shift }
+sub get_config { return Config->new() }
+package main;
+my $obj = Foo->new();
+my $s = 'x';
+$s =~ s/x/$obj->get_config->{host}/e;
+";
+    let tree = parse(src);
+    let fa = build(&tree, src.as_bytes());
+    let owners: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "host" && r.span.start.row == 8)
+        .filter(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }))
+        .map(|r| r.hash_key_owner().cloned())
+        .collect();
+    assert_eq!(owners, [Some(HashKeyOwner::Class("Config".to_string()))]);
+}
+
 #[test]
 fn chained_method_call_hash_key_emits_owned_ref() {
     let src = "\

@@ -11,7 +11,7 @@
 //! the `Undef` negative lattice): `docs/adr/flow-narrowing.md`.
 
 
-use tree_sitter::{Node, Point, Tree};
+use tree_sitter::{Node, Point};
 
 use crate::cst::node_to_span;
 use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span};
@@ -1045,12 +1045,12 @@ impl<'a> Builder<'a> {
     /// here — the same FlowEdge concept the cpp pack produces. The forcing-
     /// function start of Perl-on-the-query-engine. Provenance-only for now
     /// (no lowering): the shapes' types still come from the walk.
-    pub(super) fn mint_flow_edges_via_query(&mut self, tree: &'a Tree) {
+    pub(super) fn mint_flow_edges_via_query(&mut self) {
         // The plugin walk carries the document's matches when it ran; a
         // build with no walk patterns traverses for them here.
         let pending = match self.flow_matches.take() {
             Some(m) => m,
-            None => self.collect_flow_matches(tree.root_node()),
+            None => self.collect_flow_matches(),
         };
         for caps in pending {
             // Bind shapes: no inflowing value. A bare `my`/`local` CLEARS to
@@ -1166,17 +1166,14 @@ impl<'a> Builder<'a> {
     }
 
     /// The `@flow` document's matches, by its own traversal.
-    fn collect_flow_matches(&self, root: Node<'a>) -> Vec<FlowMatch<'a>> {
-        use tree_sitter::{QueryCursor, StreamingIterator};
+    fn collect_flow_matches(&self) -> Vec<FlowMatch<'a>> {
         crate::util::ghost_stats::count("flow.own_walk");
         let (query, caps_of) = super::flow_query();
-        let mut out = Vec::new();
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(query, root, self.source);
-        while let Some(m) = matches.next() {
-            out.extend(FlowMatch::of(m.captures.iter().map(|c| (Some(caps_of[c.index as usize]), c.node))));
-        }
-        out
+        let (matches, _) = self.file_matches(query, |_| true);
+        matches
+            .into_iter()
+            .filter_map(|(_, caps)| FlowMatch::of(caps.into_iter().map(|(i, n)| (Some(caps_of[i as usize]), n))))
+            .collect()
     }
 
     /// The variable name(s) a clear (`@flow.clear`) targets — a

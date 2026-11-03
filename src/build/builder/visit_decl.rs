@@ -246,7 +246,7 @@ impl<'a> Builder<'a> {
             // block scope of its own.
             "substitution_regexp" => match crate::cst::eval_replacement(node, self.source) {
                 Some(repl) => {
-                    let code = self.eval_injections.get(&repl.start_byte()).copied();
+                    let code = self.syntax.injected_at(repl);
                     let mut steps: Vec<Box<dyn FnOnce(&mut Builder<'a>) + 'a>> = Vec::new();
                     for c in crate::cst::NodeExt::elements(&node) {
                         if c != repl {

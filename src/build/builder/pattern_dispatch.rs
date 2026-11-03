@@ -173,7 +173,7 @@ pub(crate) fn verify_pattern_expects(spec: &PatternSpec) -> Result<(), String> {
             let mut cursor = QueryCursor::new();
             let mut it = cursor.matches(query, tree.root_node(), ex.src.as_bytes());
             while let Some(m) = it.next() {
-                if !admits(query, m, || syntax.get_or_init(|| crate::cst::SyntaxForest::new([tree.root_node()]))) {
+                if !admits(query, m, || syntax.get_or_init(|| crate::cst::SyntaxForest::new(tree.root_node()))) {
                     continue;
                 }
                 count += 1;
@@ -459,7 +459,59 @@ fn walk_queries<'p>(specs: &[(&dyn plugin::FrameworkPlugin, &'p PatternSpec, &'s
 /// to (the combined one, or the spec's own under fallback).
 type SpecMatches<'t> = (&'static Query, Vec<(usize, Vec<(u32, Node<'t>)>)>);
 
+/// One query match: its pattern index and every capture, by capture index.
+pub(super) type FileMatch<'t> = (usize, Vec<(u32, Node<'t>)>);
+
 impl<'a> Builder<'a> {
+    /// Every match of `query` over the file, the `s///e` replacement code
+    /// included: each parse runs on its own, a match capturing a node that
+    /// another parse replaces (the host's string reading of code) drops, and
+    /// each injected parse's matches stand just before the first host match
+    /// at or after the replaced node. Within a parse, tree-sitter's order
+    /// holds. `keep` filters raw matches (structural predicates); the flag
+    /// says a cursor hit its match limit and the list is short.
+    pub(super) fn file_matches(
+        &self,
+        query: &Query,
+        mut keep: impl FnMut(&tree_sitter::QueryMatch<'_, 'a>) -> bool,
+    ) -> (Vec<FileMatch<'a>>, bool) {
+        let mut exceeded = false;
+        let replaced = |caps: &[(u32, Node<'a>)]| caps.iter().any(|(_, n)| self.syntax.is_replaced(*n));
+        let mut run = |root: Node<'a>, check: bool| {
+            let mut out: Vec<FileMatch<'a>> = Vec::new();
+            let mut cursor = QueryCursor::new();
+            {
+                let mut it = cursor.matches(query, root, self.source);
+                while let Some(m) = it.next() {
+                    if !keep(m) {
+                        continue;
+                    }
+                    let caps: Vec<(u32, Node<'a>)> =
+                        m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
+                    if caps.is_empty() || (check && replaced(&caps)) {
+                        continue;
+                    }
+                    out.push((m.pattern_index, caps));
+                }
+            }
+            exceeded |= cursor.did_exceed_match_limit();
+            out
+        };
+        let mut injections = self.syntax.injections().peekable();
+        if injections.peek().is_none() {
+            let main = run(self.syntax.main().root().ts(), false);
+            return (main, exceeded);
+        }
+        let start = |m: &FileMatch<'a>| m.1.iter().map(|(_, n)| n.start_byte()).min().unwrap_or(0);
+        let mut out = run(self.syntax.main().root().ts(), true);
+        for (root, at) in injections {
+            let block = run(root, true);
+            let pos = out.iter().position(|m| start(m) >= at).unwrap_or(out.len());
+            out.splice(pos..pos, block);
+        }
+        (out, exceeded)
+    }
+
     /// The package in force at a point (`package_at_pos`), defaulting to
     /// the implicit `main` before any explicit package statement.
     fn package_at_point(&self, point: tree_sitter::Point) -> String {
@@ -480,33 +532,21 @@ impl<'a> Builder<'a> {
     /// traversal for that round rather than trusting a truncated result.
     fn collect_walk_matches(
         &self,
-        root: Node<'a>,
         walk: &[WalkQuery],
         combined: Option<&CombinedWalk>,
         skip: Option<usize>,
     ) -> Vec<SpecMatches<'a>> {
         if let Some(c) = combined {
-            let mut buckets: Vec<Vec<(usize, Vec<(u32, Node<'a>)>)>> = vec![Vec::new(); walk.len()];
-            let mut cursor = QueryCursor::new();
-            {
-                let mut it = cursor.matches(c.query, root, self.source);
-                while let Some(m) = it.next() {
-                    if !admits(c.query, m, || self.syntax) {
-                        continue;
-                    }
-                    let caps: Vec<(u32, Node<'a>)> =
-                        m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
-                    if caps.is_empty() {
-                        continue;
-                    }
-                    buckets[c.owner_of(m.pattern_index)].push((m.pattern_index, caps));
+            let mut buckets: Vec<Vec<FileMatch<'a>>> = vec![Vec::new(); walk.len()];
+            let (all, exceeded) = self.file_matches(c.query, |m| admits(c.query, m, || self.syntax));
+            if !exceeded {
+                for m in all {
+                    buckets[c.owner_of(m.0)].push(m);
                 }
-            }
-            if !cursor.did_exceed_match_limit() {
                 let out: Vec<SpecMatches<'a>> =
                     buckets.into_iter().map(|b| (c.query, b)).collect();
                 if collection_equiv_enabled() {
-                    self.assert_collections_agree(root, walk, c, &out);
+                    self.assert_collections_agree(walk, c, &out);
                 }
                 return out;
             }
@@ -519,25 +559,11 @@ impl<'a> Builder<'a> {
             .enumerate()
             .map(|(i, w)| {
                 let q = w.query;
-                let mut out = Vec::new();
                 if skip == Some(i) {
-                    return (q, out);
+                    return (q, Vec::new());
                 }
-                let mut cursor = QueryCursor::new();
-                {
-                    let mut it = cursor.matches(q, root, self.source);
-                    while let Some(m) = it.next() {
-                        if !admits(q, m, || self.syntax) {
-                            continue;
-                        }
-                        let caps: Vec<(u32, Node<'a>)> =
-                            m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
-                        if !caps.is_empty() {
-                            out.push((m.pattern_index, caps));
-                        }
-                    }
-                }
-                if cursor.did_exceed_match_limit() {
+                let (out, exceeded) = self.file_matches(q, |m| admits(q, m, || self.syntax));
+                if exceeded {
                     log::error!("walk-pattern cursor exceeded its match limit");
                     crate::util::ghost_stats::count("pd.spec.exceeded_match_limit");
                 }
@@ -565,12 +591,11 @@ impl<'a> Builder<'a> {
     ///     `build_match_context`.
     fn assert_collections_agree(
         &self,
-        root: Node<'a>,
         walk: &[WalkQuery],
         combined: &CombinedWalk,
         got: &[SpecMatches<'a>],
     ) {
-        let want = self.collect_walk_matches(root, walk, None, None);
+        let want = self.collect_walk_matches(walk, None, None);
         let names = combined.query.capture_names();
         for (i, (w, ((_, a), (_, b)))) in walk.iter().zip(got.iter().zip(want.iter())).enumerate() {
             let q = w.query;
@@ -626,7 +651,7 @@ impl<'a> Builder<'a> {
     /// repeat until nothing new dispatches. Monotone gate inputs +
     /// per-(plugin, pattern, span) dedup ⇒ termination; the cap is a
     /// debug-only net, mirroring the worklist fold's discipline.
-    pub(super) fn dispatch_pattern_plugins(&mut self, root: Node<'a>) {
+    pub(super) fn dispatch_pattern_plugins(&mut self) {
         if self.plugins.is_empty() {
             return;
         }
@@ -662,7 +687,7 @@ impl<'a> Builder<'a> {
             // a later per-spec round does not traverse for them again.
             let skip_flow = (round > 0).then_some(flow_ordinal);
             let mut rounds_matches = crate::util::ghost_stats::timed("pd.collect", || {
-                self.collect_walk_matches(root, &walk, combined.as_ref(), skip_flow)
+                self.collect_walk_matches(&walk, combined.as_ref(), skip_flow)
             });
             if round == 0 {
                 let query = rounds_matches[flow_ordinal].0;
@@ -879,7 +904,7 @@ impl<'a> Builder<'a> {
     ///
     /// The deferred `VarType` / named-sub-param flushes ran long before
     /// this phase — fold patterns must not emit those actions.
-    pub(super) fn dispatch_pattern_plugins_fold(&mut self, root: Node<'a>) {
+    pub(super) fn dispatch_pattern_plugins_fold(&mut self) {
         if self.plugins.is_empty() {
             return;
         }
@@ -910,24 +935,12 @@ impl<'a> Builder<'a> {
                         continue;
                     }
                 };
-                let mut count = 0usize;
-                {
-                    let mut cursor = QueryCursor::new();
-                    let mut it = cursor.matches(query, root, self.source);
-                    while let Some(m) = it.next() {
-                        if !admits(query, m, || self.syntax) {
-                            continue;
-                        }
-                        let caps: Vec<(u32, Node<'a>)> =
-                            m.captures.iter().map(|c| (c.index, c.node)).collect();
-                        if !caps.is_empty() {
-                            let span = union_span(&caps);
-                            collected.push((p, spec, query, m.pattern_index, caps, span));
-                            count += 1;
-                        }
-                    }
+                let (matches, _) = self.file_matches(query, |m| admits(query, m, || self.syntax));
+                crate::util::timings::record_pattern_matches(p.id(), &spec.name, matches.len());
+                for (pattern_index, caps) in matches {
+                    let span = union_span(&caps);
+                    collected.push((p, spec, query, pattern_index, caps, span));
                 }
-                crate::util::timings::record_pattern_matches(p.id(), &spec.name, count);
             }
         }
         collected.sort_by_key(|(_, _, _, _, _, s)| (s.start.row, s.start.column));
