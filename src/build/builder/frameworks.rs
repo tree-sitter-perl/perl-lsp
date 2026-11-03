@@ -1264,7 +1264,7 @@ impl<'a> Builder<'a> {
     }
 
     fn isa_type_of_string(&mut self, text: &str, mode: FrameworkMode) -> Option<InferredType> {
-        let tree = super::create_parser().parse(text, None)?;
+        let tree = super::with_fragment_parser(|p| p.parse(text, None))?;
         let src = text.as_bytes();
         let root = tree.root_node();
 
