@@ -152,7 +152,7 @@ impl<'a> Builder<'a> {
             start: Point { row: 0, column: 0 },
             end: Point { row: 0, column: 0 },
         };
-        self.bag.push(crate::model::witnesses::Witness {
+        self.push_witness(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
                 package: class,
                 name: name.to_string(),
@@ -213,7 +213,7 @@ impl<'a> Builder<'a> {
         let union = ReturnExpr::UnionOnArgs {
             branches: vec![(guard, expr)],
         };
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Symbol(sym_id),
             source: WitnessSource::Builder("framework_accessor".into()),
             payload: WitnessPayload::ReturnExpr(union),
@@ -1264,9 +1264,7 @@ impl<'a> Builder<'a> {
     }
 
     fn isa_type_of_string(&mut self, text: &str, mode: FrameworkMode) -> Option<InferredType> {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&ts_parser_perl::LANGUAGE.into()).ok()?;
-        let tree = parser.parse(text, None)?;
+        let tree = super::with_fragment_parser(|p| p.parse(text, None))?;
         let src = text.as_bytes();
         let root = tree.root_node();
 

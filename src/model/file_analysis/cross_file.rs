@@ -127,7 +127,7 @@ impl FileAnalysis {
                 let detail = self
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
-                    .map(|rt| format!("@EXPORT → {}", format_inferred_type(&rt)))
+                    .map(|rt| format!("@EXPORT → {}", self.render_type(&rt)))
                     .or_else(|| Some("@EXPORT".to_string()));
                 items.push(CompletionCandidate {
                     label: name.clone(),
@@ -147,7 +147,7 @@ impl FileAnalysis {
                 let detail = self
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
-                    .map(|rt| format!("→ {}", format_inferred_type(&rt)));
+                    .map(|rt| format!("→ {}", self.render_type(&rt)));
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,

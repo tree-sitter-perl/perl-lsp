@@ -9,8 +9,11 @@ impl<'a> Builder<'a> {
         // Skip if parent is a variable_declaration (handled by visit_variable_decl)
         if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "variable_declaration" { return; }
-            // Skip if inside a signature param
-            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter") {
+            // A signature parameter's own variable is its declaration; its
+            // default is an ordinary read.
+            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter")
+                && parent.child_by_field_name("default") != Some(node)
+            {
                 return;
             }
         }
@@ -1271,7 +1274,7 @@ impl<'a> Builder<'a> {
             // query point outside the span.
             let last = *spans.last().expect("non-empty by construction");
             let zero = Span { start: last.end, end: last.end };
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Variable { name, scope },
                 source: WitnessSource::Builder("array_push".into()),
                 payload: WitnessPayload::InferredType(InferredType::Sequence(resolved)),
@@ -1547,12 +1550,13 @@ impl<'a> Builder<'a> {
             Err(_) => return vec![],
         };
 
-        // Find position of last "::" in the raw content
-        let colons_pos = match content_text.rfind("::") {
+        // Find the last separator in the raw content.
+        let sep = crate::model::conventions::PERL_SEP;
+        let colons_pos = match content_text.rfind(sep) {
             Some(p) => p,
             None => return vec![],
         };
-        let after_colons = colons_pos + 2;
+        let after_colons = colons_pos + sep.len();
 
         // Check if there's a named child (scalar variable) that starts after the "::"
         let last_idx = match content.named_child_count().checked_sub(1) {

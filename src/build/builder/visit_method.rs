@@ -141,10 +141,24 @@ impl<'a> Builder<'a> {
         self.method_call_invocant.insert(idx, class.clone());
         self.method_call_args.insert(idx, operands);
         self.method_call_refs.entry(node.id()).or_default().push(idx);
+        self.record_call_site(node, idx, Some(io.class), io.arguments);
         self.add_ref(RefKind::PackageRef, class_span, class.clone(), AccessKind::Read);
-        self.indirect_method_calls.push((node, io.class, io.arguments));
         if let Some(a) = io.arguments {
             self.queue_node(a);
+        }
+    }
+
+    /// Mint a `MethodCall` ref's call site as a fact on its call node, in
+    /// whichever parse holds it.
+    fn record_call_site(
+        &mut self,
+        call: Node<'a>,
+        ref_idx: usize,
+        invocant: Option<Node<'a>>,
+        args: Option<Node<'a>>,
+    ) {
+        if let Some(id) = self.syntax.lift(call).map(|n| n.id()) {
+            self.call_sites.push((id, CallSite { ref_idx, invocant, args }));
         }
     }
 
@@ -208,6 +222,7 @@ impl<'a> Builder<'a> {
         });
 
         let args = self.extract_call_args(node);
+        let args_node = node.child_by_field_name("arguments");
         if let Some(inv) = invocant_node {
             self.emit_invocant_witness(inv);
         }
@@ -249,6 +264,7 @@ impl<'a> Builder<'a> {
                         }
                         self.method_call_args.insert(idx, operands.clone());
                         self.method_call_refs.entry(node.id()).or_default().push(idx);
+                        self.record_call_site(node, idx, invocant_node, args_node);
                     }
                 }
             } else {
@@ -271,6 +287,7 @@ impl<'a> Builder<'a> {
                 }
                 self.method_call_args.insert(idx, operands.clone());
                 self.method_call_refs.entry(node.id()).or_default().push(idx);
+                self.record_call_site(node, idx, invocant_node, args_node);
 
                 // Runtime-exporter setup in method-call form:
                 // `Moose::Exporter->setup_import_methods(...)`,
@@ -315,7 +332,7 @@ impl<'a> Builder<'a> {
                 if let Some(ty) = self.extract_resultset_parametric(node) {
                     self.parametric_emitted_refs.insert(idx);
                     let r_span = self.refs[idx].span;
-                    self.bag.push(crate::model::witnesses::Witness {
+                    self.push_witness(crate::model::witnesses::Witness {
                         attachment: crate::model::witnesses::WitnessAttachment::Expression(
                             crate::model::witnesses::RefIdx(idx as u32),
                         ),
@@ -348,7 +365,7 @@ impl<'a> Builder<'a> {
                     {
                         self.parametric_emitted_refs.insert(idx);
                         let r_span = self.refs[idx].span;
-                        self.bag.push(crate::model::witnesses::Witness {
+                        self.push_witness(crate::model::witnesses::Witness {
                             attachment: crate::model::witnesses::WitnessAttachment::Expression(
                                 crate::model::witnesses::RefIdx(idx as u32),
                             ),
@@ -746,7 +763,7 @@ impl<'a> Builder<'a> {
             end: Point { row: 0, column: 0 },
         };
         for (method_name, return_expr) in p.return_method_declarations() {
-            self.bag.push(crate::model::witnesses::Witness {
+            self.push_witness(crate::model::witnesses::Witness {
                 attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
                     package: base_class.clone(),
                     name: method_name.to_string(),

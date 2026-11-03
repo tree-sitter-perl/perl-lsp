@@ -1103,6 +1103,7 @@ fn remap_spans(
         member_reads,
         place_narrowings,
         place_writes,
+        variable_regions,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1234,7 +1235,7 @@ fn remap_spans(
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };
-    for w in witnesses.iter_mut() {
+    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);

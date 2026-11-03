@@ -340,7 +340,7 @@ fn test_statement_bless_receiver_pre_bless_query_keeps_rep() {
     let fa = build_fa(src);
     // Point on the `bless` line's variable read is fine — the witness is
     // at the bless span itself; probe the line BEFORE it.
-    let pre = fa.inferred_type_via_bag("$object", Point::new(3, 14));
+    let pre = fa.inferred_type_via_bag("$object", Point::new(3, 18));
     assert_eq!(
         pre,
         Some(empty_hash_shape()),
@@ -1619,7 +1619,7 @@ fn qualified_call_to_own_package_binds_locally() {
         "package T;\nsub helper { return 'x' }\nsub probe { my $s = T::helper(); return $s; }\n",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(2, 20)),
+        fa.inferred_type_via_bag("$s", Point::new(2, 40)),
         Some(InferredType::String),
     );
 }
@@ -1630,7 +1630,7 @@ fn unqualified_call_binds_locally() {
         "package T;\nsub helper { return 'x' }\nsub probe { my $s = helper(); return $s; }\n",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(2, 20)),
+        fa.inferred_type_via_bag("$s", Point::new(2, 37)),
         Some(InferredType::String),
     );
 }
@@ -1643,7 +1643,7 @@ fn qualified_call_to_foreign_package_does_not_bind_to_local_sub() {
         "package T;\nsub stat { return 'x' }\nsub probe { my $s = Data::Dumper::stat('/tmp'); return $s; }\n",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(2, 20)),
+        fa.inferred_type_via_bag("$s", Point::new(2, 55)),
         None,
         "Data::Dumper::stat must not resolve to T::stat",
     );
@@ -1657,7 +1657,7 @@ fn core_qualified_call_does_not_bind_to_local_sub() {
         "package T;\nsub stat { return 'x' }\nsub probe { my $s = CORE::stat('/tmp'); return $s; }\n",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(2, 20)),
+        fa.inferred_type_via_bag("$s", Point::new(2, 47)),
         None,
         "CORE::stat names the builtin, never the local sub it is written to bypass",
     );
@@ -1669,7 +1669,7 @@ fn core_qualified_call_does_not_bind_to_local_sub() {
 fn main_qualified_call_binds_in_a_package_less_file() {
     let fa = build_fa("sub helper { return 'x' }\nsub probe { my $s = main::helper(); return $s; }\n");
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(1, 20)),
+        fa.inferred_type_via_bag("$s", Point::new(1, 43)),
         Some(InferredType::String),
     );
 }
@@ -1882,4 +1882,3 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
-

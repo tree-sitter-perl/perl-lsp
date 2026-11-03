@@ -136,7 +136,7 @@ fn narrow_truncated_at_reassignment() {
 // Truncation must recognize EVERY way Perl rebinds a scalar, not just
 // `$x = …` / `my $x` — else a stale narrowing leaks past the rebind (an
 // always-on false `undef-deref` for the `defined`-guard flavor). One test
-// per binding shape; the cutoff (`RebindIndex`) reads the
+// per binding shape; the cutoff (`rebind_index`) reads the
 // FlowEdge set, so each shape must mint a `@flow` edge targeting the subject.
 
 #[test]
@@ -965,13 +965,48 @@ fn a_declaration_nothing_can_type_stays_absent() {
 }
 
 #[test]
-fn a_declaration_is_a_write_and_resets_too() {
-    // A redeclaration retires the earlier belief exactly as a plain
-    // assignment does — there is one kind of write.
+fn a_redeclaration_is_a_fresh_binding() {
+    // A redeclaration binds a new variable: a read after it sees only the
+    // new one's value, and an untypable one is absence, as for any first
+    // binding.
     let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $x = 'str';\n  my $o = $x;\n}\n1;\n");
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::String));
     let fa = build_fa("package P;\nsub m {\n  my $x = Foo->new;\n  my $x = unknown_fn();\n  my $o = $x;\n}\n1;\n");
-    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), Some(InferredType::Unknown));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), None);
+}
+
+#[test]
+fn a_declaration_is_in_force_after_its_statement() {
+    // `my $x = $x` reads the `$x` the new one shadows; the new one is in
+    // force from the next statement on, and holds the value it was given.
+    let fa = build_fa("package P;\nsub m {\n  my $r = [];\n  {\n    my $r = $r;\n    my $o = $r;\n  }\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(4, 13)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 13)), Some(InferredType::ArrayRef));
+    // The same in one scope: a redeclaration's RHS reads the first binding.
+    let fa = build_fa("package P;\nsub m {\n  my $x = {};\n  my $x = $x->{k};\n  my $o = $x;\n}\n1;\n");
+    assert!(matches!(fa.inferred_type_via_bag("$x", Point::new(3, 11)), Some(InferredType::HashWithKeys { .. })));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 11)), None);
+    // The read binds to the outer declaration, so goto-def agrees.
+    let outer = fa.symbols().iter().find(|s| s.name == "$x").unwrap().id;
+    let rhs = fa.refs().iter().find(|r| r.target_name == "$x" && r.span.start == Point::new(3, 10)).unwrap();
+    assert_eq!(rhs.resolved_symbol(), Some(outer));
+    // A control header's declaration is in force from its block on.
+    let fa = build_fa("package P;\nsub m {\n  my $l = [];\n  while (my $l = $l->[0]) {\n    my $o = $l;\n  }\n}\n1;\n");
+    assert_eq!(fa.inferred_type_via_bag("$l", Point::new(3, 17)), Some(InferredType::ArrayRef));
+}
+
+#[test]
+fn a_signature_parameter_is_in_force_past_its_own_default() {
+    // A default reads earlier parameters, and its own name reads the
+    // binding the parameter shadows.
+    let fa = build_fa("use v5.36;\nmy $x = 'outer';\nsub f ($x, $y = $x) { return $y }\nsub h ($x = $x) { return $x }\n");
+    let def = |row, col| {
+        fa.refs().iter().find(|r| r.target_name == "$x" && r.span.start == Point::new(row, col)).and_then(|r| r.resolved_symbol())
+    };
+    let decl = |row, col| fa.symbols().iter().find(|s| s.name == "$x" && s.span.start == Point::new(row, col)).map(|s| s.id);
+    assert_eq!(def(2, 16), decl(2, 7), "a default reads the earlier parameter");
+    assert_eq!(def(3, 12), decl(1, 0), "a parameter's own default reads the outer binding");
+    assert_eq!(def(3, 25), decl(3, 7), "the body reads the parameter");
 }
 
 #[test]

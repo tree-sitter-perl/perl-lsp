@@ -594,7 +594,7 @@ fn the_writer_drains_more_entries_than_the_queue_holds() {
     // No connection: the harness drains unregistered, which is enough to
     // prove the producer/consumer pairing. The committed lane is exercised by
     // the persist-lane tests in `pack_invalidator_tests`.
-    run_persist_writer(rx, None, "test", |_c, b: &[usize]| vec![true; b.len()], |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
+    run_persist_writer(rx, None, "test", |_c| (), |_c, (), _e: &usize| true, |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
     producer.join().unwrap();
     assert_eq!(committed.load(O::SeqCst), 0, "no connection ⇒ drained unregistered");
 }

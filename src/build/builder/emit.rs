@@ -42,31 +42,24 @@ impl<'a> Builder<'a> {
 
     pub(super) fn hash_literal_type(&mut self, node: Node<'a>) -> InferredType {
         // A spread occupies ONE list slot but flattens to an even count
-        // at runtime, so pairing must skip it as a unit — `pair_nodes`'
-        // strict k/v alternation would mispair everything after it.
+        // at runtime, so pairing skips it as a unit.
         let mut flat: Vec<Node<'a>> = Vec::new();
         crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
-        let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
 
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
         let mut open = false;
-        let mut i = 0;
-        while i < named.len() {
-            let elem = named[i];
-            if crate::cst::is_flattening(elem) {
-                // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
-                // key set is no longer exhaustive. Arrays included:
-                // `my %h = (default => 1, @_)` is the canonical
-                // args-with-defaults idiom.
-                open = true;
-                i += 1;
-                continue;
-            }
-            let Some(v_node) = named.get(i + 1).copied() else {
-                open = true;
-                break;
+        for item in crate::cst::pair_items(&flat, crate::cst::Spreads::AsUnits) {
+            let (elem, v_node) = match item {
+                crate::cst::PairItem::Pair(k, v) => (k, v),
+                // Spread (`%other` / `%$ref` / `@_` / `@rest`): the key set
+                // is no longer exhaustive. Arrays included: `my %h =
+                // (default => 1, @_)` is the canonical args-with-defaults
+                // idiom. A dangling key leaves it open the same way.
+                crate::cst::PairItem::Spread(_) | crate::cst::PairItem::Dangling(_) => {
+                    open = true;
+                    continue;
+                }
             };
-            i += 2;
             let Some((key, is_dynamic)) = self.extract_key_text(elem) else {
                 open = true;
                 continue;
@@ -592,7 +585,7 @@ impl<'a> Builder<'a> {
             span,
         };
         if !self.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
-            self.bag.push(w);
+            self.push_witness(w);
         }
     }
 
@@ -680,7 +673,7 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{
             tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
             source: WitnessSource::Builder(tags::FACT_UNDEF_ARM.into()),
             payload: WitnessPayload::Fact {
@@ -705,13 +698,13 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{
             tags, FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
             source: WitnessSource::Builder("return_arm".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(span)),
             span,
         });
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
             source: WitnessSource::Builder(tags::FACT_VALUE_ARM.into()),
             payload: WitnessPayload::Fact {
@@ -743,7 +736,7 @@ impl<'a> Builder<'a> {
         {
             return;
         }
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: symbol,
             source: WitnessSource::Builder("return_arm_chain".into()),
             payload: WitnessPayload::Edge(arms),
@@ -791,7 +784,7 @@ impl<'a> Builder<'a> {
                     _ => None,
                 };
                 if let Some(spelling) = arm_undef {
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: arm_att.clone(),
                         source: WitnessSource::Builder(tags::FACT_UNDEF_ARM.into()),
                         payload: WitnessPayload::Fact {
@@ -806,7 +799,7 @@ impl<'a> Builder<'a> {
                 // Make sure the arm's own Expr(span) carries its
                 // payload, then collect it on the BranchArm attachment.
                 self.emit_expr_witness(arm);
-                self.bag.push(Witness {
+                self.push_witness(Witness {
                     attachment: arm_att.clone(),
                     source: WitnessSource::Builder("branch_arm".into()),
                     payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arm))),
@@ -815,7 +808,7 @@ impl<'a> Builder<'a> {
             }
             // The ternary's value IS the agreed arm type: point its
             // Expr(span) at the BranchArm fold.
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("branch_arm".into()),
                 payload: WitnessPayload::Edge(arm_att),
@@ -860,7 +853,7 @@ impl<'a> Builder<'a> {
             return;
         }
         if let Some(payload) = self.expr_payload(node) {
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
                 payload,
@@ -871,7 +864,7 @@ impl<'a> Builder<'a> {
             // `ReturnExprReducer` claims it ahead of the window projection
             // above, which answers when no receiver is in hand.
             if self.is_positional_receiver(node) {
-                self.bag.push(Witness {
+                self.push_witness(Witness {
                     attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("expression".into()),
                     payload: WitnessPayload::ReturnExpr(
@@ -915,14 +908,14 @@ impl<'a> Builder<'a> {
             return;
         }
         self.emit_expr_witness(lhs);
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: arm_att.clone(),
             source: WitnessSource::Builder("branch_arm".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
             span: node_to_span(lhs),
         });
         let exits = super::narrowing::is_exit_expression(rhs, self.source);
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: arm_att.clone(),
             source: WitnessSource::Builder(tags::FACT_SHORT_CIRCUIT.into()),
             payload: WitnessPayload::Fact {
@@ -934,14 +927,14 @@ impl<'a> Builder<'a> {
         });
         if !exits {
             self.emit_expr_witness(rhs);
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: arm_att.clone(),
                 source: WitnessSource::Builder("fallback_arm".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
                 span: node_to_span(rhs),
             });
         }
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Expr(span),
             source: WitnessSource::Builder("branch_arm".into()),
             payload: WitnessPayload::Edge(arm_att),
@@ -1022,7 +1015,7 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let span = node_to_span(node);
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
                 payload,
@@ -1100,7 +1093,7 @@ impl<'a> Builder<'a> {
         // and `FrameworkAwareTypeFold`'s point-contains filter only
         // skips *non-zero* spans that miss the query point. Using the
         // same convention as TC-mirror Variable witnesses.
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Variable { name: lhs_var.to_string(), scope },
             source: WitnessSource::Builder("chain_assignment".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(cond_expr))),
@@ -1219,9 +1212,10 @@ impl<'a> Builder<'a> {
         }
         let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
         let dies_on_undef = self.deref_dies_on_undef(node, &form);
+        let place = crate::model::file_analysis::Place::variable(self.binding_key_here(&name, receiver.start_position()));
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
             receiver: name,
-            place: None,
+            place: Box::new(place),
             span: node_to_span(node),
             form,
             dies_on_undef,

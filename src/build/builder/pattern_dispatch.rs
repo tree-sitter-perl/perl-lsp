@@ -22,6 +22,7 @@ use crate::model::file_analysis::{DispatchCandidate, HandlerOwner, InferredType,
 use crate::build::plugin::{self, CaptureData, CaptureValue, MatchContext, PatternSpec};
 
 use super::{node_to_span, Builder};
+use crate::build::query_extract::Capture;
 use crate::build::query_predicates::admits;
 
 /// A `#receiver-isa?` deferred predicate on a pattern: NOT a match-time
@@ -160,10 +161,7 @@ pub(crate) fn verify_pattern_expects(spec: &PatternSpec) -> Result<(), String> {
     }
     let query = cached_pattern_query(&spec.query)
         .map_err(|e| format!("pattern `{}`: query compile failed: {}", spec.name, e))?;
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .map_err(|e| e.to_string())?;
+    let mut parser = super::create_parser();
     for ex in &spec.expect {
         let tree = parser
             .parse(&ex.src, None)
@@ -175,7 +173,7 @@ pub(crate) fn verify_pattern_expects(spec: &PatternSpec) -> Result<(), String> {
             let mut cursor = QueryCursor::new();
             let mut it = cursor.matches(query, tree.root_node(), ex.src.as_bytes());
             while let Some(m) = it.next() {
-                if !admits(query, m, || syntax.get_or_init(|| crate::cst::SyntaxForest::new([tree.root_node()]))) {
+                if !admits(query, m, || syntax.get_or_init(|| crate::cst::SyntaxForest::new(tree.root_node()))) {
                     continue;
                 }
                 count += 1;
@@ -285,12 +283,16 @@ struct CombinedWalk<'r> {
     /// source can contribute several patterns, so the owner of combined
     /// pattern `k` is the last `i` with `starts[i] <= k`.
     starts: &'r [usize],
+    /// Each capture id's parsed vocabulary, for the documents that speak it
+    /// (the `@flow` document); a plugin's free-form names parse to `None`.
+    captures: &'r [Option<Capture>],
 }
 
 /// The owned form the registry stores; `CombinedWalk` is the borrowed view.
-struct OwnedCombinedWalk {
+pub(crate) struct CombinedParts {
     query: &'static Query,
     starts: Vec<usize>,
+    captures: Vec<Option<Capture>>,
 }
 
 impl CombinedWalk<'_> {
@@ -298,7 +300,7 @@ impl CombinedWalk<'_> {
     /// `.rhai` can never take dispatch out for the other twelve — it is
     /// dropped by `eligible_walk_specs` before it reaches the concatenation.
     /// `None` means "use the per-spec path", which is always correct.
-    fn build(parts: Vec<(String, usize)>) -> Option<OwnedCombinedWalk> {
+    fn build(parts: Vec<(String, usize)>) -> Option<CombinedParts> {
         if parts.is_empty() {
             return None;
         }
@@ -337,7 +339,8 @@ impl CombinedWalk<'_> {
             crate::util::ghost_stats::count("pd.combine.pattern_count_mismatch");
             return None;
         }
-        Some(OwnedCombinedWalk { query, starts })
+        let captures = query.capture_names().iter().map(|n| Capture::parse(n).ok()).collect();
+        Some(CombinedParts { query, starts, captures })
     }
 
     fn owner_of(&self, pattern_index: usize) -> usize {
@@ -387,22 +390,16 @@ pub(crate) fn collection_equiv_enabled() -> bool {
 /// function of the registry's plugins and nothing else.
 ///
 /// `None` = use the per-spec path.
-fn combined_walk<'r>(
-    registry: &'r crate::build::plugin::PluginRegistry,
-    specs: &[(&dyn plugin::FrameworkPlugin, &PatternSpec, &'static Query)],
-) -> Option<CombinedWalk<'r>> {
+fn combined_walk<'r>(registry: &'r crate::build::plugin::PluginRegistry, walk: &[WalkQuery]) -> Option<CombinedWalk<'r>> {
     if !combine_forced().unwrap_or(!combine_disabled()) {
         return None;
     }
     // Owned, so the derivation can run on another thread: the source text
     // plus each spec's pattern count is everything the concatenation needs.
-    let parts: Vec<(String, usize)> = specs
-        .iter()
-        .map(|(_, spec, q)| (spec.query.clone(), q.pattern_count()))
-        .collect();
+    let parts: Vec<(String, usize)> = walk.iter().map(|w| (w.source.to_string(), w.query.pattern_count())).collect();
     let ready = registry.combined_walk(move || {
         crate::util::ghost_stats::count("pd.combine.built");
-        CombinedWalk::build(parts).map(|c| (c.query, c.starts))
+        CombinedWalk::build(parts)
     });
     // How many files ran before the background compile landed. The deferred
     // compile is a startup-ORDERING change, so "how long was the window" is
@@ -413,7 +410,48 @@ fn combined_walk<'r>(
     } else {
         "pd.combine.pending"
     });
-    ready.map(|(query, starts)| CombinedWalk { query, starts })
+    ready.map(|c| CombinedWalk { query: c.query, starts: &c.starts, captures: &c.captures })
+}
+
+/// The `@flow` document's matches, each read through the vocabulary of the
+/// query it was matched with: the combined query's table, or the document's
+/// own when the round fell back to per-spec traversals.
+fn flow_matches_of<'t>(
+    query: &'static Query,
+    matches: Vec<(usize, Vec<(u32, Node<'t>)>)>,
+    combined: Option<&CombinedWalk>,
+) -> Vec<super::narrowing::FlowMatch<'t>> {
+    let own;
+    let table: &[Option<Capture>] = match combined {
+        Some(c) if std::ptr::eq(c.query, query) => c.captures,
+        _ => {
+            own = super::flow_query().1.iter().copied().map(Some).collect::<Vec<_>>();
+            &own
+        }
+    };
+    matches
+        .into_iter()
+        .filter_map(|(_, caps)| super::narrowing::FlowMatch::of(caps.into_iter().map(|(ix, node)| (table[ix as usize], node))))
+        .collect()
+}
+
+/// One document the walk runs: a plugin's pattern, or the builder's own
+/// `@flow` document, which rides the same traversal (always last, so the
+/// plugin specs keep their ordinals).
+struct WalkQuery<'p> {
+    name: &'p str,
+    source: &'p str,
+    query: &'static Query,
+}
+
+/// The walk's documents: every eligible plugin spec, then `@flow`.
+fn walk_queries<'p>(specs: &[(&dyn plugin::FrameworkPlugin, &'p PatternSpec, &'static Query)]) -> Vec<WalkQuery<'p>> {
+    let (flow, _) = super::flow_query();
+    specs
+        .iter()
+        .map(|(_, spec, q)| WalkQuery { name: spec.name.as_str(), source: spec.query.as_str(), query: *q })
+        .chain(std::iter::once(WalkQuery { name: "flow.scm", source: super::flow_source(), query: flow }))
+        .collect()
 }
 
 /// Matches for one spec in one round: `(pattern_index, captures)` in the
@@ -421,7 +459,59 @@ fn combined_walk<'r>(
 /// to (the combined one, or the spec's own under fallback).
 type SpecMatches<'t> = (&'static Query, Vec<(usize, Vec<(u32, Node<'t>)>)>);
 
+/// One query match: its pattern index and every capture, by capture index.
+pub(super) type FileMatch<'t> = (usize, Vec<(u32, Node<'t>)>);
+
 impl<'a> Builder<'a> {
+    /// Every match of `query` over the file, the `s///e` replacement code
+    /// included: each parse runs on its own, a match capturing a node that
+    /// another parse replaces (the host's string reading of code) drops, and
+    /// each injected parse's matches stand just before the first host match
+    /// at or after the replaced node. Within a parse, tree-sitter's order
+    /// holds. `keep` filters raw matches (structural predicates); the flag
+    /// says a cursor hit its match limit and the list is short.
+    pub(super) fn file_matches(
+        &self,
+        query: &Query,
+        mut keep: impl FnMut(&tree_sitter::QueryMatch<'_, 'a>) -> bool,
+    ) -> (Vec<FileMatch<'a>>, bool) {
+        let mut exceeded = false;
+        let replaced = |caps: &[(u32, Node<'a>)]| caps.iter().any(|(_, n)| self.syntax.is_replaced(*n));
+        let mut run = |root: Node<'a>, check: bool| {
+            let mut out: Vec<FileMatch<'a>> = Vec::new();
+            let mut cursor = QueryCursor::new();
+            {
+                let mut it = cursor.matches(query, root, self.source);
+                while let Some(m) = it.next() {
+                    if !keep(m) {
+                        continue;
+                    }
+                    let caps: Vec<(u32, Node<'a>)> =
+                        m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
+                    if caps.is_empty() || (check && replaced(&caps)) {
+                        continue;
+                    }
+                    out.push((m.pattern_index, caps));
+                }
+            }
+            exceeded |= cursor.did_exceed_match_limit();
+            out
+        };
+        let mut injections = self.syntax.injections().peekable();
+        if injections.peek().is_none() {
+            let main = run(self.syntax.main().root().ts(), false);
+            return (main, exceeded);
+        }
+        let start = |m: &FileMatch<'a>| m.1.iter().map(|(_, n)| n.start_byte()).min().unwrap_or(0);
+        let mut out = run(self.syntax.main().root().ts(), true);
+        for (root, at) in injections {
+            let block = run(root, true);
+            let pos = out.iter().position(|m| start(m) >= at).unwrap_or(out.len());
+            out.splice(pos..pos, block);
+        }
+        (out, exceeded)
+    }
+
     /// The package in force at a point (`package_at_pos`), defaulting to
     /// the implicit `main` before any explicit package statement.
     fn package_at_point(&self, point: tree_sitter::Point) -> String {
@@ -442,33 +532,21 @@ impl<'a> Builder<'a> {
     /// traversal for that round rather than trusting a truncated result.
     fn collect_walk_matches(
         &self,
-        root: Node<'a>,
-        specs: &[(&dyn plugin::FrameworkPlugin, &PatternSpec, &'static Query)],
+        walk: &[WalkQuery],
         combined: Option<&CombinedWalk>,
+        skip: Option<usize>,
     ) -> Vec<SpecMatches<'a>> {
         if let Some(c) = combined {
-            let mut buckets: Vec<Vec<(usize, Vec<(u32, Node<'a>)>)>> =
-                vec![Vec::new(); specs.len()];
-            let mut cursor = QueryCursor::new();
-            {
-                let mut it = cursor.matches(c.query, root, self.source);
-                while let Some(m) = it.next() {
-                    if !admits(c.query, m, || self.syntax) {
-                        continue;
-                    }
-                    let caps: Vec<(u32, Node<'a>)> =
-                        m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
-                    if caps.is_empty() {
-                        continue;
-                    }
-                    buckets[c.owner_of(m.pattern_index)].push((m.pattern_index, caps));
+            let mut buckets: Vec<Vec<FileMatch<'a>>> = vec![Vec::new(); walk.len()];
+            let (all, exceeded) = self.file_matches(c.query, |m| admits(c.query, m, || self.syntax));
+            if !exceeded {
+                for m in all {
+                    buckets[c.owner_of(m.0)].push(m);
                 }
-            }
-            if !cursor.did_exceed_match_limit() {
                 let out: Vec<SpecMatches<'a>> =
                     buckets.into_iter().map(|b| (c.query, b)).collect();
                 if collection_equiv_enabled() {
-                    self.assert_collections_agree(root, specs, c, &out);
+                    self.assert_collections_agree(walk, c, &out);
                 }
                 return out;
             }
@@ -477,29 +555,19 @@ impl<'a> Builder<'a> {
             );
             crate::util::ghost_stats::count("pd.combine.exceeded_match_limit");
         }
-        specs
-            .iter()
-            .map(|(_, _, q)| {
-                let mut out = Vec::new();
-                let mut cursor = QueryCursor::new();
-                {
-                    let mut it = cursor.matches(*q, root, self.source);
-                    while let Some(m) = it.next() {
-                        if !admits(q, m, || self.syntax) {
-                            continue;
-                        }
-                        let caps: Vec<(u32, Node<'a>)> =
-                            m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
-                        if !caps.is_empty() {
-                            out.push((m.pattern_index, caps));
-                        }
-                    }
+        walk.iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let q = w.query;
+                if skip == Some(i) {
+                    return (q, Vec::new());
                 }
-                if cursor.did_exceed_match_limit() {
+                let (out, exceeded) = self.file_matches(q, |m| admits(q, m, || self.syntax));
+                if exceeded {
                     log::error!("walk-pattern cursor exceeded its match limit");
                     crate::util::ghost_stats::count("pd.spec.exceeded_match_limit");
                 }
-                (*q, out)
+                (q, out)
             })
             .collect()
     }
@@ -523,23 +591,21 @@ impl<'a> Builder<'a> {
     ///     `build_match_context`.
     fn assert_collections_agree(
         &self,
-        root: Node<'a>,
-        specs: &[(&dyn plugin::FrameworkPlugin, &PatternSpec, &'static Query)],
+        walk: &[WalkQuery],
         combined: &CombinedWalk,
         got: &[SpecMatches<'a>],
     ) {
-        let want = self.collect_walk_matches(root, specs, None);
+        let want = self.collect_walk_matches(walk, None, None);
         let names = combined.query.capture_names();
-        for (i, ((_, spec, q), ((_, a), (_, b)))) in
-            specs.iter().zip(got.iter().zip(want.iter())).enumerate()
-        {
+        for (i, (w, ((_, a), (_, b)))) in walk.iter().zip(got.iter().zip(want.iter())).enumerate() {
+            let q = w.query;
             let local_names = q.capture_names();
             let bad = |what: &str| {
                 crate::util::ghost_stats::count("pd.equiv.mismatch");
                 panic!(
                     "pattern-combine divergence in `{}`: {what}\n\
                      combined: {:?}\n per-spec: {:?}",
-                    spec.name,
+                    w.name,
                     a.iter().map(|(pi, c)| (*pi, c.len())).collect::<Vec<_>>(),
                     b.iter().map(|(pi, c)| (*pi, c.len())).collect::<Vec<_>>(),
                 );
@@ -585,7 +651,7 @@ impl<'a> Builder<'a> {
     /// repeat until nothing new dispatches. Monotone gate inputs +
     /// per-(plugin, pattern, span) dedup ⇒ termination; the cap is a
     /// debug-only net, mirroring the worklist fold's discipline.
-    pub(super) fn dispatch_pattern_plugins(&mut self, root: Node<'a>) {
+    pub(super) fn dispatch_pattern_plugins(&mut self) {
         if self.plugins.is_empty() {
             return;
         }
@@ -600,8 +666,10 @@ impl<'a> Builder<'a> {
         if specs.is_empty() {
             return;
         }
+        let walk = walk_queries(&specs);
+        let flow_ordinal = specs.len();
         let sc = crate::util::ghost_stats::ScopedNs::start("pd.setup.combine");
-        let combined = combined_walk(&plugins, &specs);
+        let combined = combined_walk(&plugins, &walk);
         drop(sc);
         let mut dispatched: HashSet<(String, String, Span)> = HashSet::new();
         let mut rounds_run = 0u64;
@@ -614,9 +682,18 @@ impl<'a> Builder<'a> {
             // by the query engine here, since `matches` gets the
             // source text; structural ones (#has-parent?, …) by
             // `admits`; `#receiver-isa?` is deferred to query time.
-            let rounds_matches = crate::util::ghost_stats::timed("pd.collect", || {
-                self.collect_walk_matches(root, &specs, combined.as_ref())
+            // The `@flow` document's matches are the tree's, the same every
+            // round: the first round keeps them for the post-walk minter, and
+            // a later per-spec round does not traverse for them again.
+            let skip_flow = (round > 0).then_some(flow_ordinal);
+            let mut rounds_matches = crate::util::ghost_stats::timed("pd.collect", || {
+                self.collect_walk_matches(&walk, combined.as_ref(), skip_flow)
             });
+            if round == 0 {
+                let query = rounds_matches[flow_ordinal].0;
+                let matches = std::mem::take(&mut rounds_matches[flow_ordinal].1);
+                self.flow_matches = Some(flow_matches_of(query, matches, combined.as_ref()));
+            }
             let mut progressed = false;
             let lr = crate::util::ghost_stats::ScopedNs::start("pd.loop");
             for (ordinal, (p, spec, _)) in specs.iter().enumerate() {
@@ -827,7 +904,7 @@ impl<'a> Builder<'a> {
     ///
     /// The deferred `VarType` / named-sub-param flushes ran long before
     /// this phase — fold patterns must not emit those actions.
-    pub(super) fn dispatch_pattern_plugins_fold(&mut self, root: Node<'a>) {
+    pub(super) fn dispatch_pattern_plugins_fold(&mut self) {
         if self.plugins.is_empty() {
             return;
         }
@@ -858,24 +935,12 @@ impl<'a> Builder<'a> {
                         continue;
                     }
                 };
-                let mut count = 0usize;
-                {
-                    let mut cursor = QueryCursor::new();
-                    let mut it = cursor.matches(query, root, self.source);
-                    while let Some(m) = it.next() {
-                        if !admits(query, m, || self.syntax) {
-                            continue;
-                        }
-                        let caps: Vec<(u32, Node<'a>)> =
-                            m.captures.iter().map(|c| (c.index, c.node)).collect();
-                        if !caps.is_empty() {
-                            let span = union_span(&caps);
-                            collected.push((p, spec, query, m.pattern_index, caps, span));
-                            count += 1;
-                        }
-                    }
+                let (matches, _) = self.file_matches(query, |m| admits(query, m, || self.syntax));
+                crate::util::timings::record_pattern_matches(p.id(), &spec.name, matches.len());
+                for (pattern_index, caps) in matches {
+                    let span = union_span(&caps);
+                    collected.push((p, spec, query, pattern_index, caps, span));
                 }
-                crate::util::timings::record_pattern_matches(p.id(), &spec.name, count);
             }
         }
         collected.sort_by_key(|(_, _, _, _, _, s)| (s.start.row, s.start.column));

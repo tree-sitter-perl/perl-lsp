@@ -27,7 +27,7 @@ use crate::model::file_analysis::{Binding, PathStep, Place, Slot, Slots, Span};
 use tree_sitter::Point;
 
 mod syntax;
-pub(crate) use syntax::{NodeFacts, NodeId, Structure, SyntaxForest};
+pub(crate) use syntax::{kind_ids, Injection, NodeFacts, NodeId, Structure, SyntaxForest};
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
 
@@ -103,8 +103,8 @@ pub(crate) fn extract_call_name(node: Node, source: &[u8]) -> Option<String> {
 /// No `::` → the node's own span. FQ identifiers are single-line tokens, so
 /// the tail column is `start.column + byte_offset_of_tail`.
 pub(crate) fn fq_tail_span(node: Node, text: &str) -> Span {
-    let sep = crate::model::conventions::PERL_SPELLINGS.sep().unwrap_or_default();
-    match text.rfind(sep).filter(|_| !sep.is_empty()) {
+    let sep = crate::model::conventions::PERL_SEP;
+    match text.rfind(sep) {
         Some(idx) => {
             let s = node.start_position();
             Span {
@@ -509,6 +509,37 @@ pub(crate) fn first_named_child_where<'a>(
 /// walking on the `fat_comma` node silently drops the plain-comma spelling
 /// (`{ 'GAMMA', 3 }` is identical to `{ GAMMA => 3 }`).
 pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
+    pair_items(children, Spreads::AsElements)
+        .into_iter()
+        .filter_map(|item| match item {
+            PairItem::Pair(k, v) => Some((k, v)),
+            PairItem::Spread(_) | PairItem::Dangling(_) => None,
+        })
+        .collect()
+}
+
+/// How [`pair_items`] treats a flattening element (`%other`, `@_`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Spreads {
+    /// An element like any other: strict key/value alternation.
+    AsElements,
+    /// One slot that flattens to an even count at runtime, skipped as a
+    /// unit so the pairs after it stay aligned.
+    AsUnits,
+}
+
+/// One position of a pair walk.
+pub(crate) enum PairItem<'a> {
+    Pair(Node<'a>, Node<'a>),
+    /// A flattening element, under [`Spreads::AsUnits`].
+    Spread(Node<'a>),
+    /// A trailing key with no value.
+    Dangling(Node<'a>),
+}
+
+/// The pair walk every positional key/value reader shares: `children` paired
+/// `elem[2k]` → key, `elem[2k+1]` → value, separators and trivia skipped.
+pub(crate) fn pair_items<'a>(children: &[Node<'a>], spreads: Spreads) -> Vec<PairItem<'a>> {
     let mut out = Vec::new();
     let count = children.len();
     let mut i = 0;
@@ -516,6 +547,10 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
         let k_node = children[i];
         i += 1;
         if !is_list_element(k_node) {
+            continue;
+        }
+        if spreads == Spreads::AsUnits && is_flattening(k_node) {
+            out.push(PairItem::Spread(k_node));
             continue;
         }
         // Skip the comma / fat comma to the next named node (the value).
@@ -526,9 +561,12 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
                 None => break None,
             }
         };
-        let Some(val) = val else { break };
+        let Some(val) = val else {
+            out.push(PairItem::Dangling(k_node));
+            break;
+        };
         i += 1; // step past the value so the next key isn't read off it
-        out.push((k_node, val));
+        out.push(PairItem::Pair(k_node, val));
     }
     out
 }
@@ -1320,6 +1358,27 @@ pub(crate) fn string_list_with_residue(
         }
     }
     (results, residue)
+}
+
+/// Where a lexical declared at `decl` comes into force. Perl introduces a
+/// `my` once the statement declaring it is done (`my $x = $x` reads the
+/// outer `$x`); one declared in a control header (`if (my $x = …)`,
+/// `while (my $l = <$fh>)`) is in force from the header's block on.
+pub(crate) fn declaration_in_force_from<'t>(syn: &SyntaxForest<'t>, decl: Node<'t>) -> tree_sitter::Point {
+    let mut from = decl;
+    for p in syn.ancestors(decl) {
+        if p.kind() == "expression_statement" {
+            return p.end_position();
+        }
+        if let Some(block) = p.child_by_field_name("block").filter(|b| b.id() != from.id()) {
+            return block.start_position();
+        }
+        if matches!(p.kind(), "block" | "source_file") {
+            break;
+        }
+        from = p;
+    }
+    decl.end_position()
 }
 
 /// The block (or file) `node` runs in: the extent a fact observed at

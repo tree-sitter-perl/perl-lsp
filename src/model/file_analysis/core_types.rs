@@ -562,7 +562,7 @@ bitflags::bitflags! {
     /// language maps its own attribute spellings onto these where it
     /// mints the symbol — a pack at skeleton conversion through
     /// `TryFrom<&str>` over the canonical names, Perl through
-    /// `conventions::field_attribute_flag` — and consumers ask
+    /// `conventions::field_attribute_flag` onto those same names — and consumers ask
     /// `contains(..)`, never compare an attribute string. Closed on
     /// purpose: every flag so far has a language-generic meaning, and the
     /// set rides the cache blob (`docs/adr/symbol-flags.md`).
@@ -650,8 +650,9 @@ impl std::fmt::Display for UnknownAttribute {
 }
 
 /// The canonical attribute vocabulary — the ONE table from a spelling to
-/// a flag. A pack's skeleton conversion and its overlay validation both
-/// go through it, so a spelling that mints nothing is an error at the
+/// a flag. A pack's skeleton conversion, its overlay validation and Perl's
+/// field attributes all go through it
+/// (`layering_tests::one_table_maps_spellings_to_flags`), so a spelling that mints nothing is an error at the
 /// producer rather than a silent skip.
 impl TryFrom<&str> for SymbolFlags {
     type Error = UnknownAttribute;
@@ -776,6 +777,12 @@ pub struct Symbol {
     /// `param_arity()`, which reads both sources).
     #[serde(default)]
     pub arity: Option<ParamArity>,
+    /// Where a lexical comes into force, when that is later than where it
+    /// is declared: Perl introduces a `my` after its statement, so
+    /// `my $x = $x` reads the outer `$x`. Minted by the producer that sees
+    /// the statement; `None` is "from the declaration on" (`in_force_from`).
+    #[serde(default, with = "point_opt_serde")]
+    pub in_force: Option<Point>,
 }
 
 /// A callable's declared parameter shape, as a set of counts — the fuel for
@@ -1040,38 +1047,6 @@ impl FlowEdge {
     }
 }
 
-/// Every FlowEdge target site, by name, sorted — the LANGUAGE-AGNOSTIC
-/// narrowing cutoff. A rebind is a value flowing into the subject (a `@flow`
-/// edge), so this one truncation is shared by the Perl narrowing pass and the
-/// query-engine (cpp/python) narrowing. Built once per cutoff pass: a region
-/// fact per use made a linear scan over every edge per fact the measured cost
-/// (FHEM `--check` +6%).
-pub struct RebindIndex<'e> {
-    by_name: HashMap<&'e str, Vec<Point>>,
-}
-
-impl<'e> RebindIndex<'e> {
-    pub fn new(flow_edges: &'e [FlowEdge]) -> Self {
-        let mut by_name: HashMap<&'e str, Vec<Point>> = HashMap::new();
-        for fe in flow_edges {
-            by_name.entry(fe.target_name.as_str()).or_default().push(fe.target_at);
-        }
-        for sites in by_name.values_mut() {
-            sites.sort_unstable_by_key(|p| (p.row, p.column));
-        }
-        RebindIndex { by_name }
-    }
-
-    /// The earliest rebind of `var` within `region` (start inclusive, end
-    /// exclusive). `None` ⇒ no rebind, the fact runs to the region's end.
-    pub fn earliest_in(&self, var: &str, region: Span) -> Option<Point> {
-        let key = |p: &Point| (p.row, p.column);
-        let sites = self.by_name.get(var)?;
-        let i = sites.partition_point(|p| key(p) < key(&region.start));
-        sites.get(i).copied().filter(|p| key(p) < key(&region.end))
-    }
-}
-
 /// The part of `region` a region fact (a narrowing, a moved-from state)
 /// still holds over: from its start up to the earliest cut inside it — a
 /// rebind, a disturbance, a reset — or to its end. `None` when a cut lands
@@ -1089,6 +1064,16 @@ pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -
 }
 
 impl Symbol {
+    /// The first point a use of this name can see the declaration.
+    pub fn in_force_from(&self) -> Point {
+        self.in_force.unwrap_or(self.span.start)
+    }
+
+    /// Where a use of this name sees the declaration (`InView`).
+    pub fn in_view(&self) -> InView {
+        InView { from: self.span.start, shadowed: (self.span.end, self.in_force_from()) }
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
@@ -1273,6 +1258,27 @@ pub enum SymKind {
     /// search as a navigable entry. Outline entity — not backed by a
     /// Perl symbol, so most queries (gd/gr/rename) don't hit it.
     Namespace,
+}
+
+/// Where a declaration is in view: from `from` on, except strictly inside
+/// `shadowed` (the rest of the declaring statement, past the declaration),
+/// where a use reads the binding the declaration shadows. The declaration's
+/// own facts sit on it, so they stay its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InView {
+    pub from: Point,
+    pub shadowed: (Point, Point),
+}
+
+impl InView {
+    /// In view from `from` on, nothing shadowed.
+    pub fn from(from: Point) -> Self {
+        InView { from, shadowed: (from, from) }
+    }
+
+    pub fn at(&self, at: Point) -> bool {
+        self.from <= at && !(self.shadowed.0 < at && at < self.shadowed.1)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -26,16 +26,15 @@ impl FileAnalysis {
         }
         let Some(idx) = module_index else { return };
         // every package name this file declares, for FQ + tail matching
-        let my_packages: Vec<String> = self
+        // (name, leaf): a loader may name a package by either.
+        let my_packages: Vec<(String, String)> = self
             .symbols
             .iter()
             .filter(|s| matches!(s.kind, SymKind::Package | SymKind::Class))
-            .map(|s| s.name.clone())
+            .map(|s| (s.name.clone(), split_qualified(&s.name, self.names()).1.to_string()))
             .collect();
         let matches_me = |load_name: &str| -> bool {
-            my_packages.iter().any(|p| {
-                p == load_name || p.rsplit("::").next() == Some(load_name)
-            })
+            my_packages.iter().any(|(p, leaf)| p == load_name || leaf == load_name)
         };
 
         let markers = self.loader_config_params.clone();
@@ -204,6 +203,7 @@ impl FileAnalysis {
                     declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,
+                    in_force: None,
                 });
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
@@ -689,16 +689,23 @@ impl FileAnalysis {
             }
         }
 
-        // Re-run the mutation-extension pass: imported shapes (a var
-        // typed by an imported sub's `HashWithKeys` return) only land
-        // with the TCs pushed above, so build-time extension found no
-        // shape to extend for them. Append-only (`clear = false`) —
-        // post-finalize removal would shift `base_witness_count`;
-        // duplicates are idempotent and truncated by the next cycle.
+        // Re-run the mutation-extension pass: a write's value typed by an
+        // imported sub, or a root typed by an imported class, only lands
+        // with the TCs pushed above. A place's deltas fold onto whatever
+        // value stands under them when read, so imported base shapes need
+        // nothing here. Append-only (`clear = false`) — post-finalize
+        // removal would shift `base_witness_count`; a later delta at the
+        // same site re-types what the build's said, and the next cycle
+        // truncates it.
         {
             let key_writes = std::mem::take(&mut self.key_writes);
+            let bindings: Vec<_> = key_writes
+                .iter()
+                .map(|w| self.variable_binding_of(&w.var_text, w.span.start, w.scope))
+                .collect();
             let ctx = crate::model::witnesses::BagContext {
                 scopes: &self.scopes,
+                symbols: self.symbols.as_slice(),
                 package_framework: &self.packages,
                 module_index,
                 package_parents: &self.packages,
@@ -710,6 +717,7 @@ impl FileAnalysis {
                 &ctx,
                 &key_writes,
                 false,
+                &bindings,
             );
             self.key_writes = key_writes;
         }
@@ -753,12 +761,14 @@ impl FileAnalysis {
     pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
-        self.witnesses.push(Witness {
+        let mut w = Witness {
             attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder("type_constraint".into()),
             payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
-        });
+        };
+        bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc));
+        self.witnesses.push(w);
     }
 
     /// Resolve one gated dispatch candidate against its receiver, AT QUERY
@@ -922,8 +932,11 @@ impl FileAnalysis {
                 _ => continue,
             };
             let subject = match place {
-                Some(place) => Subject::Place(place),
-                None => Subject::Variable(receiver.clone()),
+                Some(place) => place,
+                None => {
+                    let scope = self.scope_at(r.span.start).unwrap_or(ScopeId(0));
+                    Place::variable(self.variable_binding_of(&receiver, r.span.start, scope).0)
+                }
             };
             if let Some(ty) = self.subject_type_at(&subject, r.span.start, module_index) {
                 out.push(DerefSite {
@@ -939,7 +952,7 @@ impl FileAnalysis {
         // Derefs with no typed ref naming their receiver; the builder
         // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
-            let subject = s.subject();
+            let subject = (*s.place).clone();
             if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
                 out.push(DerefSite {
                     span: s.span,
@@ -1048,16 +1061,11 @@ impl FileAnalysis {
     /// the guard under the merged query. Innermost region wins. `None` when
     /// no region fact types the subject here, so D6 fires only on narrowed
     /// reps.
-    pub fn guard_narrowed_rep(&self, subject: &Subject, point: Point) -> Option<InferredType> {
+    pub fn guard_narrowed_rep(&self, subject: &Place, point: Point) -> Option<InferredType> {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let place = subject.clone();
         let mut best: Option<&crate::model::witnesses::Witness> = None;
-        for w in self.witnesses.filter(|w| {
-            match (&w.attachment, subject) {
-                (WitnessAttachment::Variable { name, .. }, Subject::Variable(v)) => name == v,
-                (WitnessAttachment::Place(p), Subject::Place(q)) => **p == *q,
-                _ => false,
-            }
-        }) {
+        for w in self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))) {
             let region = (w.span.start.row, w.span.start.column) < (w.span.end.row, w.span.end.column);
             if !region || !contains_point(&w.span, point) {
                 continue;

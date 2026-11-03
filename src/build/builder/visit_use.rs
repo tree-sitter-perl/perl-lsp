@@ -46,7 +46,7 @@ impl<'a> Builder<'a> {
         // aren't covered — only the `use Importer 'M' => @names` line.
         if module_name == "Importer" {
             if let Some((source_module, names)) = imports.split_first() {
-                if !source_module.is_empty() && source_module.contains("::") {
+                if crate::model::file_analysis::split_qualified(source_module, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
                     self.process_use(
                         source_module.clone(),
                         raw_args,
@@ -82,7 +82,8 @@ impl<'a> Builder<'a> {
         // `use Class::Tiny qw/a b/` / `use Class::Tiny { a => ..., b => ... }`
         // declares rw accessors at the use site (no `has` keyword), so
         // synthesis hangs off the `use` node rather than a framework-mode
-        // `has` dispatch. Recognized by the import shape, not a name list.
+        // `has` dispatch. The module is matched by name, like Sub::Exporter
+        // above; the import shape decides which words are attributes.
         if module_name == "Class::Tiny" {
             self.visit_class_tiny_use(node);
         }
@@ -191,10 +192,11 @@ impl<'a> Builder<'a> {
     /// pairs as a right-leaning `list_expression`, so recurse into those.
     pub(super) fn extract_class_tiny_hash_keys(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         let elems = crate::cst::list_elements(crate::cst::literal_body(node));
-        // Keys are at even indices (key, value, key, value, ...).
-        let mut i = 0;
-        while i < elems.len() {
-            let key = elems[i];
+        for item in crate::cst::pair_items(&elems, crate::cst::Spreads::AsElements) {
+            let key = match item {
+                crate::cst::PairItem::Pair(k, _) | crate::cst::PairItem::Dangling(k) => k,
+                crate::cst::PairItem::Spread(_) => continue,
+            };
             match key.kind() {
                 "autoquoted_bareword" | "bareword" => {
                     if let Ok(text) = key.utf8_text(self.source) {
@@ -208,7 +210,6 @@ impl<'a> Builder<'a> {
                 }
                 _ => {}
             }
-            i += 2; // skip the value element
         }
     }
 
@@ -855,28 +856,19 @@ impl<'a> Builder<'a> {
         self.literal_list_return_names(body)
     }
 
-    /// Find a top-level sub's `body` block by name within `root`'s subtree.
-    /// First match wins (Perl's last-decl-wins is irrelevant for the literal
-    /// folds this feeds — redefinition of a qw-returning helper is not a shape
-    /// we model).
+    /// Find a sub's `body` block by name anywhere under `root`. When the name
+    /// is declared more than once, the declaration that closes last wins (an
+    /// enclosing sub over one nested in it) — redefinition of a qw-returning
+    /// helper is not a shape we model, so this only has to be deterministic.
     pub(super) fn find_local_sub_body(&self, root: Node<'a>, name: &str) -> Option<Node<'a>> {
-        let mut cursor = root.walk();
-        let mut stack: Vec<Node<'a>> = root.children(&mut cursor).collect();
-        while let Some(n) = stack.pop() {
-            if matches!(
-                n.kind(),
-                "subroutine_declaration_statement" | "method_declaration_statement"
-            ) {
-                if let Some(name_node) = n.child_by_field_name("name") {
-                    if name_node.utf8_text(self.source).ok() == Some(name) {
-                        return n.child_by_field_name("body");
-                    }
-                }
-            }
-            let mut c = n.walk();
-            stack.extend(n.children(&mut c));
-        }
-        None
+        let root = self.syntax.lift(root)?;
+        root.descendants_of_kind(sub_declaration_kinds())
+            .filter(|n| {
+                n.ts().child_by_field_name("name").and_then(|t| t.utf8_text(self.source).ok())
+                    == Some(name)
+            })
+            .max_by_key(|n| (n.subtree().end, std::cmp::Reverse(n.subtree().start)))
+            .and_then(|n| n.ts().child_by_field_name("body"))
     }
 
     /// Extract the literal name list a sub body returns, when its tail/return
@@ -1862,6 +1854,14 @@ fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>
 enum ConstFold {
     Literal(String, Span),
     Values(Option<Vec<String>>),
+}
+
+/// The kind ids a sub or method declaration carries.
+fn sub_declaration_kinds() -> &'static [u16] {
+    static KINDS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+    KINDS.get_or_init(|| {
+        perl_kind_ids(&["subroutine_declaration_statement", "method_declaration_statement"])
+    })
 }
 
 /// How a statement rewrites an `@ISA` (`Builder::record_isa_write`).

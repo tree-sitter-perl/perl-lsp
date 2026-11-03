@@ -304,16 +304,13 @@ struct op { BASEOP };
     );
 
     // finding 6a: the explicit-annotation witness the inlay suppressor keys on
-    // is present on the member's own scope (parity with a plain field).
+    // is present on the member's own place (parity with a plain field).
     let op_type = sym_in(&fa, "op_type");
     assert_eq!(op_type.kind, SymKind::Field);
     assert!(
-        fa.witnesses.has_annotation(
-            &crate::model::witnesses::WitnessAttachment::Variable {
-                name: "op_type".into(),
-                scope: op_type.scope,
-            },
-        ),
+        fa.witnesses.has_annotation(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
+            fa.declared_place(op_type.id),
+        ))),
         "macro-body member carries the declared-type witness"
     );
 

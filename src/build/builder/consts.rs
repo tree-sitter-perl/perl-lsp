@@ -73,6 +73,10 @@ impl<'a> Builder<'a> {
         }
         let use_pkg = self.package_at_pos(at);
         if name.starts_with(|c| PERL_SPELLINGS.is_sigil(c)) {
+            // `@_` cannot be declared; a symbol for it is a mention.
+            if crate::model::conventions::is_argument_array(name) {
+                return crate::model::file_analysis::unbound_variable(&self.scopes, name, use_pkg.unwrap_or("main"), scope).0;
+            }
             if let Some(sym) = self.visible_variable_decl(name, at, scope, use_pkg) {
                 let sym = &self.symbols[sym.0 as usize];
                 return match super::fold::our_gate(sym) {
@@ -80,6 +84,7 @@ impl<'a> Builder<'a> {
                     None => Binding::Lexical(sym.id),
                 };
             }
+            return crate::model::file_analysis::unbound_variable(&self.scopes, name, use_pkg.unwrap_or("main"), scope).0;
         }
         Binding::Package(use_pkg.unwrap_or("main").to_string(), name.to_string())
     }
@@ -92,7 +97,17 @@ impl<'a> Builder<'a> {
             if let Some(decls) = by_scope.get(&sid) {
                 let hit = decls.iter().rev().find(|&&id| {
                     let sym = &self.symbols[id.0 as usize];
-                    sym.span.start <= at
+                    // A global minted from its uses declares nothing: its
+                    // uses bind by package, as `FileAnalysis::variable_use`
+                    // binds them.
+                    let minted = matches!(
+                        &sym.detail,
+                        crate::model::file_analysis::SymbolDetail::Variable {
+                            decl_kind: crate::model::file_analysis::DeclKind::Implicit | crate::model::file_analysis::DeclKind::Mention,
+                            ..
+                        }
+                    );
+                    !minted && sym.in_view().at(at)
                         && super::fold::our_gate_admits(super::fold::our_gate(sym), use_pkg)
                 });
                 if let Some(&id) = hit {

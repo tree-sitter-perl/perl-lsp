@@ -63,12 +63,9 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 // explicit types mark the declaration with a `skeleton-annot`
                 // witness; inferred ones (`auto`, Perl) have none, so they
                 // still get the hint.
-                if analysis.witnesses.has_annotation(
-                    &crate::model::witnesses::WitnessAttachment::Variable {
-                        name: sym.name.clone(),
-                        scope: sym.scope,
-                    },
-                ) {
+                if analysis.witnesses.has_annotation(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
+                    analysis.declared_place(sym.id),
+                ))) {
                     continue;
                 }
                 if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, sym.span.start) {
@@ -78,7 +75,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                     }
                     hints.push(InlayHint {
                         position: point_to_position(decl_point),
-                        label: InlayHintLabel::String(format!(": {}", sym.display_type(&ty))),
+                        label: InlayHintLabel::String(format!(": {}", analysis.display_type_of(sym, &ty))),
                         kind: Some(InlayHintKind::TYPE),
                         text_edits: None,
                         tooltip: None,
@@ -109,7 +106,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                             position: point_to_position(decl_point),
                             label: InlayHintLabel::String(format!(
                                 "→ {}",
-                                format_inferred_type(&rt)
+                                analysis.render_type(&rt)
                             )),
                             kind: Some(InlayHintKind::TYPE),
                             text_edits: None,

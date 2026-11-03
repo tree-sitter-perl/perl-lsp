@@ -1627,9 +1627,14 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
             // Each write's value as the registry answers it at the write:
             // a binding is an edge to its source, so the raw witness is
             // rarely the type.
-            for w in analysis.witnesses.all() {
-                let WitnessAttachment::Variable { name, scope } = &w.attachment else { continue };
-                if *scope != sid { continue; }
+            let declared = analysis.variables_declared_in(sid).map(|v| analysis.declared_place(v));
+            let places: Vec<file_analysis::Place> = declared
+                .chain(std::iter::once(file_analysis::Place::variable(file_analysis::Binding::Arguments(sid))))
+                .collect();
+            for place in places {
+              let name = analysis.binding_label(&place.root).0.to_string();
+              let name = &name;
+              for w in analysis.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place.clone()))) {
                 if !matches!(
                     w.payload,
                     WitnessPayload::InferredType(_) | WitnessPayload::Edge(_) | WitnessPayload::Projected { .. }
@@ -1642,6 +1647,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
                     "type": file_analysis::format_inferred_type(&t),
                     "line": w.span.start.row,
                 }));
+              }
             }
         }
 

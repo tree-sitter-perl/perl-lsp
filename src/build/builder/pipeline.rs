@@ -4,82 +4,6 @@
 
 use super::*;
 
-/// Walk the tree once, indexing the three node kinds the chain-typing
-/// reducer cares about. Pure: reads only tree-sitter structural data,
-/// no Builder state. Same recursion shape (depth-first via
-/// `named_child(i)`) the three former independent walks all used.
-impl<'a> ChainTypingIndex<'a> {
-    /// Index the walk's indirect-object calls like `method_call_expression`s,
-    /// so every post-walk pass reads their receiver and arguments.
-    fn add_indirect_method_calls(&mut self, calls: &[(Node<'a>, Node<'a>, Option<Node<'a>>)]) {
-        for &(call, class, args) in calls {
-            self.invocant_nodes.insert((class.start_position(), class.end_position()), class);
-            if let Some(args) = args {
-                self.method_call_args.insert((call.start_position(), call.end_position()), args);
-            }
-        }
-    }
-}
-
-pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
-    let mut idx = ChainTypingIndex {
-        assignment_nodes: Vec::new(),
-        return_nodes: std::collections::HashMap::new(),
-        invocant_nodes: std::collections::HashMap::new(),
-        method_call_args: std::collections::HashMap::new(),
-        chained_hash_elements: Vec::new(),
-    };
-    // Explicit stack, like every other tree pass here: a recursive descent
-    // costs one frame per CST level, and a stack overflow is a fatal abort
-    // no `catch_unwind` can net.
-    fn walk<'t>(root: Node<'t>, idx: &mut ChainTypingIndex<'t>) {
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
-        match node.kind() {
-            "assignment_expression" => {
-                idx.assignment_nodes.push(node);
-            }
-            "return_expression" => {
-                idx.return_nodes
-                    .insert((node.start_position(), node.end_position()), node);
-            }
-            "method_call_expression" => {
-                if let Some(inv) = node.child_by_field_name("invocant") {
-                    idx.invocant_nodes
-                        .insert((inv.start_position(), inv.end_position()), inv);
-                }
-                if let Some(args) = node.child_by_field_name("arguments") {
-                    idx.method_call_args
-                        .insert((node.start_position(), node.end_position()), args);
-                }
-            }
-            "hash_element_expression" => {
-                // Container is the first named child; index only the
-                // chained shape where it's a method call — plain
-                // `$var->{key}` is handled by the walk.
-                if node
-                    .named_child(0)
-                    .map(|c| c.kind() == "method_call_expression")
-                    .unwrap_or(false)
-                {
-                    idx.chained_hash_elements.push(node);
-                }
-            }
-            _ => {}
-        }
-        // Reversed: popping from the end yields named child 0 first, so the
-        // ordered `Vec` fields keep document order.
-        for i in (0..node.named_child_count()).rev() {
-            if let Some(c) = node.named_child(i) {
-                stack.push(c);
-            }
-        }
-        }
-    }
-    walk(tree.root_node(), &mut idx);
-    idx
-}
-
 pub fn build(tree: &Tree, source: &[u8]) -> FileAnalysis {
     build_with_plugins(tree, source, default_plugin_registry())
 }
@@ -88,7 +12,7 @@ pub fn build(tree: &Tree, source: &[u8]) -> FileAnalysis {
 ///
 /// This is no longer what keeps the process alive. The walk, the chain-typing
 /// index and the expression-shape typing are all bounded independently of CST
-/// depth (`walk.rs`, `build_chain_typing_index`, `MAX_EXPR_TYPE_DEPTH`), so a
+/// depth (`walk.rs`, `MAX_EXPR_TYPE_DEPTH`), so a
 /// deep file is analyzed rather than refused. What remains is a bound on the
 /// absurd: past this point a file is not source anyone wrote, and analyzing it
 /// buys nothing while costing time and heap proportional to its depth.
@@ -144,26 +68,30 @@ pub(super) fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usi
 
 /// Every `s///e` replacement parsed as Perl over the file's own bytes
 /// (tree-sitter included ranges), so its nodes index `source` and the walk
-/// visits them as code. Keyed by the replacement's start byte; replacements
-/// nested inside one are parsed too.
-fn parse_eval_replacements(mut ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, Tree)> {
+/// visits them as code. Each comes with the forest index of the parse that
+/// holds its replacement node (0 is the main tree); replacements nested
+/// inside one are parsed after it, so a host always precedes its guests.
+fn parse_eval_replacements(ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, tree_sitter::Range, Tree)> {
     let mut out = Vec::new();
-    if ranges.is_empty() {
+    let mut pending: Vec<(usize, tree_sitter::Range)> = ranges.into_iter().map(|r| (0, r)).collect();
+    if pending.is_empty() {
         return out;
     }
-    let mut parser = super::create_parser();
-    while let Some(range) = ranges.pop() {
-        if parser.set_included_ranges(&[range]).is_err() {
-            continue;
-        }
-        let Some(code) = parser.parse(source, None) else { continue };
-        survey(code.root_node(), |n| {
-            if let Some(r) = crate::cst::eval_replacement(n, source) {
-                ranges.push(r.range());
+    super::with_fragment_parser(|parser| {
+        while let Some((host, range)) = pending.pop() {
+            if parser.set_included_ranges(&[range]).is_err() {
+                continue;
             }
-        });
-        out.push((range.start_byte, code));
-    }
+            let Some(code) = parser.parse(source, None) else { continue };
+            let index = out.len() + 1;
+            survey(code.root_node(), |n| {
+                if let Some(r) = crate::cst::eval_replacement(n, source) {
+                    pending.push((index, r.range()));
+                }
+            });
+            out.push((host, range, code));
+        }
+    });
     out
 }
 
@@ -219,16 +147,47 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
 /// The compiled `@flow` query (`queries/perl/flow.scm`), compiled once.
 /// `Query::new` is expensive and `build` runs per file — see `warm_flow_query`
 /// for why this is warmed at startup rather than lazily on the first build.
-pub(super) fn flow_query() -> Option<&'static tree_sitter::Query> {
+///
+/// Each capture id comes with its parsed `Capture`, so the minter matches the
+/// closed vocabulary instead of spellings. The document is compiled into the
+/// binary, so a capture outside the vocabulary — or one the minter does not
+/// read — is a constant defect: it panics here, on the first build any test
+/// runs, rather than extracting nothing.
+pub(super) fn flow_query() -> (&'static tree_sitter::Query, &'static [crate::build::query_extract::Capture]) {
+    use crate::build::query_extract::Capture;
     use std::sync::OnceLock;
-    static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
-    static FLOW_QUERY: OnceLock<Option<tree_sitter::Query>> = OnceLock::new();
-    FLOW_QUERY
-        .get_or_init(|| {
-            let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
-            tree_sitter::Query::new(&lang, FLOW_SCM).ok()
+    static FLOW_QUERY: OnceLock<(tree_sitter::Query, Vec<Capture>)> = OnceLock::new();
+    let (query, caps) = FLOW_QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+        let query = tree_sitter::Query::new(&lang, FLOW_SCM).expect("queries/perl/flow.scm compiles");
+        let caps = flow_capture_table(&query).unwrap_or_else(|e| panic!("queries/perl/flow.scm: {e}"));
+        (query, caps)
+    });
+    (query, caps)
+}
+
+static FLOW_SCM: &str = include_str!("../../../queries/perl/flow.scm");
+
+/// The `@flow` document's text, for the walk that concatenates it with the
+/// plugin patterns (`pattern_dispatch::walk_queries`).
+pub(super) fn flow_source() -> &'static str {
+    FLOW_SCM
+}
+
+/// The flow minter's capture table: each capture id's parsed `Capture`, or
+/// the first capture it would not read.
+pub(super) fn flow_capture_table(
+    query: &tree_sitter::Query,
+) -> Result<Vec<crate::build::query_extract::Capture>, String> {
+    use crate::build::query_extract::{Capture, FlowCap};
+    query
+        .capture_names()
+        .iter()
+        .map(|n| match Capture::parse(n) {
+            Ok(c @ Capture::Flow(FlowCap::Target | FlowCap::Clear | FlowCap::Rebind | FlowCap::Source)) => Ok(c),
+            _ => Err(format!("`@{n}` is not a capture the flow minter reads")),
         })
-        .as_ref()
+        .collect()
 }
 
 /// Force the flow query to compile now, off the parallel per-file path.
@@ -339,14 +298,21 @@ fn build_once(
         return too_deep_analysis(tree, depth);
     }
     let eval_trees = parse_eval_replacements(evals, source);
-    let syntax = crate::cst::SyntaxForest::new(
-        std::iter::once(tree.root_node()).chain(eval_trees.iter().map(|(_, t)| t.root_node())),
+    let syntax = crate::cst::SyntaxForest::with_injections(
+        tree.root_node(),
+        eval_trees
+            .iter()
+            .map(|(host, range, t)| crate::cst::Injection {
+                host: *host,
+                replaces: range.start_byte..range.end_byte,
+                root: t.root_node(),
+            })
+            .collect(),
     );
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
-        eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
         syntax: &syntax,
         scopes: Vec::new(),
         symbols: Vec::new(),
@@ -386,6 +352,7 @@ fn build_once(
         plugin_namespaces: Vec::new(),
         type_provenance: std::collections::HashMap::new(),
         bag: crate::model::witnesses::WitnessBag::new(),
+        vars_bound: false,
         unresolved_expr_nodes: Vec::new(),
         package_framework: std::collections::HashMap::new(),
         blessing_packages: std::collections::HashSet::new(),
@@ -415,6 +382,7 @@ fn build_once(
         plugin_loads: Vec::new(),
         loader_config_params: Vec::new(),
         flow_edges: Vec::new(),
+        flow_matches: None,
         any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
         gated_emissions: Vec::new(),
@@ -438,12 +406,13 @@ fn build_once(
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
         method_call_refs: std::collections::HashMap::new(),
-        indirect_method_calls: Vec::new(),
+        call_sites: Vec::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
         tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
+        rebinds: Default::default(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
@@ -533,13 +502,14 @@ fn build_once(
     // (emissions need an open scope stack) and BEFORE the VarType /
     // named-sub flushes below so pattern emissions ride the same
     // machinery as walk-interleaved hook emissions.
-    bphase!("pattern_dispatch", b.dispatch_pattern_plugins(tree.root_node()));
+    bphase!("pattern_dispatch", b.dispatch_pattern_plugins());
     // After every walk- and pattern-time parent, so the framework base
     // is the MRO's last stop, behind the package's roles.
     b.apply_framework_bases();
 
     b.pop_scope();
     let _ = file_scope;
+    b.bind_walk_witnesses();
 
     // Flush plugin-emitted VarType constraints now that every scope
     // has been pushed. Each uses scope_at on the declared anchor point
@@ -584,7 +554,7 @@ fn build_once(
     // SHAPES) and mint FlowEdges with the builder's own scope. Provenance-only
     // for now (no lowering) — the shapes' types still come from the walk; this
     // proves the query path before it subsumes the manual minting.
-    bphase!("flow_query", b.mint_flow_edges_via_query(tree));
+    bphase!("flow_query", b.mint_flow_edges_via_query());
 
     // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
     // narrowed region at the first edge that rebinds its subject (the
@@ -670,9 +640,8 @@ fn build_once(
     // Deeper chains take more iterations; `MAX_FOLD_ITERATIONS`
     // (debug-only) catches dependency-tracking bugs that would
     // otherwise spin forever.
-    let mut chain_idx = bphase!("build_chain_typing_index", build_chain_typing_index(tree));
-    chain_idx.add_indirect_method_calls(&b.indirect_method_calls);
-    bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&chain_idx));
+    let call_sites = crate::cst::NodeFacts::new(syntax.len(), std::mem::take(&mut b.call_sites));
+    bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&call_sites));
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
     // Expression(refidx) chases resolve through to
@@ -687,7 +656,7 @@ fn build_once(
     // dispatch in document order with the topic-route base replayed
     // from the walk's recorded group spans; `SetRouteBase` emissions
     // update the replay base instead of the (stale) walk stack.
-    bphase!("pattern_dispatch_fold", b.dispatch_pattern_plugins_fold(tree.root_node()));
+    bphase!("pattern_dispatch_fold", b.dispatch_pattern_plugins_fold());
 
     // Test-only: re-run the worklist fold one more time to pin
     // idempotency. Production callers always pass `false`; only
@@ -697,7 +666,7 @@ fn build_once(
     // a byte-identical FileAnalysis — including witness counts,
     // unlike the pre-Phase-6 pipeline.
     if extra_re_fold {
-        b.fold_to_fixed_point(&chain_idx);
+        b.fold_to_fixed_point(&call_sites);
     }
 
     // Post-pass: emit `HashKeyAccess` refs for even-position stringy
@@ -705,14 +674,13 @@ fn build_once(
     // helper-emitted controllers, etc.). Runs after `fold_to_fixed_point`
     // so `invocant_class` is canonical against the bag — was a walk-time
     // emission gated on the partially-resolved walk-time class, now it's
-    // a single post-walk pass that joins refs to args via the chain
-    // typing index.
-    bphase!("emit_mc_arg_keys", b.emit_method_call_arg_keys(&chain_idx));
+    // a single post-walk pass that reads each ref's call site.
+    bphase!("emit_mc_arg_keys", b.emit_method_call_arg_keys(&call_sites));
 
     // Post-pass: chained hashref-key accesses (`$obj->get_config->{host}`).
     // Runs post-fold so the method's return type is canonical — the
     // owner class is the chain receiver's type, unknowable until then.
-    bphase!("emit_chained_hk_refs", b.emit_chained_hash_key_refs(&chain_idx));
+    bphase!("emit_chained_hk_refs", b.emit_chained_hash_key_refs());
 
     // Post-pass: upgrade Variable-owned hash-key derefs whose variable's
     // type settled to a class DURING the fold (`my $row = $rs->find(1);
@@ -743,7 +711,9 @@ fn build_once(
                 _ => None,
             })
             .collect();
-        b.arrow_deref_sites.retain(|s| s.place.as_deref().is_none_or(|p| valued.contains(p)));
+        // A variable's value reaches it through edges as well, so only a
+        // part of one needs a value fact of its own to be worth keeping.
+        b.arrow_deref_sites.retain(|s| s.place.path.is_empty() || valued.contains(&*s.place));
         b.arrow_deref_sites.shrink_to_fit();
         for r in &mut b.refs {
             if let RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } = &mut r.kind {
@@ -839,19 +809,61 @@ impl<'a> Builder<'a> {
     /// it. Idempotent per site, so the worklist fold can mint it each round.
     pub(crate) fn push_reset_marker(&mut self, variable: String, scope: ScopeId, at: Point) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let attachment = WitnessAttachment::Variable { name: variable, scope };
-        let already = self.bag.for_attachment(&attachment).iter().any(|w| {
-            w.span.start == at && w.span.end == at && matches!(w.payload, WitnessPayload::Reset)
-        });
-        if already {
-            return;
-        }
-        self.bag.push(Witness {
-            attachment,
+        let w = self.bound_witness(Witness {
+            attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
             payload: WitnessPayload::Reset,
             span: Span { start: at, end: at },
         });
+        let already = self.bag.iter_attachment(&w.attachment).any(|have| {
+            have.span == w.span && matches!(have.payload, WitnessPayload::Reset)
+        });
+        if !already {
+            self.bag.push(w);
+        }
+    }
+
+    /// Push a witness, a variable's keyed to its binding (`bound_witness`).
+    pub(crate) fn push_witness(&mut self, w: crate::model::witnesses::Witness) -> usize {
+        let w = self.bound_witness(w);
+        self.bag.push(w)
+    }
+
+    /// The walk keys a variable's facts by the scope they are made in: a
+    /// fact can precede the declaration it is about (a sub's invocant is
+    /// typed before its `my ($self) = @_` is visited). Once the walk is
+    /// done every declaration exists, so its facts move onto their
+    /// bindings here, and every later push binds as it goes.
+    pub(super) fn bind_walk_witnesses(&mut self) {
+        let mut bag = std::mem::take(&mut self.bag);
+        bag.rewrite(|w| {
+            crate::model::file_analysis::bind_variable_witness(w, &self.scopes, |n, at, sc| self.binding_of(n, at, sc));
+        });
+        self.bag = bag;
+        self.vars_bound = true;
+    }
+
+    /// A variable's facts live on the place its name binds to
+    /// (`bind_variable_witness`). During the walk a fact stays where it was
+    /// made (`bind_walk_witnesses`).
+    pub(crate) fn bound_witness(&self, mut w: crate::model::witnesses::Witness) -> crate::model::witnesses::Witness {
+        if self.vars_bound {
+            crate::model::file_analysis::bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.binding_of(n, at, sc));
+        }
+        w
+    }
+
+    /// What `name`, written at `at` in `scope`, binds to, and the scope
+    /// that binding lives in.
+    pub(crate) fn binding_of(&self, name: &str, at: Point, scope: ScopeId) -> (crate::model::file_analysis::Binding, ScopeId) {
+        use crate::model::file_analysis::Binding;
+        let binding = self.binding_key_in(name, at, scope);
+        let home = match &binding {
+            Binding::Lexical(sym) | Binding::Receiver(sym) => self.symbols[sym.0 as usize].scope,
+            Binding::Arguments(callable) => *callable,
+            Binding::Package(..) => crate::model::file_analysis::outermost_scope(&self.scopes, scope),
+        };
+        (binding, home)
     }
 
     pub(super) fn push_type_constraint_from(
@@ -861,7 +873,7 @@ impl<'a> Builder<'a> {
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Variable { name: variable, scope },
             source,
             payload: WitnessPayload::InferredType(ty),
@@ -892,11 +904,10 @@ impl<'a> Builder<'a> {
     fn seed_arg_windows(&mut self) {
         use crate::model::witnesses::WitnessAttachment;
         let facts = self.package_facts();
-        let seeded: std::collections::HashSet<ScopeId> = self.bag.all().iter().filter_map(|w| match &w.attachment {
-            WitnessAttachment::Variable { name, scope } if name == "@_"
-                && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
-            _ => None,
-        }).collect();
+        let seeded = |scope: &crate::model::file_analysis::Scope| {
+            let args = crate::model::file_analysis::Place::variable(crate::model::file_analysis::Binding::Arguments(scope.id));
+            self.bag.iter_attachment(&WitnessAttachment::Place(Box::new(args))).any(|w| w.span.start == scope.span.start)
+        };
         let method_names = self.method_call_names();
         let mut heads = Vec::new();
         for i in 0..self.scopes.len() {
@@ -910,7 +921,7 @@ impl<'a> Builder<'a> {
             // The class a sub belongs to is its symbol's (`sub Foo::bar`
             // is `Foo`'s), not the package in force around it.
             let owner_pkg = scope.owner.and_then(|o| self.symbols[o.0 as usize].package.clone());
-            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded.contains(&scope.id)) else { continue };
+            let (Some(pkg), false) = (owner_pkg.or_else(|| scope.package.clone()), seeded(scope)) else { continue };
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
             // A named sub of a class package is a method unless the file
             // only ever calls it as a plain function.
@@ -1075,11 +1086,9 @@ impl<'a> Builder<'a> {
             Err(_) => return,
         };
 
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&ts_parser_perl::LANGUAGE.into()).is_err() {
+        let Some(sub_tree) = super::with_fragment_parser(|p| p.parse(&section_text, None)) else {
             return;
-        }
-        let Some(sub_tree) = parser.parse(&section_text, None) else { return };
+        };
         let sub_src = section_text.as_bytes();
 
         // tree-sitter reports re-parse positions relative to the section text;

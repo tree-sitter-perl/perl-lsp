@@ -57,7 +57,7 @@ fn bag_present_rehydrates_evicted_at_both_caps() {
 
     // The resident copy the index would register: bag stripped.
     let mut stripped = (*full.analysis).clone();
-    stripped.evict_witness_bag();
+    stripped.evict_to(crate::model::file_analysis::Residency::RowsOnly);
     assert!(stripped.bag_is_evicted() && stripped.witnesses.is_empty());
     let stripped_cached = Arc::new(CachedModule::new(path.clone(), Arc::new(stripped)));
 
@@ -2788,7 +2788,7 @@ fn a_stripped_copy_keeps_its_handler_owner_bridges() {
     let whole = bridges(&edges);
     assert!(!whole.is_empty(), "the owned handler bridges its owner");
 
-    fa.evict_symbols();
+    fa.evict_to(crate::model::file_analysis::Residency::Skeleton);
     edges.purge_module("My::Emitter");
     edges.feed("My::Emitter", &path, &fa);
     assert_eq!(bridges(&edges), whole, "the stripped replay lost a bridge");
