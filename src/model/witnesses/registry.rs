@@ -1992,7 +1992,8 @@ impl ReducerRegistry {
     /// between them (`SpanIndex::boundary`) form one segment, read once at its
     /// first write and grown in place through the rest, and the segment's
     /// grown shape stands at its last effective write — the point fact that
-    /// later reads take. Every other witness keeps its place in bag order.
+    /// later reads take. Every other witness keeps its bag order, and the
+    /// grown shapes follow them (`splice_grown`).
     ///
     /// A `Field` is not temporal: its writes are arms of one value, so each
     /// grown shape JOINS the value it grew from, as the slot's other arms do.
@@ -2056,8 +2057,8 @@ impl ReducerRegistry {
         grown
     }
 
-    /// Each grown shape as the witness standing at its delta's raw index,
-    /// in raw order.
+    /// Each grown shape as the witness standing at its delta, in source
+    /// order.
     fn grown_witnesses(raw: &[&Witness], grown: &[(usize, InferredType)]) -> Vec<(usize, Witness)> {
         let mut out: Vec<(usize, Witness)> = grown
             .iter()
@@ -2072,23 +2073,24 @@ impl ReducerRegistry {
                 (*i, grown)
             })
             .collect();
-        out.sort_by_key(|(i, _)| *i);
+        out.sort_by_key(|(i, w)| (w.span.start, *i));
         out
     }
 
-    /// `raw` with its deltas dropped and each grown shape standing where its
-    /// delta did — borrowed, so the witnesses a read takes as they are are
-    /// never copied.
+    /// `raw` with its deltas dropped and the grown shapes after every other
+    /// witness, in source order — borrowed, so the witnesses a read takes as
+    /// they are are never copied.
+    ///
+    /// Source order, not the deltas' bag order: the fold takes the latest of
+    /// two shapes in list order, and a bag's order is not its source's (an
+    /// enrichment-time delta lands after the build's, whatever its line), so
+    /// in bag order an older closed shape could outrank the newer one a later
+    /// write opened. After the rest, because a grown shape is derived from
+    /// the witnesses standing before its write.
     fn splice_grown<'w>(raw: &[&'w Witness], grown: &'w [(usize, Witness)]) -> Vec<&'w Witness> {
-        let mut grown = grown.iter().peekable();
-        let mut out = Vec::with_capacity(raw.len());
-        for (i, w) in raw.iter().enumerate() {
-            if !matches!(w.payload, WitnessPayload::Extend(_)) {
-                out.push(*w);
-            } else if grown.peek().is_some_and(|(j, _)| *j == i) {
-                out.push(&grown.next().expect("peeked").1);
-            }
-        }
+        let mut out: Vec<&Witness> =
+            raw.iter().copied().filter(|w| !matches!(w.payload, WitnessPayload::Extend(_))).collect();
+        out.extend(grown.iter().map(|(_, w)| w));
         out
     }
 
