@@ -26,16 +26,15 @@ impl FileAnalysis {
         }
         let Some(idx) = module_index else { return };
         // every package name this file declares, for FQ + tail matching
-        let my_packages: Vec<String> = self
+        // (name, leaf): a loader may name a package by either.
+        let my_packages: Vec<(String, String)> = self
             .symbols
             .iter()
             .filter(|s| matches!(s.kind, SymKind::Package | SymKind::Class))
-            .map(|s| s.name.clone())
+            .map(|s| (s.name.clone(), split_qualified(&s.name, self.names()).1.to_string()))
             .collect();
         let matches_me = |load_name: &str| -> bool {
-            my_packages.iter().any(|p| {
-                p == load_name || p.rsplit("::").next() == Some(load_name)
-            })
+            my_packages.iter().any(|(p, leaf)| p == load_name || leaf == load_name)
         };
 
         let markers = self.loader_config_params.clone();

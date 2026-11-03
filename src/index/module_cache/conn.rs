@@ -93,6 +93,10 @@ fn apply_pragmas(conn: &Connection, busy: std::time::Duration) {
     let _ = conn.busy_timeout(busy);
     let _ = conn.execute_batch(sql::PRAGMA_JOURNAL_WAL.registered());
     let _ = conn.execute_batch(sync.registered());
+    // Every generation write is a savepoint, whose statement journal on a
+    // temp file cost the writer 15-22% of its busy time on a cold index
+    // (docs/adr/storage-engine.md, "Generation writes are savepoints").
+    let _ = conn.execute_batch(sql::PRAGMA_TEMP_STORE_MEMORY.registered());
 }
 
 /// THE open: every cache connection goes through here, so the process-wide
