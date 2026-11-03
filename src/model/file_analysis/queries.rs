@@ -834,7 +834,9 @@ impl FileAnalysis {
 
     /// True when a closed literal shape on the variable `var_text` names at
     /// `at` is its whole story in this file: that variable (not every one
-    /// spelled the same) is never reassigned. Key
+    /// spelled the same) is a lexical, and is never reassigned. A package
+    /// variable never is: other files write it (Webmin's `%config` is
+    /// filled by `init_config` in another file), so its keys are open. Key
     /// writes AND escapes are not gate clauses — both are modeled on
     /// the shape itself by the mutation-extension pass (writes extend
     /// or open; an escape is an open-switching write at the escape
@@ -844,7 +846,16 @@ impl FileAnalysis {
     /// (docs/adr/structural-shapes.md); the unknown-hash-key
     /// diagnostic only fires behind it.
     pub fn closed_shape_is_whole_story(&self, var_text: &str, at: Point) -> bool {
-        self.variable_binding(var_text, at).is_none_or(|id| !self.reassigned_vars.contains(&id))
+        let Some(id) = self.variable_binding(var_text, at) else {
+            // Unbound only when an `our` of another package is in view:
+            // still a package variable.
+            return false;
+        };
+        let package_variable = matches!(
+            self.symbols[id.0 as usize].detail,
+            SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_variable()
+        );
+        !package_variable && !self.reassigned_vars.contains(&id)
     }
 
     /// The variable a use of `name` written at `at` binds to — the
@@ -888,7 +899,7 @@ impl FileAnalysis {
         let mut declared = self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter(|s| {
             s.name == name
                 && matches!(s.kind, SymKind::Variable | SymKind::Field)
-                && !matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() || matches!(decl_kind, DeclKind::Mention))
+                && !matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_variable())
         });
         // A use inside a declaring statement reads what the declaration
         // shadows, so it binds further out.

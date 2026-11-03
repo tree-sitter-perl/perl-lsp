@@ -1441,9 +1441,9 @@ sub b2 { my $q = { url => 1 }; print $q->{typo}; }
 }
 
 /// A qualified global and a special variable are variables too: their
-/// writes bind, so a reassignment opens their shape whatever package the
-/// use is written in (Foswiki's `local %Foswiki::cfg = (…)` then
-/// `%Foswiki::cfg = %$upper`).
+/// writes bind to one identity whatever package the use is written in
+/// (Foswiki's `local %Foswiki::cfg = (…)` then `%Foswiki::cfg = %$upper`).
+/// Being package variables, neither reports a missing key.
 #[test]
 fn qualified_and_special_globals_are_reassigned_by_binding() {
     let src = "\
@@ -1466,6 +1466,30 @@ sub q { my $q = { url => 1 }; print $q->{typo}; }
     let env = fa.symbols().iter().find(|s| s.name == "%ENV").expect("%ENV binds");
     assert_eq!(env.package.as_deref(), Some("main"), "a special variable lives in main");
     assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
+}
+
+/// A package variable's shape is never the whole story: any file can write
+/// it. Webmin's bare `our %config;` is filled by `init_config` in another
+/// file, and `$Foswiki::cfg{X}` is written by `LocalSite.cfg`, so neither
+/// an `our`, an undeclared global nor a qualified spelling reports a key
+/// its literal lacks. A lexical still does.
+#[test]
+fn package_variables_have_no_closed_shape() {
+    let src = "\
+package Foswiki;
+our %cfg;
+our %init = ( A => 1 );
+my %lex = ( A => 1 );
+sub a { return $cfg{Unq} . $Foswiki::cfg{Qual} . $init{B} . $Foswiki::init{C} }
+sub b { %undeclared = ( A => 1 ); return $undeclared{B} }
+sub c { our $ref = { A => 1 }; return $ref->{B} }
+sub d { return $lex{typo} }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 7)], "only the lexical reports");
 }
 
 /// A write inside a nested block lands on the variable, wherever the block
