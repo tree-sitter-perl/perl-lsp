@@ -1536,6 +1536,24 @@ sub b { my $o = {}; my $r = \\$o->{k}; return $o->{k}{deep} . $o->{typo} }
     assert_eq!(typos, vec![("hlep".to_string(), 1), ("typo".to_string(), 2)]);
 }
 
+/// An open shape may already hold a key it does not list, so a write below
+/// that key knows only its own path: what it vivifies is open too (Znuny's
+/// `$p->{Config}->{$n} = …` in a loop, then `$p->{Config}->{Scope} //= …`).
+/// Below a closed shape the key is new, and the vivified shape is closed.
+#[test]
+fn a_write_below_an_open_shapes_unlisted_key_vivifies_open() {
+    let src = "\
+package Foo;
+sub a { my $p = {}; for my $n (qw(A B)) { $p->{C}->{$n} = 1; } $p->{C}->{A} //= 1; print $p->{C}->{B}; }
+sub b { my $p = {}; $p->{C}->{A} = 1; print $p->{C}->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.projected_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 2)]);
+}
+
 /// A fallback floor written against a value nothing types says what kind
 /// of value the author expects, not that it is the empty literal: `$o->{y}
 /// // {}` may hold any keys (98_Modbus.pm, TablePlugin Core.pm).
