@@ -48,12 +48,6 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
     }
 }
 
-/// Persist one module's generation: blob + its relational ref rows, always
-/// together (`docs/adr/relational-ref-index.md` — rows and blob describe the
-/// same analysis or neither exists). `save_to_db` skips degraded analyses;
-/// mirror that here so no rows exist for an unpersisted blob.
-/// Returns whether the blob row AND its derived rows landed (the
-/// strip-legality signal).
 /// Persist EVERY provider of `module_name` — one row per file, because the
 /// name maps to a set. `true` only when all of them landed: a partial write
 /// must not license the resident strip, or the un-persisted provider loses
@@ -64,51 +58,18 @@ pub(super) fn save_module_generation(
     result: &Option<Providers>,
 ) -> bool {
     let Some(providers) = result else {
-        return save_one_provider(conn, module_name, &None);
+        return module_cache::save_to_db(conn, module_name, &None, module_cache::NAME_KEYED_SOURCE);
     };
     let mut all = true;
     for m in providers {
-        all &= save_one_provider(conn, module_name, &Some(m.clone()));
+        all &= module_cache::save_to_db(
+            conn,
+            module_name,
+            &Some(m.clone()),
+            module_cache::NAME_KEYED_SOURCE,
+        );
     }
     all
-}
-
-fn save_one_provider(
-    conn: &rusqlite::Connection,
-    module_name: &str,
-    result: &Option<Arc<CachedModule>>,
-) -> bool {
-    if let Some(m) = result {
-        // A bag-evicted copy IS the already-persisted generation —
-        // re-encoding it would overwrite the good blob with a bagless one.
-        if m.analysis.bag_is_evicted() {
-            return true;
-        }
-    }
-    let persisted = module_cache::save_to_db(conn, module_name, result, module_cache::NAME_KEYED_SOURCE);
-    if !persisted {
-        // Blob didn't land (busy/encode failure): shredding rows now would
-        // pair a NEW generation's rows with an OLD (or absent) blob —
-        // "blob + rows describe one generation" is the write invariant.
-        return false;
-    }
-    if let Some(m) = result {
-        if !m.analysis.degraded {
-            let seeds = m.analysis.row_seeds();
-            if let Err(e) = module_cache::shred_derived_rows(
-                conn,
-                &m.path.to_string_lossy(),
-                module_cache::NAME_KEYED_SOURCE,
-                &seeds,
-            ) {
-                log::error!("Failed to shred derived rows for '{}': {}", module_name, e);
-                // Without its rows the file is invisible to retrieval; a
-                // whole copy still answers from the resident sweep.
-                return false;
-            }
-        }
-    }
-    persisted
 }
 
 /// Stamp-before-read + re-stat-after-parse: capture the disk stamp, run the
@@ -256,12 +217,16 @@ pub(crate) fn send_to_writer<E>(tx: &std::sync::mpsc::SyncSender<E>, entry: E) {
 /// fail). With no Connection the channel drains unregistered. Registration
 /// runs inside the panic guard, mirroring the txn: entries a mid-batch
 /// registration panic leaves behind take the fallback lane instead of
-/// vanishing.
-pub(crate) fn run_persist_writer<E>(
+/// vanishing. `begin_chunk` runs once per chunk inside its transaction and
+/// hands `write_entry` whatever chunk-wide state it reads (the stubs-table
+/// version); `write_entry` answers for one entry, so there is exactly one
+/// verdict per entry by construction.
+pub(crate) fn run_persist_writer<E, C>(
     rx: std::sync::mpsc::Receiver<E>,
     conn: Option<&rusqlite::Connection>,
     label: &str,
-    write_batch: impl Fn(&rusqlite::Connection, &[E]) -> Vec<bool>,
+    begin_chunk: impl Fn(&rusqlite::Connection) -> C,
+    write_entry: impl Fn(&rusqlite::Connection, &C, &E) -> bool,
     mut on_committed: impl FnMut(E),
     mut on_fallback: impl FnMut(E),
 ) {
@@ -283,8 +248,14 @@ pub(crate) fn run_persist_writer<E>(
                     false
                 }
             };
-            let landed = write_batch(conn, batch);
-            debug_assert_eq!(landed.len(), n, "{label}: one verdict per entry");
+            // A failed BEGIN would leave each write autocommitting, and the
+            // whole chunk takes the fallback lane anyway — skip the writes.
+            let landed: Vec<bool> = if txn_open {
+                let chunk = begin_chunk(conn);
+                batch.iter().map(|e| write_entry(conn, &chunk, e)).collect()
+            } else {
+                Vec::new()
+            };
             let committed = txn_open
                 && match conn.execute_batch(module_cache::sql::TXN_COMMIT.registered()) {
                     Ok(()) => true,
@@ -297,8 +268,8 @@ pub(crate) fn run_persist_writer<E>(
                     }
                 };
             if committed {
-                for (i, e) in batch.drain(..).enumerate() {
-                    if landed.get(i).copied().unwrap_or(false) {
+                for (e, landed) in batch.drain(..).zip(landed) {
+                    if landed {
                         on_committed(e);
                     } else {
                         on_fallback(e);
