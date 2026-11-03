@@ -148,9 +148,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Mint a `MethodCall` ref's call site as a fact on its main-tree call
-    /// node. A call in an `s///e` replacement tree has none: the post-walk
-    /// passes that read call sites cover the main tree.
+    /// Mint a `MethodCall` ref's call site as a fact on its call node, in
+    /// whichever parse holds it.
     fn record_call_site(
         &mut self,
         call: Node<'a>,
@@ -158,7 +157,7 @@ impl<'a> Builder<'a> {
         invocant: Option<Node<'a>>,
         args: Option<Node<'a>>,
     ) {
-        if let Some(id) = self.syntax.main().lift(call).map(|n| n.id()) {
+        if let Some(id) = self.syntax.lift(call).map(|n| n.id()) {
             self.call_sites.push((id, CallSite { ref_idx, invocant, args }));
         }
     }

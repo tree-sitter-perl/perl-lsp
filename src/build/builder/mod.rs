@@ -256,15 +256,8 @@ pub(super) enum TailArm {
 
 struct Builder<'a> {
     source: &'a [u8],
-    /// The code of each `s///e` replacement, by the replacement's start
-    /// byte — see `parse_eval_replacements`.
-    // TODO(injected-trees): only the walk sees these. Post-walk passes that
-    // traverse from the main root (pattern dispatch, flow query, the chain
-    // typing index) miss replacement code; the fix is a file tree type that
-    // yields injected trees transparently, not a roots list each pass loops.
-    eval_injections: std::collections::HashMap<usize, Node<'a>>,
-    /// Every parse this build reads (the main tree and each injection),
-    /// navigable by node identity — upward reads go through it, never
+    /// Every parse this build reads (the main tree and each `s///e`
+    /// replacement's code), navigable by node identity — upward reads go through it, never
     /// through `Node::parent`, which rescans from the root.
     syntax: &'a crate::cst::SyntaxForest<'a>,
 

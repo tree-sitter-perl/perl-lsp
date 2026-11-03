@@ -11,7 +11,7 @@
 //! the `Undef` negative lattice): `docs/adr/flow-narrowing.md`.
 
 
-use tree_sitter::{Node, Point, Tree};
+use tree_sitter::{Node, Point};
 
 use crate::cst::node_to_span;
 use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span, Subject};
@@ -1004,13 +1004,12 @@ impl<'a> Builder<'a> {
     /// here — the same FlowEdge concept the cpp pack produces. The forcing-
     /// function start of Perl-on-the-query-engine. Provenance-only for now
     /// (no lowering): the shapes' types still come from the walk.
-    pub(super) fn mint_flow_edges_via_query(&mut self, tree: &'a Tree) {
-        use tree_sitter::{QueryCursor, StreamingIterator};
+    pub(super) fn mint_flow_edges_via_query(&mut self) {
         use crate::build::query_extract::{Capture, FlowCap};
         let (query, caps_of) = super::flow_query();
-        // Collect captures per match FIRST — the cursor borrows `self.source`,
-        // so we can't mutate until it drops. `source` is optional: a clear
-        // (`@flow.clear`) carries no inflowing value.
+        // Collect captures per match FIRST: minting needs `&mut self`.
+        // `source` is optional: a clear (`@flow.clear`) carries no
+        // inflowing value.
         struct FlowCaps<'t> {
             target: Option<Node<'t>>,
             clear: Option<Node<'t>>,
@@ -1018,23 +1017,20 @@ impl<'a> Builder<'a> {
             source: Option<Node<'t>>,
         }
         let mut pending: Vec<FlowCaps> = Vec::new();
-        {
-            let mut cursor = QueryCursor::new();
-            let mut matches = cursor.matches(query, tree.root_node(), self.source);
-            while let Some(m) = matches.next() {
-                let mut caps = FlowCaps { target: None, clear: None, rebind: None, source: None };
-                for c in m.captures {
-                    match caps_of[c.index as usize] {
-                        Capture::Flow(FlowCap::Target) => caps.target = Some(c.node),
-                        Capture::Flow(FlowCap::Clear) => caps.clear = Some(c.node),
-                        Capture::Flow(FlowCap::Rebind) => caps.rebind = Some(c.node),
-                        Capture::Flow(FlowCap::Source) => caps.source = Some(c.node),
-                        other => unreachable!("flow_query admits only the captures read here, not {other}"),
-                    }
+        let (matches, _) = self.file_matches(query, |_| true);
+        for (_, captured) in matches {
+            let mut caps = FlowCaps { target: None, clear: None, rebind: None, source: None };
+            for (index, node) in captured {
+                match caps_of[index as usize] {
+                    Capture::Flow(FlowCap::Target) => caps.target = Some(node),
+                    Capture::Flow(FlowCap::Clear) => caps.clear = Some(node),
+                    Capture::Flow(FlowCap::Rebind) => caps.rebind = Some(node),
+                    Capture::Flow(FlowCap::Source) => caps.source = Some(node),
+                    other => unreachable!("flow_query admits only the captures read here, not {other}"),
                 }
-                if caps.target.or(caps.clear).or(caps.rebind).is_some() {
-                    pending.push(caps);
-                }
+            }
+            if caps.target.or(caps.clear).or(caps.rebind).is_some() {
+                pending.push(caps);
             }
         }
         for caps in pending {

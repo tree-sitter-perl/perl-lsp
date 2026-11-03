@@ -396,7 +396,7 @@ impl<'a> Builder<'a> {
         static ASSIGNMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
         let kinds = ASSIGNMENT.get_or_init(|| perl_kind_ids(&["assignment_expression"]));
         let assignments: Vec<Node<'a>> =
-            self.syntax.main().root().descendants_of_kind(kinds).map(|n| n.ts()).collect();
+            self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| n.ts()).collect();
         let mut to_push: Vec<(String, ScopeId, Span, InferredType)> = Vec::new();
         crate::util::ghost_stats::count_by("chain.assignment_nodes", assignments.len() as u64);
         // Snapshot of the bag's typed-Variable witnesses, keyed by
@@ -820,9 +820,8 @@ impl<'a> Builder<'a> {
         // The chained shape only: a plain `$var->{key}` is the walk's.
         let chained: Vec<Node<'a>> = self
             .syntax
-            .main()
-            .root()
-            .descendants_of_kind(kinds)
+            .file_nodes_of_kind(kinds)
+            .into_iter()
             .map(|n| n.ts())
             .filter(|n| crate::cst::nth_element(*n, 0).is_some_and(|c| c.kind() == "method_call_expression"))
             .collect();

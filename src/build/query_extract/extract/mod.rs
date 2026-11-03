@@ -412,7 +412,7 @@ impl<'t> DeclaratorPeel<'t> {
     pub fn of_tree(tree: &'t Tree, source: &[u8], pack: &LangPack) -> Self {
         match cached_query(&tree.language(), pack.query_source) {
             Ok(compiled) => {
-                let syntax = crate::cst::SyntaxForest::new([tree.root_node()]);
+                let syntax = crate::cst::SyntaxForest::new(tree.root_node());
                 DeclaratorPeel(record_matches(compiled, &syntax, tree.root_node(), source).0)
             }
             Err(_) => DeclaratorPeel(links::Links::default()),
@@ -461,7 +461,7 @@ pub fn extract_in(
     // ---- flatten matches into captures on the tree ----
     // The extractor reads the tree for every capture, so it is built
     // up front.
-    let syntax = crate::cst::SyntaxForest::new([root]);
+    let syntax = crate::cst::SyntaxForest::new(root);
     let (links, captured) = record_matches(compiled, &syntax, root, source);
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;

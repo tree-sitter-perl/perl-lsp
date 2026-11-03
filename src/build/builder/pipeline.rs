@@ -68,25 +68,28 @@ pub(super) fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usi
 
 /// Every `s///e` replacement parsed as Perl over the file's own bytes
 /// (tree-sitter included ranges), so its nodes index `source` and the walk
-/// visits them as code. Keyed by the replacement's start byte; replacements
-/// nested inside one are parsed too.
-fn parse_eval_replacements(mut ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, Tree)> {
+/// visits them as code. Each comes with the forest index of the parse that
+/// holds its replacement node (0 is the main tree); replacements nested
+/// inside one are parsed after it, so a host always precedes its guests.
+fn parse_eval_replacements(ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, tree_sitter::Range, Tree)> {
     let mut out = Vec::new();
-    if ranges.is_empty() {
+    let mut pending: Vec<(usize, tree_sitter::Range)> = ranges.into_iter().map(|r| (0, r)).collect();
+    if pending.is_empty() {
         return out;
     }
     let mut parser = super::create_parser();
-    while let Some(range) = ranges.pop() {
+    while let Some((host, range)) = pending.pop() {
         if parser.set_included_ranges(&[range]).is_err() {
             continue;
         }
         let Some(code) = parser.parse(source, None) else { continue };
+        let index = out.len() + 1;
         survey(code.root_node(), |n| {
             if let Some(r) = crate::cst::eval_replacement(n, source) {
-                ranges.push(r.range());
+                pending.push((index, r.range()));
             }
         });
-        out.push((range.start_byte, code));
+        out.push((host, range, code));
     }
     out
 }
@@ -287,14 +290,21 @@ fn build_once(
         return too_deep_analysis(tree, depth);
     }
     let eval_trees = parse_eval_replacements(evals, source);
-    let syntax = crate::cst::SyntaxForest::new(
-        std::iter::once(tree.root_node()).chain(eval_trees.iter().map(|(_, t)| t.root_node())),
+    let syntax = crate::cst::SyntaxForest::with_injections(
+        tree.root_node(),
+        eval_trees
+            .iter()
+            .map(|(host, range, t)| crate::cst::Injection {
+                host: *host,
+                replaces: range.start_byte..range.end_byte,
+                root: t.root_node(),
+            })
+            .collect(),
     );
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
-        eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
         syntax: &syntax,
         scopes: Vec::new(),
         symbols: Vec::new(),
@@ -481,7 +491,7 @@ fn build_once(
     // (emissions need an open scope stack) and BEFORE the VarType /
     // named-sub flushes below so pattern emissions ride the same
     // machinery as walk-interleaved hook emissions.
-    bphase!("pattern_dispatch", b.dispatch_pattern_plugins(tree.root_node()));
+    bphase!("pattern_dispatch", b.dispatch_pattern_plugins());
     // After every walk- and pattern-time parent, so the framework base
     // is the MRO's last stop, behind the package's roles.
     b.apply_framework_bases();
@@ -532,7 +542,7 @@ fn build_once(
     // SHAPES) and mint FlowEdges with the builder's own scope. Provenance-only
     // for now (no lowering) — the shapes' types still come from the walk; this
     // proves the query path before it subsumes the manual minting.
-    bphase!("flow_query", b.mint_flow_edges_via_query(tree));
+    bphase!("flow_query", b.mint_flow_edges_via_query());
 
     // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
     // narrowed region at the first edge that rebinds its subject (the
@@ -618,7 +628,7 @@ fn build_once(
     // Deeper chains take more iterations; `MAX_FOLD_ITERATIONS`
     // (debug-only) catches dependency-tracking bugs that would
     // otherwise spin forever.
-    let call_sites = crate::cst::NodeFacts::new(syntax.main().len(), std::mem::take(&mut b.call_sites));
+    let call_sites = crate::cst::NodeFacts::new(syntax.len(), std::mem::take(&mut b.call_sites));
     bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&call_sites));
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
@@ -634,7 +644,7 @@ fn build_once(
     // dispatch in document order with the topic-route base replayed
     // from the walk's recorded group spans; `SetRouteBase` emissions
     // update the replay base instead of the (stale) walk stack.
-    bphase!("pattern_dispatch_fold", b.dispatch_pattern_plugins_fold(tree.root_node()));
+    bphase!("pattern_dispatch_fold", b.dispatch_pattern_plugins_fold());
 
     // Test-only: re-run the worklist fold one more time to pin
     // idempotency. Production callers always pass `false`; only
