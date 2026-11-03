@@ -1988,7 +1988,7 @@ impl ReducerRegistry {
     /// Replace a place's `Extend` deltas with the shapes they grow: each
     /// delta lays its key over the value standing at its site, as a read
     /// there would see it. Consecutive deltas with nothing else of the place
-    /// between them (`segment_boundary`) form one segment, read once at its
+    /// between them (`SpanIndex::boundary`) form one segment, read once at its
     /// first write and grown in place through the rest, and the segment's
     /// grown shape stands at its last effective write — the point fact that
     /// later reads take. Every other witness keeps its place in bag order.
@@ -2005,8 +2005,9 @@ impl ReducerRegistry {
     ) -> Vec<Witness> {
         let temporal = q.attachment.is_temporal();
         let point = q.point.filter(|_| temporal);
-        let others: Vec<&Witness> =
-            raw.iter().copied().filter(|w| !matches!(w.payload, WitnessPayload::Extend(_))).collect();
+        let others = super::SpanIndex::of(
+            raw.iter().copied().filter(|w| !matches!(w.payload, WitnessPayload::Extend(_))),
+        );
         let mut deltas: Vec<(usize, &Witness)> = raw
             .iter()
             .copied()
@@ -2025,7 +2026,7 @@ impl ReducerRegistry {
             let at = d.span.start;
             let fresh = match prev {
                 None => true,
-                Some(prev) => temporal && super::segment_boundary(others.iter().copied(), prev, at),
+                Some(prev) => temporal && others.boundary(prev, at),
             };
             if fresh {
                 if let (Some(t), Some(j)) = (current.take(), last_effective.take()) {

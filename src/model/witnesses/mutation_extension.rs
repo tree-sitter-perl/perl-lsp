@@ -108,7 +108,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
 /// the value standing at the write. A delta never changes whether a place
 /// holds an object (it grows a shape or does nothing), so the answer moves
 /// only where some other witness of the place does — the place is re-read
-/// at a segment boundary (`segment_boundary`), never once per write.
+/// at a segment boundary (`SpanIndex::boundary`), never once per write.
 #[derive(Default)]
 struct SlotRoutes {
     current: Option<RouteSegment>,
@@ -116,7 +116,7 @@ struct SlotRoutes {
 
 struct RouteSegment {
     place: crate::model::file_analysis::Place,
-    others: Vec<Witness>,
+    others: SpanIndex,
     at: Point,
     owner: Option<String>,
 }
@@ -129,38 +129,62 @@ impl SlotRoutes {
         place: &crate::model::file_analysis::Place,
         at: Point,
     ) -> Option<String> {
-        let reuse = self.current.as_ref().is_some_and(|seg| {
-            seg.place == *place && !segment_boundary(seg.others.iter(), seg.at, at)
-        });
-        if !reuse {
+        let same_place = self.current.as_ref().is_some_and(|seg| seg.place == *place);
+        if !same_place {
             let att = WitnessAttachment::Place(Box::new(place.clone()));
-            let others = bag
-                .iter_attachment_indexed(&att)
-                .map(|(_, w)| w)
-                .filter(|w| !matches!(w.payload, WitnessPayload::Extend(_)))
-                .cloned()
-                .collect();
-            let owner = query_variable_place(bag, ctx, place, at)
-                .and_then(|t| t.class_name().map(str::to_string));
-            self.current = Some(RouteSegment { place: place.clone(), others, at, owner });
+            // A use's observation (a deref, a numeric context) says how the
+            // value is used, never which class it is, so only a witness that
+            // can bind a value moves the route.
+            let others = SpanIndex::of(bag.iter_attachment_indexed(&att).map(|(_, w)| w).filter(|w| match &w.payload {
+                WitnessPayload::Extend(_) => false,
+                WitnessPayload::Observation(_) => w.payload.binds_value(),
+                _ => true,
+            }));
+            self.current = Some(RouteSegment { place: place.clone(), others, at, owner: None });
+            let seg = self.current.as_mut().expect("set above");
+            seg.owner = query_variable_place(bag, ctx, place, at).and_then(|t| t.class_name().map(str::to_string));
         }
         let seg = self.current.as_mut().expect("set above");
+        if same_place && seg.others.boundary(seg.at, at) {
+            seg.owner = query_variable_place(bag, ctx, place, at).and_then(|t| t.class_name().map(str::to_string));
+        }
         seg.at = at;
         seg.owner.clone()
     }
 }
 
-/// Did the value standing at a place move between two of its writes
-/// (`prev` < `at`) other than by the writes themselves? Some other witness
-/// of the place opens in `(prev, at]`, or a region holding at `prev` ends
-/// before `at`. A region holding at both cannot: the write at `prev` is a
-/// point fact after the region opened, and the fold lets that outrank it.
-pub(super) fn segment_boundary<'a>(others: impl Iterator<Item = &'a Witness>, prev: Point, at: Point) -> bool {
-    others.into_iter().any(|w| {
-        let starts = prev < w.span.start && w.span.start <= at;
-        let region_ends = w.span.start != w.span.end && prev <= w.span.end && w.span.end < at;
-        starts || region_ends
-    })
+/// The sites of a place's witnesses other than its deltas, sorted for
+/// the two questions `boundary` asks.
+pub(super) struct SpanIndex {
+    starts: Vec<Point>,
+    region_ends: Vec<Point>,
+}
+
+impl SpanIndex {
+    pub(super) fn of<'a>(others: impl Iterator<Item = &'a Witness>) -> Self {
+        let mut starts = Vec::new();
+        let mut region_ends = Vec::new();
+        for w in others {
+            starts.push(w.span.start);
+            if w.span.start != w.span.end {
+                region_ends.push(w.span.end);
+            }
+        }
+        starts.sort();
+        region_ends.sort();
+        SpanIndex { starts, region_ends }
+    }
+
+    /// Did the value standing at the place move between two of its writes
+    /// (`prev` < `at`) other than by the writes themselves? Some other
+    /// witness opens in `(prev, at]`, or a region holding at `prev` ends
+    /// before `at`. A region holding at both cannot: the write at `prev` is a
+    /// point fact after the region opened, and the fold lets that outrank it.
+    pub(super) fn boundary(&self, prev: Point, at: Point) -> bool {
+        let opens = self.starts.partition_point(|p| *p <= prev) < self.starts.partition_point(|p| *p <= at);
+        let closes = self.region_ends.partition_point(|p| *p < prev) < self.region_ends.partition_point(|p| *p < at);
+        opens || closes
+    }
 }
 
 /// `shape` after a write through `hops` (outermost key first), in place: a
