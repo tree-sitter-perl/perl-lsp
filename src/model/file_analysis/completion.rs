@@ -193,7 +193,7 @@ impl FileAnalysis {
             // multi-line scope (span_size counts rows*10000), which parked
             // every real lexical BELOW all of those tiers — invisible while
             // completion was uncapped, candidate loss the day it wasn't.
-            // Innermost-shadow selection still rides the scope-size sort
+            // Innermost-shadow selection still rides the scope-depth sort
             // above; within a tier the client tie-breaks by label.
             let priority = match &self.scopes[sym.scope.0 as usize].kind {
                 ScopeKind::File => PRIORITY_FILE_WIDE,

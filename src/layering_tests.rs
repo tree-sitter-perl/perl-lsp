@@ -1919,6 +1919,26 @@ fn raw_scope_climbs_are_containment_only() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A size is not a depth: two nested scopes with the same extent tie on
+/// size, and the answer then rides push order. Scope lookups go through
+/// `innermost_scope_at` (containment) and rank by `scope_depth`; the
+/// remaining `span_size` readers pick the narrowest ref or symbol.
+#[test]
+fn span_size_never_picks_a_scope() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| !rel.contains("/tests/") && !rel.ends_with("_tests.rs"))
+            .map(|(rel, text)| (rel, without_test_modules(&code_only(&text))))
+            .collect();
+    let seen = count_lines(&files, &|l| l.contains("span_size(") && !l.contains("fn span_size"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/file_analysis/cursor_queries.rs", 3, "the narrowest ref at a point, the narrowest enclosing callable symbol, the narrowest cursor candidate"),
+    ];
+    let drift = allowlist_drift("span_size readers (a scope lookup is containment + depth)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 #[test]
 fn pack_string_tables_are_ratcheted() {
     let seen = pack_string_sites(&|value, kinds, fields| {
