@@ -1242,6 +1242,7 @@ class Clock {
 /// through the use-map, `self` and `static` name the class the method is
 /// written in, a nullable is its class, and a union, `void` or no
 /// declaration states no type.
+#[cfg(feature = "php")]
 #[test]
 fn a_declared_return_is_the_callables_value() {
     use crate::model::file_analysis::InferredType as T;
@@ -1267,6 +1268,7 @@ fn a_declared_return_is_the_callables_value() {
 /// `self` and `static` name the class they are written in wherever a type
 /// is written: a parameter, a property, a promoted parameter, a closure's
 /// parameter, nullable or not.
+#[cfg(feature = "php")]
 #[test]
 fn self_names_the_enclosing_class_in_every_written_type() {
     use crate::model::file_analysis::RefKind;
@@ -1299,6 +1301,7 @@ class Node {
 /// types hop by hop: every receiver in `$this->with()->again()->…->tick()`
 /// is the class the previous call returns, and a free call's value starts
 /// a chain too.
+#[cfg(feature = "php")]
 #[test]
 fn a_call_chain_types_through_declared_returns() {
     use crate::model::file_analysis::RefKind;
@@ -1329,6 +1332,7 @@ fn a_call_chain_types_through_declared_returns() {
 /// From a chained receiver, goto-def and rename reach the member of the
 /// class the previous call returns, in another file too, and hover on a
 /// call shows the return it resolves to.
+#[cfg(feature = "php")]
 #[test]
 fn a_chained_member_resolves_across_files_and_hovers_its_return() {
     let ws = Workspace::new(&[("/fake/php/Lib/Clock.php", CLOCK), ("/fake/php/App/Builder.php", RETURNS)]);
@@ -1378,6 +1382,7 @@ class Users extends Query {
 /// An inherited method's declared return types a chain off the child, and
 /// a `static` return names the class the method is written in: `where()`
 /// declared on `Query` answers `Query`, wherever it is called from.
+#[cfg(feature = "php")]
 #[test]
 fn an_inherited_declared_return_types_the_chain_across_files() {
     use crate::model::file_analysis::RefKind;
