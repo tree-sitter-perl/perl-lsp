@@ -329,8 +329,6 @@ pub struct FileAnalysis {
     pub language: String,
 
     // Indices (built in post-pass — skipped by serde; call rebuild_all_indices() after deserialize)
-    #[serde(skip, default)]
-    scope_starts: Vec<(Point, ScopeId)>, // sorted by start point
     /// Union of `export` + `export_ok` for O(1) membership tests.
     /// Rebuilt by `build_indices` (called from `new` and `after_deserialize`),
     /// so it is valid for freshly-built and SQLite-cached modules alike.

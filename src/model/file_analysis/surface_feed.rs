@@ -144,7 +144,6 @@ impl FileAnalysis {
             instance: _instance, // sessional copy identity, not content
 
             // ---- Derived indices, rebuilt from the tables above.
-            scope_starts: _scope_starts,
             export_lookup: _export_lookup,
         } = self;
         SurfaceFeed {

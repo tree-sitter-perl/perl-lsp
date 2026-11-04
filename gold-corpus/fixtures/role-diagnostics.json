@@ -6,7 +6,7 @@
       "difficulty": "tricky",
       "semantic_area": "roles",
       "root": "gold-corpus/role-fixture",
-      "incRoots": ["gold-corpus/local/lib/perl5"],
+      "incRoots": ["substrate"],
       "file": "",
       "expect": {
         "all": [
