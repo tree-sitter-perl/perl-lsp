@@ -1456,3 +1456,31 @@ fn framework_keywords_bind_in_the_package_that_used_the_framework() {
     assert!(analysis.imports.keyword(at(2), "has"));
     assert!(!analysis.imports.keyword(at(4), "has"), "B never used Moo");
 }
+
+#[test]
+fn a_glob_alias_of_an_import_binds_the_same_producer_in_the_aliasing_package() {
+    let producer = "package Util;\nour @EXPORT_OK = qw(helper);\nsub helper { 1 }\n1;\n";
+    // IO::Socket::SSL's shape: the inner package aliases a name its parent imported.
+    let consumer = "package A;\nuse Util qw(helper);\npackage A::Inner;\n*helper = *A::helper;\nhelper();\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache("Util", Some(cached_from_source("/usr/lib/perl5/Util.pm", producer)));
+
+    assert!(resolve_imported_function(&analysis, "helper", tree_sitter::Point::new(4, 0), &module_index).is_some());
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(!diags.iter().any(|d| d.message.contains("helper")), "got {:?}", diags);
+}
+
+#[test]
+fn a_glob_alias_binds_a_declared_sub_but_not_a_non_code_name() {
+    let source = "package A;\nsub real { 1 }\n*alias = *real;\n*VERSION = *Other::VERSION;\n";
+    let analysis = parse_analysis(source);
+    let subs: Vec<&str> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == crate::model::file_analysis::SymKind::Sub)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(subs.contains(&"alias"), "got {:?}", subs);
+    assert!(!subs.contains(&"VERSION"), "an alias to an unknown name is not a sub; got {:?}", subs);
+}

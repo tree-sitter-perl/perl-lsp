@@ -36,14 +36,8 @@ impl ImportedSymbol {
     pub fn same(name: impl Into<String>) -> Self {
         Self { local_name: name.into(), remote_name: None }
     }
-    /// Renaming import — local name differs from the real sub's name.
-    ///
-    /// Currently constructed only from Rhai plugins via serde-deserialized
-    /// maps (`#{ local_name: ..., remote_name: ... }`), so this Rust-side
-    /// constructor has no direct caller yet. Keeping it as documented public
-    /// API so future Rust callers (e.g. a hand-written parser for renaming
-    /// import syntax, or core plugins) have the canonical way to build one.
-    #[allow(dead_code)]
+    /// Renaming import — local name differs from the real sub's name
+    /// (a glob alias, or a plugin's `#{ local_name, remote_name }` map).
     pub fn renamed(local: impl Into<String>, remote: impl Into<String>) -> Self {
         let remote = remote.into();
         let local = local.into();
