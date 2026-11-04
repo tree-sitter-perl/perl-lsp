@@ -149,12 +149,28 @@ projected Surface + a stripped skeleton. Warm start registers from stubs
 without decoding full blobs (`warm_pack_stream_with_stubs`); declined
 lanes (rows missing, `NO_EVICT`, decode break, `stub_version` gate) fall
 back to a point full-decode that backfills the stub. Any modules-row
-rewrite deletes the path's stub (inside `save_to_db`/
-`save_blob_to_db_stamped`, so writers can't forget); hard-clears wipe via
+rewrite deletes the path's stub (inside `save_generation`, the one
+generation writer, so writers can't forget); hard-clears wipe via
 `clear_derived_rows`.
 
 Measured (abseil): warm peak RSS **~90 MB**; references byte-identical,
 `--refs-parity` clean, gold unaffected.
+
+## Generation writes are savepoints
+
+`save_generation` writes one file's generation (blob, conclusions,
+surface, stub drop, derived rows, optional stub) as one savepoint, so a
+failure partway keeps the previous generation whole. Inside a chunk's
+transaction a savepoint keeps a statement journal of every page it first
+touches. With the default temp store that journal is a temp file. On a
+cold index (2026-11-03, 4 cores, BMO/Znuny/FHEM, 3 reps) it made the row
+writes 36–111% slower and the writer's busy time 15–22% higher. With
+`temp_store=MEMORY` on the writer connections the writer is back to +2–6%
+over no savepoints, and RSS is flat: the journal holds a few pages per
+save. The writer is one thread whose busy time is already 50–80% of the
+workspace walk at 4 cores, so on a many-core box its cost lands on wall
+time about one to one. Measure writer busy time, not wall, when changing
+what a generation write does.
 
 ## Registration inverse under symbol eviction
 

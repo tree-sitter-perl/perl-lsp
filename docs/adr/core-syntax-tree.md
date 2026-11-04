@@ -37,16 +37,30 @@ that answers "where is this node" is built beside it.
   per-fact state. The pack extractor's captures are its first facts
   (`docs/adr/capture-vocabulary.md`); beside the tree it keeps only match
   → captures, because a match spans nodes.
+- **Kinds are a column.** Each parse keeps its nodes' kind ids in a `u16`
+  array of their own, so "every node of these kinds under here" is a scan
+  of two bytes per node over an id interval, not a walk. Chain typing's
+  passes and `find_local_sub_body` read the tree this way, and the
+  builder's method-call sites (invocant and argument nodes per `MethodCall`
+  ref) are node facts.
 - **A raw node maps to its id by identity, not position.** The preorder is
   tree-sitter's descendant order and start bytes never decrease along it,
   so `id_of` binary-searches the start byte and then matches tree-sitter's
   node id among the nodes starting there. A zero-width MISSING node stays
   distinct from its same-start neighbours, and a node of another parse
   never matches.
-- **A forest, not a tree, per build.** The Perl builder also parses each
-  `s///e` replacement as code over the file's bytes. `SyntaxForest` holds
-  every parse and answers a node from the one that holds it; a node no
-  registered parse holds is a bug (debug builds stop on it).
+- **A forest, not a tree, per build, read as one file.** The Perl builder
+  also parses each `s///e` replacement as code over the file's bytes,
+  because the grammar reads that code as an interpolated string.
+  `SyntaxForest` holds every parse and answers a node from the one that
+  holds it; a node no registered parse holds is a bug (debug builds stop on
+  it). Each injected parse is a fact on the host node it replaces, and ids
+  run on across parses, so one `NodeFacts` covers the forest. A file-order
+  read (`file_nodes_of_kind`, the builder's `file_matches` for queries) puts
+  each injected parse where its replacement node stood and drops the host's
+  string reading of it, so a post-walk pass sees replacement code the way
+  the walk does. `find_local_sub_body` scans one parse, and the place
+  survey visits every parse whole.
 - **Lazy where a consumer may not need it.** Query predicates (`#parent?`,
   `#ancestor?`) take the forest through a closure, so a pattern without
   structural predicates never builds one; the pack extractor builds its
@@ -76,8 +90,4 @@ port, and the node goes with the last raw reader:
   points, and next sibling as a load (`end` is its id), with the typed
   wrappers in `cst.rs` moving from `Node` to a `SyntaxNode` handle;
 - the indices built off the tree retire as their consumers move:
-  `ChainTypingIndex`'s span maps, `PlaceDisturbanceIndex`'s spelling keys,
-  `find_local_sub_body`'s whole-file scan per loop;
-- the injected `s///e` trees spliced under their replacement node, which
-  closes `TODO(injected-trees)` (post-walk passes that traverse from the
-  main root miss replacement code).
+  `PlaceDisturbanceIndex`'s spelling keys.

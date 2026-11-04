@@ -190,9 +190,17 @@ sub p5lib_for {
     return length($extra // '') ? "$extra:$base" : $base;
 }
 # A row's extra @INC roots, absolute and ':'-joined ('' when it declares none).
+# `substrate` names the pinned tree wherever CORPUS points: a repo-relative
+# path to it only exists in the checkout that holds the substrate, so a run
+# from another worktree lost Moo off @INC and failed the role rows. A root
+# that does not exist dies rather than quietly dropping a provider.
 sub inc_roots_for {
     my ($row) = @_;
-    join ':', map { File::Spec->rel2abs("$RealBin/../$_") } @{ $row->{incRoots} // [] };
+    join ':', map {
+        my $dir = $_ eq 'substrate' ? $corpus : File::Spec->rel2abs("$RealBin/../$_");
+        -d $dir or die "row $row->{id}: incRoot '$_' is not a directory ($dir)\n";
+        $dir;
+    } @{ $row->{incRoots} // [] };
 }
 sub batch_req {
     my ($cap, $spec, $row, $key, $root) = @_;

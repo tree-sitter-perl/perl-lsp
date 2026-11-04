@@ -136,10 +136,7 @@ impl<'a> ClassLadder<'a> {
 }
 
 fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
-    let point = match q.attachment {
-        WitnessAttachment::Variable { .. } => q.point,
-        _ => None,
-    };
+    let point = q.point.filter(|_| q.attachment.is_temporal());
     (
         bag as *const _ as usize,
         q.attachment.clone(),
@@ -549,7 +546,7 @@ pub(super) fn sweep_candidate_may_answer(
     if fa.has_dynamic_parents(class) {
         return true;
     }
-    if fa.plugin.app_surface_consumers.iter().any(|c| c == class) {
+    if crate::model::file_analysis::app_surface_parent(class, &fa.plugin.app_surface_consumers).is_some() {
         return true;
     }
     if fa
@@ -1032,17 +1029,9 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
-
-        for r in &self.reducers {
-            let claimed: Vec<&Witness> =
-                materialized.iter().filter(|w| r.claims(w)).collect();
-            if claimed.is_empty() {
-                continue;
-            }
-            let v = r.reduce(&claimed, q);
-            if v != ReducedValue::None {
-                return v;
-            }
+        let v = self.reduce_materialized(&materialized, q);
+        if v != ReducedValue::None {
+            return v;
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
@@ -1343,6 +1332,7 @@ impl ReducerRegistry {
                  state: &mut _| {
                     let cached_ctx = BagContext {
                         scopes: &full.scopes,
+                        symbols: full.symbols(),
                         package_framework: &full.packages,
                         module_index: Some(idx),
                         package_parents: &full.packages,
@@ -1727,6 +1717,7 @@ impl ReducerRegistry {
                     let full = idx.bag_present(cached);
                     let local_ctx = BagContext {
                         scopes: &full.scopes,
+                        symbols: full.symbols(),
                         package_framework: &full.packages,
                         module_index: None,
                         package_parents: &full.packages,
@@ -1987,6 +1978,186 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
+        if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
+            let grown = self.lower_extensions(bag, q, state, &raw);
+            let grown = Self::grown_witnesses(&raw, &grown);
+            return self.materialize_raw(bag, q, state, Self::splice_grown(&raw, &grown));
+        }
+        self.materialize_raw(bag, q, state, raw)
+    }
+
+    /// Replace a place's `Extend` deltas with the shapes they grow: each
+    /// delta lays its key over the value standing at its site, as a read
+    /// there would see it. Consecutive deltas with nothing else of the place
+    /// between them (`SpanIndex::boundary`) form one segment, read once at its
+    /// first write and grown in place through the rest, and the segment's
+    /// grown shape stands at its last effective write — the point fact that
+    /// later reads take. Every other witness keeps its bag order, and the
+    /// grown shapes follow them (`splice_grown`).
+    ///
+    /// A `Field` is not temporal: its writes are arms of one value, so each
+    /// grown shape JOINS the value it grew from, as the slot's other arms do.
+    #[inline(never)]
+    fn lower_extensions(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        raw: &[&Witness],
+    ) -> Vec<(usize, InferredType)> {
+        let temporal = q.attachment.is_temporal();
+        let point = q.point.filter(|_| temporal);
+        let others = super::SpanIndex::of(
+            raw.iter().copied().filter(|w| !matches!(w.payload, WitnessPayload::Extend(_))),
+        );
+        let mut deltas: Vec<(usize, &Witness)> = raw
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, w)| matches!(w.payload, WitnessPayload::Extend(_)))
+            .filter(|(_, w)| point.is_none_or(|p| w.span.start <= p))
+            .collect();
+        deltas.sort_by_key(|(_, w)| w.span.start);
+        // Grown shapes, keyed by the raw index of the delta they stand at.
+        let mut grown: Vec<(usize, InferredType)> = Vec::new();
+        let mut current: Option<InferredType> = None;
+        let mut last_effective: Option<usize> = None;
+        let mut prev: Option<Point> = None;
+        for (i, d) in deltas {
+            let WitnessPayload::Extend(x) = &d.payload else { unreachable!("filtered above") };
+            let at = d.span.start;
+            let fresh = match prev {
+                None => true,
+                Some(prev) => temporal && others.boundary(prev, at),
+            };
+            if fresh {
+                if let (Some(t), Some(j)) = (current.take(), last_effective.take()) {
+                    grown.push((j, t));
+                }
+                current = self.extension_base(bag, q, state, raw, &grown, at);
+            }
+            prev = Some(at);
+            let Some(base) = current.as_mut() else { continue };
+            let changed = if temporal {
+                super::extend_in_place(base, &x.hops, x.value.as_ref(), x.widen)
+            } else {
+                let mut next = base.clone();
+                super::extend_in_place(&mut next, &x.hops, x.value.as_ref(), x.widen) && {
+                    *base = crate::model::file_analysis::join(base, &next, class_order(q));
+                    true
+                }
+            };
+            if changed {
+                last_effective = Some(i);
+            }
+        }
+        if let (Some(t), Some(j)) = (current, last_effective) {
+            grown.push((j, t));
+        }
+        grown
+    }
+
+    /// Each grown shape as the witness standing at its delta, in source
+    /// order.
+    fn grown_witnesses(raw: &[&Witness], grown: &[(usize, InferredType)]) -> Vec<(usize, Witness)> {
+        let mut out: Vec<(usize, Witness)> = grown
+            .iter()
+            .map(|(i, t)| {
+                let w = raw[*i];
+                let grown = Witness {
+                    attachment: w.attachment.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::InferredType(t.clone()),
+                    span: w.span,
+                };
+                (*i, grown)
+            })
+            .collect();
+        out.sort_by_key(|(i, w)| (w.span.start, *i));
+        out
+    }
+
+    /// `raw` with its deltas dropped and the grown shapes after every other
+    /// witness, in source order — borrowed, so the witnesses a read takes as
+    /// they are are never copied.
+    ///
+    /// Source order, not the deltas' bag order: the fold takes the latest of
+    /// two shapes in list order, and a bag's order is not its source's (an
+    /// enrichment-time delta lands after the build's, whatever its line), so
+    /// in bag order an older closed shape could outrank the newer one a later
+    /// write opened. After the rest, because a grown shape is derived from
+    /// the witnesses standing before its write.
+    fn splice_grown<'w>(raw: &[&'w Witness], grown: &'w [(usize, Witness)]) -> Vec<&'w Witness> {
+        let mut out: Vec<&Witness> =
+            raw.iter().copied().filter(|w| !matches!(w.payload, WitnessPayload::Extend(_))).collect();
+        out.extend(grown.iter().map(|(_, w)| w));
+        out
+    }
+
+    /// The value standing under a segment's first delta at `at`: what a read
+    /// there answers from every other witness of the place plus the shapes
+    /// earlier segments grew. A `Field` reads its whole value, the class
+    /// ladder included, since the slot's other writes may live elsewhere.
+    fn extension_base(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        raw: &[&Witness],
+        grown: &[(usize, InferredType)],
+        at: Point,
+    ) -> Option<InferredType> {
+        let grown = Self::grown_witnesses(raw, grown);
+        let base_q = ReducerQuery {
+            attachment: q.attachment,
+            point: q.attachment.is_temporal().then_some(at).or(q.point),
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        let materialized = state.in_opaque_frame(|state| {
+            self.materialize_raw(bag, &base_q, state, Self::splice_grown(raw, &grown))
+        });
+        let answer = match self.reduce_materialized(&materialized, &base_q) {
+            ReducedValue::None => ClassLadder::of(q.attachment)
+                .and_then(|ladder| state.in_opaque_frame(|state| self.class_fallback(bag, &base_q, state, &ladder))),
+            v => Some(v),
+        };
+        match answer? {
+            ReducedValue::Type(t) => Some(t),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        }
+    }
+
+    /// The first reducer's answer over an already-materialized list.
+    fn reduce_materialized(&self, materialized: &[Witness], q: &ReducerQuery) -> ReducedValue {
+        for r in &self.reducers {
+            let claimed: Vec<&Witness> = materialized.iter().filter(|w| r.claims(w)).collect();
+            if claimed.is_empty() {
+                continue;
+            }
+            let v = r.reduce(&claimed, q);
+            if v != ReducedValue::None {
+                return v;
+            }
+        }
+        ReducedValue::None
+    }
+
+    fn materialize_raw(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        mut raw: Vec<&Witness>,
+    ) -> Vec<Witness> {
+        // A variable's fact made in a nested block is a region that ends
+        // with the block: past it, the fact is not there at all.
+        if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
+            raw.retain(|w| w.span.start == w.span.end || (w.span.start <= p && p <= w.span.end));
+        }
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -2016,15 +2187,25 @@ impl ReducerRegistry {
                                 WitnessAttachment::Expr(span) => span.start,
                                 _ => scope_point(ctx.scopes, *scope),
                             };
-                            // Opaque: the scope walk defers a rep-only answer
-                            // and lets an outer class identity beat it, so the
-                            // value is chosen ACROSS scopes rather than taken
-                            // from the first that answers.
+                            // Opaque: the read's point picks the binding and the
+                            // regions that hold there, so the answer is not the
+                            // edge target's alone.
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
                             )
                         }),
+                        (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
+                            state.in_opaque_frame(|state| {
+                                // A read recorded at `Expr(span)` holds what the
+                                // variable holds at the read.
+                                let point = match q.attachment {
+                                    WitnessAttachment::Expr(span) => Some(span.start),
+                                    _ => binding_scope_end(ctx, &place.root),
+                                };
+                                self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
+                            })
+                        }
                         _ => {
                             // A `PackageSymbol{package,..}` reached through an edge is
                             // a fresh method dispatch: its receiver is that call's
@@ -2100,9 +2281,9 @@ impl ReducerRegistry {
                     // the value-side mirror of the build-time
                     // `invocant_type_at_node` drill, run where the index is
                     // in hand so imported structural types project too.
-                    // A Variable base scope-walks like the Edge arm above
-                    // (`$h{k}` projects off `%h`, whose witnesses live on
-                    // the decl scope, not the access scope).
+                    // A Variable base resolves its binding like the Edge arm
+                    // above (`$h{k}` projects off `%h`, whose witnesses live
+                    // on the decl scope, not the access scope).
                     // Opaque throughout: this frame returns a value drilled OUT
                     // of the sub-chase's answer, never the answer itself, so no
                     // exit key beneath it names what this frame produces.
@@ -2117,6 +2298,13 @@ impl ReducerRegistry {
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
                             )
+                        }
+                        (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
+                            let point = match q.attachment {
+                                WitnessAttachment::Expr(span) => Some(span.start),
+                                _ => binding_scope_end(ctx, &place.root),
+                            };
+                            self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                         }
                         _ => {
                             let sub_q = ReducerQuery {
@@ -2595,6 +2783,7 @@ impl ReducerRegistry {
             state.pins.push(Arc::clone(full));
             let cached_ctx = BagContext {
                 scopes: &full.scopes,
+                symbols: full.symbols(),
                 package_framework: &full.packages,
                 module_index: Some(idx),
                 package_parents: &full.packages,
@@ -2737,98 +2926,117 @@ impl ReducerRegistry {
             .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
             .and_then(|pkg| ctx.package_framework.framework_of(pkg))
             .unwrap_or(FrameworkFact::Plain);
-        // A scope that only OBSERVES rep use of the variable (`$self->{k}`
-        // inside a nested block → HashRefAccess) yields a bare `HashRef`,
-        // but the variable's identity — an invocant's ClassName seeded on
-        // the sub scope — lives further out the chain. Class identity
-        // anywhere dominates such a rep-only projection: the same
-        // identity-over-rep rule `FrameworkAwareTypeFold` applies within a
-        // scope, lifted across the scope walk. A scope that actually BINDS
-        // the variable (explicit type / edge / class-or-bless observation)
-        // is authoritative and returned immediately, so genuine shadowing
-        // (`my $x = {}`) still wins. Defer the weak answer until the chain
-        // is exhausted.
-        let mut weak: Option<InferredType> = None;
-        for sid in chain.scopes() {
-            let att = WitnessAttachment::Variable {
-                name: var.to_string(),
-                scope: sid,
-            };
-            let q = ReducerQuery {
-                attachment: &att,
-                point: Some(point),
-                framework,
-                arity_hint: None,
-                // Threaded from the chasing query so a deferred
-                // `ReturnExpr::ReceiverOr` on the variable (a statement-
-                // position `bless $obj, $class`) substitutes the CALL
-                // SITE's class — the hop that makes an inherited
-                // `$class->new; ...; return $object` ctor type to the
-                // subclass it was called on.
-                receiver: receiver.cloned(),
-                args: Vec::new(),
-                context: Some(ctx),
-            };
-            match &*self.query_rec(bag, &q, state) {
-                ReducedValue::Type(t) => {
-                    let t = t.clone();
-                    if t.class_name().is_some() || scope_binds_variable(bag, var, sid, point) {
-                        return Some(t);
-                    }
-                    if weak.is_none() {
-                        weak = Some(t);
-                    }
-                }
-                ReducedValue::FactMap(_) | ReducedValue::None => {}
-            }
+        let Some(binding) = variable_binding_scope(bag, ctx.scopes, var, scope, point) else {
+            return None;
+        };
+        let att = WitnessAttachment::Variable { name: var.to_string(), scope: binding };
+        let q = ReducerQuery {
+            attachment: &att,
+            point: Some(point),
+            framework,
+            arity_hint: None,
+            // Threaded from the chasing query so a deferred
+            // `ReturnExpr::ReceiverOr` on the variable (a statement-
+            // position `bless $obj, $class`) substitutes the CALL
+            // SITE's class — the hop that makes an inherited
+            // `$class->new; ...; return $object` ctor type to the
+            // subclass it was called on.
+            receiver: receiver.cloned(),
+            args: Vec::new(),
+            context: Some(ctx),
+        };
+        match &*self.query_rec(bag, &q, state) {
+            ReducedValue::Type(t) => Some(t.clone()),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
         }
-        weak
     }
 }
 
-/// Does this scope *bind* the variable — establish its value/identity via
-/// an explicit type, an assignment edge, or a class/bless observation — as
-/// opposed to merely OBSERVING rep use (`$v->{k}` → `HashRefAccess`)? A
-/// binding scope's reduced type is authoritative; a rep-only scope's is a
-/// weak projection an outer class identity dominates (see the caller). A
-/// binding after the query point doesn't count. New value-carrying payload
-/// variants count as bindings by default — only the bare rep/scalar
-/// observations are the weak case.
-fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
-    binds_variable_where(bag, var, scope, |w| w.span.start <= point)
+impl ReducerRegistry {
+    /// What the variable `place` holds at `point`, under the framework of
+    /// the package its binding lives in.
+    pub(super) fn query_variable_place(
+        &self,
+        bag: &WitnessBag,
+        ctx: &BagContext,
+        place: &crate::model::file_analysis::Place,
+        point: Option<Point>,
+        receiver: Option<&InferredType>,
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        let att = WitnessAttachment::Place(Box::new(place.clone()));
+        let q = ReducerQuery {
+            attachment: &att,
+            point,
+            framework: binding_framework(ctx, &place.root),
+            arity_hint: None,
+            // Threaded so a deferred `ReturnExpr::ReceiverOr` on the
+            // variable (a statement-position `bless $obj, $class`)
+            // substitutes the CALL SITE's class.
+            receiver: receiver.cloned(),
+            args: Vec::new(),
+            context: Some(ctx),
+        };
+        match &*self.query_rec(bag, &q, state) {
+            ReducedValue::Type(t) => Some(t.clone()),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        }
+    }
 }
 
-/// The scope a read of `var` from `scope` at `point` takes its value from:
-/// the first scope out the chain that binds it, with its index on the
-/// chain (0 = `scope` itself). A write through the variable lands its
-/// shape there, so every read that binds the same value sees it.
+/// Where an edge with no read position asks a binding from: the end of the
+/// scope the binding lives in, so every fact made in that scope holds; a
+/// package variable's is the file's.
+fn binding_scope_end(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> Option<Point> {
+    use crate::model::file_analysis::Binding;
+    let home = match binding {
+        Binding::Package(..) => return ctx.scopes.first().map(|s| s.span.end),
+        Binding::Lexical(sid) | Binding::Receiver(sid) => ctx.symbols.get(sid.0 as usize)?.scope,
+        Binding::Arguments(callable) => *callable,
+    };
+    ctx.scopes.get(home.0 as usize).map(|s| s.span.end)
+}
+
+/// The framework of the package a binding lives in: a package variable's
+/// own package, else the package around the scope its declaration (or
+/// callable) sits in.
+fn binding_framework(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> FrameworkFact {
+    use crate::model::file_analysis::Binding;
+    let home = match binding {
+        Binding::Package(pkg, _) => return ctx.package_framework.framework_of(pkg).unwrap_or(FrameworkFact::Plain),
+        Binding::Lexical(sid) | Binding::Receiver(sid) => ctx.symbols.get(sid.0 as usize).map(|s| s.scope),
+        Binding::Arguments(callable) => Some(*callable),
+    };
+    home.and_then(|home| {
+        crate::model::file_analysis::lookup_chain(ctx.scopes, home)
+            .scopes()
+            .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
+            .and_then(|pkg| ctx.package_framework.framework_of(pkg))
+    })
+    .unwrap_or(FrameworkFact::Plain)
+}
+
+/// The binding a read of `var` from `scope` at `point` takes its value
+/// from: the innermost scope on the lookup chain that holds a fact about
+/// the name made at or before the point. Every fact about a variable is
+/// keyed to its binding when it is pushed, so this is name resolution
+/// over the scopes the name has facts in, never a merge of their facts.
 pub(crate) fn variable_binding_scope(
     bag: &WitnessBag,
     scopes: &[Scope],
     var: &str,
     scope: ScopeId,
     point: Point,
-) -> Option<(usize, ScopeId)> {
-    crate::model::file_analysis::lookup_chain(scopes, scope)
-        .scopes()
-        .enumerate()
-        .find(|&(_, sid)| scope_binds_variable(bag, var, sid, point))
-}
-
-fn binds_variable_where(
-    bag: &WitnessBag,
-    var: &str,
-    scope: ScopeId,
-    at: impl Fn(&Witness) -> bool,
-) -> bool {
-    let att = WitnessAttachment::Variable {
-        name: var.to_string(),
-        scope,
-    };
-    bag.for_attachment(&att).iter().any(|w| {
-        at(w)
-            && (w.payload.binds_value()
-                || !matches!(&w.payload, WitnessPayload::Observation(_) | WitnessPayload::Reset))
+) -> Option<ScopeId> {
+    let held = bag.variable_scopes(var);
+    if held.is_empty() {
+        return None;
+    }
+    crate::model::file_analysis::lookup_chain(scopes, scope).scopes().find(|&sid| {
+        held.contains(&sid)
+            && bag
+                .iter_attachment(&WitnessAttachment::Variable { name: var.to_string(), scope: sid })
+                .any(|w| w.span.start <= point)
     })
 }
 

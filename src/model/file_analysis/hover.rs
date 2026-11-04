@@ -160,51 +160,6 @@ impl FileAnalysis {
                     {
                         return Some(self.format_symbol_hover(self.symbol(sid), source, module_index));
                     }
-                    // Fall-through: the name might be a function imported
-                    // from another module (either hand-written `use` or a
-                    // plugin-synthesized Import like Mojolicious::Lite's
-                    // route verbs). Cross-file lookup pulls real POD,
-                    // real signature, real return type from the source
-                    // module's cached analysis.
-                    if let Some(idx) = module_index {
-                        for import in &self.imports {
-                            let matched = import.imported_symbols.iter()
-                                .find(|s| s.local_name == r.target_name);
-                            let Some(is) = matched else { continue };
-                            // The exporting package may be split — pick the
-                            // candidate file that defines the remote sub.
-                            let Some(cached) =
-                                idx.candidate_defining_sub(&import.module_name, is.remote())
-                            else { continue };
-                            let whole = idx.whole_present(&cached);
-                            let Some(sub_info) = whole.sub_info_view(is.remote()) else { continue };
-
-                            let sig_params = sub_info.params().iter()
-                                .map(|p| p.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let mut sig = format!("sub {}({})", r.target_name, sig_params);
-                            if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
-                                sig.push_str(&format!(" → {}", self.render_type(&rt)));
-                            }
-                            let mut text = format!("```perl\n{}\n```", sig);
-                            if let Some(doc) = sub_info.doc() {
-                                text.push_str(&format!("\n\n{}", doc));
-                            }
-                            if is.remote() != r.target_name {
-                                text.push_str(&format!(
-                                    "\n\n*imported from `{}` (as `{}`)*",
-                                    import.module_name, is.remote()
-                                ));
-                            } else {
-                                text.push_str(&format!(
-                                    "\n\n*imported from `{}`*",
-                                    import.module_name
-                                ));
-                            }
-                            return Some(text);
-                        }
-                    }
                 }
                 RefKind::MethodCall { .. } => {
                     // One section per class the receiver may be, from the
@@ -217,13 +172,6 @@ impl FileAnalysis {
                         .collect();
                     if !sections.is_empty() {
                         return Some(sections.join("\n\n---\n\n"));
-                    }
-                    // Fallback
-                    for &sid in self.symbols_named(method) {
-                        let sym = self.symbol(sid);
-                        if matches!(sym.kind, SymKind::Sub | SymKind::Method) {
-                            return Some(self.format_symbol_hover(sym, source, module_index));
-                        }
                     }
                 }
                 RefKind::FieldAccess { .. } => {
@@ -250,15 +198,10 @@ impl FileAnalysis {
                         self.receiver_classes(r, module_index, ReceiverPolicy::Edge).iter().filter_map(on).collect();
                     return (!sections.is_empty()).then(|| sections.join("\n\n---\n\n"));
                 }
-                RefKind::PackageRef => {
-                    let identity = self.spelled_identity(r);
-                    for &sid in self.symbols_named(&identity) {
-                        let sym = self.symbol(sid);
-                        if matches!(sym.kind, SymKind::Package | SymKind::Class) && sym.name == identity {
-                            return Some(self.format_symbol_hover(sym, source, module_index));
-                        }
-                    }
-                }
+                // A package name has no hover of its own here: the presenter
+                // renders the set's candidate, so a local and a cross-file
+                // package answer through the one resolution goto-def reads.
+                RefKind::PackageRef => {}
                 RefKind::HashKeyAccess { .. } => {
                     if let Some(owner) = r.hash_key_owner() {
                         let defs = self.hash_key_defs_for_owner(owner);

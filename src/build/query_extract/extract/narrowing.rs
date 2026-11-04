@@ -81,54 +81,59 @@ pub(super) fn finish(st: &mut ExtractState) {
             continue;
         };
         let guard = ad.in_match(mid, Capture::Narrow(NarrowCap::Guard)).map(|g| g.text.as_str());
-        if let Some(refined) = (st.pack.narrow_guard)(guard, ty) {
+        let Some(refined) = (st.pack.narrow_guard)(guard, ty) else { continue };
+        // A member subject (`isinstance(self.x, T)`) narrows its place, which
+        // only the assembled analysis can root (`PackPlaces`). So may a bare
+        // name: only assembly knows whether it is a local or a member of an
+        // elided receiver, and it keeps the place only for the member.
+        let node = ad.in_match(mid, Capture::Narrow(NarrowCap::Var));
+        let member = node.is_some_and(|v| ad.on_ixs(v).any(|i| st.minted[i].projects.is_some()));
+        if let Some(v) = node {
+            let refined = written_type_at(out, &st.pack.names, refined.clone(), arm.span().start);
+            out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+                subject: v.span(),
+                refined,
+                region: arm.span(),
+            });
+        }
+        if !member {
             pending.push((subject, refined, arm.span(), scope));
         }
     }
-    // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
-    // at the first FlowEdge that rebinds the subject — the SAME edge-driven
-    // cutoff the Perl narrowing uses (`RebindIndex`). Deferred to here so
-    // the edges exist. The witness gets a REAL region span [start, cutoff], so
-    // point-containment ends the narrowing at the rebind — the soundness Perl
-    // got from its cutoff, now generic. Every LangPack that narrows (python
-    // isinstance, cpp dynamic_cast + optional engagement) gets it free.
-    let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
-    let mut narrowed = Vec::new();
+    // Each region ends at the first rebind of its subject's binding, which
+    // only the assembled analysis knows (`bind_variable_regions`).
     for (name, refined, region, scope) in pending {
-        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
-        if (region.start.row, region.start.column) >= (end.row, end.column) {
-            continue; // rebound before the region even opens — nothing holds
-        }
         let refined = written_type_at(out, &st.pack.names, refined, region.start);
-        narrowed.push(crate::model::witnesses::Witness {
+        out.variable_regions.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
             payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
-            span: Span { start: region.start, end },
+            span: region,
         });
     }
-    out.witnesses.extend(narrowed);
     for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
-        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
-        if (region.start.row, region.start.column) >= (end.row, end.column) {
-            continue;
-        }
-        out.witnesses.push(crate::model::witnesses::Witness {
+        out.variable_regions.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
             payload: crate::model::witnesses::WitnessPayload::Observation(obs),
-            span: Span { start: region.start, end },
+            span: region,
         });
     }
     // std::move sites → moved-from facts. The qualifier/name verify the
     // call IS `std::move` here (no query predicates), so the diagnostic never
-    // sees the call shape — it reads the recorded var + span + scope.
+    // sees the call shape — it reads the recorded subject + span + scope. The
+    // subject becomes a place once the assembled analysis can root it.
     let ad = st.adorned;
     let text = |mid, cap| ad.in_match(mid, Capture::Move(cap)).map(|t| t.text.as_str());
     for &(mid, span, scope) in &n.move_calls {
         if text(mid, MoveCap::Scope) == Some("std") && text(mid, MoveCap::Name) == Some("move") {
-            if let Some(v) = text(mid, MoveCap::Var) {
-                out.moved_from.push(((st.pack.shape_name)(v), span, scope));
+            if let Some(v) = ad.in_match(mid, Capture::Move(MoveCap::Var)) {
+                out.moved_from.push(crate::build::query_extract::MoveCall {
+                    spelling: v.text.clone(),
+                    subject: v.span(),
+                    call: span,
+                    scope,
+                });
             }
         }
     }

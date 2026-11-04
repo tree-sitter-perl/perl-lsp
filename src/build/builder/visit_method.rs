@@ -57,7 +57,7 @@ impl<'a> Builder<'a> {
             }).unwrap_or_else(|| node_to_span(node));
 
             for name in names {
-                let pkg = self.resolve_call_package(&name);
+                let pkg = self.resolve_call_package(&name, name_span.start);
                 self.add_bound_ref(
                     RefKind::FunctionCall,
                     name_span,
@@ -141,10 +141,24 @@ impl<'a> Builder<'a> {
         self.method_call_invocant.insert(idx, class.clone());
         self.method_call_args.insert(idx, operands);
         self.method_call_refs.entry(node.id()).or_default().push(idx);
+        self.record_call_site(node, idx, Some(io.class), io.arguments);
         self.add_ref(RefKind::PackageRef, class_span, class.clone(), AccessKind::Read);
-        self.indirect_method_calls.push((node, io.class, io.arguments));
         if let Some(a) = io.arguments {
             self.queue_node(a);
+        }
+    }
+
+    /// Mint a `MethodCall` ref's call site as a fact on its call node, in
+    /// whichever parse holds it.
+    fn record_call_site(
+        &mut self,
+        call: Node<'a>,
+        ref_idx: usize,
+        invocant: Option<Node<'a>>,
+        args: Option<Node<'a>>,
+    ) {
+        if let Some(id) = self.syntax.lift(call).map(|n| n.id()) {
+            self.call_sites.push((id, CallSite { ref_idx, invocant, args }));
         }
     }
 
@@ -171,6 +185,7 @@ impl<'a> Builder<'a> {
             crate::cst::canonical_var_name(n, self.source)
                 .or_else(|| n.text(self.source).map(|s| s.to_string()))
         });
+        let receiver_place = invocant_node.and_then(|n| self.place_subject(n));
         let invocant = invocant_text.as_ref().map(|s| {
             // Resolve __PACKAGE__ to enclosing package name. This is THE
             // canonical producer for ref invocants — varname spelling
@@ -179,6 +194,11 @@ impl<'a> Builder<'a> {
                 crate::model::conventions::Invocant::assume_canonical(
                     self.current_package.clone().unwrap_or_else(|| s.to_string()),
                 )
+            } else if let Some(place) = receiver_place.clone() {
+                crate::model::conventions::Invocant::Place {
+                    name: crate::model::conventions::InvocantName::assume_canonical(s),
+                    place: Box::new(place),
+                }
             } else {
                 crate::model::conventions::Invocant::assume_canonical(s)
             }
@@ -202,6 +222,7 @@ impl<'a> Builder<'a> {
         });
 
         let args = self.extract_call_args(node);
+        let args_node = node.child_by_field_name("arguments");
         if let Some(inv) = invocant_node {
             self.emit_invocant_witness(inv);
         }
@@ -231,6 +252,7 @@ impl<'a> Builder<'a> {
                                 method_name_span,
                                 member_op: None,
                                 named_by_string: false,
+
                             },
                             node_to_span(node),
                             rname,
@@ -242,6 +264,7 @@ impl<'a> Builder<'a> {
                         }
                         self.method_call_args.insert(idx, operands.clone());
                         self.method_call_refs.entry(node.id()).or_default().push(idx);
+                        self.record_call_site(node, idx, invocant_node, args_node);
                     }
                 }
             } else {
@@ -253,6 +276,7 @@ impl<'a> Builder<'a> {
                         method_name_span,
                         member_op: None,
                         named_by_string: false,
+
                     },
                     node_to_span(node),
                     name.clone(),
@@ -263,6 +287,7 @@ impl<'a> Builder<'a> {
                 }
                 self.method_call_args.insert(idx, operands.clone());
                 self.method_call_refs.entry(node.id()).or_default().push(idx);
+                self.record_call_site(node, idx, invocant_node, args_node);
 
                 // Runtime-exporter setup in method-call form:
                 // `Moose::Exporter->setup_import_methods(...)`,
@@ -307,7 +332,7 @@ impl<'a> Builder<'a> {
                 if let Some(ty) = self.extract_resultset_parametric(node) {
                     self.parametric_emitted_refs.insert(idx);
                     let r_span = self.refs[idx].span;
-                    self.bag.push(crate::model::witnesses::Witness {
+                    self.push_witness(crate::model::witnesses::Witness {
                         attachment: crate::model::witnesses::WitnessAttachment::Expression(
                             crate::model::witnesses::RefIdx(idx as u32),
                         ),
@@ -340,7 +365,7 @@ impl<'a> Builder<'a> {
                     {
                         self.parametric_emitted_refs.insert(idx);
                         let r_span = self.refs[idx].span;
-                        self.bag.push(crate::model::witnesses::Witness {
+                        self.push_witness(crate::model::witnesses::Witness {
                             attachment: crate::model::witnesses::WitnessAttachment::Expression(
                                 crate::model::witnesses::RefIdx(idx as u32),
                             ),
@@ -555,10 +580,13 @@ impl<'a> Builder<'a> {
         // the LHS of an assignment, so the grandparent check returns
         // Write. Needed for invocant mutations.
         let in_place = self.element_written_in_place(node);
+        let escaped = !in_place && self.element_escaped(node);
         let element_access =
-            if in_place { AccessKind::Write } else { self.determine_access(node) };
+            if in_place || escaped { AccessKind::Write } else { self.determine_access(node) };
         if in_place {
             self.record_in_place_write(node);
+        } else if escaped {
+            self.record_place_escape(node);
         }
 
         // READ drills get their Projected witness here, not only when
@@ -583,7 +611,16 @@ impl<'a> Builder<'a> {
             .map(|c| c.kind() == "method_call_expression")
             .unwrap_or(false);
 
+        // An arrow access through a plain variable is a deref site: through
+        // its key ref, or, with no static key to ref, its own site — kept
+        // only where it can die, since without a ref it feeds nothing else.
+        let arrow_receiver =
+            crate::cst::element_deref_base(node).filter(|b| crate::cst::is_plain_scalar(*b));
+        let dies_on_undef = arrow_receiver.is_some()
+            && self.deref_dies_on_undef(node, &crate::model::file_analysis::DerefForm::HashKey);
+
         // Record the key access
+        let mut key_ref = false;
         if !container_is_method_call {
             if let Some(key_node) = node.child_by_field_name("key") {
                 if let Some((key_text, is_dynamic)) = self.extract_key_text(key_node) {
@@ -592,14 +629,19 @@ impl<'a> Builder<'a> {
                         self.add_ref(
                             RefKind::HashKeyAccess {
                                 var_text: var_text.clone().unwrap_or_default(),
+                                dies_on_undef,
                             },
                             node_to_span(key_node),
                             key_text,
                             element_access,
                         );
+                        key_ref = true;
                     }
                 }
             }
+        }
+        if let (Some(receiver), false, true) = (arrow_receiver, key_ref, dies_on_undef) {
+            self.record_arrow_deref(node, receiver, crate::model::file_analysis::DerefForm::HashKey);
         }
 
         // Visit children for the container variable ref
@@ -653,7 +695,8 @@ impl<'a> Builder<'a> {
     }
 
     /// `recv->resultset('Foo')` → `Parametric(ResultSet { base,
-    /// row })`. `base` is discovered via the
+    /// row })`, the row a `RowSource::Class` when `Foo` is a package
+    /// name and a `RowSource::Moniker` otherwise. `base` is discovered via the
     /// `<NS>::Result::<X>` ↔ `<NS>::ResultSet::<X>` convention if
     /// that class exists in this file; otherwise falls back to
     /// `DBIx::Class::ResultSet` (the universal DBIC default that
@@ -676,11 +719,29 @@ impl<'a> Builder<'a> {
         // `recv->resultset('Foo')` — row class from the string arg.
         if mtext == "resultset" {
             let args = node.child_by_field_name("arguments")?;
-            let row_class = self.first_string_or_constfold_arg(args)?;
+            let row_name = self.first_string_or_constfold_arg(args)?;
             let base = self
-                .discover_resultset_class(&row_class)
+                .discover_resultset_class(&row_name)
                 .unwrap_or_else(|| "DBIx::Class::ResultSet".to_string());
-            return Some(InferredType::Parametric(ParametricType::ResultSet { base, row: row_class }));
+            let names_class = crate::model::conventions::split_qualified(
+                &row_name,
+                &crate::model::conventions::PERL_SPELLINGS,
+            )
+            .0
+            .is_some()
+                || self.symbols.iter().any(|s| {
+                    s.name == row_name && matches!(s.kind, SymKind::Package | SymKind::Class)
+                });
+            let row = if names_class {
+                crate::model::file_analysis::RowSource::Class(row_name)
+            } else {
+                let schema = node
+                    .child_by_field_name("invocant")
+                    .and_then(|inv| self.invocant_type_at_node(inv))
+                    .and_then(|t| t.class_name().map(str::to_string));
+                crate::model::file_analysis::RowSource::Moniker { moniker: row_name, schema }
+            };
+            return Some(InferredType::Parametric(ParametricType::ResultSet { base, row }));
         }
         None
     }
@@ -724,7 +785,7 @@ impl<'a> Builder<'a> {
             end: Point { row: 0, column: 0 },
         };
         for (method_name, return_expr) in p.return_method_declarations() {
-            self.bag.push(crate::model::witnesses::Witness {
+            self.push_witness(crate::model::witnesses::Witness {
                 attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
                     package: base_class.clone(),
                     name: method_name.to_string(),

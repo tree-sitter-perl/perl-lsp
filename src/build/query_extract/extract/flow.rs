@@ -190,6 +190,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let member = (pack.shape_name)(&name.text);
                 st.minted[ix].value = true;
                 st.minted[ix].projects = Some(Box::new((recv.span(), member.clone())));
+                out.member_reads.push(crate::build::query_extract::MemberRead {
+                    span,
+                    receiver: recv.span(),
+                    member: member.clone(),
+                });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -325,6 +330,9 @@ pub(super) fn finish(st: &mut ExtractState) {
     // projects (a call, a literal) takes nothing.
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
         let read = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last();
+        if read.is_some() {
+            out.place_writes.push(place.span());
+        }
         if let (Some((receiver, member)), Some(value)) = (read, source_value_span(ad, &st.minted, place.match_id)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: *receiver,
