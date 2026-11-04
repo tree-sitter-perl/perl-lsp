@@ -260,6 +260,27 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "perl-lsp initialized")
             .await;
 
+        // A plugin that did not load (an API version mismatch above all) is
+        // shown, not just logged: a user's plugin silently missing reads as
+        // a perl-lsp bug. The registry is warmed at process start, so this
+        // reads it rather than building it.
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let refused = tokio::task::spawn_blocking(|| {
+                crate::build::plugin::default_plugin_registry().refused().to_vec()
+            })
+            .await
+            .unwrap_or_default();
+            if !refused.is_empty() {
+                client
+                    .show_message(
+                        MessageType::WARNING,
+                        format!("perl-lsp: {} plugin(s) not loaded:\n{}", refused.len(), refused.join("\n")),
+                    )
+                    .await;
+            }
+        });
+
         // Register file watchers for workspace indexing — the served
         // language's extensions, so out-of-editor changes reach the
         // re-index / invalidation path too.
