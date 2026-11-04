@@ -174,7 +174,8 @@ pub(super) fn param_return_expr(
             })
         }
         InferredType::Parametric(p) => match p {
-            crate::model::file_analysis::ParametricType::ResultSet { .. } => None,
+            crate::model::file_analysis::ParametricType::ResultSet { .. }
+            | crate::model::file_analysis::ParametricType::Row { .. } => None,
             crate::model::file_analysis::ParametricType::Instance { base, args } => {
                 if !args.iter().any(|a| param_return_expr(a, params).is_some()) {
                     return None;

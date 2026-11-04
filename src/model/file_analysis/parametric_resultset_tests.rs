@@ -115,7 +115,7 @@ $schema->resultset('Schema::Result::Users');
     match ty {
         InferredType::Parametric(ParametricType::ResultSet { base, row }) => {
             assert_eq!(base, "DBIx::Class::ResultSet");
-            assert_eq!(row, "Schema::Result::Users");
+            assert_eq!(row.class(), Some("Schema::Result::Users"));
         }
         other => panic!(
             "expected `Parametric(ResultSet {{ base, row }})`; got {:?}",
@@ -1320,7 +1320,7 @@ fn instance_peel_rejects_non_template_spellings() {
 fn resultset_flavor_has_no_exact_spelling() {
     // The exact-spelling dispatch key is an Instance policy; ResultSet's
     // dual identity dispatches through `base` unconditionally.
-    let p = ParametricType::ResultSet { base: "RS".into(), row: "Row".into() };
+    let p = ParametricType::ResultSet { base: "RS".into(), row: crate::model::file_analysis::RowSource::Class("Row".into()) };
     assert_eq!(p.exact_spelling(), None);
 }
 
@@ -1388,7 +1388,39 @@ fn substitute_type_params_walks_structure() {
     assert_eq!(substitute_type_params(&plain, &params, &args), plain);
     let rs = InferredType::Parametric(ParametricType::ResultSet {
         base: "RS".into(),
-        row: "T".into(),
+        row: crate::model::file_analysis::RowSource::Class("T".into()),
     });
     assert_eq!(substitute_type_params(&rs, &params, &args), rs, "ResultSet fields are not param sites");
+}
+
+/// The producer decides what a `resultset` argument names: a package name
+/// is the row class, anything else a source moniker. A moniker row is no
+/// class until the index resolves it, so without an index its receiver has
+/// no class to dispatch on (never the moniker posing as one).
+#[test]
+fn resultset_argument_mints_class_or_moniker() {
+    use crate::model::file_analysis::{ParametricType, RowSource};
+    let src = "package main;
+my $schema;
+my $by_class = $schema->resultset('MyApp::Schema::Result::Artist');
+my $by_moniker = $schema->resultset('Artist');
+my $n = $by_moniker->first->name;
+";
+    let fa = parse(src);
+    let row_of = |var: &str| match fa.inferred_type_via_bag(var, point_at(src, "my $n")) {
+        Some(InferredType::Parametric(ParametricType::ResultSet { row, .. })) => row,
+        other => panic!("{var} is a resultset, got {other:?}"),
+    };
+    assert_eq!(row_of("$by_class"), RowSource::Class("MyApp::Schema::Result::Artist".into()));
+    assert!(matches!(row_of("$by_moniker"), RowSource::Moniker { ref moniker, .. } if moniker == "Artist"));
+
+    let name_ref = fa
+        .refs
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "name")
+        .expect("->name ref");
+    assert!(
+        fa.receiver_classes(name_ref, None, ReceiverPolicy::Navigate).is_empty(),
+        "a moniker row has no class without the index",
+    );
 }

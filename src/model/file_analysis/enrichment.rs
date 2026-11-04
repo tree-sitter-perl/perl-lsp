@@ -26,16 +26,15 @@ impl FileAnalysis {
         }
         let Some(idx) = module_index else { return };
         // every package name this file declares, for FQ + tail matching
-        let my_packages: Vec<String> = self
+        // (name, leaf): a loader may name a package by either.
+        let my_packages: Vec<(String, String)> = self
             .symbols
             .iter()
             .filter(|s| matches!(s.kind, SymKind::Package | SymKind::Class))
-            .map(|s| s.name.clone())
+            .map(|s| (s.name.clone(), split_qualified(&s.name, self.names()).1.to_string()))
             .collect();
         let matches_me = |load_name: &str| -> bool {
-            my_packages.iter().any(|p| {
-                p == load_name || p.rsplit("::").next() == Some(load_name)
-            })
+            my_packages.iter().any(|(p, leaf)| p == load_name || leaf == load_name)
         };
 
         let markers = self.loader_config_params.clone();
@@ -204,6 +203,7 @@ impl FileAnalysis {
                     declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,
+                    in_force: None,
                 });
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
@@ -390,31 +390,23 @@ impl FileAnalysis {
             crate::util::ghost_stats::count("shadow.file");
             crate::util::ghost_stats::add_n(
                 "shadow.imports_len", self.imports.len() as u64);
-            for import in &self.imports {
+            for import in self.imports.in_own_scopes() {
                 crate::util::ghost_stats::count("shadow.import_seen");
-                // `package_at`, not `enclosing_package_of`: the latter
-                // wants a Package SYMBOL whose span contains the point, which
-                // is a brace-delimited pack namespace. Perl's `package Foo;`
-                // symbol spans one statement and contains nothing, so it
-                // attributes 10,435 of 10,436 imports to nobody.
-                let Some(pkg) = self.package_at(import.span.start).map(str::to_string) else {
-                    crate::util::ghost_stats::count("shadow.no_enclosing_package");
-                    continue;
-                };
-                if import.imported_symbols.is_empty() {
+                let pkg = &import.package;
+                if import.explicit_symbols().is_empty() {
                     // Bare `use M;` — the names live in M's @EXPORT, so the
                     // collision set is not enumerable from this file alone.
                     crate::util::ghost_stats::count("shadow.bare_use_unknowable");
                     continue;
                 }
-                for sym in &import.imported_symbols {
+                for sym in import.explicit_symbols() {
                     crate::util::ghost_stats::count("shadow.imported_name");
                     match self.resolve_method_in_ancestors(
-                        &pkg, &sym.local_name, module_index)
+                        pkg, &sym.local_name, module_index)
                     {
                         Some(MethodResolution::Local { class, .. })
                         | Some(MethodResolution::CrossFile { class, .. })
-                            if class != pkg =>
+                            if class != *pkg =>
                         {
                             crate::util::ghost_stats::count("shadow.COLLIDES");
                             crate::util::ghost_stats::count_distinct(
@@ -591,7 +583,7 @@ impl FileAnalysis {
         }
         if !binding_by_var.is_empty() {
             for r in &mut self.refs {
-                if let RefKind::HashKeyAccess { ref var_text } = r.kind {
+                if let RefKind::HashKeyAccess { ref var_text, .. } = r.kind {
                     if r.hash_key_owner()
                         .is_some_and(|o| !matches!(o, HashKeyOwner::Variable { .. }))
                     {
@@ -689,16 +681,23 @@ impl FileAnalysis {
             }
         }
 
-        // Re-run the mutation-extension pass: imported shapes (a var
-        // typed by an imported sub's `HashWithKeys` return) only land
-        // with the TCs pushed above, so build-time extension found no
-        // shape to extend for them. Append-only (`clear = false`) —
-        // post-finalize removal would shift `base_witness_count`;
-        // duplicates are idempotent and truncated by the next cycle.
+        // Re-run the mutation-extension pass: a write's value typed by an
+        // imported sub, or a root typed by an imported class, only lands
+        // with the TCs pushed above. A place's deltas fold onto whatever
+        // value stands under them when read, so imported base shapes need
+        // nothing here. Append-only (`clear = false`) — post-finalize
+        // removal would shift `base_witness_count`; a later delta at the
+        // same site re-types what the build's said, and the next cycle
+        // truncates it.
         {
             let key_writes = std::mem::take(&mut self.key_writes);
+            let bindings: Vec<_> = key_writes
+                .iter()
+                .map(|w| self.variable_binding_of(&w.var_text, w.span.start, w.scope))
+                .collect();
             let ctx = crate::model::witnesses::BagContext {
                 scopes: &self.scopes,
+                symbols: self.symbols.as_slice(),
                 package_framework: &self.packages,
                 module_index,
                 package_parents: &self.packages,
@@ -710,6 +709,7 @@ impl FileAnalysis {
                 &ctx,
                 &key_writes,
                 false,
+                &bindings,
             );
             self.key_writes = key_writes;
         }
@@ -753,12 +753,14 @@ impl FileAnalysis {
     pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
-        self.witnesses.push(Witness {
+        let mut w = Witness {
             attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder("type_constraint".into()),
             payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
-        });
+        };
+        bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc));
+        self.witnesses.push(w);
     }
 
     /// Resolve one gated dispatch candidate against its receiver, AT QUERY
@@ -892,10 +894,8 @@ impl FileAnalysis {
     /// covered: method (`$x->m`) and hash (`$x->{k}`) carry a receiver-typed
     /// ref; array (`$x->[i]`) and code (`$x->()`) carry none, so the builder
     /// records them as `arrow_deref_sites` and this query merges the two
-    /// sources. The residual is the receiver *shape*, not the arrow form: only
-    /// a plain scalar operand is recorded, so a chain receiver (`f()->[0]`,
-    /// `$x->{k}->()`) is skipped — only a plain scalar can be provably
-    /// `Undef`/`Optional`.
+    /// sources. A receiver is a variable or a part of one (`$x->{k}->()`);
+    /// a value receiver (`f()->[0]`) is skipped, since nothing narrows it.
     pub fn deref_receiver_sites(
         &self,
         module_index: Option<&dyn CrossFileLookup>,
@@ -903,7 +903,7 @@ impl FileAnalysis {
         use crate::model::conventions::InvocantText;
         let mut out = Vec::new();
         for r in self.refs() {
-            let (receiver, form) = match &r.kind {
+            let (receiver, form, place, dies_on_undef) = match &r.kind {
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {
                     // Only a scalar invocant can be undef/Optional; a
                     // bareword/`__PACKAGE__`/chain/bridged receiver never
@@ -912,38 +912,47 @@ impl FileAnalysis {
                     if !matches!(name.classify(), InvocantText::Scalar(_)) {
                         continue;
                     }
-                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()))
+                    let place = invocant.place().cloned();
+                    (invocant.text().to_string(), DerefForm::Method(r.target_name.clone()), place, true)
                 }
                 // A scalar `var_text` is the arrow form `$x->{k}`; the direct
                 // `$h{k}` form's base is the named hash, which can't be an
                 // undef *receiver* (and won't type as Undef/Optional anyway).
-                RefKind::HashKeyAccess { var_text, .. } if var_text.starts_with('$') => {
-                    (var_text.clone(), DerefForm::HashKey)
+                RefKind::HashKeyAccess { var_text, dies_on_undef } if var_text.starts_with('$') => {
+                    (var_text.clone(), DerefForm::HashKey, None, *dies_on_undef)
                 }
                 _ => continue,
             };
-            if let Some(ty) =
-                self.inferred_type_via_bag_ctx(&receiver, r.span.start, module_index)
-            {
+            let subject = match place {
+                Some(place) => place,
+                None => {
+                    let scope = self.scope_at(r.span.start).unwrap_or(ScopeId(0));
+                    Place::variable(self.variable_binding_of(&receiver, r.span.start, scope).0)
+                }
+            };
+            if let Some(ty) = self.subject_type_at(&subject, r.span.start, module_index) {
                 out.push(DerefSite {
                     span: r.span,
                     receiver,
+                    subject,
                     receiver_ty: ty,
                     form,
+                    dies_on_undef,
                 });
             }
         }
-        // Array (`$x->[i]`) / code (`$x->()`) derefs have no typed ref; the
-        // builder records them so they join the same stream.
+        // Derefs with no typed ref naming their receiver; the builder
+        // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
-            if let Some(ty) =
-                self.inferred_type_via_bag_ctx(&s.receiver, s.span.start, module_index)
-            {
+            let subject = (*s.place).clone();
+            if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
                 out.push(DerefSite {
                     span: s.span,
                     receiver: s.receiver.clone(),
+                    subject,
                     receiver_ty: ty,
                     form: s.form.clone(),
+                    dies_on_undef: s.dies_on_undef,
                 });
             }
         }
@@ -985,7 +994,7 @@ impl FileAnalysis {
         let mut out = Vec::new();
         for g in &self.guard_sites {
             let Some(prior) = self
-                .inferred_type_via_bag_ctx(&g.subject, g.before_point, module_index)
+                .subject_type_at(&g.subject, g.before_point, module_index)
                 .filter(InferredType::is_known)
             else {
                 continue;
@@ -1028,7 +1037,7 @@ impl FileAnalysis {
             out.push(GuardRedundancy {
                 span: g.span,
                 verdict,
-                subject: g.subject.clone(),
+                subject: g.spelling.clone(),
                 predicate: g.predicate.clone(),
                 satisfied,
             });
@@ -1036,22 +1045,21 @@ impl FileAnalysis {
         out
     }
 
-    /// The rep a `ref…eq` / `isa` GUARD established for `subject` at `point`,
-    /// read from **narrowing-sourced witnesses only**. Distinct from
-    /// `inferred_type_via_bag`: a `$x->{k}` deref pushes a zero-extent
-    /// `HashRef` belief sitting exactly at the use point, which would mask the
-    /// guard's rep under the merged query — so D6 reads the guard's assertion
-    /// directly. Innermost (narrowest) containing region wins. `None` when no
-    /// guard narrows the subject here (so D6 fires only on guard-narrowed
-    /// reps, per the plan).
-    pub fn guard_narrowed_rep(&self, subject: &str, point: Point) -> Option<InferredType> {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+    /// The rep a value fact holding over a REGION around `point` gives
+    /// `subject` — a `ref…eq` / `isa` guard's narrowed arm. A witness's span is
+    /// the site of the fact it states (rule #14), so a region-spanning
+    /// `InferredType` is a fact that holds across that region, while a
+    /// deref's own demanded-rep belief is a point at its use and would mask
+    /// the guard under the merged query. Innermost region wins. `None` when
+    /// no region fact types the subject here, so D6 fires only on narrowed
+    /// reps.
+    pub fn guard_narrowed_rep(&self, subject: &Place, point: Point) -> Option<InferredType> {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let place = subject.clone();
         let mut best: Option<&crate::model::witnesses::Witness> = None;
-        for w in self.witnesses.filter(|w| {
-            matches!(&w.source, WitnessSource::Builder(s) if s == "narrowing" || s == "defined_narrowing")
-                && matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == subject)
-        }) {
-            if !contains_point(&w.span, point) {
+        for w in self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))) {
+            let region = (w.span.start.row, w.span.start.column) < (w.span.end.row, w.span.end.column);
+            if !region || !contains_point(&w.span, point) {
                 continue;
             }
             if !matches!(&w.payload, WitnessPayload::InferredType(_)) {

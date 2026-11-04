@@ -3,6 +3,9 @@
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{ClassCall, InferredType, MemberNamespace, NameSpellings};
 
+/// C++'s scope-resolution separator, as the pack declares it.
+const CPP_SEP: &str = "::";
+
 pub fn cpp_pack() -> LangPack {
     LangPack {
         id: "cpp",
@@ -13,7 +16,7 @@ pub fn cpp_pack() -> LangPack {
         names: NameSpellings {
             member_namespace: MemberNamespace::Shared,
             class_call: ClassCall::Constructs,
-            ..NameSpellings::with_separator("::")
+            ..NameSpellings::with_separator(CPP_SEP)
         },
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
@@ -66,7 +69,7 @@ pub fn cpp_pack() -> LangPack {
                     // Strip the namespace qualifier — classes/members are
                     // keyed by the unqualified name (@context.class), so
                     // `geo::Circle` must type as `Circle` to resolve.
-                    typeish.then(|| ClassName(tag.rsplit("::").next().unwrap_or(tag).to_string()))
+                    typeish.then(|| ClassName(tag.rsplit(CPP_SEP).next().unwrap_or(tag).to_string()))
                 }
             }
         },
@@ -120,7 +123,7 @@ fn optional_inner(ty: &str) -> Option<String> {
         .or_else(|| ty.trim().strip_prefix("optional<"))?
         .strip_suffix('>')?
         .trim();
-    let leaf = inner.rsplit("::").next().unwrap_or(inner).trim();
+    let leaf = inner.rsplit(CPP_SEP).next().unwrap_or(inner).trim();
     (!leaf.is_empty()
         && !leaf.contains(' ')
         && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))

@@ -2,6 +2,7 @@
 //! drain, and the per-module resolve protocol (server and headless).
 
 use super::*;
+use std::collections::HashSet;
 
 /// The ONE resolver loop, server and headless alike. Mode differences are
 /// explicit `server` gates inside this body — the per-module resolve
@@ -83,8 +84,8 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         core.rebuild_reverse_index();
     }
 
-    // Track which extract version each module was resolved at.
-    let mut seen: HashMap<String, i64> = HashMap::new();
+    // Each module resolves at most once per process.
+    let mut seen: HashSet<String> = HashSet::new();
 
     // One parser + one parent-fallback memo for the whole sweep.
     // Without the memo, every child whose own exports are empty re-parses
@@ -190,13 +191,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         // drains.
         let mut resolved_any = false;
         for module_name in batch {
-            // Allow re-resolution when extract version is outdated.
-            if let Some(&ver) = seen.get(&module_name) {
-                if ver >= module_cache::EXTRACT_VERSION {
-                    continue;
-                }
+            if !seen.insert(module_name.clone()) {
+                continue;
             }
-            seen.insert(module_name.clone(), module_cache::EXTRACT_VERSION);
 
             let is_re_resolve = core.stale_modules.contains_key(&module_name);
             if is_re_resolve {
@@ -270,7 +267,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     let enqueue = |pending: &mut Vec<String>, name: String| {
                         if name.is_empty() { return; }
                         if core.cache.contains_key(&name) { return; }
-                        if seen.contains_key(&name) { return; }
+                        if seen.contains(&name) { return; }
                         if !pending.iter().any(|p| p == &name) {
                             pending.push(name);
                         }

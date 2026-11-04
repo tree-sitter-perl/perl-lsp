@@ -218,7 +218,7 @@ np \\%bar;
 ";
     let fa = build_fa(src);
     let dp_import = fa.imports.iter().find(|i| {
-        i.module_name == "Data::Printer" && i.imported_symbols.iter().any(|s| s.local_name == "p")
+        i.module_name == "Data::Printer" && i.imported_symbols().iter().any(|s| s.local_name == "p")
     });
     assert!(
         dp_import.is_some(),
@@ -227,7 +227,7 @@ np \\%bar;
     );
     let names: Vec<&str> = dp_import
         .unwrap()
-        .imported_symbols
+        .imported_symbols()
         .iter()
         .map(|s| s.local_name.as_str())
         .collect();
@@ -248,7 +248,7 @@ p $foo;
 ";
     let fa = build_fa(src);
     let dp_import = fa.imports.iter().find(|i| {
-        i.module_name == "Data::Printer" && i.imported_symbols.iter().any(|s| s.local_name == "p")
+        i.module_name == "Data::Printer" && i.imported_symbols().iter().any(|s| s.local_name == "p")
     });
     assert!(
         dp_import.is_some(),
@@ -257,7 +257,7 @@ p $foo;
             .iter()
             .map(|i| (
                 i.module_name.clone(),
-                i.imported_symbols
+                i.imported_symbols()
                     .iter()
                     .map(|s| s.local_name.clone())
                     .collect::<Vec<_>>(),
@@ -342,10 +342,10 @@ post '/login' => sub { my $u = param('user'); session user => $u; };
         "mime", "request_data",
     ] {
         assert!(
-            fa.framework_imports.contains(*kw),
+            fa.imports.keyword_names().contains(*kw),
             "`{}` must be autoimported by `use Dancer2`; framework_imports={:?}",
             kw,
-            fa.framework_imports,
+            fa.imports.keyword_names(),
         );
     }
 }
@@ -457,10 +457,10 @@ register my_keyword => sub { my $dsl = shift; $dsl->param('x') };
     let fa = build_fa(src);
     for kw in &["get", "post", "param", "request", "session", "config", "debug"] {
         assert!(
-            fa.framework_imports.contains(*kw),
+            fa.imports.keyword_names().contains(*kw),
             "`{}` must be autoimported by `use Dancer2::Plugin`; got {:?}",
             kw,
-            fa.framework_imports,
+            fa.imports.keyword_names(),
         );
     }
 }

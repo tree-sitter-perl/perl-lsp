@@ -308,9 +308,11 @@ fn make_add_to_qw_action(
     module_name: &str,
     func_name: &str,
 ) -> Option<CodeActionOrCommand> {
+    // The `use` the diagnostic's package reads — another package's list
+    // binds nothing here.
     let import = analysis
         .imports
-        .iter()
+        .in_scope(analysis.import_scope_at(position_to_point(diag.range.start)))
         .find(|imp| imp.module_name == module_name)?;
     let close_pos = import.qw_close_paren?;
     let insert_pos = point_to_position(close_pos);

@@ -5,26 +5,28 @@
 
 use super::*;
 
-const SCHEMA_VERSION: &str = "10";
+/// Every gate below takes its value from `cache-epochs/<gate>/`: a change
+/// that makes the gated store stale adds a file there (`cache-epochs/README.md`).
+const SCHEMA_VERSION: &str = crate::util::cache_epochs::SCHEMA;
 
-/// Bumped when the builder's analysis output changes shape in a way that
+/// Moves when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 297;
+pub const EXTRACT_VERSION: i64 = crate::util::cache_epochs::EXTRACT;
 
-/// Bumped when the ROW format of the relational ref index changes shape.
+/// Moves when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
 /// the derived `refs`/`files`/`strings` tables — the blobs stay valid and the
 /// next warm re-shreds rows from the already-decoded analyses for free.
-pub(super) const REF_ROWS_VERSION: &str = "9";
+pub(super) const REF_ROWS_VERSION: &str = crate::util::cache_epochs::REF_ROWS;
 
-/// Row format of the `conclusions` lane. Bump on any change to the row's
-/// SHAPE or to what its stamp means.
+/// Row format of the `conclusions` lane. Moves on any change to the row's
+/// SHAPE or to what its stamp means (`cache-epochs/conclusion-rows/`).
 ///
 /// Separate from `REF_ROWS_VERSION` because the lanes fail differently: a
 /// stale ref row answers a retrieval wrongly, a stale conclusion row answers
 /// a TYPE wrongly. Sharing one version would make either change wipe both.
-pub(super) const CONCLUSION_ROWS_VERSION: &str = "1";
+pub(super) const CONCLUSION_ROWS_VERSION: &str = crate::util::cache_epochs::CONCLUSION_ROWS;
 
 /// Fingerprint over everything that can change what a derivation CONCLUDES,
 /// computed by `build.rs` at compile time.
@@ -135,7 +137,17 @@ mod fingerprint_tests {
     }
 }
 
+/// Create the schema and run every version gate, as ONE `BEGIN IMMEDIATE`
+/// transaction. Two writers open the same DB (resolver thread + workspace
+/// indexer); with the check and its rebuild split across autocommit
+/// statements, both read "no stamp" on a fresh file, both rebuild, and one
+/// fails mid-rebuild with `table … already exists`. Under the write lock the
+/// second opener waits, then finds the schema finished and changes nothing.
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    in_immediate_txn(conn, || init_schema_in_txn(conn))
+}
+
+fn init_schema_in_txn(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(sql::SCHEMA_CREATE.registered())?;
     // Row-format generation for the derived tables (see REF_ROWS_VERSION).
     let rows_version: Option<String> = conn
@@ -212,7 +224,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Stub generation gate — stamped here so every fresh DB is writable by
     // the persist writers (their per-chunk `stub_version_current` check
     // would otherwise fail-closed until the first warm scan stamped it).
-    validate_stub_version(conn);
+    validate_stub_version_in_txn(conn)?;
 
     let version: Option<String> = conn
         .query_row(sql::META_GET.registered(), params!["schema_version"], |row| row.get(0))
@@ -239,7 +251,9 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 /// alongside every `DELETE FROM modules` hard-clear: the rows are shredded
 /// from the blobs, so a generation that invalidates the blobs invalidates
 /// the rows with it. Cheap to rebuild — the next warm re-shreds from the
-/// decoded analyses it is loading anyway.
+/// decoded analyses it is loading anyway. Callers hold the write transaction
+/// of the check that decided to clear, so the wipe and its generation bump
+/// land together.
 pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(sql::DERIVED_ROWS_CLEAR.registered())?;
     bump_strings_generation(conn)
@@ -278,6 +292,11 @@ pub fn compute_inc_hash(inc_paths: &[PathBuf]) -> String {
 }
 
 pub fn validate_inc_paths(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
+    // Same atomic check-and-stamp rationale as `validate_plugin_fingerprint`.
+    in_immediate_txn(conn, || validate_inc_paths_inner(conn, inc_paths))
+}
+
+fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlite::Result<()> {
     let current_hash = compute_inc_hash(inc_paths);
     let stored: Option<String> = conn
         .query_row(sql::META_GET.registered(), params!["inc_hash"], |row| row.get(0))
@@ -327,18 +346,20 @@ pub fn hydrate_builtins(conn: &Connection) -> rusqlite::Result<DashMap<String, S
 
     if need_parse {
         if let Some(p) = parsed.as_ref() {
-            conn.execute(sql::BUILTINS_CLEAR.registered(), [])?;
+            // Clear, refill and stamp together: a stamp that lands without its
+            // rows would serve an empty table as current from then on.
             in_immediate_txn(conn, || {
+                conn.execute(sql::BUILTINS_CLEAR.registered(), [])?;
                 let mut stmt = conn.prepare(sql::BUILTINS_INSERT.registered())?;
                 for (name, doc) in &p.entries {
                     stmt.execute(params![name, doc])?;
                 }
+                conn.execute(
+                    sql::META_SET.registered(),
+                    params!["builtins_perl_version", p.perl_version],
+                )?;
                 Ok(())
             })?;
-            conn.execute(
-                sql::META_SET.registered(),
-                params!["builtins_perl_version", p.perl_version],
-            )?;
             log::info!("Indexed {} Perl builtins from {}", p.entries.len(), p.perl_version);
         }
     }
@@ -463,17 +484,36 @@ fn validate_input_fingerprint_inner(conn: &Connection, fingerprint: u64) -> rusq
 /// Run `body` inside `BEGIN IMMEDIATE`, committing on `Ok` and rolling back
 /// on `Err`. IMMEDIATE takes the write lock up front, so a check-and-stamp
 /// validator's read cannot race the other writer's clear.
+///
+/// A failed COMMIT rolls back too: the gates run on the connection that later
+/// becomes the persist writer, and a transaction left open there holds the
+/// write lock and fails every later chunk's BEGIN.
 pub(crate) fn in_immediate_txn<T>(
     conn: &Connection,
     body: impl FnOnce() -> rusqlite::Result<T>,
 ) -> rusqlite::Result<T> {
     conn.execute_batch(sql::TXN_BEGIN_IMMEDIATE.registered())?;
-    let result = body();
-    match &result {
-        Ok(_) => conn.execute_batch(sql::TXN_COMMIT.registered())?,
-        Err(_) => {
-            let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
-        }
+    let finished = body().and_then(|v| conn.execute_batch(sql::TXN_COMMIT.registered()).map(|()| v));
+    if finished.is_err() {
+        let _ = conn.execute_batch(sql::TXN_ROLLBACK.registered());
     }
-    result
+    finished
+}
+
+/// Run `body` as one savepoint: every write it makes lands, or none does.
+/// Nests inside the caller's transaction (a persist chunk) or another unit —
+/// SQLite resolves the shared name to the innermost — and is its own
+/// transaction outside one, so a single-file writer gets the same unit.
+pub(crate) fn in_savepoint<T>(
+    conn: &Connection,
+    body: impl FnOnce() -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch(sql::SAVEPOINT_UNIT.registered())?;
+    let finished =
+        body().and_then(|v| conn.execute_batch(sql::RELEASE_UNIT.registered()).map(|()| v));
+    if finished.is_err() {
+        let _ = conn.execute_batch(sql::ROLLBACK_TO_UNIT.registered());
+        let _ = conn.execute_batch(sql::RELEASE_UNIT.registered());
+    }
+    finished
 }

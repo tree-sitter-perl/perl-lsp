@@ -329,7 +329,7 @@ pub enum ParametricType {
     /// the deferred side as `ReturnExpr::Operator(RowOf)`, which
     /// `eval_return_expr` projects eagerly to `ClassName(row)` — there is
     /// no value-side `RowOf` variant.
-    ResultSet { base: String, row: String },
+    ResultSet { base: String, row: RowSource },
 
     /// A template/generic instance — `Box<Widget> b;` peeled from its
     /// declared-type spelling. `base` is the unqualified template name
@@ -346,6 +346,64 @@ pub enum ParametricType {
     /// Kept AFTER `ResultSet` for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Instance { base: String, args: Vec<InferredType> },
+
+    /// A row of a DBIC source named by its MONIKER (`Artist` in
+    /// `$schema->resultset('Artist')->first`), not yet a class: which
+    /// result class registers the moniker is an index question, answered
+    /// by `dispatch_ladder_of`'s `Row` arm. `schema` is the schema class the
+    /// `resultset` receiver was, when its type named one — it scopes the
+    /// moniker to that schema's sources.
+    Row { moniker: String, schema: Option<String> },
+}
+
+/// What a `resultset(...)` argument names, decided where it is read: a
+/// package name (qualified, or a package the file declares) is the row
+/// CLASS; anything else is a source MONIKER the schema registered.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RowSource {
+    Class(String),
+    Moniker { moniker: String, schema: Option<String> },
+}
+
+impl RowSource {
+    /// The type a row of this source is: the class itself, or a `Row`
+    /// that resolves its moniker at dispatch.
+    pub fn row_type(&self) -> InferredType {
+        match self {
+            RowSource::Class(c) => InferredType::ClassName(c.clone()),
+            RowSource::Moniker { moniker, schema } => InferredType::Parametric(ParametricType::Row {
+                moniker: moniker.clone(),
+                schema: schema.clone(),
+            }),
+        }
+    }
+
+    /// The row class when the source names one; a moniker names none
+    /// until the index resolves it.
+    pub fn class(&self) -> Option<&str> {
+        match self {
+            RowSource::Class(c) => Some(c.as_str()),
+            RowSource::Moniker { .. } => None,
+        }
+    }
+
+    /// The name column-key owners key on. A moniker keys on its spelling:
+    /// a single-segment name the file doesn't declare may still be a class
+    /// another file declares, and a hash-key owner is minted at build time
+    /// with no index to tell the two apart (TODO(dbic-key-owner): an owner
+    /// that resolves the moniker at query time, like the `Row` arm does).
+    pub fn key_owner_name(&self) -> &str {
+        match self {
+            RowSource::Class(c) => c,
+            RowSource::Moniker { moniker, .. } => moniker,
+        }
+    }
+}
+
+impl std::fmt::Display for RowSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.key_owner_name())
+    }
 }
 
 impl ParametricType {
@@ -355,6 +413,8 @@ impl ParametricType {
         match self {
             ParametricType::ResultSet { base, .. } => Some(base.as_str()),
             ParametricType::Instance { base, .. } => Some(base.as_str()),
+            // A moniker is a class only once the index says which.
+            ParametricType::Row { .. } => None,
         }
     }
 
@@ -365,10 +425,12 @@ impl ParametricType {
     /// field is the right one when it lands).
     pub fn hash_key_class(&self) -> Option<&str> {
         match self {
-            ParametricType::ResultSet { row, .. } => Some(row.as_str()),
+            ParametricType::ResultSet { row, .. } => Some(row.key_owner_name()),
             // No key/value duality on a template instance — hash-key
             // access (if it ever occurs) reads the same class methods do.
             ParametricType::Instance { base, .. } => Some(base.as_str()),
+            // Keys on the spelling, as `RowSource::key_owner_name` does.
+            ParametricType::Row { moniker, .. } => Some(moniker.as_str()),
         }
     }
 
@@ -387,11 +449,11 @@ impl ParametricType {
             ParametricType::ResultSet { row, .. } => match method {
                 "search" | "search_rs" | "find" | "find_or_new" | "find_or_create"
                 | "update_or_create" | "create" | "update" | "populate" | "new_result" => {
-                    Some(HashKeyOwner::Bridged { class: row.clone() })
+                    Some(HashKeyOwner::Bridged { class: row.key_owner_name().to_string() })
                 }
                 _ => None,
             },
-            ParametricType::Instance { .. } => None,
+            ParametricType::Instance { .. } | ParametricType::Row { .. } => None,
         }
     }
 
@@ -433,7 +495,7 @@ impl ParametricType {
             // Members come from the base class's own defs; return
             // projection (arg substitution) is instantiation-aware
             // typing's job, not a declaration table.
-            ParametricType::Instance { .. } => Vec::new(),
+            ParametricType::Instance { .. } | ParametricType::Row { .. } => Vec::new(),
         }
     }
 
@@ -449,7 +511,7 @@ impl ParametricType {
     /// `canonical_template_spelling`'s output for the source text.
     pub fn exact_spelling(&self) -> Option<String> {
         match self {
-            ParametricType::ResultSet { .. } => None,
+            ParametricType::ResultSet { .. } | ParametricType::Row { .. } => None,
             ParametricType::Instance { base, args } => {
                 let parts: Vec<String> = args
                     .iter()
@@ -602,7 +664,7 @@ pub fn substitute_type_params(
         InferredType::Parametric(p) => match p {
             // A ResultSet's row/base are Perl package names — no C++
             // template params can occur inside them.
-            ParametricType::ResultSet { .. } => ty.clone(),
+            ParametricType::ResultSet { .. } | ParametricType::Row { .. } => ty.clone(),
             ParametricType::Instance { base, args: inner } => {
                 InferredType::Parametric(ParametricType::Instance {
                     base: base.clone(),
@@ -741,8 +803,17 @@ impl InferredType {
         match self {
             ClassName(c) => ClassName(f(&c)),
             FirstParam { package } => FirstParam { package: f(&package) },
-            Parametric(ParametricType::ResultSet { base, row }) => {
-                Parametric(ParametricType::ResultSet { base: f(&base), row: f(&row) })
+            Parametric(ParametricType::ResultSet { base, row }) => Parametric(ParametricType::ResultSet {
+                base: f(&base),
+                row: match row {
+                    RowSource::Class(c) => RowSource::Class(f(&c)),
+                    RowSource::Moniker { moniker, schema } => {
+                        RowSource::Moniker { moniker, schema: schema.map(|s| f(&s)) }
+                    }
+                },
+            }),
+            Parametric(ParametricType::Row { moniker, schema }) => {
+                Parametric(ParametricType::Row { moniker, schema: schema.map(|s| f(&s)) })
             }
             Parametric(ParametricType::Instance { base, args }) => Parametric(ParametricType::Instance {
                 base: f(&base),
@@ -1061,6 +1132,7 @@ impl InferredType {
             | InferredType::Numeric
             | InferredType::String
             | InferredType::Parametric(ParametricType::ResultSet { .. })
+            | InferredType::Parametric(ParametricType::Row { .. })
             | InferredType::TypeConstraintOf(None)
             | InferredType::Undef
             | InferredType::Bool

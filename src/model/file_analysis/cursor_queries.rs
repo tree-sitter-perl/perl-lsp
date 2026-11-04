@@ -995,9 +995,10 @@ impl FileAnalysis {
         }
         let idx = module_index?;
         let name = call_ref.unqualified_target_name(self.names());
-        // Later `use` wins, mirroring `resolve_call_package`'s import scan.
-        // A split exporter's surface lives across its candidate files.
-        for import in self.imports.iter().rev() {
+        // The package's own `use`s, later wins, mirroring
+        // `resolve_call_package`. A split exporter's surface lives across
+        // its candidate files.
+        for import in self.imports.in_scope(self.import_scope_at(call_ref.span.start)).rev() {
             for cached in idx.visible_def_candidates(&import.module_name) {
                 let surface = cached.analysis.export_surface_with_index(idx);
                 if imported_names(import, &surface)
