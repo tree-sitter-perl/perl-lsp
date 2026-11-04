@@ -1515,7 +1515,7 @@ impl LanguageRegistry {
             // answers from cached analyses no driver has built this process.
             for d in &drivers {
                 if let Some(pack) = d.lang_pack() {
-                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                    crate::model::conventions::register_conventions(d.id(), || pack.conventions());
                 }
             }
             LanguageRegistry { drivers }

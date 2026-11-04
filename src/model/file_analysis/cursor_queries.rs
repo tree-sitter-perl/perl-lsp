@@ -397,15 +397,10 @@ impl FileAnalysis {
         if let Some(group) = self.field_group_at(point) {
             return Some(self.rename_field_group(&group, new_name));
         }
-        // Perl owns a special variable's name (`@_`, `$_`, `%ENV`): it has
-        // occurrences, but no rename. The vocabulary is Perl's: another
-        // language's `_` is an ordinary name.
-        if self.language == crate::model::conventions::PERL_LANGUAGE
-            && self.ref_at(point).is_some_and(|r| {
-                matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-                    && crate::model::conventions::is_special_variable(&r.target_name)
-            })
-        {
+        if self.ref_at(point).is_some_and(|r| {
+            matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                && crate::model::conventions::conventions_of(&self.language).is_special_variable(&r.target_name)
+        }) {
             return None;
         }
         let refs = self.find_references(point, None);
