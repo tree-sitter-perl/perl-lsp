@@ -292,7 +292,7 @@ pub(super) fn file_stamp(path: &std::path::Path) -> i64 {
 /// makes the per-edit re-gather cheap (warm hits skip read+parse).
 fn header_info(canon: &std::path::Path, parser: &mut tree_sitter::Parser) -> Option<std::sync::Arc<CachedHeader>> {
     let mut build = |canon: &std::path::Path| -> Option<std::sync::Arc<CachedHeader>> {
-        let src = std::fs::read_to_string(canon).ok()?;
+        let src = crate::util::text::read_source(canon).ok()?;
         let tree = parser.parse(&src, None)?;
         Some(std::sync::Arc::new(CachedHeader {
             macros: collect_macros(&tree, src.as_bytes()),
@@ -551,7 +551,7 @@ pub fn include_gather(
                     continue;
                 }
                 out.push(canon.to_string_lossy().into_owned());
-                match std::fs::read_to_string(&canon) {
+                match crate::util::text::read_source(&canon) {
                     Ok(hsrc) => {
                         for inc in scan_include_directives(&hsrc) {
                             if let Some(nx) = resolve_include(&canon, &inc) {

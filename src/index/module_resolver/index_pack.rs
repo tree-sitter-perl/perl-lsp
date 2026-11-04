@@ -380,7 +380,7 @@ pub fn index_pack_language(
                 crate::util::timings::set_current_file(Some(&canon));
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     analyze_stamped(path, || {
-                        let source = std::fs::read_to_string(path).ok()?;
+                        let source = crate::util::text::read_source(path).ok()?;
                         Some(driver.analyze_with_path(&source, Some(path)))
                     })
                 }));

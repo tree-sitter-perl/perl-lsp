@@ -104,7 +104,7 @@ pub(crate) fn cli_check(args: &[String]) {
 
 /// --outline <file> — Document symbol outline
 pub(crate) fn cli_outline(file: &str) {
-    let (_source, _tree, analysis) = parse_file(file);
+    let (_source, _tree, analysis) = or_exit(parse_file(file));
     println!("{}", outline_json(&analysis));
 }
 
@@ -114,7 +114,7 @@ pub(crate) fn cli_outline(file: &str) {
 /// its own path.
 pub(crate) fn cli_hover_single_file(file: &str, line_str: &str, col_str: &str) {
     let point = parse_point(line_str, col_str);
-    let (source, _tree, analysis) = parse_file(file);
+    let (source, _tree, analysis) = or_exit(parse_file(file));
     // A language without the analysis-native `hover_info` renderer gets the
     // language-agnostic set projection (matches the LSP); no index here, so
     // cross-file function hover is unavailable in this form (use the root
@@ -145,7 +145,7 @@ pub(crate) fn cli_hover_single_file(file: &str, line_str: &str, col_str: &str) {
 
 /// --type-at <file> <line> <col> — Single type query
 pub(crate) fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
-    let (_source, _tree, analysis) = parse_file(file);
+    let (_source, _tree, analysis) = or_exit(parse_file(file));
     let point = parse_point(line_str, col_str);
 
     // Check refs for inferred type — route through the witness bag
@@ -252,28 +252,21 @@ pub(crate) fn cli_semantic_tokens(root: &str, file: &str) {
 /// Build an open `Document` (tree + analysis + stable_outline) and enrich it
 /// against the index exactly like the server's open-file path. Shared by the
 /// interactive CLI modes.
-fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::Document {
-    let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("Cannot read {}: {}", file, e);
-        super::exit_with(1, "exit");
-    });
+fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> Result<document::Document, String> {
+    let text = crate::util::text::read_source(file).map_err(|e| format!("Cannot read {}: {}", file, e))?;
     // The served driver, as the LSP server opens it. A hub-enriched
     // language keeps the native constructor + enrichment (`Document::new` is the reference
     // pipeline the hub's freshness/enrichment lanes are built around);
     // everything else goes through the generic driver constructor.
     let driver = language_driver::LanguageRegistry::served();
     if !driver.caps().hub_enrichment {
-        return tphase!("Document::new_routed", document::Document::new_routed(text, driver, Some(std::path::PathBuf::from(file))).unwrap_or_else(|| {
-            eprintln!("Parse failed: {}", file);
-            super::exit_with(1, "exit");
-        }));
+        return tphase!("Document::new_routed", document::Document::new_routed(text, driver, Some(std::path::PathBuf::from(file))))
+            .ok_or_else(|| format!("Parse failed: {}", file));
     }
-    let mut doc = tphase!("Document::new (parse+build)", document::Document::new(text).unwrap_or_else(|| {
-        eprintln!("Parse failed: {}", file);
-        super::exit_with(1, "exit");
-    }));
+    let mut doc = tphase!("Document::new (parse+build)", document::Document::new(text))
+        .ok_or_else(|| format!("Parse failed: {}", file))?;
     tphase!("enrich_imported_types", std::sync::Arc::make_mut(&mut doc.analysis).enrich_imported_types_with_keys(Some(idx)));
-    doc
+    Ok(doc)
 }
 
 #[derive(serde::Deserialize)]
@@ -311,7 +304,7 @@ impl<'a> ScopedOpenDoc<'a> {
     ) -> (Self, std::sync::Arc<file_analysis::FileAnalysis>, open_docs::FileKey) {
         let url = tower_lsp::lsp_types::Url::from_file_path(path)
             .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let text = crate::util::text::read_source(path).unwrap_or_default();
         let driver = language_driver::LanguageRegistry::served();
         let tree = driver.make_parser().parse(&text, None).unwrap_or_else(|| {
             eprintln!("Parse failed: {}", path.display());
@@ -394,7 +387,7 @@ fn run_one(
 
     match req.q.as_str() {
         "definition" => {
-            let (source, _tree, mut analysis) = parse_file(file);
+            let (source, _tree, mut analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
@@ -433,7 +426,7 @@ fn run_one(
             Err(format!("No definition found at {}:{}", req.line, req.col))
         }
         "references" => {
-            let (_s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
@@ -463,7 +456,7 @@ fn run_one(
             Ok(serde_json::to_string_pretty(&results).unwrap())
         }
         "implementations" => {
-            let (_s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
@@ -490,7 +483,7 @@ fn run_one(
             Ok(serde_json::to_string_pretty(&results).unwrap())
         }
         "type-definition" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (s, _t, mut analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
@@ -516,7 +509,7 @@ fn run_one(
             Ok(lines.join("\n"))
         }
         "type-hierarchy" | "call-hierarchy" => {
-            let (_s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
@@ -597,7 +590,7 @@ fn run_one(
             Ok(serde_json::to_string_pretty(&out).unwrap())
         }
         "hover" => {
-            let (source, _t, mut analysis) = parse_file(file);
+            let (source, _t, mut analysis) = parse_file(file)?;
             // A language without the analysis-native `hover_info` renderer
             // presents the CandidateSet's hover projection (matches the LSP
             // server — the same construction goto-def uses).
@@ -633,7 +626,7 @@ fn run_one(
                 .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col))
         }
         "type-at" => {
-            let (_s, _t, analysis) = parse_file(file);
+            let (_s, _t, analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             if let Some(r) = analysis.ref_at(point) {
                 if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
@@ -648,7 +641,7 @@ fn run_one(
             Err(format!("No type info at {}:{}", req.line, req.col))
         }
         "completion" => {
-            let doc = cli_open_document(file, idx);
+            let doc = cli_open_document(file, idx)?;
             // A language whose completion context comes from the sentinel
             // reparse (no native cursor-context) takes the pack path — the
             // same one the LSP server uses.
@@ -682,7 +675,7 @@ fn run_one(
             Ok(out.trim_end_matches('\n').to_string())
         }
         "signature-help" => {
-            let doc = cli_open_document(file, idx);
+            let doc = cli_open_document(file, idx)?;
             match symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, idx) {
                 Some(sh) => {
                     let active = sh.active_signature.unwrap_or(0) as usize;
@@ -710,7 +703,7 @@ fn run_one(
             }
         }
         "document-highlight" => {
-            let doc = cli_open_document(file, idx);
+            let doc = cli_open_document(file, idx)?;
             // Same construction as the LSP handler (process index, origin
             // key): highlights is the set's origin-narrowed projection.
             let abs = std::fs::canonicalize(file)
@@ -737,7 +730,7 @@ fn run_one(
             Ok(out.trim_end_matches('\n').to_string())
         }
         "linked-editing" => {
-            let doc = cli_open_document(file, idx);
+            let doc = cli_open_document(file, idx)?;
             let path = std::fs::canonicalize(file).map(|p| p.display().to_string())
                 .unwrap_or_else(|_| file.to_string());
             let abs = std::fs::canonicalize(file)
@@ -762,7 +755,7 @@ fn run_one(
             }
         }
         "document-link" => {
-            let text = std::fs::read_to_string(file)
+            let text = crate::util::text::read_source(file)
                 .map_err(|e| format!("Cannot read {}: {}", file, e))?;
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let root = idx
@@ -785,7 +778,7 @@ fn run_one(
             Ok(out.trim_end_matches('\n').to_string())
         }
         "semantic-tokens" => {
-            let doc = cli_open_document(file, idx);
+            let doc = cli_open_document(file, idx)?;
             let tokens = symbols::semantic_tokens(&doc.analysis);
             let legend = symbols::semantic_token_types();
             let (mut line, mut col): (u32, u32) = (0, 0);
@@ -799,7 +792,7 @@ fn run_one(
             Ok(out.trim_end_matches('\n').to_string())
         }
         "outline" => {
-            let (_s, _t, analysis) = parse_file(file);
+            let (_s, _t, analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             Ok(outline_json(&analysis))
         }
@@ -995,7 +988,7 @@ fn run_rename(
     }
     let file_path = std::path::Path::new(file).canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
-    let (_s, _t, mut analysis) = parse_file(file);
+    let (_s, _t, mut analysis) = parse_file(file)?;
     analysis.enrich_imported_types_with_keys(Some(idx));
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs
