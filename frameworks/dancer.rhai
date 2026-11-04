@@ -37,6 +37,8 @@
 
 fn id() { "dancer" }
 
+fn api() { 1 }
+
 fn triggers() {
     [
         #{ UsesModule: "Dancer2" },

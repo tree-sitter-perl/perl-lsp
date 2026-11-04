@@ -50,6 +50,9 @@ pub struct ReducerQuery<'a> {
 /// `None`/empty for in-file callers.
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
+    /// The bag's file's symbols: a variable place's binding names its
+    /// declaration. Empty for a copy whose symbols were evicted.
+    pub symbols: &'a [crate::model::file_analysis::Symbol],
     pub package_framework: &'a dyn crate::model::file_analysis::PackageFrameworks,
     pub module_index: Option<&'a dyn crate::model::file_analysis::CrossFileLookup>,
     pub package_parents: &'a dyn crate::model::file_analysis::LocalParents,
@@ -184,7 +187,7 @@ impl LiveWindow {
     pub(crate) fn at(ws: &[&Witness], q: &ReducerQuery) -> Self {
         let point = q
             .point
-            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
+            .filter(|_| q.attachment.is_temporal());
         let in_window = |w: &&&Witness| point.is_none_or(|p| w.span.start <= p);
         let reset_at = ws
             .iter()
@@ -232,7 +235,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
     fn claims(&self, w: &Witness) -> bool {
         matches!(
             w.attachment,
-            WitnessAttachment::Variable { .. } | WitnessAttachment::Expression(_)
+            WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_) | WitnessAttachment::Expression(_)
         ) && matches!(
             w.payload,
             WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) | WitnessPayload::Reset
@@ -254,12 +257,25 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
         if let Some(point) = narrow_point {
+            // A region holds its value until something later says otherwise:
+            // a write's reset or a fact stated at a point after the region
+            // opened (a key write extending the shape the region holds).
+            let latest_point_fact = ws
+                .iter()
+                .filter(|w| span_is_zero(&w.span) && window.admits(w))
+                .filter(|w| matches!(w.payload, WitnessPayload::InferredType(_)))
+                .map(|w| w.span.start)
+                .max();
             // Source priority first (an annotation outranks a flow guess
             // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
-                    if span_contains(&w.span, point) && !span_is_zero(&w.span) {
+                    if span_contains(&w.span, point)
+                        && !span_is_zero(&w.span)
+                        && window.admits(w)
+                        && latest_point_fact.is_none_or(|p| p <= w.span.start)
+                    {
                         let area = span_area(&w.span);
                         let prio = w.source.priority();
                         let better = narrow.is_none_or(|(nw, a)| {
@@ -1047,6 +1063,7 @@ impl WitnessReducer for ReturnExprReducer {
                 | WitnessAttachment::PackageSymbol { .. }
                 | WitnessAttachment::Expr(_)
                 | WitnessAttachment::Variable { .. }
+                | WitnessAttachment::Place(_)
                 | WitnessAttachment::Field { .. }
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))
     }
@@ -1057,8 +1074,8 @@ impl WitnessReducer for ReturnExprReducer {
         // fold: a bless mid-body types the variable only PAST the bless
         // site — a query before it keeps the rep answer (HashRef pre-,
         // instance post-bless).
-        let temporal_gate = |w: &&Witness| match (&w.attachment, q.point) {
-            (WitnessAttachment::Variable { .. }, Some(p)) => {
+        let temporal_gate = |w: &&Witness| match (w.attachment.is_temporal(), q.point) {
+            (true, Some(p)) => {
                 let s = w.span.start;
                 (s.row, s.column) <= (p.row, p.column)
             }
@@ -1110,9 +1127,7 @@ pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<Infe
                 // class with no further row dimension, so nested
                 // `RowOf<RowOf<…>>` correctly bottoms out at `None`.
                 match eval_return_expr(inner, q)? {
-                    InferredType::Parametric(ParametricType::ResultSet { row, .. }) => {
-                        Some(InferredType::ClassName(row))
-                    }
+                    InferredType::Parametric(ParametricType::ResultSet { row, .. }) => Some(row.row_type()),
                     _ => None,
                 }
             }

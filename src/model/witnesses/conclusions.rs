@@ -1095,6 +1095,7 @@ fn census_self_only(bag: &WitnessBag, att: &WitnessAttachment) {
                         WitnessAttachment::Symbol(_) => "selfonly.edge_to_symbol",
                         WitnessAttachment::PackageSymbol { .. } => "selfonly.edge_to_pkgsym",
                         WitnessAttachment::Variable { .. } => "selfonly.edge_to_variable",
+                        WitnessAttachment::Place(p) if p.is_variable() => "selfonly.edge_to_variable",
                         WitnessAttachment::Expression(_) => "selfonly.edge_to_expression",
                         _ => "selfonly.edge_to_other",
                     });
