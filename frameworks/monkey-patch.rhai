@@ -18,6 +18,8 @@
 
 fn id() { "monkey-patch" }
 
+fn api() { 1 }
+
 // `monkey_patch` is Mojo::Util's export, so the importing file is the scope.
 fn triggers() {
     [ #{ UsesModule: "Mojo::Util" } ]

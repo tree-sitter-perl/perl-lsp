@@ -12,6 +12,8 @@
 
 fn id() { "english" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "English" } ] }
 
 // English.pm's @MINIMAL_EXPORT, in its order.
