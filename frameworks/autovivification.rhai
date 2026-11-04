@@ -6,6 +6,8 @@
 
 fn id() { "autovivification" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "autovivification" } ] }
 
 fn categories() { #{ fetch: "Fetch", store: "Store", exists: "Exists", delete: "Delete" } }

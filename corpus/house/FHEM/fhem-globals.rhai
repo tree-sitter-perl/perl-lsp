@@ -17,6 +17,8 @@
 
 fn id() { "house-fhem-globals" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "strict" }, #{ UsesModule: "GPUtils" } ] }
 
 // fhem.pl's `use vars` names, in its order.

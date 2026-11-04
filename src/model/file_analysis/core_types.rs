@@ -248,20 +248,32 @@ pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&Na
         .max_by_key(|r| (r.span.start, std::cmp::Reverse(r.span.end)))
 }
 
-/// The innermost scope containing `point`, over a bare slice — the
-/// lookup `FileAnalysis::scope_at` is the method form of, shared with the
-/// use-map, which holds scopes without a `FileAnalysis`.
+/// The innermost scope containing `point`, over a bare slice — the one
+/// answer for the model (`FileAnalysis::scope_at`), the use-map and the
+/// builder alike. Containment, not size: the latest-starting scope, then
+/// the earliest-ending, then the deeper one for an identical span — the
+/// same rule `namespace_range_at` reads its lane by.
 pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
-    let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
-    for scope in scopes {
-        if contains_point(&scope.span, point) {
-            let size = span_size(&scope.span);
-            if best.is_none() || size <= best.unwrap().1 {
-                best = Some((scope.id, size));
-            }
-        }
-    }
-    best.map(|(id, _)| id)
+    scopes
+        .iter()
+        .filter(|s| contains_point(&s.span, point))
+        .max_by(|a, b| {
+            a.span
+                .start
+                .cmp(&b.span.start)
+                .then(b.span.end.cmp(&a.span.end))
+                .then_with(|| scope_depth(scopes, a.id).cmp(&scope_depth(scopes, b.id)))
+        })
+        .map(|s| s.id)
+}
+
+/// How many scopes enclose `id` (the file scope is 0). "Nearer" between two
+/// scopes on one chain is the deeper one; a span's size never says so.
+pub fn scope_depth(scopes: &[Scope], id: ScopeId) -> usize {
+    std::iter::successors(scopes.get(id.0 as usize).and_then(|s| s.parent), |p| {
+        scopes.get(p.0 as usize).and_then(|s| s.parent)
+    })
+    .count()
 }
 
 /// The statement-form sections a builder's walk still has running, by the
