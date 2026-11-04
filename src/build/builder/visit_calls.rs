@@ -340,7 +340,7 @@ impl<'a> Builder<'a> {
                     .strip_prefix('&')
                     .filter(|n| n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':'))
                     .unwrap_or(raw);
-                let resolved_package = self.resolve_call_package(name);
+                let resolved_package = self.resolve_call_package(name, node.start_position());
                 if let Some(pkg) = resolved_package.clone().or_else(|| self.current_package.clone()) {
                     self.plain_called_subs.insert((pkg, bare_name(name).to_string()));
                 }
@@ -397,7 +397,7 @@ impl<'a> Builder<'a> {
                 // on the package actually importing `option` (per the
                 // framework-mode manifest) so an unrelated `option(...)` sub
                 // elsewhere isn't read as an attribute declaration.
-                if name == "option" && self.imports.keyword(self.import_scope(), "option") {
+                if name == "option" && self.imports.keyword(self.import_scope_at(node.start_position()), "option") {
                     if let Some(mode) = self.current_package.as_ref()
                         .and_then(|pkg| self.framework_modes.get(pkg).copied())
                     {
@@ -418,7 +418,7 @@ impl<'a> Builder<'a> {
                 // role sugar actually being in scope (a plain class
                 // never imports `requires`) so a user-defined sub of
                 // the same name doesn't synthesize bogus methods.
-                if name == "requires" && self.imports.keyword(self.import_scope(), "requires") {
+                if name == "requires" && self.imports.keyword(self.import_scope_at(node.start_position()), "requires") {
                     if let Some(pkg) = self.current_package.clone() {
                         if self.framework_modes.contains_key(&pkg) {
                             self.visit_requires_call(node, &pkg);

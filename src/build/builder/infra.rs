@@ -317,13 +317,10 @@ impl<'a> Builder<'a> {
         self.current_package.as_deref().unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE)
     }
 
-    /// The import scope the walk is in.
-    pub(super) fn import_scope(&self) -> crate::model::file_analysis::ImportScope<'_> {
-        crate::model::file_analysis::ImportScope::in_package(self.import_package())
-    }
-
     /// The import scope in force at `point` — the namespace lane's package,
-    /// as `FileAnalysis::import_scope_at` reads it.
+    /// as `FileAnalysis::import_scope_at` reads it. Asked by position, never
+    /// by the walk's `current_package`: a deferred or fold-phase read sees
+    /// whichever package the walk last left.
     pub(super) fn import_scope_at(&self, point: Point) -> crate::model::file_analysis::ImportScope<'_> {
         crate::model::file_analysis::ImportScope::in_package(
             self.package_at_pos(point).unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE),
@@ -448,7 +445,7 @@ impl<'a> Builder<'a> {
     /// Returns `None` when none of those pin a package. Downstream
     /// class/package-scoped queries treat `None` as no-match rather
     /// than falling back to name-only union.
-    pub(super) fn resolve_call_package(&self, call_name: &str) -> Option<String> {
+    pub(super) fn resolve_call_package(&self, call_name: &str, at: Point) -> Option<String> {
         // (1) Qualified: `Foo::bar` → `Foo`.
         if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name, &crate::model::conventions::PERL_SPELLINGS) {
             return Some(pkg.to_string());
@@ -464,7 +461,8 @@ impl<'a> Builder<'a> {
             }
         }
         // (3) The package's imports — a later `use` wins.
-        let (imp, sym) = self.imports.binding(self.import_scope(), call_name)?;
+        let scope = self.import_scope_at(at);
+        let (imp, sym) = self.imports.binding(scope, call_name)?;
         // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
         // LOCAL alias the module doesn't define under that name. The
         // alias belongs to the CONSUMING package — keying its calls
@@ -473,7 +471,7 @@ impl<'a> Builder<'a> {
         // reaches `Exp::beta` via the import binding's remote name,
         // which `resolve_imported_function` reads independently.
         if sym.remote_name.is_some() {
-            return self.current_package.clone();
+            return Some(scope.package().to_string());
         }
         Some(imp.module_name.clone())
     }

@@ -540,7 +540,7 @@ impl<'a> Builder<'a> {
                 // sig-help, unresolved-function diagnostic, completion
                 // detail) just works. `qw_close_paren` stays None —
                 // there's no qw list to insert into for auto-import.
-                let package = self.import_package().to_string();
+                let package = self.import_scope_at(span.start).package().to_string();
                 self.imports.push(Import::new(module_name, imported_symbols, span, package));
             }
             plugin::EmitAction::PackageVariable { name, span } => {

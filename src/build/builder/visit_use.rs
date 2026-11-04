@@ -479,7 +479,7 @@ impl<'a> Builder<'a> {
                 .filter_map(|i| node.named_child(i))
                 .any(|c| c.kind() == "stub_expression");
         }
-        let package = self.import_package().to_string();
+        let package = self.import_scope_at(span.start).package().to_string();
         self.imports.push(
             Import::new(module_name.clone(), imported_symbols, span, package)
                 .with_qw_close(qw_close_paren)
@@ -685,7 +685,7 @@ impl<'a> Builder<'a> {
         // sub is this" (enclosing package, then imports) — no pin, no
         // ref, so unresolvable barewords (filehandles, prototypes'
         // leftovers) stay untouched.
-        if let Some(owner) = self.resolve_call_package(name) {
+        if let Some(owner) = self.resolve_call_package(name, node.start_position()) {
             self.add_bound_ref(
                 RefKind::FunctionCall,
                 node_to_span(node),
@@ -742,7 +742,7 @@ impl<'a> Builder<'a> {
             name.to_string(),
             AccessKind::Read,
         );
-        let package = self.import_package().to_string();
+        let package = self.import_scope_at(node.start_position()).package().to_string();
         self.imports.push(
             Import::new(name.to_string(), vec![], node_to_span(node), package).binding_nothing(true),
         );
