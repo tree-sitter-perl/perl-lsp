@@ -46,11 +46,6 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
 /// default for blobs that predate the field.
 pub const PERL_LANGUAGE: &str = "perl";
 
-/// Perl's subsumption rules: an object is a blessed hash, and truth is a
-/// number (`1` / `''`).
-pub static PERL_LATTICE: LatticeRules = LatticeRules::new(PERL_SUBSUMPTIONS);
-const PERL_SUBSUMPTIONS: &[Subsumption] = &[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric];
-
 /// What every file of one language shares, asked of the language by its id
 /// (`conventions_of`): no file carries it and no consumer branches on which
 /// language it serves (rules #10, #14).
@@ -81,8 +76,12 @@ fn no_special_variable(_: &str) -> bool {
 }
 
 /// Perl's conventions, declared beside its spellings and never registered.
-pub static PERL_CONVENTIONS: LanguageConventions =
-    LanguageConventions { lattice: LatticeRules::new(PERL_SUBSUMPTIONS), special_variable: is_special_variable };
+/// Its subsumption rules: an object is a blessed hash, and truth is a number
+/// (`1` / `''`).
+pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
+    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
+    special_variable: is_special_variable,
+};
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
 /// cannot see the packs that declare them, so the build layer registers each
