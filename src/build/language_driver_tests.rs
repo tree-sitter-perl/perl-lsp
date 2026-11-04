@@ -615,6 +615,28 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
     );
 }
 
+// A body that elides its receiver names its own method's class. A local
+// union's destructor mints no callable, so its bare names read no member of
+// the method around it.
+#[cfg(feature = "cpp")]
+#[test]
+fn an_unowned_body_reads_no_member_of_the_method_around_it() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessSource};
+    let src = "struct C { int inner_; void f() { int a = inner_; union U { ~U() { int b = inner_; } }; } };\n";
+    let fa = cpp_driver().analyze(src);
+    let reads: Vec<usize> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "implicit_field_read"))
+        .filter_map(|w| match w.attachment {
+            WA::Expr(sp) => Some(sp.start.column),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, [src.find("inner_; union").unwrap()], "only the method's own read is its member's");
+}
+
 // A callable with no declared return takes every `return` as an arm, and the
 // arms sit under the enrichment seal: enriching the file keeps its type.
 #[cfg(feature = "cpp")]

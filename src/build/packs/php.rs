@@ -1,7 +1,7 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassCall, ClassSpelling, FunctionLookup, InferredType, NameSpellings};
+use crate::model::file_analysis::{ClassCall, ClassSpelling, InferredType, NameSpellings};
 
 pub fn php_pack() -> LangPack {
     LangPack {
@@ -17,9 +17,11 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
-            functions: FunctionLookup::NamespaceThenGlobal,
             ..NameSpellings::NONE
         },
+        // A bare call names the function its namespace declares, else the
+        // global one.
+        functions: FunctionLookup::NamespaceThenGlobal,
         // `bool` is not an `int`: `bool|int` is a union a signature spells.
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         shape_name: |raw| raw.to_string(),

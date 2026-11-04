@@ -202,7 +202,7 @@ impl TypeOrder for Perl {
     }
 
     fn holds(&self, rule: Subsumption) -> bool {
-        crate::model::conventions::PERL_LATTICE.holds(rule)
+        crate::model::conventions::PERL_CONVENTIONS.lattice.holds(rule)
     }
 }
 

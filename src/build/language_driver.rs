@@ -1095,6 +1095,7 @@ fn remap_spans(
         macro_body_member_reads: _,
         language: _,
         names: _,
+        functions: _,
         slot_writes,
         member_writes,
         member_reads,
@@ -1515,7 +1516,7 @@ impl LanguageRegistry {
             // answers from cached analyses no driver has built this process.
             for d in &drivers {
                 if let Some(pack) = d.lang_pack() {
-                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                    crate::model::conventions::register_conventions(d.id(), || pack.conventions());
                 }
             }
             LanguageRegistry { drivers }

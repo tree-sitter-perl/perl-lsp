@@ -33,6 +33,7 @@ pub fn python_pack() -> LangPack {
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },
+        functions: FunctionLookup::Global,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
         shape_name: |raw| raw.to_string(),

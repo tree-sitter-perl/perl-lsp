@@ -169,6 +169,8 @@ pub struct SkeletonAnalysis {
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
+    /// Where the language's bare function call finds its function.
+    pub functions: super::FunctionLookup,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -413,12 +415,12 @@ impl SkeletonAnalysis {
     /// what a file that never reached extraction assembles from.
     pub fn for_pack(pack: &super::LangPack) -> Self {
         // The analysis is stamped with the pack's language here, so its
-        // lattice is registered here too: every reader of the stamp finds it.
-        // Perl's rules are declared, never registered.
+        // conventions are registered here too: every reader of the stamp
+        // finds them. Perl's are declared, never registered.
         if pack.id != crate::model::conventions::PERL_LANGUAGE {
-            crate::model::conventions::register_lattice(pack.id, || pack.lattice.clone());
+            crate::model::conventions::register_conventions(pack.id, || pack.conventions());
         }
-        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), ..Default::default() }
+        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), functions: pack.functions, ..Default::default() }
     }
 
     /// Re-anchor members that lost their enclosing container to a tree-sitter
@@ -539,6 +541,7 @@ impl SkeletonAnalysis {
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolId,
         };
         let names = self.names.clone();
+        let functions = self.functions;
         let slot_writes = std::mem::take(&mut self.slot_writes);
         let member_writes = std::mem::take(&mut self.member_writes);
         let class_scopes = std::mem::take(&mut self.class_scopes);
@@ -726,7 +729,7 @@ impl SkeletonAnalysis {
                         name: symbols[idx].name.clone(),
                         scope: symbols[idx].scope,
                     },
-                    source: WitnessSource::Builder("cpp_enumerator".into()),
+                    source: WitnessSource::Builder("enumerator".into()),
                     payload: WP::InferredType(InferredType::ClassName(enum_name)),
                     span: esp,
                 });
@@ -771,13 +774,17 @@ impl SkeletonAnalysis {
         // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
         // file scope, and only the method symbol carries `Buf`), so a closure
         // in a method reads the method's, and a free function's body has
-        // none: a lambda (no owner) is transparent. Scopes are pushed in id
+        // none: a lambda (no owner) is transparent. A body that elides its
+        // receiver is a method body of its own, so one whose declaration
+        // minted no callable (a local class's member function) names no
+        // class rather than the method around it. Scopes are pushed in id
         // order, so a parent's answer is in hand before its children's.
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
                 let class = match sc.owner.and_then(|sid| symbols.get(sid.0 as usize)) {
                     Some(owner) => owner.package.clone().filter(|_| matches!(owner.kind, SymKind::Method)),
+                    None if sc.implicit_receiver => None,
                     None => sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten()),
                 };
                 out.push(class);
@@ -842,7 +849,7 @@ impl SkeletonAnalysis {
         // it of their own capture.
         let free_call = |written: &str, at: tree_sitter::Point| {
             let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at, &symbols)?;
-            let function = function_identity(&map, &names, written, &free_functions);
+            let function = function_identity(&map, &names, functions, written, &free_functions);
             Some((function, map.resolve(written).identity(map.sep)))
         };
         // Per-class template parameter lists (declaration order) — the
@@ -868,7 +875,7 @@ impl SkeletonAnalysis {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
             let mk = |att: WA, pay: WP, span: Span| Witness {
                 attachment: att,
-                source: WitnessSource::Builder("cpp_method_return".into()),
+                source: WitnessSource::Builder("member_writeback".into()),
                 payload: pay,
                 span,
             };
@@ -1749,14 +1756,16 @@ impl SkeletonAnalysis {
 fn function_identity(
     map: &crate::model::file_analysis::UseMap,
     names: &crate::model::file_analysis::NameSpellings,
+    functions: super::FunctionLookup,
     written: &str,
     free_functions: &FreeFunctions,
 ) -> crate::model::file_analysis::QualifiedName {
-    use crate::model::file_analysis::{FunctionLookup, QualifiedName};
+    use super::FunctionLookup;
+    use crate::model::file_analysis::QualifiedName;
     if crate::model::file_analysis::split_qualified(written, names).0.is_some() {
         return map.resolve(written);
     }
-    match names.functions {
+    match functions {
         FunctionLookup::Global => QualifiedName::new("", written),
         FunctionLookup::NamespaceThenGlobal => {
             let own = map.own_namespace.unwrap_or("");

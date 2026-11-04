@@ -40,57 +40,98 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
-    functions: NameSpellings::NONE.functions,
 };
 
 /// Perl's language id: the native builder's, and `FileAnalysis::language`'s
 /// default for blobs that predate the field.
 pub const PERL_LANGUAGE: &str = "perl";
 
-/// Perl's subsumption rules: an object is a blessed hash, and truth is a
-/// number (`1` / `''`).
-pub static PERL_LATTICE: LatticeRules =
-    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
+/// What every file of one language shares, asked of the language by its id
+/// (`conventions_of`): no file carries it and no consumer branches on which
+/// language it serves (rules #10, #14).
+pub struct LanguageConventions {
+    /// Which cross-family types the language's joins fold into one another
+    /// (`docs/adr/union-types.md`).
+    pub lattice: LatticeRules,
+    /// Whether the runtime owns a variable of this (sigil-led) name.
+    special_variable: fn(&str) -> bool,
+}
 
-/// Each pack language's subsumption rules, by `FileAnalysis::language`. The
-/// model cannot see the packs that declare them, so the build layer registers
-/// each served language's set (`docs/adr/union-types.md`); Perl's are
-/// declared here, beside its other conventions, and never registered. Append-only slots, not a
-/// locked map: every bag query reads this, and a shared lock's reader count is
-/// one contended cache line across a sweep's workers.
-static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+impl LanguageConventions {
+    /// A pack language's: its declared lattice. No pack declares variables
+    /// its runtime owns, so another language's `$_` is an ordinary name.
+    pub fn of_pack(lattice: LatticeRules) -> Self {
+        LanguageConventions { lattice, special_variable: no_special_variable }
+    }
+
+    /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
+    /// has occurrences, but no rename.
+    pub fn is_special_variable(&self, name: &str) -> bool {
+        (self.special_variable)(name)
+    }
+}
+
+fn no_special_variable(_: &str) -> bool {
+    false
+}
+
+/// Perl's conventions, declared beside its spellings and never registered.
+/// Its subsumption rules: an object is a blessed hash, and truth is a number
+/// (`1` / `''`).
+pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
+    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
+    special_variable: is_special_variable,
+};
+
+/// Each pack language's conventions, by `FileAnalysis::language`. The model
+/// cannot see the packs that declare them, so the build layer registers each
+/// served language's; Perl's are declared here. Append-only slots, not a
+/// locked map: every bag query reads the lattice, and a shared lock's reader
+/// count is one contended cache line across a sweep's workers.
+static LANGUAGE_CONVENTIONS: [std::sync::OnceLock<(&'static str, LanguageConventions)>; 16] =
     [const { std::sync::OnceLock::new() }; 16];
 
-/// Register `language`'s rules once; later calls are no-ops, so `rules` is
-/// built only on the first.
-pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
-    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's rules are declared, not registered");
-    let mut rules = Some(rules);
-    for slot in &LANGUAGE_LATTICES {
+/// Register `language`'s conventions once; later calls are no-ops, so
+/// `conventions` is built only on the first.
+pub fn register_conventions(language: &'static str, conventions: impl FnOnce() -> LanguageConventions) {
+    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's conventions are declared, not registered");
+    let mut conventions = Some(conventions);
+    for slot in &LANGUAGE_CONVENTIONS {
         // A racing registration of another language can take this slot
         // between the check and the init; the loop then moves on.
-        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        let (id, _) = slot.get_or_init(|| (language, (conventions.take().expect("init runs once"))()));
         if *id == language {
             return;
         }
     }
-    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
+    panic!("more than {} languages registered", LANGUAGE_CONVENTIONS.len());
 }
 
-/// The subsumption rules of the language an analysis was built in. A
-/// language nobody registered holds no rules: it never borrows another's.
-pub fn lattice_for(language: &str) -> &'static LatticeRules {
-    static NO_RULES: LatticeRules = LatticeRules::new(&[]);
+/// The conventions of the language an analysis was built in. A language
+/// nobody registered has none: it never borrows another's.
+pub fn conventions_of(language: &str) -> &'static LanguageConventions {
+    registered_conventions(language).unwrap_or(&UNREGISTERED)
+}
+
+static UNREGISTERED: LanguageConventions =
+    LanguageConventions { lattice: LatticeRules::new(&[]), special_variable: no_special_variable };
+
+fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {
     if language == PERL_LANGUAGE {
-        return &PERL_LATTICE;
+        return Some(&PERL_CONVENTIONS);
     }
-    let registered = LANGUAGE_LATTICES
+    LANGUAGE_CONVENTIONS
         .iter()
         .map_while(|slot| slot.get())
         .find(|(id, _)| *id == language)
-        .map(|(_, rules)| rules);
+        .map(|(_, conventions)| conventions)
+}
+
+/// The subsumption rules of the language an analysis was built in.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    let registered = registered_conventions(language);
     debug_assert!(registered.is_some(), "no lattice registered for language {language:?}");
-    registered.unwrap_or(&NO_RULES)
+    &registered.unwrap_or(&UNREGISTERED).lattice
 }
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -654,7 +695,6 @@ mod tests {
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
-            functions: NameSpellings::NONE.functions,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

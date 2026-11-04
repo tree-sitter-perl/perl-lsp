@@ -60,59 +60,157 @@ fn parse(p: &QueryPredicate) -> Option<Result<Structural<'_>, String>> {
     Some(parsed)
 }
 
-/// The most captures one pattern node holds: tree-sitter keeps the first
+/// The most captures one pattern step holds: tree-sitter keeps the first
 /// three and drops the rest without a word.
-const MAX_NODE_CAPTURES: usize = 3;
+const MAX_STEP_CAPTURES: usize = 3;
 
-/// The byte offset of the first node in `source` written with more
-/// captures than a node holds.
-fn overloaded_capture_node(source: &str) -> Option<usize> {
-    let (mut run, mut at, mut in_string) = (0, 0, false);
+/// A pattern still open around the scan: what its captures land on.
+enum Open {
+    /// The top level, or a predicate's own parentheses (skipped whole).
+    Root,
+    /// `(kind …)`: its own step, and whether its kind is read yet.
+    Node { step: usize, named: bool },
+    /// `((a) (b))`: the first child's first steps.
+    Group { first: Option<Vec<usize>> },
+    /// `[(a) (b)]`: every branch's first steps.
+    Alternation { first: Vec<usize> },
+}
+
+/// Tree-sitter's capture-name characters past the first.
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || "_-.?!".contains(c)
+}
+
+/// The byte offset of the first capture in `source` that its step cannot
+/// hold. Tree-sitter files a pattern's captures on the pattern's first
+/// step (a node's own; a group's first child's; each alternation branch's
+/// first), so a group's capture stacks on the node inside it. The lexing is
+/// the query parser's: a string is `"…"` with `\` escaping the next
+/// character, `;` comments to the line's end between tokens, a capture name
+/// runs over alphanumerics and `_-.?!`, and a parenthesis opening on `#` or
+/// `.` is a predicate, whose `@` arguments name captures but add none.
+fn overloaded_capture(source: &str) -> Option<usize> {
+    let mut captures: Vec<usize> = Vec::new();
+    let mut open: Vec<Open> = vec![Open::Root];
+    // The first steps of the pattern a capture written now would follow.
+    let mut last: Option<Vec<usize>> = None;
     let mut chars = source.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if in_string {
+    let skip_string = |chars: &mut std::iter::Peekable<std::str::CharIndices>| {
+        while let Some((_, c)) = chars.next() {
             match c {
                 '\\' => {
                     chars.next();
                 }
-                '"' => in_string = false,
+                '"' => return,
                 _ => {}
             }
-            continue;
         }
+    };
+    // A pattern completes: captures may follow it, and its enclosing group
+    // or alternation learns its first steps.
+    let complete = |first: Vec<usize>, open: &mut Vec<Open>, last: &mut Option<Vec<usize>>| {
+        match open.last_mut() {
+            Some(Open::Group { first: f @ None }) => *f = Some(first.clone()),
+            Some(Open::Alternation { first: f }) => f.extend(first.iter().copied()),
+            _ => {}
+        }
+        *last = Some(first);
+    };
+    while let Some((i, c)) = chars.next() {
         match c {
+            c if c.is_whitespace() => {}
+            ';' => while chars.next_if(|&(_, c)| c != '\n').is_some() {},
             '"' => {
-                in_string = true;
-                run = 0;
-            }
-            ';' => {
-                while chars.next_if(|&(_, c)| c != '\n').is_some() {}
+                skip_string(&mut chars);
+                captures.push(0);
+                complete(vec![captures.len() - 1], &mut open, &mut last);
             }
             '@' => {
-                if run == 0 {
-                    at = i;
+                while chars.next_if(|&(_, c)| is_name_char(c)).is_some() {}
+                for &step in last.iter().flatten() {
+                    captures[step] += 1;
+                    if captures[step] > MAX_STEP_CAPTURES {
+                        return Some(i);
+                    }
                 }
-                run += 1;
-                if run > MAX_NODE_CAPTURES {
-                    return Some(at);
-                }
-                while chars.next_if(|&(_, c)| !c.is_whitespace() && !"()[]".contains(c)).is_some() {}
             }
-            c if c.is_whitespace() => {}
-            _ => run = 0,
+            '+' | '*' | '?' if last.is_some() => {}
+            '(' => {
+                last = None;
+                let mut ahead = chars.clone();
+                let next = loop {
+                    match ahead.next() {
+                        Some((_, c)) if c.is_whitespace() => {}
+                        Some((_, ';')) => while ahead.next_if(|&(_, c)| c != '\n').is_some() {},
+                        other => break other.map(|(_, c)| c),
+                    }
+                };
+                match next {
+                    Some('#' | '.') => {
+                        let mut depth = 1;
+                        while depth > 0 {
+                            match chars.next() {
+                                Some((_, '"')) => skip_string(&mut chars),
+                                Some((_, ';')) => while chars.next_if(|&(_, c)| c != '\n').is_some() {},
+                                Some((_, '(')) => depth += 1,
+                                Some((_, ')')) => depth -= 1,
+                                Some(_) => {}
+                                None => return None,
+                            }
+                        }
+                    }
+                    Some('(' | '[' | '"') => open.push(Open::Group { first: None }),
+                    _ => {
+                        captures.push(0);
+                        open.push(Open::Node { step: captures.len() - 1, named: false });
+                    }
+                }
+            }
+            '[' => {
+                last = None;
+                open.push(Open::Alternation { first: Vec::new() });
+            }
+            ')' | ']' => {
+                last = None;
+                let first = match open.pop() {
+                    Some(Open::Node { step, .. }) => vec![step],
+                    Some(Open::Group { first }) => first.unwrap_or_default(),
+                    Some(Open::Alternation { first }) => first,
+                    Some(Open::Root) | None => return None,
+                };
+                complete(first, &mut open, &mut last);
+            }
+            _ => {
+                last = None;
+                let mut word = String::from(c);
+                while let Some((_, c)) = chars.next_if(|&(_, c)| !c.is_whitespace() && !"()[]\"@;".contains(c)) {
+                    word.push(c);
+                }
+                match open.last_mut() {
+                    Some(Open::Node { named: named @ false, .. }) => *named = true,
+                    // A wildcard child is a step; a field name, negated
+                    // field or anchor only prefixes or places one.
+                    _ if word == "_" => {
+                        captures.push(0);
+                        complete(vec![captures.len() - 1], &mut open, &mut last);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     None
 }
 
-/// A query's source as tree-sitter will read it: refused when a node is
-/// written with more captures than it holds, so a document cannot lose a
-/// capture in silence. Both runners check it beside `check`.
+/// A query's source as tree-sitter will read it: refused when a step is
+/// given more captures than it holds, written on it or stacked on it by an
+/// enclosing group or alternation, so a document cannot lose a capture in
+/// silence. Both runners check it beside `check`.
 pub fn check_source(source: &str) -> Result<(), String> {
-    match overloaded_capture_node(source) {
+    match overloaded_capture(source) {
         Some(at) => Err(format!(
             "line {}: a node holds at most three captures; tree-sitter drops the rest",
-            source[..at].lines().count()
+            source[..at].matches('\n').count() + 1
         )),
         None => Ok(()),
     }
