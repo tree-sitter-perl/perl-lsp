@@ -639,7 +639,7 @@ helper foo => sub {};
         "group",
     ] {
         assert!(
-            fa.framework_imports.contains(*verb),
+            fa.imports.keyword_names().contains(*verb),
             "{} must be autoimported by use Mojolicious::Lite",
             verb
         );

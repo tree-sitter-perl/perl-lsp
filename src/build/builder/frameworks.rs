@@ -786,7 +786,7 @@ impl<'a> Builder<'a> {
     /// `use Mojo::Base ...` arm and the generic `use X -base` arm.
     pub(super) fn apply_mojo_base_mode(&mut self, pkg: String, parents: Vec<String>, node: Option<Node<'a>>) {
         self.framework_modes.insert(pkg.clone(), FrameworkMode::MojoBase);
-        self.framework_imports.insert("has".to_string());
+        self.imports.push_keyword(&pkg, "has".to_string());
         if parents.is_empty() { return; }
         if let Some(node) = node {
             let parent_set: std::collections::HashSet<&str> =

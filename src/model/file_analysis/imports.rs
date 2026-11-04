@@ -62,13 +62,18 @@ impl ImportedSymbol {
 }
 
 /// A `use Foo::Bar qw(func1 func2)` statement parsed from the source.
+///
+/// The names it binds are private: they bind in [`Import::package`] only, so
+/// the one way to ask what a name binds to is through an [`ImportScope`]
+/// (`ImportTable::binding` / `in_scope`). A whole-file walk sees the
+/// statement — module, span, package — and never the names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Import {
     /// Module name, e.g. "List::Util".
     pub module_name: String,
     /// Explicitly imported names from `qw(...)`. Empty = bare `use Foo;`.
     /// Each entry carries local + (optional) remote name for renaming imports.
-    pub imported_symbols: Vec<ImportedSymbol>,
+    imported_symbols: Vec<ImportedSymbol>,
     /// Span of the entire `use` statement.
     pub span: Span,
     /// Position of the closing delimiter of the `qw()` list (the `)` character).
@@ -80,6 +85,222 @@ pub struct Import {
     /// too, but auto-imports the defaults).
     #[serde(default)]
     pub empty_import: bool,
+    /// The package the names land in: the one in force at the `use`, minted
+    /// by the walk that saw it.
+    pub package: String,
+}
+
+impl Import {
+    /// A statement binding `imported_symbols` into `package`.
+    pub fn new(
+        module_name: String,
+        imported_symbols: Vec<ImportedSymbol>,
+        span: Span,
+        package: String,
+    ) -> Self {
+        Self { module_name, imported_symbols, span, qw_close_paren: None, empty_import: false, package }
+    }
+
+    pub fn with_qw_close(mut self, qw_close_paren: Option<Point>) -> Self {
+        self.qw_close_paren = qw_close_paren;
+        self
+    }
+
+    /// `use Foo ();` / `require Foo` — loads the module, binds nothing.
+    pub fn binding_nothing(mut self, empty: bool) -> Self {
+        self.empty_import = empty;
+        self
+    }
+
+    /// Whether what this statement binds is known only from the producer's
+    /// export surface: a bare `use` (its defaults) or a `:tag` selector.
+    pub fn needs_surface(&self) -> bool {
+        !self.empty_import
+            && (self.imported_symbols.is_empty()
+                || self.imported_symbols.iter().any(|s| {
+                    s.local_name.starts_with(':') || s.local_name.starts_with('-')
+                }))
+    }
+
+    /// The names as written, for a dump that prints the statement. A binding
+    /// question asks `ImportTable::binding`, which knows the package.
+    pub fn names_as_written(&self) -> impl Iterator<Item = &str> {
+        self.imported_symbols.iter().map(|s| s.local_name.as_str())
+    }
+
+    #[cfg(test)]
+    pub fn imported_symbols(&self) -> &[ImportedSymbol] {
+        &self.imported_symbols
+    }
+}
+
+/// Where a binding question is asked: the package in force, and optionally
+/// only the `use`s Perl has compiled by a point. Built by
+/// `FileAnalysis::import_scope_at` or `Builder::import_scope[_at]`.
+#[derive(Debug, Clone, Copy)]
+pub struct ImportScope<'a> {
+    package: &'a str,
+    before: Option<Point>,
+}
+
+impl<'a> ImportScope<'a> {
+    pub(crate) fn in_package(package: &'a str) -> Self {
+        Self { package, before: None }
+    }
+
+    /// Narrow to the `use`s textually before `point`: the compile-order
+    /// question (a parenless call parses as a call only once the sub is
+    /// known), not the runtime one.
+    pub fn parsed_before(self, point: Point) -> Self {
+        Self { before: Some(point), ..self }
+    }
+
+    pub fn package(&self) -> &'a str {
+        self.package
+    }
+
+    fn admits(&self, import: &Import) -> bool {
+        import.package == self.package && self.before.map_or(true, |p| import.span.start < p)
+    }
+}
+
+/// An `Import` read from inside its scope: the only view that names what the
+/// statement binds.
+#[derive(Debug, Clone, Copy)]
+pub struct ScopedImport<'a>(&'a Import);
+
+impl<'a> std::ops::Deref for ScopedImport<'a> {
+    type Target = Import;
+    fn deref(&self) -> &Import {
+        self.0
+    }
+}
+
+impl<'a> ScopedImport<'a> {
+    /// The explicitly named binding for `local`, if this statement names it.
+    pub fn explicit(&self, local: &str) -> Option<&'a ImportedSymbol> {
+        self.0.imported_symbols.iter().find(|s| s.local_name == local)
+    }
+
+    /// Every explicitly named binding (empty for a bare `use`).
+    pub fn explicit_symbols(&self) -> &'a [ImportedSymbol] {
+        &self.0.imported_symbols
+    }
+}
+
+/// A keyword a framework installs into a package at its `use` (`has`,
+/// `extends`, Mojolicious::Lite's `get`). It has no producer sub to resolve
+/// to, so it answers `ImportTable::keyword`, never `binding`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeywordImport {
+    pub package: String,
+    pub keyword: String,
+}
+
+/// Perl's import lane: every `use` / `require` statement and every framework
+/// keyword, each bound in the package it was minted in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportTable {
+    rows: Vec<Import>,
+    keywords: Vec<KeywordImport>,
+}
+
+impl ImportTable {
+    pub fn push(&mut self, import: Import) {
+        self.rows.push(import);
+    }
+
+    pub fn push_keyword(&mut self, package: &str, keyword: String) {
+        if !self.keyword(ImportScope::in_package(package), &keyword) {
+            self.keywords.push(KeywordImport { package: package.to_string(), keyword });
+        }
+    }
+
+    /// Every statement in source order. The statement, not its names: a
+    /// walk that needs the modules a file loads or where its `use` lines sit.
+    pub fn iter(&self) -> std::slice::Iter<'_, Import> {
+        self.rows.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// The statements that bind in `scope`, in source order (`.rev()` for
+    /// "later `use` wins").
+    pub fn in_scope<'s>(
+        &'s self,
+        scope: ImportScope<'s>,
+    ) -> impl DoubleEndedIterator<Item = ScopedImport<'s>> + 's {
+        self.rows.iter().filter(move |i| scope.admits(i)).map(ScopedImport)
+    }
+
+    /// Every statement read in its own package — for a sweep whose answer
+    /// is keyed by that package, never joined against another scope.
+    pub fn in_own_scopes(&self) -> impl Iterator<Item = ScopedImport<'_>> {
+        self.rows.iter().map(ScopedImport)
+    }
+
+    /// What `local` binds to by name in `scope`: the latest statement naming
+    /// it and its binding (local + remote). A bare or `:tag` `use` needs the
+    /// producer's surface — `imported_names` over `in_scope` answers those.
+    pub fn binding<'s>(
+        &'s self,
+        scope: ImportScope<'s>,
+        local: &str,
+    ) -> Option<(ScopedImport<'s>, &'s ImportedSymbol)> {
+        self.in_scope(scope).rev().find_map(|i| i.explicit(local).map(|s| (i, s)))
+    }
+
+    /// The modules `use`d in `scope`.
+    pub fn modules<'s>(&'s self, scope: ImportScope<'s>) -> impl Iterator<Item = &'s str> + 's {
+        self.in_scope(scope).map(|i| i.0.module_name.as_str())
+    }
+
+    /// Whether a framework installed `keyword` into `scope`'s package.
+    pub fn keyword(&self, scope: ImportScope<'_>, keyword: &str) -> bool {
+        self.keywords.iter().any(|k| k.package == scope.package && k.keyword == keyword)
+    }
+
+    /// Every keyword name the file's frameworks installed, in any package.
+    #[cfg(test)]
+    pub fn keyword_names(&self) -> std::collections::BTreeSet<&str> {
+        self.keywords.iter().map(|k| k.keyword.as_str()).collect()
+    }
+
+    /// Every keyword row, for a dump that diffs two analyses.
+    pub fn keywords_as_written(&self) -> &[KeywordImport] {
+        &self.keywords
+    }
+
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.rows.capacity() * std::mem::size_of::<Import>()
+            + self.rows.iter().map(|i| {
+                i.module_name.capacity() + i.package.capacity()
+                    + i.imported_symbols.capacity() * std::mem::size_of::<ImportedSymbol>()
+            }).sum::<usize>()
+            + self.keywords.capacity() * std::mem::size_of::<KeywordImport>()
+            + self.keywords.iter().map(|k| k.package.capacity() + k.keyword.capacity()).sum::<usize>()
+    }
+}
+
+impl std::ops::Index<usize> for ImportTable {
+    type Output = Import;
+    fn index(&self, i: usize) -> &Import {
+        &self.rows[i]
+    }
+}
+
+impl<'a> IntoIterator for &'a ImportTable {
+    type Item = &'a Import;
+    type IntoIter = std::slice::Iter<'a, Import>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.iter()
+    }
 }
 
 /// A producer module's resolved export surface — see
@@ -191,7 +412,7 @@ enum ImportSelector<'a> {
 /// `@EXPORT_OK` is NEVER auto-imported by a bare `use M;` — an opt-in name
 /// reached only by a bare use is deliberately left unbound (the GATE-5 hint).
 pub fn imported_names(
-    import: &Import,
+    import: ScopedImport<'_>,
     surface: &ExportSurface<'_>,
 ) -> std::collections::HashSet<(String, String)> {
     let mut bound = std::collections::HashSet::new();

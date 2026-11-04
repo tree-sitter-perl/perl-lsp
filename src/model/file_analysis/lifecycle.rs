@@ -68,7 +68,6 @@ impl FileAnalysis {
             pack,
             plugin,
             method_call_bindings,
-            framework_imports,
             export,
             export_ok,
             export_tags,
@@ -105,7 +104,6 @@ impl FileAnalysis {
             method_call_bindings,
             namespace_ranges,
             packages,
-            framework_imports,
             export,
             export_ok,
             export_tags,
@@ -1300,7 +1298,7 @@ impl FileAnalysis {
             + self.export_lookup.iter().map(|s| s.capacity()).sum::<usize>();
 
         // bindings / imports.
-        h.bindings = vcap(&self.imports)
+        h.bindings = self.imports.heap_bytes()
             + vcap(&self.call_bindings)
             + vcap(&self.method_call_bindings)
             + vcap(&self.fold_ranges);
@@ -1320,7 +1318,6 @@ impl FileAnalysis {
         h.misc += pkg_facts(&self.packages)
             + map_str_vec(&self.export_tags)
             + mcap(&self.type_provenance)
-            + scap(&self.framework_imports)
             + scap(&self.reassigned_vars)
             + scap(&self.column_keyed_verbs)
             + vcap(&self.export)

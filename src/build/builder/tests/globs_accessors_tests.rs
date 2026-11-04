@@ -13,7 +13,7 @@ requires 'must_implement';
 ",
     );
     assert!(
-        fa.framework_imports.contains("requires"),
+        fa.imports.keyword_names().contains("requires"),
         "Moo::Role exports `requires` — should register as a framework import"
     );
 }
@@ -27,7 +27,7 @@ use Moose::Role;
 requires 'foo';
 ",
     );
-    assert!(fa.framework_imports.contains("requires"));
+    assert!(fa.imports.keyword_names().contains("requires"));
 }
 
 #[test]
@@ -41,11 +41,11 @@ with 'Other::Role';
 ",
     );
     assert!(
-        fa.framework_imports.contains("requires"),
+        fa.imports.keyword_names().contains("requires"),
         "Role::Tiny exports `requires`"
     );
     assert!(
-        fa.framework_imports.contains("with"),
+        fa.imports.keyword_names().contains("with"),
         "Role::Tiny exports `with`"
     );
 }
@@ -59,7 +59,7 @@ use Role::Tiny::With;
 with 'Some::Role';
 ",
     );
-    assert!(fa.framework_imports.contains("with"));
+    assert!(fa.imports.keyword_names().contains("with"));
 }
 
 #[test]

@@ -22,12 +22,15 @@ use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, 
 /// every language asks the analysis's `NameSpellings` instead.
 pub const PERL_SEP: &str = "::";
 
+/// The package code runs in before any `package` statement.
+pub const PERL_ROOT_PACKAGE: &str = "main";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
-    root_package: Some(std::borrow::Cow::Borrowed("main")),
+    root_package: Some(std::borrow::Cow::Borrowed(PERL_ROOT_PACKAGE)),
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
     imports: NameSpellings::NONE.imports,

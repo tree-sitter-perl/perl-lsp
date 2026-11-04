@@ -303,7 +303,7 @@ struct Builder<'a> {
     /// (`name(...)`; a `\&name` reference is not a call).
     plain_called_subs: std::collections::HashSet<(String, String)>,
     fold_ranges: Vec<FoldRange>,
-    imports: Vec<Import>,
+    imports: crate::model::file_analysis::ImportTable,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
     return_infos: Vec<ReturnInfo>,
     /// Pending `push @arr, X, Y` contributions queued at walk time
@@ -377,8 +377,6 @@ struct Builder<'a> {
     sub_return_delegations: std::collections::HashMap<String, String>,
     /// Framework mode per package (Moo, Moose, MojoBase) for accessor synthesis.
     framework_modes: std::collections::HashMap<String, FrameworkMode>,
-    /// Functions implicitly imported by OOP frameworks (has, extends, with, etc.)
-    framework_imports: std::collections::HashSet<String>,
     /// Known compile-time string values, accumulated during the walk and
     /// keyed by what each name resolves to (`consts.rs`).
     consts: consts::ConstTable,

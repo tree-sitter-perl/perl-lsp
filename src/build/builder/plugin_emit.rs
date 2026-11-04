@@ -530,7 +530,8 @@ impl<'a> Builder<'a> {
                 self.package_parents.push(package, parent);
             }
             plugin::EmitAction::FrameworkImport { keyword } => {
-                self.framework_imports.insert(keyword);
+                let package = self.import_package().to_string();
+                self.imports.push_keyword(&package, keyword);
             }
             plugin::EmitAction::Import { module_name, imported_symbols, span } => {
                 // Plugin-synthetic `use` — indistinguishable from a
@@ -539,13 +540,8 @@ impl<'a> Builder<'a> {
                 // sig-help, unresolved-function diagnostic, completion
                 // detail) just works. `qw_close_paren` stays None —
                 // there's no qw list to insert into for auto-import.
-                self.imports.push(Import {
-                    module_name,
-                    imported_symbols,
-                    span,
-                    qw_close_paren: None,
-                    empty_import: false,
-                });
+                let package = self.import_package().to_string();
+                self.imports.push(Import::new(module_name, imported_symbols, span, package));
             }
             plugin::EmitAction::PackageVariable { name, span } => {
                 self.declare_package_variable(name, span);

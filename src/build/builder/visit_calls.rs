@@ -397,7 +397,7 @@ impl<'a> Builder<'a> {
                 // on the package actually importing `option` (per the
                 // framework-mode manifest) so an unrelated `option(...)` sub
                 // elsewhere isn't read as an attribute declaration.
-                if name == "option" && self.package_imports_framework_keyword("option") {
+                if name == "option" && self.imports.keyword(self.import_scope(), "option") {
                     if let Some(mode) = self.current_package.as_ref()
                         .and_then(|pkg| self.framework_modes.get(pkg).copied())
                     {
@@ -418,7 +418,7 @@ impl<'a> Builder<'a> {
                 // role sugar actually being in scope (a plain class
                 // never imports `requires`) so a user-defined sub of
                 // the same name doesn't synthesize bogus methods.
-                if name == "requires" && self.framework_imports.contains("requires") {
+                if name == "requires" && self.imports.keyword(self.import_scope(), "requires") {
                     if let Some(pkg) = self.current_package.clone() {
                         if self.framework_modes.contains_key(&pkg) {
                             self.visit_requires_call(node, &pkg);
@@ -1052,20 +1052,6 @@ impl<'a> Builder<'a> {
                     .map_or(false, |c| c == '_' || c.is_ascii_alphabetic())
             })
             .collect()
-    }
-
-    /// True when the current package `use`d a module whose manifest-declared
-    /// keyword surface (`framework_mode_makers()`) includes `kw`. Per-package
-    /// — `framework_imports` is file-global, so it can't gate a keyword like
-    /// `option` that only some makers export.
-    pub(super) fn package_imports_framework_keyword(&self, kw: &str) -> bool {
-        let Some(pkg) = self.current_package.as_ref() else { return false };
-        let Some(uses) = self.package_uses.get(pkg) else { return false };
-        uses.iter().any(|m| {
-            self.framework_mode_modules
-                .get(m)
-                .is_some_and(|g| g.imports.iter().any(|k| k == kw))
-        })
     }
 
     /// True if the current package `use`d an exporter whose vocabulary

@@ -115,9 +115,7 @@ impl<'a> Builder<'a> {
     /// full vocabulary through the plugin's `on_use`, and house type
     /// libraries reach the same place via `SyntheticUse`.
     fn constraint_name_imported(&self, name: &str) -> bool {
-        self.imports
-            .iter()
-            .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
+        self.imports.binding(self.import_scope(), name).is_some()
     }
 
     /// What a call to `name` reports about a reference: the `ref` builtin,
@@ -133,13 +131,10 @@ impl<'a> Builder<'a> {
         self.ref_tag_functions.iter().find_map(|f| {
             let hit = match module {
                 Some(m) => m == f.module && leaf == f.name,
-                None => self.imports.iter().any(|i| {
-                    i.module_name == f.module
-                        && i.imported_symbols.iter().any(|sym| {
-                            sym.local_name == name
-                                && sym.remote_name.as_deref().unwrap_or(&sym.local_name) == f.name
-                        })
-                }),
+                None => self
+                    .imports
+                    .binding(self.import_scope(), name)
+                    .is_some_and(|(i, sym)| i.module_name == f.module && sym.remote() == f.name),
             };
             hit.then_some(f.tag)
         })

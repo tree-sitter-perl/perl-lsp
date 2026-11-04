@@ -312,6 +312,24 @@ impl<'a> Builder<'a> {
         crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
+    /// The package a `use` here imports into — the walk's current package.
+    pub(super) fn import_package(&self) -> &str {
+        self.current_package.as_deref().unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE)
+    }
+
+    /// The import scope the walk is in.
+    pub(super) fn import_scope(&self) -> crate::model::file_analysis::ImportScope<'_> {
+        crate::model::file_analysis::ImportScope::in_package(self.import_package())
+    }
+
+    /// The import scope in force at `point` — the namespace lane's package,
+    /// as `FileAnalysis::import_scope_at` reads it.
+    pub(super) fn import_scope_at(&self, point: Point) -> crate::model::file_analysis::ImportScope<'_> {
+        crate::model::file_analysis::ImportScope::in_package(
+            self.package_at_pos(point).unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE),
+        )
+    }
+
     pub(super) fn add_ref(&mut self, kind: RefKind, span: Span, target_name: String, access: AccessKind) {
         self.add_bound_ref(kind, span, target_name, access, None);
     }
@@ -423,9 +441,9 @@ impl<'a> Builder<'a> {
     ///   1. Explicit qualifier (`Foo::bar()` → `Foo`).
     ///   2. Enclosing package that declares `sub <name>` locally (so
     ///      `package Foo { sub bar {} bar(); }` resolves to `Foo`).
-    ///   3. Most-recent import whose `imported_symbols` lists this
-    ///      name (`use Bler qw/hi/` → `Bler`). Later imports win —
-    ///      Perl's later `use` shadows earlier one.
+    ///   3. The latest `use` in the current package that names it
+    ///      (`use Bler qw/hi/` → `Bler`) — Perl's later `use` shadows
+    ///      an earlier one, and another package's `use` binds nothing here.
     ///
     /// Returns `None` when none of those pin a package. Downstream
     /// class/package-scoped queries treat `None` as no-match rather
@@ -445,23 +463,19 @@ impl<'a> Builder<'a> {
                 return Some(pkg.clone());
             }
         }
-        // (3) Imports — walk in reverse order so later `use` wins.
-        for imp in self.imports.iter().rev() {
-            if let Some(sym) = imp.imported_symbols.iter().find(|s| s.local_name == *call_name) {
-                // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
-                // LOCAL alias the module doesn't define under that name. The
-                // alias belongs to the CONSUMING package — keying its calls
-                // there keeps rename/references local (and off the exporter's
-                // unrelated symbols, e.g. a stray `Exp::rb`). goto-def still
-                // reaches `Exp::beta` via the import binding's remote name,
-                // which `resolve_imported_function` reads independently.
-                if sym.remote_name.is_some() {
-                    return self.current_package.clone();
-                }
-                return Some(imp.module_name.clone());
-            }
+        // (3) The package's imports — a later `use` wins.
+        let (imp, sym) = self.imports.binding(self.import_scope(), call_name)?;
+        // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
+        // LOCAL alias the module doesn't define under that name. The
+        // alias belongs to the CONSUMING package — keying its calls
+        // there keeps rename/references local (and off the exporter's
+        // unrelated symbols, e.g. a stray `Exp::rb`). goto-def still
+        // reaches `Exp::beta` via the import binding's remote name,
+        // which `resolve_imported_function` reads independently.
+        if sym.remote_name.is_some() {
+            return self.current_package.clone();
         }
-        None
+        Some(imp.module_name.clone())
     }
 }
 
