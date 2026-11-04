@@ -774,13 +774,17 @@ impl SkeletonAnalysis {
         // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
         // file scope, and only the method symbol carries `Buf`), so a closure
         // in a method reads the method's, and a free function's body has
-        // none: a lambda (no owner) is transparent. Scopes are pushed in id
+        // none: a lambda (no owner) is transparent. A body that elides its
+        // receiver is a method body of its own, so one whose declaration
+        // minted no callable (a local class's member function) names no
+        // class rather than the method around it. Scopes are pushed in id
         // order, so a parent's answer is in hand before its children's.
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
                 let class = match sc.owner.and_then(|sid| symbols.get(sid.0 as usize)) {
                     Some(owner) => owner.package.clone().filter(|_| matches!(owner.kind, SymKind::Method)),
+                    None if sc.implicit_receiver => None,
                     None => sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten()),
                 };
                 out.push(class);
