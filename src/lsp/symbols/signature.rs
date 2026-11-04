@@ -687,7 +687,7 @@ pub fn signature_help(
                     // Cross-file: use pre-resolved param types
                     if let Some(ref types) = sig_info.param_types {
                         if let Some(Some(ref type_tag)) = types.get(i) {
-                            return format!("{}: {}", base, type_tag);
+                            return format!("{}: {}", base, analysis.render_type(type_tag));
                         }
                         return base;
                     }
@@ -698,7 +698,7 @@ pub fn signature_help(
                         .inferred_type_via_bag(&p.name, sig_info.body_end)
                         .filter(InferredType::is_known)
                     {
-                        format!("{}: {}", base, format_inferred_type(&ty))
+                        format!("{}: {}", base, analysis.render_type(&ty))
                     } else {
                         base
                     }

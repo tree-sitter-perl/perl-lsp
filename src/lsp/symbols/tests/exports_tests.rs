@@ -433,7 +433,7 @@ sub interpolate { 3 }
 
     // Goto-def reaches the producer file via the same export surface.
     let (_import, path, remote) =
-        resolve_imported_function(&analysis, "hashify", &module_index)
+        resolve_imported_function(&analysis, "hashify", tree_sitter::Point::new(0, 0), &module_index)
             .expect("hashify resolves through the folded export surface");
     assert_eq!(remote, "hashify");
     assert!(path.ends_with("Perl/Critic/Utils.pm"));
@@ -461,7 +461,7 @@ sub private_helper { 2 }
     );
 
     assert!(
-        resolve_imported_function(&analysis, "private_helper", &module_index).is_none(),
+        resolve_imported_function(&analysis, "private_helper", tree_sitter::Point::new(0, 0), &module_index).is_none(),
         "non-exported sub must not resolve through the export surface",
     );
     let diags = collect_diagnostics(&analysis, &module_index, Default::default());
@@ -728,12 +728,12 @@ fn as_rename_binds_local_to_origin() {
     let renamed = analysis
         .imports
         .iter()
-        .flat_map(|i| i.imported_symbols.iter())
+        .flat_map(|i| i.imported_symbols().iter())
         .find(|s| s.local_name == "here");
     assert!(
         renamed.map_or(false, |s| s.remote() == "always_here"),
         "the -as rename must bind local `here` to origin `always_here`; imports: {:?}",
-        analysis.imports.iter().map(|i| i.imported_symbols.clone()).collect::<Vec<_>>(),
+        analysis.imports.iter().map(|i| i.imported_symbols().clone()).collect::<Vec<_>>(),
     );
     assert!(!flags_fn(src, "here", &idx), "renamed local `here` is bound — no FP");
     assert!(gd_resolves(src, "here", &idx), "goto-def on `here` reaches origin sub");
@@ -750,12 +750,12 @@ fn as_rename_plain_comma_binds_local_to_origin() {
     let renamed = analysis
         .imports
         .iter()
-        .flat_map(|i| i.imported_symbols.iter())
+        .flat_map(|i| i.imported_symbols().iter())
         .find(|s| s.local_name == "here");
     assert!(
         renamed.map_or(false, |s| s.remote() == "always_here"),
         "plain-comma -as rename must bind local `here` to origin `always_here`; imports: {:?}",
-        analysis.imports.iter().map(|i| i.imported_symbols.clone()).collect::<Vec<_>>(),
+        analysis.imports.iter().map(|i| i.imported_symbols().clone()).collect::<Vec<_>>(),
     );
     assert!(!flags_fn(src, "here", &idx), "renamed local `here` is bound — no FP");
     assert!(gd_resolves(src, "here", &idx), "goto-def on `here` reaches origin sub");
@@ -1004,7 +1004,7 @@ fn reexport_imported_names_evaluator_unchanged() {
 
     // A real bare `use M;` import, parsed from source (no Default on Import).
     let consumer = parse_analysis("use M;\n");
-    let import = consumer.imports.iter().find(|i| i.module_name == "M").expect("use M import");
+    let import = consumer.imports.in_scope(consumer.import_scope_at(tree_sitter::Point::new(0, 0))).find(|i| i.module_name == "M").expect("use M import");
 
     // Own-only surface: just M's own @EXPORT — base_fn NOT visible.
     let own = m.analysis.export_surface();
@@ -1411,4 +1411,76 @@ sub public_fn { helper_fn() }
     let names: Vec<&str> = outline.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"helper_fn"), "outline keeps the lexical sub: {:?}", names);
     assert!(names.contains(&"public_fn"), "{:?}", names);
+}
+
+// ---- imports bind in the package they import into ----
+
+#[test]
+fn a_use_binds_only_in_the_package_it_imports_into() {
+    let producer = "package Util;\nour @EXPORT_OK = qw(helper);\nsub helper { 1 }\n1;\n";
+    let consumer = "package A;\nuse Util qw(helper);\nhelper();\npackage B;\nhelper();\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache("Util", Some(cached_from_source("/usr/lib/perl5/Util.pm", producer)));
+
+    let in_a = tree_sitter::Point::new(2, 0);
+    let in_b = tree_sitter::Point::new(4, 0);
+    assert!(resolve_imported_function(&analysis, "helper", in_a, &module_index).is_some());
+    assert!(
+        resolve_imported_function(&analysis, "helper", in_b, &module_index).is_none(),
+        "A's `use` binds nothing in B: `B::helper` is undefined",
+    );
+
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let rows: Vec<u32> = diags
+        .iter()
+        .filter(|d| d.message.contains("helper"))
+        .map(|d| d.range.start.line)
+        .collect();
+    assert_eq!(rows, vec![4], "only B's call is unresolved; got {:?}", diags);
+}
+
+#[test]
+fn a_use_before_a_package_statement_stays_in_main() {
+    let consumer = "use Util qw(helper);\npackage Foo;\nhelper();\n";
+    let analysis = parse_analysis(consumer);
+    assert!(analysis.imports.binding(analysis.import_scope_at(tree_sitter::Point::new(0, 0)), "helper").is_some());
+    assert!(analysis.imports.binding(analysis.import_scope_at(tree_sitter::Point::new(2, 0)), "helper").is_none());
+}
+
+#[test]
+fn framework_keywords_bind_in_the_package_that_used_the_framework() {
+    let source = "package A;\nuse Moo;\nhas x => (is => 'ro');\npackage B;\nhas(1);\n";
+    let analysis = parse_analysis(source);
+    let at = |row| analysis.import_scope_at(tree_sitter::Point::new(row, 0));
+    assert!(analysis.imports.keyword(at(2), "has"));
+    assert!(!analysis.imports.keyword(at(4), "has"), "B never used Moo");
+}
+
+#[test]
+fn a_glob_alias_of_an_import_binds_the_same_producer_in_the_aliasing_package() {
+    let producer = "package Util;\nour @EXPORT_OK = qw(helper);\nsub helper { 1 }\n1;\n";
+    // IO::Socket::SSL's shape: the inner package aliases a name its parent imported.
+    let consumer = "package A;\nuse Util qw(helper);\npackage A::Inner;\n*helper = *A::helper;\nhelper();\n";
+    let analysis = parse_analysis(consumer);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache("Util", Some(cached_from_source("/usr/lib/perl5/Util.pm", producer)));
+
+    assert!(resolve_imported_function(&analysis, "helper", tree_sitter::Point::new(4, 0), &module_index).is_some());
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    assert!(!diags.iter().any(|d| d.message.contains("helper")), "got {:?}", diags);
+}
+
+#[test]
+fn a_glob_alias_binds_a_declared_sub_but_not_a_non_code_name() {
+    let source = "package A;\nsub real { 1 }\n*alias = *real;\n*VERSION = *Other::VERSION;\n";
+    let analysis = parse_analysis(source);
+    let subs: Vec<&str> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == crate::model::file_analysis::SymKind::Sub)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(subs.contains(&"alias"), "got {:?}", subs);
+    assert!(!subs.contains(&"VERSION"), "an alias to an unknown name is not a sub; got {:?}", subs);
 }

@@ -241,6 +241,72 @@ pub(crate) fn for_each_entity_bridged_to<'a>(
 /// the walk beyond contributing its bridge.
 pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 
+/// The scope every other scope of the file nests in.
+pub fn outermost_scope(scopes: &[Scope], from: ScopeId) -> ScopeId {
+    let mut cur = from;
+    while let Some(p) = scopes[cur.0 as usize].parent {
+        cur = p;
+    }
+    cur
+}
+
+/// What an undeclared `name` used in `from` within `package` binds to, and
+/// the scope that binding lives in: a package variable in the outermost
+/// scope, except the argument array, which is each callable's own.
+pub fn unbound_variable(scopes: &[Scope], name: &str, package: &str, from: ScopeId) -> (Binding, ScopeId) {
+    if crate::model::conventions::is_argument_array(name) {
+        if let Some(callable) = callable_reach(scopes, from)
+            .last()
+            .filter(|&s| matches!(scopes[s.0 as usize].kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
+        {
+            return (Binding::Arguments(callable), callable);
+        }
+    }
+    let package = if crate::model::conventions::is_special_variable(name) { "main" } else { package };
+    (Binding::Package(package.to_string(), name.to_string()), outermost_scope(scopes, from))
+}
+
+/// Key a variable fact to the place its name binds to. `bind` answers a
+/// name used at a point in a scope with its binding and the scope that
+/// binding lives in. A fact made in a block nested inside that scope holds
+/// only until the block ends, so its span becomes the region from the fact
+/// to the block's end (`docs/adr/flow-narrowing.md` §Variables are
+/// bindings). A read the fact names (an edge or projection base) binds
+/// where it is read: the expression it is attached to, else the end of its
+/// scope.
+pub fn bind_variable_witness(
+    w: &mut crate::model::witnesses::Witness,
+    scopes: &[Scope],
+    bind: impl Fn(&str, tree_sitter::Point, ScopeId) -> (Binding, ScopeId),
+) {
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    let read_at = |scope: ScopeId| match &w.attachment {
+        WitnessAttachment::Expr(span) => span.start,
+        _ => scopes[scope.0 as usize].span.end,
+    };
+    let read = match &w.payload {
+        WitnessPayload::Edge(WitnessAttachment::Variable { name, scope })
+        | WitnessPayload::Projected { base: WitnessAttachment::Variable { name, scope }, .. } => {
+            Some(bind(name, read_at(*scope), *scope).0)
+        }
+        _ => None,
+    };
+    if let Some(binding) = read {
+        if let WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } = &mut w.payload {
+            *t = WitnessAttachment::Place(Box::new(Place::variable(binding)));
+        }
+    }
+    let WitnessAttachment::Variable { name, scope } = &w.attachment else { return };
+    let (binding, home) = bind(name, w.span.start, *scope);
+    if *scope != home {
+        let end = scopes[scope.0 as usize].span.end;
+        if w.span.start == w.span.end || w.span.end > end {
+            w.span.end = end;
+        }
+    }
+    w.attachment = WitnessAttachment::Place(Box::new(Place::variable(binding)));
+}
+
 /// The containment chain `[start, parent, …, file]` over a bare
 /// `&[Scope]` slice: what a scope is INSIDE (its class, its callable, its
 /// package), never what it can see. It is plain ids and lists no names;
@@ -344,7 +410,7 @@ pub enum VariableUse {
 }
 
 /// Resolve the variable use `name` written at `at`. `decls_in(scope)`
-/// lists the variables `scope` declares under `name` as `(id, start,
+/// lists the variables `scope` declares under `name` as `(id, in_view,
 /// gate)`, the gate being the package an `our` is visible from.
 pub fn variable_use<'a, I>(
     name: &str,
@@ -355,7 +421,7 @@ pub fn variable_use<'a, I>(
     decls_in: impl Fn(ScopeId) -> I,
 ) -> VariableUse
 where
-    I: IntoIterator<Item = (SymbolId, Point, Option<&'a str>)>,
+    I: IntoIterator<Item = (SymbolId, InView, Option<&'a str>)>,
 {
     // The qualifier names the package directly, so the lexical chain is
     // irrelevant and a `my` of the same name is never the answer.
@@ -365,8 +431,8 @@ where
     let mut gated_our = false;
     for scope in chain.scopes() {
         let mut found = None;
-        for (id, start, gate) in decls_in(scope) {
-            if start > at {
+        for (id, in_view, gate) in decls_in(scope) {
+            if !in_view.at(at) {
                 continue;
             }
             match gate {
@@ -560,7 +626,7 @@ pub struct KeyWrite {
 }
 
 /// What a `KeyWrite` lands on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WriteKey {
     /// Static hash key — extends/retypes the named entry on a
     /// `HashWithKeys` shape.
@@ -795,6 +861,18 @@ impl DerefForm {
         }
     }
 
+    /// Whether the form dies on an undef receiver whatever the lexical
+    /// hints say. Every receiver here is a variable or a part of one, and
+    /// an element access through one autovivifies it (`my $x; $x->{a}`
+    /// leaves `$x = {}`) unless `no autovivification` says otherwise; a
+    /// call has nothing to call.
+    pub fn dies_on_undef(&self) -> bool {
+        match self {
+            DerefForm::HashKey | DerefForm::ArrayIndex => false,
+            DerefForm::Call | DerefForm::Method(_) => true,
+        }
+    }
+
     /// Human phrase for diagnostics ("a hash deref", …).
     pub fn access_phrase(&self) -> &'static str {
         match self {
@@ -848,19 +926,30 @@ pub struct DerefSite {
     pub span: Span,
     /// Receiver spelling (`$x`).
     pub receiver: String,
+    pub subject: Place,
     /// Receiver type at the use point, with narrowing applied.
     pub receiver_ty: InferredType,
     pub form: DerefForm,
+    /// An undef receiver dies here (D1/D2 fire) rather than vivifying.
+    pub dies_on_undef: bool,
 }
 
-/// A builder-recorded arrow-deref receiver for the forms that carry no
-/// typed ref of their own (`$x->[i]`, `$x->()`) — the array/code analog of
+/// A builder-recorded deref receiver for the forms that carry no typed
+/// ref of their own (`$x->[i]`, `$x->()`, `$x->{a}{k}`) — the analog of
 /// the method-call and hash-deref refs `deref_receiver_sites` reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArrowDerefSite {
+    /// The receiver as written: a variable's canonical name, or a part of
+    /// one's spelling, for the rendered message.
     pub receiver: String,
+    /// The receiver's place: the variable's binding, or a part of it.
+    pub place: Box<Place>,
     pub span: Span,
     pub form: DerefForm,
+    /// An undef receiver dies here rather than vivifying, decided where
+    /// the hints in force are known.
+    #[serde(default)]
+    pub dies_on_undef: bool,
 }
 
 /// What a recorded guard tests about its subject — the build-time
@@ -881,8 +970,9 @@ pub enum GuardPredicate {
 /// (in the guard, before any narrowed region).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardSite {
-    /// Subject's source spelling (`$x`, or a place key).
-    pub subject: String,
+    pub subject: Place,
+    /// The subject as written, for the rendered message.
+    pub spelling: String,
     pub scope: ScopeId,
     pub predicate: GuardPredicate,
     /// Whether the predicate holds where the guard EXPRESSION is true (`!`

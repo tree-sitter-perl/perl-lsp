@@ -402,7 +402,7 @@ impl Surface {
         macros.sort_by(|a, b| (&a.name, &a.guards).cmp(&(&b.name, &b.guards)));
         macros.dedup();
         let mut includes: Vec<String> =
-            feed.include_directives.iter().map(|(_, raw)| raw.clone()).collect();
+            feed.include_directives.iter().map(|d| d.raw.clone()).collect();
         includes.sort_unstable();
         includes.dedup();
         let mut export_tags: Vec<(String, Vec<String>)> = feed
@@ -465,7 +465,7 @@ fn despan(t: &InferredType) -> InferredType {
             open: *open,
         },
         InferredType::Parametric(p) => InferredType::Parametric(match p {
-            ParametricType::ResultSet { .. } => p.clone(),
+            ParametricType::ResultSet { .. } | ParametricType::Row { .. } => p.clone(),
             ParametricType::Instance { base, args } => ParametricType::Instance {
                 base: base.clone(),
                 args: args.iter().map(despan).collect(),

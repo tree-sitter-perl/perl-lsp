@@ -586,12 +586,12 @@ fn operator_evidence_ends_at_a_rebind() {
     let fa = extract(&tree, src.as_bytes(), &perl_pack())
         .unwrap()
         .into_file_analysis();
-    use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
+    use crate::model::witnesses::{WitnessPayload, WitnessSource};
     let obs: Vec<_> = fa
         .witnesses
         .all()
         .iter()
-        .filter(|w| matches!(&w.attachment, WitnessAttachment::Variable { name, .. } if name == "$x"))
+        .filter(|w| matches!(w.attachment.variable_binding(), Some(crate::model::file_analysis::Binding::Lexical(sid)) if fa.symbol(*sid).name == "$x"))
         .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "skeleton-obs"))
         .filter(|w| matches!(w.payload, WitnessPayload::Observation(_)))
         .collect();
@@ -1672,6 +1672,87 @@ void f() {
 }
 
 #[test]
+fn cpp_member_move_flags_only_reads_of_the_moved_part() {
+    // Moving `p.msg` leaves `p.id` alone; a read of `p.msg` is a use of the
+    // moved part until `p.msg` is written again. A read of all of `p` hands
+    // the whole on (a copy, a log line) and reads none of the moved state
+    // itself.
+    let src = "\
+struct Msg {};
+struct Packet { Msg msg; int id; };
+void f() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p.id);
+  use(p.msg);
+  p.msg = Msg();
+  use(p.msg);
+}
+void g() {
+  Packet p;
+  sink(std::move(p.msg));
+  use(p);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    reads.sort();
+    assert_eq!(reads, vec![("p.msg".to_string(), 6)]);
+}
+
+#[test]
+fn cpp_move_of_an_implicit_member_flags_its_reads() {
+    // A bare `name_` in a member function is `this->name_`: rooted at the
+    // body's receiver, so its move and its reads are one place.
+    let src = "\
+class C {
+  Name name_;
+  Name other_;
+  void f();
+  void g();
+};
+void C::f() {
+  sink(std::move(name_));
+  use(other_);
+  use(name_);
+}
+void C::g() {
+  sink(std::move(name_));
+  name_ = Name();
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    // Assigning `name_` gives it a value again (fmt's `args.h` list push).
+    assert_eq!(reads, vec![("name_".to_string(), 9)]);
+}
+
+#[test]
+fn cpp_reset_past_the_move_scope_does_not_stretch_it() {
+    // spdlog's `user_chars`: the move sits in an `if` arm; the read and the
+    // reassignment are in the `else` arm, outside the move's scope.
+    let src = "\
+class C {
+  Name name_;
+  void f(bool c);
+};
+void C::f(bool c) {
+  if (c) {
+    sink(std::move(name_));
+  } else {
+    use(name_);
+    name_ = Name();
+  }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    assert!(fa.use_after_move_reads().is_empty(), "{:?}", fa.use_after_move_reads());
+}
+
+#[test]
 fn cpp_conditional_move_does_not_flag_sibling_arm() {
     // GOAL-2.1: if/else arms are their own @scope now, so a `std::move` in the
     // `if` arm bounds its moved-from region to that arm — the read of `x` in the
@@ -1926,6 +2007,91 @@ void f(Base* b) {
         Some(InferredType::ClassName("Derived".into())),
         "dynamic_cast narrows b to Derived inside the guard",
     );
+}
+
+#[test]
+fn cpp_dynamic_cast_narrows_a_member() {
+    // A member subject narrows the place it denotes: `h.b` is Derived inside
+    // the guard and its declared Base outside.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder { Base* b; };
+void f(Holder h) {
+    if (dynamic_cast<Derived*>(h.b)) {
+        h.b->run();
+    }
+    h.b->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    assert_eq!(classes, vec![(5, Some("Derived".to_string())), (7, Some("Base".to_string()))]);
+}
+
+#[test]
+fn cpp_dynamic_cast_narrows_a_member_of_this() {
+    // `this->b` and a bare `b` in a member function are one place: either
+    // spelling's guard reaches the other's uses.
+    let src = "\
+struct Base { void run(); };
+struct Derived : Base { void run(); };
+struct Holder {
+    Base* b;
+    void f();
+    void g();
+};
+void Holder::f() {
+    if (dynamic_cast<Derived*>(this->b)) {
+        this->b->run();
+        b->run();
+    }
+    this->b->run();
+}
+void Holder::g() {
+    if (dynamic_cast<Derived*>(b)) {
+        this->b->run();
+    }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let mut classes: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    classes.sort();
+    let derived = Some("Derived".to_string());
+    assert_eq!(
+        classes,
+        vec![(9, derived.clone()), (10, derived.clone()), (12, Some("Base".to_string())), (16, derived)]
+    );
+}
+
+#[test]
+fn cpp_move_through_this_is_the_members_move() {
+    let src = "\
+class C {
+  Name name_;
+  void f();
+};
+void C::f() {
+  sink(std::move(this->name_));
+  use(name_);
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let reads: Vec<(String, usize)> =
+        fa.use_after_move_reads().into_iter().map(|(name, span)| (name, span.start.row)).collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].1, 6);
 }
 
 #[test]
@@ -3332,6 +3498,32 @@ struct H {
     );
 }
 
+/// A reset call gives its member receiver a value again (`o.v.clear()`), the
+/// same place write that ends a move of `o.v`: its member token is a write
+/// too.
+#[test]
+fn cpp_a_reset_call_writes_its_member_receiver() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::AccessKind;
+    let p = std::path::PathBuf::from("/x/reset.cpp");
+    let src = "\
+struct V { void clear(); int size(); };
+struct H { V v; };
+void f(H& o) {
+    o.v.clear();
+    int n = o.v.size();
+}
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let v: Vec<(usize, AccessKind)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "v" && r.member_site().is_some())
+        .map(|r| (r.span.start.row, r.access))
+        .collect();
+    assert_eq!(v, vec![(3, AccessKind::Write), (4, AccessKind::Read)]);
+}
+
 /// A member write gives the member its value: one this file declares keeps
 /// its declared type over what is written, and one it does not declare
 /// (its class is only forward-declared here) takes the written value.
@@ -3364,16 +3556,60 @@ struct H {
     assert_eq!(ty("b"), Some(InferredType::ClassName("Foo".into())), "a declared member keeps its type");
 }
 
-/// A write whose value retypes its own receiver settles: `lp` names both
-/// the struct member and its field, so writing `o->ptr` (a `zset`) into
-/// `it->lp.lp` makes `it->lp` a `zset`, whose `lp` the same write then
-/// fills. The write keeps both owners rather than trading one for the
-/// other every round.
-#[test]
-fn cpp_a_write_that_retypes_its_own_receiver_keeps_both_owners() {
+/// The owner each member write on `row` gave its value: the declared
+/// member it filled, or the `class.member` slot of an undeclared one.
+fn member_write_owners(path: &str, src: &str, row: usize) -> Vec<String> {
     use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::Binding;
     use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-    let p = std::path::PathBuf::from("/x/retype.c");
+    let p = std::path::PathBuf::from(path);
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let mut owners: Vec<String> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "member_write"))
+        .filter(|w| matches!(&w.payload, WP::Edge(WA::Expr(sp)) if sp.start.row == row))
+        .map(|w| match &w.attachment {
+            WA::Place(place) => match &place.root {
+                Binding::Lexical(id) if place.path.is_empty() => format!("declared {}", fa.symbol(*id).name),
+                other => format!("{other:?} {:?}", place.path),
+            },
+            WA::Field { owner, name } => format!("{owner}.{name}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    owners.sort();
+    owners
+}
+
+/// A write whose value retypes its own receiver settles: `a->b = a` makes
+/// `a->b` a `Node`, so `a->b->b = make_other()` fills `Node.b`, which then
+/// holds two classes and types `a->b` as nothing. A pass that replaced each
+/// round's facts with the next would drop that write every other round and
+/// end, at its bound, without it; the rounds accumulate, so the write keeps
+/// the owner it was given.
+#[test]
+fn cpp_a_write_that_retypes_its_own_receiver_keeps_its_owner() {
+    let src = "\
+struct Node;
+struct Other { int n; };
+Other* make_other();
+void f(Node* a) {
+    a->b = a;
+    a->b->b = make_other();
+}
+";
+    assert_eq!(member_write_owners("/x/retype.cpp", src, 4), vec!["Node.b".to_string()]);
+    assert_eq!(member_write_owners("/x/retype.cpp", src, 5), vec!["Node.b".to_string()]);
+}
+
+/// redis `it->lp.lp = o->ptr`: `lp` names both a union's member and the
+/// field of the struct that member is. A declared member's place is its
+/// binding, never its name, so writing a `zset` into the field leaves the
+/// union's member, the receiver, as declared: the write has one owner.
+#[test]
+fn cpp_a_member_named_like_its_receiver_is_its_own_place() {
     let src = "\
 typedef struct redisObject { void *ptr; } robj;
 typedef struct zset { int n; } zset;
@@ -3385,19 +3621,5 @@ void f(robj *o, iter_t *op) {
     it->lp.lp = o->ptr;
 }
 ";
-    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
-    let mut owners: Vec<String> = fa
-        .witnesses
-        .all()
-        .iter()
-        .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "member_write"))
-        .filter(|w| matches!(&w.payload, WP::Edge(WA::Expr(sp)) if sp.start.row == 7))
-        .map(|w| match &w.attachment {
-            WA::Variable { name, .. } => format!("declared {name}"),
-            WA::Field { owner, name } => format!("{owner}.{name}"),
-            other => format!("{other:?}"),
-        })
-        .collect();
-    owners.sort();
-    assert_eq!(owners, vec!["declared lp".to_string(), "zset.lp".to_string()]);
+    assert_eq!(member_write_owners("/x/retype.c", src, 7), vec!["declared lp".to_string()]);
 }

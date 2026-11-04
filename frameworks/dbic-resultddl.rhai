@@ -30,6 +30,8 @@
 
 fn id() { "dbic-resultddl" }
 
+fn api() { 1 }
+
 fn triggers() {
     // Fire only where the DSL is actually in scope. In a plain DBIC
     // project that's a literal `use DBIx::Class::ResultDDL`; in a kit

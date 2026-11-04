@@ -20,6 +20,8 @@
 
 fn id() { "mojo-lite" }
 
+fn api() { 1 }
+
 fn triggers() {
     [
         #{ UsesModule: "Mojolicious::Lite" },

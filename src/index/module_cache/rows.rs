@@ -62,10 +62,9 @@ thread_local! {
 /// Replace one file's derived rows — refs AND symbols — in the relational
 /// index. One function so both families are the same generation by
 /// construction (`files` presence is the single "already shredded" marker;
-/// a marker per family would let them drift). Runs inside the caller's
-/// transaction when one is open (bulk drains wrap N files per `BEGIN`);
-/// standalone callers get per-statement autocommit, which is fine for
-/// single-file updates. Upserts the `files` row even for an empty file.
+/// a marker per family would let them drift). One savepoint: a failure
+/// partway leaves the file's previous rows and marker, never the marker over
+/// a partial set. Upserts the `files` row even for an empty file.
 pub fn shred_derived_rows(
     conn: &Connection,
     path: &str,
@@ -76,7 +75,9 @@ pub fn shred_derived_rows(
     // an index change on these tables moves, and the persist writer runs
     // this once per file.
     crate::util::ghost_stats::timed("persist.shred", || {
-        shred_derived_rows_inner(conn, path, source, &seeds.refs, &seeds.syms, &seeds.held)
+        in_savepoint(conn, || {
+            shred_derived_rows_inner(conn, path, source, &seeds.refs, &seeds.syms, &seeds.held)
+        })
     })
 }
 
@@ -219,14 +220,16 @@ fn shred_derived_rows_inner(
 /// the delete below; what the generation bump protects is the memo a writer
 /// built in an EARLIER transaction.
 pub fn gc_strings(conn: &Connection) -> usize {
-    let deleted = conn.execute(sql::STRINGS_GC.registered(), []);
-    match deleted {
-        Ok(n) if n > 0 => {
-            let _ = crate::index::module_cache::bump_strings_generation(conn);
-            n
+    // The delete and its bump commit together: between two autocommits a
+    // writer could read the old generation and keep handing out freed ids.
+    in_immediate_txn(conn, || {
+        let n = conn.execute(sql::STRINGS_GC.registered(), [])?;
+        if n > 0 {
+            bump_strings_generation(conn)?;
         }
-        _ => 0,
-    }
+        Ok(n)
+    })
+    .unwrap_or(0)
 }
 
 /// Drop one file's whole persisted generation — blob row AND derived ref

@@ -5,6 +5,8 @@
 
 fn id() { "strict" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "strict" } ] }
 
 // Modules whose `import` turns strict on in the importing scope.

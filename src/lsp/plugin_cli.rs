@@ -174,7 +174,7 @@ fn load_single_plugin(path: &Path) -> Result<RhaiPlugin, String> {
 }
 
 fn run_plugin_on_fixture(plugin: RhaiPlugin, fixture: &Path) -> Value {
-    let source = std::fs::read_to_string(fixture).unwrap_or_else(|e| {
+    let source = crate::util::text::read_source(fixture).unwrap_or_else(|e| {
         eprintln!("Cannot read {}: {}", fixture.display(), e);
         crate::lsp::cli::exit_with(1, "exit");
     });
@@ -221,12 +221,13 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         .map(ref_to_snapshot)
         .collect();
 
-    // framework_imports — set of strings, simple diff.
-    let mut framework_imports: Vec<&String> = with_plugin
-        .framework_imports
-        .difference(&baseline.framework_imports)
-        .collect();
-    framework_imports.sort();
+    // framework keywords — set of strings, simple diff.
+    let keywords = |fa: &FileAnalysis| -> std::collections::BTreeSet<String> {
+        fa.imports.keywords_as_written().iter().map(|k| k.keyword.clone()).collect()
+    };
+    let baseline_keywords = keywords(baseline);
+    let keywords_added: Vec<String> =
+        keywords(with_plugin).into_iter().filter(|k| !baseline_keywords.contains(k)).collect();
 
     // package_parents — diff entries.
     let mut package_parents: Vec<Value> = Vec::new();
@@ -267,17 +268,17 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         .filter(|i| !baseline_imports.contains(&import_key(i)))
         .map(|i| json!({
             "module": i.module_name,
-            "items": i.imported_symbols.iter().map(|s| s.local_name.clone()).collect::<Vec<_>>(),
+            "items": i.names_as_written().collect::<Vec<_>>(),
         }))
         .collect();
 
-    // type_constraints — diff Variable+InferredType witnesses by
+    // type_constraints — diff variable-place InferredType witnesses by
     // (var_name, type, scope, span). The bag is canonical;
-    // `push_type_constraint` mirrors every TC into a Variable witness,
+    // `push_type_constraint` mirrors every TC into a variable witness,
     // so plugin-emitted TCs land here regardless.
-    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-    let var_type_key = |w: &crate::model::witnesses::Witness| -> Option<String> {
-        let WitnessAttachment::Variable { name, scope } = &w.attachment else { return None };
+    use crate::model::witnesses::WitnessPayload;
+    let var_type_key = |fa: &crate::model::file_analysis::FileAnalysis, w: &crate::model::witnesses::Witness| -> Option<String> {
+        let (name, scope) = fa.binding_label(w.attachment.variable_binding()?);
         let WitnessPayload::InferredType(t) = &w.payload else { return None };
         Some(format!(
             "{}|{:?}|{}|{}:{}",
@@ -288,16 +289,16 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         .witnesses
         .all()
         .iter()
-        .filter_map(var_type_key)
+        .filter_map(|w| var_type_key(&baseline, w))
         .collect();
     let type_constraints: Vec<Value> = with_plugin
         .witnesses
         .all()
         .iter()
         .filter_map(|w| {
-            let key = var_type_key(w)?;
+            let key = var_type_key(&with_plugin, w)?;
             if baseline_tc.contains(&key) { return None; }
-            let WitnessAttachment::Variable { name, scope } = &w.attachment else { return None };
+            let (name, scope) = with_plugin.binding_label(w.attachment.variable_binding()?);
             let WitnessPayload::InferredType(t) = &w.payload else { return None };
             Some(json!({
                 "var": name,
@@ -311,7 +312,7 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
     json!({
         "symbols": symbols,
         "refs": refs,
-        "framework_imports": framework_imports,
+        "framework_imports": keywords_added,
         "package_parents": package_parents,
         "plugin_namespaces": plugin_namespaces,
         "imports": imports,
@@ -405,7 +406,7 @@ fn ref_key(r: &crate::model::file_analysis::Ref) -> String {
 }
 
 fn import_key(i: &crate::model::file_analysis::Import) -> String {
-    let mut items: Vec<&str> = i.imported_symbols.iter().map(|s| s.local_name.as_str()).collect();
+    let mut items: Vec<&str> = i.names_as_written().collect();
     items.sort();
     format!("{}|{:?}", i.module_name, items)
 }

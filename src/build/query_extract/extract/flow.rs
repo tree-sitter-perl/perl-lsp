@@ -190,7 +190,14 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
                 st.minted[ix].value = true;
-                st.minted[ix].projects = Some(Box::new((recv.span(), member.clone(), name.span())));
+                st.minted[ix].projects = Some(Box::new((recv.span(), member.clone())));
+                out.member_reads.push(crate::build::query_extract::MemberRead {
+                    span,
+                    receiver: recv.span(),
+                    member: member.clone(),
+                    token: name.span(),
+                    written: false,
+                });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -322,17 +329,24 @@ pub(super) fn finish(st: &mut ExtractState) {
     // decided by its receiver's type, which only the assembled analysis
     // answers (`skeleton::settle_member_writes`). A name's place is its
     // binding, which `@flow.target` writes and rebinds; a place no read
-    // projects (a call, a literal) takes nothing. The member token is a
-    // write whether or not a value flows in (a compound assignment states
-    // none).
+    // projects (a call, a literal) takes nothing. The place is written
+    // whether or not a value flows in (a compound assignment states none),
+    // and once however many patterns name it: a plain `=` is both a write
+    // and a write of a value. The read itself is marked written here, while
+    // its span is still its own node's: a macro remap can fold the spans of
+    // an expansion onto one another.
+    let mut written = std::collections::HashSet::new();
+    let reads: std::collections::HashMap<Span, usize> =
+        out.member_reads.iter().enumerate().map(|(i, m)| (m.span, i)).collect();
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
-        let Some((receiver, member, token)) =
-            ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last()
-        else {
-            continue;
-        };
-        out.write_sites.push(*token);
-        if let Some(value) = source_value_span(ad, &st.minted, place.match_id) {
+        let read = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last();
+        if read.is_some() && written.insert(place.span()) {
+            out.place_writes.push(place.span());
+            if let Some(&i) = reads.get(&place.span()) {
+                out.member_reads[i].written = true;
+            }
+        }
+        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(ad, &st.minted, place.match_id)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: *receiver,
                 member: member.clone(),

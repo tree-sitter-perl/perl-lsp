@@ -112,9 +112,9 @@ has 'name' => (is => 'ro');
         // Both should have Moo's keyword set in framework_imports.
         for kw in &["has", "with", "extends", "around", "before", "after"] {
             assert!(
-                kit.framework_imports.contains(*kw),
+                kit.imports.keyword_names().contains(*kw),
                 "SyntheticUse \"Moo\" must populate framework_imports[{kw}]; got {:?}",
-                kit.framework_imports,
+                kit.imports.keyword_names(),
             );
         }
 
@@ -221,11 +221,11 @@ has 'name' => (is => 'ro');
         // module): the bundled plugins shouldn't touch it. Cycle should
         // leave this empty whether it loops once or a thousand times.
         assert!(
-            fa.framework_imports.is_empty()
-                || fa.framework_imports.iter().all(|s| !s.starts_with("co_base_")),
+            fa.imports.keyword_names().is_empty()
+                || fa.imports.keyword_names().iter().all(|s| !s.starts_with("co_base_")),
             "cycle on a non-framework module should not leak Co::Base-tagged keywords \
              into framework_imports; got {:?}",
-            fa.framework_imports,
+            fa.imports.keyword_names(),
         );
     }
 
@@ -279,13 +279,13 @@ has 'name' => (is => 'ro');
             "two SyntheticUse \"Foo\" with distinct imports must both produce \
              Import entries — dedup must NOT collide on the args-only key. \
              Got imports: {:?}",
-            foo_imports.iter().map(|i| &i.imported_symbols).collect::<Vec<_>>(),
+            foo_imports.iter().map(|i| i.imported_symbols()).collect::<Vec<_>>(),
         );
 
         // Each Import entry must carry its own qw-style import name.
         // Order-independent: we check the union covers both.
         let all_names: std::collections::HashSet<&str> = foo_imports.iter()
-            .flat_map(|i| i.imported_symbols.iter().map(|s| s.local_name.as_str()))
+            .flat_map(|i| i.imported_symbols().iter().map(|s| s.local_name.as_str()))
             .collect();
         assert!(all_names.contains("a"), "missing import name 'a': {:?}", all_names);
         assert!(all_names.contains("b"), "missing import name 'b': {:?}", all_names);
@@ -509,7 +509,7 @@ fn instanceof_expression_is_a_type_constraint_not_the_class() {
         "package T;\nuse Moo;\nuse Types::Standard qw/InstanceOf/;\nmy $t = InstanceOf['My::Thing'];\n1;\n",
     );
     let ty = fa
-        .inferred_type_via_bag("$t", Point::new(3, 20))
+        .inferred_type_via_bag("$t", Point::new(4, 0))
         .expect("$t should carry a type");
     assert!(
         matches!(&ty, InferredType::TypeConstraintOf(Some(inner))

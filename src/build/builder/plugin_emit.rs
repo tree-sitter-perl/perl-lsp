@@ -161,7 +161,7 @@ impl<'a> Builder<'a> {
         drop: Vec<String>,
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Expr(at),
             source: WitnessSource::Plugin(plugin_id.clone()),
             payload: WitnessPayload::BrandOverlay { ns: plugin_id, on_class, set, drop },
@@ -291,7 +291,7 @@ impl<'a> Builder<'a> {
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id.clone()),
                         payload: WitnessPayload::InferredType(rt),
@@ -313,7 +313,7 @@ impl<'a> Builder<'a> {
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id),
                         payload: WitnessPayload::Edge(target),
@@ -343,7 +343,7 @@ impl<'a> Builder<'a> {
                 // for HashKeyAccess → HashKeyDef by name+owner) pairs these
                 // refs to both in-file and cross-file defs automatically.
                 self.refs.push(Ref {
-                    kind: RefKind::HashKeyAccess { var_text },
+                    kind: RefKind::HashKeyAccess { var_text, dies_on_undef: false },
                     span,
                     scope: self.current_scope(),
                     target_name: name,
@@ -501,7 +501,7 @@ impl<'a> Builder<'a> {
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
                     };
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: WitnessAttachment::Symbol(sid),
                         source: WitnessSource::Plugin(plugin_id),
                         payload: WitnessPayload::InferredType(rt),
@@ -530,7 +530,8 @@ impl<'a> Builder<'a> {
                 self.package_parents.push(package, parent);
             }
             plugin::EmitAction::FrameworkImport { keyword } => {
-                self.framework_imports.insert(keyword);
+                let package = self.import_package().to_string();
+                self.imports.push_keyword(&package, keyword);
             }
             plugin::EmitAction::Import { module_name, imported_symbols, span } => {
                 // Plugin-synthetic `use` — indistinguishable from a
@@ -539,19 +540,17 @@ impl<'a> Builder<'a> {
                 // sig-help, unresolved-function diagnostic, completion
                 // detail) just works. `qw_close_paren` stays None —
                 // there's no qw list to insert into for auto-import.
-                self.imports.push(Import {
-                    module_name,
-                    imported_symbols,
-                    span,
-                    qw_close_paren: None,
-                    empty_import: false,
-                });
+                let package = self.import_scope_at(span.start).package().to_string();
+                self.imports.push(Import::new(module_name, imported_symbols, span, package));
             }
             plugin::EmitAction::PackageVariable { name, span } => {
                 self.declare_package_variable(name, span);
             }
             plugin::EmitAction::RequireDeclaration { required, span } => {
-                self.switch_declaration_rule(span, required);
+                self.switch_hint(span, crate::model::file_analysis::LexicalHint::RequireDeclaration, required);
+            }
+            plugin::EmitAction::Hint { hint, on, span } => {
+                self.switch_hint(span, hint, on);
             }
             plugin::EmitAction::VarType { variable, at, inferred_type } => {
                 // Scope resolution is deferred to the end of the build —

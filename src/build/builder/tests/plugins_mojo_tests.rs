@@ -371,7 +371,7 @@ sub _greet {
 "#;
     let fa = build_fa(src);
     // `$c` is declared on line 8 (`my $c = shift;`); query just after it.
-    let ty = first_param_type(&fa, "$c", 8, 14);
+    let ty = first_param_type(&fa, "$c", 8, 18);
     assert_eq!(
         ty,
         Some(InferredType::ClassName("Mojolicious::Controller".into())),
@@ -419,7 +419,7 @@ sub _greet {
 }
 "#;
     let fa = build_fa(src);
-    let ty = first_param_type(&fa, "$c", 8, 14);
+    let ty = first_param_type(&fa, "$c", 8, 18);
     assert_eq!(
         ty,
         Some(InferredType::ClassName("Mojolicious::Controller".into())),
@@ -441,7 +441,7 @@ $app->helper(greet => sub {
 });
 "#;
     let fa = build_fa(src);
-    let ty = first_param_type(&fa, "$c", 6, 14);
+    let ty = first_param_type(&fa, "$c", 6, 18);
     assert_eq!(
         ty,
         Some(InferredType::ClassName("Mojolicious::Controller".into())),
@@ -639,7 +639,7 @@ helper foo => sub {};
         "group",
     ] {
         assert!(
-            fa.framework_imports.contains(*verb),
+            fa.imports.keyword_names().contains(*verb),
             "{} must be autoimported by use Mojolicious::Lite",
             verb
         );
@@ -1176,8 +1176,21 @@ sub get { my $self = shift; return $self; }
     let col = line.find("get").unwrap() + 1;
     let point = tree_sitter::Point { row, column: col };
 
-    let hover = app_fa
-        .hover_info(point, app_src, Some(&idx))
+    // Through the presenter, as the server runs it: an imported verb's
+    // hover is the set's function binding, not a model-side imports scan.
+    let files = crate::index::open_docs::OpenDocs::new();
+    let cs = crate::index::resolve::resolve(
+        &files,
+        &app_fa,
+        crate::index::open_docs::FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(
+            std::path::PathBuf::from("/tmp/app.pl"),
+        )),
+        point,
+        Some(&idx),
+        crate::index::resolve::OverrideScope::default(),
+    )
+    .with_source(app_src);
+    let hover = crate::lsp::symbols::perl_hover_markdown(&cs, &idx)
         .expect("hover on DSL verb `get` returns text");
 
     assert!(
