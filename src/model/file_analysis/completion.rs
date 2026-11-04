@@ -157,30 +157,19 @@ impl FileAnalysis {
         let mut seen = HashSet::<(String, char)>::new();
         let mut candidates = Vec::new();
 
-        // Sort by scope size (innermost first) — stable priority ordering
-        let mut vars: Vec<(&Symbol, usize)> = visible
+        // Innermost declaration first (deepest scope), stable for ties.
+        let mut vars: Vec<(&Symbol, std::cmp::Reverse<usize>)> = visible
             .into_iter()
             .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
             // The token being typed is never its own completion — an
             // undeclared one is already an implicit global anchored there.
             .filter(|s| !(s.selection_span.start <= point && point <= s.selection_span.end))
-            .filter_map(|s| {
-                if let SymbolDetail::Variable { .. } = &s.detail {
-                    let scope = &self.scopes[s.scope.0 as usize];
-                    let scope_size = span_size(&scope.span);
-                    Some((s, scope_size))
-                } else if let SymbolDetail::Field { .. } = &s.detail {
-                    let scope = &self.scopes[s.scope.0 as usize];
-                    let scope_size = span_size(&scope.span);
-                    Some((s, scope_size))
-                } else {
-                    None
-                }
-            })
+            .filter(|s| matches!(s.detail, SymbolDetail::Variable { .. } | SymbolDetail::Field { .. }))
+            .map(|s| (s, std::cmp::Reverse(scope_depth(&self.scopes, s.scope))))
             .collect();
-        vars.sort_by_key(|(_, sz)| *sz);
+        vars.sort_by_key(|(_, depth)| *depth);
 
-        for (sym, _scope_size) in vars {
+        for (sym, _depth) in vars {
             let (bare_name, decl_sigil) = match &sym.detail {
                 SymbolDetail::Variable { sigil: ds, .. } => {
                     (sym.name[1..].to_string(), *ds)
