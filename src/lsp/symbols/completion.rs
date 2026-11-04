@@ -797,7 +797,12 @@ fn auto_import_span(
     crate::model::file_analysis::Span { start: p, end: p }
 }
 
-pub(super) fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> String {
+/// `analysis` is the asker's: the label reads in its language's vocabulary.
+pub(super) fn format_imported_signature(
+    analysis: &FileAnalysis,
+    name: &str,
+    sub_info: &SubInfo<'_>,
+) -> String {
     let params_str = sub_info
         .params()
         .iter()
@@ -806,7 +811,7 @@ pub(super) fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> S
         .join(", ");
     let mut sig = format!("sub {}({})", name, params_str);
     if let Some(rt) = sub_info.return_type(None).filter(InferredType::is_known) {
-        sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
+        sig.push_str(&format!(" → {}", analysis.render_type(&rt)));
     }
     sig
 }

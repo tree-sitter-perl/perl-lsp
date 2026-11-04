@@ -21,6 +21,8 @@
 
 fn id() { "dbic" }
 
+fn api() { 1 }
+
 fn triggers() {
     [ #{ ClassIsa: "DBIx::Class" } ]
 }

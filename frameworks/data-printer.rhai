@@ -36,6 +36,8 @@
 
 fn id() { "data-printer" }
 
+fn api() { 1 }
+
 // ---- Debug-left-in lint (pluggable diagnostics via patterns)
 //
 // A `p $x` / `np(...)` call is a DEV-time inspection aid; one left in

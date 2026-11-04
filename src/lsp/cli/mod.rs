@@ -26,16 +26,9 @@ pub(crate) use query::*;
 /// Print the languages this distribution was compiled to serve. A
 /// default build prints `perl`; a `cpp-lsp` build (`--features cpp`)
 /// prints `perl, cpp`.
-/// The ONE sanctioned CLI exit. `process::exit` skips destructors, so a bare
-/// call silently discards everything the run measured — 42 exit sites vs 13
-/// emit calls is how most verbs came to produce no instrumentation at all,
-/// and the failure rots: the next verb exits directly and is unmeasured
-/// forever. `layering_tests::cli_exits_flush_instrumentation` pins the rule.
-///
-/// `moment` labels the human report; the JSON sinks write regardless of it.
+/// A CLI verb's exit: the process-wide [`exit_flushed`](crate::util::ghost_stats::exit_flushed).
 pub(crate) fn exit_with(code: i32, moment: &str) -> ! {
-    crate::util::ghost_stats::emit_all(moment);
-    std::process::exit(code); // sanctioned-exit
+    crate::util::ghost_stats::exit_flushed(code, moment)
 }
 
 /// Lock the process to `path`'s language unless `--lang` already chose one,
@@ -103,7 +96,7 @@ pub(crate) fn cli_languages() {
 /// extract) when the process serves C++.
 pub(crate) fn cli_lang_analyze(file: &str) {
     let path = std::path::Path::new(file);
-    let Ok(src) = std::fs::read_to_string(path) else {
+    let Ok(src) = crate::util::text::read_source(path) else {
         eprintln!("cannot read {file}");
         exit_with(1, "exit");
     };
@@ -135,11 +128,10 @@ pub(crate) fn cli_lang_analyze(file: &str) {
     println!("# {file} [{}] — {} symbols", driver.id(), fa.symbols().len());
     for s in fa.symbols() {
         let pkg = s.package.as_deref().unwrap_or("");
-        let sep = if pkg.is_empty() { "" } else { "::" };
+        let name = crate::model::conventions::join_qualified(pkg, &s.name, fa.names().sep().unwrap_or_default());
         println!(
-            "{:<8} {pkg}{sep}{}\t{}:{}",
+            "{:<8} {name}\t{}:{}",
             format!("{:?}", s.kind),
-            s.name,
             s.span.start.row + 1,
             s.span.start.column + 1,
         );
@@ -234,24 +226,29 @@ pub(crate) fn print_usage() {
 
 // ---- Helpers ----
 
-fn parse_file(path: &str) -> (String, tree_sitter::Tree, file_analysis::FileAnalysis) {
-    let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Cannot read {}: {}", path, e);
-        exit_with(1, "exit");
-    });
+/// Read, parse and analyze one file as the served driver would. An `Err`
+/// is the message a single-shot verb prints before exiting (`or_exit`) and
+/// `--batch` returns for that row alone.
+fn parse_file(path: &str) -> Result<(String, tree_sitter::Tree, file_analysis::FileAnalysis), String> {
+    let source = crate::util::text::read_source(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
     // The served driver, as the LSP server would analyze it. A driver that
     // builds from the caller's tree (no pre-parse transform) analyzes the
     // one parse we already hold; the rest analyze independently.
     let driver = lock_for_file(std::path::Path::new(path));
     let mut parser = driver.make_parser();
-    let tree = parser.parse(&source, None).unwrap_or_else(|| {
-        eprintln!("Parse failed: {}", path);
-        exit_with(1, "exit");
-    });
+    let tree = parser.parse(&source, None).ok_or_else(|| format!("Parse failed: {}", path))?;
     let analysis = driver
         .analyze_from_tree(&tree, &source)
         .unwrap_or_else(|| driver.analyze_with_path(&source, Some(std::path::Path::new(path))));
-    (source, tree, analysis)
+    Ok((source, tree, analysis))
+}
+
+/// A single-shot verb's end on a failed helper: print why, exit 1.
+fn or_exit<T>(r: Result<T, String>) -> T {
+    r.unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        exit_with(1, "exit");
+    })
 }
 
 fn parse_point(line_str: &str, col_str: &str) -> tree_sitter::Point {
@@ -488,14 +485,12 @@ fn severity_rank(s: &str) -> u8 {
 /// half a 300-module set orphans 34.6% of the table, deleting all orphans
 /// 100%).
 ///
-/// It is not wired into startup because `shred_derived_rows` has standalone
-/// autocommit callers — the watcher's invalidation path among them — whose
-/// intern and row-insert land in SEPARATE transactions. A sweep between the
-/// two would free a string the insert is about to reference, and the rows
-/// written after it would carry a `name_id` nothing joins to: retrieval
-/// answers EMPTY, not wrong, but silently. Making it automatic means giving
-/// the shred one transaction so intern-and-insert cannot be split; until
-/// then this runs when the caller knows nothing else is writing.
+/// It is not wired into startup. A sweep that freed a string a shred had
+/// just interned would leave rows carrying a `name_id` nothing joins to:
+/// retrieval answers EMPTY, not wrong, but silently. Every shred runs as one
+/// savepoint (`shred_derived_rows`), so such a sweep should fail the shred's
+/// insert on a stale snapshot instead; that race is untested, so this still
+/// runs only when the caller knows nothing else is writing.
 pub(crate) fn cli_gc_cache(root: &str) {
     let (_, root_uri) = canonical_root_and_uri(root);
     let Some(conn) = module_cache::open_cache_db(Some(&root_uri), "perl") else {
@@ -608,7 +603,7 @@ pub(crate) fn cli_equiv_dump(out: &str, paths: &[String]) {
         .par_iter()
         .map(|path| {
             // Non-UTF-8 is skipped, as the workspace walk skips it.
-            let Ok(src) = std::fs::read_to_string(path) else { return 1 };
+            let Ok(src) = crate::util::text::read_source(path) else { return 1 };
             let _file = timings::current_file_scope(Some(path));
             served.analyze_with_path(&src, Some(path));
             0
@@ -630,14 +625,14 @@ pub(crate) fn cli_equiv_dump(out: &str, paths: &[String]) {
 pub(crate) fn cli_parse(path: &str) {
     use std::io::Read;
     let source = if path == "-" {
-        let mut s = String::new();
-        if let Err(e) = std::io::stdin().read_to_string(&mut s) {
+        let mut bytes = Vec::new();
+        if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
             eprintln!("read stdin: {}", e);
             exit_with(1, "exit");
         }
-        s
+        crate::util::text::decode_source(bytes)
     } else {
-        match std::fs::read_to_string(path) {
+        match crate::util::text::read_source(path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("read {}: {}", path, e);

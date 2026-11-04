@@ -14,7 +14,9 @@
 
 use tree_sitter::Node;
 
-/// A node's preorder index in its [`Structure`].
+/// A node's position in its [`SyntaxForest`]: the preorder index in its
+/// parse, offset by every parse registered before it, so one id names a node
+/// anywhere in the forest and one [`NodeFacts`] covers every parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub(crate) struct NodeId(u32);
 
@@ -40,12 +42,21 @@ struct Entry<'t> {
 
 /// The structure of one parse.
 pub(crate) struct Structure<'t> {
+    /// The forest id of this parse's root.
+    base: u32,
     entries: Vec<Entry<'t>>,
+    /// Each node's kind id, a column of its own: a kind scan reads two
+    /// bytes per node instead of a 48-byte entry.
+    kinds: Vec<u16>,
+    /// The nodes another parse replaces, by local index, ascending: each
+    /// with the forest index of the parse that holds its code.
+    injections: Vec<(u32, usize)>,
 }
 
 impl<'t> Structure<'t> {
-    fn build(root: Node<'t>) -> Self {
+    fn build(root: Node<'t>, base: u32) -> Self {
         let mut entries: Vec<Entry<'t>> = Vec::with_capacity(root.descendant_count());
+        let mut kinds: Vec<u16> = Vec::with_capacity(root.descendant_count());
         let mut cursor = root.walk();
         // Explicit stack, like every tree pass here: a recursive descent
         // costs one frame per CST level.
@@ -59,6 +70,7 @@ impl<'t> Structure<'t> {
                 start_byte: node.start_byte() as u32,
                 end_byte: node.end_byte() as u32,
             });
+            kinds.push(node.kind_id());
             let id = entries.len() - 1;
             if cursor.goto_first_child() {
                 open.push(id as u32);
@@ -70,7 +82,7 @@ impl<'t> Structure<'t> {
                     break;
                 }
                 if !cursor.goto_parent() {
-                    return Structure { entries };
+                    return Structure { base, entries, kinds, injections: Vec::new() };
                 }
                 if let Some(closed) = open.pop() {
                     entries[closed as usize].end = entries.len() as u32;
@@ -85,17 +97,17 @@ impl<'t> Structure<'t> {
     }
 
     pub(crate) fn node(&self, id: NodeId) -> SyntaxNode<'_, 't> {
-        SyntaxNode { tree: self, id }
+        SyntaxNode { tree: self, local: id.0 - self.base }
     }
 
-    fn root(&self) -> SyntaxNode<'_, 't> {
-        SyntaxNode { tree: self, id: NodeId(0) }
+    pub(crate) fn root(&self) -> SyntaxNode<'_, 't> {
+        SyntaxNode { tree: self, local: 0 }
     }
 
     /// The id of a node of THIS parse. `None` for a node of another tree —
     /// identity is checked, never inferred from position, so a zero-width
     /// MISSING node and its same-start neighbours stay distinct.
-    fn id_of(&self, node: Node<'t>) -> Option<NodeId> {
+    fn local_of(&self, node: Node<'t>) -> Option<u32> {
         let start = node.start_byte() as u32;
         let first = self.entries.partition_point(|e| e.start_byte < start);
         let want = node.id();
@@ -103,24 +115,130 @@ impl<'t> Structure<'t> {
             .iter()
             .take_while(|e| e.start_byte == start)
             .position(|e| e.ts.id() == want)
-            .map(|i| NodeId((first + i) as u32))
+            .map(|i| (first + i) as u32)
     }
 
     pub(crate) fn lift(&self, node: Node<'t>) -> Option<SyntaxNode<'_, 't>> {
-        self.id_of(node).map(|id| SyntaxNode { tree: self, id })
+        self.local_of(node).map(|local| SyntaxNode { tree: self, local })
     }
+
+    /// The outermost node spanning exactly `range`: preorder puts a
+    /// same-range chain's head first.
+    fn local_spanning(&self, range: std::ops::Range<usize>) -> Option<u32> {
+        let start = range.start as u32;
+        let first = self.entries.partition_point(|e| e.start_byte < start);
+        self.entries[first..]
+            .iter()
+            .take_while(|e| e.start_byte == start)
+            .position(|e| e.end_byte as usize == range.end)
+            .map(|i| (first + i) as u32)
+    }
+
+    /// The injection on the subtree holding local index `local`, if any.
+    fn injection_over(&self, local: u32) -> Option<(u32, usize)> {
+        let i = self.injections.partition_point(|(at, _)| *at <= local);
+        let (at, tree) = *self.injections[..i].last()?;
+        (local < self.entries[at as usize].end).then_some((at, tree))
+    }
+}
+
+/// A parse that replaces part of another: the code of an `s///e`
+/// replacement, which the host parse reads as a string.
+pub(crate) struct Injection<'t> {
+    /// The forest index of the parse holding the replaced node.
+    pub(crate) host: usize,
+    /// The replaced node's byte range in the host.
+    pub(crate) replaces: std::ops::Range<usize>,
+    pub(crate) root: Node<'t>,
 }
 
 /// The parses one build reads: a file's main tree plus the trees parsed
 /// over its own bytes (`s///e` replacement code). A node is answered by the
-/// parse it belongs to, found by identity.
+/// parse it belongs to, found by identity. Read in file order
+/// ([`SyntaxForest::file_nodes_of_kind`]) it is one tree: each injected parse
+/// stands where the node it replaces stood.
 pub(crate) struct SyntaxForest<'t> {
     trees: Vec<Structure<'t>>,
 }
 
 impl<'t> SyntaxForest<'t> {
-    pub(crate) fn new(roots: impl IntoIterator<Item = Node<'t>>) -> Self {
-        SyntaxForest { trees: roots.into_iter().map(Structure::build).collect() }
+    pub(crate) fn new(root: Node<'t>) -> Self {
+        Self::with_injections(root, Vec::new())
+    }
+
+    /// `injections` in registration order: a host is registered before
+    /// anything it hosts.
+    pub(crate) fn with_injections(main: Node<'t>, injections: Vec<Injection<'t>>) -> Self {
+        let mut trees = vec![Structure::build(main, 0)];
+        for inj in injections {
+            let base = trees.last().map_or(0, |t| t.base + t.len() as u32);
+            let index = trees.len();
+            debug_assert!(inj.host < index, "an injection's host registers first");
+            let at = trees.get(inj.host).and_then(|h| h.local_spanning(inj.replaces.clone()));
+            debug_assert!(at.is_some(), "no node spans the replaced range {:?}", inj.replaces);
+            if let Some(at) = at {
+                let host = &mut trees[inj.host];
+                let pos = host.injections.partition_point(|(a, _)| *a < at);
+                host.injections.insert(pos, (at, index));
+            }
+            trees.push(Structure::build(inj.root, base));
+        }
+        SyntaxForest { trees }
+    }
+
+    /// How many nodes the forest holds: every id is below it.
+    pub(crate) fn len(&self) -> usize {
+        self.trees.last().map_or(0, |t| t.base as usize + t.len())
+    }
+
+    /// The root of the parse that holds `node`'s code, when another parse
+    /// replaces it.
+    pub(crate) fn injected_at(&self, node: Node<'t>) -> Option<Node<'t>> {
+        let n = self.lift(node)?;
+        let (_, tree) = n.tree.injections.iter().find(|(at, _)| *at == n.local)?;
+        Some(self.trees[*tree].root().ts())
+    }
+
+    /// Whether `node` is inside a node another parse replaces: the host's
+    /// reading of text that is really code.
+    pub(crate) fn is_replaced(&self, node: Node<'t>) -> bool {
+        self.lift(node).is_some_and(|n| n.tree.injection_over(n.local).is_some())
+    }
+
+    /// Each injected parse's root with the byte offset of the node it
+    /// replaces, in registration order (hosts first).
+    pub(crate) fn injections(&self) -> impl Iterator<Item = (Node<'t>, usize)> + '_ {
+        self.trees.iter().flat_map(move |h| {
+            h.injections.iter().map(move |(at, tree)| {
+                (self.trees[*tree].root().ts(), h.entries[*at as usize].start_byte as usize)
+            })
+        })
+    }
+
+    /// Every node whose kind id is in `kinds`, in file order: the main
+    /// parse's preorder, with each injected parse standing in for the
+    /// subtree it replaces.
+    pub(crate) fn file_nodes_of_kind(&self, kinds: &[u16]) -> Vec<SyntaxNode<'_, 't>> {
+        let mut out = Vec::new();
+        self.scan_in_file_order(0, kinds, &mut out);
+        out
+    }
+
+    fn scan_in_file_order<'a>(&'a self, tree: usize, kinds: &[u16], out: &mut Vec<SyntaxNode<'a, 't>>) {
+        let t = &self.trees[tree];
+        let mut injections = t.injections.iter().peekable();
+        let mut local = 0u32;
+        while (local as usize) < t.len() {
+            if let Some(&(at, inner)) = injections.next_if(|(at, _)| *at == local) {
+                self.scan_in_file_order(inner, kinds, out);
+                local = t.entries[at as usize].end;
+                continue;
+            }
+            if kinds.contains(&t.kinds[local as usize]) {
+                out.push(SyntaxNode { tree: t, local });
+            }
+            local += 1;
+        }
     }
 
     /// The handle for `node`, from whichever parse holds it. `None` is a
@@ -161,36 +279,51 @@ impl<'t> SyntaxForest<'t> {
     }
 }
 
-/// A node of a [`Structure`]: a borrowed tree plus an id.
+/// Every kind id `lang` gives any of `names` as a named node. A grammar can
+/// carry one name on several symbols (aliases), and a kind scan has to match
+/// them all.
+pub(crate) fn kind_ids(lang: &tree_sitter::Language, names: &[&str]) -> Vec<u16> {
+    (0..lang.node_kind_count() as u16)
+        .filter(|&id| {
+            lang.node_kind_is_named(id)
+                && lang.node_kind_for_id(id).is_some_and(|k| names.contains(&k))
+        })
+        .collect()
+}
+
+/// A node of a [`Structure`]: a borrowed tree plus the node's index in it.
 #[derive(Clone, Copy)]
 pub(crate) struct SyntaxNode<'a, 't> {
     tree: &'a Structure<'t>,
-    id: NodeId,
+    local: u32,
 }
 
 impl PartialEq for SyntaxNode<'_, '_> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && std::ptr::eq(self.tree, other.tree)
+        self.local == other.local && std::ptr::eq(self.tree, other.tree)
     }
 }
 impl Eq for SyntaxNode<'_, '_> {}
 
 impl std::fmt::Debug for SyntaxNode<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SyntaxNode({:?}, {})", self.id, self.kind())
+        write!(f, "SyntaxNode({:?}, {})", self.id(), self.kind())
     }
 }
 
 impl<'a, 't> SyntaxNode<'a, 't> {
     fn entry(&self) -> &'a Entry<'t> {
-        &self.tree.entries[self.id.0 as usize]
+        &self.tree.entries[self.local as usize]
+    }
+    fn at(&self, local: u32) -> SyntaxNode<'a, 't> {
+        SyntaxNode { tree: self.tree, local }
     }
     /// The raw tree-sitter node, for readers not yet on the tree.
     pub(crate) fn ts(&self) -> Node<'t> {
         self.entry().ts
     }
     pub(crate) fn id(&self) -> NodeId {
-        self.id
+        NodeId(self.tree.base + self.local)
     }
     pub(crate) fn start_byte(&self) -> usize {
         self.entry().start_byte as usize
@@ -200,7 +333,8 @@ impl<'a, 't> SyntaxNode<'a, 't> {
     }
     /// The ids of this node and everything under it, in preorder.
     pub(crate) fn subtree(&self) -> std::ops::Range<usize> {
-        self.id.0 as usize..self.entry().end as usize
+        let base = self.tree.base as usize;
+        base + self.local as usize..base + self.entry().end as usize
     }
     /// The outermost node sharing this node's range: the head of its
     /// same-range chain (a node and the parent it fills exactly), so every
@@ -226,9 +360,29 @@ impl<'a, 't> SyntaxNode<'a, 't> {
     pub(crate) fn kind(&self) -> &'static str {
         self.entry().ts.kind()
     }
+    pub(crate) fn kind_id(&self) -> u16 {
+        self.tree.kinds[self.local as usize]
+    }
+    /// Every node strictly under this one whose kind id is in `kinds`, in
+    /// preorder: a scan of the kind column over the subtree's interval.
+    pub(crate) fn descendants_of_kind<'k>(
+        &self,
+        kinds: &'k [u16],
+    ) -> impl Iterator<Item = SyntaxNode<'a, 't>> + 'k
+    where
+        'a: 'k,
+    {
+        let tree = self.tree;
+        let ids = self.local as usize + 1..self.entry().end as usize;
+        tree.kinds[ids.clone()]
+            .iter()
+            .zip(ids)
+            .filter(|(k, _)| kinds.contains(k))
+            .map(move |(_, local)| SyntaxNode { tree, local: local as u32 })
+    }
     pub(crate) fn parent(&self) -> Option<SyntaxNode<'a, 't>> {
         let p = self.entry().parent;
-        (p != NO_PARENT).then_some(SyntaxNode { tree: self.tree, id: NodeId(p) })
+        (p != NO_PARENT).then(|| self.at(p))
     }
     /// Strict ancestors, nearest first.
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<'a, 't>> {
@@ -239,10 +393,10 @@ impl<'a, 't> SyntaxNode<'a, 't> {
     /// a scan of the parent's children.
     pub(crate) fn prev_sibling(&self) -> Option<SyntaxNode<'a, 't>> {
         let parent = self.entry().parent;
-        if parent == NO_PARENT || self.id.0 == parent + 1 {
+        if parent == NO_PARENT || self.local == parent + 1 {
             return None;
         }
-        let mut cur = SyntaxNode { tree: self.tree, id: NodeId(self.id.0 - 1) };
+        let mut cur = self.at(self.local - 1);
         while cur.entry().parent != parent {
             cur = cur.parent()?;
         }

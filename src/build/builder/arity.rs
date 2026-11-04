@@ -8,14 +8,9 @@ use super::*;
 /// look at the connector keyword (`if` vs `unless`) to decide. If
 /// it's a bare expression_statement, this is a default branch.
 ///
-/// Known idioms:
-///   - `return X unless @_;`       → Zero
-///   - `return X;`                  → Default
-///
-/// Unknowns (return None and punt):
-///   - `return X if @_;`            (arity >= 1 narrowing)
-///   - `return X if @_ == N;`       (exact N)
-///   - `return X if scalar @_ …;`   (scalar wrapper)
+/// The condition classifies through `classify_arity_condition`, the same
+/// as an `if (COND) { return X }` arm: `return X unless @_;` → Zero,
+/// `return X if @_;` → AtLeast(1), a bare `return X;` → Default.
 pub(super) fn classify_arity_branch<'t>(
     syn: &crate::cst::SyntaxForest<'t>,
     return_node: tree_sitter::Node<'t>,
@@ -58,8 +53,11 @@ pub(super) fn classify_bare_return_or_if_arm<'t>(
             // condition holds, regardless of arity. Classify as
             // Default so `emit_arity_return_witnesses` folds it into
             // the union's `Any` arm.
-            let cond = outer.child_by_field_name("condition")?;
-            classify_arity_condition(cond, source, "if").or(Some(ArityBranch::Default))
+            // `unless (COND) { return X }` fires when COND fails, so the
+            // statement's own keyword decides, as for the postfix form.
+            let lead = crate::cst::conditional_arms(outer).into_iter().next()?;
+            let keyword = if lead.enter { "if" } else { "unless" };
+            classify_arity_condition(lead.cond?, source, keyword).or(Some(ArityBranch::Default))
         }
         _ => None,
     }
@@ -77,7 +75,7 @@ pub(super) fn classify_arity_condition(
         if text == "@_" {
             return match keyword {
                 "unless" => Some(ArityBranch::Zero),
-                _ => None, // `if @_` is "arity >= 1" — not expressible as Exact yet.
+                _ => Some(ArityBranch::AtLeast(1)),
             };
         }
         return None;
@@ -92,8 +90,7 @@ pub(super) fn classify_arity_condition(
                     if text == "@_" {
                         return match keyword {
                             "if" => Some(ArityBranch::Zero),
-                            "unless" => None, // `unless !@_` → arity >= 1, skip
-                            _ => None,
+                            _ => Some(ArityBranch::AtLeast(1)),
                         };
                     }
                 }

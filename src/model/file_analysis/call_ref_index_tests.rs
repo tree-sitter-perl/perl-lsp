@@ -152,7 +152,7 @@ fn equal_span_first_write_wins() {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         refs: vec![call("first", "$a", 4), call("second", "$b", 6)],
         ..Default::default()

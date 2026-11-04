@@ -24,6 +24,8 @@
 ; the surface. Object-like (`#define MAX 1`) → a constant (Variable);
 ; function-like (`#define MIN(a,b) ...`) → a callable (Sub).
 (preproc_def name: (identifier) @def.var.name) @def.var
+; …and tagged a macro, so it presents as one (hover says "macro").
+(preproc_def name: (identifier) @mark.macro)
 ; a distinct skel-kind (not the plain "sub" a real function uses) so the
 ; Symbol can be tagged "macro" (hover/completion say "macro", not
 ; "function") while still resolving as a callable Sub everywhere else.
@@ -879,14 +881,23 @@
   declarator: (identifier) @flow.rebind)
 
 ; the std container / optional / smart-pointer resets put a moved-from object
-; back into a known state, so the receiver rebinds at the call: a use after
-; `x.clear()` is NOT a use-after-move. An ordinary `x.use()` is not here, so
-; the canonical bug still flags.
+; back into a known state: a use after `x.clear()` is NOT a use-after-move. A
+; variable receiver rebinds at the call; a member receiver's place gets a
+; value again. An ordinary `x.use()` is not here, so the canonical bug still
+; flags.
 (call_expression
   function: (field_expression
-    argument: (identifier) @flow.rebind
+    argument: [
+      (identifier) @flow.rebind
+      (field_expression) @flow.place
+    ]
     field: (field_identifier) @_m)
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
+
+; A write to a member gives that place a value again: it ends a narrowing or
+; a move of the member. It states no value: the member's is its declaration's.
+(assignment_expression
+  left: (field_expression) @flow.place)
 
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
@@ -897,7 +908,8 @@
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
-; Capture the moved var + the whole call span; the minter checks scope/name
+; Capture the moved var or member (`std::move(o.msg)` moves only that part)
+; + the whole call span; the minter checks scope/name
 ; against std/move (the driver has no query predicates). The moved-from region
 ; runs from the call to the first @flow rebind of x (or scope end) — the same
 ; cutoff the narrowing tier uses (`earliest_rebind_in`).
@@ -905,7 +917,7 @@
   function: (qualified_identifier
     scope: (namespace_identifier) @move.scope
     name: (identifier) @move.name)
-  arguments: (argument_list (identifier) @move.var)) @move.call
+  arguments: (argument_list [(identifier) (field_expression)] @move.var)) @move.call
 
 ; unevaluated operands — `noexcept(...)` / `sizeof(...)` / `decltype(...)`
 ; don't RUN their operand, so a `std::move` inside one never moves anything.
@@ -951,7 +963,7 @@
 ; guard's scope over the arm, and the edge-driven cutoff ends it at any rebind.
 ;
 ; `dynamic_cast<Derived*>(b)` narrows b to Derived — the cpp analog of python
-; `isinstance`.
+; `isinstance`. A member subject (`o.b`) narrows the place it denotes.
 (if_statement
   condition: (condition_clause
     value: (call_expression
@@ -959,7 +971,7 @@
         name: (identifier) @narrow.guard
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
-      arguments: (argument_list (identifier) @narrow.var)))
+      arguments: (argument_list [(identifier) (field_expression)] @narrow.var)))
   consequence: (_) @narrow.arm)
 (conditional_expression
   condition: (call_expression
@@ -967,7 +979,7 @@
       name: (identifier) @narrow.guard
       arguments: (template_argument_list
         (type_descriptor type: (type_identifier) @narrow.type)))
-    arguments: (argument_list (identifier) @narrow.var))
+    arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
   consequence: (_) @narrow.arm)
 (binary_expression
   left: (call_expression
@@ -975,7 +987,7 @@
       name: (identifier) @narrow.guard
       arguments: (template_argument_list
         (type_descriptor type: (type_identifier) @narrow.type)))
-    arguments: (argument_list (identifier) @narrow.var))
+    arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
   operator: "&&"
   right: (_) @narrow.arm)
 

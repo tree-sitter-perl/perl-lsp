@@ -680,7 +680,7 @@ fn test_imports_qw() {
 
     assert_eq!(fa.imports[0].module_name, "List::Util");
     let names0: Vec<&str> = fa.imports[0]
-        .imported_symbols
+        .imported_symbols()
         .iter()
         .map(|s| s.local_name.as_str())
         .collect();
@@ -688,7 +688,7 @@ fn test_imports_qw() {
 
     assert_eq!(fa.imports[1].module_name, "Scalar::Util");
     let names1: Vec<&str> = fa.imports[1]
-        .imported_symbols
+        .imported_symbols()
         .iter()
         .map(|s| s.local_name.as_str())
         .collect();
@@ -720,7 +720,7 @@ fn test_imports_bare() {
     // strict/warnings/Carp all produce imports with empty imported_symbols
     let carp = fa.imports.iter().find(|i| i.module_name == "Carp");
     assert!(carp.is_some());
-    assert!(carp.unwrap().imported_symbols.is_empty());
+    assert!(carp.unwrap().imported_symbols().is_empty());
 }
 
 #[test]
@@ -739,7 +739,7 @@ fn test_imports_module_symbol_created() {
     // Import should exist
     assert_eq!(fa.imports.len(), 1);
     let names: Vec<&str> = fa.imports[0]
-        .imported_symbols
+        .imported_symbols()
         .iter()
         .map(|s| s.local_name.as_str())
         .collect();
@@ -1071,5 +1071,20 @@ sub transform { }
         );
     } else {
         panic!("fetch_data should be a Sub");
+    }
+}
+
+// The Perl `@flow` document speaks the shared capture vocabulary: the shipped
+// document's every capture is one the minter reads, and a misspelt or
+// unread capture is refused instead of extracting nothing.
+#[test]
+fn flow_document_captures_are_the_minters_vocabulary() {
+    use crate::build::builder::pipeline::flow_capture_table;
+    let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+    let shipped = tree_sitter::Query::new(&lang, include_str!("../../../../queries/perl/flow.scm")).unwrap();
+    assert!(flow_capture_table(&shipped).is_ok());
+    for bad in ["(scalar) @flow.lhs", "(scalar) @flow.place", "(scalar) @flow.targte"] {
+        let q = tree_sitter::Query::new(&lang, bad).unwrap();
+        assert!(flow_capture_table(&q).is_err(), "{bad} must be refused");
     }
 }
