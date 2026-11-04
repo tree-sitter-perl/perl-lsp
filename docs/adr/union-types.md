@@ -39,7 +39,7 @@ another, and that is a closed set, `Subsumption`:
 - `BoolIntoNumeric` — `Bool` folds into `Numeric`. Perl (`1`/`''`), Python
   (`bool <: int`), C++ (promotion), R (logical arithmetic).
 
-A language declares its set as data: Perl in `conventions::PERL_LATTICE`,
+A language declares its set as data: Perl in `conventions::PERL_CONVENTIONS`,
 beside its other conventions, and a pack on `LangPack::lattice`. The model
 cannot see the packs, so the build layer registers each pack language's
 set by id with its other conventions (`conventions::register_conventions`,
