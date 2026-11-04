@@ -695,7 +695,8 @@ impl<'a> Builder<'a> {
     }
 
     /// `recv->resultset('Foo')` → `Parametric(ResultSet { base,
-    /// row })`. `base` is discovered via the
+    /// row })`, the row a `RowSource::Class` when `Foo` is a package
+    /// name and a `RowSource::Moniker` otherwise. `base` is discovered via the
     /// `<NS>::Result::<X>` ↔ `<NS>::ResultSet::<X>` convention if
     /// that class exists in this file; otherwise falls back to
     /// `DBIx::Class::ResultSet` (the universal DBIC default that
@@ -718,11 +719,29 @@ impl<'a> Builder<'a> {
         // `recv->resultset('Foo')` — row class from the string arg.
         if mtext == "resultset" {
             let args = node.child_by_field_name("arguments")?;
-            let row_class = self.first_string_or_constfold_arg(args)?;
+            let row_name = self.first_string_or_constfold_arg(args)?;
             let base = self
-                .discover_resultset_class(&row_class)
+                .discover_resultset_class(&row_name)
                 .unwrap_or_else(|| "DBIx::Class::ResultSet".to_string());
-            return Some(InferredType::Parametric(ParametricType::ResultSet { base, row: row_class }));
+            let names_class = crate::model::conventions::split_qualified(
+                &row_name,
+                &crate::model::conventions::PERL_SPELLINGS,
+            )
+            .0
+            .is_some()
+                || self.symbols.iter().any(|s| {
+                    s.name == row_name && matches!(s.kind, SymKind::Package | SymKind::Class)
+                });
+            let row = if names_class {
+                crate::model::file_analysis::RowSource::Class(row_name)
+            } else {
+                let schema = node
+                    .child_by_field_name("invocant")
+                    .and_then(|inv| self.invocant_type_at_node(inv))
+                    .and_then(|t| t.class_name().map(str::to_string));
+                crate::model::file_analysis::RowSource::Moniker { moniker: row_name, schema }
+            };
+            return Some(InferredType::Parametric(ParametricType::ResultSet { base, row }));
         }
         None
     }
