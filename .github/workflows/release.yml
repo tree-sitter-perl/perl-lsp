@@ -1,21 +1,73 @@
 name: Release
 
+# Two ways in. Pushing a `v*` tag releases that tag. Merging a version bump
+# to main releases it too: the `tag` job sees a Cargo.toml version with no tag
+# yet and creates it with this run's GITHUB_TOKEN. A tag made by GITHUB_TOKEN
+# starts no new workflow run, so this same run carries on with the release and
+# nothing fires twice; every other push to main stops at the `tag` job.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
 
 permissions:
   contents: write
   id-token: write  # needed for crates.io Trusted Publishing
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  tag:
+    name: Decide the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TAG="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists; nothing to release."
+            exit 0
+          fi
+          # A version bump without its changelog section is a mistake, not a
+          # release: refuse rather than publish a stub body.
+          if ! grep -q "^## $TAG\( \|$\)" CHANGELOG.md; then
+            echo "::error::Cargo.toml says $VERSION but CHANGELOG.md has no '## $TAG' section."
+            exit 1
+          fi
+          # Losing a race to a concurrent run (or a hand-pushed tag) leaves the
+          # tag in place, and that run or push does the release.
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+                 -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null; then
+            echo "Could not create $TAG (already created elsewhere?); not releasing from this run."
+            exit 0
+          fi
+          echo "Created $TAG at $GITHUB_SHA."
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   # Gate the release on the gold-corpus regression harness (exact-assertion
   # LSP-capability checks against a version-pinned module substrate).
   gold-corpus:
     name: Gold corpus
+    needs: tag
+    if: needs.tag.outputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -68,10 +120,12 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: gold-corpus
+    needs: [tag, gold-corpus]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -80,7 +134,8 @@ jobs:
       - name: Validate version matches tag
         run: |
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          TAG_VERSION=${GITHUB_REF_NAME#v}
+          TAG=${{ needs.tag.outputs.tag }}
+          TAG_VERSION=${TAG#v}
           if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
             echo "ERROR: Cargo.toml version ($CARGO_VERSION) != tag ($TAG_VERSION)"
             exit 1
@@ -100,27 +155,30 @@ jobs:
   # append platform binaries (those upload steps don't touch the body).
   release-notes:
     name: Release notes
-    needs: publish-crate
+    needs: [tag, publish-crate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
 
       - name: Extract CHANGELOG section for this tag
         # Shared with the local preview (`scripts/release-notes.sh v0.5.0`) so
         # what you see locally is exactly what the release publishes. The
         # script prefix-matches the dated `## <tag> — <date>` header and falls
         # back to a stub body when no section exists.
-        run: scripts/release-notes.sh "${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+        run: scripts/release-notes.sh "${{ needs.tag.outputs.tag }}" > RELEASE_NOTES.md
 
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.tag.outputs.tag }}
           body_path: RELEASE_NOTES.md
           generate_release_notes: true
 
   build:
     name: Build ${{ matrix.target }}
-    needs: release-notes
+    needs: [tag, release-notes]
     strategy:
       matrix:
         include:
@@ -151,6 +209,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.tag.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -184,6 +244,7 @@ jobs:
       - name: Upload release asset
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.tag.outputs.tag }}
           files: perl-lsp-${{ matrix.target }}.${{ matrix.archive }}
 
   # Publish the VS Code extension — a reusable workflow so it can also run
@@ -191,10 +252,10 @@ jobs:
   # the extension references already exist.
   publish-extension:
     name: Publish VS Code extension
-    needs: build
+    needs: [tag, build]
     uses: ./.github/workflows/publish-extension.yml
     with:
-      ref: ${{ github.ref_name }}
+      ref: ${{ needs.tag.outputs.tag }}
     secrets: inherit
     permissions:
       contents: read
