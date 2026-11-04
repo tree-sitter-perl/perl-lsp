@@ -2277,3 +2277,39 @@ fn sql_runs_only_registered_statements() {
     }
     assert!(violations.is_empty(), "unregistered SQL:\n{}", violations.join("\n"));
 }
+
+/// Source text is read through `util::text::read_source`, which takes a
+/// non-UTF-8 file as Latin-1. `read_to_string` refuses one outright, and a
+/// reader that used it skipped that file from the index or killed the CLI.
+/// The files below read something other than a source file (a plugin
+/// script, perlfunc.pod, `/proc`, a test expectation) and say which.
+#[test]
+fn source_files_are_read_through_read_source() {
+    const NOT_SOURCE: &[(&str, &str)] = &[
+        ("build/plugin/rhai_host.rs", "plugin scripts"),
+        ("lsp/plugin_cli.rs", "plugin scripts and expected-output files"),
+        ("index/builtins_pod.rs", "perlfunc.pod"),
+        ("util/watchdog.rs", "/proc/self/status"),
+    ];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    for (f, _layer, _module) in source_files() {
+        let rel = f.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+        let code = without_test_modules(&code_only(&fs::read_to_string(&f).expect("read source")));
+        let reads: Vec<usize> =
+            code.lines().enumerate().filter(|(_, l)| l.contains("read_to_string(")).map(|(n, _)| n + 1).collect();
+        if NOT_SOURCE.iter().any(|(p, _)| *p == rel) {
+            // Shrink-only: an entry with nothing left to excuse goes.
+            if reads.is_empty() {
+                violations.push(format!("src/{rel}: on the allowlist with no read left; remove it"));
+            }
+            continue;
+        }
+        violations.extend(reads.iter().map(|n| format!("src/{rel}:{n}")));
+    }
+    assert!(
+        violations.is_empty(),
+        "read source text with crate::util::text::read_source, not read_to_string:\n{}",
+        violations.join("\n")
+    );
+}

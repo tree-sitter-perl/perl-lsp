@@ -4,7 +4,7 @@
 /// Parse a cpanfile at `{root}/cpanfile` and extract module names.
 pub fn parse_cpanfile(root_path: &std::path::Path) -> Vec<String> {
     let cpanfile = root_path.join("cpanfile");
-    let source = match std::fs::read_to_string(&cpanfile) {
+    let source = match crate::util::text::read_source(&cpanfile) {
         Ok(s) => s,
         Err(_) => return vec![],
     };
