@@ -932,7 +932,7 @@ impl FileAnalysis {
         // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
-                for import in &self.imports {
+                for import in self.imports.in_scope(self.import_scope_at(point)) {
                     // A split exporter's surface lives across its candidates.
                     let bound_remote = idx
                         .visible_def_candidates(&import.module_name)

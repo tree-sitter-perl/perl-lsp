@@ -72,7 +72,7 @@ pub struct FileAnalysis {
     /// `refs()` and the delegating query methods.
     refs: RefTable,
     pub fold_ranges: Vec<FoldRange>,
-    pub imports: Vec<Import>,
+    pub imports: ImportTable,
     pub call_bindings: Vec<CallBinding>,
     pub method_call_bindings: Vec<MethodCallBinding>,
 
@@ -102,10 +102,6 @@ pub struct FileAnalysis {
     /// join is a single lookup.
     #[serde(default)]
     pub packages: HashMap<String, PackageFacts>,
-
-    /// Functions implicitly imported by OOP frameworks (e.g. `has`, `extends`, `with`).
-    /// Used to suppress "not defined" diagnostics for these known framework keywords.
-    pub framework_imports: HashSet<String>,
 
     /// Exported function names from `@EXPORT = ...` assignments.
     pub export: Vec<String>,
@@ -594,13 +590,12 @@ pub struct FileAnalysisParts {
     /// The build's per-site macro delegation column over `refs`.
     pub ref_delegates: RefDelegates,
     pub fold_ranges: Vec<FoldRange>,
-    pub imports: Vec<Import>,
+    pub imports: ImportTable,
     pub call_bindings: Vec<CallBinding>,
     pub packages: HashMap<String, PackageFacts>,
     pub pack: PackFacts,
     pub plugin: PluginFacts,
     pub method_call_bindings: Vec<MethodCallBinding>,
-    pub framework_imports: HashSet<String>,
     pub export: Vec<String>,
     pub export_ok: Vec<String>,
     pub export_tags: HashMap<String, Vec<String>>,

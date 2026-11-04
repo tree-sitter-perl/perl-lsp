@@ -1881,6 +1881,24 @@ fn tree_steps_go_through_the_syntax_tree() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// What a `use` binds is read through `ImportTable` with an `ImportScope`
+/// (`binding` / `in_scope` / `keyword`), never off the statement: a name
+/// imported into one package binds nothing in another. The field is private,
+/// so this catches only `pub(crate)` creep and a revived file-global keyword set.
+#[test]
+fn import_names_are_read_through_a_scope() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| rel != "model/file_analysis/imports.rs")
+            .filter(|(rel, _)| !rel.contains("/tests/") && !rel.ends_with("_tests.rs"))
+            .map(|(rel, text)| (rel, without_test_modules(&code_only(&text))))
+            .collect();
+    let seen = count_lines(&files, &|l| l.contains(".imported_symbols") || l.contains(".framework_imports"));
+    let drift = allowlist_drift("import names read off the statement (ask ImportTable with a scope)", &seen, &[]);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// A name lookup walks `lookup_chain` — the `LookupChain` a scope's
 /// bindings are listed through, which carries every language's scoping
 /// rule (`Scope::direct`, …). A raw climb up `Scope::parent` sees every

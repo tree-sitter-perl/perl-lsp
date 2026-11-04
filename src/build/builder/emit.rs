@@ -114,16 +114,14 @@ impl<'a> Builder<'a> {
     /// be imported to compile. `-all` / `:all` / bare `use` expand to the
     /// full vocabulary through the plugin's `on_use`, and house type
     /// libraries reach the same place via `SyntheticUse`.
-    fn constraint_name_imported(&self, name: &str) -> bool {
-        self.imports
-            .iter()
-            .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
+    fn constraint_name_imported(&self, name: &str, at: Point) -> bool {
+        self.imports.binding(self.import_scope_at(at), name).is_some()
     }
 
     /// What a call to `name` reports about a reference: the `ref` builtin,
     /// or a plugin-declared `ref_tag_functions()` entry this file imported
     /// (by its local name) or names fully qualified.
-    pub(super) fn ref_tag_fn(&self, name: &str) -> Option<crate::model::file_analysis::RefTagFn> {
+    pub(super) fn ref_tag_fn(&self, name: &str, at: Point) -> Option<crate::model::file_analysis::RefTagFn> {
         use crate::model::conventions::{is_ref_builtin, split_qualified, PERL_SPELLINGS};
         use crate::model::file_analysis::RefTagFn;
         if is_ref_builtin(name) {
@@ -133,13 +131,10 @@ impl<'a> Builder<'a> {
         self.ref_tag_functions.iter().find_map(|f| {
             let hit = match module {
                 Some(m) => m == f.module && leaf == f.name,
-                None => self.imports.iter().any(|i| {
-                    i.module_name == f.module
-                        && i.imported_symbols.iter().any(|sym| {
-                            sym.local_name == name
-                                && sym.remote_name.as_deref().unwrap_or(&sym.local_name) == f.name
-                        })
-                }),
+                None => self
+                    .imports
+                    .binding(self.import_scope_at(at), name)
+                    .is_some_and(|(i, sym)| i.module_name == f.module && sym.remote() == f.name),
             };
             hit.then_some(f.tag)
         })
@@ -150,7 +145,8 @@ impl<'a> Builder<'a> {
         &self,
         node: Node<'a>,
     ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
-        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n))
+        let at = node.start_position();
+        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n, at))
     }
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
@@ -419,7 +415,7 @@ impl<'a> Builder<'a> {
                 // call `->check` on it, not Foo's methods. The plugin folds the
                 // params (core extracts them, rule #1); we wrap.
                 if self.type_constraint_names.contains(&bare)
-                    && self.constraint_name_imported(&bare)
+                    && self.constraint_name_imported(&bare, node.start_position())
                 {
                     let params = self.extract_constraint_params(node);
                     // The plugin returns the whole constraint value, not the

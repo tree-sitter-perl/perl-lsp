@@ -221,12 +221,13 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         .map(ref_to_snapshot)
         .collect();
 
-    // framework_imports — set of strings, simple diff.
-    let mut framework_imports: Vec<&String> = with_plugin
-        .framework_imports
-        .difference(&baseline.framework_imports)
-        .collect();
-    framework_imports.sort();
+    // framework keywords — set of strings, simple diff.
+    let keywords = |fa: &FileAnalysis| -> std::collections::BTreeSet<String> {
+        fa.imports.keywords_as_written().iter().map(|k| k.keyword.clone()).collect()
+    };
+    let baseline_keywords = keywords(baseline);
+    let keywords_added: Vec<String> =
+        keywords(with_plugin).into_iter().filter(|k| !baseline_keywords.contains(k)).collect();
 
     // package_parents — diff entries.
     let mut package_parents: Vec<Value> = Vec::new();
@@ -267,7 +268,7 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
         .filter(|i| !baseline_imports.contains(&import_key(i)))
         .map(|i| json!({
             "module": i.module_name,
-            "items": i.imported_symbols.iter().map(|s| s.local_name.clone()).collect::<Vec<_>>(),
+            "items": i.names_as_written().collect::<Vec<_>>(),
         }))
         .collect();
 
@@ -311,7 +312,7 @@ fn diff_emissions(baseline: &FileAnalysis, with_plugin: &FileAnalysis, plugin_id
     json!({
         "symbols": symbols,
         "refs": refs,
-        "framework_imports": framework_imports,
+        "framework_imports": keywords_added,
         "package_parents": package_parents,
         "plugin_namespaces": plugin_namespaces,
         "imports": imports,
@@ -405,7 +406,7 @@ fn ref_key(r: &crate::model::file_analysis::Ref) -> String {
 }
 
 fn import_key(i: &crate::model::file_analysis::Import) -> String {
-    let mut items: Vec<&str> = i.imported_symbols.iter().map(|s| s.local_name.as_str()).collect();
+    let mut items: Vec<&str> = i.names_as_written().collect();
     items.sort();
     format!("{}|{:?}", i.module_name, items)
 }

@@ -959,6 +959,18 @@ impl FileAnalysis {
         namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
+    /// The import scope in force at `point`: the namespace lane's package,
+    /// or the language's root package outside any. The same package the walk
+    /// minted on each `Import`, so a binding read here sees exactly the
+    /// `use`s that bind at `point`.
+    pub fn import_scope_at(&self, point: Point) -> ImportScope<'_> {
+        let package = self
+            .namespace_at(point)
+            .or(self.names().root_package.as_deref())
+            .unwrap_or_default();
+        ImportScope::in_package(package)
+    }
+
     /// Trigger-matching view for plugin query hooks at `point`: the
     /// modules `use`d inside the enclosing package plus the transitive
     /// parent chain. Mirrors what the builder assembles at emit time so

@@ -57,7 +57,7 @@ impl<'a> Builder<'a> {
             }).unwrap_or_else(|| node_to_span(node));
 
             for name in names {
-                let pkg = self.resolve_call_package(&name);
+                let pkg = self.resolve_call_package(&name, name_span.start);
                 self.add_bound_ref(
                     RefKind::FunctionCall,
                     name_span,

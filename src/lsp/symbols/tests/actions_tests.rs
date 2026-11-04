@@ -530,6 +530,59 @@ fn test_hover_on_builtin_uses_module_index() {
     assert!(text.contains("Appends LIST"), "hover body missing: {text}");
 }
 
+/// Perl hover through the presenter, the way the server and `--batch` run it.
+fn presenter_hover(source: &str, point: Point) -> Option<String> {
+    let analysis = parse_analysis(source);
+    let module_index = ModuleIndex::new_for_test();
+    module_index.set_workspace_root(None);
+    let files = crate::index::open_docs::OpenDocs::new();
+    let idx: &dyn crate::model::file_analysis::CrossFileLookup = &module_index;
+    let cs = crate::index::resolve::resolve(
+        &files,
+        &analysis,
+        crate::index::open_docs::FileKey::Url(Url::parse("file:///test.pl").unwrap(), Default::default()),
+        point,
+        Some(idx),
+        crate::index::resolve::OverrideScope::default(),
+    )
+    .with_source(source);
+    let has_defs = !cs.definitions().is_empty();
+    let hover = crate::lsp::symbols::perl_hover_markdown(&cs, &module_index);
+    // Hover and goto-def answer one resolution: a hover without a
+    // definition is a hover goto-def would refuse.
+    if hover.is_some() {
+        assert!(has_defs, "hover with no definition: {hover:?}");
+    }
+    hover
+}
+
+/// An untyped receiver has no class, so neither goto-def nor hover may
+/// answer with whichever same-named sub the file happens to declare.
+#[test]
+fn test_hover_untyped_receiver_is_an_honest_miss() {
+    let source = "package Foo;\nsub m { 1 }\npackage main;\nmy $x = external();\n$x->m();\n";
+    let hover = presenter_hover(source, Point::new(4, 4));
+    assert_eq!(hover, None);
+}
+
+/// A receiver whose class is known and lacks the method: the file's other
+/// `m` is not a method `$b` can call.
+#[test]
+fn test_hover_known_receiver_without_the_method_is_an_honest_miss() {
+    let source = "package Foo;\nsub m { 1 }\npackage Bar;\nsub new { bless {}, shift }\n\
+package main;\nmy $b = Bar->new;\n$b->m();\n";
+    let hover = presenter_hover(source, Point::new(6, 4));
+    assert_eq!(hover, None);
+}
+
+/// A local package name still hovers, now through the set's candidate.
+#[test]
+fn test_hover_on_local_package_name() {
+    let source = "package Foo;\nsub new { bless {}, shift }\npackage main;\nmy $f = Foo->new;\n";
+    let hover = presenter_hover(source, Point::new(3, 8)).expect("hovers `Foo`");
+    assert!(hover.contains("Foo"), "{hover}");
+}
+
 #[test]
 fn test_code_action_multiple_exporters_not_preferred() {
     let source = "use strict;\nfirst();\n";

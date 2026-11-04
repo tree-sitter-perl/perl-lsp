@@ -102,7 +102,7 @@ fn constraint_parameter_after_a_comment() {
 #[test]
 fn as_rename_after_a_comment() {
     let fa = build_fa("use ModX always_here => # c\n { -as => 'here' };\nhere();\n");
-    let renamed = fa.imports.iter().flat_map(|i| i.imported_symbols.iter()).find(|s| s.local_name == "here");
+    let renamed = fa.imports.iter().flat_map(|i| i.imported_symbols().iter()).find(|s| s.local_name == "here");
     assert!(renamed.is_some_and(|s| s.remote() == "always_here"), "{:?}", fa.imports);
 }
 

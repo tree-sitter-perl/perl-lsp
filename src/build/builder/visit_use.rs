@@ -330,7 +330,9 @@ impl<'a> Builder<'a> {
         if let Some(pkg) = self.current_package.as_ref().cloned() {
             if let Some(grant) = self.framework_mode_modules.get(&module_name).cloned() {
                 self.framework_modes.insert(pkg.clone(), grant.mode);
-                self.framework_imports.extend(grant.imports);
+                for keyword in grant.imports {
+                    self.imports.push_keyword(&pkg, keyword);
+                }
                 if let Some(base) = grant.base {
                     self.framework_bases.insert(pkg, base);
                 }
@@ -477,13 +479,12 @@ impl<'a> Builder<'a> {
                 .filter_map(|i| node.named_child(i))
                 .any(|c| c.kind() == "stub_expression");
         }
-        self.imports.push(Import {
-            module_name: module_name.clone(),
-            imported_symbols,
-            span,
-            qw_close_paren,
-            empty_import,
-        });
+        let package = self.import_scope_at(span.start).package().to_string();
+        self.imports.push(
+            Import::new(module_name.clone(), imported_symbols, span, package)
+                .with_qw_close(qw_close_paren)
+                .binding_nothing(empty_import),
+        );
 
         // Plugin dispatch for use-statements. Mojolicious::Lite
         // autoimports a verb set (`get`, `post`, `helper`, ...) —
@@ -684,7 +685,7 @@ impl<'a> Builder<'a> {
         // sub is this" (enclosing package, then imports) — no pin, no
         // ref, so unresolvable barewords (filehandles, prototypes'
         // leftovers) stay untouched.
-        if let Some(owner) = self.resolve_call_package(name) {
+        if let Some(owner) = self.resolve_call_package(name, node.start_position()) {
             self.add_bound_ref(
                 RefKind::FunctionCall,
                 node_to_span(node),
@@ -741,13 +742,10 @@ impl<'a> Builder<'a> {
             name.to_string(),
             AccessKind::Read,
         );
-        self.imports.push(Import {
-            module_name: name.to_string(),
-            imported_symbols: vec![],
-            span: node_to_span(node),
-            qw_close_paren: None,
-            empty_import: true,
-        });
+        let package = self.import_scope_at(node.start_position()).package().to_string();
+        self.imports.push(
+            Import::new(name.to_string(), vec![], node_to_span(node), package).binding_nothing(true),
+        );
     }
 
     /// Strings of a list-ish node, per-word spans included. Syntax
@@ -1676,8 +1674,7 @@ impl<'a> Builder<'a> {
     /// and a sub imported by name into this package does.
     pub(super) fn sub_declared_before(&self, name: &str, at: Point) -> bool {
         let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
-        let here = self.package_at_pos(at);
-        let qualifier = qualifier.or(Some(here.unwrap_or("main")));
+        let qualifier = qualifier.or(Some(self.import_scope_at(at).package()));
         let declared = self.symbols.iter().any(|s| {
             s.span.start < at
                 && s.name == bare
@@ -1685,12 +1682,7 @@ impl<'a> Builder<'a> {
                 && qualifier_admits_local_sub(qualifier, s.package.as_deref())
         });
         declared
-            || (name == bare
-                && self.imports.iter().any(|i| {
-                    i.span.start < at
-                        && i.imported_symbols.iter().any(|s| s.local_name == bare)
-                        && self.package_at_pos(i.span.start) == here
-                }))
+            || (name == bare && self.imports.binding(self.import_scope_at(at).parsed_before(at), bare).is_some())
     }
 
     /// The bare name to look a call up by, for callers that resolve through a

@@ -1001,7 +1001,7 @@ require v5.36;
         fa.imports.iter().filter(|i| i.module_name == "Some::Module").collect();
     assert_eq!(imp.len(), 1, "one Import row for the required module");
     assert!(imp[0].empty_import, "require binds nothing — the `use Foo ()` shape");
-    assert!(imp[0].imported_symbols.is_empty());
+    assert!(imp[0].imported_symbols().is_empty());
     assert!(
         !fa.refs().iter().any(|r| r.target_name.contains("5.010")
             || r.target_name.contains("v5.36")),
@@ -1289,7 +1289,7 @@ fn test_plugin_declared_framework_mode_maker_grants_has_semantics() {
         "plugin-declared maker must grant native `has` accessor synthesis",
     );
     assert!(
-        fa.framework_imports.contains("has") && fa.framework_imports.contains("with"),
+        fa.imports.keyword_names().contains("has") && fa.imports.keyword_names().contains("with"),
         "the maker's declared keyword surface lands in framework_imports",
     );
 }
