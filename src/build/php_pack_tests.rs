@@ -1352,6 +1352,41 @@ fn a_chained_member_resolves_across_files_and_hovers_its_return() {
     assert!(hover.contains("*returns: App\\Builder*"), "{hover}");
 }
 
+/// Hover on a typed call into another file shows the method's declaration
+/// and the file it lives in, never `name: Type` as if it were a field; a
+/// property shows its type, and both read in PHP's words (`bool`, not the
+/// engine's `Bool`).
+#[cfg(feature = "php")]
+#[test]
+fn a_cross_file_member_call_hovers_as_its_declaration_in_php_words() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let handler = "<?php\nnamespace Lib;\n\nclass Handler {\n    public bool $on;\n    public function isHandling(int $level): bool {}\n}\n";
+    let runner = "<?php\nnamespace App;\n\nuse Lib\\Handler;\n\nclass Runner {\n    public function run(Handler $h) {\n        $h->isHandling(1);\n        return $h->on;\n    }\n}\n";
+    let root = std::env::temp_dir().join(format!("php-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for (name, src) in [("Handler.php", handler), ("Runner.php", runner)] {
+        std::fs::write(root.join(name), src).unwrap();
+        idx.insert_workspace_for_test(root.join(name), php(src));
+    }
+    let path = root.join("Runner.php");
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    let hover = |needle: &str| {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &file, key, at(runner, needle, 0), Some(&idx), OverrideScope::default()).with_source(runner);
+        crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap_or_default()
+    };
+    let call = hover("isHandling(1)");
+    let field = hover("on;");
+    std::fs::remove_dir_all(&root).ok();
+    assert!(call.contains("public function isHandling(int $level): bool"), "{call}");
+    assert!(call.contains("Handler.php"), "{call}");
+    assert!(!call.contains("*member*") && !call.contains("Bool"), "{call}");
+    assert!(field.contains("on: bool"), "{field}");
+}
+
 const FLUENT_BASE: &str = "<?php
 namespace Lib;
 
