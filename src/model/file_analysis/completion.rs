@@ -1416,6 +1416,7 @@ pub(crate) fn format_type_root(ty: &InferredType) -> String {
         InferredType::FirstParam { package } => package.clone(),
         InferredType::Parametric(ParametricType::ResultSet { base, .. })
         | InferredType::Parametric(ParametricType::Instance { base, .. }) => base.clone(),
+        InferredType::Parametric(ParametricType::Row { moniker, .. }) => moniker.clone(),
         InferredType::Branded { base, .. } => format_type_root(base),
         InferredType::Sequence(_) => "Sequence".to_string(),
         InferredType::TypeConstraintOf(_) => "TypeConstraint".to_string(),
@@ -1436,6 +1437,7 @@ pub(super) fn format_parametric_with(p: &ParametricType, vocab: TypeVocab) -> St
         ParametricType::ResultSet { base, row } => {
             format!("{}<{}>", base, row)
         }
+        ParametricType::Row { moniker, .. } => format!("Row<{}>", moniker),
         ParametricType::Instance { base, args } => {
             let parts: Vec<String> = args.iter().map(|a| format_type_with(a, vocab)).collect();
             format!("{}<{}>", base, parts.join(", "))

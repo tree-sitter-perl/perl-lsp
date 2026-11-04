@@ -465,7 +465,7 @@ fn despan(t: &InferredType) -> InferredType {
             open: *open,
         },
         InferredType::Parametric(p) => InferredType::Parametric(match p {
-            ParametricType::ResultSet { .. } => p.clone(),
+            ParametricType::ResultSet { .. } | ParametricType::Row { .. } => p.clone(),
             ParametricType::Instance { base, args } => ParametricType::Instance {
                 base: base.clone(),
                 args: args.iter().map(despan).collect(),
