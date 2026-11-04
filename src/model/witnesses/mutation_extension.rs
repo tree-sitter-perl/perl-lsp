@@ -232,7 +232,9 @@ pub(super) fn extend_in_place(
                 if widen {
                     return open_shape(open);
                 }
-                keys.to_mut().push((k.to_string(), vivify(rest, vtype).map(Box::new)));
+                // An open shape may already hold the key, so what lies below
+                // it is not just this write's path.
+                keys.to_mut().push((k.to_string(), vivify(rest, vtype, *open).map(Box::new)));
                 return true;
             };
             if rest.is_empty() {
@@ -269,7 +271,7 @@ pub(super) fn extend_in_place(
             }
             if !rest.is_empty() {
                 if i == elems.len() {
-                    elems.push(vivify(rest, vtype).unwrap_or(InferredType::Unknown));
+                    elems.push(vivify(rest, vtype, false).unwrap_or(InferredType::Unknown));
                     return true;
                 }
                 return extend_in_place(&mut elems[i], rest, vtype, widen);
@@ -300,20 +302,21 @@ fn open_shape(open: &mut bool) -> bool {
 /// leaf. A missing array autovivifies as a tuple only at index 0, the one
 /// slot a fresh array can be written at without holes (a slot the RHS can't
 /// type is `Unknown`, since a tuple has no untyped slot); at a later index
-/// it is an `ArrayRef`, which says nothing about elements.
+/// it is an `ArrayRef`, which says nothing about elements. `open` opens
+/// every vivified hash: the write may land on a value that already stood.
 /// TODO(element-typed-array): a tuple is only right while nothing else
 /// writes the array; these writes move to an element-typed array when the
 /// lattice has one.
-fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>) -> Option<InferredType> {
+fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option<InferredType> {
     use crate::model::file_analysis::SharedKeys;
     let Some((first, rest)) = hops.split_first() else { return vtype.cloned() };
     match first {
         WriteKey::Hash(k) => Some(InferredType::HashWithKeys {
-            keys: SharedKeys::new(vec![(k.clone(), vivify(rest, vtype).map(Box::new))]),
-            open: false,
+            keys: SharedKeys::new(vec![(k.clone(), vivify(rest, vtype, open).map(Box::new))]),
+            open,
         }),
         WriteKey::Index(0) => {
-            Some(InferredType::Sequence(vec![vivify(rest, vtype).unwrap_or(InferredType::Unknown)]))
+            Some(InferredType::Sequence(vec![vivify(rest, vtype, open).unwrap_or(InferredType::Unknown)]))
         }
         WriteKey::Index(i) if *i > 0 => Some(InferredType::ArrayRef),
         WriteKey::Index(_) | WriteKey::Unknown => None,
