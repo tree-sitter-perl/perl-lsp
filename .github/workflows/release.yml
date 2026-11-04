@@ -27,6 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Every file that carries the version, plus the CHANGELOG section the
+      # release body comes from. A bump that missed one stops here.
+      - name: Version strings agree
+        run: scripts/check-versions.sh --release
+
       - id: decide
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,12 +45,6 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "$TAG already exists; nothing to release."
             exit 0
-          fi
-          # A version bump without its changelog section is a mistake, not a
-          # release: refuse rather than publish a stub body.
-          if ! grep -q "^## $TAG\( \|$\)" CHANGELOG.md; then
-            echo "::error::Cargo.toml says $VERSION but CHANGELOG.md has no '## $TAG' section."
-            exit 1
           fi
           # Losing a race to a concurrent run (or a hand-pushed tag) leaves the
           # tag in place, and that run or push does the release.
