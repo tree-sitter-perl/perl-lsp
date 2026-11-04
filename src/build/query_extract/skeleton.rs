@@ -1204,11 +1204,18 @@ impl SkeletonAnalysis {
             }
         }
         // A spelled receiver (`this`) in a body that elides its receiver IS
-        // that receiver: `this->x` and a bare `x` are one place.
-        for (scope, span) in &self.receivers {
+        // that receiver: `this->x` and a bare `x` are one place. The
+        // document states `this` as a token naming the enclosing class.
+        let spelled_receivers = self.receivers.iter().copied().chain(
+            self.receiver_sites
+                .iter()
+                .filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing))
+                .map(|r| (r.scope, r.span)),
+        );
+        for (scope, span) in spelled_receivers {
             if let Some(m) = elided_receiver.get(scope.0 as usize).copied().flatten() {
                 use crate::model::file_analysis::{Binding, Place};
-                var_at.entry(*span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
+                var_at.entry(span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
