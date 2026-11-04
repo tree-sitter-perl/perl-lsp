@@ -4,6 +4,153 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
+## v0.9.1 — 2026-11-04
+
+### Perl: inheritance and declarations
+
+- **Moo, Moose and Mouse classes inherit their object base.** `Foo->new` on
+  a Moo class resolves to `Moo::Object::new` when that file is on `@INC`,
+  instead of resolving nowhere. When it isn't installed the call stays
+  silent, as with any unresolved parent. (#372)
+- **Every `@ISA` write is a parent.** `push @ISA, …`, `unshift`, `splice`,
+  `@Pkg::ISA = …`, `our`/`local @ISA` and `@ISA = (@ISA, …)` all add
+  parents. A computed value marks the package's parents as dynamic, so
+  "not defined" checks no longer fire on an ancestry the file can't spell.
+  This removed false `'new' is not defined in JSON` hints in FHEM. (#372)
+- **`sub Foo::bar { … }` belongs to `Foo`.** It used to be filed under the
+  enclosing package, so `$foo->bar` had no definition, `--dump-package Foo`
+  missed it, references found only the declaration and rename dropped the
+  qualifier. (#372)
+- **Code inside `s///e` is read like any other code.** In
+  `s/x/$o->cfg->{host}/e`, references on `host` now find the use, and an
+  assignment inside the replacement (`($err = $1)`) types and flows like
+  one outside it. (#373)
+
+- **Imports bind only in the package that imports them**, and glob
+  aliases (`*a = *Pkg::b`, `*a = \&b`) bind to what their source binds.
+  (#391)
+- **Files that aren't valid UTF-8 are indexed.** A Latin-1 file used to be
+  skipped silently; it is now read, so its real diagnostics appear (FHEM
+  has ~3,300 such hints, Webmin 55). `--batch` answers the remaining rows
+  when one row fails. (#395)
+
+### Perl: variables and narrowing
+
+- **A variable's facts belong to that variable, not its name.** (#375,
+  #377, #378)
+  - An inner `my $x` that shadows an outer one no longer reads the outer
+    variable's type, and a same-scope redeclaration starts fresh.
+  - A write in an `if` arm no longer leaks into the `else` arm or past the
+    `if`; after both arms write, the value is what they agree on.
+  - Rebinding a shadowing variable no longer ends the outer variable's
+    narrowing, and a qualified spelling (`$Pkg::x`) reads the package
+    variable.
+  - A lexical comes into force after its declaring statement, so
+    `my $x = $x` reads the outer `$x`, as Perl does. (#382)
+  - A guard or use holds over the whole region it controls; `for my $o
+    (@{$ref})` used to be clipped to the loop body.
+- **Narrowing follows the place, however it is spelled.** `$h{a}{b}` and
+  `$h{a}->{b}`, `{'a'}` and `{a}`, `our %h` and `%P::h` are each one place,
+  and a slice no longer disturbs the whole hash. A `defined` guard on
+  `$self->{cb}` now covers `$self->{cb}->()`, `$self->{cb}->[0]` and
+  `$self->{cb}{k}`. (#355, #356)
+- **`delete $x->{k}`, `undef $x->{k}` and `local $x->{k}` end a narrowing
+  of that slot.** (#374)
+- **undef-deref warns only where undef dies.** `->{}` and `->[]` on undef
+  autovivify, so the warning is now limited to `->()` and method calls,
+  except under `no autovivification`, which a new bundled plugin models
+  lexically the way `strict 'vars'` is (bare `no autovivification`,
+  `'strict'`, and the per-category forms). (#356, #360)
+
+- **Package variables no longer draw unknown-key hints.** A bare `our
+  %config;` (or any `our`, undeclared or `%Pkg::name` hash) is filled by
+  other files, so its keys are never this file's whole story. This removes
+  about 2,100 false hints on Webmin alone. Lexical hashes still report a
+  key their literal lacks. (#384)
+
+- **Combined getter/setter accessors type per call.** In `if (@_) {
+  $self->{k} = shift; return $self } return $self->{k}`, the getter call
+  is no longer typed as the class (a bare `if @_` / `unless !@_` is an
+  arity test), and an `unless (…) { return … }` block is read as
+  `unless`. This removes 40 false method hints in Znuny's SOAP client.
+  (#385)
+
+- **A reference to a hash element creates that key.** After
+  `GetOptions('help' => \$opt{'help'})` or `open STDOUT, '>',
+  \$Result{STDOUT}`, the key no longer draws an unknown-key hint; other
+  keys of the hash are still checked. (#386)
+
+- **`qq{$h{k}}` reads the hash element.** A subscript inside a braced
+  `qq{}` was parsed as the scalar `$h`, which drew a false
+  missing-declaration warning under `strict`. Fixed by ts-parser-perl 2.0.4.
+  (#387)
+
+### Editor
+
+- **Hover agrees with goto-def.** Hover renders the same definition
+  goto-def jumps to, and no longer guesses a method's documentation when
+  the receiver's type is unknown. (#390)
+
+- **Cross-file signature help shows `$x: Foo`**, not `$x: Object:Foo`.
+  (#362)
+- **A workspace under a symlinked root** no longer treats the same file
+  as two files when it arrives once as a URL and once as a path, and a
+  deleted file is resolved through its parent directory everywhere, not
+  only in the Perl file watcher. (#350)
+
+### Reliability
+
+- **Plugins declare their API version** with `fn api()`. A plugin built for
+  a different version is refused with a warning instead of misbehaving; a
+  plugin without `api()` is treated as version 1. (#394)
+
+- **A rare startup deadlock is fixed.** The first caller of the plugin
+  registry could deadlock under Rayon while warming the pattern queries.
+  (#371)
+- **The analysis cache survives concurrent and failed writes.** (#353,
+  #379, #376)
+  - Two processes opening a fresh cache share one file instead of one
+    deleting the other's. The file is replaced only when SQLite reports it
+    corrupt, and no other open can race the replacement.
+  - A file's save is all or nothing: a failed save keeps the previous
+    entry intact, so a warm start can't trust half-written rows and
+    silently miss that file's names. Save failures are logged as errors.
+
+### Performance
+
+- **Webmin's cold `--check` is ~7% faster** (build CPU −11%): build-time
+  parent climbs over the syntax tree are now array loads (#361), and call
+  sites and local-sub lookups read the same tree, a further ~12% off the
+  build's instruction count on Webmin's heaviest files (#373).
+- **Hashes written many times no longer cost quadratic time and memory.**
+  Each key write is now a small delta that is folded when the hash is
+  read, instead of a full copy of the grown shape. FHEM's `73_km200.pm`
+  whole-analysis dump goes from 64 s / 7.6 GB to 3.1 s / 559 MB, and
+  `10_MQTT_GENERIC_BRIDGE.pm`'s type fold now converges instead of
+  stopping at its iteration cap. (#383)
+- **`--heatmap` peak RSS −37%** on warm FHEM (3.68 → 2.33 GB), with sys
+  time halved; it no longer decodes every file twice. (#370, #350)
+
+### C/C++, PHP and Python (feature builds only)
+
+- **C/C++ macro delegation follows each file's own preprocessor view.**
+  A `#define` chain is credited only through headers the file includes,
+  and a function-like macro's name without call parens (`int invert`) is
+  no longer a use of the macro. In perl5's sources, `Perl_invert` goes
+  from 48 false references to 0. (#246)
+- **Narrowing and use-after-move work on members by place.**
+  `isinstance(self.pet, Foo)` and `dynamic_cast<D*>(h.b)` narrow the
+  member; reading `p.id` after `std::move(p.msg)` is not flagged, reading
+  `p` is; `std::move(name_)` in a member function is flagged again. C++
+  `this->x` is the member's place. Python's `+=` and `del` end a variable
+  or member narrowing. (#356, #374)
+
+### Upgrading
+
+- The analysis cache format changed (extract version 291 → 315). The first
+  start after upgrading re-indexes the project once.
+- One bundled plugin was added (`autovivification`).
+
 ## v0.9.0 — 2026-10-31
 
 ### Union types
