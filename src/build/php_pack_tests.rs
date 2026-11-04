@@ -708,7 +708,7 @@ fn a_parameters_declared_type_is_its_value_in_the_body() {
     let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
     let declared: Vec<_> = fa
         .witnesses
-        .for_attachment(&WA::Variable { name: "at".into(), scope: at.scope })
+        .for_attachment(&WA::Place(Box::new(fa.declared_place(at.id))))
         .into_iter()
         .map(|w| w.span.start)
         .collect();
