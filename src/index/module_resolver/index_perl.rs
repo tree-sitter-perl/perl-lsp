@@ -415,7 +415,7 @@ pub fn index_workspace_with_index(
                     // `[PHASE]` line per region per file is ~4,800 lines/s at
                     // corpus scale and turns the run it is measuring into a
                     // different run. Shares come from the totals.
-                    let source = crate::util::ghost_stats::timed("walk.read", || std::fs::read_to_string(path)).ok()?;
+                    let source = crate::util::ghost_stats::timed("walk.read", || crate::util::text::read_source(path)).ok()?;
                     let mut parser = create_parser();
                     let t_parse = if timing { Some(std::time::Instant::now()) } else { None };
                     let tree = crate::util::ghost_stats::timed("walk.parse", || parser.parse(&source, None))?;

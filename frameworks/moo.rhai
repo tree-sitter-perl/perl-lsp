@@ -24,6 +24,8 @@
 
 fn id() { "moo" }
 
+fn api() { 1 }
+
 // The base role engines this family ships: `use`-ing one makes the
 // consuming package a ROLE (is_role_package; the composer-mismatch
 // diagnostic skips roles — their requires obligations transfer to the

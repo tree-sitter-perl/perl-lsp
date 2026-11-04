@@ -428,7 +428,7 @@ impl PackInvalidator {
         let mut changed_fa: Option<Arc<FileAnalysis>> = None;
         if !deleted {
             crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.to_path_buf()).collect());
-            if let Ok(source) = std::fs::read_to_string(&canon) {
+            if let Ok(source) = crate::util::text::read_source(&canon) {
                 let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     driver.analyze_with_path(&source, Some(&canon))
                 }));
@@ -469,7 +469,7 @@ impl PackInvalidator {
             .par_iter()
             .filter_map(|p| {
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let source = std::fs::read_to_string(p).ok()?;
+                    let source = crate::util::text::read_source(p).ok()?;
                     Some(driver.analyze_with_path(&source, Some(p)))
                 }));
                 match res {

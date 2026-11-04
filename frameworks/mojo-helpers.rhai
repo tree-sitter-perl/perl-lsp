@@ -19,6 +19,8 @@
 
 fn id() { "mojo-helpers" }
 
+fn api() { 1 }
+
 fn triggers() {
     [
         #{ UsesModule: "Mojolicious::Lite" },
