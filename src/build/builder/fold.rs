@@ -472,7 +472,7 @@ impl<'a> Builder<'a> {
                 let row_from = |t: &Option<InferredType>| match t {
                     Some(InferredType::Parametric(
                         crate::model::file_analysis::ParametricType::ResultSet { row, .. },
-                    )) => Some(row.clone()),
+                    )) => Some(row.row_type()),
                     _ => None,
                 };
                 let row = row_from(&rhs).or_else(|| {
@@ -491,8 +491,7 @@ impl<'a> Builder<'a> {
                     row_from(&inv_ty)
                 });
                 self.current_package = saved;
-                if let Some(row) = row {
-                    let row_ty = InferredType::ClassName(row);
+                if let Some(row_ty) = row {
                     let sid = self.innermost_scope_id_at(span.start);
                     for name in list_scalars {
                         let already = typed_at
@@ -829,7 +828,9 @@ impl<'a> Builder<'a> {
             let Some(t) = self.bag_query_variable(var_text, r.scope, r.span.start) else {
                 continue;
             };
-            let Some(class) = t.class_name() else { continue };
+            // The key-access projection, as this pass's contract says:
+            // a row's class for a DBIC row, the dispatch class otherwise.
+            let Some(class) = t.hash_key_class() else { continue };
             upgrades.push((i, HashKeyOwner::Class(class.to_string())));
         }
         for (i, o) in upgrades {

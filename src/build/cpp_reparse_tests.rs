@@ -725,6 +725,7 @@ struct s { int x; };
 /// reports `complete=true`. An UNRESOLVED include is a legitimate boundary, not
 /// incompleteness.
 #[test]
+#[cfg(target_os = "linux")]
 fn include_closure_reports_incomplete_on_unreadable_header() {
     let dir = std::env::temp_dir().join(format!("closure_trunc_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -734,10 +735,12 @@ fn include_closure_reports_incomplete_on_unreadable_header() {
     let nested = dir.join("nested.h");
     let main_c = dir.join("main.c");
     std::fs::write(&nested, "#define NESTED 1\n").unwrap();
-    // `bad.h` resolves + canonicalizes (exists) but read_to_string fails on the
-    // invalid UTF-8, so its `#include "nested.h"` is never followed.
+    // `bad.h` resolves + canonicalizes to a regular file that can't be read:
+    // `/proc/self/mem` fails at offset 0 even for root, which permission bits
+    // don't stop. (Bytes that aren't UTF-8 no longer stop a read; they decode
+    // as Latin-1.)
     std::fs::write(&good, "#define OK 1\n").unwrap();
-    std::fs::write(&bad, [0xff, 0xfe, b'#', b'i', b'n', b'c']).unwrap();
+    std::os::unix::fs::symlink("/proc/self/mem", &bad).unwrap();
 
     let complete_src = "#include \"good.h\"\n";
     std::fs::write(&main_c, complete_src).unwrap();

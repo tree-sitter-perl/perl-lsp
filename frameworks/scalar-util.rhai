@@ -8,6 +8,8 @@
 
 fn id() { "scalar-util" }
 
+fn api() { 1 }
+
 // Manifest hooks are global (consulted by name), so triggers are irrelevant.
 fn triggers() { [] }
 

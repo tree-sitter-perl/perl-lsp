@@ -31,6 +31,9 @@ This doc is the **author's** view: write, validate, snapshot, ship.
 // Required: identifier the LSP stamps on every emission this plugin produces.
 fn id() { "my-helpers" }
 
+// The plugin API this file is written for (see "API versions").
+fn api() { 1 }
+
 // Required: when does this plugin fire?
 //   - UsesModule(M) — current package has `use M`
 //   - ClassIsa(P)   — current package has parent equal to or under P::
@@ -126,9 +129,26 @@ first file processed. **Adding or modifying a plugin requires the LSP
 to be restarted.** Use `--plugin-run` (below) to iterate without that
 loop.
 
-Plugins are loose `.rhai` scripts today — no manifest, no version,
-no per-plugin enable/disable. If you publish a plugin, ship the
-single file plus a README; users drop it into their plugin dir.
+Plugins are loose `.rhai` scripts — no manifest and no per-plugin
+enable/disable. If you publish a plugin, ship the single file plus a
+README; users drop it into their plugin dir.
+
+### API versions
+
+`fn api()` names the plugin API a file is written for. perl-lsp
+refuses a plugin whose version differs from its own, and says so: the
+editor shows a warning listing each plugin that didn't load and why,
+and `--plugin-check` prints the same reason. A plugin with no `api()`
+is read as version 1.
+
+The version moves when a hook context, an emission or a manifest entry
+changes in a way that would make an old plugin quietly wrong rather
+than fail — comparing a map to a string in Rhai is `false`, not an
+error, so a field that changes shape breaks nothing loudly on its own.
+
+| Version | What changed |
+|---|---|
+| 1 | The first versioned API: everything this guide describes. |
 
 ### Cache invalidation
 

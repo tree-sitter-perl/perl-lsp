@@ -130,7 +130,6 @@ impl FileAnalysis {
             use_map_pins: Default::default(),
             // Pack drivers re-stamp their id post-construction.
             language: super::default_language(),
-            scope_starts: Vec::new(),
             export_lookup: HashSet::new(),
         };
         fa.build_indices();
@@ -847,18 +846,11 @@ impl FileAnalysis {
     /// index fields were zeroed by `#[serde(skip, default)]`.
     pub fn after_deserialize(&mut self) {
         // Clear first in case this is called on a populated FileAnalysis.
-        self.scope_starts.clear();
         self.export_lookup.clear();
         self.build_indices();
     }
 
     fn build_indices(&mut self) {
-        // Scope starts — sorted for binary search
-        self.scope_starts = self.scopes.iter()
-            .map(|s| (s.span.start, s.id))
-            .collect();
-        self.scope_starts.sort_by_key(|(p, _)| (p.row, p.column));
-
         self.symbols.rebuild_indices();
 
         // Link HashKeyAccess refs to their HashKeyDef symbols whenever the
@@ -1292,9 +1284,7 @@ impl FileAnalysis {
         // The serde-skip reverse indices (rebuilt on load, resident-only).
         // The ref- and symbol-keyed shares of this bucket are added by the
         // tables' own `heap_add`.
-        h.rebuilt_indices += self.scope_starts.capacity()
-            * std::mem::size_of::<(Point, ScopeId)>()
-            + self.export_lookup.capacity() * (std::mem::size_of::<String>() + 1)
+        h.rebuilt_indices += self.export_lookup.capacity() * (std::mem::size_of::<String>() + 1)
             + self.export_lookup.iter().map(|s| s.capacity()).sum::<usize>();
 
         // bindings / imports.

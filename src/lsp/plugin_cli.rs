@@ -174,7 +174,7 @@ fn load_single_plugin(path: &Path) -> Result<RhaiPlugin, String> {
 }
 
 fn run_plugin_on_fixture(plugin: RhaiPlugin, fixture: &Path) -> Value {
-    let source = std::fs::read_to_string(fixture).unwrap_or_else(|e| {
+    let source = crate::util::text::read_source(fixture).unwrap_or_else(|e| {
         eprintln!("Cannot read {}: {}", fixture.display(), e);
         crate::lsp::cli::exit_with(1, "exit");
     });

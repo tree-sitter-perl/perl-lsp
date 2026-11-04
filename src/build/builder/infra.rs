@@ -124,30 +124,10 @@ impl<'a> Builder<'a> {
         self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
     }
 
-    /// Innermost scope containing `point`. Mirrors
-    /// `FileAnalysis::scope_at` but reads `&self.scopes` directly so
-    /// it's callable from within Builder during and after the walk.
-    /// Falls back to `ScopeId(0)` (the file scope) if no scope
-    /// matches — a defensive default for cases where the walk hasn't
-    /// produced any scope containing the point yet.
+    /// Innermost scope containing `point`: `innermost_scope_at` over the
+    /// walk's scopes, the file scope when the walk has none there yet.
     pub(super) fn scope_at_point(&self, point: Point) -> ScopeId {
-        let mut best: Option<(ScopeId, u64)> = None;
-        for scope in &self.scopes {
-            if !crate::model::file_analysis::contains_point(&scope.span, point) {
-                continue;
-            }
-            let r = scope.span.end.row.saturating_sub(scope.span.start.row) as u64;
-            let c = if scope.span.start.row == scope.span.end.row {
-                scope.span.end.column.saturating_sub(scope.span.start.column) as u64
-            } else {
-                0
-            };
-            let size = r * 1_000_000 + c;
-            if best.is_none() || size <= best.unwrap().1 {
-                best = Some((scope.id, size));
-            }
-        }
-        best.map(|(id, _)| id).unwrap_or(ScopeId(0))
+        crate::model::file_analysis::innermost_scope_at(&self.scopes, point).unwrap_or(ScopeId(0))
     }
 
     // ---- Symbol/Ref creation ----

@@ -877,7 +877,7 @@ fn return_expr_operator_rowof_wraps_receiver() {
     let att = WitnessAttachment::Symbol(sym_id);
     let receiver = InferredType::Parametric(ParametricType::ResultSet {
         base: "DBIx::Class::ResultSet".into(),
-        row: "Schema::Result::Users".into(),
+        row: crate::model::file_analysis::RowSource::Class("Schema::Result::Users".into()),
     });
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,

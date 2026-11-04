@@ -34,6 +34,8 @@
 
 fn id() { "minion" }
 
+fn api() { 1 }
+
 // Options accepted in the enqueue hashref (position 3). Emitted once
 // per file as HashKeyDefs owned by `Sub { package: Minion, name: enqueue }`
 // so cross-file completion + cross-file rename can pair them up.

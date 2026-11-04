@@ -1127,9 +1127,7 @@ pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<Infe
                 // class with no further row dimension, so nested
                 // `RowOf<RowOf<…>>` correctly bottoms out at `None`.
                 match eval_return_expr(inner, q)? {
-                    InferredType::Parametric(ParametricType::ResultSet { row, .. }) => {
-                        Some(InferredType::ClassName(row))
-                    }
+                    InferredType::Parametric(ParametricType::ResultSet { row, .. }) => Some(row.row_type()),
                     _ => None,
                 }
             }

@@ -1926,6 +1926,7 @@ fn raw_scope_climbs_are_containment_only() {
         ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
         ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of, and a receiver belongs to"),
+        ("model/file_analysis/core_types.rs", 1, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank"),
         ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
@@ -1933,6 +1934,26 @@ fn raw_scope_climbs_are_containment_only() {
         ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
     ];
     let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A size is not a depth: two nested scopes with the same extent tie on
+/// size, and the answer then rides push order. Scope lookups go through
+/// `innermost_scope_at` (containment) and rank by `scope_depth`; the
+/// remaining `span_size` readers pick the narrowest ref or symbol.
+#[test]
+fn span_size_never_picks_a_scope() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| !rel.contains("/tests/") && !rel.ends_with("_tests.rs"))
+            .map(|(rel, text)| (rel, without_test_modules(&code_only(&text))))
+            .collect();
+    let seen = count_lines(&files, &|l| l.contains("span_size(") && !l.contains("fn span_size"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/file_analysis/cursor_queries.rs", 3, "the narrowest ref at a point, the narrowest enclosing callable symbol, the narrowest cursor candidate"),
+    ];
+    let drift = allowlist_drift("span_size readers (a scope lookup is containment + depth)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
@@ -2273,4 +2294,40 @@ fn sql_runs_only_registered_statements() {
         }
     }
     assert!(violations.is_empty(), "unregistered SQL:\n{}", violations.join("\n"));
+}
+
+/// Source text is read through `util::text::read_source`, which takes a
+/// non-UTF-8 file as Latin-1. `read_to_string` refuses one outright, and a
+/// reader that used it skipped that file from the index or killed the CLI.
+/// The files below read something other than a source file (a plugin
+/// script, perlfunc.pod, `/proc`, a test expectation) and say which.
+#[test]
+fn source_files_are_read_through_read_source() {
+    const NOT_SOURCE: &[(&str, &str)] = &[
+        ("build/plugin/rhai_host.rs", "plugin scripts"),
+        ("lsp/plugin_cli.rs", "plugin scripts and expected-output files"),
+        ("index/builtins_pod.rs", "perlfunc.pod"),
+        ("util/watchdog.rs", "/proc/self/status"),
+    ];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    for (f, _layer, _module) in source_files() {
+        let rel = f.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+        let code = without_test_modules(&code_only(&fs::read_to_string(&f).expect("read source")));
+        let reads: Vec<usize> =
+            code.lines().enumerate().filter(|(_, l)| l.contains("read_to_string(")).map(|(n, _)| n + 1).collect();
+        if NOT_SOURCE.iter().any(|(p, _)| *p == rel) {
+            // Shrink-only: an entry with nothing left to excuse goes.
+            if reads.is_empty() {
+                violations.push(format!("src/{rel}: on the allowlist with no read left; remove it"));
+            }
+            continue;
+        }
+        violations.extend(reads.iter().map(|n| format!("src/{rel}:{n}")));
+    }
+    assert!(
+        violations.is_empty(),
+        "read source text with crate::util::text::read_source, not read_to_string:\n{}",
+        violations.join("\n")
+    );
 }

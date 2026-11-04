@@ -923,7 +923,7 @@ pub(super) mod bag_share_probe {
         // (zstd bytes whole, zstd bytes bagless, bincode whole, bincode bagless)
         let mut rows: Vec<(usize, usize, usize, usize)> = Vec::new();
         for path in files.iter() {
-            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(src) = crate::util::text::read_source(path) else { continue };
             if src.len() > 1_000_000 {
                 continue;
             }
@@ -1032,7 +1032,7 @@ pub(super) mod bag_share_probe {
         let (mut bag_z, mut concl_z, mut bag_b, mut concl_b) = (0usize, 0usize, 0usize, 0usize);
         let (mut subs, mut typed) = (0usize, 0usize);
         for path in files.iter() {
-            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(src) = crate::util::text::read_source(path) else { continue };
             if src.len() > 1_000_000 {
                 continue;
             }
@@ -1117,7 +1117,7 @@ mod bake_probe {
         let mut bake_nanos: u64 = 0;
         let mut build_nanos: u64 = 0;
         for path in files.iter() {
-            let Ok(src) = std::fs::read_to_string(path) else { continue };
+            let Ok(src) = crate::util::text::read_source(path) else { continue };
             if src.len() > 1_000_000 {
                 continue;
             }

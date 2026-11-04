@@ -149,7 +149,7 @@ fn parse_one_provider(
         return None;
     }
     let bytes = metadata.len();
-    let source = std::fs::read_to_string(&path).ok()?;
+    let source = crate::util::text::read_source(&path).ok()?;
 
     let timing = crate::util::timings::is_enabled();
     let t_parse = if timing { Some(std::time::Instant::now()) } else { None };
