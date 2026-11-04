@@ -96,7 +96,7 @@ pub(crate) fn cli_languages() {
 /// extract) when the process serves C++.
 pub(crate) fn cli_lang_analyze(file: &str) {
     let path = std::path::Path::new(file);
-    let Ok(src) = std::fs::read_to_string(path) else {
+    let Ok(src) = crate::util::text::read_source(path) else {
         eprintln!("cannot read {file}");
         exit_with(1, "exit");
     };
@@ -226,24 +226,29 @@ pub(crate) fn print_usage() {
 
 // ---- Helpers ----
 
-fn parse_file(path: &str) -> (String, tree_sitter::Tree, file_analysis::FileAnalysis) {
-    let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("Cannot read {}: {}", path, e);
-        exit_with(1, "exit");
-    });
+/// Read, parse and analyze one file as the served driver would. An `Err`
+/// is the message a single-shot verb prints before exiting (`or_exit`) and
+/// `--batch` returns for that row alone.
+fn parse_file(path: &str) -> Result<(String, tree_sitter::Tree, file_analysis::FileAnalysis), String> {
+    let source = crate::util::text::read_source(path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
     // The served driver, as the LSP server would analyze it. A driver that
     // builds from the caller's tree (no pre-parse transform) analyzes the
     // one parse we already hold; the rest analyze independently.
     let driver = lock_for_file(std::path::Path::new(path));
     let mut parser = driver.make_parser();
-    let tree = parser.parse(&source, None).unwrap_or_else(|| {
-        eprintln!("Parse failed: {}", path);
-        exit_with(1, "exit");
-    });
+    let tree = parser.parse(&source, None).ok_or_else(|| format!("Parse failed: {}", path))?;
     let analysis = driver
         .analyze_from_tree(&tree, &source)
         .unwrap_or_else(|| driver.analyze_with_path(&source, Some(std::path::Path::new(path))));
-    (source, tree, analysis)
+    Ok((source, tree, analysis))
+}
+
+/// A single-shot verb's end on a failed helper: print why, exit 1.
+fn or_exit<T>(r: Result<T, String>) -> T {
+    r.unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        exit_with(1, "exit");
+    })
 }
 
 fn parse_point(line_str: &str, col_str: &str) -> tree_sitter::Point {
@@ -598,7 +603,7 @@ pub(crate) fn cli_equiv_dump(out: &str, paths: &[String]) {
         .par_iter()
         .map(|path| {
             // Non-UTF-8 is skipped, as the workspace walk skips it.
-            let Ok(src) = std::fs::read_to_string(path) else { return 1 };
+            let Ok(src) = crate::util::text::read_source(path) else { return 1 };
             let _file = timings::current_file_scope(Some(path));
             served.analyze_with_path(&src, Some(path));
             0
@@ -620,14 +625,14 @@ pub(crate) fn cli_equiv_dump(out: &str, paths: &[String]) {
 pub(crate) fn cli_parse(path: &str) {
     use std::io::Read;
     let source = if path == "-" {
-        let mut s = String::new();
-        if let Err(e) = std::io::stdin().read_to_string(&mut s) {
+        let mut bytes = Vec::new();
+        if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
             eprintln!("read stdin: {}", e);
             exit_with(1, "exit");
         }
-        s
+        crate::util::text::decode_source(bytes)
     } else {
-        match std::fs::read_to_string(path) {
+        match crate::util::text::read_source(path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("read {}: {}", path, e);

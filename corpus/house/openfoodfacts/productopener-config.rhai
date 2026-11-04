@@ -10,6 +10,8 @@
 
 fn id() { "house-productopener-config" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "ProductOpener::Config" } ] }
 
 // lib/ProductOpener/Config_off.pm @EXPORT_OK, in its order.

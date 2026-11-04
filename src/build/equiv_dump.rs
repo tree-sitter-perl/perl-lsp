@@ -122,7 +122,7 @@ mod tests {
         let files = fixtures();
         assert!(files.len() > 20, "fixture walk found {} files", files.len());
         for path in files {
-            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            let Ok(src) = crate::util::text::read_source(&path) else { continue };
             let driver = LanguageRegistry::compiled().for_path(&path).unwrap();
             let fa = driver.analyze_with_path(&src, Some(&path));
             let want = fa.equivalence_dump();

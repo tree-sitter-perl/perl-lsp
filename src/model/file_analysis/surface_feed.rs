@@ -19,7 +19,7 @@ use super::*;
 pub struct SurfaceFeed<'a> {
     pub symbols: &'a [Symbol],
     pub packages: &'a HashMap<String, PackageFacts>,
-    pub imports: &'a [Import],
+    pub imports: &'a ImportTable,
     pub plugin_loads: &'a [PluginLoadFact],
     pub export: &'a [String],
     pub export_ok: &'a [String],
@@ -127,7 +127,6 @@ impl FileAnalysis {
             gated_param_types: _gated_param_types, // types this file's own params, query-gated
             provisional_dispatches: _provisional_dispatches, // this file's call-site candidates; foreign readers resolve them live
             loader_config_params: _loader_config_params, // callee markers joined by this file's OWN enrichment
-            framework_imports: _framework_imports, // local diagnostic suppression set
             type_provenance: _type_provenance,   // read-only debugging aid (`--dump-package`)
             column_keyed_verbs: _column_keyed_verbs, // baked from the plugin registry, not this file's source; the plugin fingerprint owns invalidation
             language: _language,                 // the origin's serving-language identity; `resolve()` reads it live per query, never baked into a consumer's cached state
@@ -144,7 +143,6 @@ impl FileAnalysis {
             instance: _instance, // sessional copy identity, not content
 
             // ---- Derived indices, rebuilt from the tables above.
-            scope_starts: _scope_starts,
             export_lookup: _export_lookup,
         } = self;
         SurfaceFeed {

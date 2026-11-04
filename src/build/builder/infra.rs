@@ -124,30 +124,10 @@ impl<'a> Builder<'a> {
         self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
     }
 
-    /// Innermost scope containing `point`. Mirrors
-    /// `FileAnalysis::scope_at` but reads `&self.scopes` directly so
-    /// it's callable from within Builder during and after the walk.
-    /// Falls back to `ScopeId(0)` (the file scope) if no scope
-    /// matches — a defensive default for cases where the walk hasn't
-    /// produced any scope containing the point yet.
+    /// Innermost scope containing `point`: `innermost_scope_at` over the
+    /// walk's scopes, the file scope when the walk has none there yet.
     pub(super) fn scope_at_point(&self, point: Point) -> ScopeId {
-        let mut best: Option<(ScopeId, u64)> = None;
-        for scope in &self.scopes {
-            if !crate::model::file_analysis::contains_point(&scope.span, point) {
-                continue;
-            }
-            let r = scope.span.end.row.saturating_sub(scope.span.start.row) as u64;
-            let c = if scope.span.start.row == scope.span.end.row {
-                scope.span.end.column.saturating_sub(scope.span.start.column) as u64
-            } else {
-                0
-            };
-            let size = r * 1_000_000 + c;
-            if best.is_none() || size <= best.unwrap().1 {
-                best = Some((scope.id, size));
-            }
-        }
-        best.map(|(id, _)| id).unwrap_or(ScopeId(0))
+        crate::model::file_analysis::innermost_scope_at(&self.scopes, point).unwrap_or(ScopeId(0))
     }
 
     // ---- Symbol/Ref creation ----
@@ -312,6 +292,21 @@ impl<'a> Builder<'a> {
         crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
+    /// The package a `use` here imports into — the walk's current package.
+    pub(super) fn import_package(&self) -> &str {
+        self.current_package.as_deref().unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE)
+    }
+
+    /// The import scope in force at `point` — the namespace lane's package,
+    /// as `FileAnalysis::import_scope_at` reads it. Asked by position, never
+    /// by the walk's `current_package`: a deferred or fold-phase read sees
+    /// whichever package the walk last left.
+    pub(super) fn import_scope_at(&self, point: Point) -> crate::model::file_analysis::ImportScope<'_> {
+        crate::model::file_analysis::ImportScope::in_package(
+            self.package_at_pos(point).unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE),
+        )
+    }
+
     pub(super) fn add_ref(&mut self, kind: RefKind, span: Span, target_name: String, access: AccessKind) {
         self.add_bound_ref(kind, span, target_name, access, None);
     }
@@ -423,14 +418,14 @@ impl<'a> Builder<'a> {
     ///   1. Explicit qualifier (`Foo::bar()` → `Foo`).
     ///   2. Enclosing package that declares `sub <name>` locally (so
     ///      `package Foo { sub bar {} bar(); }` resolves to `Foo`).
-    ///   3. Most-recent import whose `imported_symbols` lists this
-    ///      name (`use Bler qw/hi/` → `Bler`). Later imports win —
-    ///      Perl's later `use` shadows earlier one.
+    ///   3. The latest `use` in the current package that names it
+    ///      (`use Bler qw/hi/` → `Bler`) — Perl's later `use` shadows
+    ///      an earlier one, and another package's `use` binds nothing here.
     ///
     /// Returns `None` when none of those pin a package. Downstream
     /// class/package-scoped queries treat `None` as no-match rather
     /// than falling back to name-only union.
-    pub(super) fn resolve_call_package(&self, call_name: &str) -> Option<String> {
+    pub(super) fn resolve_call_package(&self, call_name: &str, at: Point) -> Option<String> {
         // (1) Qualified: `Foo::bar` → `Foo`.
         if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name, &crate::model::conventions::PERL_SPELLINGS) {
             return Some(pkg.to_string());
@@ -445,23 +440,20 @@ impl<'a> Builder<'a> {
                 return Some(pkg.clone());
             }
         }
-        // (3) Imports — walk in reverse order so later `use` wins.
-        for imp in self.imports.iter().rev() {
-            if let Some(sym) = imp.imported_symbols.iter().find(|s| s.local_name == *call_name) {
-                // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
-                // LOCAL alias the module doesn't define under that name. The
-                // alias belongs to the CONSUMING package — keying its calls
-                // there keeps rename/references local (and off the exporter's
-                // unrelated symbols, e.g. a stray `Exp::rb`). goto-def still
-                // reaches `Exp::beta` via the import binding's remote name,
-                // which `resolve_imported_function` reads independently.
-                if sym.remote_name.is_some() {
-                    return self.current_package.clone();
-                }
-                return Some(imp.module_name.clone());
-            }
+        // (3) The package's imports — a later `use` wins.
+        let scope = self.import_scope_at(at);
+        let (imp, sym) = self.imports.binding(scope, call_name)?;
+        // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
+        // LOCAL alias the module doesn't define under that name. The
+        // alias belongs to the CONSUMING package — keying its calls
+        // there keeps rename/references local (and off the exporter's
+        // unrelated symbols, e.g. a stray `Exp::rb`). goto-def still
+        // reaches `Exp::beta` via the import binding's remote name,
+        // which `resolve_imported_function` reads independently.
+        if sym.remote_name.is_some() {
+            return Some(scope.package().to_string());
         }
-        None
+        Some(imp.module_name.clone())
     }
 }
 

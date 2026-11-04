@@ -157,30 +157,19 @@ impl FileAnalysis {
         let mut seen = HashSet::<(String, char)>::new();
         let mut candidates = Vec::new();
 
-        // Sort by scope size (innermost first) — stable priority ordering
-        let mut vars: Vec<(&Symbol, usize)> = visible
+        // Innermost declaration first (deepest scope), stable for ties.
+        let mut vars: Vec<(&Symbol, std::cmp::Reverse<usize>)> = visible
             .into_iter()
             .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
             // The token being typed is never its own completion — an
             // undeclared one is already an implicit global anchored there.
             .filter(|s| !(s.selection_span.start <= point && point <= s.selection_span.end))
-            .filter_map(|s| {
-                if let SymbolDetail::Variable { .. } = &s.detail {
-                    let scope = &self.scopes[s.scope.0 as usize];
-                    let scope_size = span_size(&scope.span);
-                    Some((s, scope_size))
-                } else if let SymbolDetail::Field { .. } = &s.detail {
-                    let scope = &self.scopes[s.scope.0 as usize];
-                    let scope_size = span_size(&scope.span);
-                    Some((s, scope_size))
-                } else {
-                    None
-                }
-            })
+            .filter(|s| matches!(s.detail, SymbolDetail::Variable { .. } | SymbolDetail::Field { .. }))
+            .map(|s| (s, std::cmp::Reverse(scope_depth(&self.scopes, s.scope))))
             .collect();
-        vars.sort_by_key(|(_, sz)| *sz);
+        vars.sort_by_key(|(_, depth)| *depth);
 
-        for (sym, _scope_size) in vars {
+        for (sym, _depth) in vars {
             let (bare_name, decl_sigil) = match &sym.detail {
                 SymbolDetail::Variable { sigil: ds, .. } => {
                     (sym.name[1..].to_string(), *ds)
@@ -204,7 +193,7 @@ impl FileAnalysis {
             // multi-line scope (span_size counts rows*10000), which parked
             // every real lexical BELOW all of those tiers — invisible while
             // completion was uncapped, candidate loss the day it wasn't.
-            // Innermost-shadow selection still rides the scope-size sort
+            // Innermost-shadow selection still rides the scope-depth sort
             // above; within a tier the client tie-breaks by label.
             let priority = match &self.scopes[sym.scope.0 as usize].kind {
                 ScopeKind::File => PRIORITY_FILE_WIDE,
@@ -943,7 +932,7 @@ impl FileAnalysis {
         // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
-                for import in &self.imports {
+                for import in self.imports.in_scope(self.import_scope_at(point)) {
                     // A split exporter's surface lives across its candidates.
                     let bound_remote = idx
                         .visible_def_candidates(&import.module_name)
@@ -1427,6 +1416,7 @@ pub(crate) fn format_type_root(ty: &InferredType) -> String {
         InferredType::FirstParam { package } => package.clone(),
         InferredType::Parametric(ParametricType::ResultSet { base, .. })
         | InferredType::Parametric(ParametricType::Instance { base, .. }) => base.clone(),
+        InferredType::Parametric(ParametricType::Row { moniker, .. }) => moniker.clone(),
         InferredType::Branded { base, .. } => format_type_root(base),
         InferredType::Sequence(_) => "Sequence".to_string(),
         InferredType::TypeConstraintOf(_) => "TypeConstraint".to_string(),
@@ -1447,6 +1437,7 @@ pub(super) fn format_parametric_with(p: &ParametricType, vocab: TypeVocab) -> St
         ParametricType::ResultSet { base, row } => {
             format!("{}<{}>", base, row)
         }
+        ParametricType::Row { moniker, .. } => format!("Row<{}>", moniker),
         ParametricType::Instance { base, args } => {
             let parts: Vec<String> = args.iter().map(|a| format_type_with(a, vocab)).collect();
             format!("{}<{}>", base, parts.join(", "))

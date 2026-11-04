@@ -1374,7 +1374,7 @@ use Importer 'Some::Module' => qw/foo bar/;
         .find(|i| i.module_name == "Some::Module")
         .expect("Import re-targeted to Some::Module");
     let names: Vec<&str> = imp
-        .imported_symbols
+        .imported_symbols()
         .iter()
         .map(|s| s.local_name.as_str())
         .collect();
