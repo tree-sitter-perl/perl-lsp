@@ -1,4 +1,27 @@
-//! Byte-bounded string trimming that respects UTF-8.
+//! Source text in and out of `String`: reading a file perl may hold in any
+//! byte encoding, and byte-bounded trimming that respects UTF-8.
+
+/// A source file's text. Valid UTF-8 is taken as is; anything else is read
+/// as Latin-1, one char per byte — what perl does with a file that has no
+/// `use utf8`, and what an editor falling back to latin1 shows, so the
+/// columns line up. `read_to_string` refuses such a file outright, which
+/// left it unindexed and killed the CLI. Every fallback is counted
+/// (`source.latin1`).
+pub fn read_source(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(decode_source(bytes))
+}
+
+/// `read_source`'s decoding, for bytes already in hand (stdin).
+pub fn decode_source(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            super::ghost_stats::count("source.latin1");
+            e.into_bytes().into_iter().map(char::from).collect()
+        }
+    }
+}
 
 /// The longest prefix of `s` that fits in `max_bytes` without splitting a
 /// character.
@@ -21,6 +44,15 @@ pub fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_source_reads_as_is_and_latin1_byte_per_char() {
+        assert_eq!(decode_source("caf\u{e9}".as_bytes().to_vec()), "caf\u{e9}");
+        // `café` in Latin-1: one byte for the é, which is not UTF-8.
+        let latin1 = decode_source(vec![b'c', b'a', b'f', 0xE9, b'\n', 0xFF]);
+        assert_eq!(latin1, "caf\u{e9}\n\u{ff}");
+        assert_eq!(latin1.chars().count(), 6, "one char per byte");
+    }
 
     #[test]
     fn shorter_than_cap_is_untouched() {

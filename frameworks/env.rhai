@@ -8,6 +8,8 @@
 
 fn id() { "env" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "Env" } ] }
 
 fn on_use(ctx) {

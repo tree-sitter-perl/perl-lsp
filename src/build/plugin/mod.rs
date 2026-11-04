@@ -17,6 +17,18 @@ use crate::model::file_analysis::{
 };
 
 pub mod rhai_host;
+#[cfg(test)]
+mod api_surface_tests;
+
+/// The plugin API this host speaks. A plugin declares the version it was
+/// written for with `fn api()`; a plugin declaring another version is
+/// refused at load (`PluginRegistry::refused`), and one declaring none is
+/// read as version 1. Bump it with any change to what a plugin sees or
+/// returns that would make an old plugin quietly wrong;
+/// `plugin_api_surface_tests` fails on every such change until the
+/// snapshot is updated alongside the decision. See
+/// `docs/PLUGIN_AUTHORING.md` § API versions.
+pub const PLUGIN_API: i64 = 1;
 
 /// Process-wide plugin registry, built with the bundled Rhai plugins plus
 /// anything in `plugin_search_dirs()` (`$PERL_LSP_PLUGIN_DIR` and the
@@ -44,8 +56,12 @@ fn build_default_registry() -> PluginRegistry {
             reg.register(p);
         }
         for dir in rhai_host::plugin_search_dirs() {
-            for p in rhai_host::load_plugin_dir(&dir, engine.clone()) {
+            let (loaded, refused) = rhai_host::load_plugin_dir(&dir, engine.clone());
+            for p in loaded {
                 reg.register(p);
+            }
+            for why in refused {
+                reg.refuse(why);
             }
         }
     });
@@ -1543,6 +1559,10 @@ pub struct PluginRegistry {
     /// Whether the background compile has been kicked off. Separate from the
     /// `OnceLock` because the lock is only *set* when the compile finishes.
     combined_walk_started: std::sync::atomic::AtomicBool,
+    /// Plugins found on disk that did not load, one line each (path and
+    /// reason). Kept with the registry so the server can show them: a
+    /// refused plugin otherwise only reaches the log.
+    refused: Vec<String>,
 }
 
 impl std::fmt::Debug for PluginRegistry {
@@ -1573,6 +1593,17 @@ fn combined_walk_is_synchronous() -> bool {
 impl PluginRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record a plugin that failed to load (compile error, bad manifest,
+    /// API version mismatch).
+    pub fn refuse(&mut self, why: String) {
+        self.refused.push(why);
+    }
+
+    /// The plugins that failed to load, in load order.
+    pub fn refused(&self) -> &[String] {
+        &self.refused
     }
 
     pub fn register(&mut self, plugin: Box<dyn FrameworkPlugin>) {
