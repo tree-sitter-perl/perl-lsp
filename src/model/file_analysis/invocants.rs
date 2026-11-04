@@ -191,6 +191,15 @@ impl FileAnalysis {
     ) -> Vec<(String, InferredType)> {
         let Some(t) = t.defined_part() else { return Vec::new() };
         let mut out: Vec<(String, InferredType)> = Vec::new();
+        // A source moniker names a class only through the index: the
+        // result class that registers it, scoped to the schema when known.
+        if let Some(ParametricType::Row { moniker, schema }) = t.as_parametric() {
+            let class = self.resolve_dbic_source_moniker(moniker.clone(), schema.as_deref(), module_index);
+            if module_index.is_some() && self.class_exists(&class, module_index) {
+                out.push((class, t.clone()));
+            }
+            return out;
+        }
         if let Some(p) = t.as_parametric() {
             if let Some(spelling) = p.exact_spelling() {
                 if self.class_exists(&spelling, module_index) {
@@ -408,16 +417,7 @@ impl FileAnalysis {
         policy: ReceiverPolicy,
     ) -> ReceiverClasses {
         let (classes, source) = match r.frozen_receiver().filter(|f| f.answers_for(ReceiverView::of(module_index), policy)) {
-            // A no-index freeze can carry an UNRESOLVED DBIC source moniker
-            // (`Artist`) — enrichment re-stamps OPEN docs only; map it here,
-            // index in hand. No-op for a class that already resolves.
-            Some(f) => (
-                f.targets()
-                    .iter()
-                    .map(|t| self.resolve_dbic_source_moniker(t.invocant_class().to_string(), None, module_index))
-                    .collect(),
-                f.source,
-            ),
+            Some(f) => (f.targets().iter().map(|t| t.invocant_class().to_string()).collect(), f.source),
             None => self.resolve_receiver_shared(r, module_index),
         };
         match (policy, source) {
@@ -455,7 +455,7 @@ impl FileAnalysis {
     /// IS, so the token arm lives here in the projection, not in the value
     /// ladder (Parametric arg-claiming on `$rs->SUPER::search` still sees
     /// the resultset). Every other shape projects the ladder's type through
-    /// `dispatch_classes_of` plus the DBIC source-moniker resolve. Read
+    /// `dispatch_classes_of`. Read
     /// through `resolve_receiver_shared`.
     pub(crate) fn resolve_receiver(
         &self,
@@ -467,7 +467,10 @@ impl FileAnalysis {
         // Perl ignores the invocant's class for the lookup, so the token
         // wins ahead of invocant resolution. (A plugin-bridged token is
         // never method-qualified; the ladder's bridged arm owns it.)
-        if matches!(site.invocant, crate::model::conventions::Invocant::Name(_)) {
+        if matches!(
+            site.invocant,
+            crate::model::conventions::Invocant::Name(_) | crate::model::conventions::Invocant::Place { .. }
+        ) {
             use crate::model::conventions::MethodToken;
             match MethodToken::parse(&r.target_name) {
                 MethodToken::Super(name) => {
@@ -482,17 +485,12 @@ impl FileAnalysis {
                     let class = self
                         .enclosing_class_for_scope(r.scope)
                         .and_then(|encl| self.resolve_super_method(&encl, name, module_index))
-                        .map(|res| self.resolve_dbic_source_moniker(res.class().to_string(), None, module_index));
+                        .map(|res| res.class().to_string());
                     return (class.into_iter().collect(), ReceiverSource::Stated);
                 }
                 token => {
                     if let Some(pkg) = token.literal_package() {
-                        return (
-                            [self.resolve_dbic_source_moniker(pkg.to_string(), None, module_index)]
-                                .into_iter()
-                                .collect(),
-                            ReceiverSource::Stated,
-                        );
+                        return ([pkg.to_string()].into_iter().collect(), ReceiverSource::Stated);
                     }
                 }
             }
@@ -501,18 +499,7 @@ impl FileAnalysis {
         let Some(t) = self.invocant_type_sourced(r, module_index, &mut source) else {
             return (ReceiverClasses::default(), source);
         };
-        // A DBIC resultset row projects to `ClassName(<source moniker>)` —
-        // the short registration name (`Artist`), not the FQ result class
-        // (`DBICTest::Schema::Artist`) where methods/columns live. Resolve
-        // it here (query time, index in hand) so goto-def / references on
-        // `$row->method` start the ancestor walk from a real class. Only a
-        // single-segment name that names no real class is a moniker
-        // candidate, so ordinary class receivers are untouched.
-        let mut out = ReceiverClasses::default();
-        for class in self.dispatch_classes_of(&t, module_index) {
-            out.push(self.resolve_dbic_source_moniker(class, None, module_index));
-        }
-        (out, source)
+        (self.dispatch_classes_of(&t, module_index), source)
     }
 
     /// The class each value a type may be dispatches against
@@ -555,7 +542,7 @@ impl FileAnalysis {
         schema_hint: Option<&str>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
-        if cn.contains("::") {
+        if split_qualified(&cn, self.names()).0.is_some() {
             return cn;
         }
         let Some(mi) = module_index else { return cn };
@@ -565,7 +552,7 @@ impl FileAnalysis {
         // Gather candidate result classes by basename / source_name match.
         let mut candidates: Vec<String> = Vec::new();
         mi.for_each_cached(&mut |name, cached| {
-            let basename = name.rsplit("::").next().unwrap_or(name);
+            let basename = split_qualified(name, self.names()).1;
             let hits = basename == cn
                 || cached.analysis.dbic_source_name.as_deref() == Some(cn.as_str());
             if hits && Self::class_is_dbic_result(name, mi) {
@@ -598,8 +585,8 @@ impl FileAnalysis {
         let prefixes: Vec<(String, String)> = candidates
             .iter()
             .map(|c| {
-                let parent = c.rsplit_once("::").map(|(p, _)| p).unwrap_or(c);
-                (c.clone(), format!("{parent}::"))
+                let parent = split_qualified(c, self.names()).0.unwrap_or(c);
+                (c.clone(), format!("{parent}{}", self.names().sep().unwrap_or_default()))
             })
             .collect();
         let mut fam_size: HashMap<String, usize> =
@@ -677,7 +664,8 @@ impl FileAnalysis {
         let matches = |class: &str| match match_mode {
             BridgedMatch::Exact => class == key,
             BridgedMatch::Tail => {
-                class == key || class.strip_suffix(key).is_some_and(|p| p.ends_with("::"))
+                class == key
+                    || class.strip_suffix(key).is_some_and(|p| self.names().sep().is_some_and(|sep| p.ends_with(sep)))
             }
         };
         let mut candidates: Vec<String> = self
@@ -782,6 +770,7 @@ impl FileAnalysis {
     ) -> Option<InferredType> {
         let site = r.member_site()?;
         let (invocant, invocant_span) = (site.invocant, &site.invocant_span);
+        let receiver_place = site.invocant.place();
         let invocant = match invocant {
             crate::model::conventions::Invocant::Bridged { token, match_mode, .. } => {
                 return self
@@ -793,7 +782,9 @@ impl FileAnalysis {
                     )
                     .map(InferredType::ClassName);
             }
-            crate::model::conventions::Invocant::Name(n) | crate::model::conventions::Invocant::Expr(n) => n,
+            crate::model::conventions::Invocant::Name(n)
+            | crate::model::conventions::Invocant::Expr(n)
+            | crate::model::conventions::Invocant::Place { name: n, .. } => n,
         };
         let spelled_class_possible = matches!(site.invocant, crate::model::conventions::Invocant::Name(_));
         if invocant.is_empty() {
@@ -808,14 +799,11 @@ impl FileAnalysis {
             return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
         }
 
-        // Flow-narrowing place invocant.
-        if let Some(span) = invocant_span {
-            if InvocantText::parse(invocant).is_element_place() {
-                if let Some(t) = self.inferred_type_via_bag_ctx(invocant, span.start, module_index)
-                {
-                    if !self.dispatch_classes_of(&t, module_index).is_empty() {
-                        return Some(t);
-                    }
+        // A narrowed place receiver.
+        if let (Some(place), Some(span)) = (receiver_place, invocant_span) {
+            if let Some(t) = self.place_type_at(place, span.start, module_index) {
+                if !self.dispatch_classes_of(&t, module_index).is_empty() {
+                    return Some(t);
                 }
             }
         }

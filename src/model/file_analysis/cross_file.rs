@@ -127,7 +127,7 @@ impl FileAnalysis {
                 let detail = self
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
-                    .map(|rt| format!("@EXPORT → {}", format_inferred_type(&rt)))
+                    .map(|rt| format!("@EXPORT → {}", self.render_type(&rt)))
                     .or_else(|| Some("@EXPORT".to_string()));
                 items.push(CompletionCandidate {
                     label: name.clone(),
@@ -147,7 +147,7 @@ impl FileAnalysis {
                 let detail = self
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
-                    .map(|rt| format!("→ {}", format_inferred_type(&rt)));
+                    .map(|rt| format!("→ {}", self.render_type(&rt)));
                 items.push(CompletionCandidate {
                     label: name.clone(),
                     kind: SymKind::Sub,
@@ -966,6 +966,13 @@ pub trait CrossFileLookup {
     fn direct_specializations_of(&self, _primary: &str) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// The registered files with a directive resolving to `header` (a
+    /// canonical path) — the inverse of `IncludeDirective::target`, each
+    /// rechecked against its current analysis. Default: none (no include
+    /// index).
+    fn includers_of(&self, _header: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        Vec::new()
+    }
     /// Registration-time loader-config shapes: every (load_name, shape)
     /// projected from `PluginLoad` facts across the workspace —
     /// INCLUDING packageless entrypoint scripts, which never enter the
@@ -1238,10 +1245,25 @@ impl VisibilityAxis {
 }
 
 impl<'a> ScopedLookup<'a> {
+    /// The scope `origin` resolves names through: its visibility axis
+    /// (`VisibilityAxis::for_origin`, THE derivation) over `inner`. The only
+    /// constructor — a scope can't be built with an axis its origin didn't
+    /// derive. `visibility` is the origin language's routing fact
+    /// (`LanguageRegistry::pack_visibility`).
+    pub fn for_origin(
+        inner: &'a dyn CrossFileLookup,
+        origin: &FileAnalysis,
+        self_path: Option<&crate::util::canonical_path::CanonicalPath>,
+        visibility: PackVisibility,
+    ) -> Self {
+        let axis = VisibilityAxis::for_origin(origin, self_path.map(|p| p.as_path()), inner, visibility);
+        Self::new(inner, &origin.pack.include_closure, self_path, axis)
+    }
+
     /// Build the visibility set from a querying file's include closure plus its
     /// own path (a file always sees the classes it declares itself). The self
     /// path is canonical so it matches the candidates' `CachedModule.path`.
-    pub fn new(
+    fn new(
         inner: &'a dyn CrossFileLookup,
         include_closure: &path_intern::ClosureList,
         self_path: Option<&crate::util::canonical_path::CanonicalPath>,
@@ -1615,6 +1637,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn direct_specializations_of(&self, primary: &str) -> Vec<(String, String)> {
         self.inner.direct_specializations_of(primary)
+    }
+    fn includers_of(&self, header: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        self.inner.includers_of(header)
     }
     fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType)) {
         self.inner.for_each_loader_shape(f)

@@ -214,7 +214,7 @@ the rule above, and the epics do not supersede them:
   `bench/measure.sh` → JSONL, and `bench/baselines.jsonl` is the
   checked-in KPI record. Never hand-roll an env-gated `eprintln!`
   timer — route through `util/timings.rs`.
-- Bump `EXTRACT_VERSION` whenever FA shape or bag rules change; new
+- Bump `EXTRACT_VERSION` (add a file under `cache-epochs/extract/`) whenever FA shape or bag rules change; new
   Fact families / source tags go into `witnesses::tags`, never inline.
   A new `FileAnalysis` lane goes INTO its owner sub-struct, and
   `surface_feed` will not compile until its Surface fate is decided.

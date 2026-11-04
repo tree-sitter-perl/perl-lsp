@@ -3,6 +3,8 @@
 
 fn id() { "vars" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "vars" } ] }
 
 fn on_use(ctx) {

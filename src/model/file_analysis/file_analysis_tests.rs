@@ -18,7 +18,7 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         ..Default::default()
     });
@@ -135,7 +135,7 @@ fn test_resolve_sub_return_type() {
             owner: None,
             implicit_receiver: false,
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),
@@ -166,6 +166,7 @@ fn test_resolve_sub_return_type() {
             flags: Default::default(),
             declared_with: None,
             arity: None,
+            in_force: None,
         }],
         ..Default::default()
     });
@@ -815,6 +816,30 @@ sub get_config { return { host => 'h', port => 1 }; }
 /// completion, while the never-called import leaves zero artifacts (no TC,
 /// no owner stamp — there is no receiver variable a completion or rename
 /// could even start from, so nothing user-visible can depend on scanning it).
+/// A delta enrichment adds sits after the build's in the bag, whatever its
+/// line: the shapes a read folds are in source order, so the closed shape
+/// an imported value retypes at line 3 does not outrank the shape the
+/// dynamic write at line 4 opened (BMO Serialize.pm's `changes`).
+#[test]
+fn an_enrichment_time_delta_does_not_outrank_a_later_write() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let mut fa = build_fa_from_source(
+        "use TestExporter qw(get_config);\nmy $e = { user => 1 };\n$e->{cfg} = get_config();\n$e->{$ENV{K}} = 1;\nprint $e->{changes};\n",
+    );
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/TestExporter.pm"),
+        Arc::new(build_fa_from_source(
+            "package TestExporter;\nuse Exporter 'import';\nour @EXPORT_OK = qw(get_config);\nsub get_config { return { host => 'h' }; }\n1;\n",
+        )),
+    );
+    fa.enrich_imported_types_with_keys(Some(&idx));
+    let typos: Vec<String> = fa.closed_shape_key_typos(Some(&idx)).into_iter().map(|t| t.key).collect();
+    assert!(typos.is_empty(), "{:?}", typos);
+}
+
 #[test]
 fn enrichment_scan_is_call_binding_keyed_uncalled_imports_contribute_nothing() {
     use crate::index::module_index::ModuleIndex;
@@ -1386,8 +1411,8 @@ sub name {
         .all()
         .iter()
         .filter(|w| {
-            matches!(&w.attachment,
-                crate::model::witnesses::WitnessAttachment::Variable { name, .. } if name == "$self")
+            matches!(w.attachment.variable_binding(),
+                Some(crate::model::file_analysis::Binding::Lexical(sid)) if fa.symbol(*sid).name == "$self")
         })
         .collect();
     assert!(
@@ -1398,7 +1423,7 @@ sub name {
 
     // Find the body of `sub name` and pick a point inside it.
     // The `$self->{name} unless @_;` line is row 5 (0-indexed).
-    let point_in_body = Point { row: 5, column: 15 };
+    let point_in_body = Point { row: 6, column: 4 };
     let t = fa.inferred_type_via_bag("$self", point_in_body);
     assert!(
         matches!(t, Some(InferredType::ClassName(ref n)) if n == "Mojolicious::Routes::Route"),
@@ -1731,17 +1756,17 @@ my $x = $c ? 10 : "oops";
     );
 
     // $n: both arms Numeric.
-    let p_n = Point { row: 2, column: 22 };
+    let p_n = Point { row: 3, column: 0 };
     let t_n = fa.inferred_type_via_bag("$n", p_n);
     assert_eq!(t_n, Some(InferredType::Numeric), "agreeing numeric arms");
 
     // $s: both arms String.
-    let p_s = Point { row: 3, column: 22 };
+    let p_s = Point { row: 4, column: 0 };
     let t_s = fa.inferred_type_via_bag("$s", p_s);
     assert_eq!(t_s, Some(InferredType::String), "agreeing string arms");
 
     // $x: disagreeing arms join to their union.
-    let p_x = Point { row: 4, column: 22 };
+    let p_x = Point { row: 5, column: 0 };
     let t_x = fa.inferred_type_via_bag("$x", p_x);
     assert_eq!(
         t_x,
@@ -2731,7 +2756,7 @@ fn a_fluent_chain_past_the_resolve_cap_does_not_abort() {
 #[test]
 fn binding_owner_restamp_drops_stale_symbol_link() {
     let mut r = Ref {
-        kind: RefKind::HashKeyAccess { var_text: "$cfg".to_string() },
+        kind: RefKind::HashKeyAccess { var_text: "$cfg".to_string(), dies_on_undef: false },
         span: Span { start: Point { row: 0, column: 0 }, end: Point { row: 0, column: 4 } },
         scope: ScopeId(0),
         target_name: "host".to_string(),

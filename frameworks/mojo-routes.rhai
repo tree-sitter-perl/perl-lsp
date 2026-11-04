@@ -17,6 +17,8 @@
 
 fn id() { "mojo-routes" }
 
+fn api() { 1 }
+
 // Mojo's `Mojo::Util::camelize`, the convention that turns a route
 // controller TOKEN into a class-name tail: `-` segments become `::`,
 // `_` segments CamelCase (`ucfirst lc` each piece). `login` → `Login`,

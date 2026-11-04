@@ -365,7 +365,7 @@ impl<'a> Builder<'a> {
                 // controller. Import map pins the class; the override lives on
                 // `PackageSymbol{package, verb}`. Only reached on a local/cross-
                 // file miss, so it strictly adds answers (None → maybe Some).
-                let class = self.resolve_call_package(name)?;
+                let class = self.resolve_call_package(name, node.start_position())?;
                 self.bag_query_attachment_with(
                     &crate::model::witnesses::WitnessAttachment::PackageSymbol {
                         package: class,

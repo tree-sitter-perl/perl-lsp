@@ -12,6 +12,8 @@
 
 fn id() { "log4perl" }
 
+fn api() { 1 }
+
 fn triggers() { [ #{ UsesModule: "Log::Log4perl" }, #{ UsesModule: "Log::Log4perl::Level" } ] }
 
 fn levels() { ["OFF", "FATAL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE", "ALL"] }

@@ -20,7 +20,7 @@ fn as_alias_in_parens() {
     let renamed = fa
         .imports
         .iter()
-        .flat_map(|i| i.imported_symbols.iter())
+        .flat_map(|i| i.imported_symbols().iter())
         .find(|s| s.local_name == "here");
     assert!(renamed.is_some_and(|s| s.remote() == "always_here"), "{:?}", fa.imports);
 }
@@ -117,7 +117,7 @@ fn as_alias_on_a_double_quoted_name() {
     let renamed = fa
         .imports
         .iter()
-        .flat_map(|i| i.imported_symbols.iter())
+        .flat_map(|i| i.imported_symbols().iter())
         .find(|s| s.local_name == "here");
     assert!(renamed.is_some_and(|s| s.remote() == "always_here"), "{:?}", fa.imports);
 }
