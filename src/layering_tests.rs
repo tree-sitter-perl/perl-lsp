@@ -1908,6 +1908,7 @@ fn raw_scope_climbs_are_containment_only() {
         ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
         ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of, and a receiver belongs to"),
+        ("model/file_analysis/core_types.rs", 1, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank"),
         ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
@@ -1915,6 +1916,26 @@ fn raw_scope_climbs_are_containment_only() {
         ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
     ];
     let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A size is not a depth: two nested scopes with the same extent tie on
+/// size, and the answer then rides push order. Scope lookups go through
+/// `innermost_scope_at` (containment) and rank by `scope_depth`; the
+/// remaining `span_size` readers pick the narrowest ref or symbol.
+#[test]
+fn span_size_never_picks_a_scope() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| !rel.contains("/tests/") && !rel.ends_with("_tests.rs"))
+            .map(|(rel, text)| (rel, without_test_modules(&code_only(&text))))
+            .collect();
+    let seen = count_lines(&files, &|l| l.contains("span_size(") && !l.contains("fn span_size"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/file_analysis/cursor_queries.rs", 3, "the narrowest ref at a point, the narrowest enclosing callable symbol, the narrowest cursor candidate"),
+    ];
+    let drift = allowlist_drift("span_size readers (a scope lookup is containment + depth)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
