@@ -416,7 +416,7 @@ fn inferred_type_has_no_production_caller() {
 }
 
 /// Human type labels read in the file's language: `FileAnalysis::render_type`
-/// / `display_type_of` carry the pack's vocabulary (`type_display`), so an
+/// / `display_type_of` carry the language's words (`type_label`), so an
 /// adapter or index site rendering with the vocabulary-free engine spelling
 /// shows a PHP user Perl's words on that one surface. The engine spelling
 /// stays legal in the model (keys, `--dump-package` provenance) and in the
@@ -2049,7 +2049,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 22;
+    const RATCHET: usize = 21;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

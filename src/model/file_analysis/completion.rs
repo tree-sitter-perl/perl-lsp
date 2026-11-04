@@ -1349,8 +1349,8 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
     }
 }
 
-/// A language's spelling for an engine type tag (`PackFacts::type_display`
-/// as a function): `Some` renders the language's own word, `None` keeps the
+/// A language's spelling for an engine type tag
+/// (`LanguageConventions::type_label`): `Some` renders the language's own word, `None` keeps the
 /// engine's. Class names never pass through it — they are identities, not
 /// vocabulary — so the map is consulted per TAG at render time instead of
 /// re-tokenizing the rendered label (rule #13).

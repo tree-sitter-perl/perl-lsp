@@ -25,6 +25,10 @@ pub struct LangPack {
     /// (`docs/adr/union-types.md`). Registered by language id
     /// (`conventions::register_conventions`).
     pub lattice: crate::model::file_analysis::LatticeRules,
+    /// The language's word for an engine type tag on a human surface
+    /// (`Bool` → `bool`), registered by id with the lattice; `None` keeps
+    /// the engine's.
+    pub type_display: fn(tag: &str) -> Option<&'static str>,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -107,7 +111,7 @@ pub struct LangPack {
 impl LangPack {
     /// What every file of this language shares, registered by its id.
     pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
-        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone())
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display)
     }
 
     /// Every `&'static str` this pack declares, tagged with the field it
@@ -127,6 +131,7 @@ impl LangPack {
             names: _,
             functions: _,
             lattice: _,
+            type_display: _,
             shape_name: _,
             default_name: _,
             annot_type: _,
