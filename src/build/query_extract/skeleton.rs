@@ -169,6 +169,8 @@ pub struct SkeletonAnalysis {
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
+    /// Where the language's bare function call finds its function.
+    pub functions: super::FunctionLookup,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -418,7 +420,7 @@ impl SkeletonAnalysis {
         if pack.id != crate::model::conventions::PERL_LANGUAGE {
             crate::model::conventions::register_conventions(pack.id, || pack.conventions());
         }
-        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), ..Default::default() }
+        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), functions: pack.functions, ..Default::default() }
     }
 
     /// Re-anchor members that lost their enclosing container to a tree-sitter
@@ -539,6 +541,7 @@ impl SkeletonAnalysis {
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolId,
         };
         let names = self.names.clone();
+        let functions = self.functions;
         let slot_writes = std::mem::take(&mut self.slot_writes);
         let member_writes = std::mem::take(&mut self.member_writes);
         let class_scopes = std::mem::take(&mut self.class_scopes);
@@ -842,7 +845,7 @@ impl SkeletonAnalysis {
         // it of their own capture.
         let free_call = |written: &str, at: tree_sitter::Point| {
             let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at, &symbols)?;
-            let function = function_identity(&map, &names, written, &free_functions);
+            let function = function_identity(&map, &names, functions, written, &free_functions);
             Some((function, map.resolve(written).identity(map.sep)))
         };
         // Per-class template parameter lists (declaration order) — the
@@ -1749,14 +1752,16 @@ impl SkeletonAnalysis {
 fn function_identity(
     map: &crate::model::file_analysis::UseMap,
     names: &crate::model::file_analysis::NameSpellings,
+    functions: super::FunctionLookup,
     written: &str,
     free_functions: &FreeFunctions,
 ) -> crate::model::file_analysis::QualifiedName {
-    use crate::model::file_analysis::{FunctionLookup, QualifiedName};
+    use super::FunctionLookup;
+    use crate::model::file_analysis::QualifiedName;
     if crate::model::file_analysis::split_qualified(written, names).0.is_some() {
         return map.resolve(written);
     }
-    match names.functions {
+    match functions {
         FunctionLookup::Global => QualifiedName::new("", written),
         FunctionLookup::NamespaceThenGlobal => {
             let own = map.own_namespace.unwrap_or("");

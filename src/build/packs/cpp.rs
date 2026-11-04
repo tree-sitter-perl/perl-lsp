@@ -18,6 +18,7 @@ pub fn cpp_pack() -> LangPack {
             class_call: ClassCall::Constructs,
             ..NameSpellings::with_separator(CPP_SEP)
         },
+        functions: FunctionLookup::Global,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         // Template spellings get ONE canonical whitespace form so a
