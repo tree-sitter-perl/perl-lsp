@@ -729,7 +729,7 @@ impl SkeletonAnalysis {
                         name: symbols[idx].name.clone(),
                         scope: symbols[idx].scope,
                     },
-                    source: WitnessSource::Builder("cpp_enumerator".into()),
+                    source: WitnessSource::Builder("enumerator".into()),
                     payload: WP::InferredType(InferredType::ClassName(enum_name)),
                     span: esp,
                 });
@@ -871,7 +871,7 @@ impl SkeletonAnalysis {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
             let mk = |att: WA, pay: WP, span: Span| Witness {
                 attachment: att,
-                source: WitnessSource::Builder("cpp_method_return".into()),
+                source: WitnessSource::Builder("member_writeback".into()),
                 payload: pay,
                 span,
             };
