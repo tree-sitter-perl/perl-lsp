@@ -20,7 +20,7 @@ pub struct LangPack {
     pub names: NameSpellings,
     /// Which cross-family types the language's joins fold into one another
     /// (`docs/adr/union-types.md`). Registered by language id
-    /// (`conventions::register_lattice`).
+    /// (`conventions::register_conventions`).
     pub lattice: crate::model::file_analysis::LatticeRules,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
@@ -102,6 +102,11 @@ pub struct LangPack {
 }
 
 impl LangPack {
+    /// What every file of this language shares, registered by its id.
+    pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone())
+    }
+
     /// Every `&'static str` this pack declares, tagged with the field it
     /// came from: what the rule #15 tripwires walk.
     ///
