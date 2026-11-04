@@ -16,10 +16,10 @@ pub struct WarmStub {
     pub skeleton: FileAnalysis,
 }
 
-/// Bump when the stub's MEANING changes without breaking its bincode
+/// Moves (`cache-epochs/stub/`) when the stub's MEANING changes without breaking its bincode
 /// decode (a decode break self-heals to the full-blob path). Mismatch
 /// wipes the `stubs` table; the next warm backfills from full decodes.
-const STUB_VERSION: &str = "11";
+const STUB_VERSION: &str = crate::util::cache_epochs::STUB;
 
 /// Gate the `stubs` table on the current stub generation — call once
 /// before a stub-consuming warm scan. Check-and-clear is one IMMEDIATE

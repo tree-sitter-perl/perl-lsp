@@ -1853,7 +1853,7 @@ fn pre_split_rows_are_filtered_not_guessed() {
         "INSERT OR REPLACE INTO modules
            (module_name, path, mtime_secs, file_size, source, analysis, bag, extract_version, deps_stamp)
          VALUES (?1, ?1, 0, 0, 'workspace', ?2, NULL, ?3, 0)",
-        params![pm_str, whole_blob, EXTRACT_VERSION - 1],
+        params![pm_str, whole_blob, EXTRACT_VERSION.wrapping_sub(1)],
     )
     .unwrap();
 

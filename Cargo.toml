@@ -19,6 +19,7 @@ include = [
     "/frameworks/**",
     "/vendored/**",
     "/build.rs",
+    "/cache-epochs/**",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",

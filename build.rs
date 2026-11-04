@@ -1,4 +1,5 @@
-//! Derives the conclusion fingerprint at compile time.
+//! Derives the cache fingerprints and the `cache-epochs/` gate versions at
+//! compile time.
 //!
 //! A baked conclusion has a staleness class the witness bag does not: editing
 //! a reducer changes what the right answer IS while the stored bytes stay
@@ -85,6 +86,66 @@ fn main() {
         fnv(&mut sacc, b"\0");
     }
     println!("cargo:rustc-env=PERL_LSP_SURFACE_FINGERPRINT={sacc:016x}");
+
+    epochs();
+}
+
+/// The hand-declared cache gates, one directory per gate under
+/// `cache-epochs/` (`cache-epochs/README.md` is the contract).
+///
+/// A gate's value is a hash of the FILE NAMES in its directory, so a change
+/// that invalidates a cache adds a file named for itself. Two PRs adding two
+/// files never touch the same line, which is the point: a shared integer made
+/// every pair of bumping PRs conflict.
+///
+/// `(directory, constant, type)` — the type is the column or field the
+/// value is stored in.
+const EPOCH_GATES: &[(&str, &str, EpochType)] = &[
+    ("extract", "EXTRACT", EpochType::Int),
+    ("stub", "STUB", EpochType::Str),
+    ("ref-rows", "REF_ROWS", EpochType::Str),
+    ("conclusion-rows", "CONCLUSION_ROWS", EpochType::Str),
+    ("schema", "SCHEMA", EpochType::Str),
+    ("macro-cache", "MACRO_CACHE", EpochType::Int),
+];
+
+#[derive(Clone, Copy)]
+enum EpochType {
+    Int,
+    Str,
+}
+
+fn epochs() {
+    let root = Path::new("cache-epochs");
+    let mut out = String::new();
+    for (dir, name, ty) in EPOCH_GATES {
+        let gate = root.join(dir);
+        // A directory argument makes cargo rescan it, so adding or deleting
+        // an epoch file re-runs this script.
+        println!("cargo:rerun-if-changed={}", gate.display());
+        let mut names: Vec<String> = std::fs::read_dir(&gate)
+            .unwrap_or_else(|e| panic!("{}: {e} — every cache gate needs its epoch directory", gate.display()))
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        // An empty set would hash to the same value for every gate and every
+        // history that ever emptied one; refuse it rather than collide.
+        assert!(!names.is_empty(), "{}: a cache gate needs at least one epoch file", gate.display());
+        names.sort();
+        let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
+        fnv(&mut acc, dir.as_bytes());
+        for n in &names {
+            fnv(&mut acc, b"\0");
+            fnv(&mut acc, n.as_bytes());
+        }
+        match ty {
+            EpochType::Int => out.push_str(&format!("pub const {name}: i64 = {};\n", acc as i64)),
+            EpochType::Str => out.push_str(&format!("pub const {name}: &str = \"{acc:016x}\";\n")),
+        }
+    }
+    let dest = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("cache_epochs.rs");
+    std::fs::write(&dest, out).expect("write cache_epochs.rs");
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
