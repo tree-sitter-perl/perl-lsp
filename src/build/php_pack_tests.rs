@@ -860,6 +860,7 @@ fn at(src: &str, needle: &str, offset: usize) -> tree_sitter::Point {
 }
 
 /// A workspace of php files, asked as the editor asks: by file and point.
+#[cfg(feature = "php")]
 struct Workspace {
     idx: crate::index::module_index::ModuleIndex,
     store: crate::index::open_docs::OpenDocs,
@@ -867,8 +868,10 @@ struct Workspace {
 }
 
 /// (file name, row, start column) of each location, sorted.
+#[cfg(feature = "php")]
 type Sites = Vec<(String, usize, usize)>;
 
+#[cfg(feature = "php")]
 impl Workspace {
     fn new(files: &[(&str, &'static str)]) -> Self {
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -911,6 +914,7 @@ impl Workspace {
     }
 }
 
+#[cfg(feature = "php")]
 fn site(file: &str, row: usize, column: usize) -> (String, usize, usize) {
     (file.to_string(), row, column)
 }
@@ -1033,6 +1037,7 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
 /// promoted property, `$this`, or a class named by `self`, `static` or its
 /// spelling. A property read lands on the property, never on the method
 /// that shares its name.
+#[cfg(feature = "php")]
 #[test]
 fn a_member_at_a_call_site_resolves_to_its_declaration() {
     let ws = Workspace::new(&[("/fake/php/App/Timer.php", CALLS)]);
@@ -1055,6 +1060,7 @@ fn a_member_at_a_call_site_resolves_to_its_declaration() {
 /// either rewrites its declaration and its own uses alone, from the
 /// declaration or from a use. A class named by a static call is a class
 /// reference.
+#[cfg(feature = "php")]
 #[test]
 fn a_member_renames_with_its_call_sites_and_keeps_to_its_family() {
     let ws = Workspace::new(&[("/fake/php/App/Timer.php", CALLS)]);
@@ -1100,6 +1106,7 @@ class Child extends Base {
 
 /// A member inherited from a class in another file resolves up the
 /// `extends` chain, and renames across both files from either side.
+#[cfg(feature = "php")]
 #[test]
 fn an_inherited_member_resolves_and_renames_across_files() {
     let ws = Workspace::new(&[("/fake/php/Lib/Base.php", BASE), ("/fake/php/App/Child.php", CHILD)]);
@@ -1195,6 +1202,7 @@ fn call_invokes(fa: &FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
 
 /// A promoted property read in another file renames the property, the
 /// constructor's local and its body uses as one.
+#[cfg(feature = "php")]
 #[test]
 fn a_promoted_property_renames_from_a_read_in_another_file() {
     let user = "<?php\nfunction age(Order $o) { return $o->made; }\n";
