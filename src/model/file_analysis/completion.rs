@@ -1402,7 +1402,12 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
             let marks: Vec<String> = marks.iter().map(|m| format!("{}={}", m.key, m.value)).collect();
             format!("{}<{}>", format_type_with(base, vocab), marks.join(", "))
         }
-        InferredType::Optional(inner) => format!("{}<{}>", tag("Maybe"), format_type_with(inner, vocab)),
+        // A language with its own word for the null value writes an
+        // optional as a union with it (php `?string` reads `string|null`).
+        InferredType::Optional(inner) => match vocab("Undef") {
+            Some(null) => format!("{}|{}", format_type_with(inner, vocab), null),
+            None => format!("{}<{}>", tag("Maybe"), format_type_with(inner, vocab)),
+        },
         InferredType::Undef => tag("Undef"),
         InferredType::Bool => tag("Bool"),
         InferredType::Unknown => tag("unknown"),
