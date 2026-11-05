@@ -21,6 +21,7 @@ pub fn cpp_pack() -> LangPack {
             ..NameSpellings::with_separator(CPP_SEP)
         },
         functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |_| None,

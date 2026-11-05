@@ -116,7 +116,7 @@ impl TargetRef {
         // constructor's sites sit under its class and every descendant
         // that may inherit it, never under its own name.
         let mut constructed_classes = Vec::new();
-        if origin.names().construction == ConstructionKey::Class {
+        if crate::model::conventions::conventions_of(&origin.language).construction == ConstructionKey::Class {
             let constructor = origin
                 .constructor_of(&class, module_index)
                 .filter(|(_, ctor)| *ctor == name)

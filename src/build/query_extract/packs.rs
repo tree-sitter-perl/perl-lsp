@@ -29,6 +29,9 @@ pub struct LangPack {
     /// (`Bool` → `bool`), registered by id with the lattice; `None` keeps
     /// the engine's.
     pub type_display: fn(tag: &str) -> Option<&'static str>,
+    /// What a construction's reference to its constructor is keyed by,
+    /// registered by id with the lattice: resolution reads it, no file.
+    pub construction: crate::model::file_analysis::ConstructionKey,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -115,7 +118,7 @@ pub struct LangPack {
 impl LangPack {
     /// What every file of this language shares, registered by its id.
     pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
-        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display)
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction)
     }
 
     /// Every `&'static str` this pack declares, tagged with the field it
@@ -136,6 +139,7 @@ impl LangPack {
             functions: _,
             lattice: _,
             type_display: _,
+            construction: _,
             shape_name: _,
             default_name: _,
             annot_type: _,

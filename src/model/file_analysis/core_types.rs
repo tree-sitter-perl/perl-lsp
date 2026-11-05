@@ -416,8 +416,6 @@ pub struct NameSpellings {
     pub imports: ImportRule,
     /// What calling a name that is a class does.
     pub class_call: ClassCall,
-    /// What a construction's reference to its constructor is keyed by.
-    pub construction: ConstructionKey,
     /// Which class a site's code belongs to (`FileAnalysis::package_at`).
     pub enclosing_class: EnclosingClass,
     /// Whether a member access reaches an instance's slots
@@ -542,7 +540,6 @@ impl NameSpellings {
         member_namespace: MemberNamespace::PerFamily,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
-        construction: ConstructionKey::Constructor,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
     };
@@ -559,7 +556,6 @@ impl NameSpellings {
             member_namespace: MemberNamespace::PerFamily,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
-            construction: ConstructionKey::Constructor,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
         }

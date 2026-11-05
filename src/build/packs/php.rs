@@ -17,12 +17,12 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
-            construction: ConstructionKey::Class,
             ..NameSpellings::NONE
         },
         // A bare call names the function its namespace declares, else the
         // global one.
         functions: FunctionLookup::NamespaceThenGlobal,
+        construction: ConstructionKey::Class,
         // `bool` is not an `int`: `bool|int` is a union a signature spells.
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         type_display: display_type,

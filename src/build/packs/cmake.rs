@@ -9,6 +9,7 @@ pub fn cmake_pack() -> LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         names: NameSpellings::NONE,
         functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         type_display: |_| None,
         shape_name: |raw| raw.to_string(),
