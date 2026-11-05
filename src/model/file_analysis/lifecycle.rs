@@ -957,6 +957,7 @@ impl FileAnalysis {
         module: &str,
         module_index: &dyn CrossFileLookup,
     ) -> Option<(Vec<String>, Vec<String>)> {
+        use crate::model::conventions::IMPORT_SUB;
         // Only a parent edge lends an `import`; most packages (`main`
         // above all) declare none.
         if self.declared_parents(module).is_empty() {
@@ -972,7 +973,7 @@ impl FileAnalysis {
         // answers for its own `@ISA` and its own `import`, and FHEM's
         // `main` has 534 of them.
         let declares_here = |cls: &str| {
-            self.symbols_named("import").iter().any(|&sid| {
+            self.symbols_named(IMPORT_SUB).iter().any(|&sid| {
                 matches!(self.symbol(sid).kind, SymKind::Sub | SymKind::Method) && self.symbol_in_class(sid, cls)
             })
         };
@@ -980,7 +981,7 @@ impl FileAnalysis {
         let mut may_declare = |cls: &str| {
             declares_here(cls)
                 || indexed
-                    .get_or_insert_with(|| module_index.modules_with_symbol("import").into_iter().collect())
+                    .get_or_insert_with(|| module_index.modules_with_symbol(IMPORT_SUB).into_iter().collect())
                     .contains(cls)
         };
         let declares = |cls: &str| {
@@ -988,7 +989,7 @@ impl FileAnalysis {
                 || module_index
                     .visible_def_candidates(cls)
                     .iter()
-                    .any(|c| module_index.symbols_present(c).has_sub_in_package("import", cls))
+                    .any(|c| module_index.symbols_present(c).has_sub_in_package(IMPORT_SUB, cls))
         };
         let lists_of = |cls: &str| -> Option<(Vec<String>, Vec<String>)> {
             let listing = |fa: &FileAnalysis| {

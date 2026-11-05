@@ -25,6 +25,9 @@ pub const PERL_SEP: &str = "::";
 /// The package code runs in before any `package` statement.
 pub const PERL_ROOT_PACKAGE: &str = "main";
 
+/// The sub `use Module LIST` calls, found up `Module`'s MRO.
+pub const IMPORT_SUB: &str = "import";
+
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
