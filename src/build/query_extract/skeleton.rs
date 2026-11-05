@@ -1771,16 +1771,11 @@ impl SkeletonAnalysis {
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
+        fa.language = self.language.to_string();
         // The extractor keys a variable's facts to the scope they were made
         // in; the assembled analysis knows each name's binding.
         fa.bind_variable_witnesses();
         fa.bind_variable_regions(std::mem::take(&mut self.variable_regions));
-        // Stamped after the binding above, which reads the analysis's
-        // spellings and was written against the host's: under cpp's own, a
-        // bare member in an out-of-line member body (`void C::f()`) stops
-        // binding to `this->`'s place (`cpp_dynamic_cast_narrows_a_member_of_this`).
-        // TODO(pack-binding-spellings): bind under the pack's spellings.
-        fa.language = self.language.to_string();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
