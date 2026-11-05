@@ -1434,6 +1434,7 @@ fn language_spellings_have_one_home() {
     let seen = count_lines(&files, &|l| twinned.iter().any(|a| l.contains(a.as_str())));
     let allow: &[(&str, usize, &str)] = &[
         ("build/cpp_reparse/defs.rs", 4, "the C++ keyword table: grammar vocabulary in the pack's own tier"),
+        ("build/packs/php.rs", 1, "`static` as a type keyword inside a declared union (`static|null`): the pack parsing its own type spelling, not the attribute"),
         ("build/language_driver.rs", 2, "the driver mints two pack attributes (`include_guard`, `non_public`): the minting side"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
