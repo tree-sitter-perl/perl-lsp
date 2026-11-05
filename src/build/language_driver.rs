@@ -1077,6 +1077,7 @@ fn remap_spans(
         var_reads,
         var_writes,
         write_sites,
+        init_sites,
         label_refs,
         flow_edges,
         moved_from,
@@ -1167,7 +1168,7 @@ fn remap_spans(
     for (_, _, span) in var_reads.iter_mut().chain(var_writes.iter_mut()) {
         *span = rspan(*span);
     }
-    for span in write_sites.iter_mut() {
+    for span in write_sites.iter_mut().chain(init_sites.iter_mut()) {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after

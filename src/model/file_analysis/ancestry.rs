@@ -733,7 +733,7 @@ impl FileAnalysis {
                     }
                 }
                 if let Some(sym) = found {
-                    return Some(MethodResolution::CrossFile { class: cand_cls, member: sym.name.clone(), def_module: None, widened });
+                    return Some(MethodResolution::CrossFile { class: cand_cls, member: sym.name.clone(), def_module: None, widened, flags: sym.flags });
                 }
                 // A cross-file DBIC result class's column/relationship accessors
                 // are deferred plugin emissions (`GatedEmission`); the index's
@@ -750,25 +750,25 @@ impl FileAnalysis {
                 return None;
             };
             if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: method_name.to_string(), def_module: Some(home), widened: false });
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: method_name.to_string(), def_module: Some(home), widened: false, flags: SymbolFlags::empty() });
             }
             // Plugin-bridged method (a Mojo helper synthesized in another file,
             // bridged to `cls`). Record the registration module so the def
             // lookup hits the right file, not `cls`'s own module.
-            let mut bridged_module: Option<String> = None;
+            let mut bridged_module: Option<(String, SymbolFlags)> = None;
             idx.for_each_entity_bridged_to_named(cls, method_name, &mut |mod_name, _cached, sym| {
                 use std::ops::ControlFlow;
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                     return ControlFlow::Continue(());
                 }
                 if sym.name == method_name {
-                    bridged_module = Some(mod_name.to_string());
+                    bridged_module = Some((mod_name.to_string(), sym.flags));
                     return ControlFlow::Break(());
                 }
                 ControlFlow::Continue(())
             });
-            if bridged_module.is_some() {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: method_name.to_string(), def_module: bridged_module, widened: false });
+            if let Some((module, flags)) = bridged_module {
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: method_name.to_string(), def_module: Some(module), widened: false, flags });
             }
         }
         None
@@ -924,8 +924,8 @@ impl FileAnalysis {
                 continue;
             }
             let whole = idx.symbols_present(&cached);
-            if whole.symbols.iter().any(|s| s.name == name && whole.slot_class_of(s) == Some(cls)) {
-                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: name.to_string(), def_module: None, widened: false });
+            if let Some(slot) = whole.symbols.iter().find(|s| s.name == name && whole.slot_class_of(s) == Some(cls)) {
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), member: name.to_string(), def_module: None, widened: false, flags: slot.flags });
             }
         }
         None

@@ -540,7 +540,8 @@ fn properties_are_members_of_their_class() {
     assert_eq!(field("total").flags, F::empty());
     assert_eq!(field("clock").flags, F::STATIC | F::NON_PUBLIC);
     assert_eq!(field("made").flags, F::NON_PUBLIC);
-    assert_eq!(field("qty").flags, F::empty());
+    assert_eq!(field("qty").flags, F::READONLY);
+    assert_eq!(field("id").flags, F::NON_PUBLIC | F::READONLY);
     assert_eq!(field("id").attributes, ["readonly"]);
     assert_eq!(field("qty").attributes, ["readonly"]);
     assert_eq!(field("count").presentation.label.as_deref(), Some("$count"));
@@ -2457,4 +2458,134 @@ fn this_is_the_receiver_of_its_method() {
     let at = |row, col| fa.expr_type_at_span(Span { start: Point::new(row, col), end: Point::new(row, col + 5) }, None);
     assert_eq!(at(2, 24), Some(InferredType::ClassName("A".into())));
     assert_eq!(at(4, 22), None);
+}
+
+const READONLY: &str = "<?php
+namespace App;
+
+class Point {
+    public readonly int $x;
+    public int $plain;
+    public function __construct(public readonly int $y) {
+        $this->x = 1;
+        $f = function () { $this->x = 2; };
+    }
+    public function copy(Point $other) {
+        $other->x = 3;
+        $f = function () { $this->x = 4; };
+        $this->plain = 5;
+    }
+}
+
+class Point3 extends Point {
+    public function __construct() { $this->x = 6; }
+    public function init() { $this->x = 7; }
+}
+
+readonly class Pair {
+    public int $a;
+    public function __construct(public int $b) {}
+}
+
+function outside(Point $p, Pair $q, $unknown) {
+    $p->x = 8;
+    $p->y += 1;
+    $p->x++;
+    $p->plain = 9;
+    $unknown->x = 10;
+    $q->a = 11;
+    unset($q->b);
+}
+
+class Lazy {
+    public readonly array $cache;
+    public function get() { return $this->cache ??= []; }
+}
+function prime(Lazy $l) { $l->cache ??= []; }
+";
+
+/// `readonly` on a property or a promoted parameter, and every property a
+/// `readonly class` declares, is the member's write-once flag.
+#[cfg(feature = "php")]
+#[test]
+fn readonly_properties_carry_the_flag() {
+    use crate::model::file_analysis::SymbolFlags as F;
+    let fa = php(READONLY);
+    let flags = |class: &str, name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.kind == SymKind::Field && s.name == name && s.package.as_deref() == Some(class))
+            .unwrap()
+            .flags
+    };
+    assert_eq!(flags("App\\Point", "x"), F::READONLY);
+    assert_eq!(flags("App\\Point", "y"), F::READONLY);
+    assert_eq!(flags("App\\Point", "plain"), F::empty());
+    assert_eq!(flags("App\\Pair", "a"), F::READONLY);
+    assert_eq!(flags("App\\Pair", "b"), F::READONLY);
+}
+
+/// A readonly member written from outside its class family fails; inside
+/// it, only a constructor (its own closures and a subclass's included) or a
+/// `??=` lazy init sets it in good form. A receiver nothing types, or a
+/// writable member, is no finding.
+#[cfg(feature = "php")]
+#[test]
+fn readonly_writes_outside_the_class_or_its_constructors_are_reported() {
+    use crate::model::file_analysis::ReadonlyWriteKind::{OutsideClass as Outside, OutsideConstructor as InClass};
+    let fa = php(READONLY);
+    let found: Vec<_> = fa
+        .readonly_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.classes, w.kind))
+        .collect();
+    let at = |row: usize, member: &str, class: &str, kind| (row, member.to_string(), vec![class.to_string()], kind);
+    assert_eq!(
+        found,
+        [
+            at(11, "x", "App\\Point", InClass),
+            at(12, "x", "App\\Point", InClass),
+            at(19, "x", "App\\Point", InClass),
+            at(28, "x", "App\\Point", Outside),
+            at(29, "y", "App\\Point", Outside),
+            at(30, "x", "App\\Point", Outside),
+            at(33, "a", "App\\Pair", Outside),
+            at(34, "b", "App\\Pair", Outside),
+            at(41, "cache", "App\\Lazy", Outside),
+        ]
+    );
+}
+
+/// The lane answers through the index: a write in one file to a readonly
+/// member another file declares names the member and its class, a warning
+/// from outside the class and a hint from a subclass method.
+#[cfg(feature = "php")]
+#[test]
+fn a_readonly_write_across_files_is_reported() {
+    use crate::lsp::symbols::DiagnosticOptions;
+    let point = ("/fake/php/App/Point.php", "<?php\nnamespace App;\nclass Point { public readonly int $x; }\n");
+    let user = (
+        "/fake/php/App/Use.php",
+        "<?php\nnamespace App;\nclass Other { function f(Point $p) { $p->x = 1; } }\nclass Sub extends Point { function g() { $this->x = 2; } }\n",
+    );
+    let idx = php_indexed(&[point, user]);
+    let fa = idx.workspace_file_for_test(std::path::Path::new(user.0)).unwrap();
+    let diags: Vec<_> = crate::lsp::symbols::pack_diagnostics(&fa, &idx, DiagnosticOptions::default())
+        .into_iter()
+        .filter(|d| d.code == Some(tower_lsp::lsp_types::NumberOrString::String("readonly-write".into())))
+        .map(|d| (d.range.start.line, d.severity, d.message))
+        .collect();
+    use tower_lsp::lsp_types::DiagnosticSeverity as S;
+    assert_eq!(
+        diags,
+        [
+            (
+                2,
+                Some(S::WARNING),
+                "`x` is a readonly property of App\\Point; it cannot be written from outside App\\Point or a subclass"
+                    .to_string()
+            ),
+            (3, Some(S::HINT), "readonly property `x` of App\\Point is set outside the constructor".to_string()),
+        ]
+    );
 }

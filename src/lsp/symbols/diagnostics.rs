@@ -18,6 +18,7 @@ pub mod codes {
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
     pub const MISSING_DECLARATION: &str = "missing-declaration";
     pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
+    pub const READONLY_WRITE: &str = "readonly-write";
 }
 
 /// `resolved-by-widening`: a class reference whose identity nothing indexed
@@ -46,6 +47,46 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
                 w.named, w.resolved
             ),
             ..Default::default()
+        })
+        .collect()
+}
+
+/// `readonly-write`: a write to a write-once member where it is not set
+/// (`FileAnalysis::readonly_member_writes`). Always on: from outside the
+/// member's class family it fails at runtime every time (WARNING); inside
+/// the family but outside a constructor it is bad form (HINT). One code at
+/// two severities, so one switch silences the family. Resolves through the
+/// file's own scope, as navigation does.
+pub fn readonly_write_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::{CrossFileLookup, ReadonlyWriteKind};
+    let base: &dyn CrossFileLookup = module_index;
+    let scoped = crate::index::resolve::origin_scope(base, analysis, None);
+    analysis
+        .readonly_member_writes(Some(&scoped))
+        .into_iter()
+        .map(|w| {
+            let classes = w.classes.join(" or ");
+            let (severity, message) = match w.kind {
+                ReadonlyWriteKind::OutsideClass => (
+                    DiagnosticSeverity::WARNING,
+                    format!(
+                        "`{}` is a readonly property of {classes}; it cannot be written from outside {classes} or a subclass",
+                        w.member,
+                    ),
+                ),
+                ReadonlyWriteKind::OutsideConstructor => (
+                    DiagnosticSeverity::HINT,
+                    format!("readonly property `{}` of {classes} is set outside the constructor", w.member),
+                ),
+            };
+            Diagnostic {
+                range: span_to_range(w.span),
+                severity: Some(severity),
+                code: Some(NumberOrString::String(codes::READONLY_WRITE.into())),
+                source: Some("perl-lsp".into()),
+                message,
+                ..Default::default()
+            }
         })
         .collect()
 }

@@ -678,6 +678,10 @@ bitflags::bitflags! {
         /// `$x = …`): a use above the write reaches it. Minted from a
         /// capture (`@def.assigned`), never spelled as an attribute.
         const SCOPE_WIDE = 1 << 20;
+        /// A storage slot written at most once, and only by code of its
+        /// declaring class or a subclass (php `readonly`): any other write
+        /// fails at runtime (`FileAnalysis::readonly_member_writes`).
+        const READONLY = 1 << 21;
     }
 }
 
@@ -730,6 +734,7 @@ impl TryFrom<&str> for SymbolFlags {
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
             "trait" => SymbolFlags::TRAIT,
+            "readonly" => SymbolFlags::READONLY,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
@@ -971,6 +976,29 @@ pub struct MemberOpPeel {
     pub wrap: String,
     /// Pointer indirection levels on the receiver (≥2).
     pub depth: usize,
+}
+
+/// A write to a write-once member (`SymbolFlags::READONLY`) made where the
+/// member is not set (`FileAnalysis::readonly_member_writes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadonlyWrite {
+    /// The written member token.
+    pub span: Span,
+    /// The member as the site names it.
+    pub member: String,
+    /// The class declaring the member, one per receiver arm, deduplicated.
+    pub classes: Vec<String>,
+    pub kind: ReadonlyWriteKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadonlyWriteKind {
+    /// Code outside the declaring class and its descendants: the write
+    /// fails at runtime.
+    OutsideClass,
+    /// Code of the class family that no constructor encloses (some arm of
+    /// the receiver; the rest may be `OutsideClass`).
+    OutsideConstructor,
 }
 
 /// The peeled receiver spelling for a DEEP stack — one whose pointer depth
@@ -1845,7 +1873,7 @@ impl Ref {
             span: self.span,
             access: match self.access {
                 AccessKind::Read => 0,
-                AccessKind::Write => 1,
+                AccessKind::Write | AccessKind::WriteIfUnset => 1,
                 AccessKind::Declaration => 2,
             },
             flags,
@@ -2340,5 +2368,16 @@ pub enum AccessKind {
     Read,
     Write,
     Declaration,
+    /// A write that lands only while the place holds nothing (php `??=`):
+    /// it initialises the place, never overwrites it. Kept at the END for
+    /// bincode variant-index stability.
+    WriteIfUnset,
+}
+
+impl AccessKind {
+    /// Whether the access writes the place, whatever the condition.
+    pub fn is_write(self) -> bool {
+        matches!(self, AccessKind::Write | AccessKind::WriteIfUnset)
+    }
 }
 

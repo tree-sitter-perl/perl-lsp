@@ -85,6 +85,9 @@ spelled! {
         /// A preprocessor macro the document mints under another def kind
         /// (an object-like `#define` is a constant, so a `Variable`).
         Macro = "macro",
+        /// A storage slot its class makes write-once (a property of a php
+        /// `readonly class`).
+        Readonly = "readonly",
     }
 }
 
@@ -211,6 +214,10 @@ spelled! {
         /// class `obj` is). A name's place is its binding, which `Target`
         /// writes and rebinds.
         Place = "place",
+        /// A place its write fills only while it holds nothing (php `??=`):
+        /// the write initialises it, never overwrites it. The place's own
+        /// `Place` capture makes it a write.
+        Init = "init",
     }
 }
 
@@ -787,6 +794,7 @@ impl MarkCap {
             MarkCap::Contract => F::CONTRACT,
             MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
             MarkCap::Macro => F::MACRO,
+            MarkCap::Readonly => F::READONLY,
         }
     }
 }

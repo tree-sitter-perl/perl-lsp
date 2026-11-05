@@ -529,7 +529,7 @@ impl FileAnalysis {
                     let token_type = if is_self { TOK_KEYWORD } else { TOK_VARIABLE };
                     // Don't add sigil modifier for $self/$class — it would override the keyword color
                     let mut mods = if is_self { 0 } else { sigil_modifier(sigil) };
-                    if matches!(r.access, AccessKind::Write) { mods |= 1 << MOD_MODIFICATION; }
+                    if r.access.is_write() { mods |= 1 << MOD_MODIFICATION; }
                     tokens.push(PerlSemanticToken { span: r.span, token_type, modifiers: mods });
                 }
                 RefKind::FunctionCall | RefKind::ImportedName => {

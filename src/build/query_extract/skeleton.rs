@@ -165,6 +165,9 @@ pub struct SkeletonAnalysis {
     /// The member tokens assignments write (a `@flow.place` whose read
     /// projects a member): the reference at each is a write.
     pub write_sites: Vec<crate::model::file_analysis::Span>,
+    /// The member tokens of `write_sites` whose write only fills an empty
+    /// member (`@flow.init`): the reference at each is a `WriteIfUnset`.
+    pub init_sites: Vec<crate::model::file_analysis::Span>,
     /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
     /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —
     /// scope-chain walk WITHOUT the declared-before constraint (a forward
@@ -1331,6 +1334,8 @@ impl SkeletonAnalysis {
             .collect();
         let write_sites: std::collections::HashSet<(Point, Point)> =
             self.write_sites.iter().map(|sp| (sp.start, sp.end)).collect();
+        let init_sites: std::collections::HashSet<(Point, Point)> =
+            self.init_sites.iter().map(|sp| (sp.start, sp.end)).collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
         // A plain assignment to a name (`head_ = …`) writes the place that
@@ -1485,9 +1490,10 @@ impl SkeletonAnalysis {
                     | RefCap::Var
                     | RefCap::Key => return None,
                 };
-                let access = match write_sites.contains(&(r.start, r.end)) {
-                    true => crate::model::file_analysis::AccessKind::Write,
-                    false => crate::model::file_analysis::AccessKind::Read,
+                let access = match (write_sites.contains(&(r.start, r.end)), init_sites.contains(&(r.start, r.end))) {
+                    (true, true) => crate::model::file_analysis::AccessKind::WriteIfUnset,
+                    (true, false) => crate::model::file_analysis::AccessKind::Write,
+                    (false, _) => crate::model::file_analysis::AccessKind::Read,
                 };
                 Some(crate::model::file_analysis::Ref {
                     kind,

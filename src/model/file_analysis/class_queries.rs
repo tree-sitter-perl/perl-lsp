@@ -559,6 +559,87 @@ impl FileAnalysis {
         }
     }
 
+    /// Writes to a write-once member that are not where it belongs. The
+    /// rule, in one place: a `READONLY` member takes writes from code inside
+    /// its declaring class or a descendant of it (a closure written in one
+    /// of their methods included), so a write from anywhere else fails at
+    /// runtime (`ReadonlyWriteKind::OutsideClass`); and it is set by a
+    /// constructor, so an in-class write no constructor encloses is
+    /// `OutsideConstructor`, unless the write only fills an unset member
+    /// (`AccessKind::WriteIfUnset`): a lazy initialisation. A site is
+    /// reported only when every class its receiver may be resolves the
+    /// member to such a declaration: an untyped receiver, or one arm that
+    /// may be written there, is no finding.
+    pub fn readonly_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<ReadonlyWrite> {
+        let mut out = Vec::new();
+        for r in self.refs().iter() {
+            if !r.access.is_write() || MemberKind::of_ref(&r.kind) != Some(MemberKind::Value) {
+                continue;
+            }
+            let Some(site) = r.member_site() else { continue };
+            let writer = self.package_at(site.name_span.start);
+            // A trait's code runs as whichever class composes it, a class
+            // the site cannot name.
+            let composed = writer.is_some_and(|w| {
+                self.symbols_named(w).iter().any(|&sid| {
+                    let s = self.symbol(sid);
+                    s.kind == SymKind::Class && s.flags.contains(SymbolFlags::TRAIT)
+                })
+            });
+            if composed {
+                continue;
+            }
+            // TODO(readonly-after-cfg): with control flow modelled, an in-class write after the
+            // constructor has run is a second write: a certain error, not just a hint.
+            // TODO(readonly-after-cfg): an isset-guarded write is a lazy init too, once guards narrow.
+            let lazy = r.access == AccessKind::WriteIfUnset;
+            let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
+                self.scope(sc)
+                    .owner
+                    .is_some_and(|sym| self.symbol(sym).flags.contains(SymbolFlags::CONSTRUCTOR))
+            });
+            let admits = |class: &str| writer.is_some_and(|w| self.class_isa(w, class, module_index));
+            let arms = self.receiver_classes(r, module_index, ReceiverPolicy::Stated);
+            // The member resolves on an arm or its ancestor, so a constructor
+            // or a lazy init in a class descending from an arm may write it.
+            if arms.is_empty() || ((in_constructor || lazy) && arms.iter().any(|c| admits(c))) {
+                continue;
+            }
+            let member = r.unqualified_target_name(self.names());
+            let mut classes: Vec<String> = Vec::new();
+            let mut kind = ReadonlyWriteKind::OutsideClass;
+            let reported = arms.iter().all(|cn| {
+                let Some(res) = self.resolve_field_in_ancestors(cn, member, module_index) else {
+                    return false;
+                };
+                // A member found on a same-leaf stranger is a guess, and a
+                // guess is no finding.
+                let flags = match &res {
+                    MethodResolution::Local { sym_id, .. } => self.symbol(*sym_id).flags,
+                    MethodResolution::CrossFile { widened: true, .. } => return false,
+                    MethodResolution::CrossFile { flags, .. } => *flags,
+                };
+                if !flags.contains(SymbolFlags::READONLY) {
+                    return false;
+                }
+                if admits(res.class()) {
+                    if in_constructor || lazy {
+                        return false;
+                    }
+                    kind = ReadonlyWriteKind::OutsideConstructor;
+                }
+                if !classes.iter().any(|c| c == res.class()) {
+                    classes.push(res.class().to_string());
+                }
+                true
+            });
+            if reported {
+                out.push(ReadonlyWrite { span: site.name_span, member: member.to_string(), classes, kind });
+            }
+        }
+        out
+    }
+
     /// The type SPELLING a field's declared type edges to — the `TypeName(n)`
     /// target of the field's `Variable → Edge(TypeName(n))` witness (`op_type`
     /// declared `PERL_BITFIELD16` → `Some("PERL_BITFIELD16")`). This is the
