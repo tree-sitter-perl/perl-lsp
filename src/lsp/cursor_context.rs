@@ -300,8 +300,8 @@ module_index: Option<&dyn CrossFileLookup>,
             if crate::model::conventions::is_constructor_name(method_text) {
                 return Some(InferredType::ClassName(class_name.to_string()));
             }
-            let arg_count = crate::cst::call_args(node).len();
-            analysis.find_method_return_type(class_name, method_text, module_index, Some(arg_count))
+            let arg_count = crate::cst::call_arg_count(node, source);
+            analysis.find_method_return_type(class_name, method_text, module_index, arg_count)
         }
         "function_call_expression" | "ambiguous_function_call_expression" => {
             let func_node = node.child_by_field_name("function")?;
@@ -309,8 +309,8 @@ module_index: Option<&dyn CrossFileLookup>,
             // Route through the arity-aware helper so fluent
             // arity dispatch (`return X unless @_`) can pick the
             // right branch when the caller's arg count is known.
-            let arg_count = crate::cst::call_args(node).len() as u32;
-            analysis.sub_return_type_at_arity(name, Some(arg_count))
+            let arg_count = crate::cst::call_arg_count(node, source).map(|n| n as u32);
+            analysis.sub_return_type_at_arity(name, arg_count)
                 .or_else(|| crate::model::builtins::builtin_return_type(name))
         }
         "func1op_call_expression" | "func0op_call_expression" => {

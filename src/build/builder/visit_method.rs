@@ -22,12 +22,12 @@ impl<'a> Builder<'a> {
         // the in-file occurrence union serves highlights/references.
         if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase()) {
             if let Some(kw) = node.child(0) {
-                self.add_bound_ref(
+                self.add_call_ref(
                     RefKind::FunctionCall,
                     node_to_span(kw),
                     name.to_string(),
-                    AccessKind::Read,
                     Some(RefBinding::Function { package: "CORE".to_string() }),
+                    crate::cst::call_arg_count(node, self.source),
                 );
             }
         }
@@ -126,7 +126,7 @@ impl<'a> Builder<'a> {
         self.push_invocant_class(class_span, class.clone());
         let operands = self.call_operands(&args);
         let idx = self.refs.len();
-        self.add_ref(
+        self.add_call_ref(
             RefKind::MethodCall {
                 invocant: crate::model::conventions::Invocant::assume_canonical(class.clone()),
                 invocant_span: Some(class_span),
@@ -136,7 +136,8 @@ impl<'a> Builder<'a> {
             },
             node_to_span(node),
             method.clone(),
-            AccessKind::Read,
+            None,
+            crate::cst::arg_list_count(io.arguments, self.source),
         );
         self.method_call_invocant.insert(idx, class.clone());
         self.method_call_args.insert(idx, operands);
@@ -227,6 +228,7 @@ impl<'a> Builder<'a> {
             self.emit_invocant_witness(inv);
         }
         let operands = self.call_operands(&args);
+        let arg_count = crate::cst::call_arg_count(node, self.source);
 
         if let Some(ref name) = method_name {
             // Dynamic method dispatch: $self->$method() — resolve $method if known
@@ -245,7 +247,7 @@ impl<'a> Builder<'a> {
                         .flatten();
                     for rname in resolved {
                         let idx = self.refs.len();
-                        self.add_ref(
+                        self.add_call_ref(
                             RefKind::MethodCall {
                                 invocant: invocant.clone().unwrap_or_default(),
                                 invocant_span,
@@ -256,7 +258,8 @@ impl<'a> Builder<'a> {
                             },
                             node_to_span(node),
                             rname,
-                            AccessKind::Read,
+                            None,
+                            arg_count,
                         );
                         self.refs[idx].folded_from = folded_src;
                         if let Some(c) = invocant_class.clone() {
@@ -269,7 +272,7 @@ impl<'a> Builder<'a> {
                 }
             } else {
                 let idx = self.refs.len();
-                self.add_ref(
+                self.add_call_ref(
                     RefKind::MethodCall {
                         invocant: invocant.clone().unwrap_or_default(),
                         invocant_span,
@@ -280,7 +283,8 @@ impl<'a> Builder<'a> {
                     },
                     node_to_span(node),
                     name.clone(),
-                    AccessKind::Read,
+                    None,
+                    arg_count,
                 );
                 if let Some(c) = invocant_class.clone() {
                     self.method_call_invocant.insert(idx, c);
@@ -404,14 +408,16 @@ impl<'a> Builder<'a> {
                         Some(s.package.clone())
                     });
                     if let Some(pkg) = matched_pkg {
-                        self.add_bound_ref(
+                        // A bareword receiver is a call written with no
+                        // arguments.
+                        self.add_call_ref(
                             RefKind::FunctionCall,
                             node_to_span(inv_node),
                             bw_text.to_string(),
-                            AccessKind::Read,
                             pkg.map(|package| {
                                 crate::model::file_analysis::RefBinding::Function { package }
                             }),
+                            Some(0),
                         );
                     } else if !crate::model::conventions::is_current_package_token(bw_text) {
                         // Class-name invocant (`Foo->bar`): the bareword is a

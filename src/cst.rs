@@ -1583,6 +1583,61 @@ pub(crate) fn is_flattening(node: Node) -> bool {
     )
 }
 
+/// How many values `node` contributes to the argument list it sits in,
+/// when its shape fixes the number: a grouping list the sum of its
+/// elements, `()` none, `qw(...)` one per word, any other expression one.
+/// `None` when only the run knows: an aggregate ([`is_flattening`]), and
+/// the operators whose shape says they yield a list (`map`/`grep`, `sort`,
+/// a readline, backticks, a range). A call counts as one value — which
+/// callees return lists is not visible at the call site.
+pub(crate) fn value_count(node: Node, src: &[u8]) -> Option<usize> {
+    if is_list_literal(node) {
+        return list_elements(node).into_iter().map(|e| value_count(e, src)).sum();
+    }
+    if is_flattening(node) || is_range(node, src) {
+        return None;
+    }
+    match node.kind() {
+        "stub_expression" => Some(0),
+        "quoted_word_list" => {
+            Some(node.field_text("content", src).map_or(0, |words| words.split_whitespace().count()))
+        }
+        "map_grep_expression" | "sort_expression" | "readline_expression" | "command_string" => None,
+        _ => Some(1),
+    }
+}
+
+/// `a .. b` / `a ... b`: in list context, every value between the bounds.
+fn is_range(node: Node, src: &[u8]) -> bool {
+    node.kind() == "binary_expression" && matches!(node.field_text("operator", src), Some(".." | "..."))
+}
+
+/// `&f;` — an ampersand call with no argument list, which hands the
+/// caller's own `@_` to `f`.
+pub(crate) fn passes_callers_args(call: Node, src: &[u8]) -> bool {
+    call.kind() == "function_call_expression"
+        && call.child_by_field_name("arguments").is_none()
+        && call.text(src).is_some_and(|t| t.starts_with('&') && !t.ends_with(')'))
+}
+
+/// The number of arguments a call is written with, receiver excluded: the
+/// [`value_count`] of its argument list. `None` when any argument's count
+/// is unknown, and for [`passes_callers_args`]. A named unary builtin
+/// (`length $s`, `shift`) counts its written operand.
+pub(crate) fn call_arg_count(call: Node, src: &[u8]) -> Option<usize> {
+    match call.kind() {
+        "func0op_call_expression" | "func1op_call_expression" => Some(call.elements().count()),
+        _ if passes_callers_args(call, src) => None,
+        _ => arg_list_count(call.child_by_field_name("arguments"), src),
+    }
+}
+
+/// [`call_arg_count`] over an argument list already in hand (an indirect
+/// object call's `ARGS`); no list is zero arguments.
+pub(crate) fn arg_list_count(args: Option<Node>, src: &[u8]) -> Option<usize> {
+    args.map_or(Some(0), |a| value_count(a, src))
+}
+
 /// True when `node` is a `scalar` whose bare varname is a conventional
 /// invocant (`$self` / `$class` / `$this` / `$proto`), matching braced
 /// spellings (`${self}`) and rejecting derefs (`${$ref}`) by reading the

@@ -645,16 +645,17 @@ impl<'a> Builder<'a> {
                 return;
             }
         }
+        // Every ref minted below is a call written without arguments.
         if let (Some(qualifier), _) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS) {
             let ref_span = fq_tail_span(node, name);
-            self.add_bound_ref(
+            self.add_call_ref(
                 RefKind::FunctionCall,
                 ref_span,
                 name.to_string(),
-                AccessKind::Read,
                 Some(crate::model::file_analysis::RefBinding::Function {
                     package: qualifier.to_string(),
                 }),
+                Some(0),
             );
             return;
         }
@@ -667,12 +668,12 @@ impl<'a> Builder<'a> {
             .get(&pkg)
             .is_some_and(|set| set.contains(name));
         if is_declared {
-            self.add_bound_ref(
+            self.add_call_ref(
                 RefKind::FunctionCall,
                 node_to_span(node),
                 name.to_string(),
-                AccessKind::Read,
                 Some(crate::model::file_analysis::RefBinding::Function { package: pkg }),
+                Some(0),
             );
             return;
         }
@@ -686,12 +687,12 @@ impl<'a> Builder<'a> {
         // ref, so unresolvable barewords (filehandles, prototypes'
         // leftovers) stay untouched.
         if let Some(owner) = self.resolve_call_package(name, node.start_position()) {
-            self.add_bound_ref(
+            self.add_call_ref(
                 RefKind::FunctionCall,
                 node_to_span(node),
                 name.to_string(),
-                AccessKind::Read,
                 Some(crate::model::file_analysis::RefBinding::Function { package: owner }),
+                Some(0),
             );
         }
     }

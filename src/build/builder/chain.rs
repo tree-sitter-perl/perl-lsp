@@ -350,9 +350,9 @@ impl<'a> Builder<'a> {
                 // resolved package, so it is entitled to the bare name; only
                 // the local lookup has to clear the qualifier gate.
                 let bare = bare_name(name);
-                let arg_count = self.extract_call_args(node).len() as u32;
+                let arg_count = crate::cst::call_arg_count(node, self.source).map(|n| n as u32);
                 if let Some(local) = self.local_callee_name(name) {
-                    if let Some(t) = self.bag_query_named_sub(local, Some(arg_count)) {
+                    if let Some(t) = self.bag_query_named_sub(local, arg_count) {
                         return Some(t);
                     }
                 }
@@ -371,7 +371,7 @@ impl<'a> Builder<'a> {
                         package: class,
                         name: bare.to_string(),
                     },
-                    Some(arg_count),
+                    arg_count,
                     None,
                 )
             }

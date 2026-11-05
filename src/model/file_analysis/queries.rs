@@ -665,7 +665,7 @@ impl FileAnalysis {
                 RefKind::FunctionCall { .. } => {
                     if let Some(t) = self.sub_return_type_at_arity_ctx(
                         &self.refs[recv_idx].target_name,
-                        Some(self.refs[recv_idx].arg_count.unwrap_or(0) as u32),
+                        self.refs[recv_idx].arg_count.map(|c| c as u32),
                         module_index,
                     ) {
                         return Some(t);
@@ -712,7 +712,7 @@ impl FileAnalysis {
                     RefKind::FieldAccess { .. } => {
                         self.field_value_type(&recv_ty, member, module_index)
                     }
-                    _ => self.member_value_type(&recv_ty, member, module_index, None),
+                    _ => self.member_value_type(&recv_ty, member, module_index, r.arg_count),
                 };
                 if let Some(t) = t {
                     return Some(t);
@@ -747,12 +747,12 @@ impl FileAnalysis {
                     }
                 }
                 RefKind::FunctionCall { .. } => {
-                    // Call-root chain arm: feed the call's real written arg
-                    // count so an arity-discriminated overload types by the
-                    // args actually passed, not a hardcoded 0.
+                    // Call-root chain arm: feed the call's written arg count
+                    // so an arity-discriminated return types by the args
+                    // actually passed; an uncounted call asks with none.
                     if let Some(t) = self.sub_return_type_at_arity_ctx(
                         &self.refs[recv_idx].target_name,
-                        Some(self.refs[recv_idx].arg_count.unwrap_or(0) as u32),
+                        self.refs[recv_idx].arg_count.map(|c| c as u32),
                         module_index,
                     ) {
                         return Some(t);

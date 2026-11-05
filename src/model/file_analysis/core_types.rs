@@ -1471,11 +1471,20 @@ pub struct Ref {
     #[serde(default)]
     pub folded_from: Option<Span>,
     /// Written argument count at a call site (`FunctionCall` / `MethodCall`):
-    /// the args as spelled, receiver excluded. A structural count the pack
-    /// mints from the argument list; interpretation ("which overload fits")
-    /// lives downstream (`ParamArity::fit`, overload ranking, arity-
-    /// discriminated return typing). `None` when unminted (Perl refs, non-call
-    /// kinds).
+    /// the args as spelled, receiver excluded. A structural count the
+    /// producer mints from the argument list; interpretation ("which overload
+    /// fits", which `UnionOnArgs` arm) lives downstream (`ParamArity::fit`,
+    /// overload ranking, arity-discriminated return typing).
+    ///
+    /// `None` when the call site cannot count its arguments, and on refs that
+    /// are not written calls (imports, `\&f`, plugin-synthesized calls). Perl
+    /// counts values, not tokens (`cst::call_arg_count`): an argument that
+    /// flattens (`@args`, `%h`, `map`, a range) makes the whole count `None`,
+    /// as does `&f;`, which passes the caller's `@_`. Never a lower bound:
+    /// readers dispatch on an exact count, and a guessed one picks the wrong
+    /// arm where `None` falls back to the arm a caller-less query gets. A
+    /// nested call counts as one value. A pack's count is its document's
+    /// `@arity.arg` items, a spread among them.
     #[serde(default)]
     pub arg_count: Option<usize>,
 }

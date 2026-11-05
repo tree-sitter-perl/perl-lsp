@@ -732,16 +732,18 @@ impl FileAnalysis {
     ///     the narrowing witness at the use-site point, ahead of the
     ///     functional chase (docs/adr/flow-narrowing.md); `is_element_
     ///     place` tells a real place from a scalar deref.
-    ///   * function-call receiver → the zero-arg return of the named sub
-    ///     (its ref spans only the name, invisible to the exact-span read).
+    ///   * function-call receiver → the named sub's return at the call's
+    ///     written arity (its ref spans only the name, invisible to the
+    ///     exact-span read).
     ///   * any recorded expression → `expr_type_at_span` (scalar/array/
     ///     hash reads, baked literals, and chain receivers — its
     ///     exact-span call-ref arm keeps Parametric flavors intact, so
     ///     DBIC row-class narrowing survives the hop).
     ///   * cross-file chain receiver → re-resolve the receiver's class
     ///     fresh with the index and chase `PackageSymbol` through
-    ///     `find_method_return_type` (the one structure-from-refs step
-    ///     the build-time bag can't pre-record).
+    ///     `find_method_return_type` at the receiver call's written arity
+    ///     (the one structure-from-refs step the build-time bag can't
+    ///     pre-record).
     ///   * `$var` / `@var` / `%var` → `inferred_type_via_bag_ctx` (so
     ///     cross-file enrichment's variable types compose), with the
     ///     conventional-invocant enclosing-class fallback.
@@ -827,7 +829,7 @@ impl FileAnalysis {
                     if let RefKind::FunctionCall { .. } = &self.refs[recv_idx].kind {
                         if let Some(t) = self.sub_return_type_at_arity(
                             &self.refs[recv_idx].target_name,
-                            Some(0),
+                            self.refs[recv_idx].arg_count.map(|c| c as u32),
                         ) {
                             if !self.dispatch_classes_of(&t, module_index).is_empty() {
                                 return Some(t);
@@ -879,7 +881,7 @@ impl FileAnalysis {
                                 if crate::model::conventions::is_constructor_name(recv_method) {
                                     return Some(InferredType::ClassName(recv_class));
                                 }
-                                self.find_method_return_type(&recv_class, recv_method, module_index, None)
+                                self.find_method_return_type(&recv_class, recv_method, module_index, recv.arg_count)
                             })
                             .collect();
                         if let Some(t) = join_all(&answers, &self.type_order(module_index)) {

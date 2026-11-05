@@ -333,6 +333,23 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// `add_bound_ref` for a written call: the ref carries the count of the
+    /// arguments it was written with (`cst::call_arg_count`), so a reader
+    /// typing the call at query time asks the arm that count picks.
+    pub(super) fn add_call_ref(
+        &mut self,
+        kind: RefKind,
+        span: Span,
+        target_name: String,
+        binding: Option<crate::model::file_analysis::RefBinding>,
+        arg_count: Option<usize>,
+    ) {
+        self.add_bound_ref(kind, span, target_name, AccessKind::Read, binding);
+        if let Some(r) = self.refs.last_mut() {
+            r.arg_count = arg_count;
+        }
+    }
+
     // ---- Plugin dispatch helpers ----
 
     /// Normalize a call's `arguments` field into a flat list of argument

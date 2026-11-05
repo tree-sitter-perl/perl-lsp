@@ -1181,10 +1181,7 @@ impl<'a> Builder<'a> {
                     crate::cst::varname_child(n).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
                 }
                 "goto_expression" => true,
-                "function_call_expression" => {
-                    n.child_by_field_name("arguments").is_none()
-                        && n.utf8_text(self.source).is_ok_and(|t| t.starts_with('&') && !t.ends_with(')'))
-                }
+                "function_call_expression" => crate::cst::passes_callers_args(n, self.source),
                 _ => self.is_bare_call_of(n, "shift") || self.is_bare_call_of(n, "pop"),
             };
             if hit {

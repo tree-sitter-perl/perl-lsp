@@ -1882,3 +1882,54 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
+
+// ---- Call arg counts ----
+
+/// The written argument count on the call ref named `name`.
+fn arg_count_of(fa: &FileAnalysis, name: &str) -> Option<usize> {
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| {
+            r.target_name == name && matches!(r.kind, RefKind::FunctionCall | RefKind::MethodCall { .. })
+        })
+        .unwrap_or_else(|| panic!("no call ref for {name}"));
+    r.arg_count
+}
+
+#[test]
+fn a_call_ref_carries_its_written_arg_count() {
+    let fa = build_fa("sub f {}\nf(1, 2);\nmy $o; $o->m(1);\n$o->bare;\n");
+    assert_eq!(arg_count_of(&fa, "f"), Some(2));
+    assert_eq!(arg_count_of(&fa, "m"), Some(1));
+    assert_eq!(arg_count_of(&fa, "bare"), Some(0));
+}
+
+#[test]
+fn an_arg_count_counts_values_not_tokens() {
+    // Grouping parens splice, `()` is nothing, `qw` is one value a word, and
+    // a nested call is one value — the fat comma is a comma.
+    let fa = build_fa(
+        "sub f {} sub g {} sub h {} sub k {}\n\
+         f((1, 2), ());\ng(qw(a b c));\nh(name => k(), 3);\n",
+    );
+    assert_eq!(arg_count_of(&fa, "f"), Some(2));
+    assert_eq!(arg_count_of(&fa, "g"), Some(3));
+    assert_eq!(arg_count_of(&fa, "h"), Some(3));
+}
+
+#[test]
+fn an_uncountable_argument_list_stays_none() {
+    for (src, name) in [
+        ("sub f {}\nmy @args; f(1, @args);\n", "f"),
+        ("my ($o, %h); $o->m(%h);\n", "m"),
+        ("my ($o, @l); $o->m(map { $_ } @l);\n", "m"),
+        ("my $o; $o->m(1 .. 3);\n", "m"),
+        ("sub f {}\nsub g { &f; }\n", "f"),
+    ] {
+        let fa = build_fa(src);
+        assert_eq!(arg_count_of(&fa, name), None, "{src}");
+    }
+    // `&f()` writes an empty list; only the bare `&f;` hands on `@_`.
+    assert_eq!(arg_count_of(&build_fa("sub f {}\nsub g { &f(); }\n"), "f"), Some(0));
+}

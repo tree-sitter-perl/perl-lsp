@@ -1858,3 +1858,52 @@ fn moo_new_resolves_through_the_base_or_stays_unresolved() {
     }
     assert!(!fa.class_has_unresolved_ancestor("Foo", Some(&idx)));
 }
+
+/// Where goto-def lands from the `n`-th (0-based) `->member` in `src`:
+/// the row of the declaration it reaches.
+fn member_def_row(src: &str, member: &str, n: usize) -> Option<usize> {
+    let fa = build_fa(src);
+    let needle = format!("->{member}");
+    let byte = src.match_indices(&needle).nth(n).expect("member call").0 + 2;
+    let prefix = &src[..byte];
+    let point = tree_sitter::Point {
+        row: prefix.matches('\n').count(),
+        column: byte - prefix.rfind('\n').map_or(0, |i| i + 1),
+    };
+    fa.find_definition(point, None).map(|s| s.start.row)
+}
+
+#[test]
+fn a_fluent_setter_types_the_next_hop_and_a_getter_does_not() {
+    let src = "package My::Thing;
+use Mojo::Base -base;
+has 'name';
+sub other { 1 }
+sub go {
+    my $o = My::Thing->new;
+    $o->name('x')->other;
+    $o->name->other;
+}
+";
+    assert_eq!(member_def_row(src, "other", 0), Some(3), "setter: `other` on My::Thing");
+    assert_eq!(member_def_row(src, "other", 1), None, "getter: the value is not a My::Thing");
+}
+
+/// A function-call receiver types by the arity the call is written with:
+/// `thing(1)` takes the arm `unless @_` skips.
+#[test]
+fn a_call_receiver_types_at_its_written_arity() {
+    let src = "package My::A;
+sub new { bless {}, shift }
+sub only_a { 1 }
+package My::B;
+sub new { bless {}, shift }
+sub only_b { 1 }
+package main;
+sub thing { return My::A->new unless @_; return My::B->new }
+thing(1)->only_b;
+thing()->only_a;
+";
+    assert_eq!(member_def_row(src, "only_b", 0), Some(5));
+    assert_eq!(member_def_row(src, "only_a", 0), Some(2));
+}

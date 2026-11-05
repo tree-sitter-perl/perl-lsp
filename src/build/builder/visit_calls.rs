@@ -351,14 +351,14 @@ impl<'a> Builder<'a> {
                 // the full path (the hash-key binding + provenance rely on
                 // it); resolution sites read `unqualified_target_name()`.
                 let ref_span = fq_tail_span(func_node, raw);
-                self.add_bound_ref(
+                self.add_call_ref(
                     RefKind::FunctionCall,
                     ref_span,
                     name.to_string(),
-                    AccessKind::Read,
                     resolved_package
                         .clone()
                         .map(|package| RefBinding::Function { package }),
+                    crate::cst::call_arg_count(node, self.source),
                 );
                 // Even-position stringy args → HashKeyAccess refs
                 // owned by `Sub{resolved_package, name}`. Same
