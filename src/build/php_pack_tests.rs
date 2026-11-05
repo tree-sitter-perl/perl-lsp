@@ -1505,6 +1505,7 @@ class Timer {
 /// A body that sees no variable around it answers no type for one: a
 /// function's `$config` is not the script's, and a method's bare `$peer`
 /// is not the property a promoted parameter declares.
+#[cfg(feature = "php")]
 #[test]
 fn a_closed_body_types_no_variable_of_the_code_around_it() {
     use crate::model::file_analysis::InferredType as T;
@@ -1541,6 +1542,7 @@ fn locals(fa: &FileAnalysis) -> Vec<(String, usize, usize)> {
 /// a branch is no block of its own, and every later write is a write of
 /// that declaration. A closure's own writes are its own, and `use (&$z)`
 /// declares `$z` in the function around the closure.
+#[cfg(feature = "php")]
 #[test]
 fn a_write_declares_its_variable_once_per_function() {
     let fa = php(VARS);
@@ -1572,6 +1574,7 @@ fn a_write_declares_its_variable_once_per_function() {
 /// A by-name ask agrees with the binding a read carries: a read above the
 /// write that declares its variable (a loop's) binds to that declaration,
 /// and `resolve_variable` there names it too.
+#[cfg(feature = "php")]
 #[test]
 fn a_by_name_ask_names_the_declaration_the_read_binds() {
     let src = "<?php\nfunction f($xs) {\n    foreach ($xs as $v) {\n        if ($acc) { $acc->add($v); }\n        $acc = $v;\n    }\n}\n";
@@ -1584,6 +1587,7 @@ fn a_by_name_ask_names_the_declaration_the_read_binds() {
 
 /// A caught exception is an instance of the one class its clause names; a
 /// clause naming several states no single type.
+#[cfg(feature = "php")]
 #[test]
 fn a_caught_exception_is_its_clauses_class() {
     use crate::model::file_analysis::InferredType as T;
@@ -1596,6 +1600,7 @@ fn a_caught_exception_is_its_clauses_class() {
 /// to its right-hand side, so a declared return flows through it, a write
 /// replaces what came before, and a value inside the right-hand side (a
 /// subscripted call) is not the variable's.
+#[cfg(feature = "php")]
 #[test]
 fn a_variables_value_flows_from_its_last_write() {
     use crate::model::file_analysis::{InferredType as T, Span};
@@ -1663,6 +1668,7 @@ fn a_write_highlights_as_a_write() {
 /// An assignment writes the place its left side denotes: `$this->p = v`
 /// gives the property `v`'s value and writes its token, and a compound
 /// write writes it too.
+#[cfg(feature = "php")]
 #[test]
 fn an_assignment_writes_the_member_its_left_side_reads() {
     use crate::model::file_analysis::{AccessKind, RefKind};
@@ -1697,6 +1703,7 @@ class Box {
 
 /// A function sees no variable of the file around it: the script's
 /// `$config` and the function's are two variables.
+#[cfg(feature = "php")]
 #[test]
 fn a_function_sees_no_variable_of_the_code_around_it() {
     let src = "<?php\n$config = 1;\nfunction f() { $config = 2; return $config; }\n$config;\n";
