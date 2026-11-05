@@ -502,10 +502,6 @@ impl FileAnalysis {
         }
 
         // ---- Refs: variables, functions, methods, properties, namespaces ----
-        let imported_names: std::collections::HashSet<&str> = self.imports.iter()
-            .flat_map(|imp| imp.imported_symbols.iter().map(|s| s.local_name.as_str()))
-            .collect();
-
         // Local `use constant` decls, keyed by (package, name) — usages color
         // like the declaration. Package-keyed so a same-named non-constant sub
         // in a different package isn't mis-colored as a constant (the recolor
@@ -541,15 +537,16 @@ impl FileAnalysis {
                     let is_const = r.resolved_package().map_or(false, |pkg| {
                         constant_names.contains(&(pkg, r.unqualified_target_name(self.names())))
                     });
+                    let scope = self.import_scope_at(r.span.start);
                     let token_type = if is_const {
                         TOK_ENUM_MEMBER
-                    } else if self.framework_imports.contains(r.target_name.as_str()) {
+                    } else if self.imports.keyword(scope, &r.target_name) {
                         TOK_MACRO
                     } else {
                         TOK_FUNCTION
                     };
                     let mut mods = 0;
-                    if imported_names.contains(r.target_name.as_str()) {
+                    if self.imports.binding(scope, &r.target_name).is_some() {
                         mods |= 1 << MOD_DEFAULT_LIBRARY;
                     }
                     tokens.push(PerlSemanticToken { span: r.span, token_type, modifiers: mods });

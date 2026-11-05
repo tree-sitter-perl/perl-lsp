@@ -166,9 +166,9 @@ impl<'a> CandidateSet<'a> {
             }));
         }
         if let (true, Some(idx)) = (import_slot, self.module_index) {
-            import_candidates(self.origin, idx, mask, &mut out);
+            import_candidates(self.origin, self.point, idx, mask, &mut out);
             if mask.contains(RoleMask::DEPENDENCY) {
-                unimported_export_candidates(self.origin, idx, &mut out);
+                unimported_export_candidates(self.origin, self.point, idx, &mut out);
             }
         }
         if !prefix.is_empty() {

@@ -20,6 +20,8 @@
 
 fn id() { "mojo-events" }
 
+fn api() { 1 }
+
 fn triggers() {
     [
         #{ ClassIsa: "Mojo::EventEmitter" },

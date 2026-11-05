@@ -165,6 +165,11 @@ pub(super) fn pack_inline_owner_set(fa: &crate::model::file_analysis::FileAnalys
 /// cursor anywhere in `STRING` of `dynamic::STRING`. Walks back to the token
 /// start (like `word_at_point`), then scans a leading `::` scope.
 /// `None` when the token has no leading `::` scope.
+///
+/// `::` here is an OWNER operator, not the namespace separator: C++ spells
+/// both with it, PHP spells static access with it and namespaces with `\`,
+/// Python has none. `NameSpellings` has no owner-operator field yet, so this
+/// stays C++'s spelling (`layering_tests::qualified_names_split_through_the_spellings`).
 pub(crate) fn qualifier_at_point(source: &str, point: tree_sitter::Point) -> Option<&str> {
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
     let b = source.as_bytes();
@@ -397,7 +402,12 @@ pub(super) fn names_visible_macro(
 /// plain unqualified call) matches rather than silently dropping the site —
 /// references bias to recall under partial attribution, and the `def_paths`
 /// closure gate has already pinned file connectivity.
-pub(super) fn pkg_agrees(relative: bool, a: Option<&str>, b: Option<&str>) -> bool {
+pub(super) fn pkg_agrees(
+    names: &crate::model::file_analysis::NameSpellings,
+    relative: bool,
+    a: Option<&str>,
+    b: Option<&str>,
+) -> bool {
     if a == b {
         return true;
     }
@@ -406,7 +416,8 @@ pub(super) fn pkg_agrees(relative: bool, a: Option<&str>, b: Option<&str>) -> bo
     }
     match (a, b) {
         (Some(x), Some(y)) => {
-            x.rsplit("::").next().unwrap_or(x) == y.rsplit("::").next().unwrap_or(y)
+            crate::model::file_analysis::split_qualified(x, names).1
+                == crate::model::file_analysis::split_qualified(y, names).1
         }
         _ => true,
     }
@@ -564,7 +575,7 @@ pub(super) fn symbol_defines_target(
                 _ => None,
             };
             let sym_pkg = sym.package.as_deref().or(recovered.as_deref());
-            let in_scope = pkg_agrees(relative, sym_pkg, package.as_deref())
+            let in_scope = pkg_agrees(analysis.names(), relative, sym_pkg, package.as_deref())
                 || (target.scope == OverrideScope::Hierarchy
                     && target
                         .method_classes
@@ -852,21 +863,18 @@ pub(super) fn collect_from_analysis(
 ) {
     use crate::model::file_analysis::HashKeyOwner;
     // Pack languages: name lookups during matching (invocant typing, the
-    // typedef chase) must resolve against THIS file's include closure — the
-    // same visibility goto-def uses at this file's cursors — or a scanned
-    // file's `o->op_type` types against a globally-arbitrary same-named
-    // candidate and the site silently drops out. Transparent for Perl
-    // (empty closure = the plain index).
+    // typedef chase) must resolve against THIS file's scope — the same
+    // visibility goto-def uses at this file's cursors — or a scanned file's
+    // `o->op_type` types against a globally-arbitrary same-named candidate
+    // and the site silently drops out.
+    // TODO(perl-scanned-scope): a scanned Perl file stays on the plain index
+    // although the set scopes a Perl ORIGIN by its search path; aligning the
+    // two changes Perl reference answers and costs a scope per scanned file,
+    // so it lands as its own measured change.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
-            // Guarded by a non-empty include closure — a pack-only shape.
-            scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
-                idx,
-                &analysis.pack.include_closure,
-                Some(file),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
-            ));
+        Some(idx) if crate::build::language_driver::LanguageRegistry::is_pack_language(&analysis.language) => {
+            scoped_storage = Some(super::origin_scope(idx, analysis, Some(file)));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
             Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)
@@ -1073,7 +1081,7 @@ pub(super) fn collect_from_analysis(
                 // tolerance would re-open the bare-name sweep on members.
                 let ns_relative = relative_ns && matches!(target.kind, TargetKind::Sub { .. });
                 let pkg_matches = |pkg: &Option<String>| {
-                    pkg_agrees(ns_relative, pkg.as_deref(), scope.as_deref())
+                    pkg_agrees(analysis.names(), ns_relative, pkg.as_deref(), scope.as_deref())
                         // Inline-namespace transparency, BOTH directions. A
                         // qualified `mylib::is_thing` / `absl::X` keys on the
                         // transparent parent while the def sits under an inline

@@ -27,14 +27,12 @@ pub mod codes {
 /// lookup is the file's own scope, so only a use-map language reaches it.
 pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
     use crate::build::language_driver::LanguageRegistry;
-    use crate::model::file_analysis::{CrossFileLookup, PackVisibility, ScopedLookup, VisibilityAxis};
-    let visibility = LanguageRegistry::pack_visibility(&analysis.language);
-    if visibility != PackVisibility::NameKeyed {
+    use crate::model::file_analysis::{CrossFileLookup, PackVisibility};
+    if LanguageRegistry::pack_visibility(&analysis.language) != PackVisibility::NameKeyed {
         return Vec::new();
     }
     let base: &dyn CrossFileLookup = module_index;
-    let axis = VisibilityAxis::for_origin(analysis, None, base, visibility);
-    let scoped = ScopedLookup::new(base, &analysis.pack.include_closure, None, axis);
+    let scoped = crate::index::resolve::origin_scope(base, analysis, None);
     analysis
         .widened_class_references(&scoped)
         .into_iter()
@@ -171,8 +169,10 @@ pub fn collect_diagnostics(
     // (unresolved-ref × import) on every diagnostics publish (every keystroke).
     // Diagnostics need only the import + verdict, not the producer path or the
     // remote name `classify_import` also returns — so neither is computed here.
+    // A `use` binds in its own package only, so the snapshot is taken per
+    // package, the first time a ref in that package asks.
     struct ImportBinding<'a> {
-        import: &'a crate::model::file_analysis::Import,
+        import: crate::model::file_analysis::ScopedImport<'a>,
         /// local → remote for everything this `use` brings into scope.
         bound: HashMap<String, String>,
         /// Names on the producer's export surface; `None` when not yet cached.
@@ -183,45 +183,56 @@ pub fn collect_diagnostics(
     // render, so their sum bounds the per-file cost from the inside rather than
     // by subtraction — which is the step that produced two wrong per-item costs
     // today.
-    let _g_imports = crate::util::ghost_stats::ScopedNs::start("diag.1_import_bindings");
-    let import_bindings: Vec<ImportBinding> = analysis
-        .imports
-        .iter()
-        .map(|import| {
-            // Union the export surface across EVERY candidate file of the
-            // producer — a split exporter's surface (and thus a false
-            // "not exported" verdict) must not hinge on the name-slot winner.
-            let cands = module_index.visible_def_candidates(&import.module_name);
-            let (bound, exported) = if !cands.is_empty() {
-                let mut bound: HashMap<String, String> = HashMap::new();
-                let mut all: std::collections::HashSet<String> = Default::default();
-                for c in &cands {
-                    let surface = c.analysis.export_surface_with_index(module_index);
-                    bound.extend(crate::model::file_analysis::imported_names(import, &surface));
-                    all.extend(surface.all_names());
-                }
-                (bound, Some(all))
-            } else {
-                // Producer not cached yet: only an explicitly-named import can be
-                // judged `Brought` (tags / bare-use defaults need the surface).
-                let bound = import
-                    .imported_symbols
-                    .iter()
-                    .map(|s| (s.local_name.clone(), s.remote().to_string()))
-                    .collect();
-                (bound, None)
-            };
-            ImportBinding { import, bound, exported }
-        })
-        .collect();
+    let snapshot = |scope| -> Vec<ImportBinding> {
+        let _g_imports = crate::util::ghost_stats::ScopedNs::start("diag.1_import_bindings");
+        analysis
+            .imports
+            .in_scope(scope)
+            .map(|import| {
+                // Union the export surface across EVERY candidate file of the
+                // producer — a split exporter's surface (and thus a false
+                // "not exported" verdict) must not hinge on the name-slot winner.
+                let cands = module_index.visible_def_candidates(&import.module_name);
+                let (bound, exported) = if !cands.is_empty() {
+                    let mut bound: HashMap<String, String> = HashMap::new();
+                    let mut all: std::collections::HashSet<String> = Default::default();
+                    for c in &cands {
+                        let surface = c.analysis.export_surface_with_index(module_index);
+                        bound.extend(crate::model::file_analysis::imported_names(import, &surface));
+                        all.extend(surface.all_names());
+                    }
+                    (bound, Some(all))
+                } else {
+                    // Producer not cached yet: only an explicitly-named import can be
+                    // judged `Brought` (tags / bare-use defaults need the surface).
+                    let bound = import
+                        .explicit_symbols()
+                        .iter()
+                        .map(|s| (s.local_name.clone(), s.remote().to_string()))
+                        .collect();
+                    (bound, None)
+                };
+                ImportBinding { import, bound, exported }
+            })
+            .collect()
+    };
+    let by_package: std::cell::RefCell<HashMap<&str, std::rc::Rc<Vec<ImportBinding>>>> =
+        Default::default();
+    let bindings_at = |at: tree_sitter::Point| -> std::rc::Rc<Vec<ImportBinding>> {
+        let scope = analysis.import_scope_at(at);
+        by_package
+            .borrow_mut()
+            .entry(scope.package())
+            .or_insert_with(|| std::rc::Rc::new(snapshot(scope)))
+            .clone()
+    };
 
-    // Best resolution of a call name across all imports: `Brought` dominates
-    // `ExportedNotBrought`. Mirrors `resolve_imported_function_classified` over
-    // the precomputed snapshot.
-    drop(_g_imports);
-    let resolve_name = |name: &str| -> Option<(&crate::model::file_analysis::Import, ImportResolution)> {
-        let mut best: Option<(&crate::model::file_analysis::Import, ImportResolution)> = None;
-        for b in &import_bindings {
+    // Best resolution of a call name across the imports in force at `at`:
+    // `Brought` dominates `ExportedNotBrought`. Mirrors
+    // `resolve_imported_function_classified` over the precomputed snapshot.
+    let resolve_name = |name: &str, at: tree_sitter::Point| -> Option<(String, ImportResolution)> {
+        let mut best: Option<(String, ImportResolution)> = None;
+        for b in bindings_at(at).iter() {
             let res = if b.bound.contains_key(name) {
                 ImportResolution::Brought
             } else if b.exported.as_ref().is_some_and(|e| e.contains(name)) {
@@ -232,7 +243,7 @@ pub fn collect_diagnostics(
             if matches!(best, Some((_, ImportResolution::Brought))) {
                 continue;
             }
-            best = Some((b.import, res));
+            best = Some((b.import.module_name.clone(), res));
         }
         best
     };
@@ -271,7 +282,7 @@ pub fn collect_diagnostics(
         }
 
         // Skip functions implicitly imported by OOP frameworks (has, extends, etc.)
-        if analysis.framework_imports.contains(name.as_str()) {
+        if analysis.imports.keyword(analysis.import_scope_at(r.span.start), name) {
             continue;
         }
 
@@ -289,10 +300,10 @@ pub fn collect_diagnostics(
         // produced ~684 FPs (Moose::Util::TypeConstraints &c.). Traditional
         // opt-in `@EXPORT_OK` on a bare use is suppressed too — accepted.
         let range = span_to_range(r.span);
-        let resolution = resolve_name(name);
+        let resolution = resolve_name(name, r.span.start);
         match resolution {
             Some((_, ImportResolution::Brought)) => continue,
-            Some((import, ImportResolution::ExportedNotBrought)) => {
+            Some((module, ImportResolution::ExportedNotBrought)) => {
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Some(DiagnosticSeverity::HINT),
@@ -300,10 +311,10 @@ pub fn collect_diagnostics(
                     source: Some("perl-lsp".into()),
                     message: format!(
                         "'{}' is exported by {} but not imported",
-                        name, import.module_name,
+                        name, module,
                     ),
                     data: Some(serde_json::json!({
-                        "module": import.module_name,
+                        "module": module,
                         "function": name,
                     })),
                     ..Default::default()
@@ -362,20 +373,18 @@ pub fn collect_diagnostics(
     // Undeclared variables — what `use strict 'vars'` rejects. On by default:
     // a global nobody declared is the typo-shaped bug strict exists to catch.
     // A name an import binds is declared by its exporter. A bare or `:tag`
-    // import whose producer isn't cached yet may bind any variable, so the
-    // file stays silent until it resolves (resolution re-publishes).
-    let surface_unknown = import_bindings.iter().any(|b| {
-        b.exported.is_none()
-            && !b.import.empty_import
-            && (b.import.imported_symbols.is_empty()
-                || b.import.imported_symbols.iter().any(|s| {
-                    s.local_name.starts_with(':') || s.local_name.starts_with('-')
-                }))
-    });
-    if !surface_unknown && !options.disable_missing_declaration {
+    // import whose producer isn't cached yet may bind any variable, so its
+    // package stays silent until it resolves (resolution re-publishes).
+    if !options.disable_missing_declaration {
         for r in analysis.undeclared_variable_uses() {
+            let surface_unknown = bindings_at(r.span.start)
+                .iter()
+                .any(|b| b.exported.is_none() && b.import.needs_surface());
+            if surface_unknown {
+                continue;
+            }
             let glob = crate::model::conventions::glob_of_variable(&r.target_name);
-            let brought = |n: &str| matches!(resolve_name(n), Some((_, ImportResolution::Brought)));
+            let brought = |n: &str| matches!(resolve_name(n, r.span.start), Some((_, ImportResolution::Brought)));
             if brought(&r.target_name) || brought(&glob) {
                 continue;
             }
@@ -522,9 +531,10 @@ pub fn collect_diagnostics(
         });
     }
 
-    // 5g: undef-deref (D1) — a method call or hash deref on a receiver the
+    // 5g: undef-deref (D1) — a method or code call on a receiver the
     // lattice proves is `Undef` at that point (the `else` of `if defined`,
-    // the fall-through after `return if defined`, an `unless defined` body).
+    // the fall-through after `return if defined`, an `unless defined` body);
+    // an element deref autovivifies instead.
     // Runtime is a hard die. Maximal confidence — the type *is* undef, not
     // *may be* — so this is always-on `WARNING`, the one narrowing diagnostic
     // that doesn't wait behind an opt-in flag (rule #10: it reads the type
@@ -536,7 +546,7 @@ pub fn collect_diagnostics(
     // not "is" → opt-in, INFORMATION, with a guard-insertion quick-fix.
     for site in analysis.deref_receiver_sites(Some(module_index)) {
         match &site.receiver_ty {
-            InferredType::Undef => {
+            InferredType::Undef if site.dies_on_undef => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -550,7 +560,7 @@ pub fn collect_diagnostics(
                     ..Default::default()
                 });
             }
-            InferredType::Optional(_) if options.optional_deref => {
+            InferredType::Optional(_) if options.optional_deref && site.dies_on_undef => {
                 diagnostics.push(Diagnostic {
                     range: span_to_range(site.span),
                     severity: Some(DiagnosticSeverity::INFORMATION),
@@ -580,7 +590,7 @@ pub fn collect_diagnostics(
         if options.deref_shape {
             if let Some(demanded) = site.form.demands_rep() {
                 if let Some(rep) = analysis
-                    .guard_narrowed_rep(&site.receiver, site.span.start)
+                    .guard_narrowed_rep(&site.subject, site.span.start)
                     .and_then(|t| crate::model::file_analysis::RepKind::of(&t))
                 {
                     if rep != demanded {
@@ -613,7 +623,7 @@ pub fn collect_diagnostics(
                 GuardVerdict::AlwaysTrue => "redundant-guard",
                 GuardVerdict::AlwaysFalse => "contradictory-guard",
             };
-            let message = render_guard_message(&g);
+            let message = render_guard_message(analysis, &g);
             diagnostics.push(Diagnostic {
                 range: span_to_range(g.span),
                 severity: Some(DiagnosticSeverity::INFORMATION),
@@ -794,14 +804,17 @@ pub fn collect_diagnostics(
 /// Render a D3/D4 verdict into its user-facing message. The phrasing lives
 /// here in the adapter, not on the neutral `FileAnalysis` IR — a per-language
 /// concern in the multi-language design (`language_driver.rs`).
-fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> String {
+fn render_guard_message(
+    analysis: &FileAnalysis,
+    g: &crate::model::file_analysis::GuardRedundancy,
+) -> String {
     use crate::model::file_analysis::GuardPredicate;
     let subject = &g.subject;
     let fact = match (g.satisfied, &g.predicate) {
         (true, GuardPredicate::Defined) => format!("'{subject}' is always defined here"),
         (false, GuardPredicate::Defined) => format!("'{subject}' is undef here"),
-        (true, GuardPredicate::IsType(t)) => format!("'{subject}' is already {}", format_inferred_type(t)),
-        (false, GuardPredicate::IsType(t)) => format!("'{subject}' is not {} here", format_inferred_type(t)),
+        (true, GuardPredicate::IsType(t)) => format!("'{subject}' is already {}", analysis.render_type(t)),
+        (false, GuardPredicate::IsType(t)) => format!("'{subject}' is not {} here", analysis.render_type(t)),
     };
     let consequence = match g.verdict {
         GuardVerdict::AlwaysTrue => "this guard is redundant",

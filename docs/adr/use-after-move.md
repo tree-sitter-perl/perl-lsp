@@ -3,7 +3,7 @@
 `std::move(x)` leaves `x` in a valid-but-unspecified moved-from state; a
 subsequent READ of `x` before it is reassigned is a bug (clang-tidy's
 `bugprone-use-after-move`). The machinery to record moves and the FlowEdge
-rebind-cutoff already existed (`moved_from`, `RebindIndex` — the same
+rebind-cutoff already existed (`moved_from`, `rebind_index` — the same
 cutoff the narrowing tier uses). The naive check on top of it emitted ~17 false
 positives over baseline library headers (spdlog/fmt/onednn) and was parked
 dark.
@@ -65,6 +65,24 @@ data the builder already records — no tree, no CFG.
 Result over spdlog/fmt/onednn: 17 → 0 FP, with the canonical true positives
 (a straight-line local moved then `x.use()`d, cleared by reassignment or a
 reset method) still flagged.
+
+## Moves of places
+
+A move's subject is a `Place` (`model/file_analysis/place.rs`): `x`, or a
+member of a local (`std::move(p.msg)`), rooted at the local's declaration
+when the skeleton assembles (`query_extract/places.rs`). A bare member name
+in a member function (`std::move(name_)`) is rooted at the body's elided
+receiver (`Binding::Receiver`, the method), which nothing in the body
+rebinds. The assembly also mints the move's own accesses on its `MoveSite`:
+the reads that read into the moved part (`p.msg`, `p.msg.size()`; not
+`p.id`, and not `p` handed on whole, which reads none of the moved state
+itself — the false positive is the costlier error here) and the
+place writes that give it a value again (`p.msg = …`, `p.msg.clear()`). So
+the check matches reads by declaration and path, never by spelling, and a
+sibling member of a moved member is never flagged. Gate E still applies to
+a part of a parameter: the base-subobject move of class 2 moves `other`
+whole, and which part it feeds is decided by the callee's parameter type,
+which no capture states.
 
 ## Why gates, not a smarter analysis
 

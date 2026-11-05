@@ -85,6 +85,15 @@
   right: (_) @flow.source) @flow.assign
 (augmented_assignment left: (_) @flow.place)
 
+; An augmented assignment and a `del` leave what they name without the
+; value a guard proved, whatever it is: a name rebinds (to the operator's
+; result, or to nothing), a member or element is written.
+(augmented_assignment
+  left: [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement
+  (expression_list [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place]))
+
 (parameters
   (identifier) @def.var.name @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
@@ -162,10 +171,17 @@
 
 ; Annotated assignment: `x: int = ...` — ring 3 is partly IN the tree
 ; here; the annotation emits a direct type witness via the pack's
-; annot_type predicate.
+; annot_type predicate. With a value it is a write, landing once the value
+; is read; a bare `x: int` writes nothing, so its declared type holds from
+; its token and no write replaces it.
 (assignment
   left: (identifier) @flow.target
-  type: (type) @type.annot) @flow.assign
+  type: (type) @type.annot
+  right: (_)) @flow.assign
+(assignment
+  left: (identifier) @flow.target
+  type: (type) @type.annot
+  !right)
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
 ; type yet) so the narrowing cutoff ends a region at the loop.
@@ -234,15 +250,16 @@
 ; expression yields when the test holds, the right of `and`. The pack's
 ; narrow_guard maps the guard + type token to the refinement; core attaches
 ; it in the guard's scope over the arm (an `if` body is no scope in Python).
+; A member subject (`self.x`) narrows the place it denotes.
 (if_statement
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (elif_clause
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (conditional_expression
   (_) @narrow.arm
@@ -251,11 +268,11 @@
   .
   (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type)))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type)))
 (boolean_operator
   left: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   operator: "and"
   right: (_) @narrow.arm)
 

@@ -18,10 +18,17 @@ pub struct LangPack {
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
     pub names: NameSpellings,
+    /// Where a bare function call finds its function. Read by the extractor
+    /// as it names each free call, so no file carries it.
+    pub functions: FunctionLookup,
     /// Which cross-family types the language's joins fold into one another
     /// (`docs/adr/union-types.md`). Registered by language id
-    /// (`conventions::register_lattice`).
+    /// (`conventions::register_conventions`).
     pub lattice: crate::model::file_analysis::LatticeRules,
+    /// The language's word for an engine type tag on a human surface
+    /// (`Bool` → `bool`), registered by id with the lattice; `None` keeps
+    /// the engine's.
+    pub type_display: fn(tag: &str) -> Option<&'static str>,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -106,6 +113,11 @@ pub struct LangPack {
 }
 
 impl LangPack {
+    /// What every file of this language shares, registered by its id.
+    pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display)
+    }
+
     /// Every `&'static str` this pack declares, tagged with the field it
     /// came from: what the rule #15 tripwires walk.
     ///
@@ -121,7 +133,9 @@ impl LangPack {
             id: _,
             query_source: _,
             names: _,
+            functions: _,
             lattice: _,
+            type_display: _,
             shape_name: _,
             default_name: _,
             annot_type: _,
@@ -178,7 +192,8 @@ pub(super) fn param_return_expr(
             })
         }
         InferredType::Parametric(p) => match p {
-            crate::model::file_analysis::ParametricType::ResultSet { .. } => None,
+            crate::model::file_analysis::ParametricType::ResultSet { .. }
+            | crate::model::file_analysis::ParametricType::Row { .. } => None,
             crate::model::file_analysis::ParametricType::Instance { base, args } => {
                 if !args.iter().any(|a| param_return_expr(a, params).is_some()) {
                     return None;
@@ -198,4 +213,23 @@ pub(super) fn param_return_expr(
         },
         _ => None,
     }
+}
+
+/// Where a bare (unqualified) function call finds its function in a
+/// use-map language. A qualified call resolves like a class spelling in
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FunctionLookup {
+    /// The global function of that name.
+    ///
+    /// TODO(module-functions): Python files its functions by bare name, not
+    /// under their module, so a call names the leaf. Filed under the
+    /// module, a call would resolve through the use-map like a class
+    /// spelling (`from app.a import helper`).
+    #[default]
+    Global,
+    /// The namespace in force when it declares the function, else the
+    /// global namespace: PHP's fallback for an unqualified function. (A
+    /// `use function` row names one too; those rows are not read yet.)
+    NamespaceThenGlobal,
 }

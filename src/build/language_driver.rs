@@ -60,11 +60,6 @@ pub struct DriverCaps {
     /// + include-closure consumer eviction). Off = the Perl direct re-index
     /// path handles watcher/save events.
     pub pack_invalidation: bool,
-    /// A bare identifier can name a CROSS-FILE entity with no import
-    /// binding (macro / enum constant / global reached through the include
-    /// closure) — enables the raw-word goto-def/hover fallback lane outside
-    /// the CandidateSet.
-    pub cross_file_words: bool,
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
@@ -284,11 +279,14 @@ pub struct PackDriver {
     /// parses clean), and mint the synthetic base + parent edges. `None` for
     /// packs without a preprocessor.
     member_blocks: Option<fn(&mut tree_sitter::Parser, &str) -> crate::build::cpp_reparse::MemberBlockPlan>,
-    /// Transitive `#include` closure (C preprocessor only): file path + source →
-    /// canonical header paths this file reaches — the cross-file VISIBILITY key
-    /// (`ScopedLookup` ranks `get_cached` candidates by it). `None` for packs
-    /// with no include model.
-    include_closure: Option<fn(&Path, &str) -> (Vec<String>, bool)>,
+    /// Include gather (C preprocessor only): file path + source → the
+    /// canonical header paths this file reaches — the cross-file VISIBILITY
+    /// key (`ScopedLookup` ranks `get_cached` candidates by it) — and where
+    /// each direct directive lands, plus completeness. `None` for packs with
+    /// no include model.
+    include_closure: Option<
+        fn(&Path, &str) -> (std::sync::Arc<crate::build::cpp_reparse::IncludeGather>, bool),
+    >,
     /// External analysis-input fingerprint (see
     /// `LanguageDriver::analysis_input_fingerprint`). `None` = no external
     /// inputs (fingerprint 0).
@@ -393,7 +391,6 @@ impl LanguageDriver for PackDriver {
             // a cached-only open is already full quality, nothing to heal.
             context_gather: self.gather_macros.is_some() || self.include_closure.is_some(),
             pack_invalidation: true,
-            cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
             ..Default::default()
         }
@@ -650,11 +647,16 @@ impl PackDriver {
         // resolver needs; empty on-open until the header cache warms.
         let mut closure_incomplete = false;
         if let (Some(f), Some(p)) = (self.include_closure, path) {
-            let (closure, complete) =
+            let (gather, complete) =
                 crate::util::timings::phase("cpp.include_closure", || f(p, source));
             fa.pack.include_closure = crate::model::file_analysis::path_intern::ClosureList::from_iter(
-                closure.iter().map(|s| s.as_str()),
+                gather.closure.iter().map(|s| s.as_str()),
             );
+            // Each directive's target is minted here, where the resolver's
+            // search anchor is in hand; navigation reads it, never re-resolves.
+            for d in &mut fa.pack.include_directives {
+                d.target = gather.target_of(&d.raw).map(str::to_owned);
+            }
             closure_incomplete = !complete;
         }
         // Never persist an analysis built from a partial dependency view: a
@@ -687,7 +689,7 @@ fn cpp_driver() -> PackDriver {
         gather_macros: Some(crate::build::cpp_reparse::included_macros_pre_expanded),
         collect_macro_defs: Some(crate::build::cpp_reparse::collect_file_macros),
         member_blocks: Some(crate::build::cpp_reparse::plan_member_blocks),
-        include_closure: Some(crate::build::cpp_reparse::include_closure),
+        include_closure: Some(crate::build::cpp_reparse::include_gather),
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
         file_module: None,
@@ -906,7 +908,7 @@ fn inject_member_blocks(
             closed: false,
             captures: Vec::new(),
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {
@@ -1098,8 +1100,13 @@ fn remap_spans(
         macro_body_member_reads: _,
         language: _,
         names: _,
+        functions: _,
         slot_writes,
         member_writes,
+        member_reads,
+        place_narrowings,
+        place_writes,
+        variable_regions,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1189,6 +1196,19 @@ fn remap_spans(
         *receiver = rspan(*receiver);
         *value = rspan(*value);
     }
+    for w in place_writes.iter_mut() {
+        *w = rspan(*w);
+    }
+    for n in place_narrowings.iter_mut() {
+        let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;
+        *subject = rspan(*subject);
+        *region = rspan(*region);
+    }
+    for m in member_reads.iter_mut() {
+        let crate::build::query_extract::MemberRead { span, receiver, member: _ } = m;
+        *span = rspan(*span);
+        *receiver = rspan(*receiver);
+    }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
         sc.span.end = r(sc.span.end);
@@ -1224,9 +1244,10 @@ fn remap_spans(
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
-        | WitnessAttachment::Param { .. } => {}
+        | WitnessAttachment::Param { .. }
+        | WitnessAttachment::Place(_) => {}
     };
-    for w in witnesses.iter_mut() {
+    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);
@@ -1248,8 +1269,10 @@ fn remap_spans(
     for (_, _, span) in label_refs.iter_mut() {
         *span = rspan(*span);
     }
-    for (_, span, _) in moved_from.iter_mut() {
-        *span = rspan(*span);
+    for m in moved_from.iter_mut() {
+        let crate::build::query_extract::MoveCall { spelling: _, subject, call, scope: _ } = m;
+        *subject = rspan(*subject);
+        *call = rspan(*call);
     }
     for span in control_regions.iter_mut() {
         *span = rspan(*span);
@@ -1502,7 +1525,7 @@ impl LanguageRegistry {
             // answers from cached analyses no driver has built this process.
             for d in &drivers {
                 if let Some(pack) = d.lang_pack() {
-                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                    crate::model::conventions::register_conventions(d.id(), || pack.conventions());
                 }
             }
             LanguageRegistry { drivers }
@@ -1647,20 +1670,10 @@ impl LanguageRegistry {
             .unwrap_or_default()
     }
 
-    /// Does this language's pack declare `#include`-style path tokens (the
-    /// header-is-the-module reference goto-def resolves and references
-    /// reverses)? THE gate for the include-token lanes on BOTH serving
-    /// surfaces — the LSP handlers and their CLI/--batch mirrors — so
-    /// editor and gold cannot answer it differently.
-    pub fn has_include_tokens(id: &str) -> bool {
-        use crate::build::query_extract::{Capture, ImportCap};
-        Self::document_mints(id, Capture::Import(ImportCap::Path))
-    }
-
     /// Does this language's pack declare a C-style preprocessor — `#define`
     /// macros reachable through `#include`s that identifier-context
-    /// completion offers? Same asked-never-named contract as
-    /// `has_include_tokens`.
+    /// completion offers? Asked, never named: read off what the language's
+    /// document mints.
     pub fn has_preprocessor_macros(id: &str) -> bool {
         use crate::build::query_extract::{Capture, DefCap, DefPart};
         Self::document_mints(id, Capture::Def { kind: DefCap::Macro, part: DefPart::Node })

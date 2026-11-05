@@ -133,21 +133,58 @@ pub struct Scope {
     /// so a language states the rule once.
     #[serde(default)]
     pub direct: bool,
-    /// Where this scope switches "every variable must be declared" on or
-    /// off (Perl's `use strict 'vars'` / `no strict 'vars'`), in source
-    /// order. Lexical: a nested scope inherits the switch in force where it
-    /// opens, and its own switches end with it.
+    /// The lexical pragma switches made in this scope, in source order
+    /// (`use strict 'vars'`, `no autovivification`). A nested scope
+    /// inherits each hint in force where it opens, and its own switches
+    /// end with it.
     #[serde(default)]
-    pub declaration_rules: Vec<DeclarationRule>,
+    pub hints: Vec<HintSwitch>,
 }
 
-/// One switch of a scope's declaration rule: from `at` on, an undeclared
-/// variable is (`required`) or is not an error.
+/// One switch of a lexical hint: from `at` on, `hint` is on or off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeclarationRule {
+pub struct HintSwitch {
     #[serde(with = "PointDef")]
     pub at: Point,
-    pub required: bool,
+    pub hint: LexicalHint,
+    pub on: bool,
+}
+
+/// A compile-time pragma bit, lexically scoped the way `$^H` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LexicalHint {
+    /// Every variable must be declared (`strict 'vars'`).
+    RequireDeclaration,
+    /// Accesses of this kind through undef don't autovivify
+    /// (`no autovivification` and its categories).
+    NoVivify(VivifyAccess),
+    /// A vivification an on `NoVivify` category avoids dies instead
+    /// (`no autovivification 'strict'`).
+    VivifyStrict,
+}
+
+/// An autovivification category: how an element access reaches through
+/// its receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VivifyAccess {
+    /// An rvalue read (`$y = $x->{k}`).
+    Fetch,
+    /// An lvalue (`$x->{k} = v`, a sub argument, a `foreach` list).
+    Store,
+    /// Under `exists`.
+    Exists,
+    /// Under `delete`.
+    Delete,
+}
+
+/// The category an element access falls in, as far as its syntax says.
+/// Perl decides lvalue-ness per op (a sub's arguments and `sprintf`'s are
+/// lvalues, `join`'s are not), so a context the syntax can't place is
+/// either, and dies only where both would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VivifyContext {
+    Is(VivifyAccess),
+    FetchOrStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,20 +264,32 @@ pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&Na
         .max_by_key(|r| (r.span.start, std::cmp::Reverse(r.span.end)))
 }
 
-/// The innermost scope containing `point`, over a bare slice — the
-/// lookup `FileAnalysis::scope_at` is the method form of, shared with the
-/// use-map, which holds scopes without a `FileAnalysis`.
+/// The innermost scope containing `point`, over a bare slice — the one
+/// answer for the model (`FileAnalysis::scope_at`), the use-map and the
+/// builder alike. Containment, not size: the latest-starting scope, then
+/// the earliest-ending, then the deeper one for an identical span — the
+/// same rule `namespace_range_at` reads its lane by.
 pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
-    let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
-    for scope in scopes {
-        if contains_point(&scope.span, point) {
-            let size = span_size(&scope.span);
-            if best.is_none() || size <= best.unwrap().1 {
-                best = Some((scope.id, size));
-            }
-        }
-    }
-    best.map(|(id, _)| id)
+    scopes
+        .iter()
+        .filter(|s| contains_point(&s.span, point))
+        .max_by(|a, b| {
+            a.span
+                .start
+                .cmp(&b.span.start)
+                .then(b.span.end.cmp(&a.span.end))
+                .then_with(|| scope_depth(scopes, a.id).cmp(&scope_depth(scopes, b.id)))
+        })
+        .map(|s| s.id)
+}
+
+/// How many scopes enclose `id` (the file scope is 0). "Nearer" between two
+/// scopes on one chain is the deeper one; a span's size never says so.
+pub fn scope_depth(scopes: &[Scope], id: ScopeId) -> usize {
+    std::iter::successors(scopes.get(id.0 as usize).and_then(|s| s.parent), |p| {
+        scopes.get(p.0 as usize).and_then(|s| s.parent)
+    })
+    .count()
 }
 
 /// The statement-form sections a builder's walk still has running, by the
@@ -374,27 +423,6 @@ pub struct NameSpellings {
     /// Whether a member access reaches an instance's slots
     /// (`FileAnalysis::slot_class_of`).
     pub instance_slots: InstanceSlots,
-    /// Where a use-map language's bare function call finds its function.
-    pub functions: FunctionLookup,
-}
-
-/// Where a bare (unqualified) function call finds its function in a
-/// use-map language. A qualified call resolves like a class spelling in
-/// both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum FunctionLookup {
-    /// The global function of that name.
-    ///
-    /// TODO(module-functions): Python files its functions by bare name, not
-    /// under their module, so a call names the leaf. Filed under the
-    /// module, a call would resolve through the use-map like a class
-    /// spelling (`from app.a import helper`).
-    #[default]
-    Global,
-    /// The namespace in force when it declares the function, else the
-    /// global namespace: PHP's fallback for an unqualified function. (A
-    /// `use function` row names one too; those rows are not read yet.)
-    NamespaceThenGlobal,
 }
 
 /// Whether a language's member access (`obj.x`) reaches the slots an
@@ -517,7 +545,6 @@ impl NameSpellings {
         construction: ConstructionKey::Constructor,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
-        functions: FunctionLookup::Global,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -535,7 +562,6 @@ impl NameSpellings {
             construction: ConstructionKey::Constructor,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
-            functions: FunctionLookup::Global,
         }
     }
 
@@ -591,7 +617,7 @@ bitflags::bitflags! {
     /// language maps its own attribute spellings onto these where it
     /// mints the symbol — a pack at skeleton conversion through
     /// `TryFrom<&str>` over the canonical names, Perl through
-    /// `conventions::field_attribute_flag` — and consumers ask
+    /// `conventions::field_attribute_flag` onto those same names — and consumers ask
     /// `contains(..)`, never compare an attribute string. Closed on
     /// purpose: every flag so far has a language-generic meaning, and the
     /// set rides the cache blob (`docs/adr/symbol-flags.md`).
@@ -684,8 +710,9 @@ impl std::fmt::Display for UnknownAttribute {
 }
 
 /// The canonical attribute vocabulary — the ONE table from a spelling to
-/// a flag. A pack's skeleton conversion and its overlay validation both
-/// go through it, so a spelling that mints nothing is an error at the
+/// a flag. A pack's skeleton conversion, its overlay validation and Perl's
+/// field attributes all go through it
+/// (`layering_tests::one_table_maps_spellings_to_flags`), so a spelling that mints nothing is an error at the
 /// producer rather than a silent skip.
 impl TryFrom<&str> for SymbolFlags {
     type Error = UnknownAttribute;
@@ -810,6 +837,12 @@ pub struct Symbol {
     /// `param_arity()`, which reads both sources).
     #[serde(default)]
     pub arity: Option<ParamArity>,
+    /// Where a lexical comes into force, when that is later than where it
+    /// is declared: Perl introduces a `my` after its statement, so
+    /// `my $x = $x` reads the outer `$x`. Minted by the producer that sees
+    /// the statement; `None` is "from the declaration on" (`in_force_from`).
+    #[serde(default, with = "point_opt_serde")]
+    pub in_force: Option<Point>,
 }
 
 /// A callable's declared parameter shape, as a set of counts — the fuel for
@@ -1074,36 +1107,20 @@ impl FlowEdge {
     }
 }
 
-/// Every FlowEdge target site, by name, sorted — the LANGUAGE-AGNOSTIC
-/// narrowing cutoff. A rebind is a value flowing into the subject (a `@flow`
-/// edge), so this one truncation is shared by the Perl narrowing pass and the
-/// query-engine (cpp/python) narrowing. Built once per cutoff pass: a region
-/// fact per use made a linear scan over every edge per fact the measured cost
-/// (FHEM `--check` +6%).
-pub struct RebindIndex<'e> {
-    by_name: HashMap<&'e str, Vec<Point>>,
-}
-
-impl<'e> RebindIndex<'e> {
-    pub fn new(flow_edges: &'e [FlowEdge]) -> Self {
-        let mut by_name: HashMap<&'e str, Vec<Point>> = HashMap::new();
-        for fe in flow_edges {
-            by_name.entry(fe.target_name.as_str()).or_default().push(fe.target_at);
-        }
-        for sites in by_name.values_mut() {
-            sites.sort_unstable_by_key(|p| (p.row, p.column));
-        }
-        RebindIndex { by_name }
-    }
-
-    /// The earliest rebind of `var` within `region` (start inclusive, end
-    /// exclusive). `None` ⇒ no rebind, the fact runs to the region's end.
-    pub fn earliest_in(&self, var: &str, region: Span) -> Option<Point> {
-        let key = |p: &Point| (p.row, p.column);
-        let sites = self.by_name.get(var)?;
-        let i = sites.partition_point(|p| key(p) < key(&region.start));
-        sites.get(i).copied().filter(|p| key(p) < key(&region.end))
-    }
+/// The part of `region` a region fact (a narrowing, a moved-from state)
+/// still holds over: from its start up to the earliest cut inside it — a
+/// rebind, a disturbance, a reset — or to its end. `None` when a cut lands
+/// at or before the start, so nothing holds. Every cutoff site in Perl and
+/// the packs goes through here; only where its cuts come from differs.
+pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -> Option<Span> {
+    let key = |p: &Point| (p.row, p.column);
+    let end = cuts
+        .into_iter()
+        .flatten()
+        .filter(|p| key(p) < key(&region.end))
+        .min_by_key(key)
+        .unwrap_or(region.end);
+    (key(&region.start) < key(&end)).then_some(Span { start: region.start, end })
 }
 
 impl Symbol {
@@ -1120,7 +1137,7 @@ impl Symbol {
         };
         declared.then(|| VariableDecl {
             id: self.id,
-            at: self.selection_span.start,
+            view: InView { from: self.selection_span.start, ..self.in_view() },
             gate: match &self.detail {
                 SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => self.package.as_deref(),
                 _ => None,
@@ -1132,6 +1149,16 @@ impl Symbol {
     /// The name listing views (outline, hover) show the symbol by.
     pub fn listed_name(&self) -> &str {
         self.presentation.label.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The first point a use of this name can see the declaration.
+    pub fn in_force_from(&self) -> Point {
+        self.in_force.unwrap_or(self.span.start)
+    }
+
+    /// Where a use of this name sees the declaration (`InView`).
+    pub fn in_view(&self) -> InView {
+        InView { from: self.span.start, shadowed: (self.span.end, self.in_force_from()) }
     }
 
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
@@ -1358,6 +1385,27 @@ pub enum SymKind {
     Namespace,
 }
 
+/// Where a declaration is in view: from `from` on, except strictly inside
+/// `shadowed` (the rest of the declaring statement, past the declaration),
+/// where a use reads the binding the declaration shadows. The declaration's
+/// own facts sit on it, so they stay its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InView {
+    pub from: Point,
+    pub shadowed: (Point, Point),
+}
+
+impl InView {
+    /// In view from `from` on, nothing shadowed.
+    pub fn from(from: Point) -> Self {
+        InView { from, shadowed: (from, from) }
+    }
+
+    pub fn at(&self, at: Point) -> bool {
+        self.from <= at && !(self.shadowed.0 < at && at < self.shadowed.1)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum SymbolDetail {
@@ -1451,6 +1499,13 @@ impl DeclKind {
     /// only from its own package.
     pub fn is_package_global(self) -> bool {
         matches!(self, DeclKind::Our | DeclKind::Implicit)
+    }
+
+    /// A variable in a package's symbol table, however this file names it
+    /// (`our`, an undeclared use, a qualified or forced-`main` spelling):
+    /// any file can write it, so no one file holds all of its writes.
+    pub fn is_package_variable(self) -> bool {
+        self.is_package_global() || matches!(self, DeclKind::Mention)
     }
 
     /// The keyword the declaration was spelled with, as outline and
@@ -2225,6 +2280,10 @@ pub enum RefKind {
     /// linked `HashKeyDef`) lives in `Ref::binding` (`RefBinding::HashKey`).
     HashKeyAccess {
         var_text: String,
+        /// The access dies on an undef receiver instead of vivifying it,
+        /// under the `autovivification` hints in force here.
+        #[serde(default)]
+        dies_on_undef: bool,
     },
     /// The container variable in `$hash{key}`, `@arr[0]`, etc.
     ContainerAccess,
