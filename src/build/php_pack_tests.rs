@@ -568,12 +568,38 @@ fn a_declared_property_type_is_the_members_value() {
     assert_eq!(value("count"), Some(T::Numeric));
     assert_eq!(value("id"), Some(T::String));
     assert_eq!(value("name"), Some(T::String));
-    assert_eq!(value("clock"), Some(T::ClassName("Lib\\Clock".into())));
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(value("clock"), or(T::ClassName("Lib\\Clock".into()), T::Undef), "`?T` is `T|null`");
     assert_eq!(value("made"), Some(T::ClassName("Lib\\Clock".into())));
     assert_eq!(value("qty"), Some(T::Numeric));
     assert_eq!(value("legacy"), None);
-    assert_eq!(value("key"), None, "a union has no single type");
+    assert_eq!(value("key"), or(T::Numeric, T::String), "a union is the join of its arms");
     assert_eq!(value("plain"), None, "a plain parameter is no property");
+}
+
+/// An intersection or a DNF group names no single class, and an arm that
+/// can't be read types nothing rather than claiming the arms that can.
+#[cfg(feature = "php")]
+#[test]
+fn a_type_with_an_unreadable_arm_types_nothing() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Box {
+    public Clock&Countable $both;
+    public (A&B)|null $group;
+    public array|string $mixed;
+    public ?string $maybe;
+}
+");
+    let boxed = T::ClassName("Box".into());
+    let value = |m: &str| fa.field_value_type(&boxed, m, None);
+    assert_eq!(value("both"), None);
+    assert_eq!(value("group"), None);
+    assert_eq!(value("mixed"), None);
+    assert_eq!(
+        value("maybe"),
+        crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered)
+    );
 }
 
 #[cfg(feature = "php")]
@@ -716,7 +742,7 @@ fn parameters_are_locals_of_their_callable() {
 }
 
 /// A declared type is the parameter's value from its binding site: a class
-/// spelling resolves through the use-map, a union has no single type.
+/// spelling resolves through the use-map, a union is the join of its arms.
 #[cfg(feature = "php")]
 #[test]
 fn a_parameters_declared_type_is_its_value_in_the_body() {
@@ -724,8 +750,10 @@ fn a_parameters_declared_type_is_its_value_in_the_body() {
     use crate::model::witnesses::WitnessAttachment as WA;
     let fa = php(PARAMS);
     let body = tree_sitter::Point { row: 6, column: 12 };
-    assert_eq!(fa.inferred_type_via_bag("at", body), Some(T::ClassName("Lib\\Clock".into())));
-    assert_eq!(fa.inferred_type_via_bag("n", body), None);
+    let clock = || T::ClassName("Lib\\Clock".into());
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(fa.inferred_type_via_bag("at", body), or(clock(), T::Undef));
+    assert_eq!(fa.inferred_type_via_bag("n", body), or(T::Numeric, clock()));
     assert_eq!(fa.inferred_type_via_bag("rest", body), None, "a variadic's type is its elements'");
     let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
     let declared: Vec<_> = fa
@@ -740,7 +768,7 @@ fn a_parameters_declared_type_is_its_value_in_the_body() {
         start: tree_sitter::Point { row: 6, column: 11 },
         end: tree_sitter::Point { row: 6, column: 14 },
     };
-    assert_eq!(fa.expr_type_at_span(read, None), Some(T::ClassName("Lib\\Clock".into())));
+    assert_eq!(fa.expr_type_at_span(read, None), or(clock(), T::Undef));
 }
 
 /// A use of `$x` in the body is a reference to the parameter: the name
@@ -995,7 +1023,10 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
                     assert_eq!(*lookup, Lookup::Receiver);
                     match receiver {
                         Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => {
-                            fa.expr_type_at_span(*recv, None).and_then(|t| t.class_name().map(str::to_string))
+                            // The class the call dispatches on: a `?Timer` receiver is
+                            // `Timer|null`, and a call reaches the `Timer` arm.
+                            fa.expr_type_at_span(*recv, None)
+                                .and_then(|t| fa.dispatch_classes_of(&t, None).single().map(str::to_string))
                         }
                         _ => None,
                     }
@@ -1251,8 +1282,8 @@ class Clock {
 
 /// A declared return is the callable's value: a class spelling resolves
 /// through the use-map, `self` and `static` name the class the method is
-/// written in, a nullable is its class, and a union, `void` or no
-/// declaration states no type.
+/// written in, a nullable class is the class or null, a union is the join
+/// of its arms, and `void` or no declaration states no type.
 #[cfg(feature = "php")]
 #[test]
 fn a_declared_return_is_the_callables_value() {
@@ -1263,12 +1294,13 @@ fn a_declared_return_is_the_callables_value() {
     let clock = Some(T::ClassName("Lib\\Clock".into()));
     assert_eq!(ret("with"), builder, "`static`");
     assert_eq!(ret("again"), builder, "`self`");
-    assert_eq!(ret("maybe"), builder, "a nullable class");
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(ret("maybe"), or(T::ClassName("App\\Builder".into()), T::Undef), "a nullable class");
     assert_eq!(ret("nullable"), builder, "a nullable `static`");
     assert_eq!(ret("clock"), clock, "an imported class");
     assert_eq!(ret("full"), clock, "a fully qualified class");
     assert_eq!(ret("count"), Some(T::Numeric));
-    assert_eq!(ret("either"), None, "a union has no single type");
+    assert_eq!(ret("either"), or(T::ClassName("Lib\\Clock".into()), T::Numeric), "a union is the join of its arms");
     let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
     assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
     assert_eq!(ret("nothing"), None);
