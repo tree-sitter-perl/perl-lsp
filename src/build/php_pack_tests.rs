@@ -1020,7 +1020,10 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
                     assert_eq!(*lookup, Lookup::Receiver);
                     match receiver {
                         Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => {
-                            fa.expr_type_at_span(*recv, None).and_then(|t| t.class_name().map(str::to_string))
+                            // The class the call dispatches on: a `?Timer` receiver is
+                            // `Timer|null`, and a call reaches the `Timer` arm.
+                            fa.expr_type_at_span(*recv, None)
+                                .and_then(|t| fa.dispatch_classes_of(&t, None).single().map(str::to_string))
                         }
                         _ => None,
                     }
