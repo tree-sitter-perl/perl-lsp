@@ -1659,12 +1659,12 @@ sub name {
         "#,
     );
 
-    // At a point inside the method body where `$self` has been
+    // At a point inside the method body after `$self` has been
     // assigned via `shift`, the flat `inferred_type` returns
     // HashRef (because the access flipped it). The witness-based
     // path — which is what `invocant_classes_in_scope` now calls —
     // should return the class.
-    let point = Point { row: 5, column: 15 };
+    let point = Point { row: 6, column: 15 };
 
     // Walk up the scope chain to find the sub's scope.
     let scope = fa.scope_at(point).expect("scope");

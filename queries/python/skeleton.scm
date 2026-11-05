@@ -163,10 +163,17 @@
 
 ; Annotated assignment: `x: int = ...` — ring 3 is partly IN the tree
 ; here; the annotation emits a direct type witness via the pack's
-; annot_type predicate.
+; annot_type predicate. With a value it is a write, landing once the value
+; is read; a bare `x: int` writes nothing, so its declared type holds from
+; its token and no write replaces it.
 (assignment
   left: (identifier) @flow.target
-  type: (type) @type.annot) @flow.assign
+  type: (type) @type.annot
+  right: (_)) @flow.assign
+(assignment
+  left: (identifier) @flow.target
+  type: (type) @type.annot
+  !right)
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
 ; type yet) so the narrowing cutoff ends a region at the loop.
