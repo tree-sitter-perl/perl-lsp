@@ -10,39 +10,104 @@
 //! Decisions (engine-is-emission, truncation soundness, polarity +
 //! the `Undef` negative lattice): `docs/adr/flow-narrowing.md`.
 
-use std::collections::HashMap;
 
-use tree_sitter::{Node, Point, Tree};
+use tree_sitter::{Node, Point};
 
 use crate::cst::node_to_span;
-use crate::model::file_analysis::{InferredType, ScopeId, Span};
+use crate::model::file_analysis::{Access, Binding, InferredType, Place, PlaceDisturbanceIndex, ScopeId, Span};
 
 use super::extract::ListSlot;
-use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Builder};
+use super::{connector_keyword_between, raw_leading_op, raw_mid_op, Builder};
 
-/// The subject a guard narrows — a plain scalar, or a hash/array place
-/// (`$self->{x}`, `$h{k}`, `$self->{$k}`) keyed by its source spelling.
-/// `key_vars` are the place's dynamic-key scalars (`$k` in `$self->{$k}`);
-/// reassigning any of them ends the narrowing region.
+/// One `@flow` match, read through the capture vocabulary. `source` is
+/// optional: a clear (`@flow.clear`) carries no inflowing value.
+pub(super) struct FlowMatch<'t> {
+    target: Option<Node<'t>>,
+    clear: Option<Node<'t>>,
+    rebind: Option<Node<'t>>,
+    source: Option<Node<'t>>,
+}
+
+impl<'t> FlowMatch<'t> {
+    /// A match's captures; `None` when it binds nothing.
+    pub(super) fn of(caps: impl IntoIterator<Item = (Option<crate::build::query_extract::Capture>, Node<'t>)>) -> Option<Self> {
+        use crate::build::query_extract::{Capture, FlowCap};
+        let mut m = FlowMatch { target: None, clear: None, rebind: None, source: None };
+        for (cap, node) in caps {
+            match cap {
+                Some(Capture::Flow(FlowCap::Target)) => m.target = Some(node),
+                Some(Capture::Flow(FlowCap::Clear)) => m.clear = Some(node),
+                Some(Capture::Flow(FlowCap::Rebind)) => m.rebind = Some(node),
+                Some(Capture::Flow(FlowCap::Source)) => m.source = Some(node),
+                other => unreachable!("flow_query admits only the captures read here, not {other:?}"),
+            }
+        }
+        m.target.or(m.clear).or(m.rebind).is_some().then_some(m)
+    }
+}
+
+/// The subject a guard narrows — a variable or a part of one (`$x`,
+/// `$self->{x}`, `$h{k}`, `$self->{$k}`), named by its `Place`. `key_vars`
+/// spell the place's key variables (`$k` in `$self->{$k}`): rebinding one
+/// moves the place, so the narrowing ends there. `spelling` is for display.
 #[derive(Clone)]
 pub(super) enum NarrowSubject {
-    Variable(String),
-    Place { key: String, root: String, key_vars: Vec<String>, prefixes: Vec<String> },
+    Place { place: Place, spelling: String, key_vars: Vec<String> },
     /// A variable holding a `ref`/`reftype`/`blessed` result (`$ref` in
     /// `$ref eq 'ARRAY'`): the guard is on whatever that tag names, which
     /// only the bag can say once `$ref`'s value has folded.
-    TagOf(String),
+    TagOf(Place),
 }
 
-/// Classify a guard's operand into the subject it narrows: a plain
-/// scalar (`Variable`), else a stable place path (`Place`).
-fn narrow_subject_of<'t>(syn: &crate::cst::SyntaxForest<'t>, node: Node<'t>, src: &[u8]) -> Option<NarrowSubject> {
-    if let Some(v) = crate::cst::canonical_var_name(node, src) {
-        return Some(NarrowSubject::Variable(v));
+impl NarrowSubject {
+    /// The subject's identity, for dedup across arms and the guard record.
+    fn subject(&self) -> &Place {
+        match self {
+            NarrowSubject::Place { place, .. } | NarrowSubject::TagOf(place) => place,
+        }
     }
-    let (key, root) = crate::cst::canonical_place_path(syn, node, src)?;
-    let crate::cst::PlaceDeps { key_vars, prefixes } = crate::cst::place_deps(node, src);
-    Some(NarrowSubject::Place { key, root, key_vars, prefixes })
+
+    fn spelling(&self) -> &str {
+        match self {
+            NarrowSubject::Place { spelling, .. } => spelling,
+            NarrowSubject::TagOf(_) => "",
+        }
+    }
+}
+
+/// Binds a place's spellings where the walk stands.
+struct WalkBinder<'b, 'a>(&'b Builder<'a>);
+
+impl crate::cst::PlaceBinder for WalkBinder<'_, '_> {
+    fn root(&mut self, spelling: &str, at: Point) -> Option<Binding> {
+        Some(self.0.binding_key_here(spelling, at))
+    }
+    fn key(&mut self, spelling: &str, at: Point) -> Binding {
+        self.0.binding_key_here(spelling, at)
+    }
+}
+
+/// Binds a surveyed place's spellings by position, for the roots some
+/// narrowing is about: a root no subject names cannot disturb one, so it
+/// is never resolved.
+struct SurveyBinder<'b, 'a, 's> {
+    builder: &'b Builder<'a>,
+    scopes: super::infra::ScopeCursor<'s>,
+    wanted: &'b std::collections::HashSet<String>,
+}
+
+impl crate::cst::PlaceBinder for SurveyBinder<'_, '_, '_> {
+    fn root(&mut self, spelling: &str, at: Point) -> Option<Binding> {
+        let key = crate::model::conventions::name_match_key(spelling, &crate::model::conventions::PERL_SPELLINGS);
+        if !self.wanted.contains(&key) {
+            return None;
+        }
+        Some(self.key(spelling, at))
+    }
+    fn key(&mut self, spelling: &str, at: Point) -> Binding {
+        let scope = self.scopes.at(at);
+        self.builder.binding_key_in(spelling, at, scope)
+    }
 }
 
 /// What a guard does to the subject's type where it holds.
@@ -101,7 +166,7 @@ impl GuardFact {
 /// is re-derived each fold iteration once the subject type converges.
 #[derive(Clone)]
 pub(super) struct DefinedNarrowing {
-    name: String,
+    subject: Place,
     scope: ScopeId,
     region: Span,
     query_point: Point,
@@ -111,7 +176,7 @@ pub(super) struct DefinedNarrowing {
 /// since what `var` holds is a fold answer.
 #[derive(Clone)]
 pub(super) struct TagNarrowing {
-    var: String,
+    var: Place,
     scope: ScopeId,
     region: Span,
     lit: String,
@@ -139,91 +204,6 @@ pub(super) struct PendingNarrow {
     scope: ScopeId,
 }
 
-/// Every site that could disturb a place, sorted per key — the place
-/// sibling of `RebindIndex`, built in one pass over the file's trees. A
-/// place is disturbed by a write to its slot, or by an opaque use (a write,
-/// a method call, an argument — anything but the base of a longer access)
-/// of its root or of a proper prefix. Conservative: it under-narrows.
-struct PlaceDisturbanceIndex {
-    /// `$self->{a}{b} = …`, by the written slot's key.
-    slot_writes: HashMap<String, Vec<Point>>,
-    /// The root of a place used whole: `$self`, `%h` (`keys %h`, `\@h`),
-    /// or any slice of the named container (it can write several slots).
-    root_uses: HashMap<String, Vec<Point>>,
-    /// An element used opaquely, by its own key (`$self->{a}` passed on
-    /// disturbs `$self->{a}{b}`).
-    prefix_uses: HashMap<String, Vec<Point>>,
-}
-
-impl PlaceDisturbanceIndex {
-    fn new<'t>(syn: &crate::cst::SyntaxForest<'t>, src: &[u8]) -> Self {
-        fn push(map: &mut HashMap<String, Vec<Point>>, key: String, at: Point) {
-            map.entry(key).or_default().push(at);
-        }
-        // A prefix that is the base of a longer access is read, not used.
-        let is_access_base = |node: Node<'t>| -> bool {
-            syn.parent(node).is_some_and(|p| {
-                matches!(p.kind(), "hash_element_expression" | "array_element_expression")
-                    && p.named_child(0) == Some(node)
-            })
-        };
-        let mut idx = PlaceDisturbanceIndex {
-            slot_writes: HashMap::new(),
-            root_uses: HashMap::new(),
-            prefix_uses: HashMap::new(),
-        };
-        for root in syn.roots() {
-            super::pipeline::survey(root, |node| {
-                let at = node.start_position();
-                if node.kind() == "assignment_expression" {
-                    if let Some((key, _)) =
-                        node.child_by_field_name("left").and_then(|l| crate::cst::canonical_place_path(syn, l, src))
-                    {
-                        push(&mut idx.slot_writes, key, at);
-                    }
-                }
-                match node.kind() {
-                    // A slice's appearance is never a read of one slot.
-                    "slice_container_variable" | "keyval_container_variable" => {
-                        if let Some(name) = crate::cst::canonical_container_name(syn, node, src) {
-                            push(&mut idx.root_uses, name, at);
-                        }
-                    }
-                    "scalar" | "hash" | "array" if !is_access_base(node) => {
-                        if let Some(name) = crate::cst::canonical_var_name(node, src) {
-                            push(&mut idx.root_uses, name, at);
-                        }
-                    }
-                    "hash_element_expression" | "array_element_expression" if !is_access_base(node) => {
-                        if let Some((key, _)) = crate::cst::canonical_place_path(syn, node, src) {
-                            push(&mut idx.prefix_uses, key, at);
-                        }
-                    }
-                    _ => {}
-                }
-            });
-        }
-        for sites in idx.slot_writes.values_mut().chain(idx.root_uses.values_mut()).chain(idx.prefix_uses.values_mut()) {
-            sites.sort_unstable_by_key(|p| (p.row, p.column));
-        }
-        idx
-    }
-
-    /// The earliest disturbance of the place within `region` (start
-    /// inclusive, end exclusive).
-    fn earliest_in(&self, key: &str, root: &str, prefixes: &[String], region: Span) -> Option<Point> {
-        let first = |map: &HashMap<String, Vec<Point>>, k: &str| {
-            let sites = map.get(k)?;
-            let i = sites.partition_point(|p| point_lt(*p, region.start));
-            sites.get(i).copied().filter(|p| point_lt(*p, region.end))
-        };
-        let mut best = earliest_point(first(&self.slot_writes, key), first(&self.root_uses, root));
-        for p in prefixes {
-            best = earliest_point(best, first(&self.prefix_uses, p));
-        }
-        best
-    }
-}
 
 /// Map a `ref(...) eq STRING` right-hand string to the type it proves.
 /// The builtin reftype tokens are a fixed Perl language constant (reading
@@ -249,14 +229,6 @@ fn tag_string_to_type(via: crate::model::file_analysis::RefTagFn, s: &str) -> Op
         RefTagFn::Ref => ref_string_to_type(s),
         RefTagFn::RefType => ref_string_to_type(s).filter(|t| !t.is_object()),
         RefTagFn::Blessed => (!s.is_empty()).then(|| InferredType::ClassName(s.to_string())),
-    }
-}
-
-/// The earlier of two optional truncation points (`None` = no bound).
-fn earliest_point(a: Option<Point>, b: Option<Point>) -> Option<Point> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(if point_lt(x, y) { x } else { y }),
-        (some, None) | (None, some) => some,
     }
 }
 
@@ -371,7 +343,7 @@ fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact
         "equality_expression" => recognize_ref_eq_guard(builder, cond, source),
         "func1op_call_expression" => recognize_defined_guard(builder, cond, source),
         "ambiguous_function_call_expression" | "function_call_expression" => {
-            recognize_blessed_guard(builder, cond, source)
+            recognize_blessed_guard(builder, cond)
         }
         _ => None,
     }
@@ -384,7 +356,7 @@ fn recognize_defined_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[
     }
     let arg = func1op_subject_arg(call)?;
     Some(GuardFact {
-        subject: narrow_subject_of(builder.syntax, arg, source)?,
+        subject: builder.narrow_subject_of(arg)?,
         op: NarrowOp::StripOptional { query_point: arg.start_position() },
         asserts_when_true: true,
     })
@@ -393,13 +365,13 @@ fn recognize_defined_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[
 /// `blessed $x` / `blessed($x)` → strip `Optional` off the subject (v1
 /// treats `blessed` as `defined`'s strip; the extra "is an object"
 /// precision has no lattice target yet).
-fn recognize_blessed_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact> {
+fn recognize_blessed_guard<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<GuardFact> {
     let (via, arg) = builder.ref_tag_call(call)?;
     if via != crate::model::file_analysis::RefTagFn::Blessed {
         return None;
     }
     Some(GuardFact {
-        subject: narrow_subject_of(builder.syntax, arg, source)?,
+        subject: builder.narrow_subject_of(arg)?,
         op: NarrowOp::StripOptional { query_point: arg.start_position() },
         asserts_when_true: true,
     })
@@ -414,7 +386,7 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
     if method != "isa" && method != "DOES" {
         return None;
     }
-    let subject = narrow_subject_of(builder.syntax, mc.invocant()?, source)?;
+    let subject = builder.narrow_subject_of(mc.invocant()?)?;
     let arg = call.child_by_field_name("arguments")?;
     let class = crate::cst::plain_string_literal_text(arg, source)
         .or_else(|| builder.folded_class_name_arg(arg))
@@ -444,7 +416,7 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
             None => InferredType::ClassName(builder.current_package_literal(lit)?),
         };
         return Some(GuardFact {
-            subject: narrow_subject_of(builder.syntax, operand, source)?,
+            subject: builder.narrow_subject_of(operand)?,
             op: NarrowOp::To(ty),
             asserts_when_true: true,
         });
@@ -454,7 +426,9 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
         if var.kind() != "scalar" {
             return None;
         }
-        Some((crate::cst::canonical_var_name(var, source)?, crate::cst::plain_string_literal_text(lit, source)?))
+        let name = crate::cst::canonical_var_name(var, source)?;
+        let place = Place::variable(builder.binding_key_here(&name, var.start_position()));
+        Some((place, crate::cst::plain_string_literal_text(lit, source)?))
     };
     let (var, lit) = tagged(left, right).or_else(|| tagged(right, left))?;
     Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true })
@@ -484,15 +458,34 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
     }
 }
 
-/// A subject's identity for dedup across arms (its source spelling).
-fn subject_key(subject: &NarrowSubject) -> String {
-    match subject {
-        NarrowSubject::Variable(v) | NarrowSubject::TagOf(v) => v.clone(),
-        NarrowSubject::Place { key, .. } => key.clone(),
-    }
-}
-
 impl<'a> Builder<'a> {
+    /// Classify a guard's operand into the subject it narrows: a plain
+    /// scalar (`Variable`), else a part of a variable whose every
+    /// subscript names its slot (`Place`).
+    fn narrow_subject_of(&self, node: Node<'a>) -> Option<NarrowSubject> {
+        if let Some(v) = crate::cst::canonical_var_name(node, self.source) {
+            let place = Place::variable(self.binding_key_here(&v, node.start_position()));
+            return Some(NarrowSubject::Place { place, spelling: v, key_vars: Vec::new() });
+        }
+        let read = self.place_read(node)?;
+        Some(NarrowSubject::Place {
+            place: read.place,
+            spelling: node.utf8_text(self.source).ok()?.to_string(),
+            key_vars: read.key_vars,
+        })
+    }
+
+    /// The part of a variable `node` names, when every subscript names its
+    /// slot: a place a narrowing can be about.
+    pub(super) fn place_subject(&self, node: Node<'a>) -> Option<Place> {
+        self.place_read(node).map(|r| r.place)
+    }
+
+    fn place_read(&self, node: Node<'a>) -> Option<crate::cst::PlaceRead> {
+        let read = crate::cst::read_place(self.syntax, node, self.source, &mut WalkBinder(self))?;
+        (read.exact && !read.place.is_variable()).then_some(read)
+    }
+
     /// `__PACKAGE__` as a class operand: the enclosing package.
     fn current_package_literal(&self, node: Node<'a>) -> Option<String> {
         let text = node.utf8_text(self.source).ok()?;
@@ -535,13 +528,13 @@ impl<'a> Builder<'a> {
             let region = node_to_span(blk);
             // The arm's own guard is the more direct statement about a
             // subject; a prior arm's negation must not override it.
-            let mut covered: Vec<String> = Vec::new();
+            let mut covered: Vec<Place> = Vec::new();
             if let Some(c) = own_cond {
                 // Record the arm's own guard once (not the priors re-walked
                 // for cumulative negation) — D3/D4 want each condition once.
                 self.record_guard_sites(c);
                 for (subject, op) in facts_for_region(self, c, enter) {
-                    covered.push(subject_key(&subject));
+                    covered.push(subject.subject().clone());
                     self.emit_narrowing_fact(&subject, op, region);
                 }
             }
@@ -550,7 +543,7 @@ impl<'a> Builder<'a> {
                 // A prior arm not taken means its condition held at the
                 // opposite of its enter polarity.
                 for (subject, op) in facts_for_region(self, prior_cond, !prior_enter) {
-                    let key = subject_key(&subject);
+                    let key = subject.subject().clone();
                     if covered.contains(&key) {
                         continue;
                     }
@@ -582,7 +575,8 @@ impl<'a> Builder<'a> {
                 NarrowOp::TagEq(_) => continue,
             };
             self.guard_sites.push(GuardSite {
-                subject: subject_key(&fact.subject),
+                subject: fact.subject.subject().clone(),
+                spelling: fact.subject.spelling().to_string(),
                 scope,
                 predicate,
                 asserts_when_true: fact.asserts_when_true,
@@ -747,7 +741,7 @@ impl<'a> Builder<'a> {
         if !is_subject_node_kind(operand.kind()) {
             return;
         }
-        let Some(subject) = narrow_subject_of(self.syntax, operand, self.source) else { return };
+        let Some(subject) = self.narrow_subject_of(operand) else { return };
         let extent = crate::cst::conditional_arm(self.syntax, context, crate::cst::ArmBound::Block)
             .or_else(|| crate::cst::enclosing_block(self.syntax, context));
         let Some(extent) = extent else { return };
@@ -782,19 +776,19 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("defined_narrowing");
         let guards = self.defined_narrowings.clone();
-        let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
+        let mut emits: Vec<(WitnessAttachment, InferredType, Span)> = Vec::new();
         for g in &guards {
             if let Some(inner) = self
-                .bag_query_variable(&g.name, g.scope, g.query_point)
+                .bag_query_place(&g.subject, g.scope, g.query_point)
                 .as_ref()
                 .and_then(InferredType::optional_inner)
             {
-                emits.push((g.name.clone(), g.scope, inner.clone(), g.region));
+                emits.push((WitnessAttachment::Place(Box::new(g.subject.clone())), inner.clone(), g.region));
             }
         }
-        for (name, scope, inner, region) in emits {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Variable { name, scope },
+        for (attachment, inner, region) in emits {
+            self.push_witness(Witness {
+                attachment,
                 source: WitnessSource::Builder("defined_narrowing".into()),
                 payload: WitnessPayload::InferredType(inner),
                 span: region,
@@ -811,10 +805,9 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("tag_narrowing");
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
-        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for g in &self.tag_narrowings {
             let Some(InferredType::RefTagOf { subject, site, via }) =
-                self.bag_query_variable(&g.var, g.scope, g.region.start)
+                self.bag_query_place(&g.var, g.scope, g.region.start)
             else {
                 continue;
             };
@@ -822,17 +815,18 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let since_tag = Span { start: site.end, end: g.region.start };
-            if rebinds.earliest_in(&subject, since_tag).is_some() {
+            let rebound = Place::variable(self.binding_of(&subject, g.region.start, g.scope).0);
+            if self.rebinds.earliest_in(&rebound, since_tag).is_some() {
                 continue;
             }
             let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
-            let end = rebinds.earliest_in(&subject, g.region).unwrap_or(g.region.end);
-            if point_lt(g.region.start, end) {
-                emits.push((subject, g.scope, ty, Span { start: g.region.start, end }));
+            let cut = self.rebinds.earliest_in(&rebound, g.region);
+            if let Some(region) = crate::model::file_analysis::cut_region(g.region, [cut]) {
+                emits.push((subject, g.scope, ty, region));
             }
         }
         for (name, scope, ty, region) in emits {
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Variable { name, scope },
                 source: WitnessSource::Builder("tag_narrowing".into()),
                 payload: WitnessPayload::InferredType(ty),
@@ -860,12 +854,24 @@ impl<'a> Builder<'a> {
     /// (minted post-walk). The place index walks the injected `s///e` trees
     /// too: their code runs, so a write there disturbs a place.
     pub(super) fn apply_narrowing_cutoffs(&mut self) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        use crate::model::witnesses::{Witness, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
-        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
-        let places = pending.iter().any(|pn| matches!(pn.subject, NarrowSubject::Place { .. })).then(|| {
-            PlaceDisturbanceIndex::new(self.syntax, self.source)
-        });
+        let wanted: std::collections::HashSet<String> = pending
+            .iter()
+            .filter_map(|pn| match &pn.subject {
+                NarrowSubject::Place { place, .. } if !place.is_variable() => Some(self.binding_name(&place.root).to_string()),
+                NarrowSubject::Place { .. } | NarrowSubject::TagOf(_) => None,
+            })
+            .collect();
+        let places = if wanted.is_empty() {
+            None
+        } else {
+            let (idx, sites) = self.place_disturbances(self.syntax.roots(), &wanted);
+            self.arrow_deref_sites.extend(sites);
+            Some(idx)
+        };
+        self.rebinds = self.rebind_index();
+        let mut facts = Vec::new();
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
@@ -879,27 +885,27 @@ impl<'a> Builder<'a> {
                 });
                 continue;
             }
-            let (name, end) = match &pn.subject {
-                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => {
-                    (var.clone(), rebinds.earliest_in(var, pn.region))
-                }
-                NarrowSubject::Place { key, root, key_vars, prefixes } => {
-                    let mut end = places.as_ref().and_then(|idx| idx.earliest_in(key, root, prefixes, pn.region));
-                    for kv in key_vars {
-                        end = earliest_point(end, rebinds.earliest_in(kv, pn.region));
-                    }
-                    (key.clone(), end)
+            let rebound = |var: &str| {
+                let var = Place::variable(self.binding_of(var, pn.region.start, pn.scope).0);
+                self.rebinds.earliest_in(&var, pn.region)
+            };
+            let cuts: Vec<Option<Point>> = match &pn.subject {
+                NarrowSubject::TagOf(var) => vec![self.rebinds.earliest_in(var, pn.region)],
+                NarrowSubject::Place { place, .. } if place.is_variable() => vec![self.rebinds.earliest_in(place, pn.region)],
+                NarrowSubject::Place { place, key_vars, .. } => {
+                    std::iter::once(places.as_ref().and_then(|idx| idx.earliest_in(place, pn.region)))
+                        .chain(key_vars.iter().map(|kv| rebound(kv)))
+                        .collect()
                 }
             };
-            let end = end.unwrap_or(pn.region.end);
-            if !point_lt(pn.region.start, end) {
+            let Some(region) = crate::model::file_analysis::cut_region(pn.region, cuts) else {
                 continue; // truncated to nothing
-            }
-            let region = Span { start: pn.region.start, end };
+            };
+            let subject = pn.subject.subject().clone();
             match pn.fact {
                 RegionFact::Guard(NarrowOp::To(ty)) => {
-                    self.bag.push(Witness {
-                        attachment: WitnessAttachment::Variable { name, scope: pn.scope },
+                    facts.push(Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),
                         source: WitnessSource::Builder("narrowing".into()),
                         payload: WitnessPayload::InferredType(ty),
                         span: region,
@@ -907,7 +913,7 @@ impl<'a> Builder<'a> {
                 }
                 RegionFact::Guard(NarrowOp::StripOptional { query_point }) => {
                     self.defined_narrowings.push(DefinedNarrowing {
-                        name,
+                        subject,
                         scope: pn.scope,
                         region,
                         query_point,
@@ -915,8 +921,8 @@ impl<'a> Builder<'a> {
                 }
                 RegionFact::Guard(NarrowOp::TagEq(_)) => {}
                 RegionFact::Observe(obs) => {
-                    self.bag.push(Witness {
-                        attachment: WitnessAttachment::Variable { name, scope: pn.scope },
+                    facts.push(Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),
                         source: WitnessSource::Builder("usage_observation".into()),
                         payload: WitnessPayload::Observation(obs),
                         span: region,
@@ -924,6 +930,113 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        for w in facts {
+            self.push_witness(w);
+        }
+    }
+
+    /// Every FlowEdge target as a write of the whole variable it binds:
+    /// what cuts a fact about that variable short.
+    fn rebind_index(&self) -> PlaceDisturbanceIndex {
+        let mut idx = PlaceDisturbanceIndex::default();
+        for fe in &self.flow_edges {
+            let (binding, _) = self.binding_of(&fe.target_name, fe.target_at, fe.target_scope);
+            idx.add(fe.target_at, Access::Write, Place::variable(binding));
+        }
+        idx.seal();
+        idx
+    }
+
+    /// The unqualified, sigiled name a binding was declared or written
+    /// with: what every spelling of it shares.
+    pub(super) fn binding_name<'b>(&'b self, binding: &'b Binding) -> &'b str {
+        match binding {
+            Binding::Lexical(sid) => &self.symbols[sid.0 as usize].name,
+            Binding::Package(_, name) => name,
+            Binding::Arguments(_) => crate::model::conventions::ARGUMENT_ARRAY,
+            // Perl has no elided receiver: `$self` is a lexical.
+            Binding::Receiver(_) => "",
+        }
+    }
+
+    /// Every access of a place rooted at a `wanted` name, over the file's
+    /// trees: one survey, with each name bound by position.
+    ///
+    /// The same survey mints the deref sites whose receiver is a part of a
+    /// variable (`$self->{cb}->()`): only a narrowed place can type one,
+    /// and only a wanted root is read here.
+    fn place_disturbances(
+        &self,
+        roots: impl IntoIterator<Item = Node<'a>>,
+        wanted: &std::collections::HashSet<String>,
+    ) -> (PlaceDisturbanceIndex, Vec<crate::model::file_analysis::ArrowDerefSite>) {
+        let mut idx = PlaceDisturbanceIndex::default();
+        let mut sites = Vec::new();
+        for root in roots {
+            // Each tree runs in document order; an injected tree restarts it.
+            let mut binder = SurveyBinder { builder: self, scopes: super::infra::ScopeCursor::new(&self.scopes), wanted };
+            let mut read_through = std::collections::HashSet::new();
+            super::pipeline::survey(root, |node| {
+                let kind = node.kind();
+                if !matches!(
+                    kind,
+                    "hash_element_expression"
+                        | "array_element_expression"
+                        | "slice_expression"
+                        | "keyval_expression"
+                        | "scalar"
+                        | "array"
+                        | "hash"
+                        | "coderef_call_expression"
+                ) {
+                    return;
+                }
+                if let Some((receiver, form)) = crate::cst::deref_of_part(node) {
+                    let read = crate::cst::read_place(self.syntax, receiver, self.source, &mut binder)
+                        .filter(|r| r.exact && !r.place.is_variable());
+                    if let (Some(read), Ok(text)) = (read, receiver.utf8_text(self.source)) {
+                        let dies_on_undef = self.deref_dies_on_undef(node, &form);
+                        sites.push(crate::model::file_analysis::ArrowDerefSite {
+                            receiver: text.to_string(),
+                            place: Box::new(read.place),
+                            span: node_to_span(node),
+                            form,
+                            dies_on_undef,
+                        });
+                    }
+                }
+                if kind == "coderef_call_expression" {
+                    return;
+                }
+                // Preorder reaches an access before what it reads through,
+                // so the outer access marks the inner one: a deref's operand
+                // sits below the access, not as its direct child.
+                if let Some(inner) = crate::cst::place_inner(node) {
+                    read_through.insert(inner.id());
+                }
+                if read_through.remove(&node.id()) {
+                    return;
+                }
+                // Binding first: most accesses hang off a root no subject
+                // names, and classifying the access is the costly half.
+                let Some(read) = crate::cst::read_place(self.syntax, node, self.source, &mut binder) else { return };
+                let access = match kind {
+                    "hash_element_expression" | "array_element_expression" => {
+                        let written = self.element_write_kind(node).is_some()
+                            || crate::cst::is_value_reset_target(self.syntax, node, self.source);
+                        if written { Access::Write } else { Access::Opaque }
+                    }
+                    // A slice can write every slot it names, read or not.
+                    "slice_expression" | "keyval_expression" => Access::Write,
+                    _ => {
+                        if crate::cst::is_assignment_target(self.syntax, node) { Access::Write } else { Access::Opaque }
+                    }
+                };
+                idx.add(node.start_position(), access, read.place);
+            });
+        }
+        idx.seal();
+        (idx, sites)
     }
 
     /// Run the declarative `@flow` query (`queries/perl/flow.scm`) and mint a
@@ -932,55 +1045,18 @@ impl<'a> Builder<'a> {
     /// here — the same FlowEdge concept the cpp pack produces. The forcing-
     /// function start of Perl-on-the-query-engine. Provenance-only for now
     /// (no lowering): the shapes' types still come from the walk.
-    pub(super) fn mint_flow_edges_via_query(&mut self, tree: &'a Tree) {
-        use tree_sitter::{QueryCursor, StreamingIterator};
-        let query = match super::flow_query() {
-            Some(q) => q,
-            None => return,
+    pub(super) fn mint_flow_edges_via_query(&mut self) {
+        // The plugin walk carries the document's matches when it ran; a
+        // build with no walk patterns traverses for them here.
+        let pending = match self.flow_matches.take() {
+            Some(m) => m,
+            None => self.collect_flow_matches(),
         };
-        let cap_names: Vec<String> = query.capture_names().iter().map(|s| s.to_string()).collect();
-        // Collect captures per match FIRST — the cursor borrows `self.source`,
-        // so we can't mutate until it drops. `source` is optional: bind shapes
-        // (`@flow.bare`) carry no inflowing value.
-        struct FlowCaps<'t> {
-            lhs: Option<Node<'t>>,
-            target: Option<Node<'t>>,
-            bare: Option<Node<'t>>,
-            loopvar: Option<Node<'t>>,
-            source: Option<Node<'t>>,
-        }
-        let mut pending: Vec<FlowCaps> = Vec::new();
-        {
-            let mut cursor = QueryCursor::new();
-            let mut matches = cursor.matches(query, tree.root_node(), self.source);
-            while let Some(m) = matches.next() {
-                let mut caps = FlowCaps {
-                    lhs: None,
-                    target: None,
-                    bare: None,
-                    loopvar: None,
-                    source: None,
-                };
-                for c in m.captures {
-                    match cap_names[c.index as usize].as_str() {
-                        "flow.lhs" => caps.lhs = Some(c.node),
-                        "flow.target" => caps.target = Some(c.node),
-                        "flow.bare" => caps.bare = Some(c.node),
-                        "flow.loopvar" => caps.loopvar = Some(c.node),
-                        "flow.source" => caps.source = Some(c.node),
-                        _ => {}
-                    }
-                }
-                if caps.lhs.or(caps.target).or(caps.bare).or(caps.loopvar).is_some() {
-                    pending.push(caps);
-                }
-            }
-        }
         for caps in pending {
             // Bind shapes: no inflowing value. A bare `my`/`local` CLEARS to
             // undef (`Cleared`); a `foreach` var rebinds per element (`Rebind`,
             // type TBD). Both record the rebind for the narrowing cutoff.
-            if let Some(bare) = caps.bare {
+            if let Some(bare) = caps.clear {
                 let at = bare.start_position();
                 for name in self.bare_bind_names(bare) {
                     // `my %h;` is an empty hash, a closed shape its element
@@ -1011,7 +1087,7 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            if let Some(loopvar) = caps.loopvar {
+            if let Some(loopvar) = caps.rebind {
                 if let (Ok(name), Some(src)) = (loopvar.utf8_text(self.source), caps.source) {
                     self.push_flow_edge(
                         name.to_string(),
@@ -1034,7 +1110,7 @@ impl<'a> Builder<'a> {
                     source_span = node_to_span(assign);
                 }
             }
-            if let Some(lhs_node) = caps.lhs {
+            if let Some(lhs_node) = caps.target {
                 if let Some(slots) = self.lhs_list_slots(lhs_node) {
                     // List/destructuring: each slot edges to its literal element
                     // (Whole) or a Positional projection; an element target
@@ -1085,23 +1161,22 @@ impl<'a> Builder<'a> {
                         reassigns,
                     );
                 }
-            } else if let Some(tnode) = caps.target {
-                // `@flow.target` is the bare-scalar lhs: a reassignment.
-                if let Ok(vt) = tnode.utf8_text(self.source) {
-                    let vt = vt.to_string();
-                    self.push_flow_edge(
-                        vt,
-                        write_at.unwrap_or_else(|| tnode.start_position()),
-                        source_span,
-                        crate::model::file_analysis::Extraction::Whole,
-                        true,
-                    );
-                }
             }
         }
     }
 
-    /// The variable name(s) a bare bind (`@flow.bare`) targets — a
+    /// The `@flow` document's matches, by its own traversal.
+    fn collect_flow_matches(&self) -> Vec<FlowMatch<'a>> {
+        crate::util::ghost_stats::count("flow.own_walk");
+        let (query, caps_of) = super::flow_query();
+        let (matches, _) = self.file_matches(query, |_| true);
+        matches
+            .into_iter()
+            .filter_map(|(_, caps)| FlowMatch::of(caps.into_iter().map(|(i, n)| (Some(caps_of[i as usize]), n))))
+            .collect()
+    }
+
+    /// The variable name(s) a clear (`@flow.clear`) targets — a
     /// `variable_declaration` (single or paren list) or a `localization`
     /// scalar.
     pub(super) fn bare_bind_names(&self, bare: Node<'a>) -> Vec<String> {
@@ -1144,9 +1219,8 @@ impl<'a> Builder<'a> {
         if let Some(w) = fe.lower_to_witness() {
             // The walk mints a single-target write's edge as it passes;
             // the `@flow` pass reaches the same write again.
-            if self.bag.for_attachment(&w.attachment).iter().any(|o| {
-                o.span == w.span && o.payload == w.payload
-            }) {
+            let w = self.bound_witness(w);
+            if self.bag.iter_attachment(&w.attachment).any(|o| o.span == w.span && o.payload == w.payload) {
                 return;
             }
             self.bag.push(w);

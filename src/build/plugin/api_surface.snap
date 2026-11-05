@@ -1,0 +1,440 @@
+PLUGIN_API 1
+
+pub struct ArgInfo {
+pub text: String,
+pub string_value: Option<String>,
+#[serde(default)]
+pub string_values: Vec<String>,
+pub span: Span,
+#[serde(default)]
+pub content_span: Option<Span>,
+pub inferred_type: Option<InferredType>,
+#[serde(default)]
+pub value_shape: ValueShape,
+#[serde(default)]
+pub sub_params: Vec<EmittedParam>,
+#[serde(default)]
+pub callable_return_edge: Option<crate::model::witnesses::WitnessAttachment>,
+#[serde(default)]
+pub ref_sub_name: Option<String>,
+}
+
+pub enum ValueShape {
+Str(String),
+Num(String),
+HashPairs(Vec<(String, String)>),
+ArrayItems(Vec<String>),
+Other(String),
+}
+
+pub struct UseContext {
+pub module_name: String,
+pub imports: Vec<String>,
+pub raw_args: Vec<String>,
+#[serde(default)]
+pub import_words: Vec<ImportWord>,
+#[serde(default)]
+pub negated: bool,
+pub current_package: Option<String>,
+pub span: Span,
+}
+
+pub struct ImportWord {
+pub text: String,
+pub span: Span,
+}
+
+pub struct EmittedParam {
+pub name: String,
+pub default: Option<String>,
+pub is_slurpy: bool,
+#[serde(default)]
+pub is_invocant: bool,
+}
+
+pub struct TopicRouteDsl {
+pub module: String,
+pub verbs: Vec<String>,
+pub group_fn: String,
+}
+
+pub enum EmitAction {
+SetRouteBase {
+controller: String,
+},
+Brand {
+at: Span,
+on_class: String,
+#[serde(default)]
+set: Vec<(String, String)>,
+#[serde(default)]
+drop: Vec<String>,
+},
+Method {
+name: String,
+span: Span,
+selection_span: Span,
+params: Vec<EmittedParam>,
+is_method: bool,
+return_type: Option<InferredType>,
+doc: Option<String>,
+#[serde(default)]
+on_class: Option<String>,
+#[serde(default)]
+display: Option<HandlerDisplay>,
+#[serde(default)]
+hide_in_outline: bool,
+#[serde(default)]
+opaque_return: bool,
+#[serde(default)]
+outline_label: Option<String>,
+#[serde(default)]
+return_via_edge: Option<crate::model::witnesses::WitnessAttachment>,
+#[serde(default)]
+attr: Option<String>,
+},
+HashKeyDef {
+name: String,
+owner: HashKeyOwner,
+span: Span,
+selection_span: Span,
+},
+HashKeyAccess {
+name: String,
+owner: HashKeyOwner,
+var_text: String,
+span: Span,
+access: AccessKind,
+},
+ImportRef {
+name: String,
+#[serde(default)]
+package: Option<String>,
+span: Span,
+},
+PackageParent { package: String, parent: String },
+Handler {
+name: String,
+owner: HandlerOwner,
+dispatchers: Vec<String>,
+params: Vec<EmittedParam>,
+span: Span,
+selection_span: Span,
+#[serde(default)]
+display: HandlerDisplay,
+#[serde(default)]
+hide_in_outline: bool,
+#[serde(default)]
+outline_label: Option<String>,
+},
+DispatchCall {
+name: String,
+dispatcher: String,
+owner: HandlerOwner,
+span: Span,
+var_text: String,
+},
+PluginLoad {
+name: String,
+#[serde(default)]
+config_span: Option<Span>,
+},
+MethodCallRef {
+method_name: String,
+invocant: String,
+span: Span,
+#[serde(default)]
+invocant_span: Option<Span>,
+#[serde(default)]
+bridged: Option<crate::model::conventions::BridgedMatch>,
+},
+Diagnostic {
+message: String,
+span: Span,
+#[serde(default = "default_diag_severity")]
+severity: String,
+code: String,
+},
+Symbol {
+name: String,
+kind: SymKind,
+span: Span,
+selection_span: Span,
+detail: SymbolDetail,
+#[serde(default)]
+return_type: Option<InferredType>,
+#[serde(default)]
+display: Option<HandlerDisplay>,
+#[serde(default)]
+hide_in_outline: bool,
+},
+PluginNamespace {
+id: String,
+kind: String,
+bridges: Vec<Bridge>,
+#[serde(default)]
+entity_names: Vec<String>,
+decl_span: Span,
+},
+FrameworkImport { keyword: String },
+Import {
+module_name: String,
+imported_symbols: Vec<crate::model::file_analysis::ImportedSymbol>,
+span: Span,
+},
+PackageVariable { name: String, span: Span },
+RequireDeclaration { required: bool, span: Span },
+Hint { hint: crate::model::file_analysis::LexicalHint, on: bool, span: Span },
+VarType {
+variable: String,
+at: Span,
+inferred_type: InferredType,
+},
+NamedSubParamType {
+sub_name: String,
+param_index: usize,
+inferred_type: InferredType,
+},
+SyntheticUse {
+module: String,
+#[serde(default)]
+args: Vec<String>,
+#[serde(default)]
+imports: Vec<String>,
+span: Span,
+},
+}
+
+pub struct PatternExpect {
+pub src: String,
+pub matches: usize,
+#[serde(default)]
+pub captures: std::collections::HashMap<String, String>,
+}
+
+pub struct PatternSpec {
+pub name: String,
+#[serde(default = "default_pattern_language")]
+pub language: String,
+#[serde(default = "default_pattern_phase")]
+pub phase: String,
+pub query: String,
+#[serde(default)]
+pub projections: std::collections::HashMap<String, Vec<String>>,
+#[serde(default)]
+pub expect: Vec<PatternExpect>,
+}
+
+pub struct CaptureData {
+pub text: String,
+pub span: Span,
+#[serde(rename = "str", default)]
+pub string_value: Option<String>,
+#[serde(rename = "strs", default)]
+pub string_values: Vec<String>,
+#[serde(default)]
+pub content_span: Option<Span>,
+#[serde(rename = "ty", default)]
+pub inferred_type: Option<InferredType>,
+#[serde(rename = "shape", default)]
+pub value_shape: Option<ValueShape>,
+#[serde(default)]
+pub sub_params: Vec<EmittedParam>,
+#[serde(rename = "callable_edge", default)]
+pub callable_return_edge: Option<crate::model::witnesses::WitnessAttachment>,
+#[serde(default)]
+pub list: Vec<(String, Span)>,
+#[serde(default)]
+pub is_package_receiver: Option<bool>,
+#[serde(default)]
+pub args: Vec<ArgInfo>,
+#[serde(default)]
+pub ref_sub_name: Option<String>,
+#[serde(default)]
+pub call_name: Option<String>,
+#[serde(default)]
+pub brand: Vec<(String, String)>,
+#[serde(default)]
+pub topic_base: Option<String>,
+#[serde(default)]
+pub isa: Option<InferredType>,
+}
+
+pub enum CaptureValue {
+Many(Vec<CaptureData>),
+One(Box<CaptureData>),
+}
+
+pub struct MatchContext {
+pub pattern: String,
+pub span: Span,
+pub package: Option<String>,
+pub package_parents: Vec<String>,
+pub package_uses: Vec<String>,
+pub captures: std::collections::HashMap<String, CaptureValue>,
+}
+
+pub enum Trigger {
+UsesModule(String),
+ClassIsa(String),
+Always,
+}
+
+pub struct FrameworkModeMaker {
+pub module: String,
+pub flavor: String,
+#[serde(default)]
+pub imports: Vec<String>,
+#[serde(default)]
+pub base: Option<String>,
+}
+
+pub struct RefTagFunction {
+pub module: String,
+pub name: String,
+pub tag: crate::model::file_analysis::RefTagFn,
+}
+
+pub struct TypeOverride {
+pub target: OverrideTarget,
+pub return_type: OverrideReturn,
+pub reason: String,
+}
+
+pub enum OverrideReturn {
+Type(InferredType),
+Expr(crate::model::witnesses::ReturnExpr),
+}
+
+pub struct DispatchVerb {
+pub verb: String,
+pub target_class: String,
+pub owner_class: String,
+#[serde(default)]
+pub name_arg_index: usize,
+}
+
+pub struct AttributeMacro {
+pub name: String,
+pub signal: String,
+}
+
+pub struct LoadVerb {
+pub verb: String,
+pub receiver_class: String,
+#[serde(default)]
+pub name_arg_index: usize,
+}
+
+pub struct ConstraintParam {
+#[serde(default)]
+pub string: Option<String>,
+#[serde(default)]
+pub ty: Option<InferredType>,
+}
+
+pub struct ParamType {
+#[serde(default)]
+pub method: Option<String>,
+pub in_role: String,
+pub param: usize,
+pub type_class: String,
+#[serde(default)]
+pub requires_action_attr: bool,
+#[serde(default)]
+pub implicit_action_names: Vec<String>,
+#[serde(default)]
+pub from_loader_config: bool,
+}
+
+pub enum OverrideTarget {
+Method { class: String, name: String },
+Sub {
+#[serde(default)]
+package: Option<String>,
+name: String,
+},
+}
+
+pub struct SigHelpQueryContext {
+pub call: Option<CallFrame>,
+pub cursor_inside: Option<ContainerFrame>,
+pub current_package: Option<String>,
+#[serde(default)]
+pub current_use_module: Option<String>,
+}
+
+pub struct CallFrame {
+pub is_method: bool,
+pub name: String,
+pub receiver_text: Option<String>,
+pub receiver_type: Option<InferredType>,
+pub args: Vec<ArgInfo>,
+pub cursor_arg_index: usize,
+}
+
+pub struct ContainerFrame {
+pub kind: ContainerKind,
+pub active_slot: usize,
+pub existing_keys: Vec<String>,
+}
+
+pub enum ContainerKind {
+Array,
+Hash,
+}
+
+pub struct PluginSignatureHelp {
+pub label: String,
+pub params: Vec<String>,
+pub active_param: usize,
+}
+
+pub enum PluginSigHelpAnswer {
+Show(PluginSignatureHelp),
+Silent,
+ShowHandler {
+owner_class: String,
+dispatcher: String,
+handler_name: String,
+active_param: usize,
+},
+ShowCallSig,
+}
+
+pub struct PluginCompletionAnswer {
+pub items: Vec<PluginCompletion>,
+#[serde(default)]
+pub exclusive: bool,
+#[serde(default)]
+pub dispatch_targets_for: Option<DispatchTargetRequest>,
+}
+
+pub struct DispatchTargetRequest {
+pub owner_class: String,
+pub dispatcher_names: Vec<String>,
+}
+
+pub struct PluginCompletion {
+pub label: String,
+pub kind: CompletionKindHint,
+#[serde(default)]
+pub detail: Option<String>,
+#[serde(default)]
+pub insert_text: Option<String>,
+}
+
+pub enum CompletionKindHint {
+Function,
+Method,
+Field,
+Property,
+Value,
+Event,
+Operator,
+Keyword,
+Task,
+Helper,
+Route,
+}
+

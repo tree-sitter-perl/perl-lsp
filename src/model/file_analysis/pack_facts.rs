@@ -41,15 +41,6 @@ pub struct PackFacts {
     #[serde(default)]
     pub doc_mentions: Vec<String>,
 
-    /// The language's display vocabulary for the engine's value lattice:
-    /// `format_inferred_type` tag → this language's spelling (php:
-    /// `"HashRef"` → `"array"`, `"Numeric"` → `"int|float"`). Applied by
-    /// `FileAnalysis::render_type` / `display_type_of` at every human
-    /// surface; a tag not in the map (class names, parametrics) passes
-    /// through. Empty for Perl — the engine's tags ARE its vocabulary.
-    #[serde(default)]
-    pub type_display: Vec<(String, String)>,
-
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
     /// inheritance edge — a spec REPLACES the primary wholesale (its member
@@ -76,12 +67,11 @@ pub struct PackFacts {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
-    /// `#include "x.h"` / `<x.h>` directives and import paths as written:
-    /// (path-token span, raw path text). Goto-def on the path token
-    /// resolves the header like `use` resolves a module. A use-map
-    /// language's `use` rows are `use_rows` instead.
+    /// `#include "x.h"` / `<x.h>` directives and import paths as written,
+    /// each with the file it resolves to. A use-map language's `use` rows
+    /// are `use_rows` instead.
     #[serde(default)]
-    pub include_directives: Vec<(Span, String)>,
+    pub include_directives: Vec<IncludeDirective>,
 
     /// A use-map language's `use` rows, as the (namespace, leaf, alias)
     /// parts the extractor read them in — the table `UseMap` resolves
@@ -133,11 +123,11 @@ pub struct PackFacts {
     #[serde(default)]
     pub domain_sites: Vec<DomainSite>,
 
-    /// `std::move(x)` sites: (moved var name, move-call span, enclosing scope).
-    /// A read of the var after the call and before its next rebind is a
-    /// use-after-move bug — see `use_after_move_reads`.
+    /// `std::move` sites. A read of the moved part after the call and
+    /// before it is reset is a use-after-move bug — see
+    /// `use_after_move_reads`.
     #[serde(default)]
-    pub moved_from: Vec<(String, Span, ScopeId)>,
+    pub moved_from: Vec<MoveSite>,
 
     /// Control-flow construct spans (`if`/`while`/`for`/`switch`/ternary/preproc
     /// conditionals). `use_after_move_reads` reads these for its straight-line
@@ -189,14 +179,32 @@ impl FileModule {
     }
 }
 
+/// One include/import directive: the path token, its text as written, and
+/// the file it resolves to — minted by the driver, which holds the path the
+/// resolver searches from, so no consumer re-runs the header lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncludeDirective {
+    pub span: Span,
+    pub raw: String,
+    /// Canonical path of the resolved file; `None` when nothing on the
+    /// search path answers (a system header off the toolchain roots) or the
+    /// language has no include resolver.
+    pub target: Option<String>,
+}
+
 impl PackFacts {
+    /// The directive whose path token holds `point`.
+    pub fn include_directive_at(&self, point: Point) -> Option<&IncludeDirective> {
+        self.include_directives.iter().find(|d| contains_point(&d.span, point))
+    }
+
     /// Is `span` inside an import row (a `use` row's name or an
     /// `#include` path token)? The one speller for that question: the
     /// row's leaf carries its own ref; every other segment is a namespace
     /// no by-name lookup should answer for.
     pub fn in_import_row(&self, span: &Span) -> bool {
         self.use_row_covering(span).is_some()
-            || self.include_directives.iter().any(|(row, _)| span_within(span, row))
+            || self.include_directives.iter().any(|d| span_within(span, &d.span))
     }
 
     /// The `use` row whose name token covers `span`, if any.
@@ -225,7 +233,7 @@ impl PackFacts {
             + self
                 .include_directives
                 .iter()
-                .map(|(_, s)| s.capacity())
+                .map(|d| d.raw.capacity() + d.target.as_ref().map_or(0, String::capacity))
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
@@ -244,7 +252,6 @@ impl PackFacts {
             + vcap(&self.native_type_spellings)
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
-            + vcap(&self.type_display)
             + self.file_module.as_ref().map_or(0, |m| vcap(&m.segments) + m.segments.iter().map(String::capacity).sum::<usize>());
     }
 }
@@ -252,4 +259,23 @@ impl PackFacts {
 fn span_within(inner: &Span, outer: &Span) -> bool {
     (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
         && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
+}
+
+/// A `std::move` of a place (`x`, `other.msg`): what it moved, the call,
+/// the scope it runs in, and the accesses that touch the moved part,
+/// decided where the places are built so the check never re-reads a
+/// spelling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveSite {
+    pub place: super::Place,
+    /// The moved subject as written, for the rendered message.
+    pub spelling: String,
+    pub call: Span,
+    pub scope: ScopeId,
+    /// The variable token of every read reaching the moved part: a read of
+    /// a sibling member (`other.id` after moving `other.msg`) is not one.
+    pub reads: Vec<Span>,
+    /// Writes of the moved part or of what holds it (`other.msg = …`),
+    /// each of which gives it a value again.
+    pub resets: Vec<Span>,
 }

@@ -383,9 +383,9 @@ pub(super) fn include_set_hash(src: &str) -> u64 {
     h.finish()
 }
 
-/// Bump when the persisted macro-table format or the gather's semantics
+/// Moves (`cache-epochs/macro-cache/`) when the persisted macro-table format or the gather's semantics
 /// change in a way that invalidates on-disk blobs.
-const MACRO_CACHE_VERSION: i64 = 5;
+const MACRO_CACHE_VERSION: i64 = crate::util::cache_epochs::MACRO_CACHE;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedMacros {

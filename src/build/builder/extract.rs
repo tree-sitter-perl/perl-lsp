@@ -186,7 +186,26 @@ impl<'a> Builder<'a> {
                 _ => ElementWrite::Compound,
             });
         }
-        self.element_written_in_place(elem).then_some(ElementWrite::InPlace)
+        if self.element_written_in_place(elem) {
+            return Some(ElementWrite::InPlace);
+        }
+        self.element_escaped(elem).then_some(ElementWrite::Escaped)
+    }
+
+    /// A reference to the element is taken (`\$opt{help}`, `\$v->{k}`):
+    /// the element's place escapes. Taking the reference vivifies the slot,
+    /// and whoever holds it may store anything there; every other key of the
+    /// container stays as it was (`GetOptions('help' => \$opt{'help'})`).
+    pub(super) fn element_escaped(&self, elem: Node<'a>) -> bool {
+        self.syntax.parent(elem).is_some_and(|p| p.kind() == "refgen_expression")
+    }
+
+    /// Record an escaped element place for the mutation-extension pass: its
+    /// key joins the container's shape with an unknown value, so the slot
+    /// exists and nothing below it is closed. The place-scoped form of
+    /// `record_escape_write`, whose place is the whole root.
+    pub(super) fn record_place_escape(&mut self, elem: Node<'a>) {
+        self.record_key_write(elem, None, None, self.current_scope());
     }
 
     /// An element written in place. A list-assignment target's write is the
@@ -658,7 +677,7 @@ impl<'a> Builder<'a> {
                 node_to_span(key_node)
             };
             self.refs.push(Ref {
-                kind: RefKind::HashKeyAccess { var_text: hash_name.to_string() },
+                kind: RefKind::HashKeyAccess { var_text: hash_name.to_string(), dies_on_undef: false },
                 span,
                 scope: self.scope_at_point(span.start),
                 target_name: key,
@@ -784,6 +803,7 @@ impl<'a> Builder<'a> {
             self.refs.push(Ref {
                 kind: RefKind::HashKeyAccess {
                     var_text: String::new(),
+                    dies_on_undef: false,
                 },
                 span,
                 scope: self.scope_at_point(span.start),
@@ -898,6 +918,9 @@ pub(super) enum ElementWrite {
     /// `$h{k}++`, a list-assignment target, an autovivified container
     /// (`element_written_in_place`).
     InPlace,
+    /// `\$h{k}`: the element's place escapes (`element_escaped`), so its
+    /// value may be written by whoever holds the reference.
+    Escaped,
 }
 
 impl ElementWrite {

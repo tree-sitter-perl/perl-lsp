@@ -77,6 +77,15 @@
   right: (_) @flow.source) @flow.assign
 (augmented_assignment left: (_) @flow.place)
 
+; An augmented assignment and a `del` leave what they name without the
+; value a guard proved, whatever it is: a name rebinds (to the operator's
+; result, or to nothing), a member or element is written.
+(augmented_assignment
+  left: [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement
+  (expression_list [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place]))
+
 (parameters
   (identifier) @def.var.name @def.var)
 (typed_parameter . (identifier) @def.var.name @def.var)
@@ -226,15 +235,16 @@
 ; expression yields when the test holds, the right of `and`. The pack's
 ; narrow_guard maps the guard + type token to the refinement; core attaches
 ; it in the guard's scope over the arm (an `if` body is no scope in Python).
+; A member subject (`self.x`) narrows the place it denotes.
 (if_statement
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (elif_clause
   condition: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   consequence: (block) @narrow.arm)
 (conditional_expression
   (_) @narrow.arm
@@ -243,11 +253,11 @@
   .
   (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type)))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type)))
 (boolean_operator
   left: (call
     function: (identifier) @narrow.guard
-    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   operator: "and"
   right: (_) @narrow.arm)
 

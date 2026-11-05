@@ -226,14 +226,14 @@ pub(super) fn names_enclosing(ad: &Adorned, t: &Event) -> bool {
 /// in the body reaches it whatever the order. Every other write is a
 /// `var_writes` row of the declaration it reaches.
 pub(super) fn unify_assigned(st: &mut ExtractState) {
-    use crate::model::file_analysis::{callable_reach, latest_in_force, write_lookup_chain, ScopeId, SymKind, VariableDecl};
+    use crate::model::file_analysis::{callable_reach, latest_in_force, write_lookup_chain, InView, ScopeId, SymKind, VariableDecl};
     let out = &mut st.out;
     if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
     }
     // Every other Variable def declares where it is written, from its token on.
     let mut decls: HashMap<String, Vec<(ScopeId, VariableDecl<'static, ()>)>> = HashMap::new();
-    let decl = |at, scope_wide| VariableDecl { id: (), at, gate: None, scope_wide };
+    let decl = |at, scope_wide| VariableDecl { id: (), view: InView::from(at), gate: None, scope_wide };
     for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == SymKind::Variable) {
         decls.entry(s.name.clone()).or_default().push((s.scope, decl(s.name_start, false)));
     }

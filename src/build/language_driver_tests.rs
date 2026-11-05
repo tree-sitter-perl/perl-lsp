@@ -304,16 +304,13 @@ struct op { BASEOP };
     );
 
     // finding 6a: the explicit-annotation witness the inlay suppressor keys on
-    // is present on the member's own scope (parity with a plain field).
+    // is present on the member's own place (parity with a plain field).
     let op_type = sym_in(&fa, "op_type");
     assert_eq!(op_type.kind, SymKind::Field);
     assert!(
-        fa.witnesses.has_annotation(
-            &crate::model::witnesses::WitnessAttachment::Variable {
-                name: "op_type".into(),
-                scope: op_type.scope,
-            },
-        ),
+        fa.witnesses.has_annotation(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
+            fa.declared_place(op_type.id),
+        ))),
         "macro-body member carries the declared-type witness"
     );
 
@@ -618,6 +615,28 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
     );
 }
 
+// A body that elides its receiver names its own method's class. A local
+// union's destructor mints no callable, so its bare names read no member of
+// the method around it.
+#[cfg(feature = "cpp")]
+#[test]
+fn an_unowned_body_reads_no_member_of_the_method_around_it() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessSource};
+    let src = "struct C { int inner_; void f() { int a = inner_; union U { ~U() { int b = inner_; } }; } };\n";
+    let fa = cpp_driver().analyze(src);
+    let reads: Vec<usize> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "implicit_field_read"))
+        .filter_map(|w| match w.attachment {
+            WA::Expr(sp) => Some(sp.start.column),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, [src.find("inner_; union").unwrap()], "only the method's own read is its member's");
+}
+
 // A callable with no declared return takes every `return` as an arm, and the
 // arms sit under the enrichment seal: enriching the file keeps its type.
 #[cfg(feature = "cpp")]
@@ -638,27 +657,19 @@ fn every_return_arm_survives_enrichment() {
     assert_eq!(fa.sub_return_type_at_arity("pick", None), before, "enrichment keeps the arms");
 }
 
-// The by-id capability askers on the registry are THE include-token /
-// preprocessor gates for both serving surfaces (LSP handlers and their
-// CLI/--batch mirrors). Each answer is read off what the language's
-// document mints (`@import.path`, `@def.macro`), never a pack bool.
+// The by-id capability asker on the registry is the preprocessor gate for
+// both serving surfaces. Its answer is read off what the language's document
+// mints (`@def.macro`), never a pack bool.
 #[cfg(feature = "cpp")]
 #[test]
 fn capability_askers_answer_by_language_id() {
     use crate::build::language_driver::LanguageRegistry;
-    assert!(LanguageRegistry::has_include_tokens("cpp"),
-        "cpp declares include path tokens — CLI + server both gate on this");
     assert!(LanguageRegistry::has_preprocessor_macros("cpp"));
-    assert!(!LanguageRegistry::has_include_tokens("perl"),
+    assert!(!LanguageRegistry::has_preprocessor_macros("perl"),
         "perl has no LangPack: the asker answers false, no name branch");
-    assert!(!LanguageRegistry::has_preprocessor_macros("perl"));
-    assert!(!LanguageRegistry::has_include_tokens("no-such-language"));
+    assert!(!LanguageRegistry::has_preprocessor_macros("no-such-language"));
     #[cfg(feature = "python")]
-    {
-        assert!(!LanguageRegistry::has_include_tokens("python"),
-            "python imports are name-keyed, no path tokens");
-        assert!(!LanguageRegistry::has_preprocessor_macros("python"));
-    }
+    assert!(!LanguageRegistry::has_preprocessor_macros("python"));
 }
 
 // A function-pointer member (`int (*read)(char *)`) is a data member: the
@@ -984,7 +995,6 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             synchronous_rebuild,
             context_gather,
             pack_invalidation,
-            cross_file_words,
             entrypoint_symbols,
         } = d.caps();
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
@@ -998,7 +1008,6 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             || synchronous_rebuild;
         let pack_family = pack_invalidation
             || context_gather
-            || cross_file_words
             || !entrypoint_symbols.is_empty();
         assert!(
             !(hub_family && pack_family),

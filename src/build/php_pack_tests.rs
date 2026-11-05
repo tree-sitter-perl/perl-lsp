@@ -4,6 +4,7 @@ use super::*;
 use crate::build::packs::php_pack;
 use crate::model::file_analysis::{FileAnalysis, SymKind};
 
+#[cfg(feature = "php")]
 fn php(src: &str) -> FileAnalysis {
     crate::build::language_driver::LanguageRegistry::compiled()
         .for_path(std::path::Path::new("t.php"))
@@ -24,6 +25,7 @@ fn owned(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
     pairs.iter().map(|(n, p)| (n.to_string(), p.map(str::to_string))).collect()
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn a_class_is_filed_under_its_namespace() {
     let fa = php("<?php
@@ -45,6 +47,7 @@ trait Greets {}
     assert_eq!(fa.find_type_decl("App\\Models\\User").map(|s| s.start.row), Some(3));
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn each_namespace_holds_until_the_next_and_a_braced_one_for_its_body() {
     let fa = php("<?php
@@ -69,6 +72,7 @@ namespace { class Y extends A\\X {} }
     assert_eq!(fa.declared_parents("Y"), ["A\\X"]);
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn parents_resolve_through_the_use_map() {
     let fa = php("<?php
@@ -104,6 +108,7 @@ trait Greets { use Talks; }
     assert_eq!(fa.declared_parents("App\\Models\\Greets"), ["Vendor\\Pkg\\Speaker"]);
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn use_rows_and_aliases_are_the_files_use_map() {
     let fa = php("<?php
@@ -157,6 +162,7 @@ fn the_php_driver_serves_php_files() {
     assert_eq!(fa.declared_parents("App\\User"), ["Base\\Model"]);
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn the_class_keyword_or_modifier_is_its_flavour_flag() {
     use crate::model::file_analysis::SymbolFlags;
@@ -173,6 +179,7 @@ trait Named {}
     assert_eq!(flags("Named"), SymbolFlags::TRAIT);
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn parent_names_and_imported_leaves_are_class_references() {
     use crate::model::file_analysis::RefKind;
@@ -215,6 +222,7 @@ class User extends Model implements Speaker, \\Countable, Sub\\Local {
 /// A `use function` / `use const` row names no class, whether its keyword
 /// sits on the statement (flat, or a whole group) or on one clause of a
 /// group: it is neither a use-map row nor a class reference.
+#[cfg(feature = "php")]
 #[test]
 fn function_and_const_imports_are_neither_rows_nor_class_references() {
     use crate::model::file_analysis::RefKind;
@@ -240,6 +248,7 @@ use Lib\\Mixed\\{function f, const C, Klass};
 /// A class's uses in another file are found by the identity they name:
 /// goto-def from a parent clause lands on the declaration, and rename
 /// rewrites the declaration, the import's leaf and the parent's leaf.
+#[cfg(feature = "php")]
 #[test]
 fn a_class_renames_across_files_through_its_identity() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -284,6 +293,7 @@ fn a_class_renames_across_files_through_its_identity() {
     );
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn an_aliased_imports_leaf_renames_the_imported_class() {
     use crate::model::file_analysis::RenameKind;
@@ -300,6 +310,7 @@ fn an_aliased_imports_leaf_renames_the_imported_class() {
 /// A `use` row binds in the namespace section it is written in: two
 /// sections of one file importing the same leaf from different places each
 /// resolve their own, in either namespace form.
+#[cfg(feature = "php")]
 #[test]
 fn each_namespace_section_resolves_through_its_own_use_rows() {
     use crate::model::file_analysis::RefKind;
@@ -357,6 +368,7 @@ class Qux extends Foo {}
 
 /// Rename of a class reaches only the section that imports it: B's
 /// same-leaf import of another class is left alone.
+#[cfg(feature = "php")]
 #[test]
 fn a_rename_stays_in_the_section_that_imports_the_class() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -398,6 +410,7 @@ fn a_rename_stays_in_the_section_that_imports_the_class() {
     assert_eq!(edits_from(6), [s("App", 5, 6), s("App", 6, 18), s("Y", 2, 6)]);
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn functions_and_methods_are_callables_of_their_namespace_and_class() {
     let fa = php("<?php
@@ -415,6 +428,7 @@ class User {
     assert!(fa.symbols().iter().all(|s| s.kind != SymKind::Field));
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn what_the_document_states_about_a_method_is_its_flag() {
     use crate::model::file_analysis::SymbolFlags as F;
@@ -444,6 +458,7 @@ trait Proxy { public function __get($n) {} }
     assert_eq!(flags("Repo"), F::ABSTRACT);
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn an_interface_or_abstract_class_is_a_role_its_contracts_require() {
     let fa = php("<?php
@@ -502,6 +517,7 @@ class Order {
 /// A property is a member of its class under its bare name; the `$` it is
 /// declared with is its listed spelling, and the name token alone is the
 /// span a rename rewrites.
+#[cfg(feature = "php")]
 #[test]
 fn properties_are_members_of_their_class() {
     use crate::model::file_analysis::SymbolFlags as F;
@@ -541,6 +557,7 @@ fn properties_are_members_of_their_class() {
 /// A declared type is the member's value, read where a member access
 /// reads it; a class spelling resolves through the use-map. A property and
 /// a method of one name are separate families.
+#[cfg(feature = "php")]
 #[test]
 fn a_declared_property_type_is_the_members_value() {
     use crate::model::file_analysis::InferredType as T;
@@ -559,6 +576,7 @@ fn a_declared_property_type_is_the_members_value() {
     assert_eq!(value("plain"), None, "a plain parameter is no property");
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn the_outline_lists_properties_under_their_class() {
     let fa = php(MEMBERS);
@@ -578,6 +596,7 @@ fn the_outline_lists_properties_under_their_class() {
 }
 
 /// A property's hover names it as it is listed, `$` and all.
+#[cfg(feature = "php")]
 #[test]
 fn a_property_hovers_by_its_listed_name() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -596,6 +615,7 @@ fn a_property_hovers_by_its_listed_name() {
 /// Rename from a property's declaration rewrites its bare name, never the
 /// `$` (a typed `$` is the sigil, not part of the name), and never the
 /// method that shares the name.
+#[cfg(feature = "php")]
 #[test]
 fn a_property_renames_from_its_declaration() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -672,6 +692,7 @@ class Timer {
 
 /// A parameter is a local of its callable under the name after its `$`;
 /// a closure's parameters are the closure's.
+#[cfg(feature = "php")]
 #[test]
 fn parameters_are_locals_of_their_callable() {
     let fa = php(PARAMS);
@@ -696,6 +717,7 @@ fn parameters_are_locals_of_their_callable() {
 
 /// A declared type is the parameter's value from its binding site: a class
 /// spelling resolves through the use-map, a union has no single type.
+#[cfg(feature = "php")]
 #[test]
 fn a_parameters_declared_type_is_its_value_in_the_body() {
     use crate::model::file_analysis::InferredType as T;
@@ -708,7 +730,7 @@ fn a_parameters_declared_type_is_its_value_in_the_body() {
     let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
     let declared: Vec<_> = fa
         .witnesses
-        .for_attachment(&WA::Variable { name: "at".into(), scope: at.scope })
+        .for_attachment(&WA::Place(Box::new(fa.declared_place(at.id))))
         .into_iter()
         .map(|w| w.span.start)
         .collect();
@@ -724,6 +746,7 @@ fn a_parameters_declared_type_is_its_value_in_the_body() {
 /// A use of `$x` in the body is a reference to the parameter: the name
 /// token is the reference, so rename never touches the `$`. A read the
 /// callable declares no parameter for binds to nothing.
+#[cfg(feature = "php")]
 #[test]
 fn a_parameter_use_binds_to_the_parameter() {
     use crate::model::file_analysis::RefKind;
@@ -762,6 +785,7 @@ class Order {
 /// A promoted constructor parameter is the property and the constructor's
 /// local on one token, one declaration: rename from either side rewrites
 /// the token, the body's uses and the property's reads alike.
+#[cfg(feature = "php")]
 #[test]
 fn a_promoted_parameter_is_the_property_and_the_local_as_one() {
     let fa = php(PROMOTED);
@@ -784,6 +808,7 @@ fn a_promoted_parameter_renames_as_one_from_either_side() {
 /// Every class a type position names is a class reference through the
 /// use-map, so rename of the class rewrites property, parameter, nullable,
 /// union, qualified and return spellings.
+#[cfg(feature = "php")]
 #[test]
 fn class_names_in_type_positions_are_class_references() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -827,6 +852,7 @@ fn a_cpp_local_renames_whole() {
 }
 
 /// Where `needle` starts in `src`, `offset` bytes in.
+#[cfg(feature = "php")]
 fn at(src: &str, needle: &str, offset: usize) -> tree_sitter::Point {
     let i = src.find(needle).unwrap_or_else(|| panic!("`{needle}` in the source")) + offset;
     let row = src[..i].matches('\n').count();
@@ -926,6 +952,7 @@ class Timer {
 /// slot. Every member call dispatches on its receiver's value, and a
 /// receiver that names its class (`$this`, `self`, `Timer`) has that class
 /// as its value.
+#[cfg(feature = "php")]
 #[test]
 fn member_calls_and_reads_name_their_member_on_the_receiver() {
     use crate::model::file_analysis::RefKind;
@@ -1102,6 +1129,7 @@ fn an_inherited_member_resolves_and_renames_across_files() {
 }
 
 /// Hover on a member at a call site shows the declaration it resolves to.
+#[cfg(feature = "php")]
 #[test]
 fn a_member_call_hovers_as_its_declaration() {
     let fa = php(CALLS);
@@ -1225,6 +1253,7 @@ class Clock {
 /// through the use-map, `self` and `static` name the class the method is
 /// written in, a nullable is its class, and a union, `void` or no
 /// declaration states no type.
+#[cfg(feature = "php")]
 #[test]
 fn a_declared_return_is_the_callables_value() {
     use crate::model::file_analysis::InferredType as T;
@@ -1250,6 +1279,7 @@ fn a_declared_return_is_the_callables_value() {
 /// `self` and `static` name the class they are written in wherever a type
 /// is written: a parameter, a property, a promoted parameter, a closure's
 /// parameter, nullable or not.
+#[cfg(feature = "php")]
 #[test]
 fn self_names_the_enclosing_class_in_every_written_type() {
     use crate::model::file_analysis::RefKind;
@@ -1282,6 +1312,7 @@ class Node {
 /// types hop by hop: every receiver in `$this->with()->again()->…->tick()`
 /// is the class the previous call returns, and a free call's value starts
 /// a chain too.
+#[cfg(feature = "php")]
 #[test]
 fn a_call_chain_types_through_declared_returns() {
     use crate::model::file_analysis::RefKind;
@@ -1330,6 +1361,41 @@ fn a_chained_member_resolves_across_files_and_hovers_its_return() {
     assert!(hover.contains("*returns: Lib\\Clock*"), "{hover}");
     let hover = fa.hover_info(at(RETURNS, "with()->again", 0), RETURNS, None).unwrap_or_default();
     assert!(hover.contains("*returns: App\\Builder*"), "{hover}");
+}
+
+/// Hover on a typed call into another file shows the method's declaration
+/// and the file it lives in, never `name: Type` as if it were a field; a
+/// property shows its type, and both read in PHP's words (`bool`, not the
+/// engine's `Bool`).
+#[cfg(feature = "php")]
+#[test]
+fn a_cross_file_member_call_hovers_as_its_declaration_in_php_words() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let handler = "<?php\nnamespace Lib;\n\nclass Handler {\n    public bool $on;\n    public function isHandling(int $level): bool {}\n}\n";
+    let runner = "<?php\nnamespace App;\n\nuse Lib\\Handler;\n\nclass Runner {\n    public function run(Handler $h) {\n        $h->isHandling(1);\n        return $h->on;\n    }\n}\n";
+    let root = std::env::temp_dir().join(format!("php-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for (name, src) in [("Handler.php", handler), ("Runner.php", runner)] {
+        std::fs::write(root.join(name), src).unwrap();
+        idx.insert_workspace_for_test(root.join(name), php(src));
+    }
+    let path = root.join("Runner.php");
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    let hover = |needle: &str| {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &file, key, at(runner, needle, 0), Some(&idx), OverrideScope::default()).with_source(runner);
+        crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap_or_default()
+    };
+    let call = hover("isHandling(1)");
+    let field = hover("on;");
+    std::fs::remove_dir_all(&root).ok();
+    assert!(call.contains("public function isHandling(int $level): bool"), "{call}");
+    assert!(call.contains("Handler.php"), "{call}");
+    assert!(!call.contains("*member*") && !call.contains("Bool"), "{call}");
+    assert!(field.contains("on: bool"), "{field}");
 }
 
 const FLUENT_BASE: &str = "<?php
@@ -1755,11 +1821,11 @@ fn php_member(
     class: &str,
 ) -> Option<crate::model::file_analysis::MethodResolution> {
     use crate::build::language_driver::LanguageRegistry;
-    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
     let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
     let base: &dyn CrossFileLookup = idx;
     let vis = LanguageRegistry::pack_visibility(&fa.language);
-    let scoped = ScopedLookup::new(base, &fa.pack.include_closure, None, VisibilityAxis::for_origin(&fa, None, base, vis));
+    let scoped = ScopedLookup::for_origin(base, &fa, None, vis);
     fa.resolve_method_in_ancestors(class, "name", Some(&scoped))
 }
 
@@ -1841,6 +1907,7 @@ fn lane(fa: &FileAnalysis) -> Vec<(&str, usize, usize)> {
     fa.namespace_ranges.iter().map(|r| (r.namespace.as_str(), r.span.start.row, r.span.end.row)).collect()
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn statement_namespaces_fill_the_lane_and_a_method_belongs_to_its_class() {
     let fa = php("<?php
@@ -1859,6 +1926,7 @@ function f() { return 2; }
     assert_eq!(fa.namespace_at(tree_sitter::Point::new(6, 16)), Some("B"));
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn braced_namespaces_cover_their_bodies() {
     let fa = php("<?php
@@ -1946,6 +2014,7 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
 // an object of that method's class. A function has no receiver.
 /// One system types `$this`: one capture states it, one table names its
 /// class, so its value is one witness.
+#[cfg(feature = "php")]
 #[test]
 fn this_is_typed_once() {
     use crate::model::witnesses::WitnessAttachment as WA;
@@ -1958,6 +2027,7 @@ fn this_is_typed_once() {
 /// A call on a receiver that names a class dispatches on the receiver's
 /// value, the one store of that class: no second, span-keyed copy picks a
 /// named lookup.
+#[cfg(feature = "php")]
 #[test]
 fn a_class_receiver_dispatches_on_its_value() {
     use crate::model::witnesses::{Callee, Lookup, WitnessAttachment as WA, WitnessPayload as WP};
@@ -1977,6 +2047,7 @@ fn a_class_receiver_dispatches_on_its_value() {
     assert_eq!(fa.expr_type_at_span(recv, None), Some(InferredType::ClassName("A".into())));
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn this_is_the_receiver_of_its_method() {
     let fa = php("<?php\nclass A {\n  function f() { return $this; }\n}\nfunction g() { return $this; }\n");

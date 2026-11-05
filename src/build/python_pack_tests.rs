@@ -373,11 +373,11 @@ fn member_on(
     class: &str,
 ) -> Option<crate::model::file_analysis::MethodResolution> {
     use crate::build::language_driver::LanguageRegistry;
-    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
     let fa = idx.workspace_file_for_test(path).unwrap();
     let base: &dyn CrossFileLookup = idx;
     let vis = LanguageRegistry::pack_visibility(&fa.language);
-    let scoped = ScopedLookup::new(base, &fa.pack.include_closure, None, VisibilityAxis::for_origin(&fa, None, base, vis));
+    let scoped = ScopedLookup::for_origin(base, &fa, None, vis);
     fa.resolve_method_in_ancestors(class, "name", Some(&scoped))
 }
 
@@ -1637,4 +1637,137 @@ def f(self):
     assert!(!receiver("self", 10), "a free function has no receiver");
     assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
     assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
+}
+
+#[test]
+fn a_member_receiver_down_to_a_variable_is_its_place() {
+    use crate::model::file_analysis::{Binding, PathStep, Place, RefKind};
+    // Only a place a narrowing gives a value rides on its receiver.
+    let fa = py_in(
+        "class B:\n    pass\nclass A:\n    def go(self):\n        if isinstance(self.a.b, B):\n            self.a.b.run()\n        f().x.run()\n        if isinstance(self.c, B):\n            self.c.run()\n        self.d.run()\n",
+        None,
+    );
+    let me = fa.symbols().iter().find(|s| s.name == "self" && s.kind == SymKind::Variable).expect("self param").id;
+    let places: Vec<Option<Place>> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| r.member_site().unwrap().invocant.place().cloned())
+        .collect();
+    let member = |m: &str| PathStep::Member(m.to_string());
+    assert_eq!(
+        places,
+        vec![
+            Some(Place { root: Binding::Lexical(me), path: vec![member("a"), member("b")] }),
+            None,
+            Some(Place { root: Binding::Lexical(me), path: vec![member("c")] }),
+            None,
+        ],
+        "a value-rooted receiver is no place, and an unnarrowed one carries none"
+    );
+}
+
+/// The class each `run()` call's receiver types as, by row.
+fn run_receivers(src: &str) -> Vec<(usize, Option<String>)> {
+    use crate::model::file_analysis::RefKind;
+    let fa = py_in(src, None);
+    let mut out: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| {
+            let t = fa.method_call_invocant_type(r, None);
+            (r.span.start.row, t.and_then(|t| t.class_name().map(str::to_string)))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn an_augmented_assignment_or_del_ends_a_member_narrowing() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.pet += 1
+            self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            del self.pet
+            self.pet.run()
+    def both(self):
+        if isinstance(self.pet, Foo):
+            del self.other, self.pet
+            self.pet.run()
+";
+    assert_eq!(run_receivers(src), vec![(6, Some("Foo".to_string())), (8, None), (12, None), (16, None)]);
+}
+
+#[test]
+fn an_augmented_assignment_or_del_ends_a_variable_narrowing() {
+    // A variable and a member end the same way. The rebind ends only what a
+    // guard proved: a declared value (`y = Foo()`) still stands, and an
+    // unnarrowed `x` answers as the untyped parameter in `k` does.
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+def f(x):
+    if isinstance(x, Foo):
+        x.run()
+        x += 1
+        x.run()
+def g(x):
+    if isinstance(x, Foo):
+        del x
+        x.run()
+def k(x):
+    x.run()
+def h():
+    y = Foo()
+    y.run()
+    y += 1
+    y.run()
+";
+    let receivers = run_receivers(src);
+    let untyped = receivers.iter().find(|(row, _)| *row == 13).unwrap().1.clone();
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        receivers,
+        vec![(5, foo.clone()), (7, untyped.clone()), (11, untyped.clone()), (13, untyped), (16, foo.clone()), (18, foo)]
+    );
+}
+
+#[test]
+fn isinstance_narrows_a_member_until_it_is_disturbed() {
+    let src = "\
+class Foo:
+    def run(self):
+        pass
+class A:
+    def go(self):
+        if isinstance(self.pet, Foo):
+            self.pet.run()
+            self.other = 1
+            self.pet.run()
+            self.pet = make()
+            self.pet.run()
+        self.pet.run()
+    def stop(self):
+        if isinstance(self.pet, Foo):
+            self.reset()
+            self.pet.run()
+";
+    let foo = Some("Foo".to_string());
+    assert_eq!(
+        run_receivers(src),
+        vec![(6, foo.clone()), (8, foo), (10, None), (11, None), (15, None)],
+        "a sibling write leaves the narrowing; a write to the member, the arm's end, and the receiver handed \
+         whole to a call end it"
+    );
 }

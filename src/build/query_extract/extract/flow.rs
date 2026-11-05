@@ -248,6 +248,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let member = (pack.shape_name)(&name.text);
                 st.minted[ix].projects =
                     Some(Box::new(MemberRead { receiver: recv.span(), member: member.clone(), token: name.span() }));
+                out.member_reads.push(crate::build::query_extract::MemberRead {
+                    span,
+                    receiver: recv.span(),
+                    member: member.clone(),
+                });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -404,6 +409,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
         let Some(read) = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last() else { continue };
         out.write_sites.push(read.token);
+        out.place_writes.push(place.span());
         if let Some(value) = source_value_span(ad, place.match_id) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: read.receiver,

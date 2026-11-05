@@ -1,7 +1,7 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassCall, ClassSpelling, FunctionLookup, InferredType, NameSpellings};
+use crate::model::file_analysis::{ClassCall, ClassSpelling, InferredType, NameSpellings};
 
 pub fn php_pack() -> LangPack {
     LangPack {
@@ -17,11 +17,14 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
-            functions: FunctionLookup::NamespaceThenGlobal,
             ..NameSpellings::NONE
         },
+        // A bare call names the function its namespace declares, else the
+        // global one.
+        functions: FunctionLookup::NamespaceThenGlobal,
         // `bool` is not an `int`: `bool|int` is a union a signature spells.
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
+        type_display: display_type,
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: declared_type,
@@ -39,6 +42,20 @@ pub fn php_pack() -> LangPack {
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
+    }
+}
+
+/// PHP's word for an engine type tag: the keyword a declaration would read
+/// (`declared_type` read backwards). `int` and `float` share the engine's
+/// `Numeric`, so it reads as both.
+fn display_type(tag: &str) -> Option<&'static str> {
+    match tag {
+        "Numeric" => Some("int|float"),
+        "String" => Some("string"),
+        "Bool" => Some("bool"),
+        "HashRef" | "ArrayRef" => Some("array"),
+        "CodeRef" => Some("callable"),
+        _ => None,
     }
 }
 

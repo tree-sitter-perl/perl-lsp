@@ -93,14 +93,16 @@ impl<'a> Builder<'a> {
             }
             None => crate::model::witnesses::ReturnExpr::Receiver,
         };
-        self.bag.push(crate::model::witnesses::Witness {
+        self.push_witness(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable {
                 name: var_name.to_string(),
                 scope: self.current_scope(),
             },
             source: crate::model::witnesses::WitnessSource::Builder("bless_receiver".into()),
             payload: crate::model::witnesses::WitnessPayload::ReturnExpr(re),
-            span: node_to_span(bless_node),
+            // A write: zero-width at its site, so it holds from there on
+            // rather than only inside the call.
+            span: Span { start: bless_node.start_position(), end: bless_node.start_position() },
         });
         true
     }

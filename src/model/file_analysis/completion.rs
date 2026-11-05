@@ -145,7 +145,7 @@ pub struct SignatureInfo {
     /// End of the sub body — used to query inferred types for params.
     pub body_end: Point,
     /// Pre-resolved param types (for cross-file subs where body_end is meaningless).
-    pub param_types: Option<Vec<Option<String>>>,
+    pub param_types: Option<Vec<Option<InferredType>>>,
 }
 
 // ---- Completion query methods ----
@@ -157,30 +157,19 @@ impl FileAnalysis {
         let mut seen = HashSet::<(String, char)>::new();
         let mut candidates = Vec::new();
 
-        // Sort by scope size (innermost first) — stable priority ordering
-        let mut vars: Vec<(&Symbol, usize)> = visible
+        // Innermost declaration first (deepest scope), stable for ties.
+        let mut vars: Vec<(&Symbol, std::cmp::Reverse<usize>)> = visible
             .into_iter()
             .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
             // The token being typed is never its own completion — an
             // undeclared one is already an implicit global anchored there.
             .filter(|s| !(s.selection_span.start <= point && point <= s.selection_span.end))
-            .filter_map(|s| {
-                if let SymbolDetail::Variable { .. } = &s.detail {
-                    let scope = &self.scopes[s.scope.0 as usize];
-                    let scope_size = span_size(&scope.span);
-                    Some((s, scope_size))
-                } else if let SymbolDetail::Field { .. } = &s.detail {
-                    let scope = &self.scopes[s.scope.0 as usize];
-                    let scope_size = span_size(&scope.span);
-                    Some((s, scope_size))
-                } else {
-                    None
-                }
-            })
+            .filter(|s| matches!(s.detail, SymbolDetail::Variable { .. } | SymbolDetail::Field { .. }))
+            .map(|s| (s, std::cmp::Reverse(scope_depth(&self.scopes, s.scope))))
             .collect();
-        vars.sort_by_key(|(_, sz)| *sz);
+        vars.sort_by_key(|(_, depth)| *depth);
 
-        for (sym, _scope_size) in vars {
+        for (sym, _depth) in vars {
             let (bare_name, decl_sigil) = match &sym.detail {
                 SymbolDetail::Variable { sigil: ds, .. } => {
                     (sym.name[1..].to_string(), *ds)
@@ -204,7 +193,7 @@ impl FileAnalysis {
             // multi-line scope (span_size counts rows*10000), which parked
             // every real lexical BELOW all of those tiers — invisible while
             // completion was uncapped, candidate loss the day it wasn't.
-            // Innermost-shadow selection still rides the scope-size sort
+            // Innermost-shadow selection still rides the scope-depth sort
             // above; within a tier the client tie-breaks by label.
             let priority = match &self.scopes[sym.scope.0 as usize].kind {
                 ScopeKind::File => PRIORITY_FILE_WIDE,
@@ -843,10 +832,7 @@ impl FileAnalysis {
                 ..
             } => {
                 let mut params: Vec<ParamInfo> = cross_params;
-                let mut param_types: Vec<Option<String>> = cross_param_types
-                    .into_iter()
-                    .map(|t| t.as_ref().map(inferred_type_to_tag))
-                    .collect();
+                let mut param_types: Vec<Option<InferredType>> = cross_param_types;
 
                 let is_method = is_method
                     || cf_is_method
@@ -946,7 +932,7 @@ impl FileAnalysis {
         // members; `-as` binds local→origin; `use M ();` binds nothing.
         if !is_method {
             if let Some(idx) = module_index {
-                for import in &self.imports {
+                for import in self.imports.in_scope(self.import_scope_at(point)) {
                     // A split exporter's surface lives across its candidates.
                     let bound_remote = idx
                         .visible_def_candidates(&import.module_name)
@@ -1337,46 +1323,6 @@ pub(super) fn source_line_at(source: &str, row: usize) -> &str {
     source.lines().nth(row).unwrap_or("")
 }
 
-/// Serialize an InferredType to a simple string tag.
-/// Used by signature help's `param_types` field, which piggy-backs on the
-/// pre-unification string representation for backwards-compatible JSON output.
-pub fn inferred_type_to_tag(ty: &InferredType) -> String {
-    match ty {
-        InferredType::ClassName(name) => format!("Object:{}", name),
-        InferredType::FirstParam { package } => format!("Object:{}", package),
-        InferredType::HashRef => "HashRef".to_string(),
-        // Structurally-typed hashes read as plain HashRef on the wire —
-        // the per-key detail drives narrowing, not display (yet).
-        InferredType::HashWithKeys { .. } => "HashRef".to_string(),
-        InferredType::ArrayRef => "ArrayRef".to_string(),
-        InferredType::CodeRef { .. } => "CodeRef".to_string(),
-        InferredType::Regexp => "Regexp".to_string(),
-        InferredType::Numeric => "Numeric".to_string(),
-        InferredType::String | InferredType::RefTagOf { .. } => "String".to_string(),
-        // Method dispatch on a Parametric uses its `class_name()`
-        // (= the flavor's dispatch class), so the tag follows.
-        // Type-arg detail lives in the richer
-        // `format_inferred_type` rendering.
-        InferredType::Parametric(p) => match p.class_name() {
-            Some(c) => format!("Object:{}", c),
-            None => "Parametric".to_string(),
-        },
-        InferredType::Sequence(_) => "Sequence".to_string(),
-        // A constraint is a Type::Tiny object; method dispatch (deferred)
-        // routes there, so tag it as such rather than as its inner type.
-        InferredType::TypeConstraintOf(_) => "Object:Type::Tiny".to_string(),
-        // Marks never change dispatch: tag the base.
-        InferredType::Branded { base, .. } => inferred_type_to_tag(base),
-        // Optional dispatches nowhere until narrowed; tag the inner so the
-        // wire format stays backward-compatible, prefixed Maybe.
-        InferredType::Optional(inner) => format!("Maybe:{}", inferred_type_to_tag(inner)),
-        InferredType::Undef => "Undef".to_string(),
-        InferredType::Bool => "Bool".to_string(),
-        InferredType::Unknown => "Unknown".to_string(),
-        InferredType::Union(arms) => arms.iter().map(inferred_type_to_tag).collect::<Vec<_>>().join("|"),
-    }
-}
-
 /// Format a cross-file method signature from a SubInfo view.
 pub(super) fn format_cross_file_signature(method_name: &str, sub_info: &SubInfo<'_>) -> String {
     let params = sub_info.params();
@@ -1403,8 +1349,8 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
     }
 }
 
-/// A language's spelling for an engine type tag (`PackFacts::type_display`
-/// as a function): `Some` renders the language's own word, `None` keeps the
+/// A language's spelling for an engine type tag
+/// (`LanguageConventions::type_label`): `Some` renders the language's own word, `None` keeps the
 /// engine's. Class names never pass through it — they are identities, not
 /// vocabulary — so the map is consulted per TAG at render time instead of
 /// re-tokenizing the rendered label (rule #13).
@@ -1470,6 +1416,7 @@ pub(crate) fn format_type_root(ty: &InferredType) -> String {
         InferredType::FirstParam { package } => package.clone(),
         InferredType::Parametric(ParametricType::ResultSet { base, .. })
         | InferredType::Parametric(ParametricType::Instance { base, .. }) => base.clone(),
+        InferredType::Parametric(ParametricType::Row { moniker, .. }) => moniker.clone(),
         InferredType::Branded { base, .. } => format_type_root(base),
         InferredType::Sequence(_) => "Sequence".to_string(),
         InferredType::TypeConstraintOf(_) => "TypeConstraint".to_string(),
@@ -1490,6 +1437,7 @@ pub(super) fn format_parametric_with(p: &ParametricType, vocab: TypeVocab) -> St
         ParametricType::ResultSet { base, row } => {
             format!("{}<{}>", base, row)
         }
+        ParametricType::Row { moniker, .. } => format!("Row<{}>", moniker),
         ParametricType::Instance { base, args } => {
             let parts: Vec<String> = args.iter().map(|a| format_type_with(a, vocab)).collect();
             format!("{}<{}>", base, parts.join(", "))
