@@ -720,15 +720,17 @@ fn parameters_are_locals_of_their_callable() {
 }
 
 /// A declared type is the parameter's value from its binding site: a class
-/// spelling resolves through the use-map, a union has no single type.
+/// spelling resolves through the use-map, a union is the join of its arms.
 #[test]
 fn a_parameters_declared_type_is_its_value_in_the_body() {
     use crate::model::file_analysis::InferredType as T;
     use crate::model::witnesses::WitnessAttachment as WA;
     let fa = php(PARAMS);
     let body = tree_sitter::Point { row: 6, column: 12 };
-    assert_eq!(fa.inferred_type_via_bag("at", body), Some(T::ClassName("Lib\\Clock".into())));
-    assert_eq!(fa.inferred_type_via_bag("n", body), None);
+    let clock = || T::ClassName("Lib\\Clock".into());
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(fa.inferred_type_via_bag("at", body), or(clock(), T::Undef));
+    assert_eq!(fa.inferred_type_via_bag("n", body), or(T::Numeric, clock()));
     assert_eq!(fa.inferred_type_via_bag("rest", body), None, "a variadic's type is its elements'");
     let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
     let declared: Vec<_> = fa
@@ -743,7 +745,7 @@ fn a_parameters_declared_type_is_its_value_in_the_body() {
         start: tree_sitter::Point { row: 6, column: 11 },
         end: tree_sitter::Point { row: 6, column: 14 },
     };
-    assert_eq!(fa.expr_type_at_span(read, None), Some(T::ClassName("Lib\\Clock".into())));
+    assert_eq!(fa.expr_type_at_span(read, None), or(clock(), T::Undef));
 }
 
 /// A use of `$x` in the body is a reference to the parameter: the name
