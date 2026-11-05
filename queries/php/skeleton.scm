@@ -41,12 +41,12 @@
 ; ---- properties ----
 ; A property is a data member of its class, named without the `$` it is
 ; declared with: `$obj->x` reads the member `x`. The `$x` it is written as
-; is the spelling it is listed by. A declared type is the member's value;
-; a union or intersection names no single type, so only a single type is
-; captured. `readonly` is display vocabulary, no flag.
+; is the spelling it is listed by. A declared type is the member's value,
+; a union the join of its arms; an intersection names no single type, so
+; it is not captured. `readonly` is display vocabulary, no flag.
 (property_declaration
   (readonly_modifier)? @sym.attr
-  type: [(named_type) (primitive_type) (optional_type)]? @type.annot
+  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
   (property_element
     name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
 ; A constructor parameter with a visibility or `readonly` is also a
@@ -54,7 +54,7 @@
 ; body, not to the constructor whose parameter list declares it.
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
-  type: [(named_type) (primitive_type) (optional_type)]? @type.annot
+  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
   name: [
     (variable_name (name) @def.field.name @flow.target) @def.field.spelled
     (by_ref (variable_name (name) @def.field.name @flow.target) @def.field.spelled)
