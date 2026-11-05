@@ -1,6 +1,7 @@
 //! A language's source files on disk: the directory walk every indexer and
-//! dependency map shares, and the size-capped read-and-analyze every
-//! indexing and dependency parse of a file on disk goes through. An open
+//! dependency map shares, and the size-capped read-and-analyze every pack
+//! file's indexing and re-parse goes through. Perl's workspace walk reads
+//! and parses in place, under the same cap, to time each phase. An open
 //! editor buffer is analyzed straight from memory, uncapped.
 
 use crate::build::language_driver::LanguageDriver;
