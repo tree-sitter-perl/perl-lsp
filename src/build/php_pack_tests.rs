@@ -596,10 +596,9 @@ class Box {
     assert_eq!(value("both"), None);
     assert_eq!(value("group"), None);
     assert_eq!(value("mixed"), None);
-    assert_eq!(
-        value("maybe"),
-        crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered)
-    );
+    let maybe = value("maybe");
+    assert_eq!(maybe, crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered));
+    assert_eq!(fa.render_type(&maybe.unwrap()), "string|null", "a nullable reads in PHP's words");
 }
 
 #[cfg(feature = "php")]
