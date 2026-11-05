@@ -31,7 +31,6 @@ use crate::model::witnesses::{FrameworkFact, ReducedValue, ReducerQuery, Reducer
 const SET_FIELDS: &[&str] = &[
     "column_keyed_verbs",
     "export_lookup",
-    "framework_imports",
     // A `ClosureList` is a set of paths in global intern-id order, which is
     // the order a process happened to intern them in.
     "include_closure",

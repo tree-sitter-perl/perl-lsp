@@ -575,7 +575,7 @@ impl FileAnalysis {
     ) -> Option<String> {
         match self.resolve_method_in_ancestors(class, field, module_index)? {
             MethodResolution::Local { sym_id, .. } => {
-                self.type_name_edge_of(&self.symbol(sym_id).name, self.symbol(sym_id).scope)
+                self.type_name_edge_of(sym_id)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
@@ -589,7 +589,7 @@ impl FileAnalysis {
                             && s.name == field
                             && s.package.as_deref() == Some(class.as_str())
                     })?;
-                    full.type_name_edge_of(&sym.name, sym.scope)
+                    full.type_name_edge_of(sym.id)
                 })
             }
         }
@@ -885,17 +885,14 @@ impl FileAnalysis {
             .unwrap_or_default()
     }
 
-    /// The `TypeName(n)` a `Variable{name, scope}` declared type edges to, read
-    /// from the recorded witness bag (the alias edge the skeleton emits for a
-    /// class-shaped declared type). Scope-matched so two same-named fields in
-    /// different structs don't cross-wire.
-    pub(crate) fn type_name_edge_of(&self, name: &str, scope: ScopeId) -> Option<String> {
+    /// The `TypeName(n)` the declared type of the variable or member `sym`
+    /// edges to (the alias edge the skeleton emits for a class-shaped
+    /// declared type).
+    pub(crate) fn type_name_edge_of(&self, sym: SymbolId) -> Option<String> {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-        self.witnesses.all().iter().find_map(|w| match (&w.attachment, &w.payload) {
-            (
-                WitnessAttachment::Variable { name: n, scope: s },
-                WitnessPayload::Edge(WitnessAttachment::TypeName(target)),
-            ) if n == name && *s == scope => Some(target.clone()),
+        let place = self.declared_place(sym);
+        self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))).find_map(|w| match &w.payload {
+            WitnessPayload::Edge(WitnessAttachment::TypeName(target)) => Some(target.clone()),
             _ => None,
         })
     }
@@ -960,6 +957,18 @@ impl FileAnalysis {
     /// first `package`).
     pub fn namespace_at(&self, point: Point) -> Option<&str> {
         namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
+    }
+
+    /// The import scope in force at `point`: the namespace lane's package,
+    /// or the language's root package outside any. The same package the walk
+    /// minted on each `Import`, so a binding read here sees exactly the
+    /// `use`s that bind at `point`.
+    pub fn import_scope_at(&self, point: Point) -> ImportScope<'_> {
+        let package = self
+            .namespace_at(point)
+            .or(self.names().root_package.as_deref())
+            .unwrap_or_default();
+        ImportScope::in_package(package)
     }
 
     /// Trigger-matching view for plugin query hooks at `point`: the

@@ -47,13 +47,16 @@ pub fn pack_hover_markdown(
                         .find(|a| analysis.dispatch_class_of(a, Some(midx)).as_deref() == Some(cn)),
                 }
             };
+            // A cross-file method's declaration is the projection's
+            // candidate, rendered from its own file.
+            let declaration = || cs.hover_candidate().and_then(|loc| render_candidate_hover(cs, &loc, language));
             let sections: Vec<String> = analysis
                 .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
                 .iter()
                 .filter_map(|cn| {
                     // A construction names each class's constructor.
                     let field = analysis.called_member(r, cn, Some(midx))?;
-                    member_hover_on(analysis, cn, &field, want, arm_for(cn), source, language, midx)
+                    member_hover_on(analysis, cn, &field, want, arm_for(cn), source, language, midx, &declaration)
                 })
                 .collect();
             if !sections.is_empty() {
@@ -115,18 +118,11 @@ fn render_candidate_hover(
         return (!line.is_empty()).then(|| format!("```{}\n{}\n```", language, line));
     }
     let path = crate::index::resolve::key_for_sort(&loc.key);
-    let text = std::fs::read_to_string(&path).ok()?;
+    let text = crate::util::text::read_source(&path).ok()?;
     let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     // The candidate's own analysis: the scoped index caches every pack file
     // a projection can answer from.
-    let mut found: Option<std::sync::Arc<crate::model::file_analysis::CachedModule>> = None;
-    if let Some(midx) = module_index {
-        midx.for_each_cached_file(&mut |cached| {
-            if found.is_none() && Some(&cached.path) == loc.key.canonical_path() {
-                found = Some(std::sync::Arc::clone(cached));
-            }
-        });
-    }
+    let found = module_index.zip(loc.key.canonical_path()).and_then(|(midx, p)| midx.cached_by_path(p));
     if let Some(cached) = &found {
         let whole = module_index
             .map(|midx| midx.whole_present(cached))
@@ -193,10 +189,10 @@ fn render_symbol_hover(
             let display = module_index
                 .and_then(|midx| {
                     analysis
-                        .type_name_edge_of(&sym.name, sym.scope)
+                        .type_name_edge_of(sym.id)
                         .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
                 })
-                .unwrap_or_else(|| sym.display_type(&ty));
+                .unwrap_or_else(|| analysis.display_type_of(sym, &ty));
             // A union member's def-site hover carries the storage overlay,
             // same as the member-access path (`FileAnalysis::member_hover`).
             let overlay = match analysis.union_overlay(sym) {
@@ -321,7 +317,7 @@ fn perl_hover_named(
                     // Present the sig under the LOCAL name — that's
                     // what the user typed and what hover should lead
                     // with; the remote name is just how we fetched it.
-                    let sig = format_imported_signature(&r.target_name, &sub_info);
+                    let sig = format_imported_signature(analysis, &r.target_name, &sub_info);
                     parts.push(format!("```perl\n{}\n```", sig));
                     if let Some(doc) = sub_info.doc() {
                         parts.push(doc.to_string());
@@ -346,7 +342,7 @@ fn perl_hover_named(
             let cached = module_index.candidate_defining_sub(pkg, bare)?;
             let whole = module_index.bag_present(&cached);
             let sub_info = whole.sub_info_view(bare)?;
-            let sig = format_imported_signature(bare, &sub_info);
+            let sig = format_imported_signature(analysis, bare, &sub_info);
             let mut parts = vec![format!("```perl\n{}\n```", sig)];
             if let Some(doc) = sub_info.doc() {
                 parts.push(doc.to_string());
@@ -359,6 +355,8 @@ fn perl_hover_named(
 
 /// One class's member hover: `field` on `cn`, `recv` the receiver value
 /// that dispatches there (its template args refine a param-shaped member).
+/// A method answers with its signature (`declaration` renders a cross-file
+/// one); only a field answers with its type.
 #[allow(clippy::too_many_arguments)]
 fn member_hover_on(
     analysis: &crate::model::file_analysis::FileAnalysis,
@@ -369,6 +367,7 @@ fn member_hover_on(
     source: &str,
     language: &str,
     midx: &dyn crate::model::file_analysis::CrossFileLookup,
+    declaration: &dyn Fn() -> Option<String>,
 ) -> Option<String> {
     // The ref's family picks the rung: a value read never answers
     // through a method's return.
@@ -396,23 +395,32 @@ fn member_hover_on(
             ) {
                 text.push_str(&format!(
                     "\n\n*returns: {}*",
-                    crate::model::file_analysis::format_inferred_type(&rt)
+                    analysis.render_type(&rt)
                 ));
             }
             return Some(text);
         }
     }
-    // A param-typed member substitutes the same way (`T v_;` on
-    // `Box<int>` reads `v_: int`; a cross-file method's return
-    // lands here too, so the label stays kind-agnostic).
+    if want == crate::model::file_analysis::MemberKind::Callable {
+        // A cross-file method shows its declaration: here only when the
+        // receiver's arguments refine its return (`T get()` on `Box<int>`),
+        // which this section adds under it; otherwise the projection's
+        // candidate renders it.
+        let returns = substituted(analysis.find_method_return_type(cn, field, Some(midx), None))?;
+        let mut text = declaration()?;
+        text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&returns)));
+        return Some(text);
+    }
+    // A param-typed field substitutes the same way (`T v_;` on `Box<int>`
+    // reads `v_: int`).
     if let Some(sub) =
         substituted(analysis.field_type_on_class(cn, field, Some(midx)))
     {
         return Some(format!(
-            "```{}\n{}: {}\n```\n\n*member*",
+            "```{}\n{}: {}\n```\n\n*field*",
             language,
             field,
-            crate::model::file_analysis::format_inferred_type(&sub)
+            analysis.render_type(&sub)
         ));
     }
     // The member's declared type may be a config-variant macro whose

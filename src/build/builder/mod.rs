@@ -13,7 +13,8 @@ use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
-/// replacement parse) shares. Lives in the builder layer: the resolver
+/// replacement parse, `isa` strings, cpanfiles, plugin pattern examples)
+/// shares (`layering_tests::perl_parsers_come_from_create_parser`). Lives in the builder layer: the resolver
 /// calling down is fine, the builder reaching up was not.
 pub fn create_parser() -> tree_sitter::Parser {
     let mut parser = tree_sitter::Parser::new();
@@ -21,6 +22,24 @@ pub fn create_parser() -> tree_sitter::Parser {
         .set_language(&ts_parser_perl::LANGUAGE.into())
         .expect("failed to set Perl language");
     parser
+}
+
+/// Run `f` with this thread's reused Perl parser. The build parses fragments
+/// per site (every `isa => '…'` string, each `s///e` replacement, a `__DATA__`
+/// section), and a fresh parser per fragment re-allocates its stacks and
+/// lexer each time. Included ranges are reset afterwards, so a
+/// range-restricted parse never leaks into the next caller.
+pub(crate) fn with_fragment_parser<R>(f: impl FnOnce(&mut tree_sitter::Parser) -> R) -> R {
+    thread_local! {
+        static PARSER: std::cell::RefCell<tree_sitter::Parser> =
+            std::cell::RefCell::new(create_parser());
+    }
+    PARSER.with(|p| {
+        let mut p = p.borrow_mut();
+        let out = f(&mut p);
+        let _ = p.set_included_ranges(&[]);
+        out
+    })
 }
 use crate::build::plugin::{self, PluginRegistry};
 
@@ -78,60 +97,45 @@ mod fold;
 mod consts;
 mod docs;
 
-/// Single CST walk that powers the post-walk `ChainTypingReducer`.
-/// Indexes the node sets the reducer needs:
-///
-/// - `assignment_nodes` — every `assignment_expression`, used to type
-///   `my $X = <rhs>` (and bare `$X = …`) via `resolve_invocant_class_tree`.
-/// - `return_nodes` — every `return_expression`, indexed by span so
-///   the return-arm refresh can match it back to a `ReturnInfo`.
-/// - `invocant_nodes` — every `method_call_expression`'s invocant,
-///   indexed by span so the post-fold invocant-class refresh can
-///   find the right node for a `MethodCall` ref's `invocant_span`.
-/// - `method_call_args` — every `method_call_expression`'s args
-///   node, indexed by the call-expression span. Lets the post-walk
-///   keys-as-HashKeyAccess emission look up the args from a
-///   MethodCall ref instead of stashing them on the ref itself or
-///   running emit at walk time (where invocant_class is still
-///   getting refined).
-///
-/// Tree-sitter-perl `arguments` field shapes encountered in the
-/// wild (notes for parser-side adjustments — `args` is the value
-/// of `child_by_field_name("arguments")`):
-///
-/// | Call shape | `args.kind()`                 | Notes |
-/// | --- | --- | --- |
-/// | `f()`                | (no `arguments` field)        | empty arglist; field absent |
-/// | `f($x)`              | `scalar`                      | single non-literal arg, unwrapped |
-/// | `f('x')`             | `string_literal`              | single string, unwrapped |
-/// | `f('x', 'y')`        | `list_expression`             | flat positional list |
-/// | `f(k => v)`          | `list_expression`             | fat-comma is flat in this list |
-/// | `Foo->new(k => v)`   | `parenthesized_expression`    | constructor wraps in parens |
-/// | `f({k => v})`        | `anonymous_hash_expression`   | hashref-arg shape — DBIC's `search`/`find`. The hash's children are a `list_expression` of the k=>v pairs |
-/// | `qw(a b c)`          | `quoted_word_list`            | DBIC `add_columns(qw(...))` shape |
-///
-/// Recursive-into-wrapper rule: emitters typically walk one level
-/// past `parenthesized_expression` / `anonymous_hash_expression`
-/// to the enclosed `list_expression`. The k=>v iteration logic
-/// expects a flat positional list; nested wrappers want unwrapping
-/// at the call site, not in the arg-walker.
-///
-/// Built once per `build_with_plugins_inner` call and consumed by both
-/// `ChainPassMode::PreFold` and `ChainPassMode::PostFold` invocations
-/// of the reducer.
-struct ChainTypingIndex<'a> {
-    assignment_nodes: Vec<Node<'a>>,
-    return_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
-    invocant_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
-    method_call_args: std::collections::HashMap<(Point, Point), Node<'a>>,
-    /// `hash_element_expression` nodes whose container is itself a
-    /// method-call result (`$obj->get_config->{host}`). The container
-    /// type — and thus the key's owner class — is only knowable after
-    /// the fold resolves the method's return type, so the chained-key
-    /// HashKeyAccess emission (`emit_chained_hash_key_refs`) waits for
-    /// it. Plain `$var->{key}` keys are emitted during the walk
-    /// (`visit_hash_element`) and owner-resolved at phase 3.
-    chained_hash_elements: Vec<Node<'a>>,
+/// A `MethodCall` ref's call site, minted where the walk emits the ref: the
+/// receiver and argument nodes it had in hand, so a post-walk pass reads them
+/// instead of finding them again by span. Facts on the main tree's call node
+/// (`Builder::call_sites` until the walk ends).
+#[derive(Clone, Copy)]
+struct CallSite<'a> {
+    ref_idx: usize,
+    invocant: Option<Node<'a>>,
+    /// The call's `arguments` node.
+    ///
+    /// Tree-sitter-perl `arguments` field shapes encountered in the
+    /// wild (notes for parser-side adjustments — `args` is the value
+    /// of `child_by_field_name("arguments")`):
+    ///
+    /// | Call shape | `args.kind()`                 | Notes |
+    /// | --- | --- | --- |
+    /// | `f()`                | (no `arguments` field)        | empty arglist; field absent |
+    /// | `f($x)`              | `scalar`                      | single non-literal arg, unwrapped |
+    /// | `f('x')`             | `string_literal`              | single string, unwrapped |
+    /// | `f('x', 'y')`        | `list_expression`             | flat positional list |
+    /// | `f(k => v)`          | `list_expression`             | fat-comma is flat in this list |
+    /// | `Foo->new(k => v)`   | `parenthesized_expression`    | constructor wraps in parens |
+    /// | `f({k => v})`        | `anonymous_hash_expression`   | hashref-arg shape — DBIC's `search`/`find`. The hash's children are a `list_expression` of the k=>v pairs |
+    /// | `qw(a b c)`          | `quoted_word_list`            | DBIC `add_columns(qw(...))` shape |
+    ///
+    /// Recursive-into-wrapper rule: emitters typically walk one level
+    /// past `parenthesized_expression` / `anonymous_hash_expression`
+    /// to the enclosed `list_expression`. The k=>v iteration logic
+    /// expects a flat positional list; nested wrappers want unwrapping
+    /// at the call site, not in the arg-walker.
+    args: Option<Node<'a>>,
+}
+
+/// Every call site the walk minted, as facts on the main tree.
+type CallSites<'a> = crate::cst::NodeFacts<CallSite<'a>>;
+
+/// The Perl grammar's kind ids for `names`; callers cache them in a static.
+fn perl_kind_ids(names: &[&str]) -> Vec<u16> {
+    crate::cst::kind_ids(&ts_parser_perl::LANGUAGE.into(), names)
 }
 
 /// Which chain-typing tasks the reducer should apply on this call.
@@ -270,15 +274,8 @@ pub(super) enum TailArm {
 
 struct Builder<'a> {
     source: &'a [u8],
-    /// The code of each `s///e` replacement, by the replacement's start
-    /// byte — see `parse_eval_replacements`.
-    // TODO(injected-trees): only the walk sees these. Post-walk passes that
-    // traverse from the main root (pattern dispatch, flow query, the chain
-    // typing index) miss replacement code; the fix is a file tree type that
-    // yields injected trees transparently, not a roots list each pass loops.
-    eval_injections: std::collections::HashMap<usize, Node<'a>>,
-    /// Every parse this build reads (the main tree and each injection),
-    /// navigable by node identity — upward reads go through it, never
+    /// Every parse this build reads (the main tree and each `s///e`
+    /// replacement's code), navigable by node identity — upward reads go through it, never
     /// through `Node::parent`, which rescans from the root.
     syntax: &'a crate::cst::SyntaxForest<'a>,
 
@@ -306,7 +303,7 @@ struct Builder<'a> {
     /// (`name(...)`; a `\&name` reference is not a call).
     plain_called_subs: std::collections::HashSet<(String, String)>,
     fold_ranges: Vec<FoldRange>,
-    imports: Vec<Import>,
+    imports: crate::model::file_analysis::ImportTable,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
     return_infos: Vec<ReturnInfo>,
     /// Pending `push @arr, X, Y` contributions queued at walk time
@@ -380,14 +377,14 @@ struct Builder<'a> {
     sub_return_delegations: std::collections::HashMap<String, String>,
     /// Framework mode per package (Moo, Moose, MojoBase) for accessor synthesis.
     framework_modes: std::collections::HashMap<String, FrameworkMode>,
-    /// Functions implicitly imported by OOP frameworks (has, extends, with, etc.)
-    framework_imports: std::collections::HashSet<String>,
     /// Known compile-time string values, accumulated during the walk and
     /// keyed by what each name resolves to (`consts.rs`).
     consts: consts::ConstTable,
-    /// Variable/field declarations by `(scope, sigiled name)`, in walk
-    /// order — the walk-time half of variable visibility, for `binding_key_in`.
-    var_decls: std::collections::HashMap<(ScopeId, String), Vec<SymbolId>>,
+    /// Variable/field declarations by sigiled name, then scope, in walk
+    /// order — the walk-time half of variable visibility, for
+    /// `binding_key_in`. Name first so a lookup borrows the name it is
+    /// given instead of building a key per scope on the chain.
+    var_decls: std::collections::HashMap<String, std::collections::HashMap<ScopeId, Vec<SymbolId>>>,
     /// Names declared via `use constant` (NAME and block forms), per the
     /// enclosing package. A standalone bareword whose text is in this set is
     /// a usage of the constant sub, so it earns a `FunctionCall` ref back to
@@ -434,6 +431,10 @@ struct Builder<'a> {
     /// push directly here. Moved into `FileAnalysis.witnesses` when
     /// the analysis is constructed — no second seeding pass.
     bag: crate::model::witnesses::WitnessBag,
+    /// Whether the walk is done, so every declaration exists and a variable
+    /// fact can be keyed to its binding as it is pushed
+    /// (`bind_walk_witnesses`).
+    vars_bound: bool,
     /// Nodes that `emit_expr_witness` couldn't resolve at walk time.
     /// Two common shapes:
     ///   * **Forward-defined sub call** — `sub a { b() } sub b {…}`
@@ -515,6 +516,9 @@ struct Builder<'a> {
     /// Value-flow edges minted at assignment sites — the provenance tier; each
     /// lowers to the same type witness the builder used to push inline.
     flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
+    /// The `@flow` document's matches, when the plugin pattern walk
+    /// collected them; the minter reads them after the walk.
+    flow_matches: Option<Vec<narrowing::FlowMatch<'a>>>,
     /// Rules from `param_types()` with `method: None` — applied to every sub
     /// declaration in a matching class, regardless of method name. The
     /// "every action in a controller" case (Catalyst `$c`).
@@ -561,7 +565,7 @@ struct Builder<'a> {
     /// per variable is enough: it widens the shape from that point on, and
     /// the mutation-extension pass charges one bag query per record).
     /// Keyed by binding: two subs' `my $p` are two variables.
-    escape_recorded: std::collections::HashSet<consts::BindingKey>,
+    escape_recorded: std::collections::HashSet<crate::model::file_analysis::Binding>,
 
     /// The `Variable` refs that reassign their variable (`$v = …` targeting
     /// the variable itself; element writes go to `key_writes` instead).
@@ -648,12 +652,9 @@ struct Builder<'a> {
     /// **Build-only**.
     method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
 
-    /// Indirect-object calls (`new Foo(ARGS)`): `(call, class, args)`. The
-    /// chain-typing index finds a call's receiver and arguments by
-    /// `method_call_expression` node, and only the walk knows a
-    /// function-call node is one of these, so the walk hands them over.
-    /// **Build-only**.
-    indirect_method_calls: Vec<(Node<'a>, Node<'a>, Option<Node<'a>>)>,
+    /// Each `MethodCall` ref's call site on the main tree, in mint order;
+    /// they become `NodeFacts` when the walk ends. **Build-only**.
+    call_sites: Vec<(crate::cst::NodeId, CallSite<'a>)>,
 
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
@@ -682,6 +683,9 @@ struct Builder<'a> {
     /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
     /// truncation that replaced the `cst::rebinds_scalar` grammar scan.
     pending_narrowings: Vec<narrowing::PendingNarrow>,
+    /// Every rebind, as a write of the whole variable it binds; built with
+    /// the narrowing cutoffs, once the FlowEdges are minted.
+    rebinds: crate::model::file_analysis::PlaceDisturbanceIndex,
 
     /// Recognized guard conditions, for the redundant/contradictory-guard
     /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into

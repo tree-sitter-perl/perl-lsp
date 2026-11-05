@@ -49,6 +49,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # A version bump that misses one of the files carrying the version
+      # fails here, before it can merge and release.
+      - name: Version strings agree
+        run: scripts/check-versions.sh
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2

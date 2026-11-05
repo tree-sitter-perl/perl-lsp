@@ -244,7 +244,7 @@ pub fn index_workspace_with_index(
                     "workspace",
                     seeds,
                 ) {
-                    log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
+                    log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
                 }
             },
         );
@@ -301,23 +301,22 @@ pub fn index_workspace_with_index(
                 fresh_rx,
                 writer_conn.as_ref(),
                 "workspace persist writer",
-                |conn, batch: &[WsFresh]| {
-                    for e in batch {
-                        let path_str = e.path.to_string_lossy();
-                        module_cache::save_blob_to_db_stamped(
-                            conn, &path_str, &e.path, &e.closure, &e.blob, "workspace",
-                            e.stamp,
-                        );
-                        if let Err(err) = module_cache::shred_derived_rows(
-                            conn, &path_str, "workspace", &e.seeds,
-                        ) {
-                            log::warn!(
-                                "Failed to shred derived rows for {:?}: {}",
-                                e.path,
-                                err
-                            );
-                        }
-                    }
+                |_conn| (),
+                |conn, (), e: &WsFresh| {
+                    let path_str = e.path.to_string_lossy();
+                    module_cache::save_generation(
+                        conn,
+                        &module_cache::PersistedGeneration {
+                            module_name: &path_str,
+                            path: &e.path,
+                            include_closure: &e.closure,
+                            blob: &e.blob,
+                            seeds: &e.seeds,
+                            source: "workspace",
+                            stamp: e.stamp,
+                            stub: None,
+                        },
+                    )
                 },
                 |e: WsFresh| {
                     // Clear any stale LRU pin BEFORE the stripped copy
@@ -329,8 +328,8 @@ pub fn index_workspace_with_index(
                     }
                 },
                 |e: WsFresh| {
-                    // The chunk never landed but the copies were stripped
-                    // for it. The blob in hand IS the whole analysis —
+                    // This entry's generation never landed (its chunk failed,
+                    // or its own write did) but the copy was stripped for it. The blob in hand IS the whole analysis —
                     // register full copies instead, so nothing is lost
                     // beyond the persistence itself (disk full / lock storm
                     // stays loud AND self-heals) — up to the budget.
@@ -386,7 +385,7 @@ pub fn index_workspace_with_index(
                     // `[PHASE]` line per region per file is ~4,800 lines/s at
                     // corpus scale and turns the run it is measuring into a
                     // different run. Shares come from the totals.
-                    let source = crate::util::ghost_stats::timed("walk.read", || std::fs::read_to_string(path)).ok()?;
+                    let source = crate::util::ghost_stats::timed("walk.read", || crate::util::text::read_source(path)).ok()?;
                     let mut parser = create_parser();
                     let t_parse = if timing { Some(std::time::Instant::now()) } else { None };
                     let tree = crate::util::ghost_stats::timed("walk.parse", || parser.parse(&source, None))?;
@@ -418,7 +417,7 @@ pub fn index_workspace_with_index(
                     crate::util::ghost_stats::timed("walk.projections", || {
                         idx.record_workspace_projections(&canon, &analysis)
                     });
-                    let payload = if persist && !analysis.degraded {
+                    let payload = if persist {
                         crate::util::ghost_stats::timed("walk.encode", || module_cache::encode_analysis(&analysis)).map(|blob| {
                             // One tag over both seed shreds so the sample
                             // count stays one-per-file and the average reads

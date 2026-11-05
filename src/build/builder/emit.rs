@@ -42,31 +42,24 @@ impl<'a> Builder<'a> {
 
     pub(super) fn hash_literal_type(&mut self, node: Node<'a>) -> InferredType {
         // A spread occupies ONE list slot but flattens to an even count
-        // at runtime, so pairing must skip it as a unit — `pair_nodes`'
-        // strict k/v alternation would mispair everything after it.
+        // at runtime, so pairing skips it as a unit.
         let mut flat: Vec<Node<'a>> = Vec::new();
         crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
-        let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
 
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
         let mut open = false;
-        let mut i = 0;
-        while i < named.len() {
-            let elem = named[i];
-            if crate::cst::is_flattening(elem) {
-                // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
-                // key set is no longer exhaustive. Arrays included:
-                // `my %h = (default => 1, @_)` is the canonical
-                // args-with-defaults idiom.
-                open = true;
-                i += 1;
-                continue;
-            }
-            let Some(v_node) = named.get(i + 1).copied() else {
-                open = true;
-                break;
+        for item in crate::cst::pair_items(&flat, crate::cst::Spreads::AsUnits) {
+            let (elem, v_node) = match item {
+                crate::cst::PairItem::Pair(k, v) => (k, v),
+                // Spread (`%other` / `%$ref` / `@_` / `@rest`): the key set
+                // is no longer exhaustive. Arrays included: `my %h =
+                // (default => 1, @_)` is the canonical args-with-defaults
+                // idiom. A dangling key leaves it open the same way.
+                crate::cst::PairItem::Spread(_) | crate::cst::PairItem::Dangling(_) => {
+                    open = true;
+                    continue;
+                }
             };
-            i += 2;
             let Some((key, is_dynamic)) = self.extract_key_text(elem) else {
                 open = true;
                 continue;
@@ -121,16 +114,14 @@ impl<'a> Builder<'a> {
     /// be imported to compile. `-all` / `:all` / bare `use` expand to the
     /// full vocabulary through the plugin's `on_use`, and house type
     /// libraries reach the same place via `SyntheticUse`.
-    fn constraint_name_imported(&self, name: &str) -> bool {
-        self.imports
-            .iter()
-            .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
+    fn constraint_name_imported(&self, name: &str, at: Point) -> bool {
+        self.imports.binding(self.import_scope_at(at), name).is_some()
     }
 
     /// What a call to `name` reports about a reference: the `ref` builtin,
     /// or a plugin-declared `ref_tag_functions()` entry this file imported
     /// (by its local name) or names fully qualified.
-    pub(super) fn ref_tag_fn(&self, name: &str) -> Option<crate::model::file_analysis::RefTagFn> {
+    pub(super) fn ref_tag_fn(&self, name: &str, at: Point) -> Option<crate::model::file_analysis::RefTagFn> {
         use crate::model::conventions::{is_ref_builtin, split_qualified, PERL_SPELLINGS};
         use crate::model::file_analysis::RefTagFn;
         if is_ref_builtin(name) {
@@ -140,13 +131,10 @@ impl<'a> Builder<'a> {
         self.ref_tag_functions.iter().find_map(|f| {
             let hit = match module {
                 Some(m) => m == f.module && leaf == f.name,
-                None => self.imports.iter().any(|i| {
-                    i.module_name == f.module
-                        && i.imported_symbols.iter().any(|sym| {
-                            sym.local_name == name
-                                && sym.remote_name.as_deref().unwrap_or(&sym.local_name) == f.name
-                        })
-                }),
+                None => self
+                    .imports
+                    .binding(self.import_scope_at(at), name)
+                    .is_some_and(|(i, sym)| i.module_name == f.module && sym.remote() == f.name),
             };
             hit.then_some(f.tag)
         })
@@ -157,7 +145,8 @@ impl<'a> Builder<'a> {
         &self,
         node: Node<'a>,
     ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
-        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n))
+        let at = node.start_position();
+        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n, at))
     }
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
@@ -426,7 +415,7 @@ impl<'a> Builder<'a> {
                 // call `->check` on it, not Foo's methods. The plugin folds the
                 // params (core extracts them, rule #1); we wrap.
                 if self.type_constraint_names.contains(&bare)
-                    && self.constraint_name_imported(&bare)
+                    && self.constraint_name_imported(&bare, node.start_position())
                 {
                     let params = self.extract_constraint_params(node);
                     // The plugin returns the whole constraint value, not the
@@ -592,7 +581,7 @@ impl<'a> Builder<'a> {
             span,
         };
         if !self.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
-            self.bag.push(w);
+            self.push_witness(w);
         }
     }
 
@@ -680,7 +669,7 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{
             tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
             source: WitnessSource::Builder(tags::FACT_UNDEF_ARM.into()),
             payload: WitnessPayload::Fact {
@@ -705,13 +694,13 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{
             tags, FactValue, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
             source: WitnessSource::Builder("return_arm".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(span)),
             span,
         });
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::SymbolReturnArm(sym_id),
             source: WitnessSource::Builder(tags::FACT_VALUE_ARM.into()),
             payload: WitnessPayload::Fact {
@@ -743,7 +732,7 @@ impl<'a> Builder<'a> {
         {
             return;
         }
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: symbol,
             source: WitnessSource::Builder("return_arm_chain".into()),
             payload: WitnessPayload::Edge(arms),
@@ -791,7 +780,7 @@ impl<'a> Builder<'a> {
                     _ => None,
                 };
                 if let Some(spelling) = arm_undef {
-                    self.bag.push(Witness {
+                    self.push_witness(Witness {
                         attachment: arm_att.clone(),
                         source: WitnessSource::Builder(tags::FACT_UNDEF_ARM.into()),
                         payload: WitnessPayload::Fact {
@@ -806,7 +795,7 @@ impl<'a> Builder<'a> {
                 // Make sure the arm's own Expr(span) carries its
                 // payload, then collect it on the BranchArm attachment.
                 self.emit_expr_witness(arm);
-                self.bag.push(Witness {
+                self.push_witness(Witness {
                     attachment: arm_att.clone(),
                     source: WitnessSource::Builder("branch_arm".into()),
                     payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arm))),
@@ -815,7 +804,7 @@ impl<'a> Builder<'a> {
             }
             // The ternary's value IS the agreed arm type: point its
             // Expr(span) at the BranchArm fold.
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("branch_arm".into()),
                 payload: WitnessPayload::Edge(arm_att),
@@ -860,7 +849,7 @@ impl<'a> Builder<'a> {
             return;
         }
         if let Some(payload) = self.expr_payload(node) {
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
                 payload,
@@ -871,7 +860,7 @@ impl<'a> Builder<'a> {
             // `ReturnExprReducer` claims it ahead of the window projection
             // above, which answers when no receiver is in hand.
             if self.is_positional_receiver(node) {
-                self.bag.push(Witness {
+                self.push_witness(Witness {
                     attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("expression".into()),
                     payload: WitnessPayload::ReturnExpr(
@@ -915,14 +904,14 @@ impl<'a> Builder<'a> {
             return;
         }
         self.emit_expr_witness(lhs);
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: arm_att.clone(),
             source: WitnessSource::Builder("branch_arm".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
             span: node_to_span(lhs),
         });
         let exits = super::narrowing::is_exit_expression(rhs, self.source);
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: arm_att.clone(),
             source: WitnessSource::Builder(tags::FACT_SHORT_CIRCUIT.into()),
             payload: WitnessPayload::Fact {
@@ -934,14 +923,14 @@ impl<'a> Builder<'a> {
         });
         if !exits {
             self.emit_expr_witness(rhs);
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: arm_att.clone(),
                 source: WitnessSource::Builder("fallback_arm".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
                 span: node_to_span(rhs),
             });
         }
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Expr(span),
             source: WitnessSource::Builder("branch_arm".into()),
             payload: WitnessPayload::Edge(arm_att),
@@ -1022,7 +1011,7 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let span = node_to_span(node);
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
                 payload,
@@ -1100,7 +1089,7 @@ impl<'a> Builder<'a> {
         // and `FrameworkAwareTypeFold`'s point-contains filter only
         // skips *non-zero* spans that miss the query point. Using the
         // same convention as TC-mirror Variable witnesses.
-        self.bag.push(Witness {
+        self.push_witness(Witness {
             attachment: WitnessAttachment::Variable { name: lhs_var.to_string(), scope },
             source: WitnessSource::Builder("chain_assignment".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(cond_expr))),
@@ -1202,24 +1191,50 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain
-    /// scalar, for the deref diagnostics (the array/code analog of the
-    /// method-call / hash-deref refs). Only a scalar operand can be undef /
-    /// Optional / rep-narrowed; a chain receiver (`f()->[0]`) is skipped.
-    pub(super) fn record_arrow_deref(&mut self, node: Node<'a>, form: crate::model::file_analysis::DerefForm) {
-        let Some(operand) = node.named_child(0) else { return };
-        if operand.kind() != "scalar" {
+    /// Record a `$x->[i]` / `$x->()` deref whose receiver is a plain
+    /// variable, for the deref diagnostics (the array/code analog of the
+    /// method-call / hash-deref refs). A receiver that is a part of a
+    /// variable is recorded by the place survey (`place_disturbances`),
+    /// only when a narrowing names its root; a value (`f()->[0]`) is never
+    /// narrowed, so it is skipped.
+    pub(super) fn record_arrow_deref(
+        &mut self,
+        node: Node<'a>,
+        receiver: Node<'a>,
+        form: crate::model::file_analysis::DerefForm,
+    ) {
+        if !crate::cst::is_plain_scalar(receiver) {
             return;
         }
-        let Ok(text) = operand.utf8_text(self.source) else { return };
-        if !text.starts_with('$') {
-            return;
-        }
+        let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
+        let dies_on_undef = self.deref_dies_on_undef(node, &form);
+        let place = crate::model::file_analysis::Place::variable(self.binding_key_here(&name, receiver.start_position()));
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
-            receiver: text.to_string(),
+            receiver: name,
+            place: Box::new(place),
             span: node_to_span(node),
             form,
+            dies_on_undef,
         });
+    }
+
+    /// Whether the deref at `node` dies on an undef receiver: a call
+    /// always does; an element access does where the `autovivification`
+    /// hints in force forbid vivifying its receiver, and vivifies it
+    /// otherwise.
+    pub(super) fn deref_dies_on_undef(&self, node: Node<'a>, form: &crate::model::file_analysis::DerefForm) -> bool {
+        use crate::model::file_analysis::{hint_in, vivify_dies_in, LexicalHint, VivifyAccess};
+        if form.dies_on_undef() {
+            return true;
+        }
+        let at = node.start_position();
+        let scope = self.scope_at_point(at);
+        // Most files never say `no autovivification`; asking the scopes
+        // first spares every element access its climb to its context.
+        let any_off = [VivifyAccess::Fetch, VivifyAccess::Store, VivifyAccess::Exists, VivifyAccess::Delete]
+            .into_iter()
+            .any(|a| hint_in(&self.scopes, scope, at, LexicalHint::NoVivify(a)));
+        any_off && vivify_dies_in(&self.scopes, scope, at, crate::cst::vivify_context(self.syntax, node))
     }
 
     /// Infer types from binary operator expressions.

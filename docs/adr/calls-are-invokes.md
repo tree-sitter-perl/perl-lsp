@@ -122,7 +122,7 @@ extra, whatever the pattern.
   class identity the token spells, the same key as the class's own
   `PackageRef` there, so it adds no ref row. The PostFold stamp freezes the
   class it dispatches on. The language states that its constructions key
-  by class (`NameSpellings::construction`, `ConstructionKey::Class`), so a
+  by class (`LanguageConventions::construction`, `ConstructionKey::Class`), so a
   constructor's references retrieve under its class and every class
   inheriting it (`TargetRef::retrieval_keys`, from the in-memory class
   graph) and match a site whose class's constructor walk reaches it; Perl
