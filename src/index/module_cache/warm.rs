@@ -158,8 +158,8 @@ mod row_generation_tests {
         let (mtime, size) = crate::index::module_cache::file_stamp(&file).unwrap();
         let verdict = |v: i64| classify_row_generation(&path, mtime, size, v);
         assert!(matches!(verdict(EXTRACT_VERSION), RowGeneration::Current(_)));
-        assert!(matches!(verdict(EXTRACT_VERSION - 1), RowGeneration::VersionStale));
-        assert!(matches!(verdict(EXTRACT_VERSION + 1), RowGeneration::VersionStale));
+        assert!(matches!(verdict(EXTRACT_VERSION.wrapping_sub(1)), RowGeneration::VersionStale));
+        assert!(matches!(verdict(EXTRACT_VERSION.wrapping_add(1)), RowGeneration::VersionStale));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

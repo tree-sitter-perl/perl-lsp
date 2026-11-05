@@ -89,8 +89,9 @@ pub fn report_oversize(oversize: &[(PathBuf, u64)], cap: u64) {
     }
 }
 
-/// `path` read and analyzed in `driver`'s language. `None` when it cannot
-/// be read, is at or over `cap` bytes, or its analysis panics; a panic is
+/// `path` read (as `util::text::read_source` reads it) and analyzed in
+/// `driver`'s language. `None` when it cannot be read, is at or over `cap`
+/// bytes, or its analysis panics; a panic is
 /// reported with the file it hit, since one that doesn't name its file
 /// costs a bisection.
 pub fn analyze_file(driver: &dyn LanguageDriver, path: &Path, cap: u64) -> Option<FileAnalysis> {
@@ -99,10 +100,12 @@ pub fn analyze_file(driver: &dyn LanguageDriver, path: &Path, cap: u64) -> Optio
     if std::fs::metadata(path).ok()?.len() >= cap {
         return None;
     }
-    let source = std::fs::read_to_string(path).ok()?;
-    if source.len() as u64 >= cap {
+    // The cap is on bytes: Latin-1 decoding widens every high byte to two.
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as u64 >= cap {
         return None;
     }
+    let source = crate::util::text::decode_source(bytes);
     let analyzed =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| driver.analyze_with_path(&source, Some(path))));
     if analyzed.is_err() {

@@ -8,8 +8,11 @@ pub fn r_pack() -> LangPack {
         id: "r",
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         names: NameSpellings::NONE,
+        functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // A logical is a number in arithmetic (`TRUE + 1` is 2).
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
+        type_display: |_| None,
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: |_| None,

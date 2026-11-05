@@ -315,6 +315,26 @@ impl RhaiPlugin {
             .call_fn(&mut rhai::Scope::new(), &ast, "id", ())
             .map_err(|e| format!("rhai `id()`: {}", e))?;
 
+        // Checked before any other hook is read: a plugin written for
+        // another API may read a manifest shape this host no longer means.
+        let api: i64 = if ast.iter_functions().any(|f| f.name == "api") {
+            engine
+                .call_fn(&mut rhai::Scope::new(), &ast, "api", ())
+                .map_err(|e| format!("rhai `api()`: {}", e))?
+        } else {
+            log::warn!("plugin `{}` declares no `api()`; reading it as plugin API 1", id);
+            1
+        };
+        if api != crate::build::plugin::PLUGIN_API {
+            return Err(format!(
+                "plugin `{}` is written for plugin API {}; this perl-lsp speaks API {} \
+                 (see docs/PLUGIN_AUTHORING.md, API versions)",
+                id,
+                api,
+                crate::build::plugin::PLUGIN_API
+            ));
+        }
+
         let trig_dyn: Array = engine
             .call_fn(&mut rhai::Scope::new(), &ast, "triggers", ())
             .map_err(|e| format!("rhai `triggers()`: {}", e))?;
@@ -628,6 +648,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("log4perl", include_str!("../../../frameworks/log4perl.rhai")),
     ("vars", include_str!("../../../frameworks/vars.rhai")),
     ("strict", include_str!("../../../frameworks/strict.rhai")),
+    ("autovivification", include_str!("../../../frameworks/autovivification.rhai")),
     ("dbic-resultddl", include_str!("../../../frameworks/dbic-resultddl.rhai")),
     ("dbic", include_str!("../../../frameworks/dbic.rhai")),
     ("type-tiny", include_str!("../../../frameworks/type-tiny.rhai")),
@@ -638,6 +659,12 @@ const BUNDLED: &[(&str, &str)] = &[
     ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),
     ("cpp-attributes", include_str!("../../../frameworks/cpp-attributes.rhai")),
 ];
+
+/// The bundled plugins' `(id, source)` pairs, for checks over all of them.
+#[cfg(test)]
+pub fn bundled_sources() -> &'static [(&'static str, &'static str)] {
+    BUNDLED
+}
 
 /// One bundled plugin by id — for registries composed from a custom
 /// plugin PLUS a bundled manifest carrier (e.g. a kit-plugin test that
@@ -757,6 +784,8 @@ pub fn plugin_fingerprint() -> String {
 
     let mut hasher = DefaultHasher::new();
 
+    // A host that speaks another API reads the same plugins differently.
+    crate::build::plugin::PLUGIN_API.hash(&mut hasher);
     for (id, src) in BUNDLED {
         id.hash(&mut hasher);
         src.hash(&mut hasher);
@@ -808,14 +837,17 @@ pub fn plugin_source_paths() -> Vec<std::path::PathBuf> {
 }
 
 /// Load all `*.rhai` files from a directory. Used for user-installed plugins.
+/// Load every `.rhai` in `dir`. Returns the plugins that loaded and one
+/// line per file that did not (path and reason), for the registry to keep.
 pub fn load_plugin_dir(
     dir: &std::path::Path,
     engine: Arc<Engine>,
-) -> Vec<Box<dyn FrameworkPlugin>> {
+) -> (Vec<Box<dyn FrameworkPlugin>>, Vec<String>) {
     let mut out: Vec<Box<dyn FrameworkPlugin>> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
-        Err(_) => return out,
+        Err(_) => return (out, refused),
     };
     for entry in read.flatten() {
         let path = entry.path();
@@ -826,6 +858,7 @@ pub fn load_plugin_dir(
             Ok(s) => s,
             Err(e) => {
                 log::warn!("plugin {}: read: {}", path.display(), e);
+                refused.push(format!("{}: read: {}", path.display(), e));
                 continue;
             }
         };
@@ -834,10 +867,13 @@ pub fn load_plugin_dir(
                 log::info!("loaded plugin {} from {}", p.id(), path.display());
                 out.push(Box::new(p));
             }
-            Err(e) => log::warn!("plugin {}: {}", path.display(), e),
+            Err(e) => {
+                log::warn!("plugin {}: {}", path.display(), e);
+                refused.push(format!("{}: {}", path.display(), e));
+            }
         }
     }
-    out
+    (out, refused)
 }
 
 #[cfg(test)]
@@ -1005,6 +1041,8 @@ mod tests {
             ("log4perl", include_str!("../../../frameworks/log4perl.rhai")),
             ("vars", include_str!("../../../frameworks/vars.rhai")),
             ("strict", include_str!("../../../frameworks/strict.rhai")),
+            ("autovivification", include_str!("../../../frameworks/autovivification.rhai")),
+    ("autovivification", include_str!("../../../frameworks/autovivification.rhai")),
             ("dbic-resultddl", include_str!("../../../frameworks/dbic-resultddl.rhai")),
             ("dbic", include_str!("../../../frameworks/dbic.rhai")),
             ("type-tiny", include_str!("../../../frameworks/type-tiny.rhai")),

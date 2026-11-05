@@ -2,7 +2,6 @@
 //! every served language — Perl's `@INC` — through the driver's dependency
 //! map (`acquire`), plus the workspace bulk indexers.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

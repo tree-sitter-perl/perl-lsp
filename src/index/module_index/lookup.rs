@@ -23,10 +23,11 @@ impl ModuleIndex {
         if self.loaded_modules.contains_key(module) {
             return true;
         }
-        let tail = module.rsplit("::").next().unwrap_or(module);
+        use crate::model::{conventions::PERL_SPELLINGS, file_analysis::split_qualified};
+        let tail = split_qualified(module, &PERL_SPELLINGS).1;
         self.loaded_modules
             .iter()
-            .any(|e| e.key().rsplit("::").next() == Some(tail))
+            .any(|e| split_qualified(e.key(), &PERL_SPELLINGS).1 == tail)
     }
 
     /// Was `module` registered from the workspace tree (vs @INC)?
@@ -269,8 +270,7 @@ impl ModuleIndex {
             return entry.clone();
         }
         let result = module_resolver::parse_from_inc(module_name).into_iter().next();
-        self.core.note_shape_change();
-        self.core.cache.insert(module_name.to_string(), result.clone());
+        self.core.set_slot(module_name, result.clone());
         result
     }
 
@@ -871,6 +871,26 @@ impl CrossFileLookup for ModuleIndex {
         out.sort();
         out.dedup();
         out
+    }
+
+    fn includers_of(&self, header: &str) -> Vec<Arc<CachedModule>> {
+        let members: Vec<String> = self
+            .core
+            .edges
+            .includers
+            .get(header)
+            .map(|b| b.as_slice().to_vec())
+            .unwrap_or_default();
+        members
+            .iter()
+            .filter_map(|p| {
+                let p = crate::util::canonical_path::CanonicalPath::from_stored(p.into());
+                CrossFileLookup::cached_by_path(self, &p)
+            })
+            .filter(|c| {
+                c.analysis.pack.include_directives.iter().any(|d| d.target.as_deref() == Some(header))
+            })
+            .collect()
     }
 
     fn direct_specializations_of(&self, primary: &str) -> Vec<(String, String)> {

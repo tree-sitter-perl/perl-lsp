@@ -10,17 +10,18 @@ use super::*;
 /// be re-offered by the export walk under the wrong affordance.
 pub(super) fn import_candidates(
     origin: &FileAnalysis,
+    at: tree_sitter::Point,
     idx: &dyn CrossFileLookup,
     mask: RoleMask,
     out: &mut Vec<CompletionCandidate>,
 ) {
     use crate::model::file_analysis::{
-        format_inferred_type, SymKind as FaSymKind, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
+        SymKind as FaSymKind, PRIORITY_AUTO_ADD_QW, PRIORITY_BARE_IMPORT,
         PRIORITY_EXPLICIT_IMPORT,
     };
     let mut seen = std::collections::HashSet::new();
 
-    for import in &origin.imports {
+    for import in origin.imports.in_scope(origin.import_scope_at(at)) {
         // Every candidate file of the producer — a split exporter's surface
         // and subs span the set.
         let cands = idx.visible_def_candidates(&import.module_name);
@@ -29,7 +30,7 @@ pub(super) fn import_candidates(
         // Dedup/dispatch by LOCAL name (what the user types); resolve detail
         // against REMOTE name (what exists in the source module) so renaming
         // imports like `del` → `delete` show the real doc.
-        for is in &import.imported_symbols {
+        for is in import.explicit_symbols() {
             let local = &is.local_name;
             if !seen.insert(local.clone()) {
                 continue;
@@ -68,7 +69,7 @@ pub(super) fn import_candidates(
         }
         for cached in &cands {
             let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
-            let all_exported: Vec<&String> = if import.imported_symbols.is_empty() {
+            let all_exported: Vec<&String> = if import.explicit_symbols().is_empty() {
                 // Bare `use Foo;` — offer @EXPORT
                 surface.default_set().iter().collect()
             } else {
@@ -95,7 +96,7 @@ pub(super) fn import_candidates(
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
                     .filter(crate::model::file_analysis::InferredType::is_known)
-                    .map(|rt| format!("→ {} ", format_inferred_type(&rt)))
+                    .map(|rt| format!("→ {} ", origin.render_type(&rt)))
                     .unwrap_or_default();
 
                 // The FACT: this name can join the existing qw() list at
@@ -141,18 +142,17 @@ pub(super) fn import_candidates(
 /// affordance.
 pub(super) fn unimported_export_candidates(
     origin: &FileAnalysis,
+    at: tree_sitter::Point,
     idx: &dyn CrossFileLookup,
     out: &mut Vec<CompletionCandidate>,
 ) {
     use crate::model::file_analysis::{SymKind as FaSymKind, PRIORITY_UNIMPORTED};
     let mut candidates = Vec::new();
 
-    // Already-imported modules are the import walk's job, not this one's.
-    let imported_modules: std::collections::HashSet<&str> = origin
-        .imports
-        .iter()
-        .map(|i| i.module_name.as_str())
-        .collect();
+    // Modules already imported into this package are the import walk's
+    // job, not this one's.
+    let imported_modules: std::collections::HashSet<&str> =
+        origin.imports.modules(origin.import_scope_at(at)).collect();
 
     // Collected first: a surface reads the cache, and a lookup made under
     // the iteration's shard guard can deadlock against a queued writer.
@@ -200,11 +200,10 @@ pub(super) fn completion_detail_for_import(
     whole: Option<&crate::model::file_analysis::FileAnalysis>,
     module_name: &str,
 ) -> String {
-    use crate::model::file_analysis::format_inferred_type;
     if let Some(whole) = whole {
         if let Some(sub_info) = whole.sub_info_view(name) {
             if let Some(rt) = sub_info.return_type(None).filter(crate::model::file_analysis::InferredType::is_known) {
-                return format!("→ {} ({})", format_inferred_type(&rt), module_name);
+                return format!("→ {} ({})", whole.render_type(&rt), module_name);
             }
         }
     }
@@ -273,7 +272,7 @@ pub(crate) enum ImportResolution {
 /// explicitly-named `qw()` imports — those don't need the surface — so an
 /// explicit named import is never spuriously flagged while the resolver warms.
 fn classify_import(
-    import: &crate::model::file_analysis::Import,
+    import: crate::model::file_analysis::ScopedImport<'_>,
     func_name: &str,
     cached: Option<&crate::model::file_analysis::CachedModule>,
     module_index: &dyn CrossFileLookup,
@@ -296,13 +295,14 @@ fn classify_import(
     // `Brought` without the producer surface (tags / bare-use defaults need it).
     // This keeps a `qw(foo)` import from being flagged while the resolver warms,
     // and never resolves a bare/tagged name it can't actually verify.
-    if let Some(sym) = import.imported_symbols.iter().find(|s| s.local_name == *func_name) {
+    if let Some(sym) = import.explicit(func_name) {
         return Some((ImportResolution::Brought, sym.remote().to_string()));
     }
     None
 }
 
-/// Best resolution of `func_name` across all imports: the matched import, its
+/// Best resolution of `func_name` across the imports in force at `at`: the
+/// matched import, its
 /// remote name, the resolvability verdict, and — when known — the module path
 /// for navigation. `Brought` wins over `ExportedNotBrought` when several
 /// imports relate. The single resolvability query goto-def, the diagnostic, and
@@ -310,15 +310,16 @@ fn classify_import(
 pub(crate) fn resolve_imported_function_classified<'b>(
     analysis: &'b FileAnalysis,
     func_name: &str,
+    at: tree_sitter::Point,
     module_index: &dyn CrossFileLookup,
-) -> Option<(&'b crate::model::file_analysis::Import, Option<CanonicalPath>, String, ImportResolution)> {
+) -> Option<(crate::model::file_analysis::ScopedImport<'b>, Option<CanonicalPath>, String, ImportResolution)> {
     let mut best: Option<(
-        &'b crate::model::file_analysis::Import,
+        crate::model::file_analysis::ScopedImport<'b>,
         Option<CanonicalPath>,
         String,
         ImportResolution,
     )> = None;
-    for import in &analysis.imports {
+    for import in analysis.imports.in_scope(analysis.import_scope_at(at)) {
         // Classify against EVERY candidate file of the imported module —
         // a split exporter's surface (and the sub itself) may live in a
         // losing candidate. `Brought` is the strongest verdict per import.
@@ -362,10 +363,11 @@ pub(crate) fn resolve_imported_function_classified<'b>(
 pub(crate) fn resolve_imported_function<'b>(
     analysis: &'b FileAnalysis,
     func_name: &str,
+    at: tree_sitter::Point,
     module_index: &dyn CrossFileLookup,
-) -> Option<(&'b crate::model::file_analysis::Import, CanonicalPath, String)> {
+) -> Option<(crate::model::file_analysis::ScopedImport<'b>, CanonicalPath, String)> {
     // Goto-def needs a concrete module path to jump to.
-    resolve_imported_function_classified(analysis, func_name, module_index)
+    resolve_imported_function_classified(analysis, func_name, at, module_index)
         .and_then(|(import, path, remote, _)| path.map(|p| (import, p, remote)))
 }
 
@@ -378,7 +380,7 @@ pub enum FunctionBinding<'a> {
     /// and the REMOTE name (differs from the typed name only for renaming
     /// imports like `del` → `delete`).
     Imported {
-        import: &'a crate::model::file_analysis::Import,
+        import: crate::model::file_analysis::ScopedImport<'a>,
         path: CanonicalPath,
         remote: String,
     },
@@ -400,7 +402,7 @@ impl<'a> CandidateSet<'a> {
         }
         let idx = self.idx()?;
         if let Some((import, path, remote)) =
-            resolve_imported_function(self.origin_analysis(), &r.target_name, idx)
+            resolve_imported_function(self.origin_analysis(), &r.target_name, r.span.start, idx)
         {
             return Some(FunctionBinding::Imported { import, path, remote });
         }

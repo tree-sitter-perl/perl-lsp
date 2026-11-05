@@ -83,7 +83,7 @@ impl SourceCache {
         let src = self
             .files
             .entry(path.to_string())
-            .or_insert_with(|| std::fs::read_to_string(path).ok());
+            .or_insert_with(|| crate::util::text::read_source(path).ok());
         let line_src = src.as_deref().and_then(|s| s.lines().nth(row));
         self.fmt.render(row, byte_col, line_src)
     }
@@ -165,7 +165,7 @@ pub(super) fn parse_cursor_target(rest: &[String], root: &str) -> Option<CursorT
         [flag, spec] if flag == "--at" => {
             let (file, line1, col1) = split_at_spec(spec)?;
             let file = resolve_cursor_file(&file, root);
-            let source = std::fs::read_to_string(&file).ok();
+            let source = crate::util::text::read_source(&file).ok();
             let point = editor_to_internal_point(source.as_deref(), line1, col1);
             Some(CursorTarget { file, point, fmt: CoordFmt::EditorOneBasedChar, raw: spec.clone() })
         }
@@ -230,7 +230,7 @@ pub(super) fn emit_pos_annotation(target: &CursorTarget) {
     // Distinguish "couldn't open the file" from "line past EOF": the old
     // code collapsed both into a "past the end" message, which lied about
     // files it never read (unresolved path, permissions).
-    match std::fs::read_to_string(&target.file) {
+    match crate::util::text::read_source(&target.file) {
         Err(e) => eprintln!("      (could not read {}: {})", target.file, e),
         Ok(text) => match text.lines().nth(row) {
             Some(line) => {

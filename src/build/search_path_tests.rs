@@ -1,4 +1,6 @@
 //! A search-path map locates a name's module, longest first.
+// Every test here needs a path-named pack language.
+#![cfg_attr(not(feature = "python"), allow(unused_imports))]
 
 use super::*;
 use crate::build::language_driver::{LanguageRegistry, Located, LocatedBy};

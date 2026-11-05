@@ -87,13 +87,7 @@ impl IndexCore {
             }
         }
         // A miss under the old map may be a hit under this one.
-        self.cache.retain(|name, slot| {
-            if slot.is_some() {
-                return true;
-            }
-            reask.push(name.clone());
-            false
-        });
+        reask.extend(self.clear_misses());
         let locator: Arc<dyn DependencyLocator> = driver.dependency_locator(root.as_deref()).unwrap_or_else(|| {
             Arc::new(crate::build::search_path::SearchPathLocator::new(driver, Vec::new(), Vec::new(), Vec::new()))
         });
@@ -226,12 +220,8 @@ impl IndexCore {
                     best_candidate(&v.iter().collect::<Vec<_>>(), name, &|m, n| self.module_defines_class(m, n))
                 });
                 match survivor {
-                    Some(c) => {
-                        self.cache.insert(name.clone(), Some(c));
-                    }
-                    None => {
-                        self.cache.remove(name);
-                    }
+                    Some(c) => self.set_slot(name, Some(c)),
+                    None => self.clear_slot(name),
                 }
             }
             // A front door that declares the name publishes under it too;

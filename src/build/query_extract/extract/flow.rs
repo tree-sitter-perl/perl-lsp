@@ -14,6 +14,8 @@ struct Target {
     scopes: Vec<ScopeId>,
     /// Where the write lands (`written_at`).
     at: Point,
+    /// Whether the write resets the binding where it lands.
+    resets: bool,
     /// The target token's own start.
     token: Point,
     /// A `@type.<relative>` annotation's mark and the class in force where
@@ -36,19 +38,24 @@ pub(super) struct State {
     pub(super) observations: Vec<(String, ScopeId, crate::model::witnesses::TypeObservation, Span)>,
 }
 
-/// Where a target event's write lands. A `@flow.assign` match writes at its
-/// assignment's end, after every read the assignment makes, and resets the
-/// variable there (`docs/adr/flow-narrowing.md`); any other target is
-/// bound at its own token.
-fn written_at(ad: &Adorned, out: &mut SkeletonAnalysis, name: String, scope: ScopeId, e: &Event) -> Point {
-    let Some(at) = ad.in_match(e.match_id, Capture::Flow(FlowCap::Assign)).map(|a| a.end) else { return e.start };
-    out.witnesses.push(Witness {
+/// Where a target event's write lands, and whether it lands there as a
+/// reset. A `@flow.assign` match writes at its assignment's end, after every
+/// read the assignment makes, and resets the variable there
+/// (`docs/adr/flow-narrowing.md`); any other target is bound at its own token.
+fn written_at(ad: &Adorned, e: &Event) -> (Point, bool) {
+    match ad.in_match(e.match_id, Capture::Flow(FlowCap::Assign)) {
+        Some(a) => (a.end, true),
+        None => (e.start, false),
+    }
+}
+
+fn reset(witnesses: &mut Vec<Witness>, name: String, scope: ScopeId, at: Point) {
+    witnesses.push(Witness {
         attachment: WitnessAttachment::Variable { name, scope },
         source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
         payload: WitnessPayload::Reset,
         span: Span { start: at, end: at },
     });
-    at
 }
 
 fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: WitnessPayload, span: Span) -> Witness {
@@ -112,10 +119,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         }
         Capture::Flow(FlowCap::Target) => {
             let name = (pack.shape_name)(&e.text);
-            let mut at = e.start;
-            for &scope in &target_scopes {
-                at = written_at(ad, out, name.clone(), scope, e);
-            }
+            let (at, resets) = written_at(ad, e);
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk).
@@ -128,11 +132,14 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     relative = Some((rel, class.clone()));
                 }
             }
-            let target = Target { name, scopes: target_scopes, at, token: e.start, relative };
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
-            let at = written_at(ad, out, (pack.shape_name)(&e.text), cur_scope, e);
+            let (at, resets) = written_at(ad, e);
+            if resets {
+                reset(&mut out.witnesses, (pack.shape_name)(&e.text), cur_scope, at);
+            }
             f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, e.start));
         }
         Capture::AnonAggMember => {
@@ -299,6 +306,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let member = (pack.shape_name)(&name.text);
                 st.minted[ix].projects =
                     Some(Box::new(MemberRead { receiver: recv.span(), member: member.clone(), token: name.span() }));
+                out.member_reads.push(crate::build::query_extract::MemberRead {
+                    span,
+                    receiver: recv.span(),
+                    member: member.clone(),
+                });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -394,8 +406,14 @@ pub(super) fn finish(st: &mut ExtractState) {
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
-    for (mid, Target { name, at, token, relative, .. }, scope) in targets {
+    for (mid, Target { name, at, resets, token, relative, .. }, scope) in targets {
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
+        // A data member's write in its class body is its initializer, not a
+        // step in a sequence: its declared type holds class-wide, so nothing
+        // there retires it.
+        if *resets && !field_scope_span.contains_key(&(name.clone(), *scope)) {
+            reset(&mut out.witnesses, name.clone(), *scope, *at);
+        }
         // Class-wide extent for a data member; the sequential decl point for a
         // local (see `field_scope_span`).
         let annot_span = field_scope_span
@@ -455,6 +473,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
         let Some(read) = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last() else { continue };
         out.write_sites.push(read.token);
+        out.place_writes.push(place.span());
         if let Some(value) = source_value_span(ad, place.match_id) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: read.receiver,

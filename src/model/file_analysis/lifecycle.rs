@@ -68,7 +68,6 @@ impl FileAnalysis {
             pack,
             plugin,
             method_call_bindings,
-            framework_imports,
             export,
             export_ok,
             export_tags,
@@ -105,7 +104,6 @@ impl FileAnalysis {
             method_call_bindings,
             namespace_ranges,
             packages,
-            framework_imports,
             export,
             export_ok,
             export_tags,
@@ -132,7 +130,6 @@ impl FileAnalysis {
             use_map_pins: Default::default(),
             // Pack drivers re-stamp their id post-construction.
             language: super::default_language(),
-            scope_starts: Vec::new(),
             export_lookup: HashSet::new(),
         };
         fa.build_indices();
@@ -166,7 +163,7 @@ impl FileAnalysis {
     /// rehydrate, which is the whole reason enrichment's provider chase is
     /// dominated by `bag_present` (measured: ~400 witnesses moved per return-type
     /// query answered).
-    pub fn evict_witness_bag(&mut self) {
+    pub(super) fn evict_witness_bag(&mut self) {
         self.witnesses = crate::model::witnesses::WitnessBag::default();
         self.bag_evicted = true;
     }
@@ -181,7 +178,7 @@ impl FileAnalysis {
     /// `RefTable::evict` drops the vec and every index over it in one place,
     /// so no index can survive its refs. Touches no other pinned field.
     /// Idempotent.
-    pub fn evict_refs(&mut self) {
+    pub(super) fn evict_refs(&mut self) {
         self.refs.evict();
     }
 
@@ -203,7 +200,7 @@ impl FileAnalysis {
     /// BEFORE this runs. Touches no other pinned field
     /// (`export`/`export_ok`/`export_lookup` derive from export lists, not
     /// symbols, and stay). Idempotent.
-    pub fn evict_symbols(&mut self) {
+    pub(super) fn evict_symbols(&mut self) {
         self.symbols.evict();
     }
 
@@ -221,10 +218,11 @@ impl FileAnalysis {
         !self.bag_evicted && !self.refs.is_evicted() && !self.symbols.is_evicted()
     }
 
-    /// The ONE speller of the registration strip. Every registration path
-    /// routes here so a new eviction axis is added in exactly one place; a
-    /// site spelling `evict_*` calls directly is re-stating this by
-    /// convention.
+    /// The ONE speller of the strip. Every path that strips a copy (the
+    /// registration tiers, the warm-stub decode, the narrow-axis loaders)
+    /// routes here so a new eviction axis is added in exactly one place; the
+    /// per-axis `evict_*` setters are private to the model, so no site
+    /// outside it can spell a strip of its own.
     ///
     /// Takes a `Residency` rather than a pair of flags because the axes are
     /// a LADDER, not independent switches — see that type. The pair could
@@ -847,18 +845,11 @@ impl FileAnalysis {
     /// index fields were zeroed by `#[serde(skip, default)]`.
     pub fn after_deserialize(&mut self) {
         // Clear first in case this is called on a populated FileAnalysis.
-        self.scope_starts.clear();
         self.export_lookup.clear();
         self.build_indices();
     }
 
     fn build_indices(&mut self) {
-        // Scope starts — sorted for binary search
-        self.scope_starts = self.scopes.iter()
-            .map(|s| (s.span.start, s.id))
-            .collect();
-        self.scope_starts.sort_by_key(|(p, _)| (p.row, p.column));
-
         self.symbols.rebuild_indices();
 
         // Link HashKeyAccess refs to their HashKeyDef symbols whenever the
@@ -1395,13 +1386,11 @@ impl FileAnalysis {
         // The serde-skip reverse indices (rebuilt on load, resident-only).
         // The ref- and symbol-keyed shares of this bucket are added by the
         // tables' own `heap_add`.
-        h.rebuilt_indices += self.scope_starts.capacity()
-            * std::mem::size_of::<(Point, ScopeId)>()
-            + self.export_lookup.capacity() * (std::mem::size_of::<String>() + 1)
+        h.rebuilt_indices += self.export_lookup.capacity() * (std::mem::size_of::<String>() + 1)
             + self.export_lookup.iter().map(|s| s.capacity()).sum::<usize>();
 
         // bindings / imports.
-        h.bindings = vcap(&self.imports)
+        h.bindings = self.imports.heap_bytes()
             + vcap(&self.call_bindings)
             + vcap(&self.method_call_bindings)
             + vcap(&self.fold_ranges);
@@ -1421,7 +1410,6 @@ impl FileAnalysis {
         h.misc += pkg_facts(&self.packages)
             + map_str_vec(&self.export_tags)
             + mcap(&self.type_provenance)
-            + scap(&self.framework_imports)
             + scap(&self.reassigned_vars)
             + scap(&self.column_keyed_verbs)
             + vcap(&self.export)

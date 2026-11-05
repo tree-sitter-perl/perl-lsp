@@ -16,7 +16,7 @@ fn admitted(query_src: &str) -> Vec<String> {
     parser.set_language(&lang).unwrap();
     let tree = parser.parse(SRC, None).unwrap();
     let root = tree.root_node();
-    let syntax = crate::cst::SyntaxForest::new([root]);
+    let syntax = crate::cst::SyntaxForest::new(root);
     let mut out = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut it = cursor.matches(&query, root, SRC.as_bytes());

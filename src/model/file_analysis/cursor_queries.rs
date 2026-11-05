@@ -397,15 +397,10 @@ impl FileAnalysis {
         if let Some(group) = self.field_group_at(point) {
             return Some(self.rename_field_group(&group, new_name));
         }
-        // Perl owns a special variable's name (`@_`, `$_`, `%ENV`): it has
-        // occurrences, but no rename. The vocabulary is Perl's: another
-        // language's `_` is an ordinary name.
-        if self.language == crate::model::conventions::PERL_LANGUAGE
-            && self.ref_at(point).is_some_and(|r| {
-                matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-                    && crate::model::conventions::is_special_variable(&r.target_name)
-            })
-        {
+        if self.ref_at(point).is_some_and(|r| {
+            matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                && crate::model::conventions::conventions_of(&self.language).is_special_variable(&r.target_name)
+        }) {
             return None;
         }
         let refs = self.find_references(point, None);
@@ -995,9 +990,10 @@ impl FileAnalysis {
         }
         let idx = module_index?;
         let name = call_ref.unqualified_target_name(self.names());
-        // Later `use` wins, mirroring `resolve_call_package`'s import scan.
-        // A split exporter's surface lives across its candidate files.
-        for import in self.imports.iter().rev() {
+        // The package's own `use`s, later wins, mirroring
+        // `resolve_call_package`. A split exporter's surface lives across
+        // its candidate files.
+        for import in self.imports.in_scope(self.import_scope_at(call_ref.span.start)).rev() {
             for cached in idx.visible_def_candidates(&import.module_name) {
                 let surface = cached.analysis.export_surface_with_index(&import.module_name, idx);
                 if imported_names(import, &surface)

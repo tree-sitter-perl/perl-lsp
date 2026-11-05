@@ -15,75 +15,152 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
+use crate::model::file_analysis::{ClassSpelling, ConstructionKey, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
+
+/// Perl's namespace separator. Source-side Perl code (the builder, the CST
+/// view, the cursor detector) spells it through this; a consumer that serves
+/// every language asks the analysis's `NameSpellings` instead.
+pub const PERL_SEP: &str = "::";
+
+/// The package code runs in before any `package` statement.
+pub const PERL_ROOT_PACKAGE: &str = "main";
 
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
-    namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
+    namespace_sep: Some(std::borrow::Cow::Borrowed(PERL_SEP)),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
-    root_package: Some(std::borrow::Cow::Borrowed("main")),
+    root_package: Some(std::borrow::Cow::Borrowed(PERL_ROOT_PACKAGE)),
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
     imports: NameSpellings::NONE.imports,
     // `Foo()` calls a sub; construction is `Foo->new`.
     class_call: crate::model::file_analysis::ClassCall::FunctionCall,
-    construction: crate::model::file_analysis::ConstructionKey::Constructor,
     // A package is both the namespace and the class its code belongs to.
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
-    functions: NameSpellings::NONE.functions,
 };
 
 /// Perl's language id: the native builder's, and `FileAnalysis::language`'s
 /// default for blobs that predate the field.
 pub const PERL_LANGUAGE: &str = "perl";
 
-/// Perl's subsumption rules: an object is a blessed hash, and truth is a
-/// number (`1` / `''`).
-pub static PERL_LATTICE: LatticeRules =
-    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
+/// What every file of one language shares, asked of the language by its id
+/// (`conventions_of`): no file carries it and no consumer branches on which
+/// language it serves (rules #10, #14).
+pub struct LanguageConventions {
+    /// Which cross-family types the language's joins fold into one another
+    /// (`docs/adr/union-types.md`).
+    pub lattice: LatticeRules,
+    /// Whether the runtime owns a variable of this (sigil-led) name.
+    special_variable: fn(&str) -> bool,
+    /// The language's own word for an engine type tag (`Bool` → php
+    /// `bool`); `None` keeps the engine's.
+    type_display: fn(&str) -> Option<&'static str>,
+    /// What a construction's reference to its constructor is keyed by.
+    pub construction: ConstructionKey,
+}
 
-/// Each pack language's subsumption rules, by `FileAnalysis::language`. The
-/// model cannot see the packs that declare them, so the build layer registers
-/// each served language's set (`docs/adr/union-types.md`); Perl's are
-/// declared here, beside its other conventions, and never registered. Append-only slots, not a
-/// locked map: every bag query reads this, and a shared lock's reader count is
-/// one contended cache line across a sweep's workers.
-static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+impl LanguageConventions {
+    /// A pack language's: its declared lattice and type words. No pack
+    /// declares variables its runtime owns, so another language's `$_` is
+    /// an ordinary name.
+    pub fn of_pack(
+        lattice: LatticeRules,
+        type_display: fn(&str) -> Option<&'static str>,
+        construction: ConstructionKey,
+    ) -> Self {
+        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction }
+    }
+
+    /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
+    /// has occurrences, but no rename.
+    pub fn is_special_variable(&self, name: &str) -> bool {
+        (self.special_variable)(name)
+    }
+
+    /// How a human surface spells the engine type tag `tag` in this
+    /// language; `None` keeps the engine's spelling.
+    pub fn type_label(&self, tag: &str) -> Option<&'static str> {
+        (self.type_display)(tag)
+    }
+}
+
+fn no_special_variable(_: &str) -> bool {
+    false
+}
+
+/// The engine's tags are Perl's own words.
+fn engine_type_words(_: &str) -> Option<&'static str> {
+    None
+}
+
+/// Perl's conventions, declared beside its spellings and never registered.
+/// Its subsumption rules: an object is a blessed hash, and truth is a number
+/// (`1` / `''`).
+pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
+    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
+    special_variable: is_special_variable,
+    type_display: engine_type_words,
+    // `Foo->new` calls its constructor by name.
+    construction: ConstructionKey::Constructor,
+};
+
+/// Each pack language's conventions, by `FileAnalysis::language`. The model
+/// cannot see the packs that declare them, so the build layer registers each
+/// served language's; Perl's are declared here. Append-only slots, not a
+/// locked map: every bag query reads the lattice, and a shared lock's reader
+/// count is one contended cache line across a sweep's workers.
+static LANGUAGE_CONVENTIONS: [std::sync::OnceLock<(&'static str, LanguageConventions)>; 16] =
     [const { std::sync::OnceLock::new() }; 16];
 
-/// Register `language`'s rules once; later calls are no-ops, so `rules` is
-/// built only on the first.
-pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
-    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's rules are declared, not registered");
-    let mut rules = Some(rules);
-    for slot in &LANGUAGE_LATTICES {
+/// Register `language`'s conventions once; later calls are no-ops, so
+/// `conventions` is built only on the first.
+pub fn register_conventions(language: &'static str, conventions: impl FnOnce() -> LanguageConventions) {
+    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's conventions are declared, not registered");
+    let mut conventions = Some(conventions);
+    for slot in &LANGUAGE_CONVENTIONS {
         // A racing registration of another language can take this slot
         // between the check and the init; the loop then moves on.
-        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        let (id, _) = slot.get_or_init(|| (language, (conventions.take().expect("init runs once"))()));
         if *id == language {
             return;
         }
     }
-    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
+    panic!("more than {} languages registered", LANGUAGE_CONVENTIONS.len());
 }
 
-/// The subsumption rules of the language an analysis was built in. A
-/// language nobody registered holds no rules: it never borrows another's.
-pub fn lattice_for(language: &str) -> &'static LatticeRules {
-    static NO_RULES: LatticeRules = LatticeRules::new(&[]);
+/// The conventions of the language an analysis was built in. A language
+/// nobody registered has none: it never borrows another's.
+pub fn conventions_of(language: &str) -> &'static LanguageConventions {
+    registered_conventions(language).unwrap_or(&UNREGISTERED)
+}
+
+static UNREGISTERED: LanguageConventions =
+    LanguageConventions {
+        lattice: LatticeRules::new(&[]),
+        special_variable: no_special_variable,
+        type_display: engine_type_words,
+        construction: ConstructionKey::Constructor,
+    };
+
+fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {
     if language == PERL_LANGUAGE {
-        return &PERL_LATTICE;
+        return Some(&PERL_CONVENTIONS);
     }
-    let registered = LANGUAGE_LATTICES
+    LANGUAGE_CONVENTIONS
         .iter()
         .map_while(|slot| slot.get())
         .find(|(id, _)| *id == language)
-        .map(|(_, rules)| rules);
+        .map(|(_, conventions)| conventions)
+}
+
+/// The subsumption rules of the language an analysis was built in.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    let registered = registered_conventions(language);
     debug_assert!(registered.is_some(), "no lattice registered for language {language:?}");
-    registered.unwrap_or(&NO_RULES)
+    &registered.unwrap_or(&UNREGISTERED).lattice
 }
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -115,7 +192,18 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
 /// The file a Perl module is under an `@INC` root: `Foo::Bar` →
 /// `Foo/Bar.pm`.
 pub fn perl_module_paths(module: &str) -> Vec<String> {
-    vec![format!("{}.pm", module.replace("::", "/"))]
+    vec![perl_module_rel_path(module)]
+}
+
+/// A Perl module's path relative to an `@INC` root: `Foo::Bar` → `Foo/Bar.pm`.
+pub fn perl_module_rel_path(module: &str) -> String {
+    format!("{}.pm", module.replace(PERL_SEP, "/"))
+}
+
+/// `perl_module_rel_path`'s inverse, over a root-relative path whose `.pm`
+/// the caller has already checked.
+pub fn perl_module_from_rel_path(rel: &std::path::Path) -> String {
+    rel.to_string_lossy().trim_end_matches(".pm").replace(std::path::MAIN_SEPARATOR, PERL_SEP)
 }
 
 /// `split_qualified`'s inverse: a namespace and a leaf as one qualified
@@ -189,6 +277,15 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
         "self" | "class" | "this" | "proto"
     )
 }
+
+/// Perl's `@_`: each call's own arguments, so it names a different array
+/// in every callable rather than one package variable.
+pub fn is_argument_array(name: &str) -> bool {
+    name == ARGUMENT_ARRAY
+}
+
+/// The argument array's spelling.
+pub const ARGUMENT_ARRAY: &str = "@_";
 
 /// A variable Perl itself defines (perlvar): punctuation (`$_`, `$@`, `@_`),
 /// digit (`$0`, `$1`), caret (`${^W}`) and the identifiers Perl forces into
@@ -279,18 +376,18 @@ pub fn is_bareword_class_name(text: &str, names: &NameSpellings) -> bool {
     text.split(sep).all(is_ident)
 }
 
-/// Perl's attribute vocabulary, spelling → flag — the one table for a
-/// Corinna `field` attribute (`:param`, `:reader`, the writer family
-/// `:writer` / `:mutator` / `:accessor`), the way a pack declares its own.
-/// A spelling with no declaration fact (`:ro` style hints) is display-only.
+/// Perl's spellings of a Corinna `field` attribute, mapped onto the
+/// canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`, the one
+/// spelling → flag table) the way a pack maps its own: `:param`, `:reader`,
+/// and the writer family `:writer` / `:mutator` / `:accessor`. A spelling
+/// with no declaration fact (`:ro` style hints) is display-only.
 pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::SymbolFlags> {
-    use crate::model::file_analysis::SymbolFlags;
-    Some(match attr {
-        "param" => SymbolFlags::PARAM,
-        "reader" => SymbolFlags::READER,
-        "writer" | "mutator" | "accessor" => SymbolFlags::WRITER,
+    let canonical = match attr {
+        "param" | "reader" | "writer" => attr,
+        "mutator" | "accessor" => "writer",
         _ => return None,
-    })
+    };
+    crate::model::file_analysis::SymbolFlags::try_from(canonical).ok()
 }
 
 /// A Perl sigil: what kind of thing a name, or a deref, denotes.
@@ -421,6 +518,11 @@ pub enum Invocant {
     /// spelling, however much it looks like one (`self.x`).
     Expr(InvocantName),
     Bridged { plugin: String, token: String, match_mode: BridgedMatch },
+    /// A receiver that is a part of a variable (`$self->{a}->m`): its value
+    /// is that place's, narrowings included, and its text is never a class
+    /// spelling. The place rides here, on the receiver it describes, so
+    /// every member ref carries it at no cost to the ones without.
+    Place { name: InvocantName, place: Box<crate::model::file_analysis::Place> },
 }
 
 /// How a [`Bridged`](Invocant::Bridged) token resolves to a class. Strict
@@ -466,8 +568,16 @@ impl Invocant {
     /// `Class->`) bind through this and skip bridged tokens.
     pub fn as_name(&self) -> Option<&InvocantName> {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => Some(n),
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => Some(n),
             Invocant::Bridged { .. } => None,
+        }
+    }
+
+    /// The receiver's place, when it is a part of a variable.
+    pub fn place(&self) -> Option<&crate::model::file_analysis::Place> {
+        match self {
+            Invocant::Place { place, .. } => Some(place),
+            Invocant::Name(_) | Invocant::Expr(_) | Invocant::Bridged { .. } => None,
         }
     }
 
@@ -481,7 +591,7 @@ impl Invocant {
     /// callers match the variant instead.
     pub fn text(&self) -> &str {
         match self {
-            Invocant::Name(n) | Invocant::Expr(n) => n,
+            Invocant::Name(n) | Invocant::Expr(n) | Invocant::Place { name: n, .. } => n,
             Invocant::Bridged { token, .. } => token,
         }
     }
@@ -534,24 +644,6 @@ impl<'a> InvocantText<'a> {
             t => Self::Bareword(t),
         }
     }
-
-    /// True when the invocant is a hash/array **element place** — `$h{k}`,
-    /// `$a[0]`, `$h{a}{b}`, or the arrow forms `$x->{k}` / `$x->[0]` — i.e.
-    /// a stable slot that flow-narrowing may have refined, so the receiver
-    /// query consults a place witness for it. A scalar **deref** (`${$ref}`,
-    /// `${name}`) is NOT a place: its brace follows the sigil directly,
-    /// whereas a place's subscript follows the container name (or an arrow /
-    /// a prior subscript). Plain scalars and non-scalars are never places.
-    pub fn is_element_place(&self) -> bool {
-        let Self::Scalar(inner) = self else { return false };
-        // `inner` is the text after the `$` sigil. A deref spelling leads
-        // with the brace (`${…}` → inner `"{…}"`); a place has its container
-        // name / `->` / prior subscript before the first `{` or `[`.
-        let b = inner.as_bytes();
-        b.iter().position(|&c| c == b'{' || c == b'[').is_some_and(|i| {
-            i > 0 && !matches!(b[i - 1], b'$' | b'@' | b'%')
-        })
-    }
 }
 
 /// A method-call name token (`$obj->Foo::Bar::m`, `$self->SUPER::m`,
@@ -579,7 +671,7 @@ pub enum MethodToken<'a> {
 
 impl<'a> MethodToken<'a> {
     pub fn parse(token: &'a str) -> Self {
-        match token.rsplit_once("::") {
+        match token.rsplit_once(PERL_SEP) {
             None => Self::Bare(token),
             Some(("SUPER", tail)) => Self::Super(tail),
             Some(("", tail)) => Self::Main(tail),
@@ -636,10 +728,8 @@ mod tests {
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
             imports: NameSpellings::NONE.imports,
             class_call: NameSpellings::NONE.class_call,
-            construction: NameSpellings::NONE.construction,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
-            functions: NameSpellings::NONE.functions,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
@@ -679,25 +769,6 @@ mod tests {
         assert_eq!(InvocantText::parse("$_[0]"), InvocantText::PositionalReceiver);
         assert_eq!(InvocantText::parse("@_[0]"), InvocantText::PositionalReceiver);
         assert_eq!(InvocantText::parse("Foo::Bar"), InvocantText::Bareword("Foo::Bar"));
-    }
-
-    #[test]
-    fn element_place_vs_deref() {
-        // Element places: subscript follows the container name / arrow.
-        for place in ["$h{k}", "$a[0]", "$h{a}{b}", "$self->{x}", "$self->[0]"] {
-            assert!(
-                InvocantText::parse(place).is_element_place(),
-                "{place} should be an element place",
-            );
-        }
-        // Scalar derefs and plain vars are NOT places — `${...}`'s brace
-        // follows the sigil directly.
-        for not_place in ["${name}", "${$ref}", "$obj", "@list", "Foo::Bar", "shift"] {
-            assert!(
-                !InvocantText::parse(not_place).is_element_place(),
-                "{not_place} should NOT be an element place",
-            );
-        }
     }
 
     #[test]

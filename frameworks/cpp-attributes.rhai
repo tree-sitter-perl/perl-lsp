@@ -18,6 +18,8 @@
 
 fn id() { "cpp-attributes" }
 
+fn api() { 1 }
+
 // No emit/query hooks — this plugin is purely a declarative manifest, read
 // trigger-independently like overrides/dispatch_verbs. So no triggers fire.
 fn triggers() { [] }

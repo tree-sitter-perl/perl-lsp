@@ -26,7 +26,7 @@ impl<'a> Builder<'a> {
             closed: false,
             captures: Vec::new(),
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -37,13 +37,12 @@ impl<'a> Builder<'a> {
         self.scope_stack.pop()
     }
 
-    /// Switch the declaration rule from the end of `span` on, in the scope
-    /// `span` sits in.
-    pub(super) fn switch_declaration_rule(&mut self, span: Span, required: bool) {
+    /// Switch `hint` from the end of `span` on, in the scope `span` sits in.
+    pub(super) fn switch_hint(&mut self, span: Span, hint: crate::model::file_analysis::LexicalHint, on: bool) {
         let scope = self.scope_at_point(span.start);
         self.scopes[scope.0 as usize]
-            .declaration_rules
-            .push(crate::model::file_analysis::DeclarationRule { at: span.end, required });
+            .hints
+            .push(crate::model::file_analysis::HintSwitch { at: span.end, hint, on });
     }
 
     pub(super) fn current_scope(&self) -> ScopeId {
@@ -127,30 +126,10 @@ impl<'a> Builder<'a> {
         self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
     }
 
-    /// Innermost scope containing `point`. Mirrors
-    /// `FileAnalysis::scope_at` but reads `&self.scopes` directly so
-    /// it's callable from within Builder during and after the walk.
-    /// Falls back to `ScopeId(0)` (the file scope) if no scope
-    /// matches — a defensive default for cases where the walk hasn't
-    /// produced any scope containing the point yet.
+    /// Innermost scope containing `point`: `innermost_scope_at` over the
+    /// walk's scopes, the file scope when the walk has none there yet.
     pub(super) fn scope_at_point(&self, point: Point) -> ScopeId {
-        let mut best: Option<(ScopeId, u64)> = None;
-        for scope in &self.scopes {
-            if !crate::model::file_analysis::contains_point(&scope.span, point) {
-                continue;
-            }
-            let r = scope.span.end.row.saturating_sub(scope.span.start.row) as u64;
-            let c = if scope.span.start.row == scope.span.end.row {
-                scope.span.end.column.saturating_sub(scope.span.start.column) as u64
-            } else {
-                0
-            };
-            let size = r * 1_000_000 + c;
-            if best.is_none() || size <= best.unwrap().1 {
-                best = Some((scope.id, size));
-            }
-        }
-        best.map(|(id, _)| id).unwrap_or(ScopeId(0))
+        crate::model::file_analysis::innermost_scope_at(&self.scopes, point).unwrap_or(ScopeId(0))
     }
 
     // ---- Symbol/Ref creation ----
@@ -238,7 +217,7 @@ impl<'a> Builder<'a> {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         if matches!(kind, SymKind::Variable | SymKind::Field) {
-            self.var_decls.entry((scope, name.clone())).or_default().push(id);
+            self.var_decls.entry(name.clone()).or_default().entry(scope).or_default().push(id);
         }
         // Perl says "this constructs" with a name and nothing else, so the
         // convention is read here, at the mint, and consumers ask the flag.
@@ -272,6 +251,7 @@ impl<'a> Builder<'a> {
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
             // reads them. No pack-minted arity here.
             arity: None,
+            in_force: None,
         });
         id
     }
@@ -312,6 +292,21 @@ impl<'a> Builder<'a> {
     /// analysis exists.
     pub(super) fn package_at_pos(&self, point: Point) -> Option<&str> {
         crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
+    }
+
+    /// The package a `use` here imports into — the walk's current package.
+    pub(super) fn import_package(&self) -> &str {
+        self.current_package.as_deref().unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE)
+    }
+
+    /// The import scope in force at `point` — the namespace lane's package,
+    /// as `FileAnalysis::import_scope_at` reads it. Asked by position, never
+    /// by the walk's `current_package`: a deferred or fold-phase read sees
+    /// whichever package the walk last left.
+    pub(super) fn import_scope_at(&self, point: Point) -> crate::model::file_analysis::ImportScope<'_> {
+        crate::model::file_analysis::ImportScope::in_package(
+            self.package_at_pos(point).unwrap_or(crate::model::conventions::PERL_ROOT_PACKAGE),
+        )
     }
 
     pub(super) fn add_ref(&mut self, kind: RefKind, span: Span, target_name: String, access: AccessKind) {
@@ -425,14 +420,14 @@ impl<'a> Builder<'a> {
     ///   1. Explicit qualifier (`Foo::bar()` → `Foo`).
     ///   2. Enclosing package that declares `sub <name>` locally (so
     ///      `package Foo { sub bar {} bar(); }` resolves to `Foo`).
-    ///   3. Most-recent import whose `imported_symbols` lists this
-    ///      name (`use Bler qw/hi/` → `Bler`). Later imports win —
-    ///      Perl's later `use` shadows earlier one.
+    ///   3. The latest `use` in the current package that names it
+    ///      (`use Bler qw/hi/` → `Bler`) — Perl's later `use` shadows
+    ///      an earlier one, and another package's `use` binds nothing here.
     ///
     /// Returns `None` when none of those pin a package. Downstream
     /// class/package-scoped queries treat `None` as no-match rather
     /// than falling back to name-only union.
-    pub(super) fn resolve_call_package(&self, call_name: &str) -> Option<String> {
+    pub(super) fn resolve_call_package(&self, call_name: &str, at: Point) -> Option<String> {
         // (1) Qualified: `Foo::bar` → `Foo`.
         if let (Some(pkg), _) = crate::model::file_analysis::split_qualified(call_name, &crate::model::conventions::PERL_SPELLINGS) {
             return Some(pkg.to_string());
@@ -447,22 +442,58 @@ impl<'a> Builder<'a> {
                 return Some(pkg.clone());
             }
         }
-        // (3) Imports — walk in reverse order so later `use` wins.
-        for imp in self.imports.iter().rev() {
-            if let Some(sym) = imp.imported_symbols.iter().find(|s| s.local_name == *call_name) {
-                // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
-                // LOCAL alias the module doesn't define under that name. The
-                // alias belongs to the CONSUMING package — keying its calls
-                // there keeps rename/references local (and off the exporter's
-                // unrelated symbols, e.g. a stray `Exp::rb`). goto-def still
-                // reaches `Exp::beta` via the import binding's remote name,
-                // which `resolve_imported_function` reads independently.
-                if sym.remote_name.is_some() {
-                    return self.current_package.clone();
-                }
-                return Some(imp.module_name.clone());
-            }
+        // (3) The package's imports — a later `use` wins.
+        let scope = self.import_scope_at(at);
+        let (imp, sym) = self.imports.binding(scope, call_name)?;
+        // A renaming import (`use Exp beta => { -as => 'rb' }`) binds a
+        // LOCAL alias the module doesn't define under that name. The
+        // alias belongs to the CONSUMING package — keying its calls
+        // there keeps rename/references local (and off the exporter's
+        // unrelated symbols, e.g. a stray `Exp::rb`). goto-def still
+        // reaches `Exp::beta` via the import binding's remote name,
+        // which `resolve_imported_function` reads independently.
+        if sym.remote_name.is_some() {
+            return Some(scope.package().to_string());
         }
-        None
+        Some(imp.module_name.clone())
+    }
+}
+
+/// `scope_at_point` for a run of points in document order — a tree
+/// survey's — as one pass over the scopes instead of a scan per point.
+pub(super) struct ScopeCursor<'s> {
+    order: Vec<&'s crate::model::file_analysis::Scope>,
+    next: usize,
+    open: Vec<&'s crate::model::file_analysis::Scope>,
+}
+
+impl<'s> ScopeCursor<'s> {
+    pub(super) fn new(scopes: &'s [crate::model::file_analysis::Scope]) -> Self {
+        let mut order: Vec<_> = scopes.iter().collect();
+        // An enclosing scope opens before what it holds; of two with one
+        // span the later-minted is innermost, as `scope_at_point` picks.
+        order.sort_by(|a, b| {
+            (a.span.start.row, a.span.start.column)
+                .cmp(&(b.span.start.row, b.span.start.column))
+                .then((b.span.end.row, b.span.end.column).cmp(&(a.span.end.row, a.span.end.column)))
+                .then(a.id.0.cmp(&b.id.0))
+        });
+        ScopeCursor { order, next: 0, open: Vec::new() }
+    }
+
+    /// The innermost scope holding `p`; `p` never moves backwards.
+    pub(super) fn at(&mut self, p: Point) -> ScopeId {
+        use crate::model::file_analysis::contains_point;
+        while let Some(s) = self.order.get(self.next).filter(|s| !point_lt(p, s.span.start)) {
+            while self.open.last().is_some_and(|o| !contains_point(&o.span, s.span.start)) {
+                self.open.pop();
+            }
+            self.open.push(s);
+            self.next += 1;
+        }
+        while self.open.last().is_some_and(|o| !contains_point(&o.span, p)) {
+            self.open.pop();
+        }
+        self.open.last().map_or(ScopeId(0), |s| s.id)
     }
 }

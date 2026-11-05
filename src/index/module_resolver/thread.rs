@@ -3,6 +3,7 @@
 //! (`acquire`), server and headless, for every served language.
 
 use super::*;
+use std::collections::HashSet;
 
 /// The ONE resolver loop, server and headless alike. Mode differences are
 /// explicit `server` gates inside this body — the per-name protocol
@@ -24,8 +25,8 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     // language persists its landings or lists its names yet.
     let db = if hub { hub_warmup(&core, server.as_ref(), ws_root.as_deref(), &search_roots) } else { None };
 
-    // Track which extract version each module was resolved at.
-    let mut seen: HashMap<String, i64> = HashMap::new();
+    // Each module resolves at most once per process.
+    let mut seen: HashSet<String> = HashSet::new();
 
     // Queue cpanfile dependencies (non-blocking — lets priority items go first).
     // Track total for progress reporting in the main loop. Server-only: a
@@ -144,13 +145,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
             if !is_re_resolve && matches!(core.cache.get(&module_name).as_deref(), Some(Some(_))) {
                 continue;
             }
-            // Allow re-resolution when extract version is outdated.
-            if let Some(&ver) = seen.get(&module_name) {
-                if ver >= module_cache::EXTRACT_VERSION {
-                    continue;
-                }
+            if !seen.insert(module_name.clone()) {
+                continue;
             }
-            seen.insert(module_name.clone(), module_cache::EXTRACT_VERSION);
 
             if is_re_resolve {
                 log::info!("Re-resolving stale module '{}'", module_name);
@@ -296,8 +293,8 @@ fn hub_warmup(
 }
 
 /// Queue `asks` that nothing answers yet and this map has not tried.
-fn ask_unresolved(core: &IndexCore, seen: &HashMap<String, i64>, mut asks: Vec<String>) {
-    asks.retain(|n| !core.cache.contains_key(n) && !seen.contains_key(n));
+fn ask_unresolved(core: &IndexCore, seen: &HashSet<String>, mut asks: Vec<String>) {
+    asks.retain(|n| !core.cache.contains_key(n) && !seen.contains(n));
     if !asks.is_empty() {
         core.queue.ask(asks);
     }

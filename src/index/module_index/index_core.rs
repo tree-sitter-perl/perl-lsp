@@ -283,6 +283,71 @@ impl IndexCore {
         self.shape_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Write the name-keyed winner slot. Every slot writer goes through
+    /// here or [`Self::clear_slot`]: a slot write moves `get_cached`
+    /// answers without a per-path generation mint, so the enrichment epoch
+    /// must move with it, and a writer that forgot left memos keyed on the
+    /// old answer (`layering_tests::name_slot_writes_move_the_epoch`). The
+    /// epoch moves AFTER the write, so a reader that saw the new epoch
+    /// cannot have read the old slot.
+    pub(crate) fn set_slot(&self, name: &str, value: Option<Arc<CachedModule>>) {
+        self.cache.insert(name.to_string(), value);
+        self.note_shape_change();
+    }
+
+    /// Empty the name-keyed slot ([`Self::set_slot`]'s removal half).
+    pub(crate) fn clear_slot(&self, name: &str) {
+        self.cache.remove(name);
+        self.note_shape_change();
+    }
+
+    /// Empty every slot that holds a miss, returning their names: a new
+    /// dependency map may answer what the old one could not.
+    pub(crate) fn clear_misses(&self) -> Vec<String> {
+        let mut missed = Vec::new();
+        self.cache.retain(|name, slot| {
+            if slot.is_some() {
+                return true;
+            }
+            missed.push(name.clone());
+            false
+        });
+        if !missed.is_empty() {
+            self.note_shape_change();
+        }
+        missed
+    }
+
+    /// Offer `cand` for `name`'s slot: it is written when the slot is empty
+    /// or holds `None`, or when `replaces(existing)` says it wins.
+    pub(crate) fn offer_slot(
+        &self,
+        name: &str,
+        cand: &Arc<CachedModule>,
+        replaces: impl FnOnce(&Arc<CachedModule>) -> bool,
+    ) {
+        use dashmap::mapref::entry::Entry;
+        let wrote = match self.cache.entry(name.to_string()) {
+            Entry::Vacant(v) => {
+                v.insert(Some(cand.clone()));
+                true
+            }
+            Entry::Occupied(mut o) => {
+                let replace = match o.get() {
+                    None => true,
+                    Some(existing) => replaces(existing),
+                };
+                if replace {
+                    o.insert(Some(cand.clone()));
+                }
+                replace
+            }
+        };
+        if wrote {
+            self.note_shape_change();
+        }
+    }
+
     pub(crate) fn insert_resolved(
         &self,
         module_name: &str,
@@ -342,7 +407,7 @@ impl IndexCore {
             && self.front_door_declares(module_name);
         let answered = matches!(self.cache.get(module_name).as_deref(), Some(Some(_)));
         if !shadowed && (claim || !answered) {
-            self.cache.insert(module_name.to_string(), primary);
+            self.set_slot(module_name, primary);
         }
         stored
     }
