@@ -1,7 +1,11 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassCall, ClassSpelling, InferredType, NameSpellings};
+use crate::model::file_analysis::{join_all, ClassCall, ClassSpelling, InferredType, LatticeRules, NameSpellings};
+
+/// PHP's subsumption rules: none. `bool` is not an `int`, so `bool|int`
+/// is a union a signature spells.
+const PHP_LATTICE: LatticeRules = LatticeRules::new(&[]);
 
 pub fn php_pack() -> LangPack {
     LangPack {
@@ -22,8 +26,7 @@ pub fn php_pack() -> LangPack {
         // A bare call names the function its namespace declares, else the
         // global one.
         functions: FunctionLookup::NamespaceThenGlobal,
-        // `bool` is not an `int`: `bool|int` is a union a signature spells.
-        lattice: crate::model::file_analysis::LatticeRules::new(&[]),
+        lattice: PHP_LATTICE,
         type_display: display_type,
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
@@ -59,21 +62,49 @@ fn display_type(tag: &str) -> Option<&'static str> {
     }
 }
 
-/// A single declared type as written (`int`, `?Foo`, `\App\User`): the
-/// document captures no union or intersection, and marks `self` and
-/// `static` `@type.enclosing`, so neither reaches here. A class spelling
-/// resolves through the use-map at its site.
+/// A declared type as written (`int`, `?Foo`, `\App\User`, `int|string`).
+/// A union is the join of its arms and `?T` is `T|null`; a spelling with
+/// an arm this can't read (an intersection, `array`) types nothing, rather
+/// than claiming the arms it can. A lone `self` or `static` is marked
+/// `@type.enclosing` and never reaches here; inside a union it is an arm
+/// this can't read. A class spelling resolves through the use-map at its
+/// site.
 fn declared_type(text: &str) -> Option<InferredType> {
-    let t = text.trim().trim_start_matches('?');
-    match t.to_ascii_lowercase().as_str() {
+    let t = text.trim();
+    let arms: Vec<&str> = match t.strip_prefix('?') {
+        Some(inner) => vec![inner.trim(), "null"],
+        None => t.split('|').map(str::trim).collect(),
+    };
+    if arms.len() > 1 {
+        let types = arms.into_iter().map(arm_type).collect::<Option<Vec<_>>>()?;
+        return join_all(&types, &PHP_LATTICE);
+    }
+    match arm_type(t)? {
+        // `null` is the null value's type: an arm of a union, no type alone.
+        InferredType::Undef => None,
+        one => Some(one),
+    }
+}
+
+/// One arm of a declared type.
+fn arm_type(arm: &str) -> Option<InferredType> {
+    match arm.to_ascii_lowercase().as_str() {
         "int" | "float" => Some(InferredType::Numeric),
         "string" => Some(InferredType::String),
         "bool" | "true" | "false" => Some(InferredType::Bool),
-        "array" | "iterable" | "callable" | "object" | "mixed" | "null" | "void" | "never" => None,
+        "null" => Some(InferredType::Undef),
+        // A callable's body is not in its type.
+        "callable" => Some(InferredType::CodeRef { return_edge: None }),
+        "array" | "iterable" | "object" | "mixed" | "void" | "never" | "self" | "static" => None,
         // TODO(parent-type): `parent` names the class's parent by where it
         // is written; it goes through `Lookup::Super` with every other
         // `parent` site (the `new` layer).
         "parent" => None,
-        _ => Some(InferredType::ClassName(t.to_string())),
+        // A class spelling is a name, possibly qualified; anything else
+        // (an intersection or DNF group) names no single class.
+        _ if !arm.is_empty() && arm.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\') => {
+            Some(InferredType::ClassName(arm.to_string()))
+        }
+        _ => None,
     }
 }
