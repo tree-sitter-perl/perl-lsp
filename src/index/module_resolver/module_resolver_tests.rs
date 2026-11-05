@@ -449,7 +449,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     // the app file resolves it to the lib copy — one relation, two
     // visibility rules, decided at CandidateSet construction so every
     // projection inherits it.
-    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
     // Fixed-width pid: the path is spelled into an analyzed source, and the
     // equivalence dump compares that source's spans across two test runs.
     let base = std::env::temp_dir().join(format!("perl-lsp-asker-{:010}", std::process::id()));
@@ -485,10 +485,8 @@ fn two_askers_with_different_use_lib_see_different_providers() {
         testlib.display()
     ));
 
-    let empty = Default::default();
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
-        let axis = VisibilityAxis::for_origin(fa, None, &idx, crate::model::file_analysis::PackVisibility::Host);
-        let scoped = ScopedLookup::new(&idx, &empty, None, axis);
+        let scoped = ScopedLookup::for_origin(&idx, fa, None, crate::model::file_analysis::PackVisibility::Host);
         scoped.get_cached("Twin").map(|c| c.path.to_path_buf())
     };
 
@@ -598,7 +596,7 @@ fn the_writer_drains_more_entries_than_the_queue_holds() {
     // No connection: the harness drains unregistered, which is enough to
     // prove the producer/consumer pairing. The committed lane is exercised by
     // the persist-lane tests in `pack_invalidator_tests`.
-    run_persist_writer(rx, None, "test", |_c, _b: &[usize]| {}, |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
+    run_persist_writer(rx, None, "test", |_c| (), |_c, (), _e: &usize| true, |_e| { c.fetch_add(1, O::SeqCst); }, |_e| {});
     producer.join().unwrap();
     assert_eq!(committed.load(O::SeqCst), 0, "no connection ⇒ drained unregistered");
 }
@@ -740,4 +738,53 @@ fn perls_map_is_inc_with_the_project_libs_first() {
     assert!(bare.roots().is_empty() && bare.inputs().is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose own blob fails to save inside a chunk that still commits
+/// must stay WHOLE: a copy stripped against a blob that is not on disk
+/// answers empty. Its chunk siblings landed and must strip. The failure is
+/// injected with a statement-scoped `RAISE(ABORT)` trigger, so the
+/// transaction commits with the siblings' rows.
+#[test]
+fn a_workspace_file_whose_save_failed_in_a_committed_chunk_stays_whole() {
+    let base = std::env::temp_dir().join(format!("ws-perfile-strip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (root, cache) = (base.join("root"), base.join("cache"));
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["Alpha", "Beta", "Gamma"] {
+        std::fs::write(
+            root.join(format!("{name}.pm")),
+            format!("package {name};\nsub run {{ my $self = shift; return {{ k => 1 }}; }}\n1;\n"),
+        )
+        .unwrap();
+    }
+    let failing = std::fs::canonicalize(root.join("Beta.pm")).unwrap();
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    crate::index::module_cache::with_test_cache_dir(&cache, std::time::Duration::from_secs(10), || {
+        {
+            let conn = crate::index::module_cache::open_cache_db(None, "perl").expect("test cache db");
+            let target = failing.to_string_lossy().replace('\'', "''");
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER kill_one BEFORE INSERT ON modules \
+                 WHEN NEW.path = '{target}' \
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+            ))
+            .unwrap();
+        }
+        index_workspace_with_index(&root, &idx, None, None);
+    });
+
+    let mut seen = 0;
+    idx.for_each_registered_file(&mut |cm| {
+        seen += 1;
+        let stripped = cm.analysis.symbols_are_evicted() || cm.analysis.bag_is_evicted();
+        if cm.path.as_path() == failing.as_path() {
+            assert!(!stripped, "{:?} was stripped though its blob never landed", cm.path);
+        } else {
+            assert!(stripped, "{:?} landed but was not stripped", cm.path);
+        }
+    });
+    assert_eq!(seen, 3, "every file must stay registered");
+    let _ = std::fs::remove_dir_all(&base);
 }

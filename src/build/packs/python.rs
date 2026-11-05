@@ -31,12 +31,14 @@ pub fn python_pack() -> LangPack {
             member_namespace: MemberNamespace::Shared,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
             class_call: ClassCall::Constructs,
-            construction: ConstructionKey::Class,
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },
+        functions: FunctionLookup::Global,
+        construction: ConstructionKey::Class,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
+        type_display: |_| None,
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: annotation_type,

@@ -42,7 +42,7 @@ fn data_printer_use_ddp_resolves_p_to_data_printer() {
             )),
         );
 
-    let resolved = resolve_imported_function(&analysis, "p", &module_index);
+    let resolved = resolve_imported_function(&analysis, "p", tree_sitter::Point::new(0, 0), &module_index);
     assert!(
         resolved.is_some(),
         "use DDP must alias to Data::Printer; resolve_imported_function for `p` returned None — \
@@ -52,7 +52,7 @@ fn data_printer_use_ddp_resolves_p_to_data_printer() {
             .iter()
             .map(|i| (
                 i.module_name.clone(),
-                i.imported_symbols
+                i.imported_symbols()
                     .iter()
                     .map(|s| s.local_name.clone())
                     .collect::<Vec<_>>(),
@@ -67,7 +67,7 @@ fn data_printer_use_ddp_resolves_p_to_data_printer() {
     assert_eq!(remote, "p", "local `p` maps to remote `p`");
 
     // np too — both DDP-installed names.
-    let np = resolve_imported_function(&analysis, "np", &module_index);
+    let np = resolve_imported_function(&analysis, "np", tree_sitter::Point::new(0, 0), &module_index);
     assert!(
         np.is_some(),
         "use DDP must also resolve `np` to Data::Printer"
@@ -91,7 +91,7 @@ fn data_printer_use_data_printer_resolves_p_to_data_printer() {
             )),
         );
 
-    let resolved = resolve_imported_function(&analysis, "p", &module_index);
+    let resolved = resolve_imported_function(&analysis, "p", tree_sitter::Point::new(0, 0), &module_index);
     assert!(
         resolved.is_some(),
         "use Data::Printer (no qw list) must still let resolve_imported_function find p"

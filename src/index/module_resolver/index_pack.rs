@@ -237,7 +237,7 @@ pub fn index_pack_language(
                         "workspace",
                         seeds,
                     ) {
-                        log::warn!("Failed to backfill derived rows for {:?}: {}", path, e);
+                        log::error!("Failed to backfill derived rows for {:?}: {}", path, e);
                     }
                 },
             );
@@ -301,36 +301,24 @@ pub fn index_pack_language(
                     fresh_rx,
                     writer_conn.as_ref(),
                     "pack persist writer",
-                    |conn, batch: &[FreshEntry]| {
-                        // Chunk-scoped: a concurrent different-generation
-                        // process may wipe/restamp the stubs table mid-run.
-                        let stubs_writable = module_cache::stub_version_current(conn);
-                        for e in batch {
-                            let path_str = e.path.to_string_lossy();
-                            module_cache::save_blob_to_db_stamped(
-                                conn,
-                                &path_str,
-                                &e.path,
-                                &e.arc.pack.include_closure,
-                                &e.blob,
-                                "workspace",
-                                e.stamp,
-                            );
-                            if let Err(err) = module_cache::shred_derived_rows(
-                                conn, &path_str, "workspace", &e.seeds,
-                            ) {
-                                log::warn!(
-                                    "Failed to shred derived rows for {:?}: {}",
-                                    e.path,
-                                    err
-                                );
-                            }
-                            if let Some(sb) = &e.stub_blob {
-                                if stubs_writable {
-                                    module_cache::save_stub(conn, &path_str, sb);
-                                }
-                            }
-                        }
+                    // Chunk-scoped: a concurrent different-generation
+                    // process may wipe/restamp the stubs table mid-run.
+                    module_cache::stub_version_current,
+                    |conn, &stubs_writable: &bool, e: &FreshEntry| {
+                        let path_str = e.path.to_string_lossy();
+                        module_cache::save_generation(
+                            conn,
+                            &module_cache::PersistedGeneration {
+                                module_name: &path_str,
+                                path: &e.path,
+                                include_closure: &e.arc.pack.include_closure,
+                                blob: &e.blob,
+                                seeds: &e.seeds,
+                                source: "workspace",
+                                stamp: e.stamp,
+                                stub: e.stub_blob.as_deref().filter(|_| stubs_writable),
+                            },
+                        )
                     },
                     |e: FreshEntry| {
                         // Stale-pin clear BEFORE the stripped copy is
@@ -388,9 +376,9 @@ pub fn index_pack_language(
                     // Encode the FULL analysis for the disk write, then strip
                     // the resident copy — one struct, no clone
                     // (`docs/adr/memory-slice-2-lru.md`). Strip only when the
-                    // bag/refs are recoverable: persisted and non-degraded
-                    // (`save_*` skip degraded rows, so their bag would be lost).
-                    let payload = if persist && !analysis.degraded {
+                    // bag/refs are recoverable, i.e. when there is an
+                    // encoding to persist (a degraded analysis has none).
+                    let payload = if persist {
                         module_cache::encode_analysis(&analysis).map(|blob| {
                             (blob, analysis.row_seeds())
                         })

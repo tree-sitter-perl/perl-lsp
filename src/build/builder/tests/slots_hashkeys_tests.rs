@@ -132,6 +132,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
     };
     let ctx = BagContext {
         scopes: &fa.scopes,
+        symbols: fa.symbols(),
         package_framework: &fa.packages,
         module_index: None,
         package_parents: &fa.packages,
@@ -554,7 +555,7 @@ my $open = { %$config, extra => 'x' };
 
     // Spread → open shape.
     let open = fa
-        .inferred_type_via_bag("$open", Point::new(4, 9))
+        .inferred_type_via_bag("$open", Point::new(5, 0))
         .expect("$open typed");
     assert!(
         matches!(open, InferredType::HashWithKeys { open: true, .. }),
@@ -881,7 +882,7 @@ my $id = $obj->{users}->[0]->{id};
         "heterogeneous tuple projects per index",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$s", Point::new(2, 8)),
+        fa.inferred_type_via_bag("$s", Point::new(3, 0)),
         Some(InferredType::String),
     );
     assert_eq!(
@@ -890,7 +891,7 @@ my $id = $obj->{users}->[0]->{id};
         "mixed drill end-to-end",
     );
     assert_eq!(
-        fa.inferred_type_via_bag("$id", Point::new(5, 30)),
+        fa.inferred_type_via_bag("$id", Point::new(6, 0)),
         Some(InferredType::Numeric),
     );
 }
@@ -911,7 +912,7 @@ my $mixed = [1, some_call()];
         None,
         "out-of-range projection stays honest",
     );
-    let m = fa.inferred_type_via_bag("$mixed", Point::new(2, 10));
+    let m = fa.inferred_type_via_bag("$mixed", Point::new(3, 0));
     assert_eq!(m, Some(InferredType::ArrayRef), "untypable element degrades whole literal");
 }
 
@@ -1000,7 +1001,7 @@ require v5.36;
         fa.imports.iter().filter(|i| i.module_name == "Some::Module").collect();
     assert_eq!(imp.len(), 1, "one Import row for the required module");
     assert!(imp[0].empty_import, "require binds nothing — the `use Foo ()` shape");
-    assert!(imp[0].imported_symbols.is_empty());
+    assert!(imp[0].imported_symbols().is_empty());
     assert!(
         !fa.refs().iter().any(|r| r.target_name.contains("5.010")
             || r.target_name.contains("v5.36")),
@@ -1288,7 +1289,7 @@ fn test_plugin_declared_framework_mode_maker_grants_has_semantics() {
         "plugin-declared maker must grant native `has` accessor synthesis",
     );
     assert!(
-        fa.framework_imports.contains("has") && fa.framework_imports.contains("with"),
+        fa.imports.keyword_names().contains("has") && fa.imports.keyword_names().contains("with"),
         "the maker's declared keyword surface lands in framework_imports",
     );
 }
@@ -1440,9 +1441,9 @@ sub b2 { my $q = { url => 1 }; print $q->{typo}; }
 }
 
 /// A qualified global and a special variable are variables too: their
-/// writes bind, so a reassignment opens their shape whatever package the
-/// use is written in (Foswiki's `local %Foswiki::cfg = (…)` then
-/// `%Foswiki::cfg = %$upper`).
+/// writes bind to one identity whatever package the use is written in
+/// (Foswiki's `local %Foswiki::cfg = (…)` then `%Foswiki::cfg = %$upper`).
+/// Being package variables, neither reports a missing key.
 #[test]
 fn qualified_and_special_globals_are_reassigned_by_binding() {
     let src = "\
@@ -1465,6 +1466,30 @@ sub q { my $q = { url => 1 }; print $q->{typo}; }
     let env = fa.symbols().iter().find(|s| s.name == "%ENV").expect("%ENV binds");
     assert_eq!(env.package.as_deref(), Some("main"), "a special variable lives in main");
     assert!(fa.document_symbols().iter().all(|o| o.name != "%cfg" && o.name != "%ENV" && o.children.iter().all(|c| c.name != "%cfg" && c.name != "%ENV")));
+}
+
+/// A package variable's shape is never the whole story: any file can write
+/// it. Webmin's bare `our %config;` is filled by `init_config` in another
+/// file, and `$Foswiki::cfg{X}` is written by `LocalSite.cfg`, so neither
+/// an `our`, an undeclared global nor a qualified spelling reports a key
+/// its literal lacks. A lexical still does.
+#[test]
+fn package_variables_have_no_closed_shape() {
+    let src = "\
+package Foswiki;
+our %cfg;
+our %init = ( A => 1 );
+my %lex = ( A => 1 );
+sub a { return $cfg{Unq} . $Foswiki::cfg{Qual} . $init{B} . $Foswiki::init{C} }
+sub b { %undeclared = ( A => 1 ); return $undeclared{B} }
+sub c { our $ref = { A => 1 }; return $ref->{B} }
+sub d { return $lex{typo} }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 7)], "only the lexical reports");
 }
 
 /// A write inside a nested block lands on the variable, wherever the block
@@ -1491,6 +1516,60 @@ sub s10 { my $d = {}; run(sub { $d->{Name} = 1; }); print $d->{Name}; }
     let typos: Vec<(String, u32)> =
         fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
     assert_eq!(typos, vec![("Name".to_string(), 8), ("typo".to_string(), 9)]);
+}
+
+/// A reference to one element escapes that place only: the slot exists
+/// (taking `\$h{k}` vivifies it) and its value is open, while every other
+/// key stays closed. `GetOptions('help' => \$opt{'help'})` then
+/// `$opt{'help'}` is clean, and a typo beside it still reports.
+#[test]
+fn an_element_reference_escapes_only_its_place() {
+    let src = "\
+package Foo;
+sub a { my %opt; GetOptions('help' => \\$opt{'help'}, 'cfg=s' => \\$opt{cfg}); return $opt{help} . $opt{cfg} . $opt{hlep} }
+sub b { my $o = {}; my $r = \\$o->{k}; return $o->{k}{deep} . $o->{typo} }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.closed_shape_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("hlep".to_string(), 1), ("typo".to_string(), 2)]);
+}
+
+/// An open shape may already hold a key it does not list, so a write below
+/// that key knows only its own path: what it vivifies is open too (Znuny's
+/// `$p->{Config}->{$n} = …` in a loop, then `$p->{Config}->{Scope} //= …`).
+/// Below a closed shape the key is new, and the vivified shape is closed.
+#[test]
+fn a_write_below_an_open_shapes_unlisted_key_vivifies_open() {
+    let src = "\
+package Foo;
+sub a { my $p = {}; for my $n (qw(A B)) { $p->{C}->{$n} = 1; } $p->{C}->{A} //= 1; print $p->{C}->{B}; }
+sub b { my $p = {}; $p->{C}->{A} = 1; print $p->{C}->{typo}; }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<(String, u32)> =
+        fa.projected_key_typos(None).into_iter().map(|t| (t.key, t.span.start.row as u32)).collect();
+    assert_eq!(typos, vec![("typo".to_string(), 2)]);
+}
+
+/// The fold runs until no witness changes, not until the bag's length
+/// stops: the call binding below is re-emitted at the same count when the
+/// producer's shape opens, and the `defined $q` narrowing, which ran
+/// earlier in that iteration, must see the open shape (openfoodfacts
+/// Packaging.pm's `shape`).
+#[test]
+fn the_fold_settles_on_content_not_on_bag_length() {
+    let src = "\
+package T;
+sub producer { my ($a, $b) = @_; my $r = {}; return undef if !$b; if ($a) { $r->{x} = 1; } return $r; }
+sub consumer { my ($p) = @_; my $q = producer($p, 1); if (defined $q) { if (not defined $q->{shape}) { $q->{shape} = 'u'; } } }
+1;
+";
+    let fa = build_fa(src);
+    let typos: Vec<String> = fa.closed_shape_key_typos(None).into_iter().map(|t| t.key).collect();
+    assert!(typos.is_empty(), "{:?}", typos);
 }
 
 /// A fallback floor written against a value nothing types says what kind

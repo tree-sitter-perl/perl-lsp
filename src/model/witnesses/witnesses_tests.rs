@@ -877,7 +877,7 @@ fn return_expr_operator_rowof_wraps_receiver() {
     let att = WitnessAttachment::Symbol(sym_id);
     let receiver = InferredType::Parametric(ParametricType::ResultSet {
         base: "DBIx::Class::ResultSet".into(),
-        row: "Schema::Result::Users".into(),
+        row: crate::model::file_analysis::RowSource::Class("Schema::Result::Users".into()),
     });
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,
@@ -935,11 +935,12 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
     let consumers: Vec<String> = Vec::new();
     let ctx = BagContext {
         scopes: &scopes,
+        symbols: &[],
         package_framework: &package_framework,
         module_index: None,
         package_parents: &package_parents,
         app_surface_consumers: &consumers,
-        lattice: &crate::model::conventions::PERL_LATTICE,
+        lattice: &crate::model::conventions::PERL_CONVENTIONS.lattice,
     };
 
     let reg = ReducerRegistry::with_defaults();
@@ -1426,7 +1427,7 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
     packages.entry("Child".into()).or_default().parents = vec!["S".into()];
     // The context's scope chain is what the callee's `Variable` edge walks.
     let scopes: Vec<Scope> = vec![
-        Scope { id: ScopeId(0), parent: None, kind: crate::model::file_analysis::ScopeKind::File, span: span(0, 0, 9, 0), package: None, owner: None, implicit_receiver: false, closed: false, captures: Vec::new(), direct: false, declaration_rules: Vec::new() },
+        Scope { id: ScopeId(0), parent: None, kind: crate::model::file_analysis::ScopeKind::File, span: span(0, 0, 9, 0), package: None, owner: None, implicit_receiver: false, closed: false, captures: Vec::new(), direct: false, hints: Vec::new() },
         Scope {
             id: ScopeId(1),
             parent: Some(ScopeId(0)),
@@ -1438,16 +1439,17 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
             closed: false,
             captures: Vec::new(),
             direct: false,
-            declaration_rules: Vec::new(),
+            hints: Vec::new(),
         },
     ];
     let ctx = BagContext {
         scopes: &scopes,
+        symbols: &[],
         package_framework: &packages,
         module_index: None,
         package_parents: &packages,
         app_surface_consumers: &[],
-        lattice: &crate::model::conventions::PERL_LATTICE,
+        lattice: &crate::model::conventions::PERL_CONVENTIONS.lattice,
     };
     let att = var("$out");
     let q = ReducerQuery {

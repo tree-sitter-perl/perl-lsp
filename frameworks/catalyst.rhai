@@ -62,6 +62,8 @@
 
 fn id() { "catalyst" }
 
+fn api() { 1 }
+
 fn triggers() {
     [
         // App classes: `use Catalyst` or `use Catalyst::Plugin::*`

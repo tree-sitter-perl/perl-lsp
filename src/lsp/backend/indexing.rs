@@ -123,7 +123,7 @@ impl Backend {
                         // its persisted generation was just invalidated, so
                         // the resident copy is the only source until the
                         // next bulk index re-persists.
-                        if let Ok(source) = std::fs::read_to_string(&path) {
+                        if let Ok(source) = crate::util::text::read_source(&path) {
                             let mut parser = crate::index::module_resolver::create_parser();
                             if let Some(tree) = parser.parse(&source, None) {
                                 let analysis = crate::build::builder::build(&tree, source.as_bytes());

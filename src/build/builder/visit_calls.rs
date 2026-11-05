@@ -9,8 +9,11 @@ impl<'a> Builder<'a> {
         // Skip if parent is a variable_declaration (handled by visit_variable_decl)
         if let Some(parent) = self.syntax.parent(node) {
             if parent.kind() == "variable_declaration" { return; }
-            // Skip if inside a signature param
-            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter") {
+            // A signature parameter's own variable is its declaration; its
+            // default is an ordinary read.
+            if matches!(parent.kind(), "mandatory_parameter" | "optional_parameter" | "slurpy_parameter")
+                && parent.child_by_field_name("default") != Some(node)
+            {
                 return;
             }
         }
@@ -337,7 +340,7 @@ impl<'a> Builder<'a> {
                     .strip_prefix('&')
                     .filter(|n| n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':'))
                     .unwrap_or(raw);
-                let resolved_package = self.resolve_call_package(name);
+                let resolved_package = self.resolve_call_package(name, node.start_position());
                 if let Some(pkg) = resolved_package.clone().or_else(|| self.current_package.clone()) {
                     self.plain_called_subs.insert((pkg, bare_name(name).to_string()));
                 }
@@ -394,7 +397,7 @@ impl<'a> Builder<'a> {
                 // on the package actually importing `option` (per the
                 // framework-mode manifest) so an unrelated `option(...)` sub
                 // elsewhere isn't read as an attribute declaration.
-                if name == "option" && self.package_imports_framework_keyword("option") {
+                if name == "option" && self.imports.keyword(self.import_scope_at(node.start_position()), "option") {
                     if let Some(mode) = self.current_package.as_ref()
                         .and_then(|pkg| self.framework_modes.get(pkg).copied())
                     {
@@ -415,7 +418,7 @@ impl<'a> Builder<'a> {
                 // role sugar actually being in scope (a plain class
                 // never imports `requires`) so a user-defined sub of
                 // the same name doesn't synthesize bogus methods.
-                if name == "requires" && self.framework_imports.contains("requires") {
+                if name == "requires" && self.imports.keyword(self.import_scope_at(node.start_position()), "requires") {
                     if let Some(pkg) = self.current_package.clone() {
                         if self.framework_modes.contains_key(&pkg) {
                             self.visit_requires_call(node, &pkg);
@@ -1051,20 +1054,6 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// True when the current package `use`d a module whose manifest-declared
-    /// keyword surface (`framework_mode_makers()`) includes `kw`. Per-package
-    /// — `framework_imports` is file-global, so it can't gate a keyword like
-    /// `option` that only some makers export.
-    pub(super) fn package_imports_framework_keyword(&self, kw: &str) -> bool {
-        let Some(pkg) = self.current_package.as_ref() else { return false };
-        let Some(uses) = self.package_uses.get(pkg) else { return false };
-        uses.iter().any(|m| {
-            self.framework_mode_modules
-                .get(m)
-                .is_some_and(|g| g.imports.iter().any(|k| k == kw))
-        })
-    }
-
     /// True if the current package `use`d an exporter whose vocabulary
     /// includes `export` / `exports` / `default_export` as declaration
     /// verbs — Exporter::Extensible or Exporter::Declare (incl. its
@@ -1271,7 +1260,7 @@ impl<'a> Builder<'a> {
             // query point outside the span.
             let last = *spans.last().expect("non-empty by construction");
             let zero = Span { start: last.end, end: last.end };
-            self.bag.push(Witness {
+            self.push_witness(Witness {
                 attachment: WitnessAttachment::Variable { name, scope },
                 source: WitnessSource::Builder("array_push".into()),
                 payload: WitnessPayload::InferredType(InferredType::Sequence(resolved)),
@@ -1312,6 +1301,10 @@ impl<'a> Builder<'a> {
     pub(super) fn synthesize_glob_assigned_sub(&mut self, glob_node: Node<'a>, assign_node: Node<'a>) {
         // Gate on RHS shape: only a sub-producing rvalue installs a callable.
         let Some(right) = assign_node.child_by_field_name("right") else { return };
+        if right.kind() == "glob" {
+            self.alias_glob(glob_node, right, assign_node);
+            return;
+        }
         if !self.glob_rhs_is_sub(right) {
             return;
         }
@@ -1351,6 +1344,73 @@ impl<'a> Builder<'a> {
                 Namespace::Language,
                 target_pkg,
             );
+        }
+    }
+
+    /// `*a = *Pkg::b` — the alias binds `a` to whatever `Pkg::b` is. An
+    /// imported `b` becomes an import row of the same binding in `a`'s
+    /// package, so the call resolves to the producer (IO::Socket::SSL's
+    /// `*weaken = *IO::Socket::SSL::weaken` lands on Scalar::Util). A `b`
+    /// the file declares as a sub mints a local sub, as `\&Pkg::b` does.
+    /// Anything else (a scalar or array glob, a name declared elsewhere)
+    /// binds nothing: a glob alias copies every slot, so its name alone
+    /// does not say it is callable.
+    fn alias_glob(&mut self, glob_node: Node<'a>, right: Node<'a>, assign_node: Node<'a>) {
+        let at = assign_node.start_position();
+        let spellings = &crate::model::conventions::PERL_SPELLINGS;
+        let sources = self.glob_install_names(right, assign_node);
+        let [source] = sources.as_slice() else { return };
+        let source = source.clone();
+        let (src_pkg, src_local) = match crate::model::file_analysis::split_qualified(&source, spellings) {
+            (Some(prefix), tail) if !prefix.is_empty() => (prefix.to_string(), tail.to_string()),
+            _ => (self.import_scope_at(at).package().to_string(), source.clone()),
+        };
+        let imported = self
+            .imports
+            .binding(ImportScope::in_package(&src_pkg).parsed_before(at), &src_local)
+            .map(|(imp, sym)| (imp.module_name.clone(), sym.remote().to_string()));
+        let declared = imported.is_none()
+            && self.symbols.iter().any(|s| {
+                s.kind == SymKind::Sub && s.name == src_local && s.package.as_deref() == Some(&*src_pkg)
+            });
+        if imported.is_none() && !declared {
+            return;
+        }
+        let def_span = node_to_span(assign_node);
+        for name in self.glob_install_names(glob_node, assign_node) {
+            let (dst_pkg, local) = match crate::model::file_analysis::split_qualified(&name, spellings) {
+                (Some(prefix), tail) if !prefix.is_empty() => (prefix.to_string(), tail.to_string()),
+                _ => (self.import_scope_at(at).package().to_string(), name.clone()),
+            };
+            if local.is_empty() {
+                continue;
+            }
+            match &imported {
+                Some((module, remote)) => self.imports.push(Import::new(
+                    module.clone(),
+                    vec![ImportedSymbol::renamed(local, remote.clone())],
+                    def_span,
+                    dst_pkg,
+                )),
+                None => {
+                    self.add_symbol_in_package(
+                        local,
+                        SymKind::Sub,
+                        def_span,
+                        node_to_span(glob_node),
+                        SymbolDetail::Sub {
+                            params: vec![],
+                            is_method: false,
+                            doc: None,
+                            opaque_return: false,
+                            is_constant: false,
+                            lexical: false,
+                        },
+                        Namespace::Language,
+                        Some(dst_pkg),
+                    );
+                }
+            }
         }
     }
 
@@ -1547,12 +1607,13 @@ impl<'a> Builder<'a> {
             Err(_) => return vec![],
         };
 
-        // Find position of last "::" in the raw content
-        let colons_pos = match content_text.rfind("::") {
+        // Find the last separator in the raw content.
+        let sep = crate::model::conventions::PERL_SEP;
+        let colons_pos = match content_text.rfind(sep) {
             Some(p) => p,
             None => return vec![],
         };
-        let after_colons = colons_pos + 2;
+        let after_colons = colons_pos + sep.len();
 
         // Check if there's a named child (scalar variable) that starts after the "::"
         let last_idx = match content.named_child_count().checked_sub(1) {

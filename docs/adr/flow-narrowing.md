@@ -33,11 +33,11 @@ witness, so the region is truncated at the first op that could disturb
 the subject. Both cutoffs are lookups in an index built once per file,
 never a search per fact — every use observes, so a per-fact scan is a
 scan per use (Znuny `PDF.t`: a whole-block CST scan per place use took
-one file's build to 100 s). A variable's cutoff is its first rebind
-(`RebindIndex`, from the FlowEdges, shared with the pack narrowing and the
-pack observations); a place's is its first disturbance
-(`PlaceDisturbanceIndex`, one pass over the file's trees, `s///e` code
-included). Conservative by construction — it under-narrows, never lies. The bias is
+one file's build to 100 s). A variable's cutoff is its first rebind, a
+write of its whole place in the same index (`rebind_index`, from the
+FlowEdges, shared with the pack narrowing and the pack observations); a
+place's is its first disturbance (`PlaceDisturbanceIndex`, one pass over the
+file's trees, `s///e` code included). Conservative by construction — it under-narrows, never lies. The bias is
 load-bearing for the diagnostics built on top: they miss some real bugs
 but never invent a false `Undef`/`Optional`.
 
@@ -161,27 +161,109 @@ plugin's parameter assertion is minted at the sub's start, ahead of the
 every binding witness sits at or after its binding site, declarations can
 mark too and the rule needs no syntax at all.
 
-## Subjects: variables and places, one keying
+## Subjects: variables and places
 
-A guard subject is a variable (`$x`) or a **place** — a chain of stable
-hash/array projections (`cst::canonical_place_path`). A projection is
-stable when its subscript pins one slot: a constant key/index (`{a}`,
-`[0]`) or a plain scalar (`{$k}`, `[$i]`), off a scalar root
-(`$self->{a}{b}`, arrow form) or the named container itself
-(`$h{a}`/`$h[0]`, direct form, root `%h`/`@h`). Both subject kinds are
-keyed by the subject's **source spelling** on the same `Variable`
-attachment, so the reducer, scope-walk, and narrow-filter are untouched —
-a place witness is just a span-scoped slot witness. The place-vs-variable
-distinction lives in exactly two spots: the truncation rule and the one
-`method_call_invocant_classes` query seam (which fires for any invocant
-carrying a subscript — `->` / `{` / `[`). Truncation generalizes to
-multi-hop as "an opaque use of any **proper prefix** of the place (root,
-intermediate element, or — for a dynamic-key place — a key scalar)
-disturbs it, unless that prefix is the base of a longer access (a read)."
+A guard subject is a variable (`$x`) or a **place**: a part of a
+variable's value, named by what its root binds and the steps from it
+(`model/file_analysis/place.rs`, cfg-tier §3.3). `cst::read_place` reads
+the steps off the spelling — `Deref`, `Hash(slots)`, `Array(slots)` — and
+the builder binds the root and every key variable where they are written
+(`binding_key_here`), so the spelling never keys a fact:
+
+- `$self->{a}{b}`, `$self->{a}->{b}`, `$$self{a}{b}` and `${$self}{a}{b}`
+  are one place; `{'a'}`, `{"a"}` and `{a}` are one key.
+- `our %h; $h{a}` in package `P` and `$P::h{a}` are one place; an inner
+  `my $self` is another place from the outer one.
+- A subject's every subscript names its slot: a constant, or a plain
+  scalar (`{$k}`). A computed subscript is no subject, and as a
+  disturbance it reaches every slot.
+
+Place facts attach to `WitnessAttachment::Place`, temporal like
+`Variable` but with no scope walk: the place is its own identity, and
+the region decides where a fact holds. A member access carries its
+receiver's place on its invocant (`Invocant::Place`), and a deref with no
+ref of its own carries it on its `ArrowDerefSite`, so the receiver query
+and the deref diagnostics read it without re-reading the spelling. Plain
+variables are `Variable { name, scope }` keyed to their binding (below).
+
+A pack builds the same places from its captures at skeleton assembly
+(`query_extract/places.rs`): a member read whose receivers lead down to a
+resolved variable read is that variable's declaration plus a `Member` step
+per read. A guard whose subject is a member read (`isinstance(self.x, T)`,
+`dynamic_cast<D*>(o.b)`) narrows that place, cut by the same index: a
+member write is a write of its place, and a variable or member read that no
+further member read reads through is an opaque use. A bare member name in
+a member function is rooted at the body's elided receiver
+(`Binding::Receiver`), and so is a spelled receiver (`@receiver`, C++'s
+`this`) in that body, so `this->x` and a bare `x` are one place. A guard
+on a bare name records both a variable and a place narrowing; assembly
+keeps the place only when the name roots at the receiver. A receiver carries its place (`Invocant::Place`) only
+where a narrowing gives that place a value; elsewhere the place would
+answer nothing, so the ref keeps its plain receiver.
+
+Truncation is `Place::disturbed_by`: a **write** disturbs the place and
+everything under it — the place itself, a proper prefix, or an
+overlapping slice (a slice may write every slot it names, so it is a
+write wherever it appears; `delete`, `undef` and `local` on a slot are
+writes too, since each leaves it without the guarded value); an **opaque use** (a call, an argument, a
+whole-container op) disturbs only what lies strictly under it, so a
+method call on the slot's value leaves the slot narrowed. A read that
+steps further in is not an access. Two steps overlap when they can reach
+one slot: distinct constants never do, a key variable may hold anything.
+Rebinding a key variable moves the place, so its narrowing ends there
+(at a rebind of the key variable's binding).
 
 Accessor places (`$self->name`) are out: an accessor isn't a stable slot
 (it can return a different object per call, with side effects), so
 soundness needs a stricter no-call-between-guard-and-use model.
+
+## Variables are bindings
+
+Every fact about a variable attaches to the place its name binds to where
+the fact is made, `Place{root, []}`: a lexical is its declaration
+(`Binding::Lexical`), a package variable its package and name
+(`Binding::Package`), and `@_` the arguments of the callable it is read in
+(`Binding::Arguments`), never a symbol, since `@_` cannot be declared. A
+token that declares two symbols in one scope (python's class-body binding,
+`Symbol::declared_with`) binds one value. The builder binds the walk's
+facts once the walk is done, since a fact can precede the declaration it is
+about (`bind_walk_witnesses`), and every later push as it goes
+(`Builder::push_witness`); a pack binds the assembled analysis once, before
+the seal (`FileAnalysis::bind_variable_witnesses`); enrichment binds its own
+pushes. One rule serves all three (`bind_variable_witness`), over the two
+binders `Builder::binding_of` and `FileAnalysis::variable_binding_of`.
+
+A read is then name resolution, never a merge: the reader binds the name
+where it reads it and queries that one place. A shadowing declaration is its
+own binding, so an inner `my $x` never sees the outer one's facts, and a
+redeclaration in the same scope is a fresh binding too: a read after it sees
+only the new variable's value. On the assembled analysis, a fact made in the
+scope declaring the name belongs to that declaration wherever it sits in the
+scope (a member's declared type spans its class). An edge that reaches a
+variable from a read takes the read's point; one with no read position (a
+member's declared type) asks at the end of the scope the binding lives in.
+
+A rebind cuts a fact about the variable it binds, not every variable of the
+name: each FlowEdge target is a write of the whole variable in the place
+disturbance index (`rebind_index`), so a write to a shadowing `$x` leaves
+the outer `$x`'s narrowing standing. A pack's variable regions are cut
+the same way once its analysis is assembled and bound
+(`FileAnalysis::bind_variable_regions`), since the extractor has no
+bindings to key them by.
+
+**A fact made in a nested block is a region.** It holds from where it is made
+to the end of the block it was made in, so the else arm never sees the then
+arm's write, and past the `if` the write is gone. What the variable holds
+after the `if` is the join of "the write ran" and "it did not": a write in a
+nested block also mints a reset marker on each enclosing level, at the end
+of the statement holding that level, up to the binding. With no join of
+values, that marker reads `Unknown` after a write that may have run, the
+same answer the flat walk gave. A join that keeps the value both arms agree
+on is `JoinFold`'s job (`docs/prompt-cfg-tier.md`).
+
+A key write (`$h->{k} = …`) in a nested block extends the shape on the
+binding with no end: it opens the shape instead (`mutation_extension`), which
+already says the write may not have run.
 
 ## Polarity and the negative lattice
 

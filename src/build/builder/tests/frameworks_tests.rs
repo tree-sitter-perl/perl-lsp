@@ -510,6 +510,33 @@ sub attr {
     );
 }
 
+/// A bare `@_` guard is an arity test too: `if (@_)` and `unless !@_` fire
+/// at arity ≥ 1, so a combined accessor's fluent `return $self` answers
+/// only the setter call and the getter arity stays honestly empty (Znuny's
+/// SOAP::Transport::HTTP::Client `http_request` typed its getter as the
+/// client class at every arity).
+#[test]
+fn test_bare_args_guard_splits_a_combined_accessor() {
+    let fa = build_fa(
+        "
+package My::C;
+sub if_arm { my $self = shift; if (@_) { $self->{a} = shift; return $self } return $self->{a} }
+sub unless_not { my $self = shift; unless (!@_) { $self->{a} = shift; return $self } return $self->{a} }
+sub postfix { my $self = shift; return $self if @_; return $self->{a} }
+sub unless_two { my $self = shift; unless (@_ > 0) { return $self->{a} } $self->{a} = shift; return $self }
+",
+    );
+    let class = Some(InferredType::ClassName("My::C".into()));
+    // `unless (@_ > 0) { … }` is the getter at arity 0: the block's own
+    // keyword decides, as the postfix form's does.
+    assert_ne!(fa.sub_return_type_at_arity("unless_two", Some(0)), class);
+    assert_eq!(fa.sub_return_type_at_arity("unless_two", Some(1)), class);
+    for sub in ["if_arm", "unless_not", "postfix"] {
+        assert_ne!(fa.sub_return_type_at_arity(sub, Some(0)), class, "{sub}: the getter is not the class");
+        assert_eq!(fa.sub_return_type_at_arity(sub, Some(1)), class, "{sub}: the setter is fluent");
+    }
+}
+
 /// H7-12 companion: an arity-discriminated sub whose branches all AGREE on
 /// the return type (Path::Tiny::path — every branch yields the invocant
 /// class) must still answer a NO-HINT query with the agreed type. The
@@ -1347,7 +1374,7 @@ use Importer 'Some::Module' => qw/foo bar/;
         .find(|i| i.module_name == "Some::Module")
         .expect("Import re-targeted to Some::Module");
     let names: Vec<&str> = imp
-        .imported_symbols
+        .imported_symbols()
         .iter()
         .map(|s| s.local_name.as_str())
         .collect();

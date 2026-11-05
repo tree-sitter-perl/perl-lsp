@@ -137,7 +137,7 @@ fn parse_one_provider(
         return None;
     }
     let bytes = metadata.len();
-    let source = std::fs::read_to_string(&path).ok()?;
+    let source = crate::util::text::read_source(&path).ok()?;
 
     let timing = crate::util::timings::is_enabled();
     let t_parse = if timing { Some(std::time::Instant::now()) } else { None };
@@ -200,9 +200,7 @@ fn scan_dir_recursive(base: &std::path::Path, dir: &std::path::Path, available: 
             scan_dir_recursive(base, &path, available, depth + 1);
         } else if path.extension().map(|e| e == "pm").unwrap_or(false) {
             if let Ok(rel) = path.strip_prefix(base) {
-                let module_name = rel.to_string_lossy()
-                    .trim_end_matches(".pm")
-                    .replace(std::path::MAIN_SEPARATOR, "::");
+                let module_name = crate::model::conventions::perl_module_from_rel_path(rel);
                 // Roots are walked in @INC order, so the FIRST one to claim a
                 // name is the one `require` would load. Overwriting here made
                 // the availability map name the LAST root — disagreeing with

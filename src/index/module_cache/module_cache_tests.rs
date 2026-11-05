@@ -1144,9 +1144,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     let specs: Vec<(String, String)> = Vec::new();
     let surface = crate::model::surface::Surface::project(&whole);
     let mut skeleton = whole;
-    skeleton.evict_witness_bag();
-    skeleton.evict_refs();
-    skeleton.evict_symbols();
+    skeleton.evict_to(crate::model::file_analysis::Residency::Skeleton);
 
     let blob = encode_stub(&feed, &specs, &surface, &skeleton).expect("encodes");
     let stub = decode_stub(&blob).expect("decodes");
@@ -1253,7 +1251,20 @@ fn refresh_deps_stamp_revalidates_consumer_rows() {
     let blob = encode_analysis(&fa).unwrap();
     let consumer_str = consumer.to_string_lossy().into_owned();
     let stamp = file_stamp(&consumer).unwrap_or((0, 0));
-    save_blob_to_db_stamped(&conn, &consumer_str, &consumer, &fa.pack.include_closure, &blob, "workspace", stamp);
+    let seeds = fa.row_seeds();
+    assert!(save_generation(
+        &conn,
+        &PersistedGeneration {
+            module_name: &consumer_str,
+            path: &consumer,
+            include_closure: &fa.pack.include_closure,
+            blob: &blob,
+            seeds: &seeds,
+            source: "workspace",
+            stamp,
+            stub: None,
+        },
+    ));
     let stored: i64 = conn
         .query_row("SELECT deps_stamp FROM modules WHERE path=?1", params![consumer_str], |r| r.get(0))
         .unwrap();
@@ -1842,7 +1853,7 @@ fn pre_split_rows_are_filtered_not_guessed() {
         "INSERT OR REPLACE INTO modules
            (module_name, path, mtime_secs, file_size, source, analysis, bag, extract_version, deps_stamp)
          VALUES (?1, ?1, 0, 0, 'workspace', ?2, NULL, ?3, 0)",
-        params![pm_str, whole_blob, EXTRACT_VERSION - 1],
+        params![pm_str, whole_blob, EXTRACT_VERSION.wrapping_sub(1)],
     )
     .unwrap();
 
@@ -2282,7 +2293,7 @@ fn the_persisted_surface_is_the_cold_projection() {
 
     // And it is NOT what a warm reader would have produced on its own.
     let mut stripped = (*cached.analysis).clone();
-    stripped.evict_witness_bag();
+    stripped.evict_to(crate::model::file_analysis::Residency::RowsOnly);
     assert_ne!(
         crate::model::surface::surface_fingerprint(&crate::model::surface::Surface::project(
             &stripped
@@ -2483,4 +2494,192 @@ fn held_names_are_candidates_of_their_own() {
     shred_rows(&conn, "/ws/Held.pm", "workspace", &[], &[]).unwrap();
     assert!(ref_candidate_files(&conn, &["accessor".to_string()]).is_empty());
     assert_eq!(sym_name_row_exists(&conn, "/ws/Held.pm", &names, "accessor"), Some(false));
+}
+
+/// A fresh, unique cache dir for one open-path test round.
+fn fresh_cache_dir(tag: &str) -> PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("perl_lsp_{tag}_{}_{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// Two writers (the resolver thread and the workspace indexer) open the same
+/// fresh DB at once. Both must end on ONE working file: if either opener's
+/// init failed and recreated the file, the other is left writing into an
+/// unlinked inode and the run persists nothing, silently.
+#[test]
+fn concurrent_openers_on_a_fresh_db_share_one_schema() {
+    for round in 0..32 {
+        let dir = fresh_cache_dir("open_race");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let openers: Vec<_> = (0..2)
+            .map(|_| {
+                let (dir, barrier) = (dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    open_cache_db_at(&dir, "perl", WRITER_BUSY_TIMEOUT)
+                })
+            })
+            .collect();
+        let conns: Vec<Connection> = openers
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap_or_else(|| panic!("round {round}: an opener got no connection")))
+            .collect();
+
+        // Each writer's rows must be visible to the other and to a fresh
+        // open of the path — the proof neither is on a deleted file.
+        for (i, c) in conns.iter().enumerate() {
+            shred_rows(c, &format!("/ws/W{i}.pm"), "workspace", &[], &[])
+                .unwrap_or_else(|e| panic!("round {round}: writer {i} cannot shred: {e}"));
+        }
+        let fresh = Connection::open(db_path_for(&dir, "perl")).unwrap();
+        for c in conns.iter().chain(std::iter::once(&fresh)) {
+            for i in 0..2 {
+                assert!(
+                    has_ref_rows(c, &format!("/ws/W{i}.pm")),
+                    "round {round}: writer {i}'s rows are not in the shared file"
+                );
+            }
+        }
+        drop(conns);
+        drop(fresh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Real corruption still recreates: a file of garbage bytes is not a
+/// database, and the open replaces it with a working one. Several openers
+/// race on it, and all must end on the SAME new file: none may delete the
+/// file another just created, and none may be mid-open while the old file
+/// and its `-wal`/`-shm` are unlinked.
+#[test]
+fn a_corrupt_cache_file_is_recreated() {
+    const OPENERS: usize = 4;
+    for round in 0..16 {
+        let dir = fresh_cache_dir("open_corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = db_path_for(&dir, "perl");
+        std::fs::write(&db, vec![0xA5u8; 8192]).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(OPENERS));
+        let openers: Vec<_> = (0..OPENERS)
+            .map(|_| {
+                let (dir, barrier) = (dir.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    open_cache_db_at(&dir, "perl", WRITER_BUSY_TIMEOUT)
+                })
+            })
+            .collect();
+        let conns: Vec<Connection> = openers
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap_or_else(|| panic!("round {round}: corrupt file was not recreated")))
+            .collect();
+        for (i, c) in conns.iter().enumerate() {
+            shred_rows(c, &format!("/ws/W{i}.pm"), "workspace", &[], &[]).unwrap();
+        }
+        let fresh = Connection::open(&db).unwrap();
+        for i in 0..OPENERS {
+            assert!(has_ref_rows(&fresh, &format!("/ws/W{i}.pm")), "round {round}: writer {i} is on a deleted file");
+        }
+        let header = std::fs::read(&db).unwrap();
+        assert!(header.starts_with(b"SQLite format 3\0"), "the garbage file was not replaced");
+        drop((conns, fresh));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A DB whose derived tables carry an older row format is upgraded in place
+/// by the row-version gate. The open must not fail on the old shape, and
+/// must never recreate the file over it: the blob rows survive.
+#[test]
+fn an_old_row_format_upgrades_without_recreating_the_file() {
+    let dir = fresh_cache_dir("open_old_rows");
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = db_path_for(&dir, "perl");
+    {
+        let c = Connection::open(&db).unwrap();
+        init_schema(&c).unwrap();
+        save_to_db(&c, "Keep::Me", &None, NAME_KEYED_SOURCE);
+        // An older `syms`: no `key_id`/`flags`, so none of today's indexes.
+        c.execute_batch(
+            "DROP TABLE syms;
+             CREATE TABLE syms (file_id INTEGER NOT NULL, name_id INTEGER NOT NULL);
+             UPDATE meta SET value = '1' WHERE key = 'ref_rows_version';",
+        )
+        .unwrap();
+    }
+
+    let conn = open_cache_db_at(&dir, "perl", WRITER_BUSY_TIMEOUT).expect("an old row format must open");
+    let kept: i64 = conn
+        .query_row("SELECT COUNT(*) FROM modules WHERE module_name = 'Keep::Me'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 1, "the open recreated the file and dropped the blob rows");
+    shred_rows(&conn, "/ws/Upgraded.pm", "workspace", &[], &[]).unwrap();
+    assert!(has_ref_rows(&conn, "/ws/Upgraded.pm"));
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A COMMIT that fails must not leave its transaction open: the gates run on
+/// the connection that later persists, and an open transaction there holds
+/// the write lock and fails every later BEGIN. A deferred foreign key is the
+/// one way to make COMMIT itself fail.
+#[test]
+fn a_failed_commit_leaves_no_transaction_open() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON;
+         CREATE TABLE parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE child (pid INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);",
+    )
+    .unwrap();
+    let r = in_immediate_txn(&conn, || conn.execute("INSERT INTO child VALUES (7)", []).map(|_| ()));
+    assert!(r.is_err(), "the dangling key must fail the commit");
+    assert!(conn.is_autocommit(), "the failed commit left its transaction open");
+    in_immediate_txn(&conn, || Ok(())).expect("the next gate opens cleanly");
+}
+
+/// A file whose rows fail partway, inside a chunk that still commits, keeps
+/// its PREVIOUS generation whole: old blob, old rows. Without the savepoint
+/// the chunk committed the new blob and the `files` marker over a partial
+/// row set, and the next warm trusted the marker.
+#[test]
+fn a_half_saved_generation_leaves_the_previous_one_intact() {
+    let conn = test_db();
+    let pm = std::env::temp_dir().join(format!("half_saved_{}.pm", std::process::id()));
+    let path_str = pm.to_string_lossy().into_owned();
+    let save = |src: &str| {
+        std::fs::write(&pm, src).unwrap();
+        let cached = parse_source_to_cached(src, &pm);
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let landed = save_to_db(&conn, &path_str, &Some(cached), "workspace");
+        conn.execute_batch("COMMIT").unwrap();
+        landed
+    };
+    let blob = || -> Vec<u8> {
+        conn.query_row("SELECT analysis FROM modules WHERE path=?1", params![path_str], |r| r.get(0))
+            .unwrap()
+    };
+
+    assert!(save("package Half;\nsub alpha { 1 }\nalpha();\n1;\n"));
+    let before = blob();
+    assert_eq!(ref_candidate_files(&conn, &["alpha".to_string()]), vec![path_str.clone()]);
+
+    conn.execute_batch(
+        "CREATE TRIGGER kill_refs BEFORE INSERT ON refs BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    assert!(!save("package Half;\nsub beta { 1 }\nbeta();\n1;\n"), "the failed rows must fail the save");
+
+    assert_eq!(blob(), before, "the new blob landed beside rows that did not");
+    assert_eq!(
+        ref_candidate_files(&conn, &["alpha".to_string()]),
+        vec![path_str.clone()],
+        "the previous generation's rows must survive"
+    );
+    assert!(ref_candidate_files(&conn, &["beta".to_string()]).is_empty());
+    let _ = std::fs::remove_file(&pm);
 }

@@ -17,6 +17,18 @@ use crate::model::file_analysis::{
 };
 
 pub mod rhai_host;
+#[cfg(test)]
+mod api_surface_tests;
+
+/// The plugin API this host speaks. A plugin declares the version it was
+/// written for with `fn api()`; a plugin declaring another version is
+/// refused at load (`PluginRegistry::refused`), and one declaring none is
+/// read as version 1. Bump it with any change to what a plugin sees or
+/// returns that would make an old plugin quietly wrong;
+/// `plugin_api_surface_tests` fails on every such change until the
+/// snapshot is updated alongside the decision. See
+/// `docs/PLUGIN_AUTHORING.md` § API versions.
+pub const PLUGIN_API: i64 = 1;
 
 /// Process-wide plugin registry, built with the bundled Rhai plugins plus
 /// anything in `plugin_search_dirs()` (`$PERL_LSP_PLUGIN_DIR` and the
@@ -44,8 +56,12 @@ fn build_default_registry() -> PluginRegistry {
             reg.register(p);
         }
         for dir in rhai_host::plugin_search_dirs() {
-            for p in rhai_host::load_plugin_dir(&dir, engine.clone()) {
+            let (loaded, refused) = rhai_host::load_plugin_dir(&dir, engine.clone());
+            for p in loaded {
                 reg.register(p);
+            }
+            for why in refused {
+                reg.refuse(why);
             }
         }
     });
@@ -648,6 +664,12 @@ pub enum EmitAction {
     /// `no strict 'vars'`, and the modules that turn strict on for their
     /// importer (`frameworks/strict.rhai`).
     RequireDeclaration { required: bool, span: Span },
+
+    /// From the end of `span` to the end of its enclosing scope, the
+    /// lexical pragma bit `hint` is on (or off): `no autovivification`'s
+    /// categories (`frameworks/autovivification.rhai`). `RequireDeclaration`
+    /// is the same switch for `strict 'vars'`.
+    Hint { hint: crate::model::file_analysis::LexicalHint, on: bool, span: Span },
 
     /// Declare a type for a variable inside a scope. Plugins use this
     /// when they know a framework-provided variable's type that the
@@ -1532,11 +1554,15 @@ pub struct PluginRegistry {
     /// per-spec traversal is an always-correct fallback (and proven
     /// equivalent), "not compiled yet" is simply another reason to take it.
     combined_walk: std::sync::Arc<
-        std::sync::OnceLock<Option<(&'static tree_sitter::Query, Vec<usize>)>>,
+        std::sync::OnceLock<Option<crate::build::builder::pattern_dispatch::CombinedParts>>,
     >,
     /// Whether the background compile has been kicked off. Separate from the
     /// `OnceLock` because the lock is only *set* when the compile finishes.
     combined_walk_started: std::sync::atomic::AtomicBool,
+    /// Plugins found on disk that did not load, one line each (path and
+    /// reason). Kept with the registry so the server can show them: a
+    /// refused plugin otherwise only reaches the log.
+    refused: Vec<String>,
 }
 
 impl std::fmt::Debug for PluginRegistry {
@@ -1569,6 +1595,17 @@ impl PluginRegistry {
         Self::default()
     }
 
+    /// Record a plugin that failed to load (compile error, bad manifest,
+    /// API version mismatch).
+    pub fn refuse(&mut self, why: String) {
+        self.refused.push(why);
+    }
+
+    /// The plugins that failed to load, in load order.
+    pub fn refused(&self) -> &[String] {
+        &self.refused
+    }
+
     pub fn register(&mut self, plugin: Box<dyn FrameworkPlugin>) {
         self.plugins.push(plugin);
     }
@@ -1594,11 +1631,11 @@ impl PluginRegistry {
     /// registry; the builder side closes over owned spec sources.
     pub(crate) fn combined_walk(
         &self,
-        derive: impl FnOnce() -> Option<(&'static tree_sitter::Query, Vec<usize>)> + Send + 'static,
-    ) -> Option<(&'static tree_sitter::Query, &[usize])> {
+        derive: impl FnOnce() -> Option<crate::build::builder::pattern_dispatch::CombinedParts> + Send + 'static,
+    ) -> Option<&crate::build::builder::pattern_dispatch::CombinedParts> {
         use std::sync::atomic::Ordering;
         if let Some(v) = self.combined_walk.get() {
-            return v.as_ref().map(|(q, s)| (*q, s.as_slice()));
+            return v.as_ref();
         }
         if combined_walk_is_synchronous() {
             // `get_or_init`, not `set`: under Rayon several threads arrive
@@ -1608,8 +1645,7 @@ impl PluginRegistry {
             return self
                 .combined_walk
                 .get_or_init(derive)
-                .as_ref()
-                .map(|(q, s)| (*q, s.as_slice()));
+                .as_ref();
         }
         if !self.combined_walk_started.swap(true, Ordering::Relaxed) {
             let slot = std::sync::Arc::clone(&self.combined_walk);

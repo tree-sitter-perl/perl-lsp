@@ -21,19 +21,15 @@ impl FileAnalysis {
         }
     }
 
-    /// Whether every variable must be declared at `at` in `scope`: the
-    /// latest switch on the scope chain, innermost first. Off by default —
-    /// Perl without `strict` creates globals on first mention.
+    /// Whether `hint` is on at `at` in `scope`.
+    pub fn hint_at(&self, scope: ScopeId, at: Point, hint: LexicalHint) -> bool {
+        hint_in(&self.scopes, scope, at, hint)
+    }
+
+    /// Whether every variable must be declared at `at` in `scope` — Perl
+    /// without `strict` creates globals on first mention.
     pub fn declaration_required_at(&self, scope: ScopeId, at: Point) -> bool {
-        let mut current = Some(scope);
-        while let Some(id) = current {
-            let s = self.scope(id);
-            if let Some(rule) = s.declaration_rules.iter().rev().find(|r| r.at <= at) {
-                return rule.required;
-            }
-            current = s.parent;
-        }
-        false
+        self.hint_at(scope, at, LexicalHint::RequireDeclaration)
     }
 
     /// Every use of a variable no declaration reaches that `use strict
@@ -131,13 +127,15 @@ impl FileAnalysis {
         self.resolve_variable(name, point).map(|s| s.deref_stack.as_slice())
     }
 
-    /// Each READ of a variable that occurs after a `std::move` of it and
-    /// before it is reassigned — a use-after-move bug. The moved-from region
-    /// runs from the move call to the earliest FlowEdge rebinding the var (the
-    /// SAME edge-driven cutoff narrowing uses, `RebindIndex`), or the
-    /// enclosing scope's end. Reads are matched on name + access AND filtered
-    /// to the move's scope subtree, so a same-named var in another function
-    /// never false-flags. Returns (var name, read span).
+    /// Each READ of a moved place (`x`, `other.msg`) after its `std::move`
+    /// and before it is given a value again — a use-after-move bug. The
+    /// moved-from region runs from the move call to the earliest FlowEdge
+    /// rebinding the root (the SAME edge-driven cutoff narrowing uses,
+    /// `rebind_index`) or write of the moved part, or the enclosing scope's
+    /// end. The reads are the move's own (`MoveSite::reads`): keyed by the
+    /// root's declaration, so a same-named var elsewhere never matches, and
+    /// by path, so a sibling member of a moved member is no read of it.
+    /// Returns (moved subject as written, read span).
     ///
     /// The check is deliberately the DECIDABLE subset: it flags only a
     /// straight-line moved-then-used LOCAL. Three conservative gates keep it
@@ -156,15 +154,19 @@ impl FileAnalysis {
     ///    subobject-move idiom, not flagged.
     /// What stays out: any use that needs true path-sensitivity (a use in a
     /// different branch arm, a loop-carried move, a reset via a by-mutable-ref
-    /// call), and non-local / subobject moves.
+    /// call), and moves of a parameter or of a part of one.
     pub fn use_after_move_reads(&self) -> Vec<(String, Span)> {
         let key = |p: &Point| (p.row, p.column);
         let contains = |outer: &Span, inner: &Span| {
             key(&outer.start) <= key(&inner.start) && key(&inner.end) <= key(&outer.end)
         };
         let mut out = Vec::new();
-        let rebinds = RebindIndex::new(&self.flow_edges);
-        for (name, move_span, move_scope) in &self.pack.moved_from {
+        if self.pack.moved_from.is_empty() {
+            return out;
+        }
+        let rebinds = self.rebind_index();
+        for m in &self.pack.moved_from {
+            let (move_span, move_scope) = (&m.call, &m.scope);
             let scope_span = self.scope(*move_scope).span;
             // GATE B (in-function): only a move that is lexically inside SOME
             // function body is executable straight-line code we can reason
@@ -200,38 +202,34 @@ impl FileAnalysis {
             // GATE E (locals only): a moved PARAMETER is a forwarding /
             // subobject-move idiom — move-constructors and `operator=` move
             // the rvalue-ref param into a base/member subobject and then read
-            // sibling members, which this tier can't tell from a real bug
-            // without subobject + path analysis. Detect param-ness by the moved
-            // var's declaration landing inside a parameter list; only moves of
+            // sibling members, which this tier can't tell from a real bug: the
+            // base subobject a whole-parameter move feeds is decided by the
+            // callee's parameter type, which no capture states. Only moves of
             // LOCALS are flagged. This is what clears the last real-header FPs.
-            let chain = self.lookup_chain(*move_scope);
-            let moved_is_param = self.symbols.iter().any(|s| {
-                s.name == *name
-                    && chain.contains(s.scope)
-                    && self
-                        .pack.param_regions
-                        .iter()
-                        .any(|pr| contains(pr, &s.selection_span))
-            });
-            if moved_is_param {
-                continue;
-            }
-            let scope_end = scope_span.end;
-            let region = Span { start: move_span.end, end: scope_end };
-            let cutoff = rebinds.earliest_in(name, region).unwrap_or(scope_end);
-            for r in self.refs() {
-                if r.target_name != *name || r.access != AccessKind::Read {
-                    continue;
+            // A member of the elided receiver is no parameter, and nothing
+            // in the body rebinds the receiver.
+            let root = match &m.place.root {
+                Binding::Lexical(root) => {
+                    let decl = self.symbol(*root);
+                    if self.pack.param_regions.iter().any(|pr| contains(pr, &decl.selection_span)) {
+                        continue;
+                    }
+                    Some(Place::variable(m.place.root.clone()))
                 }
-                let p = r.span.start;
-                // strictly after the move, strictly before the rebind cutoff
-                if key(&p) <= key(&move_span.end) || key(&p) >= key(&cutoff) {
-                    continue;
-                }
-                // same variable: the read must sit inside the move's scope
-                // subtree (the move scope is on the read's scope chain).
-                if scope_chain_of(&self.scopes, r.scope).contains(move_scope) {
-                    out.push((name.clone(), r.span));
+                Binding::Receiver(_) => None,
+                Binding::Package(..) | Binding::Arguments(_) => continue,
+            };
+            // The moved-from state holds over the rest of the move's scope, up
+            // to a rebind of its root or a reset of the moved place there.
+            let region = Span { start: move_span.end, end: scope_span.end };
+            let reset = m.resets.iter().map(|s| s.start).filter(|p| key(p) > key(&move_span.end)).min_by_key(key);
+            let cuts = [root.and_then(|r| rebinds.earliest_in(&r, region)), reset];
+            let Some(held) = cut_region(region, cuts) else { continue };
+            for read in &m.reads {
+                let p = read.start;
+                // strictly after the move, strictly before the cutoff
+                if key(&p) > key(&move_span.end) && key(&p) < key(&held.end) {
+                    out.push((m.spelling.clone(), *read));
                 }
             }
         }
@@ -289,8 +287,8 @@ impl FileAnalysis {
         }
     }
 
-    /// Raw Variable+InferredType lookup — returns the latest in-scope
-    /// witness for `var_name` before `point`, with no framework rules,
+    /// Raw place+InferredType lookup — returns the latest witness on the
+    /// binding `var_name` names at `point`, before `point`, with no framework rules,
     /// no branch fold, no narrowing.
     ///
     /// **NOT the canonical type query — test-only** (`#[cfg(test)]`
@@ -301,12 +299,10 @@ impl FileAnalysis {
     #[cfg(test)]
     pub fn inferred_type(&self, var_name: &str, point: Point) -> Option<&InferredType> {
         use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let scope = self.scope_at(point)?;
+        let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
         let mut best: Option<(&InferredType, Point)> = None;
-        for w in self.witnesses.all() {
-            let WitnessAttachment::Variable { name, scope } = &w.attachment else { continue };
-            if name != var_name { continue; }
-            let scope_obj = &self.scopes[scope.0 as usize];
-            if !contains_point(&scope_obj.span, point) { continue; }
+        for w in self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))) {
             if w.span.start > point { continue; }
             let WitnessPayload::InferredType(t) = &w.payload else { continue };
             if best.is_none() || w.span.start > best.unwrap().1 {
@@ -341,6 +337,7 @@ impl FileAnalysis {
     ) -> crate::model::witnesses::BagContext<'a> {
         crate::model::witnesses::BagContext {
             scopes: &self.scopes,
+            symbols: self.symbols(),
             package_framework: &self.packages,
             module_index,
             package_parents: &self.packages,
@@ -356,19 +353,40 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
-        if let Some(t) = crate::model::witnesses::query_variable_type(
-            &self.witnesses,
-            &self.bag_context(module_index),
-            var_name,
-            scope,
-            point,
-        ) {
+        let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
+        self.subject_type_at(&place, point, module_index)
+    }
+
+    /// What `place` holds at `point`: the narrowings and use evidence its
+    /// regions carry there.
+    pub fn place_type_at(
+        &self,
+        place: &Place,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        let scope = self.scope_at(point)?;
+        crate::model::witnesses::query_place_type(&self.witnesses, &self.bag_context(module_index), place, scope, point)
+    }
+
+    /// What a narrowing subject holds at `point`.
+    pub fn subject_type_at(
+        &self,
+        subject: &Place,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        if let Some(t) = self.place_type_at(subject, point, module_index) {
             return Some(t);
+        }
+        if !subject.path.is_empty() {
+            return None;
         }
         // Role-contract param types are gated on the enclosing package's
         // cross-file ancestry, so they resolve here (index in hand), not in
         // the bag the index-free builder seeded.
-        self.gated_param_type_for(var_name, scope, point, module_index)
+        let scope = self.scope_at(point)?;
+        self.gated_param_type_for(self.binding_label(&subject.root).0, scope, point, module_index)
     }
 
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
@@ -819,7 +837,9 @@ impl FileAnalysis {
 
     /// True when a closed literal shape on the variable `var_text` names at
     /// `at` is its whole story in this file: that variable (not every one
-    /// spelled the same) is never reassigned. Key
+    /// spelled the same) is a lexical, and is never reassigned. A package
+    /// variable never is: other files write it (Webmin's `%config` is
+    /// filled by `init_config` in another file), so its keys are open. Key
     /// writes AND escapes are not gate clauses — both are modeled on
     /// the shape itself by the mutation-extension pass (writes extend
     /// or open; an escape is an open-switching write at the escape
@@ -829,23 +849,23 @@ impl FileAnalysis {
     /// (docs/adr/structural-shapes.md); the unknown-hash-key
     /// diagnostic only fires behind it.
     pub fn closed_shape_is_whole_story(&self, var_text: &str, at: Point) -> bool {
-        self.variable_binding(var_text, at).is_none_or(|id| !self.reassigned_vars.contains(&id))
+        let Some(id) = self.variable_binding(var_text, at) else {
+            // Unbound only when an `our` of another package is in view:
+            // still a package variable.
+            return false;
+        };
+        let package_variable = matches!(
+            self.symbols[id.0 as usize].detail,
+            SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_variable()
+        );
+        !package_variable && !self.reassigned_vars.contains(&id)
     }
 
     /// What a use of the variable `name` written at `at` names, by the
     /// binders' rule (`variable_use`) over the declarations the analysis
     /// holds.
     fn variable_use_at(&self, name: &str, at: Point) -> Option<VariableUse> {
-        let scope = self.scope_at(at)?;
-        let chain = variable_lookup_chain(&self.scopes, scope, name);
-        Some(variable_use(name, at, chain, self.package_at(at), self.names(), |scope| {
-            self.symbols
-                .declared_directly_in(scope)
-                .iter()
-                .map(|sid| &self.symbols[sid.0 as usize])
-                .filter(|s| s.name == name)
-                .filter_map(Symbol::variable_decl)
-        }))
+        Some(self.variable_use_in(name, at, self.scope_at(at)?))
     }
 
     /// The variable a use of `name` written at `at` binds to — the
@@ -872,6 +892,159 @@ impl FileAnalysis {
                 global(false).or_else(|| global(true)).map(|s| s.id)
             }
         }
+    }
+
+    /// What `name`, used at `at` in `scope`, binds to, and the scope that
+    /// binding lives in: the builder's `binding_of` by the same rule
+    /// (`variable_use`).
+    pub(crate) fn variable_binding_of(&self, name: &str, at: Point, scope: ScopeId) -> (Binding, ScopeId) {
+        // `@_` cannot be declared; a symbol for it is a mention.
+        if crate::model::conventions::is_argument_array(name) {
+            return unbound_variable(&self.scopes, name, self.package_at(at).unwrap_or("main"), scope);
+        }
+        // A fact made in the scope declaring the name is that binding's,
+        // wherever in the scope it sits: a member's declared type spans its
+        // class from the class's start.
+        let mut declared = self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter(|s| {
+            s.name == name
+                && matches!(s.kind, SymKind::Variable | SymKind::Field)
+                && !matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_variable())
+        });
+        // A use inside a declaring statement reads what the declaration
+        // shadows, so it binds further out.
+        if let Some(first) = declared.next() {
+            let mut shadowed = false;
+            let mut hit = None;
+            for s in std::iter::once(first).chain(declared) {
+                let view = s.in_view();
+                if view.at(at) {
+                    hit = Some(s);
+                } else if view.from <= at {
+                    shadowed = true;
+                }
+            }
+            match hit {
+                Some(sym) => return (Binding::Lexical(self.binding_symbol(sym.id)), scope),
+                None if !shadowed => return (Binding::Lexical(self.binding_symbol(first.id)), scope),
+                None => {}
+            }
+        }
+        let use_pkg = self.package_at(at).unwrap_or("main");
+        match self.variable_use_in(name, at, scope) {
+            VariableUse::Declared(id) => {
+                let sym = &self.symbols[id.0 as usize];
+                match &sym.detail {
+                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => (
+                        Binding::Package(sym.package.as_deref().unwrap_or("main").to_string(), name.to_string()),
+                        outermost_scope(&self.scopes, scope),
+                    ),
+                    _ => (Binding::Lexical(self.binding_symbol(id)), sym.scope),
+                }
+            }
+            VariableUse::Global { package, name } => unbound_variable(&self.scopes, &name, &package, scope),
+            VariableUse::GatedOur => unbound_variable(&self.scopes, name, use_pkg, scope),
+        }
+    }
+
+    /// The name a binding was declared or written with, and the scope it
+    /// lives in.
+    pub fn binding_label<'a>(&'a self, binding: &'a Binding) -> (&'a str, ScopeId) {
+        match binding {
+            Binding::Lexical(sid) | Binding::Receiver(sid) => {
+                let s = &self.symbols[sid.0 as usize];
+                (&s.name, s.scope)
+            }
+            Binding::Package(_, name) => (name, ScopeId(0)),
+            Binding::Arguments(callable) => (crate::model::conventions::ARGUMENT_ARRAY, *callable),
+        }
+    }
+
+    /// Every FlowEdge target as a write of the whole variable it binds:
+    /// what cuts a fact about that variable short.
+    pub(crate) fn rebind_index(&self) -> PlaceDisturbanceIndex {
+        let mut idx = PlaceDisturbanceIndex::default();
+        for fe in &self.flow_edges {
+            let (binding, _) = self.variable_binding_of(&fe.target_name, fe.target_at, fe.target_scope);
+            idx.add(fe.target_at, Access::Write, Place::variable(binding));
+        }
+        idx.seal();
+        idx
+    }
+
+    /// The variables `scope` itself declares.
+    pub fn variables_declared_in(&self, scope: ScopeId) -> impl Iterator<Item = SymbolId> + '_ {
+        self.symbols
+            .declared_directly_in(scope)
+            .iter()
+            .copied()
+            .filter(|&v| matches!(self.symbols[v.0 as usize].kind, SymKind::Variable))
+    }
+
+    /// The place the variable or member `sym` declares.
+    pub fn declared_place(&self, sym: SymbolId) -> Place {
+        let s = &self.symbols[sym.0 as usize];
+        Place::variable(self.variable_binding_of(&s.name, s.span.start, s.scope).0)
+    }
+
+    /// The one symbol a binding is named by. A token that declares two
+    /// symbols in one scope (python's class-body binding: the member and
+    /// the name the body reads, `Symbol::declared_with`) binds one value.
+    fn binding_symbol(&self, id: SymbolId) -> SymbolId {
+        let sym = &self.symbols[id.0 as usize];
+        match sym.declared_with {
+            Some(twin) if self.symbols[twin.0 as usize].scope == sym.scope => id.min(twin),
+            _ => id,
+        }
+    }
+
+    /// Key every variable fact in the bag to the place its name binds to
+    /// (`bind_variable_witness`), for an analysis whose facts were minted
+    /// against the scope they were made in.
+    pub(crate) fn bind_variable_witnesses(&mut self) {
+        let mut bag = std::mem::take(&mut self.witnesses);
+        bag.rewrite(|w| bind_variable_witness(w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc)));
+        self.witnesses = bag;
+    }
+
+    /// Bind facts that hold over a region to their places, each cut at the
+    /// first rebind of its binding inside the region; one rebound before
+    /// its region opens holds nowhere.
+    pub(crate) fn bind_variable_regions(&mut self, facts: Vec<crate::model::witnesses::Witness>) {
+        use crate::model::witnesses::WitnessAttachment;
+        if facts.is_empty() {
+            return;
+        }
+        let rebinds = self.rebind_index();
+        let mut held = Vec::with_capacity(facts.len());
+        for mut w in facts {
+            bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc));
+            let cut = match &w.attachment {
+                WitnessAttachment::Place(p) => rebinds.earliest_in(p, w.span),
+                _ => None,
+            };
+            let Some(span) = cut_region(w.span, [cut]) else { continue };
+            w.span = span;
+            held.push(w);
+        }
+        for w in held {
+            self.witnesses.push(w);
+        }
+    }
+
+    fn variable_use_in(&self, name: &str, at: Point, scope: ScopeId) -> VariableUse {
+        let chain = variable_lookup_chain(&self.scopes, scope, name);
+        variable_use(name, at, chain, self.package_at(at), self.names(), |scope| {
+            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter(|s| s.name == name).filter_map(move |s| {
+                // A member is in force throughout its class, wherever it is
+                // declared — a pack's too, which the ref binders reach
+                // through its receiver instead.
+                if s.kind == SymKind::Field {
+                    let view = InView::from(self.scopes[scope.0 as usize].span.start);
+                    return Some(VariableDecl { id: s.id, view, gate: None, scope_wide: false });
+                }
+                s.variable_decl()
+            })
+        })
     }
 
     /// Closed-shape hash-key typo sites: a READ of `$config->{typo}` where
@@ -950,7 +1123,7 @@ impl FileAnalysis {
                 continue;
             }
             // A base that is a bare variable read (its Expr attachment
-            // edges to a Variable) is `closed_shape_key_typos`'s territory —
+            // edges to a variable) is `closed_shape_key_typos`'s territory —
             // it carries the whole-story gate this walk deliberately
             // doesn't. Materializing it here would bypass the gate
             // (the Compiler.pm conditional-reassignment FP).
@@ -959,10 +1132,7 @@ impl FileAnalysis {
                 .for_attachment(&WitnessAttachment::Expr(base_span))
                 .iter()
                 .any(|bw| {
-                    matches!(
-                        bw.payload,
-                        WitnessPayload::Edge(WitnessAttachment::Variable { .. })
-                    )
+                    matches!(&bw.payload, WitnessPayload::Edge(target) if target.variable_binding().is_some())
                 });
             if base_is_variable {
                 continue;
@@ -1018,4 +1188,34 @@ impl FileAnalysis {
             .unwrap_or(TypeProvenance::Inferred)
     }
 
+}
+
+/// Whether `hint` is on at `at` in `scope`: the latest switch of it on the
+/// scope chain, innermost first. Every hint is off by default. Over bare
+/// scopes, so the builder asks it mid-walk the way a query does after.
+pub fn hint_in(scopes: &[Scope], scope: ScopeId, at: Point, hint: LexicalHint) -> bool {
+    let mut current = Some(scope);
+    while let Some(id) = current {
+        let s = &scopes[id.0 as usize];
+        if let Some(sw) = s.hints.iter().rev().find(|h| h.hint == hint && h.at <= at) {
+            return sw.on;
+        }
+        current = s.parent;
+    }
+    false
+}
+
+/// Whether an element access in `context` through an undef receiver dies
+/// at `at`, rather than autovivifying or yielding undef: a store whose
+/// vivification is off dies (perl can't store into nothing), any other
+/// access only under `'strict'`.
+pub fn vivify_dies_in(scopes: &[Scope], scope: ScopeId, at: Point, context: VivifyContext) -> bool {
+    let dies = |access| {
+        hint_in(scopes, scope, at, LexicalHint::NoVivify(access))
+            && (access == VivifyAccess::Store || hint_in(scopes, scope, at, LexicalHint::VivifyStrict))
+    };
+    match context {
+        VivifyContext::Is(access) => dies(access),
+        VivifyContext::FetchOrStore => dies(VivifyAccess::Fetch) && dies(VivifyAccess::Store),
+    }
 }

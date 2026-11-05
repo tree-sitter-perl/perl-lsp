@@ -22,7 +22,7 @@ impl<'a> Builder<'a> {
             "use_version_statement" => {
                 if let Some(version) = node.child_by_field_name("version").and_then(|v| v.utf8_text(self.source).ok()) {
                     if crate::model::conventions::version_enables_strict(version) {
-                        self.switch_declaration_rule(node_to_span(node), true);
+                        self.switch_hint(node_to_span(node), crate::model::file_analysis::LexicalHint::RequireDeclaration, true);
                     }
                 }
             }
@@ -129,11 +129,13 @@ impl<'a> Builder<'a> {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
                 if self.element_written_in_place(node) {
                     self.record_in_place_write(node);
+                } else if self.element_escaped(node) {
+                    self.record_place_escape(node);
                 }
-                // Only the arrow form `$x->[i]` has a scalar-ref receiver; the
-                // direct `$arr[i]` indexes the named array.
-                if crate::cst::element_arrow_deref(node, self.source) {
-                    self.record_arrow_deref(node, crate::model::file_analysis::DerefForm::ArrayIndex);
+                // The direct `$arr[i]` indexes the named array; only a
+                // subscript through a reference has a receiver.
+                if let Some(base) = crate::cst::element_deref_base(node) {
+                    self.record_arrow_deref(node, base, crate::model::file_analysis::DerefForm::ArrayIndex);
                 }
                 self.queue_children(node);
             }
@@ -141,7 +143,9 @@ impl<'a> Builder<'a> {
                 // The call's value is the expr arm's `Invoke` on the
                 // operand; here only the operand's rep is observed.
                 self.infer_deref_type(node, TypeObservation::CodeRefInvocation);
-                self.record_arrow_deref(node, crate::model::file_analysis::DerefForm::Call);
+                if let Some(operand) = crate::cst::NodeExt::elements(&node).next() {
+                    self.record_arrow_deref(node, operand, crate::model::file_analysis::DerefForm::Call);
+                }
                 self.queue_children(node);
             }
             // Symbolic code-deref: `&{ EXPR }` / `&{ EXPR }(...)`. The operand
@@ -244,7 +248,7 @@ impl<'a> Builder<'a> {
             // block scope of its own.
             "substitution_regexp" => match crate::cst::eval_replacement(node, self.source) {
                 Some(repl) => {
-                    let code = self.eval_injections.get(&repl.start_byte()).copied();
+                    let code = self.syntax.injected_at(repl);
                     let mut steps: Vec<Box<dyn FnOnce(&mut Builder<'a>) + 'a>> = Vec::new();
                     for c in crate::cst::NodeExt::elements(&node) {
                         if c != repl {
@@ -1244,13 +1248,21 @@ impl<'a> Builder<'a> {
                                 let p = &params[param_idx];
                                 let sigil = p.name.chars().next().unwrap_or('$');
                                 let decl_kind = DeclKind::Param;
-                                self.add_symbol(
+                                // The parameter's variable declares it; the
+                                // parameter is in force past its own default,
+                                // so `$x = $x` reads the outer `$x` and a
+                                // later default reads an earlier parameter.
+                                let var = crate::cst::NodeExt::elements(&param_node)
+                                    .find(|c| matches!(c.kind(), "scalar" | "array" | "hash"))
+                                    .unwrap_or(param_node);
+                                let id = self.add_symbol(
                                     p.name.clone(),
                                     SymKind::Variable,
-                                    node_to_span(param_node),
-                                    node_to_span(param_node),
+                                    node_to_span(var),
+                                    node_to_span(var),
                                     SymbolDetail::Variable { sigil, decl_kind },
                                 );
+                                self.symbols[id.0 as usize].in_force = Some(param_node.end_position());
                                 param_idx += 1;
                             }
                         }
@@ -1511,6 +1523,7 @@ impl<'a> Builder<'a> {
                 *var_span,
                 detail,
             );
+            self.symbols[sym_id.0 as usize].in_force = Some(crate::cst::declaration_in_force_from(self.syntax, node));
             // A field's declaration facts ride the closed flag set (rule
             // #12): the attribute spellings become flags here, once, and
             // stay on the symbol as display text.
