@@ -383,16 +383,8 @@ impl LanguageServer for Backend {
                 needs_gather_refresh =
                     crate::build::language_driver::LanguageRegistry::caps(doc.language)
                         .context_gather;
-                // Enqueue imports for background resolution (non-blocking).
-                for imp in &doc.analysis.imports {
-                    self.module_index.request_resolve(&imp.module_name);
-                }
-                // Enqueue parent classes for resolution (inheritance chain).
-                for (_pkg, parents) in doc.analysis.package_parent_edges() {
-                    for parent in parents {
-                        self.module_index.request_resolve(parent);
-                    }
-                }
+                // Background resolution of its imports and parents (non-blocking).
+                self.module_index.request_demand_of(&doc.analysis);
             }
         }
         // The open-doc path now owns this file's surface record (buffer
@@ -474,14 +466,7 @@ impl LanguageServer for Backend {
         if crate::build::language_driver::LanguageRegistry::caps(language).synchronous_rebuild {
             if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
                 doc.update(change.text);
-                for imp in &doc.analysis.imports {
-                    self.module_index.request_resolve(&imp.module_name);
-                }
-                for (_pkg, parents) in doc.analysis.package_parent_edges() {
-                    for parent in parents {
-                        self.module_index.request_resolve(parent);
-                    }
-                }
+                self.module_index.request_demand_of(&doc.analysis);
             }
             // Surface record + publish + surface-gated consumer refresh, all
             // debounced OFF the pipeline: the publish re-enriches (heavy),

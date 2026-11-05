@@ -344,9 +344,7 @@ fn resolve_imports_blocking(
     idx: &module_index::ModuleIndex,
     analysis: &file_analysis::FileAnalysis,
 ) {
-    for name in module_index::dependency_demand_of(analysis) {
-        idx.request_resolve(&name);
-    }
+    idx.request_demand_of(analysis);
     idx.wait_idle();
 }
 

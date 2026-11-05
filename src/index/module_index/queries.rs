@@ -184,6 +184,14 @@ impl ModuleIndex {
         }
     }
 
+    /// `request_resolve` for what one file names (`dependency_demand_of`):
+    /// an opened, edited or rebuilt document, or a one-shot query's file.
+    pub fn request_demand_of(&self, fa: &FileAnalysis) {
+        for name in dependency_demand_of(fa) {
+            self.request_resolve(&name);
+        }
+    }
+
     /// Block until the resolver has read its map and has nothing queued or
     /// in flight — for one-shot callers that answer from a settled index.
     /// Every landing happens on the resolver thread, so this is the only
