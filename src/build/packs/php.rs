@@ -58,6 +58,7 @@ fn display_type(tag: &str) -> Option<&'static str> {
         "Bool" => Some("bool"),
         "HashRef" | "ArrayRef" => Some("array"),
         "CodeRef" => Some("callable"),
+        "Undef" => Some("null"),
         _ => None,
     }
 }

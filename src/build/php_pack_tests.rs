@@ -1276,8 +1276,8 @@ class Clock {
 
 /// A declared return is the callable's value: a class spelling resolves
 /// through the use-map, `self` and `static` name the class the method is
-/// written in, a nullable is its class, and a union, `void` or no
-/// declaration states no type.
+/// written in, a nullable class is the class or null, a union is the join
+/// of its arms, and `void` or no declaration states no type.
 #[cfg(feature = "php")]
 #[test]
 fn a_declared_return_is_the_callables_value() {
@@ -1288,12 +1288,13 @@ fn a_declared_return_is_the_callables_value() {
     let clock = Some(T::ClassName("Lib\\Clock".into()));
     assert_eq!(ret("with"), builder, "`static`");
     assert_eq!(ret("again"), builder, "`self`");
-    assert_eq!(ret("maybe"), builder, "a nullable class");
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(ret("maybe"), or(T::ClassName("App\\Builder".into()), T::Undef), "a nullable class");
     assert_eq!(ret("nullable"), builder, "a nullable `static`");
     assert_eq!(ret("clock"), clock, "an imported class");
     assert_eq!(ret("full"), clock, "a fully qualified class");
     assert_eq!(ret("count"), Some(T::Numeric));
-    assert_eq!(ret("either"), None, "a union has no single type");
+    assert_eq!(ret("either"), or(T::ClassName("Lib\\Clock".into()), T::Numeric), "a union is the join of its arms");
     let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
     assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
     assert_eq!(ret("nothing"), None);
