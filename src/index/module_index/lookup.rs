@@ -241,9 +241,9 @@ impl ModuleIndex {
         member_prefilter_may_declare(rows)
     }
 
-    /// Block until `module_name` appears in the cache, or timeout.
-    /// (Used by tests and the one-shot CLI import resolution.)
-    #[doc(hidden)]
+    /// Block until `module_name` appears in the cache, or timeout. A
+    /// one-shot caller waits with `wait_idle`, which covers descent too.
+    #[cfg(test)]
     pub fn wait_resolved(&self, module_name: &str, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let mut guard = self.core.resolved.mu.lock().unwrap();
