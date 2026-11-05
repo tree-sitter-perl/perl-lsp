@@ -551,12 +551,37 @@ fn a_declared_property_type_is_the_members_value() {
     assert_eq!(value("count"), Some(T::Numeric));
     assert_eq!(value("id"), Some(T::String));
     assert_eq!(value("name"), Some(T::String));
-    assert_eq!(value("clock"), Some(T::ClassName("Lib\\Clock".into())));
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(value("clock"), or(T::ClassName("Lib\\Clock".into()), T::Undef), "`?T` is `T|null`");
     assert_eq!(value("made"), Some(T::ClassName("Lib\\Clock".into())));
     assert_eq!(value("qty"), Some(T::Numeric));
     assert_eq!(value("legacy"), None);
-    assert_eq!(value("key"), None, "a union has no single type");
+    assert_eq!(value("key"), or(T::Numeric, T::String), "a union is the join of its arms");
     assert_eq!(value("plain"), None, "a plain parameter is no property");
+}
+
+/// An intersection or a DNF group names no single class, and an arm that
+/// can't be read types nothing rather than claiming the arms that can.
+#[test]
+fn a_type_with_an_unreadable_arm_types_nothing() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Box {
+    public Clock&Countable $both;
+    public (A&B)|null $group;
+    public array|string $mixed;
+    public ?string $maybe;
+}
+");
+    let boxed = T::ClassName("Box".into());
+    let value = |m: &str| fa.field_value_type(&boxed, m, None);
+    assert_eq!(value("both"), None);
+    assert_eq!(value("group"), None);
+    assert_eq!(value("mixed"), None);
+    assert_eq!(
+        value("maybe"),
+        crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered)
+    );
 }
 
 #[test]
