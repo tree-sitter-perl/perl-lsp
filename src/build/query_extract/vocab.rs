@@ -523,6 +523,11 @@ pub enum Capture {
     SpecPrimary,
     /// An inline namespace's name token.
     NsInline,
+    /// A member namespace the declaration or member site at this token
+    /// lives in or may land in, by the pack's own namespace names
+    /// (`@space.<name>`, `@space.<name>.illegal`). Resolved against the
+    /// pack's `MemberSpaces` when its document compiles.
+    Space { id: crate::model::file_analysis::NamespaceId, illegal: bool },
     /// A field typed by an anonymous aggregate.
     AnonAggMember,
     /// The node a pattern's links start from, and the walk they belong to.
@@ -686,6 +691,7 @@ impl fmt::Display for Capture {
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),
+            C::Space { id, illegal } => write!(f, "space#{}{}", id.0, if illegal { ".illegal" } else { "" }),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),
             C::Deref(k) => write!(f, "deref.{k}"),
@@ -698,10 +704,27 @@ impl fmt::Display for Capture {
 /// A compiled query's capture table, indexed by capture id. `None` marks a
 /// predicate-only capture: tree-sitter's `_` prefix (`@_const` under
 /// `#eq?`) names a node a predicate reads, never one the extractor does.
-pub(super) fn capture_table(names: &[&str]) -> Result<Vec<Option<Capture>>, UnknownCapture> {
+pub(super) fn capture_table(
+    names: &[&str],
+    spaces: &crate::model::file_analysis::MemberSpaces,
+) -> Result<Vec<Option<Capture>>, UnknownCapture> {
     names
         .iter()
-        .map(|n| if n.starts_with('_') { Ok(None) } else { Capture::parse(n).map(Some) })
+        .map(|n| {
+            if n.starts_with('_') {
+                return Ok(None);
+            }
+            // A namespace is the pack's own word, so it resolves against
+            // the pack's declared names, never the closed vocabulary.
+            if let Some(rest) = n.strip_prefix("space.") {
+                let (name, illegal) = match rest.strip_suffix(".illegal") {
+                    Some(name) => (name, true),
+                    None => (rest, false),
+                };
+                return spaces.id_of(name).map(|id| Some(Capture::Space { id, illegal })).ok_or_else(|| UnknownCapture(n.to_string()));
+            }
+            Capture::parse(n).map(Some)
+        })
         .collect()
 }
 

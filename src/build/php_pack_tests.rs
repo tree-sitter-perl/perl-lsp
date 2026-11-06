@@ -564,13 +564,23 @@ fn a_declared_property_type_is_the_members_value() {
     use crate::model::file_analysis::InferredType as T;
     let fa = php(MEMBERS);
     let order = T::ClassName("App\\Order".into());
-    let value = |m: &str| fa.field_value_type(&order, m, None);
+    let value = |m: &str| fa.field_value_type(&order, m, None, crate::model::file_analysis::MemberKind::VALUE);
+    // A static property answers an ask in its own namespace (`Order::$clock`).
+    let statics = crate::model::file_analysis::MemberKind {
+        mode: crate::model::file_analysis::MemberMode::Value,
+        spaces: Some(crate::model::file_analysis::SpaceAsk {
+            search: crate::model::file_analysis::SpaceSet::of(fa.names().member_spaces.id_of("static_property").unwrap()),
+            illegal: Default::default(),
+        }),
+    };
+    let static_value = |m: &str| fa.field_value_type(&order, m, None, statics);
+    assert_eq!(value("clock"), None, "`->` reaches no static property");
     assert_eq!(value("total"), Some(T::Numeric));
     assert_eq!(value("count"), Some(T::Numeric));
     assert_eq!(value("id"), Some(T::String));
     assert_eq!(value("name"), Some(T::String));
     let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
-    assert_eq!(value("clock"), or(T::ClassName("Lib\\Clock".into()), T::Undef), "`?T` is `T|null`");
+    assert_eq!(static_value("clock"), or(T::ClassName("Lib\\Clock".into()), T::Undef), "`?T` is `T|null`");
     assert_eq!(value("made"), Some(T::ClassName("Lib\\Clock".into())));
     assert_eq!(value("qty"), Some(T::Numeric));
     assert_eq!(value("legacy"), None);
@@ -593,7 +603,7 @@ class Box {
 }
 ");
     let boxed = T::ClassName("Box".into());
-    let value = |m: &str| fa.field_value_type(&boxed, m, None);
+    let value = |m: &str| fa.field_value_type(&boxed, m, None, crate::model::file_analysis::MemberKind::VALUE);
     assert_eq!(value("both"), None);
     assert_eq!(value("group"), None);
     assert_eq!(value("mixed"), None);
@@ -2723,4 +2733,70 @@ function f(User $u) { $u->id = 2; }
 ");
     let found: Vec<_> = fa.misplaced_member_writes(None).into_iter().map(|w| w.span.start.row).collect();
     assert_eq!(found, [6]);
+}
+
+const SPACES: &str = "<?php
+namespace App;
+
+class Base {
+    public static $shared = 1;
+}
+
+class Card extends Base {
+    const X = 1;
+    public $X = 2;
+    public static $count = 0;
+    public function X() {}
+    public function run(Card $c) {
+        $a = Card::X;
+        $b = $c->X;
+        $d = $c->X();
+        $e = self::X;
+        $f = Card::$count;
+        $g = $c->count;
+        $h = Card::$X;
+        $i = static::$shared;
+    }
+}
+";
+
+/// `Card::X`, `$c->X` and `$c->X()` reach the constant, the property and
+/// the method of one name, each in its own namespace.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_property_and_method_of_one_name_are_three_members() {
+    let ws = Workspace::new(&[("spaces.php", SPACES)]);
+    assert_eq!(ws.defs("spaces.php", "Card::X;", 6), [site("spaces.php", 8, 10)]);
+    assert_eq!(ws.defs("spaces.php", "self::X;", 6), [site("spaces.php", 8, 10)]);
+    assert_eq!(ws.defs("spaces.php", "$c->X;", 4), [site("spaces.php", 9, 12)]);
+    assert_eq!(ws.defs("spaces.php", "$c->X();", 4), [site("spaces.php", 11, 20)]);
+}
+
+/// A static property is read through `::`; `->` finds it only as a
+/// fallback, and that landing is illegal. An instance property read
+/// through `::` is the mirror case. A static one inherited from a parent
+/// resolves through `static::`.
+#[cfg(feature = "php")]
+#[test]
+fn a_static_property_is_reached_through_its_own_side_and_illegally_through_the_other() {
+    use crate::model::file_analysis::{MemberKind, MethodResolution, RefKind};
+    let ws = Workspace::new(&[("spaces.php", SPACES)]);
+    assert_eq!(ws.defs("spaces.php", "Card::$count", 7), [site("spaces.php", 10, 19)]);
+    assert_eq!(ws.defs("spaces.php", "static::$shared", 9), [site("spaces.php", 4, 19)]);
+    assert_eq!(ws.defs("spaces.php", "$c->count", 4), [site("spaces.php", 10, 19)], "a fallback still resolves");
+    assert_eq!(ws.defs("spaces.php", "Card::$X", 7), [site("spaces.php", 9, 12)], "a fallback still resolves");
+    let fa = php(SPACES);
+    let illegal: Vec<(usize, &str)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }))
+        .filter_map(|r| {
+            let want = MemberKind::of_ref(&r.kind)?;
+            let Some(MethodResolution::Local { sym_id, .. }) = fa.resolve_member_in_ancestors("App\\Card", &r.target_name, None, want) else {
+                return None;
+            };
+            want.reaches_illegally(fa.symbol(sym_id), &fa.names().member_spaces).then_some((r.span.start.row, r.target_name.as_str()))
+        })
+        .collect();
+    assert_eq!(illegal, [(18, "count"), (19, "X")]);
 }

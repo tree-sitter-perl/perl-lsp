@@ -168,6 +168,7 @@ fn test_resolve_sub_return_type() {
             attributes: Vec::new(),
             deref_stack: Vec::new(),
             flags: Default::default(),
+        member_space: None,
             declared_with: None,
             arity: None,
             in_force: None,
@@ -2015,7 +2016,7 @@ $dog->speak();
 
     // Inherited (defined in Animal, not in Dog) — chain runs
     // child → defining ancestor and stops.
-    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::Callable, None);
+    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::CALLABLE, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string(), "Animal".to_string()],
@@ -2025,7 +2026,7 @@ $dog->speak();
     // Override (Dog defines `speak` itself) — chain stops at
     // child. Walking past the override into Animal would lump
     // two semantically distinct methods together in one rename.
-    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::Callable, None);
+    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::CALLABLE, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string()],
@@ -2035,7 +2036,7 @@ $dog->speak();
 
     // Unknown method: degrade to the original class so the
     // backend's per-class rename still runs (no edits, no harm).
-    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::Callable, None);
+    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::CALLABLE, None);
     assert_eq!(chain, vec!["Dog".to_string()]);
 }
 
@@ -3243,24 +3244,24 @@ fn a_member_ask_crosses_families_only_in_a_shared_namespace() {
     let stored = [SymKind::Field, SymKind::Variable, SymKind::Enumerator];
     let callable = [SymKind::Sub, SymKind::Method];
     for k in stored {
-        assert!(MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(!MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::Shared));
+        assert!(MemberKind::VALUE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(!MemberKind::CALLABLE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(MemberKind::CALLABLE.admits_decl(k, None, &MemberSpaces::SHARED));
     }
     for k in callable {
-        assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(!MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(MemberKind::Value.admits_decl(k, MemberNamespace::Shared));
+        assert!(MemberKind::CALLABLE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(!MemberKind::VALUE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(MemberKind::VALUE.admits_decl(k, None, &MemberSpaces::SHARED));
     }
-    for (want, other) in [(MemberKind::Value, MemberKind::Callable), (MemberKind::Callable, MemberKind::Value)] {
-        assert!(want.admits_ref(Some(want), MemberNamespace::PerFamily));
-        assert!(!want.admits_ref(Some(other), MemberNamespace::PerFamily));
-        assert!(want.admits_ref(Some(other), MemberNamespace::Shared));
-        assert!(want.admits_ref(None, MemberNamespace::PerFamily), "a non-member use is not refused");
+    for (want, other) in [(MemberKind::VALUE, MemberKind::CALLABLE), (MemberKind::CALLABLE, MemberKind::VALUE)] {
+        assert!(want.admits_ref(Some(want), &MemberSpaces::PER_FAMILY));
+        assert!(!want.admits_ref(Some(other), &MemberSpaces::PER_FAMILY));
+        assert!(want.admits_ref(Some(other), &MemberSpaces::SHARED));
+        assert!(want.admits_ref(None, &MemberSpaces::PER_FAMILY), "a non-member use is not refused");
     }
     assert_eq!(
-        crate::model::conventions::PERL_SPELLINGS.member_namespace,
-        MemberNamespace::PerFamily,
+        crate::model::conventions::PERL_SPELLINGS.member_spaces,
+        MemberSpaces::PER_FAMILY,
         "a Perl call reaches a sub, never a `field` of the same name"
     );
 }

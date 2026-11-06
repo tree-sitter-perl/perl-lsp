@@ -23,6 +23,12 @@ fn bundled_documents_speak_the_vocabulary() {
             if name.starts_with('_') {
                 continue;
             }
+            // A namespace is the pack's own word: it names one the pack declares.
+            if let Some(rest) = name.strip_prefix("space.") {
+                let space = rest.strip_suffix(".illegal").unwrap_or(rest);
+                assert!(pack.names.member_spaces.id_of(space).is_some(), "{lang}: @{name} names a declared namespace");
+                continue;
+            }
             let cap = Capture::parse(name).unwrap_or_else(|e| panic!("{lang}: {e}"));
             assert_eq!(cap.to_string(), *name, "{lang}: @{name} round-trips");
         }
@@ -48,7 +54,7 @@ fn unknown_capture_fails_the_load() {
 /// rest of the pattern extracts as usual.
 #[test]
 fn predicate_only_captures_are_skipped() {
-    let table = capture_table(&["def.sub", "_const", "def.sub.name"]).unwrap();
+    let table = capture_table(&["def.sub", "_const", "def.sub.name"], &crate::model::file_analysis::MemberSpaces::PER_FAMILY).unwrap();
     assert_eq!(
         table,
         vec![

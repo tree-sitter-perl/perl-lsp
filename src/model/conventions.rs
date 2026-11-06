@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, ConstructionKey, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
+use crate::model::file_analysis::{ClassSpelling, ConstructionKey, LatticeRules, MemberSpaces, NameSpellings, Subsumption};
 
 /// Perl's namespace separator. Source-side Perl code (the builder, the CST
 /// view, the cursor detector) spells it through this; a consumer that serves
@@ -32,7 +32,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed(PERL_ROOT_PACKAGE)),
     // A call reaches a sub, never a `field` of the same name.
-    member_namespace: MemberNamespace::PerFamily,
+    member_spaces: MemberSpaces::PER_FAMILY,
     imports: NameSpellings::NONE.imports,
     // `Foo()` calls a sub; construction is `Foo->new`.
     class_call: crate::model::file_analysis::ClassCall::FunctionCall,
@@ -719,7 +719,7 @@ mod tests {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
-            member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
+            member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
             imports: NameSpellings::NONE.imports,
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,

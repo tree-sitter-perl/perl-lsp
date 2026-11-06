@@ -205,6 +205,10 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         arity: None,
         qualifier_owned: qualifier.is_some(),
         flags,
+        member_space: on_name.iter().find_map(|t| match t.cap {
+            Capture::Space { id, .. } => Some(id),
+            _ => None,
+        }),
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),

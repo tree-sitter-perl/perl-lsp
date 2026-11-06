@@ -246,6 +246,7 @@ impl<'a> Builder<'a> {
             presentation: Default::default(),
             attributes: Vec::new(),
             flags,
+            member_space: None,
             declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`

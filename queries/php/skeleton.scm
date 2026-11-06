@@ -82,6 +82,16 @@
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
   (property_element
     name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
+; A static property lives apart from the instance ones: `$obj->x` and
+; `Foo::$x` land in different namespaces.
+(property_declaration
+  (static_modifier)
+  (property_element name: (variable_name (name) @space.static_property)))
+; A class constant is a member of its own namespace: `const X` beside a
+; property `$X` and a method `X()` is a third member. It never changes.
+(declaration_list
+  (const_declaration
+    (const_element (name) @def.field.name @space.constant) @def.field))
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
@@ -338,6 +348,49 @@
 (nullsafe_member_access_expression
   object: (_) @member.recv
   name: (name) @ref.member.value) @expr.member
+; `->` reads an instance property; finding a static one there is PHP's
+; error, so it is looked for only when no instance property answers.
+(member_access_expression name: (name) @space.property @space.static_property.illegal)
+(nullsafe_member_access_expression name: (name) @space.property @space.static_property.illegal)
+; `Foo::$x` reads a static property of the class `Foo` names (`self::`,
+; `static::` the class the code is written in, `parent::` the one it
+; extends, `$obj::` the object's class), named without its `$`; finding
+; an instance property there is PHP's error.
+(scoped_property_access_expression
+  scope: [(name) (qualified_name)] @member.recv @receiver.class
+  name: (variable_name (name) @ref.member.value)) @expr.member
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.enclosing
+  name: (variable_name (name) @ref.member.value)) @expr.member
+ (#any-of? @receiver.enclosing "self" "static"))
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.super
+  name: (variable_name (name) @ref.member.value)) @expr.member
+ (#eq? @receiver.super "parent"))
+(scoped_property_access_expression
+  scope: (variable_name) @member.recv
+  name: (variable_name (name) @ref.member.value)) @expr.member
+(scoped_property_access_expression
+  name: (variable_name (name) @space.static_property @space.property.illegal))
+; `Foo::X` reads a class constant, through the same receivers.
+((class_constant_access_expression
+   . [(name) (qualified_name)] @member.recv @receiver.class
+   . (name) @ref.member.value @space.constant) @expr.member
+ (#not-eq? @ref.member.value "class"))
+((class_constant_access_expression
+   . (relative_scope) @member.recv @receiver.enclosing
+   . (name) @ref.member.value @space.constant) @expr.member
+ (#any-of? @receiver.enclosing "self" "static")
+ (#not-eq? @ref.member.value "class"))
+((class_constant_access_expression
+   . (relative_scope) @member.recv @receiver.super
+   . (name) @ref.member.value @space.constant) @expr.member
+ (#eq? @receiver.super "parent")
+ (#not-eq? @ref.member.value "class"))
+((class_constant_access_expression
+   . (variable_name) @member.recv
+   . (name) @ref.member.value @space.constant) @expr.member
+ (#not-eq? @ref.member.value "class"))
 ; `Foo::m()` calls the method of the class `Foo` names; `self::` and
 ; `static::` name the class whose method the call is written in, `parent::`
 ; the class it extends.

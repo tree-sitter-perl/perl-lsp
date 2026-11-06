@@ -477,10 +477,7 @@ impl FileAnalysis {
             let arms = classes
                 .into_iter()
                 .map(|cn| {
-                    let want = match &r.kind {
-                        RefKind::FieldAccess { .. } => MemberKind::Value,
-                        _ => MemberKind::Callable,
-                    };
+                    let want = MemberKind::of_ref(&r.kind).unwrap_or(MemberKind::CALLABLE);
                     let resolved =
                         self.resolve_member_key_in_ancestors(&cn, r.member_key(self.names()), module_index, want);
                     match resolved {

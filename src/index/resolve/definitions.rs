@@ -922,7 +922,7 @@ impl<'a> CandidateSet<'a> {
             // through the index, walking the family the use's syntax names.
             if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
-                let namespace = analysis.names().member_namespace;
+                let namespace = &analysis.names().member_spaces;
                 // A union receiver dispatches on every arm: each arm's
                 // definition is offered.
                 let mut found: Vec<RefLocation> = Vec::new();
@@ -971,7 +971,8 @@ impl<'a> CandidateSet<'a> {
                                 // an enum constant, not a sub.
                                 let stored_member = || {
                                     whole.symbols().iter().find(|s| {
-                                        MemberKind::of_sym(s.kind) == MemberKind::Value
+                                        want.admits_decl(s.kind, s.member_space, namespace)
+                                            && MemberKind::of_symbol(s).mode == MemberMode::Value
                                             && s.name == method
                                             && s.package.as_deref() == Some(class.as_str())
                                             && whole.symbol_is_class_content(s)
@@ -981,12 +982,12 @@ impl<'a> CandidateSet<'a> {
                                     Url::from_file_path(&cached.path).is_ok().then(|| RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration))
                                 };
                                 // A value read lands on the stored member first.
-                                if want == MemberKind::Value {
+                                if want.mode == MemberMode::Value {
                                     if let Some(loc) = stored_member().and_then(stored_loc) {
                                         return vec![loc];
                                     }
                                 }
-                                let callable = want.admits_decl(SymKind::Sub, namespace)
+                                let callable = want.admits_decl(SymKind::Sub, None, namespace)
                                     .then(|| whole.sub_info_view(method))
                                     .flatten();
                                 if let Some(sub_info) = callable {
@@ -1016,7 +1017,7 @@ impl<'a> CandidateSet<'a> {
                                 }
                                 // A call reaches a stored member where the
                                 // language keeps one member namespace.
-                                if want.admits_decl(SymKind::Field, namespace) {
+                                if want.admits_decl(SymKind::Field, None, namespace) {
                                     if let Some(loc) = stored_member().and_then(stored_loc) {
                                         return vec![loc];
                                     }

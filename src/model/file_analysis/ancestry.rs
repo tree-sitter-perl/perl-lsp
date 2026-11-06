@@ -595,10 +595,10 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
-        let namespace = self.names().member_namespace;
+        let namespace = &self.names().member_spaces;
         // A callable-only arm (plugin entities, typeglob installs, bridges)
         // answers only an ask that reaches callables.
-        let reaches_callables = want.admits_decl(SymKind::Sub, namespace);
+        let reaches_callables = want.admits_decl(SymKind::Sub, None, namespace);
         // (a) Local symbols in this file packaged under `cls`. Methods AND
         // data members, as the namespace admits them. A
         // Variable/Field must be the class's OWN content — a lexical local
@@ -618,7 +618,7 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && want.admits_decl(sym.kind, namespace) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && want.admits_decl(sym.kind, sym.member_space, namespace) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
             }
         }
@@ -701,7 +701,7 @@ impl FileAnalysis {
                     member.admits(s)
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
-                        && want.admits_decl(s.kind, namespace)
+                        && want.admits_decl(s.kind, s.member_space, namespace)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             // On the WHOLE view: the class-content test
                             // resolves the owning container through
@@ -782,7 +782,7 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, method_name, module_index, MemberKind::Callable)
+        self.resolve_member_in_ancestors(class_name, method_name, module_index, MemberKind::CALLABLE)
     }
 
     /// Walk the inheritance chain to find a VALUE member — what a
@@ -793,11 +793,11 @@ impl FileAnalysis {
         field_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, field_name, module_index, MemberKind::Value)
+        self.resolve_member_in_ancestors(class_name, field_name, module_index, MemberKind::VALUE)
     }
 
     /// The MRO walk both member walks share. Which declarations answer
-    /// `want` is the language's `MemberNamespace`: per family, a call
+    /// `want` is the language's `MemberSpaces`: per family, a call
     /// reaches only callables and a value read only values; in one shared
     /// namespace the nearest declaration of the name answers either.
     pub fn resolve_member_in_ancestors(
@@ -817,7 +817,7 @@ impl FileAnalysis {
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_key_in_ancestors(class_name, MemberKey::Constructor, module_index, MemberKind::Callable)
+        self.resolve_member_key_in_ancestors(class_name, MemberKey::Constructor, module_index, MemberKind::CALLABLE)
     }
 
     /// The constructor `resolve_constructor_in_ancestors` finds, as the
@@ -850,8 +850,23 @@ impl FileAnalysis {
         }
     }
 
-    /// `resolve_member_in_ancestors`, asking by name or by role.
+    /// `resolve_member_in_ancestors`, asking by name or by role. The
+    /// namespaces the site may legally reach are walked first, the whole
+    /// MRO; only when none answers are the illegal ones walked, so a
+    /// legal ancestor member beats an illegal own one and a legal site
+    /// pays nothing for them.
     pub fn resolve_member_key_in_ancestors(
+        &self,
+        class_name: &str,
+        member: MemberKey<'_>,
+        module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
+    ) -> Option<MethodResolution> {
+        self.resolve_member_key_walk(class_name, member, module_index, want.legal())
+            .or_else(|| self.resolve_member_key_walk(class_name, member, module_index, want.illegal_only()?))
+    }
+
+    fn resolve_member_key_walk(
         &self,
         class_name: &str,
         member: MemberKey<'_>,
@@ -864,7 +879,7 @@ impl FileAnalysis {
         // instance `__dict__`, then the class.
         let slot_name = member.name().filter(|_| {
             self.names().instance_slots == InstanceSlots::BeforeClass
-                && want.admits_decl(SymKind::HashKeyDef, self.names().member_namespace)
+                && want.admits_decl(SymKind::HashKeyDef, None, &self.names().member_spaces)
         });
         if let Some(method_name) = slot_name {
             let mut slot: Option<MethodResolution> = None;
@@ -1003,7 +1018,7 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, MemberKey::Named(method_name), module_index, MemberKind::Callable) {
+                match self.method_resolution_on_class(cls, MemberKey::Named(method_name), module_index, MemberKind::CALLABLE) {
                     Some(r) => {
                         if self.hit_class_declared(cls, SymbolFlags::INTERFACE, &r, module_index) {
                             iface_fallback.get_or_insert(r);
