@@ -3397,6 +3397,7 @@ fn cpp_receiver_peel_skips_comments() {
 
 // `this` is the object of the class whose body it is in, not a class named
 // `this`: its value types from the eliding body, never from its spelling.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_this_reads_the_enclosing_class() {
     use crate::build::language_driver::LanguageRegistry;
