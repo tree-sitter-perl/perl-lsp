@@ -259,7 +259,8 @@ fn family(cap: Capture) -> Family {
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::Mark(_) => Family::Defs,
+        | C::Mark(_)
+        | C::Space { .. } => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
@@ -462,7 +463,7 @@ pub struct DeclaratorPeel<'t>(links::Links<'t>);
 
 impl<'t> DeclaratorPeel<'t> {
     pub fn of_tree(tree: &'t Tree, source: &[u8], pack: &LangPack) -> Self {
-        match cached_query(&tree.language(), pack.query_source) {
+        match cached_query(&tree.language(), pack) {
             Ok(compiled) => {
                 let syntax = crate::cst::SyntaxForest::new(tree.root_node());
                 DeclaratorPeel(record_matches(compiled, &syntax, tree.root_node(), source).0)
@@ -493,7 +494,7 @@ pub fn extract_in(
     file_module: Option<&FileModule>,
 ) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let compiled = cached_query(&language, pack.query_source)?;
+    let compiled = cached_query(&language, pack)?;
 
     let root = tree.root_node();
     let mut out = SkeletonAnalysis::for_pack(pack);

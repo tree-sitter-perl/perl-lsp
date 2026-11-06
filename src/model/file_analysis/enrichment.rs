@@ -200,6 +200,7 @@ impl FileAnalysis {
                     presentation: gs.presentation.clone(),
                     attributes: Vec::new(),
                     flags: Default::default(),
+                    member_space: None,
                     declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,

@@ -408,9 +408,9 @@ pub struct NameSpellings {
     /// The package an empty qualifier names (Perl's `$::x` is `$main::x`);
     /// `None` keeps the empty qualifier as written.
     pub root_package: Option<std::borrow::Cow<'static, str>>,
-    /// How the language's classes hold their members: the rule a member
-    /// ask is answered by (`docs/adr/member-kinds.md`).
-    pub member_namespace: MemberNamespace,
+    /// The namespaces the language's classes hold their members in: the
+    /// rule a member ask is answered by (`docs/adr/member-kinds.md`).
+    pub member_spaces: MemberSpaces,
     /// How a use-map language's import rows bind — read by the extractor
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
@@ -537,7 +537,7 @@ impl NameSpellings {
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
         root_package: None,
-        member_namespace: MemberNamespace::PerFamily,
+        member_spaces: MemberSpaces::PER_FAMILY,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
@@ -553,7 +553,7 @@ impl NameSpellings {
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
             root_package: None,
-            member_namespace: MemberNamespace::PerFamily,
+            member_spaces: MemberSpaces::PER_FAMILY,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
@@ -853,6 +853,11 @@ pub struct Symbol {
     /// onto them at conversion, the Perl builder sets them directly.
     #[serde(default)]
     pub flags: SymbolFlags,
+    /// The member namespace the query document tagged this declaration
+    /// with (`@space.<name>`); `None` lives where its kind does
+    /// (`MemberSpaces::of_decl`).
+    #[serde(default)]
+    pub member_space: Option<NamespaceId>,
     /// The OTHER symbol the same declaration token minted: a `has` accessor
     /// and its constructor key, a promoted constructor parameter and its
     /// field. Minted where the pair is synthesized, so no consumer
@@ -1359,69 +1364,191 @@ impl<'a> From<&'a str> for MemberKey<'a> {
     }
 }
 
-/// Which family a member belongs to: a stored value or a callable. An ask
-/// carries the family of the fact that produced it, a declaration the
-/// family of its symbol kind (`docs/adr/member-kinds.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MemberKind {
-    Value,
-    Callable,
+/// One of a language's member namespaces, by its index in the language's
+/// `MemberSpaces`. Opaque to the model: two ids are compared, never read.
+/// Each language owns the closed enum its ids stand for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct NamespaceId(pub u8);
+
+/// The namespaces a language's classes hold their members in, by name, and
+/// the one each mode of access reaches when its site states none. A
+/// declaration or a member site the query document tags (`@space.<name>`)
+/// lives in that namespace instead (php's `const X` beside `$X` and `X()`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberSpaces {
+    pub names: std::borrow::Cow<'static, [std::borrow::Cow<'static, str>]>,
+    /// Where a call, and a callable declaration, lives untagged.
+    pub callables: NamespaceId,
+    /// Where a value read, and a stored declaration, lives untagged.
+    pub values: NamespaceId,
 }
 
-impl MemberKind {
-    pub fn of_sym(kind: SymKind) -> MemberKind {
-        match kind {
-            SymKind::Sub | SymKind::Method => MemberKind::Callable,
-            _ => MemberKind::Value,
-        }
-    }
-
-    /// May a declaration of `kind` answer an ask of this family, in a
-    /// language whose classes hold their members in `namespace`? Nothing
-    /// resolves across families where they are separate; where there is
-    /// one namespace the family never mattered.
-    pub fn admits_decl(self, kind: SymKind, namespace: MemberNamespace) -> bool {
-        match namespace {
-            MemberNamespace::PerFamily => MemberKind::of_sym(kind) == self,
-            MemberNamespace::Shared => true,
-        }
-    }
-
-    /// The family a ref's own kind states: a value read is `Value`, a call
-    /// `Callable`, anything else no member at all.
-    pub fn of_ref(kind: &RefKind) -> Option<MemberKind> {
-        match kind {
-            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
-            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
-            _ => None,
-        }
-    }
-
-    /// May a use of family `other` reference a target of this family? The
-    /// same rule as `admits_decl`, read from the use's side; a use that is
-    /// no member access is not this rule's to refuse.
-    pub fn admits_ref(self, other: Option<MemberKind>, namespace: MemberNamespace) -> bool {
-        match namespace {
-            MemberNamespace::PerFamily => other.is_none_or(|o| o == self),
-            MemberNamespace::Shared => true,
-        }
+impl Default for MemberSpaces {
+    fn default() -> Self {
+        MemberSpaces::PER_FAMILY
     }
 }
 
-/// How a language's classes hold their members. A language declares it on
-/// its spellings; the member walk reads the value and never asks which
-/// language it serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum MemberNamespace {
-    /// A namespace per family: a read reaches only a stored value and a
-    /// call only a callable (Perl's sub beside a same-named `field`).
-    #[default]
-    PerFamily,
+impl MemberSpaces {
+    /// A namespace per mode: a read reaches only a stored value and a call
+    /// only a callable (Perl's sub beside a same-named `field`).
+    pub const PER_FAMILY: MemberSpaces = MemberSpaces {
+        names: std::borrow::Cow::Borrowed(&[std::borrow::Cow::Borrowed("callable"), std::borrow::Cow::Borrowed("value")]),
+        callables: NamespaceId(0),
+        values: NamespaceId(1),
+    };
     /// One namespace: a name is one member whatever its kind, so every ask
     /// reaches the nearest declaration of it. C++'s `d.hook()` reads member
     /// `hook` and calls whatever it holds, so a derived function pointer
     /// hides a base method of that name.
-    Shared,
+    pub const SHARED: MemberSpaces = MemberSpaces {
+        names: std::borrow::Cow::Borrowed(&[std::borrow::Cow::Borrowed("member")]),
+        callables: NamespaceId(0),
+        values: NamespaceId(0),
+    };
+
+    /// The id a query document's `@space.<name>` names.
+    pub fn id_of(&self, name: &str) -> Option<NamespaceId> {
+        self.names.iter().position(|n| n == name).and_then(|i| u8::try_from(i).ok()).map(NamespaceId)
+    }
+
+    /// The namespaces an ask is answered from.
+    ///
+    /// TODO(mandatory-space-tags): an untagged site or declaration falls
+    /// back to the namespace its mode implies, here and in `of_decl`. The
+    /// tag should be mandatory in every pack document, so a member pattern
+    /// that forgets it fails the vocabulary test instead of defaulting. Not
+    /// done with the namespaces: it touches every member pattern in the
+    /// cpp, python and php documents (cpp alone has 33 method defs), and a
+    /// name node already carrying three captures silently drops a fourth,
+    /// so each pattern has to be restructured, not tagged.
+    pub fn of_ask(&self, ask: MemberKind) -> SpaceSet {
+        match ask.spaces {
+            Some(a) => a.search,
+            None => SpaceSet::of(match ask.mode {
+                MemberMode::Value => self.values,
+                MemberMode::Callable => self.callables,
+            }),
+        }
+    }
+
+    /// The namespace a declaration of `kind` lives in.
+    pub fn of_decl(&self, kind: SymKind, space: Option<NamespaceId>) -> NamespaceId {
+        space.unwrap_or(match MemberKind::of_sym(kind, None).mode {
+            MemberMode::Value => self.values,
+            MemberMode::Callable => self.callables,
+        })
+    }
+}
+
+/// A set of a language's member namespaces (at most 32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct SpaceSet(pub u32);
+
+impl SpaceSet {
+    pub fn of(id: NamespaceId) -> SpaceSet {
+        SpaceSet(1 << id.0)
+    }
+    pub fn with(self, id: NamespaceId) -> SpaceSet {
+        SpaceSet(self.0 | 1 << id.0)
+    }
+    pub fn contains(self, id: NamespaceId) -> bool {
+        self.0 & (1 << id.0) != 0
+    }
+    pub fn intersects(self, other: SpaceSet) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
+/// The namespaces a member site may land in, as its query document tagged
+/// them (`@space.<name>`), and those of them it may not legally reach
+/// (`@space.<name>.illegal`: php's `$obj->x` finds a static `$x`, wrongly).
+/// Resolution searches every one; a landing in an illegal one resolves and
+/// is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct SpaceAsk {
+    pub search: SpaceSet,
+    pub illegal: SpaceSet,
+}
+
+/// How a member site uses what it names: reads a stored value or invokes a
+/// callable. The model gives each its own meaning (a call has a return and
+/// an out-of-line body; a read has a slot's value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemberMode {
+    Value,
+    Callable,
+}
+
+/// A member ask: what the site does with the member, and the namespaces it
+/// asks in (`None`: the one its mode reaches in its language,
+/// `MemberSpaces::of_ask`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemberKind {
+    pub mode: MemberMode,
+    pub spaces: Option<SpaceAsk>,
+}
+
+impl MemberKind {
+    pub const VALUE: MemberKind = MemberKind { mode: MemberMode::Value, spaces: None };
+    pub const CALLABLE: MemberKind = MemberKind { mode: MemberMode::Callable, spaces: None };
+
+    pub fn of_sym(kind: SymKind, space: Option<NamespaceId>) -> MemberKind {
+        let mode = match kind {
+            SymKind::Sub | SymKind::Method => MemberMode::Callable,
+            _ => MemberMode::Value,
+        };
+        MemberKind { mode, spaces: space.map(|id| SpaceAsk { search: SpaceSet::of(id), illegal: SpaceSet::default() }) }
+    }
+
+    pub fn of_symbol(sym: &Symbol) -> MemberKind {
+        MemberKind::of_sym(sym.kind, sym.member_space)
+    }
+
+    /// May a declaration of `kind`, living in `space`, answer this ask, in
+    /// a language whose classes hold their members in `spaces`? Only one
+    /// in the namespace the ask is answered from.
+    pub fn admits_decl(self, kind: SymKind, space: Option<NamespaceId>, spaces: &MemberSpaces) -> bool {
+        spaces.of_ask(self).contains(spaces.of_decl(kind, space))
+    }
+
+    /// This ask over the namespaces its site may legally reach.
+    pub fn legal(self) -> MemberKind {
+        MemberKind {
+            spaces: self.spaces.map(|a| SpaceAsk { search: SpaceSet(a.search.0 & !a.illegal.0), illegal: SpaceSet::default() }),
+            ..self
+        }
+    }
+
+    /// This ask over only the namespaces its site may not legally reach;
+    /// `None` when it has none.
+    pub fn illegal_only(self) -> Option<MemberKind> {
+        let a = self.spaces.filter(|a| a.illegal.0 != 0)?;
+        Some(MemberKind { spaces: Some(SpaceAsk { search: a.illegal, illegal: a.illegal }), ..self })
+    }
+
+    /// Whether this ask reaches `sym` only through a namespace its site
+    /// may not legally reach.
+    pub fn reaches_illegally(self, sym: &Symbol, spaces: &MemberSpaces) -> bool {
+        self.spaces.is_some_and(|a| a.illegal.contains(spaces.of_decl(sym.kind, sym.member_space)))
+    }
+
+    /// The ask a ref's own kind states: a value read or a call, in the
+    /// namespace its site was tagged with; anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<MemberKind> {
+        match kind {
+            RefKind::FieldAccess { spaces, .. } => Some(MemberKind { mode: MemberMode::Value, spaces: *spaces }),
+            RefKind::MethodCall { .. } => Some(MemberKind::CALLABLE),
+            _ => None,
+        }
+    }
+
+    /// May a use asking `other` reference a target of this ask? The same
+    /// rule as `admits_decl`, read from the use's side; a use that is no
+    /// member access is not this rule's to refuse.
+    pub fn admits_ref(self, other: Option<MemberKind>, spaces: &MemberSpaces) -> bool {
+        other.is_none_or(|o| spaces.of_ask(o).intersects(spaces.of_ask(self)))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2397,6 +2524,9 @@ pub enum RefKind {
         /// `x`), where a narrowing gives that place a value; elsewhere the
         /// place answers nothing and is not kept.
         place: Option<Box<Place>>,
+        /// The member namespaces the site was tagged with
+        /// (`@space.<name>`); `None` reads where a value read does.
+        spaces: Option<SpaceAsk>,
     },
     /// A name an import binds from another module (python's `from m import
     /// Foo`): a reference to the def the name resolves to, pinned through

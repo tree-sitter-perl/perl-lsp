@@ -266,6 +266,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     member_op: None,
                     arg_count,
                     constructs: true,
+                    spaces: None,
                 });
             }
         }

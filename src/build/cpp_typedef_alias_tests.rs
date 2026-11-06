@@ -123,7 +123,7 @@ void g(S* p) { p->field_f; }
 ";
     let fa = fa(src);
     assert_eq!(
-        fa.field_type_on_class("S", "field_f", None),
+        fa.field_type_on_class("S", "field_f", None, crate::model::file_analysis::MemberKind::VALUE),
         Some(InferredType::Numeric),
     );
 }

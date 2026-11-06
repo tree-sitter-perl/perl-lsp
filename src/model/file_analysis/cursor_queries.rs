@@ -632,7 +632,7 @@ impl FileAnalysis {
                 bare: bare.to_string(),
                 has_param: true,
                 has_reader: accessor.is_some(),
-                reader_kind: MemberKind::Callable,
+                reader_kind: MemberKind::CALLABLE,
             });
         }
         // (2) Class-key pairing (DBIC `add_columns`, Class::Accessor): an
@@ -662,7 +662,7 @@ impl FileAnalysis {
             bare: bare.to_string(),
             has_param: false,
             has_reader: true,
-            reader_kind: MemberKind::Callable,
+            reader_kind: MemberKind::CALLABLE,
         })
     }
 
@@ -679,7 +679,7 @@ impl FileAnalysis {
                 bare: sym.name.clone(),
                 has_param: false,
                 has_reader: true,
-                reader_kind: MemberKind::of_sym(sym.kind),
+                reader_kind: MemberKind::of_symbol(sym),
             });
         }
         let SymbolDetail::Field { .. } = sym.detail else {
@@ -696,7 +696,7 @@ impl FileAnalysis {
             bare: sym.name[1..].to_string(),
             has_param: sym.flags.contains(SymbolFlags::PARAM),
             has_reader: sym.flags.contains(SymbolFlags::READER),
-            reader_kind: MemberKind::Callable,
+            reader_kind: MemberKind::CALLABLE,
         })
     }
 
@@ -1242,7 +1242,7 @@ impl FileAnalysis {
                     Some(RenameKind::Method {
                         name: sym.name.clone(),
                         class,
-                        member: Some(MemberKind::of_sym(sym.kind)),
+                        member: Some(MemberKind::of_symbol(sym)),
                     })
                 }
                 SymKind::Package | SymKind::Class => Some(RenameKind::Package(sym.name.clone())),

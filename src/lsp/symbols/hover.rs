@@ -372,11 +372,11 @@ fn member_hover_on(
     // The ref's family picks the rung: a value read never answers
     // through a method's return.
     let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
-        let sub = recv.and_then(|t| match want {
-            crate::model::file_analysis::MemberKind::Value => {
-                analysis.field_value_type(t, field, Some(midx))
+        let sub = recv.and_then(|t| match want.mode {
+            crate::model::file_analysis::MemberMode::Value => {
+                analysis.field_value_type(t, field, Some(midx), want)
             }
-            crate::model::file_analysis::MemberKind::Callable => {
+            crate::model::file_analysis::MemberMode::Callable => {
                 analysis.member_value_type(t, field, Some(midx), None)
             }
         })?;
@@ -401,7 +401,7 @@ fn member_hover_on(
             return Some(text);
         }
     }
-    if want == crate::model::file_analysis::MemberKind::Callable {
+    if want.mode == crate::model::file_analysis::MemberMode::Callable {
         // A cross-file method shows its declaration: here only when the
         // receiver's arguments refine its return (`T get()` on `Box<int>`),
         // which this section adds under it; otherwise the projection's
@@ -414,7 +414,7 @@ fn member_hover_on(
     // A param-typed field substitutes the same way (`T v_;` on `Box<int>`
     // reads `v_: int`).
     if let Some(sub) =
-        substituted(analysis.field_type_on_class(cn, field, Some(midx)))
+        substituted(analysis.field_type_on_class(cn, field, Some(midx), want))
     {
         return Some(format!(
             "```{}\n{}: {}\n```\n\n*field*",

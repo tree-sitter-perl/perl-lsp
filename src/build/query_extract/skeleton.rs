@@ -48,6 +48,8 @@ pub struct SkelSymbol {
     /// (a receiver parameter). Or-ed onto the flags the kind and the
     /// attributes give.
     pub flags: SymbolFlags,
+    /// The member namespace a `@space.<name>` on the name token states.
+    pub member_space: Option<crate::model::file_analysis::NamespaceId>,
 }
 
 impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
@@ -81,6 +83,9 @@ pub struct SkelRef {
     /// A member call that constructs (`new Foo(…)`): its token spells the
     /// class, not the member it calls.
     pub constructs: bool,
+    /// The member namespaces `@space.<name>` captures on the member token
+    /// state.
+    pub spaces: Option<crate::model::file_analysis::SpaceAsk>,
 }
 
 /// One `@expr.call` site.
@@ -1467,6 +1472,7 @@ impl SkeletonAnalysis {
                             member_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
                             place,
+                            spaces: r.spaces,
                         }
                     }
                     // `recv.f(…)`: the SAME MethodCall ref core resolves for
@@ -1633,6 +1639,7 @@ impl SkeletonAnalysis {
                             member_name_span: *span,
                             member_op: None,
                             place: None,
+                            spaces: None,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),
@@ -2095,6 +2102,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
             a
         },
         flags: symbol_flags_of(s.kind, &s.attributes) | s.flags,
+        member_space: s.member_space,
         declared_with: None,
         deref_stack: s.deref_stack.clone(),
         arity: s.arity,
