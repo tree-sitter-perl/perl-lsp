@@ -1813,3 +1813,13 @@ class A:
          whole to a call end it"
     );
 }
+
+/// A return arm that reads a member no write types is `Unknown`, and
+/// `Unknown` poisons the join: `ev` does not claim `Ref` because one arm
+/// returns `self`.
+#[test]
+fn an_untyped_member_read_poisons_a_return_join() {
+    let src = "class Ref:\n    def __init__(self, f):\n        self.v = f()\n\n    def ev(self, x):\n        if x:\n            return self\n        return self.v\n\n\nr = Ref(len).ev(1)\n";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("r", Point { row: 11, column: 0 }), Some(InferredType::Unknown));
+}

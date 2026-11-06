@@ -30,6 +30,10 @@ fn an_assignment_is_worth_the_value_it_stores() {
         "my $s; return $s //= Bar->new;",
         "my $s = 1; return $s &&= Bar->new;",
         "my $h = shift; return $h->{k} = Bar->new;",
+        // The memoized accessor reads the member it writes: a cycle, not an
+        // untyped member.
+        "my $self = shift; return $self->{k} ||= Bar->new;",
+        "my $self = shift; my $o = $self->{k} //= Bar->new; return $o;",
         "return cache->{k} ||= Bar->new;",
         "return cache->{k} //= Bar->new;",
         "cache->{k} ||= Bar->new",
