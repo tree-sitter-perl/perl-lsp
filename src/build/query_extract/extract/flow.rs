@@ -420,18 +420,20 @@ pub(super) fn finish(st: &mut ExtractState) {
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
-    // A member declaration's facts land on the member, keyed by the token
-    // that wrote them; `into_file_analysis` lowers each to its declaring
-    // symbol's place. Its owner is the class its scope names, the one the
-    // declaring symbol is filed under (`defs::handle`).
-    let mut member_decls: HashMap<(ScopeId, Point), WitnessAttachment> = HashMap::new();
+    // A member declaration's facts are its declaring token's
+    // (`SkeletonAnalysis::member_decl_facts`): `into_file_analysis` lowers
+    // them to the place of the symbol that token declares. Their fallback
+    // attachment is the member, owned by the class its scope names — the one
+    // the declaring symbol is filed under (`defs::handle`).
+    let mut member_decls: HashMap<(ScopeId, Point), (ScopeId, Point, String, WitnessAttachment)> = HashMap::new();
     for (mid, Target { name, at, resets, token, relative, space, .. }, scope) in targets {
         let owner = classes.class_of(*scope).filter(|_| field_scope_span.contains_key(&(name.clone(), *scope)));
+        let decl = owner.is_some().then(|| (*scope, *token, name.clone()));
         let var = match owner {
             Some(owner) => {
                 let space = st.pack.member_spaces.of_decl(crate::model::file_analysis::SymKind::Field, *space);
                 let att = WitnessAttachment::holds_of(owner, space, name.clone());
-                member_decls.insert((*scope, *at), att.clone());
+                member_decls.insert((*scope, *at), (*scope, *token, name.clone(), att.clone()));
                 att
             }
             _ => WitnessAttachment::Variable { name: name.clone(), scope: *scope },
@@ -469,12 +471,16 @@ pub(super) fn finish(st: &mut ExtractState) {
                 None => None,
             };
             if let Some(payload) = payload {
-                out.witnesses.push(Witness {
+                let w = Witness {
                     attachment: var.clone(),
                     source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
                     payload,
                     span: annot_span,
-                });
+                };
+                match decl {
+                    Some((scope, token, name)) => out.member_decl_facts.push((scope, token, name, w)),
+                    None => out.witnesses.push(w),
+                }
             }
         }
         if let Some(target_span) = source_value_span(ad, mid) {
@@ -533,10 +539,13 @@ pub(super) fn finish(st: &mut ExtractState) {
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
         if let Some(mut w) = fe.lower_to_witness() {
-            if let Some(att) = member_decls.get(&(fe.target_scope, fe.target_at)) {
-                w.attachment = att.clone();
+            match member_decls.get(&(fe.target_scope, fe.target_at)) {
+                Some((scope, token, name, att)) => {
+                    w.attachment = att.clone();
+                    out.member_decl_facts.push((*scope, *token, name.clone(), w));
+                }
+                None => out.witnesses.push(w),
             }
-            out.witnesses.push(w);
         }
     }
 }

@@ -3094,6 +3094,64 @@ fn a_partial_specs_members_are_owned_by_the_class_its_scope_names() {
     assert_eq!(fa.expr_type_at_span(read, None), Some(crate::model::file_analysis::InferredType::Numeric));
 }
 
+/// Two declarations of one member (`#if` arms) are two symbols, and each
+/// keeps the facts its own token declared: neither place takes the other's
+/// type, whichever is declared last.
+#[test]
+fn each_declaration_of_a_member_keeps_its_own_facts() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+    let src = "class H {\n#if A\n  int v_;\n#else\n  bool v_;\n#endif\n};\n";
+    let fa = cpp_skel(src).into_file_analysis();
+    let declared: Vec<Vec<crate::model::file_analysis::InferredType>> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "v_")
+        .map(|s| {
+            fa.witnesses
+                .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
+                .iter()
+                .filter_map(|w| match &w.payload {
+                    WP::InferredType(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    use crate::model::file_analysis::InferredType as T;
+    assert_eq!(declared, vec![vec![T::Numeric], vec![T::Bool]]);
+}
+
+/// A macro's expansion declares several members at its one call-site token
+/// (remapping lands each expanded name on the call), and each still keeps
+/// the facts its own name declared.
+#[test]
+fn members_declared_at_one_token_keep_their_own_facts() {
+    use crate::model::file_analysis::InferredType as T;
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+    let src = "class H {\n  int a;\n  bool c;\n};\n";
+    let mut skel = cpp_skel(src);
+    let call = tree_sitter::Point { row: 1, column: 2 };
+    for s in skel.symbols.iter_mut().filter(|s| s.name == "a" || s.name == "c") {
+        s.name_start = call;
+    }
+    for fact in skel.member_decl_facts.iter_mut() {
+        fact.1 = call;
+    }
+    let fa = skel.into_file_analysis();
+    let declared = |n: &str| -> Vec<T> {
+        let s = fa.symbols().iter().find(|s| s.name == n).unwrap();
+        fa.witnesses
+            .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WP::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!((declared("a"), declared("c")), (vec![T::Numeric], vec![T::Bool]));
+}
+
 /// F8: an out-of-line method whose owning class is declared in a HEADER (absent
 /// here) is NOT a truncation fall-through — the `::` qualifier is authoritative,
 /// so re-anchoring must leave `RE2::Init`'s package as `RE2`, not upgrade it to

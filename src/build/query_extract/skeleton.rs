@@ -162,6 +162,12 @@ pub struct SkeletonAnalysis {
     /// slot's value edge: a type that mentions its class's template
     /// parameters substitutes the receiver's arguments.
     pub field_types: Vec<(String, crate::model::file_analysis::ScopeId, InferredType)>,
+    /// A data member's declaration facts (its annotation, its initializer),
+    /// each with the scope, token and name that declare it, attached to the member
+    /// until `into_file_analysis` lowers it to the place of the symbol that
+    /// token declares — so two declarations of one member (`#if` arms, one
+    /// struct name defined in two function bodies) keep their own facts.
+    pub member_decl_facts: Vec<(crate::model::file_analysis::ScopeId, Point, String, crate::model::witnesses::Witness)>,
     /// Variable reads (`@expr.read.var`): (name, scope, span). Each resolves
     /// to the nearest visible Variable declaration by lexical scope walk →
     /// local goto-def + hover. Resolution runs in `into_file_analysis`.
@@ -994,22 +1000,21 @@ impl SkeletonAnalysis {
                 )))
             };
             let member_spaces = crate::model::conventions::member_spaces_for(self.language);
-            let declared: std::collections::HashMap<WA, WA> = symbols
+            // By name too: a macro's expansion declares several members at
+            // the one call-site token.
+            type DeclSite<'a> = (crate::model::file_analysis::ScopeId, Point, &'a str);
+            let declaring: std::collections::HashMap<DeclSite, &Symbol> = symbols
                 .iter()
                 .filter(|s| matches!(s.kind, SymKind::Field))
-                .filter_map(|s| {
-                    let class = s.package.clone()?;
-                    let space = member_spaces.of_decl(s.kind, s.member_space);
-                    Some((WA::holds_of(class, space, s.name.clone()), place_of(s)))
-                })
+                .map(|s| ((s.scope, s.selection_span.start, s.name.as_str()), s))
                 .collect();
-            // A member declaration's own facts (its annotation, its
-            // initializer) were minted on its identity; they are its place's.
-            bag.rewrite(|w| {
-                if let Some(place) = declared.get(&w.attachment) {
-                    w.attachment = place.clone();
+            // A member declaration's own facts are its declaring symbol's place's.
+            for (scope, token, name, mut w) in std::mem::take(&mut self.member_decl_facts) {
+                if let Some(sym) = declaring.get(&(scope, token, name.as_str())) {
+                    w.attachment = place_of(sym);
                 }
-            });
+                bag.push(w);
+            }
             for sym in symbols.iter().filter(|s| matches!(s.kind, SymKind::Field)) {
                 let Some(class) = &sym.package else { continue };
                 let deferred = field_types
