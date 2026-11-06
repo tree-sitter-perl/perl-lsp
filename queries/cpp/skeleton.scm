@@ -966,7 +966,7 @@
 ; analysis this tier lacks, so parameter moves are not flagged (gate E).
 (parameter_list) @param.region
 
-; A guard narrows the arm it enters, tagged `@narrow.arm`: an `if`'s
+; A guard narrows the arm it enters, tagged `@narrow.then`: an `if`'s
 ; consequence, a ternary's consequence, the right of `&&`. The pack's
 ; narrow_guard maps the guard to the refinement; core attaches it in the
 ; guard's scope over the arm, and the edge-driven cutoff ends it at any rebind.
@@ -981,7 +981,7 @@
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list [(identifier) (field_expression)] @narrow.var)))
-  consequence: (_) @narrow.arm)
+  consequence: (_) @narrow.then)
 (conditional_expression
   condition: (call_expression
     function: (template_function
@@ -989,7 +989,7 @@
       arguments: (template_argument_list
         (type_descriptor type: (type_identifier) @narrow.type)))
     arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
-  consequence: (_) @narrow.arm)
+  consequence: (_) @narrow.then)
 (binary_expression
   left: (call_expression
     function: (template_function
@@ -998,7 +998,7 @@
         (type_descriptor type: (type_identifier) @narrow.type)))
     arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
   operator: "&&"
-  right: (_) @narrow.arm)
+  right: (_) @narrow.then)
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
 ; engaged proves it HOLDS a T inside the arm, so `opt->m` / `*opt` resolve on
@@ -1012,34 +1012,34 @@
 ; checks the one-token hook can't express, so it's left out.
 (if_statement
   condition: (condition_clause value: (identifier) @narrow.var)
-  consequence: (_) @narrow.arm)
+  consequence: (_) @narrow.then)
 (conditional_expression
   condition: (identifier) @narrow.var
-  consequence: (_) @narrow.arm)
+  consequence: (_) @narrow.then)
 (binary_expression
   left: (identifier) @narrow.var
   operator: "&&"
-  right: (_) @narrow.arm)
+  right: (_) @narrow.then)
 (if_statement
   condition: (condition_clause
     value: (call_expression
       function: (field_expression
         argument: (identifier) @narrow.var
         field: (field_identifier) @narrow.guard)))
-  consequence: (_) @narrow.arm)
+  consequence: (_) @narrow.then)
 (conditional_expression
   condition: (call_expression
     function: (field_expression
       argument: (identifier) @narrow.var
       field: (field_identifier) @narrow.guard))
-  consequence: (_) @narrow.arm)
+  consequence: (_) @narrow.then)
 (binary_expression
   left: (call_expression
     function: (field_expression
       argument: (identifier) @narrow.var
       field: (field_identifier) @narrow.guard))
   operator: "&&"
-  right: (_) @narrow.arm)
+  right: (_) @narrow.then)
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

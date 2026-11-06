@@ -2149,7 +2149,7 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
 #[test]
 fn a_pack_guard_narrows_every_arm_it_enters() {
     // One region rule for every pack guard: the arm the pattern tags
-    // `@narrow.arm`, whatever construct holds it, and nothing outside it.
+    // `@narrow.then`, whatever construct holds it, and nothing outside it.
     let src = "\
 void f(Base* b, std::optional<Widget> o) {
     if (o) return o->run();
