@@ -884,7 +884,7 @@ has 'db' => (is => 'ro', isa => 'DBI::db', handles => [qw(prepare execute)]);
 #[test]
 fn test_moo_has_handles_instanceof_edges_return_type() {
     // When isa is InstanceOf['X'], handles delegation edges each local
-    // method's return through PackageSymbol{X, remote} so type inference
+    // method's return through Member{X, remote} so type inference
     // chains through.
     let fa = build_fa(
         "

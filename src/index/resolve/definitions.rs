@@ -922,7 +922,7 @@ impl<'a> CandidateSet<'a> {
             // through the index, walking the family the use's syntax names.
             if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
-                let namespace = &analysis.names().member_spaces;
+                let namespace = analysis.member_spaces();
                 // A union receiver dispatches on every arm: each arm's
                 // definition is offered.
                 let mut found: Vec<RefLocation> = Vec::new();
@@ -968,14 +968,18 @@ impl<'a> CandidateSet<'a> {
                                 // view carries it — no per-query enrichment.
                                 let whole = idx.whole_present(&cached);
                                 // A stored member of the class: a data field or
-                                // an enum constant, not a sub.
+                                // an enum constant, not a sub. Legal namespaces
+                                // first, the illegal ones only as the fallback,
+                                // as the resolution itself walks.
                                 let stored_member = || {
-                                    whole.symbols().iter().find(|s| {
-                                        want.admits_decl(s.kind, s.member_space, namespace)
-                                            && MemberKind::of_symbol(s).mode == MemberMode::Value
-                                            && s.name == method
-                                            && s.package.as_deref() == Some(class.as_str())
-                                            && whole.symbol_is_class_content(s)
+                                    std::iter::once(want.legal()).chain(want.illegal_only()).find_map(|ask| {
+                                        whole.symbols().iter().find(|s| {
+                                            ask.admits_decl(s.kind, s.member_space, namespace)
+                                                && MemberKind::of_symbol(s).mode == MemberMode::Value
+                                                && s.name == method
+                                                && s.package.as_deref() == Some(class.as_str())
+                                                && whole.symbol_is_class_content(s)
+                                        })
                                     })
                                 };
                                 let stored_loc = |sym: &crate::model::file_analysis::Symbol| {

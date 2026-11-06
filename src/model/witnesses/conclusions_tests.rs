@@ -117,7 +117,7 @@ fn a_receiver_dependent_answer_is_never_baked_as_a_constant() {
     );
     let mut saw_accessor = false;
     for (key, c) in map.0.iter() {
-        let ConclusionKey::MethodOnClass { class, name } = key else { continue };
+        let ConclusionKey::Member { owner: class, name, aspect: crate::model::witnesses::MemberAspect::Returns, .. } = key else { continue };
         if class != "R" || name != "new" {
             continue;
         }
@@ -209,10 +209,7 @@ fn m(entries: Vec<(ConclusionKey, Conclusion)>) -> Arc<ConclusionMap> {
 }
 
 fn moc(class: &str, name: &str) -> ConclusionKey {
-    ConclusionKey::MethodOnClass {
-        class: class.into(),
-        name: name.into(),
-    }
+    ConclusionKey::returns_of(class, name)
 }
 
 /// A `Link` chain resolves to the answer at its end, with no bag decoded.
@@ -253,7 +250,12 @@ fn a_link_chain_resolves_to_the_answer_at_its_end() {
 /// `SubByName` (no class to name files by) degrades to the decode.
 #[test]
 fn a_field_link_resolves_through_the_class_ladder() {
-    let field = |owner: &str| ConclusionKey::Field { owner: owner.into(), name: "k".into() };
+    let field = |owner: &str| ConclusionKey::Member {
+        owner: owner.into(),
+        space: crate::model::file_analysis::MemberSpaces::PER_FAMILY.values,
+        name: "k".into(),
+        aspect: crate::model::witnesses::MemberAspect::Holds,
+    };
     let a = m(vec![(
         field("A"),
         Conclusion::Link {
@@ -432,11 +434,10 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
         lattice: crate::model::conventions::lattice_for(&fa.language),
+
+        member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
     };
-    let att = WitnessAttachment::PackageSymbol {
-        package: class.to_string(),
-        name: name.to_string(),
-    };
+    let att = WitnessAttachment::returns_of(class.to_string(), name.to_string());
     let _bake = BakeScope::enter();
     let _ = registry.query(
         &fa.witnesses,
@@ -509,7 +510,7 @@ fn a_parent_walk_exit_is_still_residualized() {
     assert!(
         residuals.as_deref().is_some_and(|r| r.iter().any(|k| matches!(
             k,
-            ConclusionKey::MethodOnClass { class, name }
+            ConclusionKey::Member { owner: class, name, aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                 if class == "Elsewhere::Base" && name == "inherited"
         ))),
         "a parent rung was not recorded; got {residuals:?} — with this failing, \

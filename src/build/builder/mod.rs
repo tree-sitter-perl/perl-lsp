@@ -498,7 +498,7 @@ struct Builder<'a> {
     meta_methods: Vec<String>,
 
     /// Plugin `app_surface_consumers()` manifest union, flattened once.
-    /// Threaded into `BagContext` so the build-time `PackageSymbol`
+    /// Threaded into `BagContext` so the build-time `Member`
     /// inheritance walk injects the synthetic app-surface parent the same
     /// way the query-time walks do (`file_analysis::parents_of`).
     app_surface_consumers: Vec<String>,
@@ -660,7 +660,7 @@ struct Builder<'a> {
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading
     /// targets. `emit_method_call_return_edges` consults this set
-    /// and skips publishing its standard `Edge(PackageSymbol)` for
+    /// and skips publishing its standard `Edge(Member)` for
     /// these refs, so the Parametric isn't masked by the receiver
     /// class's plain return-type entry. **Build-only**, like
     /// `method_call_invocant`.

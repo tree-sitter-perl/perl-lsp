@@ -7,10 +7,7 @@ fn surface(v: &[(&str, &str)]) -> EvaluatedSurface {
         v.iter()
             .map(|(name, ty)| {
                 (
-                    ConclusionKey::MethodOnClass {
-                        class: "K".into(),
-                        name: (*name).into(),
-                    },
+                    ConclusionKey::returns_of("K", *name),
                     EvaluatedAnswer::Answer(InferredType::ClassName((*ty).into())),
                 )
             })

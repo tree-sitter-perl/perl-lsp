@@ -223,6 +223,8 @@ struct MemberRead {
     receiver: Span,
     member: String,
     token: Span,
+    /// The namespaces the member may live in (`@space.*` on its token).
+    spaces: crate::model::file_analysis::SpaceAsk,
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`

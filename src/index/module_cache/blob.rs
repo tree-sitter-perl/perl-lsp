@@ -305,6 +305,8 @@ pub fn bake_conclusion_map(
             package_parents: &fa.packages,
             app_surface_consumers: &fa.plugin.app_surface_consumers,
             lattice: crate::model::conventions::lattice_for(&fa.language),
+
+            member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
         };
         let map = crate::model::witnesses::bake_in_context(
             &bag,
@@ -1155,6 +1157,8 @@ mod bake_probe {
                 package_parents: &fa.packages,
                 app_surface_consumers: &fa.plugin.app_surface_consumers,
                 lattice: crate::model::conventions::lattice_for(&fa.language),
+
+                member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
             };
             let map = crate::model::witnesses::bake_in_context(
                 &fa.witnesses,

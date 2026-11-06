@@ -126,10 +126,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
     use crate::model::witnesses::{
         BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
     };
-    let att = WitnessAttachment::Field {
-        owner: class.to_string(),
-        name: key.to_string(),
-    };
+    let att = WitnessAttachment::holds_of(class.to_string(), crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, key.to_string());
     let ctx = BagContext {
         scopes: &fa.scopes,
         symbols: fa.symbols(),
@@ -138,6 +135,8 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
         lattice: crate::model::conventions::lattice_for(&fa.language),
+
+        member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
     };
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,

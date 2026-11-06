@@ -11,7 +11,7 @@ use crate::model::witnesses::{Conclusion, ConclusionKey, ReceiverRule};
 use std::collections::{BTreeMap, HashMap};
 
 fn key(class: &str, name: &str) -> ConclusionKey {
-    ConclusionKey::MethodOnClass { class: class.into(), name: name.into() }
+    ConclusionKey::returns_of(class, name)
 }
 
 /// A map holding one key, with `class` enumerated so absence elsewhere in it

@@ -106,12 +106,12 @@ impl FileAnalysis {
 
     /// Find a method's return type within a class/package, walking
     /// inheritance. Thin wrapper that queries the bag's class-keyed
-    /// `PackageSymbol{package, method}` attachment with the caller's
+    /// `Member{package, method}` attachment with the caller's
     /// `arg_count` as arity hint. Inheritance composes through
     /// `package_parents` (carried in `BagContext`); cross-file
     /// classes resolve via `module_index`. No procedural ancestor
     /// walk; no procedural overload picking — the registry's
-    /// `ReturnExprReducer` claims `PackageSymbol + ReturnExpr` and
+    /// `ReturnExprReducer` claims `Member + ReturnExpr` and
     /// the structural-walk code in `query_rec` handles MRO.
     pub(crate) fn find_method_return_type(
         &self,
@@ -138,7 +138,7 @@ impl FileAnalysis {
     }
 
     /// `find_method_return_type` with the receiver's FULL value threaded
-    /// into the `PackageSymbol` query — the receiver-relative shapes
+    /// into the `Member` query — the receiver-relative shapes
     /// (`ReturnExpr::Receiver`, `Operator(RowOf/ParamOf)`) substitute the
     /// rich value (`Parametric(Instance { args })`) rather than a bare
     /// class projection. Callers with a value in hand pass it here (via
@@ -157,10 +157,7 @@ impl FileAnalysis {
             WitnessAttachment,
         };
         let framework = self.package_framework(class_name).unwrap_or(FrameworkFact::Plain);
-        let att = WitnessAttachment::PackageSymbol {
-            package: class_name.to_string(),
-            name: method_name.to_string(),
-        };
+        let att = WitnessAttachment::returns_of(class_name.to_string(), method_name.to_string());
         let ctx = self.bag_context(module_index);
         let q = ReducerQuery {
             attachment: &att,
@@ -544,23 +541,28 @@ impl FileAnalysis {
                 if MemberKind::of_symbol(sym).mode != MemberMode::Value {
                     return None;
                 }
-                self.inferred_type_via_bag(field, sym.span.end)
+                self.subject_type_at(&self.declared_place(sym_id), sym.span.end, module_index)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
                 // Whichever of `class`'s candidate files holds the field.
                 // The field's type lives in the OWNING file's bag; the symbol
                 // scan needs symbols too; take the whole view.
-                idx.visible_def_candidates(&class).iter().find_map(|cached| {
-                    let full = idx.whole_present(cached);
-                    let sym = full.symbols.iter().find(|s| {
-                        matches!(s.kind, SymKind::Variable | SymKind::Field)
-                            && want.admits_decl(s.kind, s.member_space, &full.names().member_spaces)
-                            && s.name == field
-                            && s.package.as_deref() == Some(class.as_str())
-                            && full.symbol_is_class_content(s)
-                    })?;
-                    full.inferred_type_via_bag(field, sym.span.end)
+                // Legal namespaces first, the illegal ones only as the
+                // fallback, as the resolution walks.
+                let candidates = idx.visible_def_candidates(&class);
+                std::iter::once(want.legal()).chain(want.illegal_only()).find_map(|ask| {
+                    candidates.iter().find_map(|cached| {
+                        let full = idx.whole_present(cached);
+                        let sym = full.symbols.iter().find(|s| {
+                            matches!(s.kind, SymKind::Variable | SymKind::Field)
+                                && ask.admits_decl(s.kind, s.member_space, full.member_spaces())
+                                && s.name == field
+                                && s.package.as_deref() == Some(class.as_str())
+                                && full.symbol_is_class_content(s)
+                        })?;
+                        full.subject_type_at(&full.declared_place(sym.id), sym.span.end, None)
+                    })
                 })
             }
         }
@@ -760,7 +762,7 @@ impl FileAnalysis {
             | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => class.to_string(),
         };
-        crate::model::witnesses::WitnessAttachment::Field { owner, name: name.to_string() }
+        crate::model::witnesses::WitnessAttachment::holds_of(owner, self.member_spaces().values, name.to_string())
     }
 
     /// Route a field ACCESS ref — in any of Perl's varied forms — onto its
@@ -827,7 +829,7 @@ impl FileAnalysis {
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<NominalDomain> {
-        let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
+        let crate::model::witnesses::WitnessAttachment::Member { owner, aspect: crate::model::witnesses::MemberAspect::Holds, .. } =
             self.field_subject(class, field, module_index)
         else {
             return None;
@@ -860,7 +862,7 @@ impl FileAnalysis {
             domain_coherence, ReducedValue, ReducerQuery, ReducerRegistry, Witness,
             WitnessAttachment, WitnessBag, WitnessPayload, WitnessSource,
         };
-        let att = WitnessAttachment::Field { owner: owner.to_string(), name: field.to_string() };
+        let att = WitnessAttachment::holds_of(owner.to_string(), self.member_spaces().values, field.to_string());
         let mut bag = WitnessBag::new();
         for site in &self.pack.domain_sites {
             if site.slot != field {
@@ -924,7 +926,7 @@ impl FileAnalysis {
         // A site votes for one subject; a union receiver names several.
         let classes = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
         let class = classes.single()?;
-        let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
+        let crate::model::witnesses::WitnessAttachment::Member { owner, aspect: crate::model::witnesses::MemberAspect::Holds, .. } =
             self.field_subject(class, &site.slot, module_index)
         else {
             return None;

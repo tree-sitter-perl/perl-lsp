@@ -9,6 +9,7 @@ pub fn perl_pack() -> LangPack {
         names: crate::model::conventions::PERL_SPELLINGS,
         functions: FunctionLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
+        member_spaces: crate::model::conventions::PERL_CONVENTIONS.member_spaces.clone(),
         lattice: crate::model::conventions::PERL_CONVENTIONS.lattice.clone(),
         type_display: |_| None,
         // The builder stores variable symbols WITH sigil. Nothing to

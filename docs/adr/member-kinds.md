@@ -22,22 +22,36 @@ registry partitions on, and no per-pack strictness flag.
   match). The value pattern excludes the callee with
   `#not-has-parent? call_expression` (`capture-vocabulary.md`), so the
   two never fire at one token.
-- **Attachment.** A field's value edge is `Field{owner, name} →
-  Edge(Variable{decl})`, pushed per field declaration by the pack
-  extractor. `Field{owner, name}` is the storage slot's project-wide
-  subject that the domain fold already keyed (`field-projections.md`);
-  the value rides the same subject. A read (`@expr.member`) is
-  `Expr(read) → Projected{Expr(receiver), ValueHop{member}}`, which chases
-  `Field{class, member}`; a call is an `Invoke` that dispatches
-  `PackageSymbol{class, member}` (`calls-are-invokes.md`). A field whose
-  declared type mentions its class's template parameters pushes the
-  deferred `ReturnExpr` instead of the edge, so the hop's receiver
-  substitutes them (`item_: T` read on a `Box<int>` is `int`). The
-  registry's `Field` fallback walks the owner's candidate
-  files and parents exactly as the `PackageSymbol` ladder does (no bridge
-  hop — a plugin entity is a callable). `FieldValueReducer` answers the
-  materialized value and is registered ahead of `DomainCoherenceFold`, so
-  the defeasible domain never becomes the type that flows.
+- **Attachment.** A member's identity is `Member{owner, space, name}`:
+  the declaring class, the namespace, the name. Every class-owned fact
+  keys by it, never by a spelling, so php's `const X`, `$X` and `X()` are
+  three identities. One identity is asked one of two questions, its
+  `aspect`: `Returns` (what calling it yields: a method's return, the
+  dispatch ladder) and `Holds` (the value stored in it: a data member's
+  value, a slot's writes, the domain vote). They are separate questions
+  because a value read must not answer with a call's result: python's
+  `obj.m` is the bound method, not `m()`. Identities are strings, not
+  symbol ids, because a `SymbolId` means nothing outside its file and the
+  ladder crosses files.
+  A member declaration's own facts (its declared type, its initializer)
+  are minted on its identity, then lowered to the declaring symbol's place,
+  so two members of one name in one class never meet at a name-keyed
+  binding. The identity edges to that place class-wide. A read
+  (`@expr.member`) is `Expr(read) → Projected{Expr(receiver),
+  ValueHop{member, spaces}}`, which asks `Holds` of each namespace the
+  site searches, legal ones first; a call is an `Invoke` that asks
+  `Returns` (`calls-are-invokes.md`). A member a class holds but cannot
+  type answers `Unknown`, so it still shadows a parent's member of the
+  same name and stops the namespace walk: an untyped legal member is the
+  one the read reaches, never a typed illegal one. A field whose declared
+  type mentions its class's template parameters pushes the deferred
+  `ReturnExpr` instead of the edge, so the hop's receiver substitutes them
+  (`item_: T` read on a `Box<int>` is `int`). The registry's class ladder
+  walks the owner's candidate files and parents for either aspect (the
+  bridge hop only for `Returns`: a plugin entity is a callable).
+  `FieldValueReducer` answers `Holds` and is registered ahead of
+  `DomainCoherenceFold`, so the defeasible domain never becomes the type
+  that flows.
 - **Walk.** `resolve_method_in_ancestors` asks for a `Callable`,
   `resolve_field_in_ancestors` for a `Value`; both are the one MRO walk,
   and which declarations answer is the site's namespace set against the
@@ -65,7 +79,7 @@ So a `@def.field` is filed at the innermost scope that is not a callable's
 body. The member's name token is also the `@flow.target` of its declared
 type, and a target that is a def's own name token binds where that def
 does, so the `Variable` lands at that same scope.
-The `Field{owner, name}` edge then reaches it class-wide, the outline lists
+The `Member{owner, space, name}` edge then reaches it class-wide, the outline lists
 it under the class rather than under the constructor, and no consumer
 reasons about where the token sat.
 
@@ -83,8 +97,9 @@ reads them; nothing branches on a language. Core holds a namespace only
 as an opaque `NamespaceId` and compares sets of them (`SpaceSet`); the
 language owns the closed enum that names them (PHP's `PhpSpace`), so a
 language crate split moves the enum with the language and core never
-learns its members. The table (`MemberSpaces`) is declared on the
-language's `NameSpellings`. A call lands in
+learns its members. The table (`MemberSpaces`) lives on the language's
+conventions (`member_spaces_for`, `FileAnalysis::member_spaces`): it is a
+per-language constant, not a per-file fact (rule #14). A call lands in
 namespace 0 (`NamespaceId::CALLABLES`) unless its site says otherwise.
 
 - **`PER_FAMILY`** (Perl, and the neutral default): `callable` and
@@ -145,7 +160,7 @@ sub (assignable like a field: `$o->name = 'x'`) is the one Perl
 declaration whose members ARE value slots. That is the open note: an
 `:lvalue` sub is a `Sub` symbol today, and its write sites are plain
 `MethodCall` refs with no write access classification. Minting it as a
-member with a value edge (`Field{owner, name}` alongside the `Symbol`) is
+member with a value edge (a `Member` Holds identity alongside the `Symbol`) is
 the producer-side fact that would make `$o->name = ...` a write in
 `documentHighlight` and references, and it needs nothing from this ADR's
 seams beyond the extractor's attribute walk (`SymbolFlags`).

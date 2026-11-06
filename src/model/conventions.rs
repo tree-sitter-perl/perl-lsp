@@ -31,8 +31,6 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed(PERL_ROOT_PACKAGE)),
-    // A call reaches a sub, never a `field` of the same name.
-    member_spaces: MemberSpaces::PER_FAMILY,
     imports: NameSpellings::NONE.imports,
     // `Foo()` calls a sub; construction is `Foo->new`.
     class_call: crate::model::file_analysis::ClassCall::FunctionCall,
@@ -60,6 +58,9 @@ pub struct LanguageConventions {
     type_display: fn(&str) -> Option<&'static str>,
     /// What a construction's reference to its constructor is keyed by.
     pub construction: ConstructionKey,
+    /// The namespaces its classes hold their members in
+    /// (`docs/adr/member-kinds.md`).
+    pub member_spaces: crate::model::file_analysis::MemberSpaces,
 }
 
 impl LanguageConventions {
@@ -70,8 +71,9 @@ impl LanguageConventions {
         lattice: LatticeRules,
         type_display: fn(&str) -> Option<&'static str>,
         construction: ConstructionKey,
+        member_spaces: crate::model::file_analysis::MemberSpaces,
     ) -> Self {
-        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction }
+        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction, member_spaces }
     }
 
     /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
@@ -105,6 +107,8 @@ pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     type_display: engine_type_words,
     // `Foo->new` calls its constructor by name.
     construction: ConstructionKey::Constructor,
+    // A call reaches a sub, never a `field` of the same name.
+    member_spaces: MemberSpaces::PER_FAMILY,
 };
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
@@ -143,6 +147,7 @@ static UNREGISTERED: LanguageConventions =
         special_variable: no_special_variable,
         type_display: engine_type_words,
         construction: ConstructionKey::Constructor,
+        member_spaces: MemberSpaces::PER_FAMILY,
     };
 
 fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {
@@ -154,6 +159,11 @@ fn registered_conventions(language: &str) -> Option<&'static LanguageConventions
         .map_while(|slot| slot.get())
         .find(|(id, _)| *id == language)
         .map(|(_, conventions)| conventions)
+}
+
+/// The member namespaces of the language an analysis was built in.
+pub fn member_spaces_for(language: &str) -> &'static crate::model::file_analysis::MemberSpaces {
+    &conventions_of(language).member_spaces
 }
 
 /// The subsumption rules of the language an analysis was built in.
@@ -719,7 +729,6 @@ mod tests {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
-            member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
             imports: NameSpellings::NONE.imports,
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,

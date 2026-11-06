@@ -48,7 +48,7 @@ pub fn app_surface_parent(class: &str, consumers: &[String]) -> Option<String> {
 
 /// The full parent enumeration: real ancestors ∪ the synthetic
 /// app-surface edge. Every direct parent-enumeration site
-/// (`collect_ancestor_methods`, the `PackageSymbol` inheritance walk in
+/// (`collect_ancestor_methods`, the `Member` inheritance walk in
 /// `witnesses/`) routes through here so they can't drift; graph walks
 /// compose the same two spellers per edge kind. Real ancestors come
 /// first; the surface is appended last so same-name overrides on a real
@@ -595,7 +595,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
-        let namespace = &self.names().member_spaces;
+        let namespace = self.member_spaces();
         // A callable-only arm (plugin entities, typeglob installs, bridges)
         // answers only an ask that reaches callables.
         let reaches_callables = want.admits_decl(SymKind::Sub, None, namespace);
@@ -879,7 +879,7 @@ impl FileAnalysis {
         // instance `__dict__`, then the class.
         let slot_name = member.name().filter(|_| {
             self.names().instance_slots == InstanceSlots::BeforeClass
-                && want.admits_decl(SymKind::HashKeyDef, None, &self.names().member_spaces)
+                && want.admits_decl(SymKind::HashKeyDef, None, self.member_spaces())
         });
         if let Some(method_name) = slot_name {
             let mut slot: Option<MethodResolution> = None;

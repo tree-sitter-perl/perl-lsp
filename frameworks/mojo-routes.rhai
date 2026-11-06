@@ -73,7 +73,7 @@ fn triggers() {
 // engine doesn't model — so without these the receiver loses its Route
 // type after the first hop and a partial `->to('#action')` never gets a
 // brand to inherit from. `apply_type_overrides` publishes each as a
-// package-keyed `PackageSymbol` fact, so the chain types even when
+// class-keyed `Member` fact, so the chain types even when
 // Mojolicious isn't indexed (rule #8: the framework plugin owns the
 // rule; core dispatches it generically — no verb name-allowlist in core,
 // rule #10). `routes` on the app/controller surface hands back the root

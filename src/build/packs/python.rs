@@ -28,7 +28,6 @@ pub fn python_pack() -> LangPack {
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(".")),
             class_spelling: ClassSpelling::UseMap,
-            member_spaces: MemberSpaces::SHARED,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
             class_call: ClassCall::Constructs,
             instance_slots: InstanceSlots::BeforeClass,
@@ -36,6 +35,8 @@ pub fn python_pack() -> LangPack {
         },
         functions: FunctionLookup::Global,
         construction: ConstructionKey::Class,
+        // One member namespace (see `names`).
+        member_spaces: MemberSpaces::SHARED,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
         type_display: |_| None,

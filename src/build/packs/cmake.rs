@@ -10,6 +10,7 @@ pub fn cmake_pack() -> LangPack {
         names: NameSpellings::NONE,
         functions: FunctionLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
+        member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
         type_display: |_| None,
         shape_name: |raw| raw.to_string(),

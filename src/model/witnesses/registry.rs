@@ -8,7 +8,7 @@ use super::*;
 /// Cycle guard + result memo key for recursive bag queries, keyed by
 /// `(bag_ptr, attachment, receiver_identity, arity_hint)`. Per-bag
 /// entries stay separate so a legitimate cross-bag query for the same
-/// attachment (the common `PackageSymbol{C, m}` jump into C's own bag)
+/// attachment (the common `Member{C, m}` jump into C's own bag)
 /// isn't misread as a cycle. The receiver **identity** + arity hint
 /// widen the key so two queries differing only in `receiver` /
 /// `arity_hint` aren't treated as duplicates — `UnionOnArgs` and
@@ -20,7 +20,7 @@ use super::*;
 /// resolve to different classes; a variant-only discriminant collapses
 /// them to one memo key and the memo hands Foo's answer to Bar (silent
 /// wrong type). A same-receiver diamond (the inheritance walk holds
-/// `q.receiver` constant within one `PackageSymbol` query) still hashes
+/// `q.receiver` constant within one `Member` query) still hashes
 /// to one key, so memoization still kills the exponential re-chase.
 ///
 /// A `Variable` is temporal — its reducer answers AT `q.point` — so its key
@@ -74,34 +74,25 @@ struct ClassLadder<'a> {
 impl<'a> ClassLadder<'a> {
     fn of(att: &'a WitnessAttachment) -> Option<ClassLadder<'a>> {
         Some(match att {
-            WitnessAttachment::PackageSymbol { package, name } => ClassLadder {
-                owner: package,
-                rows_member: Some((name, true)),
-                callable: Some(name),
-                rekey: Some(|att, p| match att {
-                    WitnessAttachment::PackageSymbol { name, .. } => {
-                        WitnessAttachment::PackageSymbol { package: p, name: name.clone() }
-                    }
-                    _ => unreachable!("rekey is minted from its own attachment"),
-                }),
-                rungs_on_parents: true,
-                site: "moc_primary",
-                fetch_tag: "mocsite.primary",
-            },
-            WitnessAttachment::Field { owner, name } => ClassLadder {
-                owner,
-                rows_member: Some((name, false)),
-                callable: None,
-                rekey: Some(|att, p| match att {
-                    WitnessAttachment::Field { name, .. } => {
-                        WitnessAttachment::Field { owner: p, name: name.clone() }
-                    }
-                    _ => unreachable!("rekey is minted from its own attachment"),
-                }),
-                rungs_on_parents: false,
-                site: "field",
-                fetch_tag: "mocsite.field",
-            },
+            WitnessAttachment::Member { owner, name, aspect, .. } => {
+                let returns = *aspect == MemberAspect::Returns;
+                ClassLadder {
+                    owner,
+                    rows_member: Some((name, returns)),
+                    callable: returns.then_some(name.as_str()),
+                    // A parent's member is the same member one class up:
+                    // same namespace, same name, same question.
+                    rekey: Some(|att, p| match att {
+                        WitnessAttachment::Member { space, name, aspect, .. } => {
+                            WitnessAttachment::Member { owner: p, space: *space, name: name.clone(), aspect: *aspect }
+                        }
+                        _ => unreachable!("rekey is minted from its own attachment"),
+                    }),
+                    rungs_on_parents: returns,
+                    site: if returns { "moc_primary" } else { "field" },
+                    fetch_tag: if returns { "mocsite.primary" } else { "mocsite.field" },
+                }
+            }
             WitnessAttachment::Param { package, .. } => ClassLadder {
                 owner: package,
                 rows_member: None,
@@ -505,7 +496,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`PackageSymbol{class, name}` when `attributed`, `Field{owner, name}`
+/// (`Member{class, name}` when `attributed`, `Field{owner, name}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -583,7 +574,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
-/// on `PackageSymbol{package}` (an `Edge` into a class's
+/// on `Member{package}` (an `Edge` into a class's
 /// method): the receiver is that call's invocant, i.e. `class`. A fluent
 /// `ReturnExpr(Receiver)` substitutes the dispatch class.
 ///
@@ -756,9 +747,9 @@ impl ReducerRegistry {
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
-        // PackageSymbol primary-fallback after ReturnExprReducer so
+        // Member primary-fallback after ReturnExprReducer so
         // per-arity declarations win when one matches.
-        r.register(Box::new(PackageSymbolReducer));
+        r.register(Box::new(MemberReturnsReducer));
         // TypeName is a disjoint attachment shape (typedef/using aliases),
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
@@ -820,19 +811,19 @@ impl ReducerRegistry {
     pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
         let mut state = QueryState::new();
         // Is the CONCLUSION LAYER CLOSED for the shape that dominates
-        // cross-file traffic? A `PackageSymbol` answer that never reads an
+        // cross-file traffic? A `Member` answer that never reads an
         // `Expr(span)` witness could be served from stored conclusions; one
         // that does needs the raw derivation, so the bag has to come along.
         // Measured at the top-level query only — inner hops are the thing
         // being counted, not separate questions.
-        let top_moc = matches!(q.attachment, WitnessAttachment::PackageSymbol { .. });
+        let top_moc = matches!(q.attachment, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. });
         if top_moc {
             // Attribution: what share of top-level moc queries are main-keyed?
             // Two buckets, not per-package keys — a script-heavy corpus mints
             // these from every plain call, and the question a fix must answer
             // is main's SHARE, not a cardinality-unbounded census.
             if crate::util::ghost_stats::enabled() {
-                if let WitnessAttachment::PackageSymbol { package, .. } = &q.attachment {
+                if let WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. } = &q.attachment {
                     crate::util::ghost_stats::count(if package == "main" {
                         "mocpkg.main"
                     } else {
@@ -1035,11 +1026,11 @@ impl ReducerRegistry {
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
-        // answer — `PackageSymbol{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
+        // answer — `Member{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
         // `TypeName(T)`: one ladder (`ClassLadder`, `class_fallback`) for
         // all four. Most cases are covered by build-time edge emission
-        // (local writeback emits `PackageSymbol(child, m) →
-        // Edge(PackageSymbol(parent, m))`; enrichment projects the same for
+        // (local writeback emits `Member(child, m) →
+        // Edge(Member(parent, m))`; enrichment projects the same for
         // cross-file parents), resolved by the generic edge-chase; the ladder
         // covers the residual: the class's other files, its ancestry, and
         // plugin-namespace bridges declared elsewhere.
@@ -1060,6 +1051,15 @@ impl ReducerRegistry {
         // nothing named it) rather than silence — silence would read as
         // by-value.
         if matches!(q.attachment, WitnessAttachment::Param { .. })
+            && !bag.for_attachment(q.attachment).is_empty()
+        {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
+        // A member this class holds: its own witnesses (a declaration, a
+        // write) are present but untyped, so the member EXISTS here and
+        // shadows a parent's of the same name; `Unknown` says so where
+        // silence would read as absent and walk on.
+        if matches!(q.attachment, WitnessAttachment::Member { aspect: MemberAspect::Holds, .. })
             && !bag.for_attachment(q.attachment).is_empty()
         {
             return ReducedValue::Type(InferredType::Unknown);
@@ -1338,6 +1338,8 @@ impl ReducerRegistry {
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
                         lattice: crate::model::conventions::lattice_for(&full.language),
+
+                        member_spaces: crate::model::conventions::member_spaces_for(&full.language),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -1723,6 +1725,8 @@ impl ReducerRegistry {
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
                         lattice: crate::model::conventions::lattice_for(&full.language),
+
+                        member_spaces: crate::model::conventions::member_spaces_for(&full.language),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -2207,25 +2211,25 @@ impl ReducerRegistry {
                             })
                         }
                         _ => {
-                            // A `PackageSymbol{package,..}` reached through an edge is
+                            // A `Member{package,..}` reached through an edge is
                             // a fresh method dispatch: its receiver is that call's
                             // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
                             // substitutes the dispatch class — not whatever the outer
                             // query carried. Mirrors `query_sub_return_type`'s
                             // `effective_receiver`. The exception is an inheritance
-                            // hop (`PackageSymbol{child} → Edge(PackageSymbol{parent})`):
-                            // there the source is itself a `PackageSymbol`, and the
+                            // hop (`Member{child} → Edge(Member{parent})`):
+                            // there the source is itself a `Member`, and the
                             // child's receiver must carry through so an inherited fluent
                             // accessor returns the child, not where `has` was declared.
                             let redispatched = matches!(
                                 target,
-                                WitnessAttachment::PackageSymbol { .. }
+                                WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                             ) && !matches!(
                                 q.attachment,
-                                WitnessAttachment::PackageSymbol { .. }
+                                WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                             );
                             let receiver = match target {
-                                WitnessAttachment::PackageSymbol { package, .. }
+                                WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                                     if redispatched =>
                                 {
                                     fresh_dispatch_receiver(&q.receiver, package, q.context)
@@ -2337,10 +2341,7 @@ impl ReducerRegistry {
                                         // through the registry, never a
                                         // baked value.
                                         let owner = t.class_name()?.to_string();
-                                        let att = WitnessAttachment::Field {
-                                            owner,
-                                            name: k.clone(),
-                                        };
+                                        let att = WitnessAttachment::holds_of(owner, super::reducers::member_spaces(q).values, k.clone());
                                         let sub_q = ReducerQuery {
                                             attachment: &att,
                                             point: q.point,
@@ -2358,6 +2359,8 @@ impl ReducerRegistry {
                                             }
                                         })
                                     })
+                                    // An untyped slot is no value.
+                                    .filter(|t| !matches!(t, InferredType::Unknown))
                                 }
                                 ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
                                 ProjectionStep::Element => match t {
@@ -2418,16 +2421,24 @@ impl ReducerRegistry {
                                         })
                                     })
                                 }
-                                ProjectionStep::ValueHop { member } => {
-                                    // A value read chases `Field{class, member}`,
-                                    // the slot's own subject, so a same-named
-                                    // callable's return never answers it (a call
-                                    // is an `Invoke`). The base type IS the
-                                    // receiver, so a slot typed by the class's
-                                    // template parameters substitutes the base's
-                                    // arguments.
-                                    t.class_name().map(str::to_string).and_then(|class| {
-                                        let att = WitnessAttachment::Field { owner: class, name: member.clone() };
+                                ProjectionStep::ValueHop { member, spaces } => {
+                                    // A value read asks what the member HOLDS,
+                                    // so a same-named callable's return never
+                                    // answers it (a call is an `Invoke`). It
+                                    // asks each namespace its site may land in,
+                                    // the legal ones first over the whole MRO
+                                    // and the illegal ones only when none
+                                    // answers, so the member it reads is the
+                                    // one resolution picks. The base type IS
+                                    // the receiver, so a slot typed by the
+                                    // class's template parameters substitutes
+                                    // the base's arguments.
+                                    let class = t.class_name()?.to_string();
+                                    // The first namespace holding the member
+                                    // answers, typed or not: an untyped legal
+                                    // member is still the one the read reaches.
+                                    let found = spaces.in_order().find_map(|space| {
+                                        let att = WitnessAttachment::holds_of(class.clone(), space, member.clone());
                                         let sub_q = ReducerQuery {
                                             attachment: &att,
                                             point: q.point,
@@ -2444,7 +2455,8 @@ impl ReducerRegistry {
                                                 | ReducedValue::None => None,
                                             }
                                         })
-                                    })
+                                    });
+                                    found.filter(|t| !matches!(t, InferredType::Unknown))
                                 }
                             }
                         };
@@ -2596,7 +2608,7 @@ impl ReducerRegistry {
         // (its own or inherited, in any file) hides every free function of
         // the name, with the class itself as the receiver.
         if let Callee::Function { name, member_of: Some(class), .. } = callee {
-            let att = WitnessAttachment::PackageSymbol { package: class.clone(), name: name.clone() };
+            let att = WitnessAttachment::returns_of(class.clone(), name.clone());
             let sub_q = ReducerQuery {
                 attachment: &att,
                 point: q.point,
@@ -2675,7 +2687,7 @@ impl ReducerRegistry {
                 }
                 classes
                     .into_iter()
-                    .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
+                    .map(|package| WitnessAttachment::returns_of(package, name.clone()))
                     .collect()
             }
             Callee::Function { name, local: None, constructs, .. } => {
@@ -2694,7 +2706,7 @@ impl ReducerRegistry {
                 let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
                 // Invoking a method through a coderef passes its invocant as
                 // the first argument (`$cb->($obj, …)` for `\&Class::m`).
-                if recv.is_none() && matches!(target, WitnessAttachment::PackageSymbol { .. }) {
+                if recv.is_none() && matches!(target, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }) {
                     if !arg_types.is_empty() {
                         recv = Some(arg_types.remove(0));
                     }
@@ -2800,6 +2812,8 @@ impl ReducerRegistry {
                 package_parents: &full.packages,
                 app_surface_consumers: &full.plugin.app_surface_consumers,
                 lattice: crate::model::conventions::lattice_for(&full.language),
+
+                member_spaces: crate::model::conventions::member_spaces_for(&full.language),
             };
             let att = WitnessAttachment::Symbol(sym);
             let q = ReducerQuery {

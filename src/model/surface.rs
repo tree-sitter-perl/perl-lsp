@@ -449,14 +449,14 @@ impl Surface {
 /// value is position-independent. The one offender is `CodeRef`'s
 /// `return_edge`: an `Expr(span)` (or any other file-internal attachment)
 /// shifts on unrelated edits AND is meaningless to another file — only the
-/// `PackageSymbol` edge is both stable and cross-file-resolvable. Container
+/// `Member` edge is both stable and cross-file-resolvable. Container
 /// variants recurse.
 fn despan(t: &InferredType) -> InferredType {
     use crate::model::witnesses::WitnessAttachment;
     match t {
         InferredType::CodeRef { return_edge } => InferredType::CodeRef {
             return_edge: match return_edge {
-                Some(WitnessAttachment::PackageSymbol { .. }) => return_edge.clone(),
+                Some(WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }) => return_edge.clone(),
                 _ => None,
             },
         },
