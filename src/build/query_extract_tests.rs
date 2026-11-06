@@ -2506,7 +2506,7 @@ struct S {
 // ---- Domain typing (int-used-as-enum): a storage slot's DOMAIN recovered
 // from usage. `op_type` is stored `uint16_t` but always compared against
 // `enum opcode` values — the sites fold onto the language-generic
-// `Field{owner, name}` subject via `DomainCoherenceFold`. ----
+// `Member{owner, name, Holds}` subject via `DomainCoherenceFold`. ----
 
 #[test]
 fn cpp_domain_typing_field_folds_to_enum() {

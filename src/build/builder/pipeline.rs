@@ -955,7 +955,7 @@ impl<'a> Builder<'a> {
         // Two seeds per typed-owner write: the untyped `mutation` Fact
         // (key-name completion via `mutated_keys_on_class`) and — when
         // the owner resolves to a CLASS and the RHS has a recorded span
-        // and a bag-resolved type — a typed `Field{class, key} →
+        // and a bag-resolved type — a typed `Member{class, key, Holds} →
         // Edge(Expr(rhs_span))`, the slot's value as any language's member
         // write states it. The edge routes through the same canonical chase
         // as implicit-return chains; `FieldValueReducer` agrees the

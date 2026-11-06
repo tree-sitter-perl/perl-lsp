@@ -1034,7 +1034,7 @@ fn idx_find_method_return(
         .find_method_return_type(class, method, Some(idx), None)
 }
 
-/// Seam (b), primary (hop 1): the cross-file `Field{owner, name}` primary —
+/// Seam (b), primary (hop 1): the cross-file `Member{owner, name, Holds}` primary —
 /// a typed slot WRITE in the class's OWN file, read from a consumer, resolves
 /// through the extracted `attempt` closure. (The enriched-retry twin of this
 /// hop is dormant today: Perl slot seeds are build-gated on a resolvable RHS,
@@ -1056,7 +1056,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     let tree = parser.parse(app_src, None).unwrap();
     let fa = crate::build::builder::build(&tree, app_src.as_bytes());
 
-    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `Field{Store, conn}`
+    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `Member{Store, conn, Holds}`
     // into Store's own file (hop 1) and found the `Conn->new` slot write.
     let t = fa.inferred_type_via_bag_ctx(
         "$c",

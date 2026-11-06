@@ -735,7 +735,7 @@ impl FileAnalysis {
             .find_map(|cached| packaged(&idx.symbols_present(cached)))
     }
 
-    /// The canonical, language-generic `Field{owner, name}` subject for a
+    /// The canonical, language-generic `Member{owner, name, Holds}` subject for a
     /// field access `(class, name)` — the SAME bag primitive a C struct
     /// member folds onto (`witnesses::WitnessAttachment::Field`). This is the
     /// ONE place a field's project-wide identity is minted; every Perl field
@@ -748,7 +748,7 @@ impl FileAnalysis {
     /// (the one hover/goto-def use) climbs to the class whose accessor backs
     /// the slot, so an inherited/role field accessed on any receiver converges
     /// on one subject (a child's `$self->{name}` and the parent's `has 'name'`
-    /// are the same `Field`). A classic hash slot with no accessor doesn't
+    /// are the same `Holds` member). A classic hash slot with no accessor doesn't
     /// resolve through method lookup — it isn't inherited that way — so the
     /// owner falls back to the access class (its own per-class storage).
     pub fn field_subject(
@@ -766,7 +766,7 @@ impl FileAnalysis {
     }
 
     /// Route a field ACCESS ref — in any of Perl's varied forms — onto its
-    /// shared `Field{owner, name}` subject. The dispatch is on the access
+    /// shared `Member{owner, name, Holds}` subject. The dispatch is on the access
     /// SHAPE (accessor call / hash-slot deref / Corinna field variable) to
     /// recover the owning class + slot name; identity minting is delegated to
     /// `field_subject`, so the field's FLAVOR never enters here. This is the
@@ -837,7 +837,7 @@ impl FileAnalysis {
         self.field_domain_for_owner(&owner, field, module_index)
     }
 
-    /// Fold this file's domain sites for `Field{owner, field}` and query
+    /// Fold this file's domain sites for `Member{owner, field, Holds}` and query
     /// `DomainCoherenceFold`. The witnesses are built into a scratch bag at
     /// query time because a site's enum resolves cross-file (the module
     /// index is only in hand here); the fold + majority rule live in the
@@ -882,7 +882,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         // No context: the vote is these sites and nothing else. With one, a
         // slot whose vote fails falls through to the registry's cross-file
-        // `Field` ladder and answers the slot's declared VALUE as its domain.
+        // `Holds` ladder and answers the slot's declared VALUE as its domain.
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -907,7 +907,7 @@ impl FileAnalysis {
         Some(NominalDomain { domain, confidence })
     }
 
-    /// The canonical `Field` owner of one domain site: the member ref at the
+    /// The canonical `Holds` member owner of one domain site: the member ref at the
     /// site's own span (the member pattern captures the same field token the
     /// domain pattern does), its receiver's class, then the SAME
     /// `field_subject` ancestor walk that minted the queried subject — so an

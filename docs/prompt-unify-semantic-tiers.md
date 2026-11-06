@@ -52,7 +52,7 @@ strings won't.
 - `src/model/witnesses/` — `WitnessBag`, `WitnessAttachment` (`Symbol`,
   `SymbolReturnArm`, `Expr`, `BranchArm`, `Variable{name,scope}`,
   `Expression(refidx)`, `TypeName`, `PackageSymbol{package,name}`,
-  `Field{owner,name}`), `ReducerRegistry::with_defaults()`, the
+  `Member{owner, name, Holds}`), `ReducerRegistry::with_defaults()`, the
   reducers, `query_variable_type` / `query_sub_return_type`, the
   cross-file fallback hops in `query_rec` (PackageSymbol primary +
   parents + bridged entities; Field primary + parents; TypeName
@@ -70,7 +70,7 @@ strings won't.
   — post-walk: `HashRefAccess` observations, mutation Facts, the
   implicit-return chain (`Symbol(sid) → Edge(SymbolReturnArm(sid))`,
   `SymbolReturnArm(sid) → Edge(Expr(last_expr_span))`), slot write
-  edges (`Field{class,key} → Edge(Expr(rhs_span))`).
+  edges (`Member{class, key, Holds} → Edge(Expr(rhs_span))`).
 - `resolve_forward_expr_witnesses` — deferred `Expr(span) →
   Edge(Symbol(sid))` for forward-defined callees.
 

@@ -1167,8 +1167,8 @@ my $silent = $taken{anything};
 
 /// A slot's shape can live only in a PARENT's file, written through the
 /// grandparent's spelling (`my $self = Grand->new; $self->{_area} = {..}`):
-/// the parent file states `Field{Grand, _area}`, never `Field{Base, _area}`.
-/// The child's `Field{Base, _area}` reaches it through `Base.pm`'s own bag
+/// the parent file states `Member{Grand, _area, Holds}`, never `Member{Base, _area, Holds}`.
+/// The child's `Member{Base, _area, Holds}` reaches it through `Base.pm`'s own bag
 /// re-keyed to the grandparent — a hop the candidate fan-out's on-path skip
 /// must not take with it.
 #[test]

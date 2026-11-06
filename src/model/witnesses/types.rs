@@ -89,7 +89,7 @@ pub enum WitnessAttachment {
     /// ("a value flowed here"), because the binding is a fact even when
     /// the callee never types what it leaves behind. Cross-file the
     /// registry walks the callee's candidate files and parents the way
-    /// `Field` does. Kept at the END for bincode variant-index stability
+    /// a `Holds` member does. Kept at the END for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Param { package: String, name: String, index: u32 },
     /// A part of a variable's value (`$self->{a}`, `$h{k}[0]`), named by
@@ -403,7 +403,7 @@ pub enum WitnessPayload {
         base: WitnessAttachment,
         step: ProjectionStep,
     },
-    /// **Domain evidence** for a `Field` slot: a single use-site where the
+    /// **Domain evidence** for a `Holds` member: a single use-site where the
     /// slot interacts with a value operand (a comparison `slot == E`, an
     /// assignment `slot = E`, a `switch(slot){case E}`, a typed-arg
     /// position). `Some(enum)` when the operand resolves to an enumerator

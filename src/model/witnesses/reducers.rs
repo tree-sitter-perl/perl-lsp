@@ -850,7 +850,7 @@ impl WitnessReducer for TypeNameReducer {
 
 // ---- Field value ----
 //
-// Claims `Field{owner, name}` carrying a materialized `InferredType` — the
+// Claims `Member{owner, name, Holds}` carrying a materialized `InferredType` — the
 // storage slot's value edges after `materialize` chased them: one per field
 // declaration (`Edge(Variable{decl})`, whose own fold already ranked
 // annotation over assignment) and one per write to a slot nothing in the
@@ -909,7 +909,7 @@ impl WitnessReducer for ParamBindingReducer {
 
 // ---- Domain-coherence fold (int-used-as-enum) ----
 //
-// Claims `Field{owner, name}` carrying `DomainCompare{enum_type}` — the
+// Claims `Member{owner, name, Holds}` carrying `DomainCompare{enum_type}` — the
 // per-site evidence that a storage slot is *used as* a value of some enum.
 // Folds every site project-wide: a slot mostly compared/assigned against
 // one enum HAS that enum as its domain; a truly-mixed slot has none. The
@@ -920,7 +920,7 @@ impl WitnessReducer for ParamBindingReducer {
 //
 // The domain is defeasible — it refines the human surfaces (hover / the
 // navigation bridge), never the storage type that flows. The flow axis
-// reaches `Field` only through a `ValueHop`, and `FieldValueReducer` is
+// reaches a `Holds` member only through a `ValueHop`, and `FieldValueReducer` is
 // registered ahead of this fold, so a slot with a value edge answers its
 // storage type before the vote is consulted; the vote itself is asked only
 // by `field_domain_for_owner`, over a private bag of `DomainCompare`.
@@ -1066,7 +1066,7 @@ impl WitnessReducer for ReturnExprReducer {
         // edge chase; `Variable{..}` carries a statement-position
         // receiver bless (`bless $obj, $class; ...; return $obj` — the
         // deferred class rides the VARIABLE so the return-arm chase
-        // substitutes the call site's receiver); `Field{..}` a data member
+        // substitutes the call site's receiver); `Member{.., Holds}` a data member
         // typed by its class's template parameters, substituted against the
         // `ValueHop`'s receiver. Claiming these lets a self-returning method
         // substitute the call's receiver at arbitrary chain depth.

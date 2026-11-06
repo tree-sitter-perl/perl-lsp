@@ -22,7 +22,7 @@ use crate::model::file_analysis::{KeyWrite, WriteKey};
 ///
 /// A nested write through an object's slot (`$self->{s}{k} = …`) lands in
 /// the slot's value, which every method shares, so its delta goes on
-/// `Field{class, s}`; every other delta goes on the variable's place, with
+/// `Member{class, s, Holds}`; every other delta goes on the variable's place, with
 /// a zero-width span at the write — invisible to reads before it.
 ///
 /// `bindings[i]` is `key_writes[i]`'s variable binding and its home scope,

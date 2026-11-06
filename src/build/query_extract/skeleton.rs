@@ -211,7 +211,7 @@ pub struct SkeletonAnalysis {
     pub param_regions: Vec<crate::model::file_analysis::Span>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
-    /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
+    /// at query time); folds onto `Member{owner, name, Holds}` for the int-used-as-enum
     /// domain (`op_type` → `opcode`).
     pub domain_sites: Vec<crate::model::file_analysis::DomainSite>,
     /// Function-like macros the driver typed from their bodies (the expansion
@@ -969,7 +969,7 @@ impl SkeletonAnalysis {
                     }
                 }
             }
-            // A data member's VALUE rides its own `Field` attachment, which a
+            // A data member's VALUE rides its own `Holds` member, which a
             // member read's `ValueHop` chases (`docs/adr/member-kinds.md`): an
             // edge to the declaration's `Variable`, or, for a type that
             // mentions the class's template parameters, the deferred shape
@@ -2031,7 +2031,7 @@ fn declare_slots(
 /// that class or an ancestor takes the write the way a variable takes one:
 /// into its declaration's `Variable`, whose fold ranks a declared type over
 /// what flows in. Any other member — an instance slot, or one declared in
-/// another file — takes it on `Field{owner, name}`, the attachment a member
+/// another file — takes it on `Member{owner, name, Holds}`, the attachment a member
 /// read's `ValueHop` chases, where every write is one arm of the slot's
 /// value. A write through a receiver of no known class states nothing.
 ///
@@ -2040,7 +2040,7 @@ fn declare_slots(
 ///
 /// TODO(member-write-declared-elsewhere): a write to a member declared in
 /// another file (a parent's annotated attribute) lands on the writer's
-/// `Field`, and an answer there is found before the declaring file's, so
+/// `Holds` member, and an answer there is found before the declaring file's, so
 /// the write's value shadows the declared type. Deciding the declaration
 /// needs the index, the same deferral as `TODO(slot-owner-deferred)`.
 fn settle_member_writes(

@@ -284,7 +284,7 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub flow_edges: Vec<FlowEdge>,
     /// Class-keyed bag attachment names (`Member{..}.name`,
-    /// `Field{..}.name`) with NO backing symbol/ref in this file — the
+    /// `Member{.., Holds}.name`) with NO backing symbol/ref in this file — the
     /// declarative residue (parametric method declarations, plugin `Method`
     /// overrides, bridged entities under a foreign container) the relational
     /// rows cannot see. Derived generically from the final bag in

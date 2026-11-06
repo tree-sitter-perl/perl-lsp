@@ -496,7 +496,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`Member{class, name}` when `attributed`, `Field{owner, name}`
+/// (`Member{class, name}` when `attributed`, `Member{owner, name, Holds}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -754,7 +754,7 @@ impl ReducerRegistry {
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
+        // The two `Member{.., Holds}` reducers claim disjoint PAYLOADS on one
         // attachment: FieldValueReducer the slot's materialized value edge
         // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
         // vote. Value first is load-bearing — the domain is a human-surface
@@ -1026,11 +1026,11 @@ impl ReducerRegistry {
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
-        // answer — `Member{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
-        // `TypeName(T)`: one ladder (`ClassLadder`, `class_fallback`) for
-        // all four. Most cases are covered by build-time edge emission
-        // (local writeback emits `Member(child, m) →
-        // Edge(Member(parent, m))`; enrichment projects the same for
+        // answer (or, for a stored member, couldn't type) — `Member{C, m}`
+        // of either aspect, `Param{C, f, i}`, `TypeName(T)`: one ladder
+        // (`ClassLadder`, `class_fallback`) for all three. Most cases are
+        // covered by build-time edge emission (local writeback emits
+        // `Member(child, m) → Edge(Member(parent, m))`; enrichment projects the same for
         // cross-file parents), resolved by the generic edge-chase; the ladder
         // covers the residual: the class's other files, its ancestry, and
         // plugin-namespace bridges declared elsewhere.
@@ -1999,7 +1999,7 @@ impl ReducerRegistry {
     /// later reads take. Every other witness keeps its bag order, and the
     /// grown shapes follow them (`splice_grown`).
     ///
-    /// A `Field` is not temporal: its writes are arms of one value, so each
+    /// A `Holds` member is not temporal: its writes are arms of one value, so each
     /// grown shape JOINS the value it grew from, as the slot's other arms do.
     #[inline(never)]
     fn lower_extensions(
@@ -2100,7 +2100,7 @@ impl ReducerRegistry {
 
     /// The value standing under a segment's first delta at `at`: what a read
     /// there answers from every other witness of the place plus the shapes
-    /// earlier segments grew. A `Field` reads its whole value, the class
+    /// earlier segments grew. A `Holds` member reads its whole value, the class
     /// ladder included, since the slot's other writes may live elsewhere.
     fn extension_base(
         &self,
@@ -2334,8 +2334,8 @@ impl ReducerRegistry {
                                     t.key_value_type(k).flatten().cloned().or_else(|| {
                                         // Class-typed base: the structural
                                         // literal can't answer, but a typed
-                                        // slot WRITE can — `Field{class,
-                                        // key}`, local or (via the arm in
+                                        // slot WRITE can — `Member{class,
+                                        // key, Holds}`, local or (via the arm in
                                         // query_rec_body) cross-file and up
                                         // the ancestry. The read drills
                                         // through the registry, never a

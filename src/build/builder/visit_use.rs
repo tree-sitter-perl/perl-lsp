@@ -1576,7 +1576,7 @@ impl<'a> Builder<'a> {
         }
         // `$obj->{k} = <rhs>` slot-type seed. Record key-span →
         // rhs-span so `populate_witness_bag` can mint
-        // `Field{owner_class, k} → Edge(Expr(rhs_span))`
+        // `Member{owner_class, k, Holds} → Edge(Expr(rhs_span))`
         // keyed off the matching HashKeyAccess Write ref (whose
         // span is this key node's span). `emit_expr_witness(right)`
         // already published the RHS's `Expr(rhs_span)`; a compound write
