@@ -590,8 +590,12 @@ impl FileAnalysis {
             }
             // TODO(readonly-after-cfg): with control flow modelled, an in-class write after the
             // constructor has run is a second write: a certain error, not just a hint.
-            // TODO(readonly-after-cfg): an isset-guarded write is a lazy init too, once guards narrow.
-            let lazy = r.access == AccessKind::WriteIfUnset;
+            // A write where the member holds nothing (`??=`, or one a guard
+            // proves unset) initialises it.
+            let lazy = r.access == AccessKind::WriteIfUnset
+                || r.access_place().is_some_and(|place| {
+                    self.place_type_at(place, site.name_span.start, module_index) == Some(InferredType::Undef)
+                });
             let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
                 self.scope(sc)
                     .owner
