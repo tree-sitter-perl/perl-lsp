@@ -45,7 +45,7 @@ pub fn php_pack() -> LangPack {
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.
         module_paths: |_| Vec::new(),
-        narrow_guard: |_, _| None,
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: true,
         trigger_chars: &[],

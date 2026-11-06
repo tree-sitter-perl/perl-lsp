@@ -1414,6 +1414,15 @@ impl MemberSpaces {
     }
 
     /// The namespaces an ask is answered from.
+    ///
+    /// TODO(mandatory-space-tags): an untagged site or declaration falls
+    /// back to the namespace its mode implies, here and in `of_decl`. The
+    /// tag should be mandatory in every pack document, so a member pattern
+    /// that forgets it fails the vocabulary test instead of defaulting. Not
+    /// done with the namespaces: it touches every member pattern in the
+    /// cpp, python and php documents (cpp alone has 33 method defs), and a
+    /// name node already carrying three captures silently drops a fourth,
+    /// so each pattern has to be restructured, not tagged.
     pub fn of_ask(&self, ask: MemberKind) -> SpaceSet {
         match ask.spaces {
             Some(a) => a.search,
@@ -1823,6 +1832,15 @@ impl Ref {
                     member_op: member_op.as_ref(),
                 })
             }
+            _ => None,
+        }
+    }
+
+    /// The place a member value access denotes, where a narrowing gives it
+    /// a value.
+    pub fn access_place(&self) -> Option<&Place> {
+        match &self.kind {
+            RefKind::FieldAccess { place, .. } => place.as_deref(),
             _ => None,
         }
     }
@@ -2522,6 +2540,10 @@ pub enum RefKind {
         /// The member token alone (`r.span` may cover the whole access).
         member_name_span: Span,
         member_op: Option<(MemberOp, Span)>,
+        /// The place the access denotes (`$this->x` → the method's object →
+        /// `x`), where a narrowing gives that place a value; elsewhere the
+        /// place answers nothing and is not kept.
+        place: Option<Box<Place>>,
         /// The member namespaces the site was tagged with
         /// (`@space.<name>`); `None` reads where a value read does.
         spaces: Option<SpaceAsk>,

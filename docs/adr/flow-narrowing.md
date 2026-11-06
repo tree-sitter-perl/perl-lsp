@@ -309,15 +309,47 @@ rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once, as before.
 
-A pack guard states its region one way: the pattern that recognizes the
-guard tags the arm it enters `@narrow.arm` (an `if`/`elif` body, a
-ternary's consequence, the right of `&&`/`and`), and the extractor attaches
-the refinement in the guard's own scope over that arm, cut at the
-subject's next rebind. The guard and its arm join by match, so neither
-needs to be a scope. Pack guards (`isinstance`, `dynamic_cast`, optional
-engagement) have no complement, so no arm narrows on a false test; the
-early-exit fall-through (`if not isinstance(x, T): return`) waits on a
-pack-side negation (TODO(pack-exit-guard)).
+A pack's document states its guards in three parts, and the extractor
+(`query_extract/extract/narrowing.rs`) joins them by containment, the
+polarity rule above ported over captures. An **atom** is a match naming
+its subject (`@narrow.var`) and what it proves on the atom's node:
+`@narrow.is` (the class `@narrow.type` names where it holds, nothing where
+it fails), `@narrow.set` (a value where it holds, the null value where it
+fails) or `@narrow.unset` (the swap). A **connective** is a node marked
+`@narrow.not`, `@narrow.and`, `@narrow.or` or `@narrow.group` (a
+parenthesis). A **position** match marks a condition `@narrow.cond` and
+what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
+it fails, and `@narrow.exit` is a statement that leaves its block unless
+the condition fails, so the rest of that block runs where it fails. An
+atom climbs to each condition above it through connectives alone (an
+atom inside a call argument is no part of the condition), and the
+connectives on the way decide its value in each of the condition's
+regions, or that the region says nothing about it. The refinement
+attaches in the atom's scope over the region, cut at the subject's next
+rebind (a variable) or disturbance (a place). A failed `is` proves
+nothing; a passing `set` would strip the null from the incoming type,
+which needs a fold the pack tier lacks (TODO(narrow-set-strip)).
+
+PHP's document declares its atoms (`instanceof`; a single-argument
+`isset`, `!== null`; `=== null`, `is_null`), its connectives and its
+positions; a property of `$this` is a place of the method's object
+(`Binding::Receiver`), so a guard on it narrows the property's receiver.
+A write ends a place's narrowing where it lands, as it ends a variable's
+(an assignment's end, after every read it makes), so the written access
+reads the place as it held coming in. A member value access carries its
+own place where a narrowing gives that place a value
+(`Ref::access_place`), and the `readonly-write` rule asks it: a write to
+a member a guard proves unset (`!isset($this->x)`, `$this->x === null`)
+is a lazy init, as `??=` is.
+
+Python's document declares `isinstance` and C++'s `dynamic_cast` as
+`@narrow.is` atoms naming their `@narrow.type`, read through the
+language's type spelling first (`isinstance(x, str)` is a string, not a
+class named `str`). C++'s `std::optional` engagement (the subject's own
+truth, or `has_value()`) names no type: its class is what the pack's
+`narrow_guard` peels off the subject's declared type. So `if not
+isinstance(x, T): return` and `if (!opt) return;` narrow the rest of
+their block.
 
 ## A tag is a value: `ref` names its subject
 

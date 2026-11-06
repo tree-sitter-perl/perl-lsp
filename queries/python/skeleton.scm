@@ -245,36 +245,48 @@
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
 
-; Guard narrowing: `isinstance(x, Foo)` refines x to Foo over the arm it
-; enters, tagged `@narrow.arm` — an `if`/`elif` body, the value a conditional
-; expression yields when the test holds, the right of `and`. The pack's
-; narrow_guard maps the guard + type token to the refinement; core attaches
-; it in the guard's scope over the arm (an `if` body is no scope in Python).
-; A member subject (`self.x`) narrows the place it denotes.
+; Guard narrowing. An atom states what a test proves of its subject, a
+; name or a member (`self.x`): `isinstance(x, Foo)` that it is the class
+; named (a tuple of classes names no single one). The narrowing attaches in
+; the guard's scope (an `if` body is no scope in Python).
+((call
+   function: (identifier) @_fn
+   arguments: (argument_list . [(identifier) (attribute)] @narrow.var . (identifier) @narrow.type .)) @narrow.is
+ (#eq? @_fn "isinstance"))
+; A condition built of atoms decides them through its connectives.
+(not_operator) @narrow.not
+(boolean_operator operator: "and") @narrow.and
+(boolean_operator operator: "or") @narrow.or
+(parenthesized_expression) @narrow.group
+; Where a condition decides what runs: an `if` or `elif` body runs where it
+; holds, every later clause of the chain where it fails; a conditional
+; expression yields its first value or its last; the right of `and` runs
+; where the left holds, of `or` where it fails. An `if` whose body only
+; leaves the block, with no clause after it, leaves the rest of the block
+; to run where its condition fails.
+(if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
+(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (if_statement
-  condition: (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  consequence: (block) @narrow.arm)
-(elif_clause
-  condition: (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  consequence: (block) @narrow.arm)
+  alternative: (elif_clause condition: (_) @narrow.cond)
+  alternative: (_) @narrow.else)
 (conditional_expression
-  (_) @narrow.arm
+  (_) @narrow.then
   .
   "if"
   .
-  (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type)))
-(boolean_operator
-  left: (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  operator: "and"
-  right: (_) @narrow.arm)
+  (_) @narrow.cond
+  .
+  "else"
+  .
+  (_) @narrow.else)
+(boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
+(boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  consequence: (block
+    . [(return_statement) (raise_statement) (continue_statement) (break_statement)] .)
+  !alternative) @narrow.exit
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.

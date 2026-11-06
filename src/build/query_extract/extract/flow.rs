@@ -502,7 +502,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
         let Some(read) = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last() else { continue };
         out.write_sites.push(read.token);
-        out.place_writes.push(place.span());
+        out.place_writes.push((place.span(), written_at(ad, place).0));
         if let Some(value) = source_value_span(ad, place.match_id) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: read.receiver,

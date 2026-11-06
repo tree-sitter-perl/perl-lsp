@@ -71,20 +71,28 @@ impl<'a> PackPlaces<'a> {
         }
     }
 
+    /// The place the member access read through `receiver` denotes, when
+    /// `valued` gives it a value.
+    pub(crate) fn access(&self, receiver: Span, valued: &HashSet<Place>) -> Option<Place> {
+        let read = self.through.get(&receiver)?;
+        self.at(read.span).filter(|place| valued.contains(place))
+    }
+
     /// Every access that could disturb a place rooted in `wanted`: a place
-    /// write is a write; a variable or member read that no
+    /// write is a write where it lands, so what the write itself reads sees
+    /// the place as it held coming in; a variable or member read that no
     /// further member read reads through is handed on whole (an argument, a
     /// call's receiver), an opaque access.
-    pub(crate) fn disturbances(&self, wanted: &HashSet<Binding>, writes: &[Span]) -> PlaceDisturbanceIndex {
+    pub(crate) fn disturbances(&self, wanted: &HashSet<Binding>, writes: &[(Span, Point)]) -> PlaceDisturbanceIndex {
         let mut idx = PlaceDisturbanceIndex::default();
         let mut add = |at: Point, access: Access, place: Place| {
             if wanted.contains(&place.root) {
                 idx.add(at, access, place);
             }
         };
-        for &w in writes {
+        for &(w, lands) in writes {
             if let Some(place) = self.at(w) {
-                add(w.start, Access::Write, place);
+                add(lands, Access::Write, place);
             }
         }
         for (&span, base) in &self.vars {
@@ -120,11 +128,11 @@ impl<'a> PackPlaces<'a> {
     }
 
     /// The writes that give `place` a value again: of it, or of what holds it.
-    pub(crate) fn writes_to(&self, place: &Place, writes: &[Span]) -> Vec<Span> {
+    pub(crate) fn writes_to(&self, place: &Place, writes: &[(Span, Point)]) -> Vec<Span> {
         writes
             .iter()
-            .filter(|&&w| self.at(w).is_some_and(|written| place.disturbed_by(Access::Write, &written)))
-            .copied()
+            .map(|&(w, _)| w)
+            .filter(|&w| self.at(w).is_some_and(|written| place.disturbed_by(Access::Write, &written)))
             .collect()
     }
 

@@ -1995,7 +1995,7 @@ void f() {
 #[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
-    // the cpp analog of python isinstance, via the now-wired narrow_guard.
+    // the cpp analog of python isinstance.
     let src = "\
 void f(Base* b) {
     if (dynamic_cast<Derived*>(b)) {
@@ -2150,7 +2150,7 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
 #[test]
 fn a_pack_guard_narrows_every_arm_it_enters() {
     // One region rule for every pack guard: the arm the pattern tags
-    // `@narrow.arm`, whatever construct holds it, and nothing outside it.
+    // `@narrow.then`, whatever construct holds it, and nothing outside it.
     let src = "\
 void f(Base* b, std::optional<Widget> o) {
     if (o) return o->run();
@@ -2190,6 +2190,61 @@ x.tail()
     assert_eq!(at(4, 27), class("Foo"), "the right of `and`");
     assert_eq!(at(8, 4), class("Foo"), "an `elif` body");
     assert_ne!(at(9, 0), class("Foo"), "nothing after");
+}
+
+#[test]
+fn a_negated_pack_guard_narrows_where_it_fails() {
+    // A failed negation is the atom holding: an `else`, the right of `or` /
+    // `||`, and the rest of a block after an `if` that only leaves it. An
+    // `is` test's class is read as the language reads a type spelling.
+    let src = "\
+class Foo:
+    pass
+def f(x, y):
+    if not isinstance(x, Foo):
+        return
+    x.run()
+    if not isinstance(y, Foo):
+        y.other()
+    else:
+        y.run()
+    z = not isinstance(y, Foo) or y.run()
+    w = isinstance(y, Foo) or y.other()
+    if isinstance(y, str):
+        y.upper()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(at("x", 5, 4), class("Foo"), "the rest of the block after the exit");
+    assert_ne!(at("x", 4, 8), class("Foo"), "not the exit itself");
+    assert_ne!(at("y", 7, 8), class("Foo"), "a failed isinstance proves nothing");
+    assert_eq!(at("y", 9, 8), class("Foo"), "the else of a negation");
+    assert_eq!(at("y", 10, 34), class("Foo"), "the right of `or` after a negation");
+    assert_ne!(at("y", 11, 30), class("Foo"), "the right of `or` after the atom itself");
+    assert_eq!(at("y", 13, 8), Some(InferredType::String), "a builtin type is the language's reading of it");
+
+    let src = "\
+void f(Base* b, std::optional<Widget> o) {
+    if (!o) return;
+    o->run();
+    if (!dynamic_cast<Derived*>(b)) {
+        b->base();
+    } else {
+        b->derived();
+    }
+    bool k = !o || o->ok();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    assert_eq!(at("o", 2, 4), class("Widget"), "the rest of the block after `if (!o) return;`");
+    assert_ne!(at("b", 4, 8), class("Derived"));
+    assert_eq!(at("b", 6, 8), class("Derived"), "the else of a negated cast");
+    assert_eq!(at("o", 8, 19), class("Widget"), "the right of `||` after a negation");
 }
 
 #[test]

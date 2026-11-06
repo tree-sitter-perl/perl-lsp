@@ -86,21 +86,8 @@ pub fn cpp_pack() -> LangPack {
             let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
             vec![p.to_string()]
         },
-        // Two narrowings, both keyed on what the value IS, not a name allowlist:
-        //   `if (dynamic_cast<Derived*>(b))` — b is a Derived inside (ty is the
-        //     template arg; pointer-ness dropped for navigation, like locals).
-        //   `if (opt)` / `if (opt.has_value())` — an engaged std::optional<T>
-        //     holds a T inside (ty is opt's DECLARED type; peel the inner T).
-        //     The bare form carries no guard token; `.has_value()` gates the
-        //     method so `opt.value_or(x)` (not an engagement test) won't narrow.
-        narrow_guard: |guard, ty| {
-            let class = match guard {
-                Some("dynamic_cast") => ty.to_string(),
-                None | Some("has_value") => optional_inner(ty)?,
-                _ => return None,
-            };
-            Some(InferredType::ClassName(class))
-        },
+        // An engaged `std::optional<T>` holds a T.
+        narrow_guard: |declared| optional_inner(declared).map(InferredType::ClassName),
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,
         trigger_chars: &[".", ">", ":"],

@@ -333,14 +333,14 @@ sealed baseline with `FileAnalysis::adopt_witnesses`). A
 member the file declares on that class or an ancestor takes the write
 into its declaration's `Variable`, as a variable takes one, so a declared
 type outranks what flows in. Any other member — an instance slot, or one
-declared in another file — takes it on `Field{owner, name}`, the
+declared in another file — takes it on `Member{owner, name}`, the
 attachment a C++ or php member declaration's value rides and a member
 read's `ValueHop` chases, where each write is an arm and the arms agree
 as a hash slot's writes do: two classes are no answer. The witness spans
 the class body, as a declaration's does, so a method above `__init__`
 reads what `__init__` writes.
 `TODO(member-write-declared-elsewhere)`: a write to a member declared in
-another file lands on the writer's `Field` and shadows the declared type
+another file lands on the writer's `Member` and shadows the declared type
 until the declaration is decided with the index.
 
 `TODO(slot-owner-deferred)`: an owner only the index can name (a receiver

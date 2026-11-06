@@ -273,7 +273,42 @@ spelled! {
 }
 
 spelled! {
-    pub enum NarrowCap { Var = "var", Type = "type", Guard = "guard", Arm = "arm" }
+    /// A guard's parts. An atom is a match naming its subject (`var`) and
+    /// what it proves (`is`, `set`, `unset`, on the atom's node);
+    /// connectives and positions are matches of their own, joined to the
+    /// atoms they hold by containment.
+    pub enum NarrowCap {
+        /// The subject the atom is about.
+        Var = "var",
+        /// The type an `is` atom names.
+        Type = "type",
+        /// The subject is the class `@narrow.type` names where the atom
+        /// holds, or with none, what its declared type holds engaged (the
+        /// pack's `narrow_guard`); its failure proves nothing.
+        Is = "is",
+        /// The subject holds a value where the atom holds, the null value
+        /// where it fails.
+        Set = "set",
+        /// `set` with the polarity swapped.
+        Unset = "unset",
+        /// A condition that holds where its operand fails.
+        Not = "not",
+        /// A condition that holds where each operand holds.
+        And = "and",
+        /// A condition that fails where each operand fails.
+        Or = "or",
+        /// A condition that holds where its one operand does (`(…)`).
+        Group = "group",
+        /// The condition a position match's arms are taken on.
+        Cond = "cond",
+        /// What runs where the condition holds.
+        Then = "then",
+        /// What runs where the condition fails.
+        Else = "else",
+        /// A statement that leaves its block unless the condition fails: the
+        /// rest of the block runs where it fails.
+        Exit = "exit",
+    }
 }
 
 spelled! {

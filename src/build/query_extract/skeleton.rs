@@ -265,9 +265,9 @@ pub struct SkeletonAnalysis {
     /// makes the access a place (`PackPlaces`).
     pub member_reads: Vec<MemberRead>,
     /// Member places an access writes (`obj.x = …`, `obj.x.clear()`), by
-    /// the written member read's span, value or not: what ends a narrowing
-    /// or a move of that place.
-    pub place_writes: Vec<crate::model::file_analysis::Span>,
+    /// the written member read's span, value or not, and where the write
+    /// lands: what ends a narrowing or a move of that place.
+    pub place_writes: Vec<(crate::model::file_analysis::Span, tree_sitter::Point)>,
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
     pub place_narrowings: Vec<PlaceNarrowing>,
@@ -877,6 +877,19 @@ impl SkeletonAnalysis {
             }
             out
         };
+        // The method whose object a spelled receiver (`$this`, `this`) is:
+        // the nearest enclosing method body's, a closure inside one included.
+        let owning_method: Vec<Option<SymbolId>> = {
+            let mut out: Vec<Option<SymbolId>> = Vec::with_capacity(self.scopes.len());
+            for sc in &self.scopes {
+                let method = sc
+                    .owner
+                    .filter(|sid| symbols.get(sid.0 as usize).is_some_and(|s| matches!(s.kind, SymKind::Method)))
+                    .or_else(|| sc.parent.and_then(|p| out.get(p.0 as usize).copied().flatten()));
+                out.push(method);
+            }
+            out
+        };
         // What a use-map call names a function by (`function_identity`); the
         // earliest declaration of a name wins, as in `callee_sid`.
         let mut free_functions: FreeFunctions = Default::default();
@@ -1319,19 +1332,19 @@ impl SkeletonAnalysis {
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
             }
         }
-        // A spelled receiver (`this`) in a body that elides its receiver IS
-        // that receiver: `this->x` and a bare `x` are one place. The
-        // document states `this` as a token naming the enclosing class.
-        let spelled_receivers = self.receivers.iter().copied().chain(
-            self.receiver_sites
-                .iter()
-                .filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing))
-                .map(|r| (r.scope, r.span)),
-        );
-        for (scope, span) in spelled_receivers {
+        // A receiver parameter in a body that elides its receiver IS that
+        // receiver, and a spelled receiver (`this`, `$this`, a token the
+        // document states names the enclosing class) is its method's
+        // wherever it is written: `this->x` and a bare `x` are one place.
+        use crate::model::file_analysis::{Binding, Place};
+        for &(scope, span) in &self.receivers {
             if let Some(m) = elided_receiver.get(scope.0 as usize).copied().flatten() {
-                use crate::model::file_analysis::{Binding, Place};
                 var_at.entry(span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
+            }
+        }
+        for r in self.receiver_sites.iter().filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing)) {
+            if let Some(m) = owning_method.get(r.scope.0 as usize).copied().flatten() {
+                var_at.entry(r.span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
@@ -1383,7 +1396,7 @@ impl SkeletonAnalysis {
         {
             let name_at: std::collections::HashMap<tree_sitter::Point, Span> =
                 places.name_reads().map(|s| (s.start, s)).collect();
-            place_writes.extend(self.flow_edges.iter().filter_map(|e| name_at.get(&e.target_at).copied()));
+            place_writes.extend(self.flow_edges.iter().filter_map(|e| Some((*name_at.get(&e.target_at)?, e.target_at))));
         }
         let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
             .into_iter()
@@ -1484,12 +1497,14 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        let place = places.access(inv_span, &valued).map(Box::new);
                         let invocant = places.receiver(inv_span, invocant, &valued);
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
                             member_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
+                            place,
                             spaces: r.spaces,
                         }
                     }
@@ -1656,6 +1671,7 @@ impl SkeletonAnalysis {
                             invocant_span: None,
                             member_name_span: *span,
                             member_op: None,
+                            place: None,
                             spaces: None,
                         },
                         span: *span,
