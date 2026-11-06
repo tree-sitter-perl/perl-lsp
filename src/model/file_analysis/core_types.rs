@@ -678,10 +678,46 @@ bitflags::bitflags! {
         /// `$x = …`): a use above the write reaches it. Minted from a
         /// capture (`@def.assigned`), never spelled as an attribute.
         const SCOPE_WIDE = 1 << 20;
-        /// A storage slot written at most once, and only by code of its
-        /// declaring class or a subclass (php `readonly`): any other write
-        /// fails at runtime (`FileAnalysis::readonly_member_writes`).
+        /// A storage slot written at most once (php `readonly`). Unless a
+        /// set scope says otherwise, its class family sets it
+        /// (`SymbolFlags::set_scope`).
         const READONLY = 1 << 21;
+        /// A storage slot any code may write (php `public(set)`).
+        const SET_PUBLIC = 1 << 22;
+        /// A storage slot only its declaring class and that class's
+        /// descendants may write (php `protected(set)`).
+        const SET_PROTECTED = 1 << 23;
+        /// A storage slot only its declaring class may write (php
+        /// `private(set)`).
+        const SET_PRIVATE = 1 << 24;
+    }
+}
+
+/// Where a storage slot may be written from (`SymbolFlags::set_scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetScope {
+    Anywhere,
+    /// The declaring class and its descendants.
+    Family,
+    /// The declaring class alone.
+    Class,
+}
+
+impl SymbolFlags {
+    /// Where the slot these flags describe may be written from: its stated
+    /// set scope, else its class family for a write-once slot, else
+    /// anywhere. `NON_PUBLIC` is not consulted: a non-public member with
+    /// no set scope answers `Anywhere`.
+    pub fn set_scope(self) -> SetScope {
+        if self.contains(SymbolFlags::SET_PUBLIC) {
+            SetScope::Anywhere
+        } else if self.contains(SymbolFlags::SET_PRIVATE) {
+            SetScope::Class
+        } else if self.intersects(SymbolFlags::SET_PROTECTED | SymbolFlags::READONLY) {
+            SetScope::Family
+        } else {
+            SetScope::Anywhere
+        }
     }
 }
 
@@ -735,6 +771,9 @@ impl TryFrom<&str> for SymbolFlags {
             "writer" => SymbolFlags::WRITER,
             "trait" => SymbolFlags::TRAIT,
             "readonly" => SymbolFlags::READONLY,
+            "set_public" => SymbolFlags::SET_PUBLIC,
+            "set_protected" => SymbolFlags::SET_PROTECTED,
+            "set_private" => SymbolFlags::SET_PRIVATE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
@@ -978,26 +1017,32 @@ pub struct MemberOpPeel {
     pub depth: usize,
 }
 
-/// A write to a write-once member (`SymbolFlags::READONLY`) made where the
-/// member is not set (`FileAnalysis::readonly_member_writes`).
+/// A write made where its member may not be set, or, for a write-once
+/// member, where it is not set in good form
+/// (`FileAnalysis::misplaced_member_writes`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadonlyWrite {
+pub struct MisplacedWrite {
     /// The written member token.
     pub span: Span,
     /// The member as the site names it.
     pub member: String,
     /// The class declaring the member, one per receiver arm, deduplicated.
     pub classes: Vec<String>,
-    pub kind: ReadonlyWriteKind,
+    pub kind: MisplacedWriteKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadonlyWriteKind {
-    /// Code outside the declaring class and its descendants: the write
-    /// fails at runtime.
+/// Ordered strictest first: a site whose receiver arms disagree reports
+/// the most lenient verdict any arm gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MisplacedWriteKind {
+    /// Code outside the declaring class of a member only that class may
+    /// set (`SetScope::Class`): the write fails at runtime.
     OutsideClass,
-    /// Code of the class family that no constructor encloses (some arm of
-    /// the receiver; the rest may be `OutsideClass`).
+    /// Code outside the declaring class and its descendants
+    /// (`SetScope::Family`): the write fails at runtime.
+    OutsideFamily,
+    /// Code of the class family that no constructor encloses, writing a
+    /// write-once member it may set.
     OutsideConstructor,
 }
 

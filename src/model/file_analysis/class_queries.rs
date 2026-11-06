@@ -559,18 +559,19 @@ impl FileAnalysis {
         }
     }
 
-    /// Writes to a write-once member that are not where it belongs. The
-    /// rule, in one place: a `READONLY` member takes writes from code inside
-    /// its declaring class or a descendant of it (a closure written in one
-    /// of their methods included), so a write from anywhere else fails at
-    /// runtime (`ReadonlyWriteKind::OutsideClass`); and it is set by a
-    /// constructor, so an in-class write no constructor encloses is
+    /// Member writes made where the member may not be set. The rule, in
+    /// one place: a member's `SymbolFlags::set_scope` says what code may
+    /// write it — a closure written in a method counts as that method's
+    /// class — so a write from code outside it fails at runtime
+    /// (`MisplacedWriteKind::OutsideClass` / `OutsideFamily`). A write-once
+    /// (`READONLY`) member is set by a constructor, so a write its class
+    /// family makes where no constructor encloses it is
     /// `OutsideConstructor`, unless the write only fills an unset member
     /// (`AccessKind::WriteIfUnset`): a lazy initialisation. A site is
     /// reported only when every class its receiver may be resolves the
-    /// member to such a declaration: an untyped receiver, or one arm that
-    /// may be written there, is no finding.
-    pub fn readonly_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<ReadonlyWrite> {
+    /// member to a declaration that finds it misplaced: an untyped
+    /// receiver, or one arm that may be written there, is no finding.
+    pub fn misplaced_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<MisplacedWrite> {
         let mut out = Vec::new();
         for r in self.refs().iter() {
             if !r.access.is_write() || MemberKind::of_ref(&r.kind) != Some(MemberKind::Value) {
@@ -580,13 +581,11 @@ impl FileAnalysis {
             let writer = self.package_at(site.name_span.start);
             // A trait's code runs as whichever class composes it, a class
             // the site cannot name.
-            let composed = writer.is_some_and(|w| {
-                self.symbols_named(w).iter().any(|&sid| {
-                    let s = self.symbol(sid);
-                    s.kind == SymKind::Class && s.flags.contains(SymbolFlags::TRAIT)
-                })
-            });
-            if composed {
+            if writer.is_some_and(|w| self.declares_class_with(w, SymbolFlags::TRAIT)) {
+                continue;
+            }
+            let arms = self.receiver_classes(r, module_index, ReceiverPolicy::Stated);
+            if arms.is_empty() {
                 continue;
             }
             // TODO(readonly-after-cfg): with control flow modelled, an in-class write after the
@@ -598,16 +597,9 @@ impl FileAnalysis {
                     .owner
                     .is_some_and(|sym| self.symbol(sym).flags.contains(SymbolFlags::CONSTRUCTOR))
             });
-            let admits = |class: &str| writer.is_some_and(|w| self.class_isa(w, class, module_index));
-            let arms = self.receiver_classes(r, module_index, ReceiverPolicy::Stated);
-            // The member resolves on an arm or its ancestor, so a constructor
-            // or a lazy init in a class descending from an arm may write it.
-            if arms.is_empty() || ((in_constructor || lazy) && arms.iter().any(|c| admits(c))) {
-                continue;
-            }
             let member = r.unqualified_target_name(self.names());
             let mut classes: Vec<String> = Vec::new();
-            let mut kind = ReadonlyWriteKind::OutsideClass;
+            let mut kind = MisplacedWriteKind::OutsideClass;
             let reported = arms.iter().all(|cn| {
                 let Some(res) = self.resolve_field_in_ancestors(cn, member, module_index) else {
                     return false;
@@ -619,22 +611,38 @@ impl FileAnalysis {
                     MethodResolution::CrossFile { widened: true, .. } => return false,
                     MethodResolution::CrossFile { flags, .. } => *flags,
                 };
-                if !flags.contains(SymbolFlags::READONLY) {
+                let scope = flags.set_scope();
+                let write_once = flags.contains(SymbolFlags::READONLY);
+                if scope == SetScope::Anywhere && (!write_once || in_constructor || lazy) {
                     return false;
                 }
-                if admits(res.class()) {
-                    if in_constructor || lazy {
-                        return false;
+                let declaring = res.class();
+                let in_family = writer.is_some_and(|w| self.class_isa(w, declaring, module_index));
+                let verdict = match scope {
+                    // A trait's member is its composer's own.
+                    SetScope::Class
+                        if writer != Some(declaring)
+                            && !(in_family && self.hit_class_declared(declaring, SymbolFlags::TRAIT, &res, module_index)) =>
+                    {
+                        MisplacedWriteKind::OutsideClass
                     }
-                    kind = ReadonlyWriteKind::OutsideConstructor;
-                }
-                if !classes.iter().any(|c| c == res.class()) {
-                    classes.push(res.class().to_string());
+                    SetScope::Family if !in_family => MisplacedWriteKind::OutsideFamily,
+                    // Only a write-once member has a place it is set in good
+                    // form; a write from outside the family to one any code
+                    // may set is what its set scope declares.
+                    _ if write_once && in_family && !in_constructor && !lazy => {
+                        MisplacedWriteKind::OutsideConstructor
+                    }
+                    _ => return false,
+                };
+                kind = kind.max(verdict);
+                if !classes.iter().any(|c| c == declaring) {
+                    classes.push(declaring.to_string());
                 }
                 true
             });
             if reported {
-                out.push(ReadonlyWrite { span: site.name_span, member: member.to_string(), classes, kind });
+                out.push(MisplacedWrite { span: site.name_span, member: member.to_string(), classes, kind });
             }
         }
         out

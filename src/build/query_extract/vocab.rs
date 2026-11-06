@@ -88,6 +88,12 @@ spelled! {
         /// A storage slot its class makes write-once (a property of a php
         /// `readonly class`).
         Readonly = "readonly",
+        /// Where a storage slot may be written from, stated apart from
+        /// where it may be read (php `public(set)` / `protected(set)` /
+        /// `private(set)`).
+        SetPublic = "set_public",
+        SetProtected = "set_protected",
+        SetPrivate = "set_private",
     }
 }
 
@@ -795,6 +801,9 @@ impl MarkCap {
             MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
             MarkCap::Macro => F::MACRO,
             MarkCap::Readonly => F::READONLY,
+            MarkCap::SetPublic => F::SET_PUBLIC,
+            MarkCap::SetProtected => F::SET_PROTECTED,
+            MarkCap::SetPrivate => F::SET_PRIVATE,
         }
     }
 }

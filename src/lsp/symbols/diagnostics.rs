@@ -51,30 +51,31 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
         .collect()
 }
 
-/// `readonly-write`: a write to a write-once member where it is not set
-/// (`FileAnalysis::readonly_member_writes`). Always on: from outside the
-/// member's class family it fails at runtime every time (WARNING); inside
-/// the family but outside a constructor it is bad form (HINT). One code at
-/// two severities, so one switch silences the family. Resolves through the
-/// file's own scope, as navigation does.
+/// `readonly-write`: a member written where it may not be set
+/// (`FileAnalysis::misplaced_member_writes`). Always on: from outside the
+/// member's set scope it fails at runtime every time (WARNING); a write-once
+/// member set by its class family outside a constructor is bad form (HINT).
+/// One code at two severities, so one switch silences the family. Resolves
+/// through the file's own scope, as navigation does.
 pub fn readonly_write_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
-    use crate::model::file_analysis::{CrossFileLookup, ReadonlyWriteKind};
+    use crate::model::file_analysis::{CrossFileLookup, MisplacedWriteKind};
     let base: &dyn CrossFileLookup = module_index;
     let scoped = crate::index::resolve::origin_scope(base, analysis, None);
     analysis
-        .readonly_member_writes(Some(&scoped))
+        .misplaced_member_writes(Some(&scoped))
         .into_iter()
         .map(|w| {
             let classes = w.classes.join(" or ");
             let (severity, message) = match w.kind {
-                ReadonlyWriteKind::OutsideClass => (
+                MisplacedWriteKind::OutsideClass => (
                     DiagnosticSeverity::WARNING,
-                    format!(
-                        "`{}` is a readonly property of {classes}; it cannot be written from outside {classes} or a subclass",
-                        w.member,
-                    ),
+                    format!("`{}` of {classes} cannot be set from outside {classes}", w.member),
                 ),
-                ReadonlyWriteKind::OutsideConstructor => (
+                MisplacedWriteKind::OutsideFamily => (
+                    DiagnosticSeverity::WARNING,
+                    format!("`{}` of {classes} cannot be set from outside {classes} or a subclass", w.member),
+                ),
+                MisplacedWriteKind::OutsideConstructor => (
                     DiagnosticSeverity::HINT,
                     format!("readonly property `{}` of {classes} is set outside the constructor", w.member),
                 ),

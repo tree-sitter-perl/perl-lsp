@@ -76,7 +76,7 @@
 ; is the spelling it is listed by. A declared type is the member's value,
 ; a union the join of its arms; an intersection names no single type, so
 ; it is not captured. `readonly` is the attribute that makes the member
-; write-once, from its class or a subclass only.
+; write-once.
 (property_declaration
   (readonly_modifier)? @sym.attr
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
@@ -115,6 +115,42 @@
     (by_ref (variable_name (name) @mark.non_public))
   ]
   (#any-of? @_visibility "private" "protected"))
+; A `(set)` visibility says where the member may be written from, apart
+; from where it may be read. A readonly member stating none is set by its
+; class and the classes extending it.
+((property_declaration
+  (visibility_modifier "public" (operation) @_set)
+  (property_element name: (variable_name (name) @mark.set_public)))
+ (#eq? @_set "set"))
+((property_declaration
+  (visibility_modifier "protected" (operation) @_set)
+  (property_element name: (variable_name (name) @mark.set_protected)))
+ (#eq? @_set "set"))
+((property_declaration
+  (visibility_modifier "private" (operation) @_set)
+  (property_element name: (variable_name (name) @mark.set_private)))
+ (#eq? @_set "set"))
+((property_promotion_parameter
+  visibility: (visibility_modifier "public" (operation) @_set)
+  name: [
+    (variable_name (name) @mark.set_public)
+    (by_ref (variable_name (name) @mark.set_public))
+  ])
+ (#eq? @_set "set"))
+((property_promotion_parameter
+  visibility: (visibility_modifier "protected" (operation) @_set)
+  name: [
+    (variable_name (name) @mark.set_protected)
+    (by_ref (variable_name (name) @mark.set_protected))
+  ])
+ (#eq? @_set "set"))
+((property_promotion_parameter
+  visibility: (visibility_modifier "private" (operation) @_set)
+  name: [
+    (variable_name (name) @mark.set_private)
+    (by_ref (variable_name (name) @mark.set_private))
+  ])
+ (#eq? @_set "set"))
 (method_declaration (static_modifier) name: (name) @mark.static)
 (property_declaration
   (static_modifier)

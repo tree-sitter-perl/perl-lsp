@@ -2532,10 +2532,10 @@ fn readonly_properties_carry_the_flag() {
 #[cfg(feature = "php")]
 #[test]
 fn readonly_writes_outside_the_class_or_its_constructors_are_reported() {
-    use crate::model::file_analysis::ReadonlyWriteKind::{OutsideClass as Outside, OutsideConstructor as InClass};
+    use crate::model::file_analysis::MisplacedWriteKind::{OutsideConstructor as InClass, OutsideFamily as Outside};
     let fa = php(READONLY);
     let found: Vec<_> = fa
-        .readonly_member_writes(None)
+        .misplaced_member_writes(None)
         .into_iter()
         .map(|w| (w.span.start.row, w.member, w.classes, w.kind))
         .collect();
@@ -2582,10 +2582,145 @@ fn a_readonly_write_across_files_is_reported() {
             (
                 2,
                 Some(S::WARNING),
-                "`x` is a readonly property of App\\Point; it cannot be written from outside App\\Point or a subclass"
-                    .to_string()
+"`x` of App\\Point cannot be set from outside App\\Point or a subclass".to_string()
             ),
             (3, Some(S::HINT), "readonly property `x` of App\\Point is set outside the constructor".to_string()),
         ]
     );
+}
+
+const SET_SCOPES: &str = "<?php
+namespace App;
+
+class Point {
+    public public(set) readonly int $open;
+    public private(set) readonly int $own;
+    public protected(set) int $kin;
+    public private(set) int $mine;
+    public function __construct(private(set) int $p) {
+        $this->own = 1;
+    }
+    public function move() {
+        $this->mine = 2;
+        $this->own = 3;
+    }
+}
+
+class Point3 extends Point {
+    public function __construct() {
+        $this->own = 4;
+        $this->kin = 5;
+        $this->mine = 6;
+        $this->p = 7;
+    }
+}
+
+function outside(Point $q) {
+    $q->open = 8;
+    $q->kin = 9;
+    $q->mine = 10;
+    $q->p = 11;
+}
+";
+
+/// A `(set)` visibility is the member's set scope, on a property and on a
+/// promoted parameter alike; a readonly member stating none keeps its
+/// class family, and get visibility alone states no set scope.
+#[cfg(feature = "php")]
+#[test]
+fn set_visibility_is_the_members_set_scope() {
+    use crate::model::file_analysis::{SetScope, SymbolFlags as F};
+    let fa = php(SET_SCOPES);
+    let flags = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.kind == SymKind::Field && s.name == name && s.package.as_deref() == Some("App\\Point"))
+            .unwrap()
+            .flags
+    };
+    assert_eq!(flags("open"), F::READONLY | F::SET_PUBLIC);
+    assert_eq!(flags("own"), F::READONLY | F::SET_PRIVATE);
+    assert_eq!(flags("kin"), F::SET_PROTECTED);
+    assert_eq!(flags("mine"), F::SET_PRIVATE);
+    assert_eq!(flags("p"), F::SET_PRIVATE);
+    let scope = |name: &str| flags(name).set_scope();
+    assert_eq!(
+        ["open", "own", "kin", "mine", "p"].map(scope),
+        [SetScope::Anywhere, SetScope::Class, SetScope::Family, SetScope::Class, SetScope::Class]
+    );
+    assert_eq!(php(READONLY).symbols().iter().find(|s| s.name == "x").unwrap().flags.set_scope(), SetScope::Family);
+    assert_eq!(php(READONLY).symbols().iter().find(|s| s.name == "plain").unwrap().flags.set_scope(), SetScope::Anywhere);
+}
+
+/// A write outside the member's set scope fails, whether or not the member
+/// is write-once: `private(set)` shuts out a subclass, `protected(set)`
+/// admits it, `public(set)` admits anyone. Only a write-once member has a
+/// constructor to be set in.
+#[cfg(feature = "php")]
+#[test]
+fn writes_outside_the_set_scope_are_reported() {
+    use crate::model::file_analysis::MisplacedWriteKind::{OutsideClass, OutsideConstructor, OutsideFamily};
+    let fa = php(SET_SCOPES);
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    let at = |row: usize, member: &str, kind| (row, member.to_string(), kind);
+    assert_eq!(
+        found,
+        [
+            at(13, "own", OutsideConstructor),
+            at(19, "own", OutsideClass),
+            at(21, "mine", OutsideClass),
+            at(22, "p", OutsideClass),
+            at(28, "kin", OutsideFamily),
+            at(29, "mine", OutsideClass),
+            at(30, "p", OutsideClass),
+        ]
+    );
+}
+
+/// The warning names the set scope it is outside: the class alone, or the
+/// class and its subclasses.
+#[cfg(feature = "php")]
+#[test]
+fn a_set_scope_warning_names_its_scope() {
+    use crate::lsp::symbols::DiagnosticOptions;
+    let point = (
+        "/fake/php/App/Point.php",
+        "<?php\nnamespace App;\nclass Point { public private(set) int $x; public protected(set) int $y; }\n",
+    );
+    let user = ("/fake/php/App/Use.php", "<?php\nnamespace App;\nfunction f(Point $p) { $p->x = 1; $p->y = 2; }\n");
+    let idx = php_indexed(&[point, user]);
+    let fa = idx.workspace_file_for_test(std::path::Path::new(user.0)).unwrap();
+    let messages: Vec<_> = crate::lsp::symbols::pack_diagnostics(&fa, &idx, DiagnosticOptions::default())
+        .into_iter()
+        .filter(|d| d.code == Some(tower_lsp::lsp_types::NumberOrString::String("readonly-write".into())))
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "`x` of App\\Point cannot be set from outside App\\Point",
+            "`y` of App\\Point cannot be set from outside App\\Point or a subclass",
+        ]
+    );
+}
+
+/// A trait's `private(set)` member is the composing class's own, so the
+/// composer's methods may set it.
+#[cfg(feature = "php")]
+#[test]
+fn a_traits_private_set_member_is_its_composers() {
+    let fa = php("<?php
+trait HasId { public private(set) int $id; }
+class User {
+    use HasId;
+    public function assign() { $this->id = 1; }
+}
+function f(User $u) { $u->id = 2; }
+");
+    let found: Vec<_> = fa.misplaced_member_writes(None).into_iter().map(|w| w.span.start.row).collect();
+    assert_eq!(found, [6]);
 }

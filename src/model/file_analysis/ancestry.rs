@@ -891,7 +891,7 @@ impl FileAnalysis {
                 // abstract stub otherwise shadows the trait method every
                 // consumer actually runs (laravel `Collection->eachSpread`).
                 Some(r) => {
-                    if self.hit_class_is_interface(cls, &r, module_index) {
+                    if self.hit_class_declared(cls, SymbolFlags::INTERFACE, &r, module_index) {
                         iface_fallback.get_or_insert(r);
                         std::ops::ControlFlow::Continue(())
                     } else {
@@ -931,27 +931,27 @@ impl FileAnalysis {
         None
     }
 
-    /// Is the class that answered a method resolution an INTERFACE (php:
-    /// a Class symbol carrying the "interface" flavor attribute)? Cost-
-    /// shaped by the hit kind: a Local hit consults only the local symbol
-    /// (for Perl that scan never matches — no symbol carries the flavor —
-    /// and no cross-file work happens); a CrossFile hit also sweeps the
-    /// class's candidate files, whose copies the resolution itself just
-    /// rehydrated (LRU-warm).
-    fn hit_class_is_interface(
+    /// Is the class that answered a member resolution declared with `flag`
+    /// (php: an interface, a trait)? Cost-shaped by the hit kind: a Local
+    /// hit consults only the local symbols (for Perl that scan never
+    /// matches — no class carries a flavor flag — and no cross-file work
+    /// happens); a CrossFile hit also sweeps the class's candidate files,
+    /// whose copies the resolution itself just rehydrated (LRU-warm).
+    pub(crate) fn hit_class_declared(
         &self,
         cls: &str,
+        flag: SymbolFlags,
         r: &MethodResolution,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> bool {
         match r {
-            MethodResolution::Local { .. } => self.declares_interface(cls),
+            MethodResolution::Local { .. } => self.declares_class_with(cls, flag),
             MethodResolution::CrossFile { .. } => {
-                self.declares_interface(cls)
+                self.declares_class_with(cls, flag)
                     || module_index.is_some_and(|i| {
                         i.visible_def_candidates(cls)
                             .iter()
-                            .any(|c| i.whole_present(c).declares_interface(cls))
+                            .any(|c| i.whole_present(c).declares_class_with(cls, flag))
                     })
             }
         }
@@ -962,10 +962,15 @@ impl FileAnalysis {
     /// (stamped from the `@classattr.interface` capture); Perl never marks
     /// one. The one speller every interface-deferral walk asks.
     pub fn declares_interface(&self, class: &str) -> bool {
-        self.symbols().iter().any(|s| {
-            matches!(s.kind, SymKind::Class)
-                && s.name == class
-                && s.flags.contains(SymbolFlags::INTERFACE)
+        self.declares_class_with(class, SymbolFlags::INTERFACE)
+    }
+
+    /// Does THIS file declare `class` with the flavor `flag` (an interface,
+    /// a trait)?
+    pub fn declares_class_with(&self, class: &str, flag: SymbolFlags) -> bool {
+        self.symbols_named(class).iter().any(|&sid| {
+            let s = self.symbol(sid);
+            matches!(s.kind, SymKind::Class) && s.flags.contains(flag)
         })
     }
 
@@ -1000,7 +1005,7 @@ impl FileAnalysis {
                 };
                 match self.method_resolution_on_class(cls, MemberKey::Named(method_name), module_index, MemberKind::Callable) {
                     Some(r) => {
-                        if self.hit_class_is_interface(cls, &r, module_index) {
+                        if self.hit_class_declared(cls, SymbolFlags::INTERFACE, &r, module_index) {
                             iface_fallback.get_or_insert(r);
                             crate::model::graph::WalkControl::Continue
                         } else {
