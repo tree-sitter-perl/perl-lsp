@@ -256,12 +256,22 @@
 ((variable_name) @receiver.enclosing
  (#eq? @receiver.enclosing "$this"))
 
-; A literal is a value of its own kind.
-(integer) @expr.lit.number
-(float) @expr.lit.number
-(string) @expr.lit.string
-(encapsed_string) @expr.lit.string
-(boolean) @expr.lit.bool
+; A literal is a value of its own kind, stated only where that value flows
+; on: into a write, a return, an argument, a declared initializer or an
+; operator. A literal nothing reads that way (an array element or key, a
+; `case` label, a parameter's default) would cost a fact no query asks for.
+([(integer) (float)] @expr.lit.number
+ (#has-parent? @expr.lit.number assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
+([(string) (encapsed_string)] @expr.lit.string
+ (#has-parent? @expr.lit.string assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
+((boolean) @expr.lit.bool
+ (#has-parent? @expr.lit.bool assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
 
 ; Parentheses hold the value they wrap.
 ((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper

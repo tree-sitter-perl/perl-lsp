@@ -3122,3 +3122,43 @@ fn a_literal_types_and_an_initializer_flows_into_its_property() {
     assert_eq!(ty("d"), Some(T::String), "the initializer of an untyped property");
     assert_eq!(ty("e"), Some(T::Numeric));
 }
+
+const FLOWING_LITERALS: &str = "<?php
+class K {
+    const C = 11;
+    public $p = 12;
+    public function f($q = 13) {
+        static $s = 14;
+        $a = 15;
+        $a += 16;
+        g(17);
+        $b = $a + 18;
+        $c = -19;
+        $d = [20 => 21];
+        switch ($a) { case 22: break; }
+        return 23;
+    }
+}
+";
+
+/// A literal states its kind only where its value flows on: a write, a
+/// return, an argument, a declared initializer, an operand. One nothing
+/// reads that way (an array key or element, a `case` label, a parameter's
+/// default) states nothing.
+#[cfg(feature = "php")]
+#[test]
+fn a_literal_states_its_kind_only_where_its_value_flows() {
+    use crate::model::file_analysis::{InferredType as T, Span};
+    let fa = php(FLOWING_LITERALS);
+    let lit = |needle: &str| {
+        let start = at(FLOWING_LITERALS, needle, 0);
+        let end = tree_sitter::Point { column: start.column + needle.len(), ..start };
+        fa.expr_type_at_span(Span { start, end }, None)
+    };
+    for flowing in ["11", "12", "14", "15", "16", "17", "18", "19", "23"] {
+        assert_eq!(lit(flowing), Some(T::Numeric), "`{flowing}` flows on");
+    }
+    for idle in ["13", "20", "21", "22"] {
+        assert_eq!(lit(idle), None, "`{idle}` flows nowhere");
+    }
+}
