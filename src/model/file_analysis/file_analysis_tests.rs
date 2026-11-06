@@ -2506,11 +2506,11 @@ fn loader_config_types_register_conf_cross_file() {
 }
 
 
-// ---- Field{owner, name}: one subject, source-agnostic across flavors ----
+// ---- Member{owner, name, Holds}: one subject, source-agnostic across flavors ----
 //
 // Every Perl field flavor (Moo `has`, classic `$self->{k}` hash slot, Corinna
 // `field`) and every access form (accessor call, hash-slot deref, field var)
-// projects onto the SAME language-generic `Field{owner, name}` bag primitive a
+// projects onto the SAME language-generic `Member{owner, name, Holds}` bag primitive a
 // C struct member uses — resolved via `field_subject_of_ref`, which dispatches
 // on the access SHAPE, never the field flavor (rule #10). These lock the
 // convergence the refs-splat relies on.

@@ -29,7 +29,8 @@ use super::*;
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
-type VisitedSet = std::collections::HashSet<VisitedKey>;
+/// The keys on the current path, each with its depth on it.
+type VisitedSet = std::collections::HashMap<VisitedKey, usize>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
 /// candidate files (`class_candidates_node`), or a free function's exporters
 /// and linkage-visible definitions (`free_function_cross_file`).
@@ -65,6 +66,12 @@ struct ClassLadder<'a> {
     /// up front (the `MethodOnClass` bake), rather than letting each
     /// parent's own frame record its exit.
     rungs_on_parents: bool,
+    /// Whether a rung that holds the member but cannot type it ends the
+    /// walk. A call dispatches to the nearest definition whatever it
+    /// returns, so it does; a stored member's type is the nearest TYPED
+    /// declaration's up the walk, so an untyped one only says the member
+    /// exists there and the walk goes on (`ClassLadder::settles`).
+    untyped_settles: bool,
     /// The bake's residual-site tag (`note_bake_exit`).
     site: &'static str,
     /// The live consult's attribution tag (`mocsite.*`).
@@ -89,6 +96,7 @@ impl<'a> ClassLadder<'a> {
                         _ => unreachable!("rekey is minted from its own attachment"),
                     }),
                     rungs_on_parents: returns,
+                    untyped_settles: returns,
                     site: if returns { "moc_primary" } else { "field" },
                     fetch_tag: if returns { "mocsite.primary" } else { "mocsite.field" },
                 }
@@ -104,6 +112,7 @@ impl<'a> ClassLadder<'a> {
                     _ => unreachable!("rekey is minted from its own attachment"),
                 }),
                 rungs_on_parents: false,
+                untyped_settles: true,
                 site: "param",
                 fetch_tag: "mocsite.param",
             },
@@ -114,6 +123,7 @@ impl<'a> ClassLadder<'a> {
                 // An alias names one type; the alias graph has no ancestry.
                 rekey: None,
                 rungs_on_parents: false,
+                untyped_settles: true,
                 site: "type_name",
                 fetch_tag: "mocsite.type_name",
             },
@@ -123,6 +133,38 @@ impl<'a> ClassLadder<'a> {
 
     fn arity(&self, q: &ReducerQuery) -> Option<u32> {
         self.callable.and(q.arity_hint)
+    }
+
+    /// Does a rung's answer end the walk? Any answer does, except an
+    /// untyped one where the ladder walks on past it (`untyped_settles`).
+    fn settles(&self, v: &ReducedValue) -> bool {
+        self.untyped_settles || !matches!(v, ReducedValue::Type(InferredType::Unknown))
+    }
+}
+
+/// The answers a ladder's rungs give, settled in walk order: the first that
+/// settles (`ClassLadder::settles`) is the walk's, and an unsettled one is
+/// kept as the walk's answer should nothing settle after it.
+#[derive(Default)]
+struct RungAnswers {
+    unsettled: Option<ReducedValue>,
+}
+
+impl RungAnswers {
+    /// `Some` when `v` ends the walk.
+    fn offer(&mut self, ladder: &ClassLadder, v: ReducedValue) -> Option<ReducedValue> {
+        if v == ReducedValue::None {
+            return None;
+        }
+        if ladder.settles(&v) {
+            return Some(v);
+        }
+        self.unsettled.get_or_insert(v);
+        None
+    }
+
+    fn rest(self) -> Option<ReducedValue> {
+        self.unsettled
     }
 }
 
@@ -363,6 +405,11 @@ pub(super) struct QueryState {
     memo: std::collections::HashMap<VisitedKey, MemoEntry>,
     /// Cuts seen so far in this query; read as a difference across a subtree.
     cuts: u64,
+    /// The shallowest path depth a cut beneath the current frame returned
+    /// to (`usize::MAX`: none). A frame at depth `d` whose subtree only cut
+    /// back to depth `d` or deeper closed every cycle it entered, so its
+    /// walk is complete; a cut to a shallower key left it open.
+    low_cut: usize,
     /// Where a BAKE's chase would have consulted the index, in the order the
     /// ladder reached them.
     ///
@@ -423,12 +470,13 @@ impl QueryState {
 
     pub(super) fn new() -> Self {
         QueryState {
-            visited: std::collections::HashSet::new(),
+            visited: VisitedSet::new(),
             fan_outs: std::collections::HashSet::new(),
             fan_out_memo: std::collections::HashMap::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
             cuts: 0,
+            low_cut: usize::MAX,
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
@@ -496,7 +544,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`Member{class, name}` when `attributed`, `Field{owner, name}`
+/// (`Member{class, name}` when `attributed`, `Member{owner, name, Holds}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -754,7 +802,7 @@ impl ReducerRegistry {
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
+        // The two `Member{.., Holds}` reducers claim disjoint PAYLOADS on one
         // attachment: FieldValueReducer the slot's materialized value edge
         // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
         // vote. Value first is load-bearing — the domain is a human-surface
@@ -936,6 +984,7 @@ impl ReducerRegistry {
             // truncates is not wrong, it is incomplete, so comparing a
             // conclusion against it proves nothing either way.
             state.poisoned = true;
+            state.low_cut = 0;
             // The LIVE counterpart of the poison above, and it has to be
             // thread-local rather than a `QueryState` field: the cap counts
             // frames across the whole THREAD, so it fires inside nested
@@ -965,6 +1014,8 @@ impl ReducerRegistry {
             let cached = std::sync::Arc::clone(cached);
             if *cut {
                 state.cuts += 1;
+                // Where that cut returned to is not recorded: assume the root.
+                state.low_cut = 0;
             }
             // Re-reaching an exiting subtree from inside a combining frame is
             // the same claim as reaching it there the first time; the memo must
@@ -987,16 +1038,22 @@ impl ReducerRegistry {
         // `key` has two owners (the visited set, transiently; the memo,
         // for the rest of the query). Clone once for visited, then move
         // the original into the memo store below.
-        if !state.visited.insert(key.clone()) {
+        let depth_on_path = state.visited.len();
+        if let Some(&target) = state.visited.get(&key) {
             state.cuts += 1;
+            state.low_cut = state.low_cut.min(target);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
+        state.visited.insert(key.clone(), depth_on_path);
+        let low_cut_outside = std::mem::replace(&mut state.low_cut, usize::MAX);
         let exits_before = state.residual.len();
         let poison_before = state.poisoned;
         let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
+        let body = self.query_rec_body(bag, q, depth_on_path, state);
+        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, body));
+        state.low_cut = state.low_cut.min(low_cut_outside);
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
         let cut = state.cuts > cuts_before
@@ -1017,20 +1074,22 @@ impl ReducerRegistry {
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
+        depth_on_path: usize,
         state: &mut QueryState,
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
-        if v != ReducedValue::None {
+        let ladder = ClassLadder::of(q.attachment);
+        if v != ReducedValue::None && ladder.as_ref().is_none_or(|l| l.settles(&v)) {
             return v;
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
-        // answer — `Member{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
-        // `TypeName(T)`: one ladder (`ClassLadder`, `class_fallback`) for
-        // all four. Most cases are covered by build-time edge emission
-        // (local writeback emits `Member(child, m) →
-        // Edge(Member(parent, m))`; enrichment projects the same for
+        // answer (or, for a stored member, couldn't type) — `Member{C, m}`
+        // of either aspect, `Param{C, f, i}`, `TypeName(T)`: one ladder
+        // (`ClassLadder`, `class_fallback`) for all three. Most cases are
+        // covered by build-time edge emission (local writeback emits
+        // `Member(child, m) → Edge(Member(parent, m))`; enrichment projects the same for
         // cross-file parents), resolved by the generic edge-chase; the ladder
         // covers the residual: the class's other files, its ancestry, and
         // plugin-namespace bridges declared elsewhere.
@@ -1043,7 +1102,7 @@ impl ReducerRegistry {
         // placement.
         if let Some(idx) = q.context.and_then(|c| c.module_index) {
             if !super::session::budget_available(idx) {
-                return ReducedValue::None;
+                return v;
             }
         }
         // `Param`: the callee's bag is the authority. Its own witness present
@@ -1055,18 +1114,23 @@ impl ReducerRegistry {
         {
             return ReducedValue::Type(InferredType::Unknown);
         }
-        // A member this class holds: its own witnesses (a declaration, a
-        // write) are present but untyped, so the member EXISTS here and
-        // shadows a parent's of the same name; `Unknown` says so where
-        // silence would read as absent and walk on.
-        if matches!(q.attachment, WitnessAttachment::Member { aspect: MemberAspect::Holds, .. })
-            && !bag.for_attachment(q.attachment).is_empty()
-        {
-            return ReducedValue::Type(InferredType::Unknown);
-        }
-        if let Some(ladder) = ClassLadder::of(q.attachment) {
-            if let Some(v) = self.class_fallback(bag, q, state, &ladder) {
-                return v;
+        if let Some(ladder) = &ladder {
+            if let Some(found) = self.class_fallback(bag, q, state, ladder) {
+                return found;
+            }
+            // THE presence check. Nothing up the walk typed the member, but
+            // this class holds it (a declaration, a write): it exists, so the
+            // answer is `Unknown`, not the silence that would read as absent.
+            // A read site stops at the namespace that answers
+            // (`ProjectionStep::ValueHop`), so this is also what keeps a read
+            // of a legal member out of the illegal namespaces. A walk the
+            // cycle guard cut ABOVE this frame (`$self->{k} ||= Foo->new`
+            // reached from the expression reads the member it writes) did not
+            // finish, so it settles nothing: the member's value is the rest of
+            // that cycle, which the frame it started from folds.
+            if !ladder.untyped_settles && !bag.for_attachment(q.attachment).is_empty() {
+                let complete = state.low_cut >= depth_on_path;
+                return if complete { ReducedValue::Type(InferredType::Unknown) } else { v };
             }
         }
 
@@ -1111,10 +1175,13 @@ impl ReducerRegistry {
         ladder: &ClassLadder,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
+        let mut rungs = RungAnswers::default();
         match ctx.module_index {
             Some(idx) => {
                 if let Some(v) = self.class_candidates_node(bag, q, state, ctx, idx, ladder) {
-                    return Some(v);
+                    if let Some(v) = rungs.offer(ladder, v) {
+                        return Some(v);
+                    }
                 }
             }
             None => {
@@ -1131,10 +1198,12 @@ impl ReducerRegistry {
         }
         if let Some(rekey) = ladder.rekey {
             if let Some(v) = self.class_ancestry(bag, q, state, ctx, ladder, rekey) {
-                return Some(v);
+                if let Some(v) = rungs.offer(ladder, v) {
+                    return Some(v);
+                }
             }
         }
-        Self::class_bridges(ctx, ladder)
+        Self::class_bridges(ctx, ladder).or_else(|| rungs.rest())
     }
 
     /// Hop (1) of `class_fallback` as a fan-out node (`fan_out_node`). Only
@@ -1185,6 +1254,7 @@ impl ReducerRegistry {
                 )));
             }
         }
+        let mut rungs = RungAnswers::default();
         for p in parents {
             let parent_att = rekey(q.attachment, p);
             let sub_q = ReducerQuery {
@@ -1197,11 +1267,11 @@ impl ReducerRegistry {
                 context: q.context,
             };
             let v = self.query_rec(bag, &sub_q, state);
-            if *v != ReducedValue::None {
-                return Some((*v).clone());
+            if let Some(v) = rungs.offer(ladder, (*v).clone()) {
+                return Some(v);
             }
         }
-        None
+        rungs.rest()
     }
 
     /// Hop (3) of `class_fallback`: callable entities other files' plugin
@@ -1323,6 +1393,7 @@ impl ReducerRegistry {
         // The sweep-tier spelling of the same key — shared across files and
         // workers where a batch sweep opened the store (SweepAnswerGuard).
         let verdict_key = super::ConsultVerdictKey::of(&memo_q);
+        let mut rungs = RungAnswers::default();
         for cached in super::session::visible_def_candidates(idx, package).iter() {
             // Rehydrate the target file's bag if its resident copy
             // was Slice-2-evicted; the cross-file chase reads its
@@ -1367,8 +1438,8 @@ impl ReducerRegistry {
             if let Some(hit) =
                 super::session::candidate_answer(idx, &cached.path, &memo_q)
             {
-                if *hit != ReducedValue::None {
-                    return Some((*hit).clone());
+                if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
+                    return Some(v);
                 }
                 continue;
             }
@@ -1376,8 +1447,8 @@ impl ReducerRegistry {
             // another file's build already derived this sweep.
             if let Some(hit) = idx.sweep_consult_answer(&cached.path, &verdict_key) {
                 super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit);
-                if *hit != ReducedValue::None {
-                    return Some((*hit).clone());
+                if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
+                    return Some(v);
                 }
                 continue;
             }
@@ -1465,7 +1536,10 @@ impl ReducerRegistry {
                                 idx, &cached.path, &memo_q, &v,
                             );
                             idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
-                            return Some(v);
+                            match rungs.offer(ladder, v) {
+                                Some(v) => return Some(v),
+                                None => continue,
+                            }
                         }
                         // ABSENT. The spec lets this mean a proven
                         // `None` and skip the candidate outright —
@@ -1628,7 +1702,10 @@ impl ReducerRegistry {
                                         idx.remember_sweep_consult(
                                             &cached.path, &verdict_key, &v,
                                         );
-                                        return Some(v);
+                                        match rungs.offer(ladder, v) {
+                                            Some(v) => return Some(v),
+                                            None => continue,
+                                        }
                                     }
                                 }
                                 None => {
@@ -1899,7 +1976,7 @@ impl ReducerRegistry {
                         != QUERY_REC_TRUNCATIONS.with(|c| c.get())
                     {
                         Some("concl.follow_break_truncated")
-                    } else if state.visited.contains(&candidate_key) {
+                    } else if state.visited.contains_key(&candidate_key) {
                         Some("concl.follow_break_guarded")
                     } else {
                         None
@@ -1957,12 +2034,12 @@ impl ReducerRegistry {
             }
             super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v);
             idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
-            if v != ReducedValue::None {
+            if let Some(v) = rungs.offer(ladder, v) {
                 return Some(v);
             }
         }
 
-        None
+        rungs.rest()
     }
 
     /// Resolve every Edge witness on `q.attachment` to an `InferredType`
@@ -1999,7 +2076,7 @@ impl ReducerRegistry {
     /// later reads take. Every other witness keeps its bag order, and the
     /// grown shapes follow them (`splice_grown`).
     ///
-    /// A `Field` is not temporal: its writes are arms of one value, so each
+    /// A `Holds` member is not temporal: its writes are arms of one value, so each
     /// grown shape JOINS the value it grew from, as the slot's other arms do.
     #[inline(never)]
     fn lower_extensions(
@@ -2100,7 +2177,7 @@ impl ReducerRegistry {
 
     /// The value standing under a segment's first delta at `at`: what a read
     /// there answers from every other witness of the place plus the shapes
-    /// earlier segments grew. A `Field` reads its whole value, the class
+    /// earlier segments grew. A `Holds` member reads its whole value, the class
     /// ladder included, since the slot's other writes may live elsewhere.
     fn extension_base(
         &self,
@@ -2334,8 +2411,8 @@ impl ReducerRegistry {
                                     t.key_value_type(k).flatten().cloned().or_else(|| {
                                         // Class-typed base: the structural
                                         // literal can't answer, but a typed
-                                        // slot WRITE can — `Field{class,
-                                        // key}`, local or (via the arm in
+                                        // slot WRITE can — `Member{class,
+                                        // key, Holds}`, local or (via the arm in
                                         // query_rec_body) cross-file and up
                                         // the ancestry. The read drills
                                         // through the registry, never a
@@ -2359,8 +2436,6 @@ impl ReducerRegistry {
                                             }
                                         })
                                     })
-                                    // An untyped slot is no value.
-                                    .filter(|t| !matches!(t, InferredType::Unknown))
                                 }
                                 ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
                                 ProjectionStep::Element => match t {
@@ -2436,8 +2511,9 @@ impl ReducerRegistry {
                                     let class = t.class_name()?.to_string();
                                     // The first namespace holding the member
                                     // answers, typed or not: an untyped legal
-                                    // member is still the one the read reaches.
-                                    let found = spaces.in_order().find_map(|space| {
+                                    // member is still the one the read
+                                    // reaches, and its `Unknown` flows.
+                                    spaces.in_order().find_map(|space| {
                                         let att = WitnessAttachment::holds_of(class.clone(), space, member.clone());
                                         let sub_q = ReducerQuery {
                                             attachment: &att,
@@ -2455,8 +2531,7 @@ impl ReducerRegistry {
                                                 | ReducedValue::None => None,
                                             }
                                         })
-                                    });
-                                    found.filter(|t| !matches!(t, InferredType::Unknown))
+                                    })
                                 }
                             }
                         };

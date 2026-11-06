@@ -754,7 +754,7 @@
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
 ; OP_FREED` / `o->op_targ = pad_alloc(...)`. @domain.slot is the field access,
 ; @domain.value the other operand — an enumerator carries its `enum`, resolved
-; cross-file at query time, then the sites fold onto `Field{owner,name}`
+; cross-file at query time, then the sites fold onto `Member{owner, name, Holds}`
 ; (op_type → opcode). The value is deliberately UNGATED (`(_)`): a site whose
 ; operand is NOT an enumerator (integer literal, arithmetic, a call) is
 ; counter-evidence in the coherence vote's denominator — capturing only

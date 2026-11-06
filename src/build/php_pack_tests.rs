@@ -3053,13 +3053,43 @@ class Card extends Base {
 ";
 
 /// The member a read reaches is the first namespace that HOLDS it, typed
-/// or not: `$c->v` reaches the untyped property, so the parent's static
-/// `$v` (an illegal reach from `->`) never answers in its place.
+/// or not: `$c->v` reaches the untyped property, so it reads `Unknown` and
+/// the parent's static `$v` (an illegal reach from `->`) never answers in
+/// its place.
 #[cfg(feature = "php")]
 #[test]
 fn an_untyped_legal_member_is_still_the_one_a_read_reaches() {
+    use crate::model::file_analysis::InferredType as T;
     let fa = php(UNTYPED_LEGAL);
-    assert_eq!(fa.inferred_type_via_bag("a", at(UNTYPED_LEGAL, "return;", 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("a", at(UNTYPED_LEGAL, "return;", 0)), Some(T::Unknown));
+}
+
+const UNTYPED_REDECLARED: &str = "<?php
+class Gadget {}
+class Base {
+    protected Gadget $aliasOf;
+}
+class Alias extends Base {
+    protected $aliasOf;
+    public function run() {
+        $a = $this->aliasOf;
+        return;
+    }
+}
+";
+
+/// A child that redeclares a member without a type still has the member, but
+/// its type is the nearest typed declaration's up the MRO in the same
+/// namespace: the parent's `Gadget`.
+#[cfg(feature = "php")]
+#[test]
+fn an_untyped_redeclaration_takes_the_parents_type() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(UNTYPED_REDECLARED);
+    assert_eq!(
+        fa.inferred_type_via_bag("a", at(UNTYPED_REDECLARED, "return;", 0)),
+        Some(T::ClassName("Gadget".into()))
+    );
 }
 
 const LITERALS: &str = "<?php

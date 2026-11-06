@@ -21,11 +21,10 @@ struct Target {
     /// A `@type.<relative>` annotation's mark and the class in force where
     /// it is written.
     relative: Option<(RelativeClass, String)>,
-    /// The class in force at the token and the namespace its `@space.*`
-    /// names: a data member's declaration is its member identity's, so two
-    /// members of one name in one class (php's `const X` and `$X`) never
-    /// share a fact.
-    member: Option<(String, Option<crate::model::file_analysis::NamespaceId>)>,
+    /// The namespace the token's `@space.*` names: a data member's
+    /// declaration is its member identity's, so two members of one name in
+    /// one class (php's `const X` and `$X`) never share a fact.
+    space: Option<crate::model::file_analysis::NamespaceId>,
 }
 
 #[derive(Default)]
@@ -137,14 +136,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     relative = Some((rel, class.clone()));
                 }
             }
-            let member = st.package.clone().map(|owner| {
-                let space = ad.on(e).find_map(|t| match t.cap {
-                    Capture::Space { id, .. } => Some(id),
-                    _ => None,
-                });
-                (owner, space)
+            let space = ad.on(e).find_map(|t| match t.cap {
+                Capture::Space { id, .. } => Some(id),
+                _ => None,
             });
-            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative, member };
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative, space };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
@@ -397,6 +393,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     let ad = st.adorned;
     let f = &mut st.flow;
     let out = &mut st.out;
+    let classes = &st.scopes;
     // A class/struct DATA MEMBER is visible throughout its class body
     // regardless of declaration order (C++ member lookup is not sequential:
     // a method reads a field declared later in a `private:` section below
@@ -425,13 +422,15 @@ pub(super) fn finish(st: &mut ExtractState) {
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
     // A member declaration's facts land on the member, keyed by the token
     // that wrote them; `into_file_analysis` lowers each to its declaring
-    // symbol's place.
+    // symbol's place. Its owner is the class its scope names, the one the
+    // declaring symbol is filed under (`defs::handle`).
     let mut member_decls: HashMap<(ScopeId, Point), WitnessAttachment> = HashMap::new();
-    for (mid, Target { name, at, resets, token, relative, member, .. }, scope) in targets {
-        let var = match member {
-            Some((owner, space)) if field_scope_span.contains_key(&(name.clone(), *scope)) => {
+    for (mid, Target { name, at, resets, token, relative, space, .. }, scope) in targets {
+        let owner = classes.class_of(*scope).filter(|_| field_scope_span.contains_key(&(name.clone(), *scope)));
+        let var = match owner {
+            Some(owner) => {
                 let space = st.pack.member_spaces.of_decl(crate::model::file_analysis::SymKind::Field, *space);
-                let att = WitnessAttachment::holds_of(owner.clone(), space, name.clone());
+                let att = WitnessAttachment::holds_of(owner, space, name.clone());
                 member_decls.insert((*scope, *at), att.clone());
                 att
             }

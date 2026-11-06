@@ -324,7 +324,7 @@ impl<'a> Builder<'a> {
                     return v.cloned();
                 }
                 // Class-typed base: a typed write to this slot
-                // (`Field{class, key}`, seeded at the write site, agreed
+                // (`Member{class, key, Holds}`, seeded at the write site, agreed
                 // by `FieldValueReducer`) is the honest answer; otherwise
                 // untyped.
                 let class = base_ty.class_name()?.to_string();

@@ -29,6 +29,14 @@ pub(super) struct State {
     open_sections: OpenSections,
 }
 
+impl State {
+    /// The class `scope` is the own scope of, by the identity its def
+    /// minted: the owner of every member declared directly in it.
+    pub(super) fn class_of(&self, scope: ScopeId) -> Option<&str> {
+        self.class_scopes.get(&scope).map(String::as_str)
+    }
+}
+
 /// Record a namespace section under a use-map: a braced one is its body,
 /// a statement-form one runs to the end of the enclosing scope until the
 /// next one at its depth cuts it short.

@@ -931,7 +931,7 @@ fn inject_member_blocks(
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
-                qualifier_owned: false,
+                owner_stated: false,
                 flags: Default::default(),
                 member_space: None,
             });
@@ -1129,7 +1129,7 @@ fn remap_spans(
             deref_stack: _,
             attributes: _,
             arity: _,
-            qualifier_owned: _,
+            owner_stated: _,
             flags: _,
             member_space: _,
         } = s;

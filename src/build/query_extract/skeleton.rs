@@ -38,12 +38,15 @@ pub struct SkelSymbol {
     /// def's parameter list (`@arity.sig`). `None` for non-callables and defs
     /// whose parameter list the query didn't capture. Flows to `Symbol.arity`.
     pub arity: Option<crate::model::file_analysis::ParamArity>,
-    /// The `package` came from an explicit `::` qualifier on an out-of-line def
-    /// (`Ret Class::m(){}`), not from lexical/sticky context. The class the
-    /// qualifier names is authoritative EVEN when its body lives in another file
-    /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
-    /// the enclosing namespace. Not serialized — a driver-internal marker.
-    pub qualifier_owned: bool,
+    /// The `package` is the owner the syntax states, not the lexical/sticky
+    /// context: an explicit `::` qualifier on an out-of-line def (`Ret
+    /// Class::m(){}`), authoritative EVEN when the class body lives in
+    /// another file (a header), or the class whose own scope the def is
+    /// declared in. `reanchor_truncated_containers` must not re-attribute
+    /// it — a class spelled other than its identity (`Hook<R (*)(A...)>`)
+    /// is no container it can locate. Not serialized — a driver-internal
+    /// marker.
+    pub owner_stated: bool,
     /// Declaration facts a capture minted rather than an attribute token
     /// (a receiver parameter). Or-ed onto the flags the kind and the
     /// attributes give.
@@ -211,7 +214,7 @@ pub struct SkeletonAnalysis {
     pub param_regions: Vec<crate::model::file_analysis::Span>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
-    /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
+    /// at query time); folds onto `Member{owner, name, Holds}` for the int-used-as-enum
     /// domain (`op_type` → `opcode`).
     pub domain_sites: Vec<crate::model::file_analysis::DomainSite>,
     /// Function-like macros the driver typed from their bodies (the expansion
@@ -525,10 +528,11 @@ impl SkeletonAnalysis {
         }
 
         for s in self.symbols.iter_mut() {
-            // An explicit `::` qualifier is authoritative — the owning class it
-            // names may live in a header not present here, so its absence as a
-            // local container is NOT a truncation fall-through to recover.
-            if s.qualifier_owned {
+            // A stated owner is authoritative: a `::` qualifier's class may
+            // live in a header not present here, and a class's own scope names
+            // its class however it is spelled, so neither is a truncation
+            // fall-through to recover.
+            if s.owner_stated {
                 continue;
             }
             let sb = pt(s.start);
@@ -969,7 +973,7 @@ impl SkeletonAnalysis {
                     }
                 }
             }
-            // A data member's VALUE rides its own `Field` attachment, which a
+            // A data member's VALUE rides its own `Holds` member, which a
             // member read's `ValueHop` chases (`docs/adr/member-kinds.md`): an
             // edge to the declaration's `Variable`, or, for a type that
             // mentions the class's template parameters, the deferred shape
@@ -2031,7 +2035,7 @@ fn declare_slots(
 /// that class or an ancestor takes the write the way a variable takes one:
 /// into its declaration's `Variable`, whose fold ranks a declared type over
 /// what flows in. Any other member — an instance slot, or one declared in
-/// another file — takes it on `Field{owner, name}`, the attachment a member
+/// another file — takes it on `Member{owner, name, Holds}`, the attachment a member
 /// read's `ValueHop` chases, where every write is one arm of the slot's
 /// value. A write through a receiver of no known class states nothing.
 ///
@@ -2040,7 +2044,7 @@ fn declare_slots(
 ///
 /// TODO(member-write-declared-elsewhere): a write to a member declared in
 /// another file (a parent's annotated attribute) lands on the writer's
-/// `Field`, and an answer there is found before the declaring file's, so
+/// `Holds` member, and an answer there is found before the declaring file's, so
 /// the write's value shadows the declared type. Deciding the declaration
 /// needs the index, the same deferral as `TODO(slot-owner-deferred)`.
 fn settle_member_writes(
