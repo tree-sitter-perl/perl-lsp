@@ -408,9 +408,6 @@ pub struct NameSpellings {
     /// The package an empty qualifier names (Perl's `$::x` is `$main::x`);
     /// `None` keeps the empty qualifier as written.
     pub root_package: Option<std::borrow::Cow<'static, str>>,
-    /// The namespaces the language's classes hold their members in: the
-    /// rule a member ask is answered by (`docs/adr/member-kinds.md`).
-    pub member_spaces: MemberSpaces,
     /// How a use-map language's import rows bind — read by the extractor
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
@@ -537,7 +534,6 @@ impl NameSpellings {
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
         root_package: None,
-        member_spaces: MemberSpaces::PER_FAMILY,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
@@ -553,7 +549,6 @@ impl NameSpellings {
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
             root_package: None,
-            member_spaces: MemberSpaces::PER_FAMILY,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
@@ -1367,8 +1362,16 @@ impl<'a> From<&'a str> for MemberKey<'a> {
 /// One of a language's member namespaces, by its index in the language's
 /// `MemberSpaces`. Opaque to the model: two ids are compared, never read.
 /// Each language owns the closed enum its ids stand for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct NamespaceId(pub u8);
+
+impl NamespaceId {
+    /// Where a call, and a callable declaration, lives untagged, in every
+    /// language: a language lists its callables' namespace first. A plugin
+    /// manifest stating what a call returns names no namespace, so it
+    /// means this one.
+    pub const CALLABLES: NamespaceId = NamespaceId(0);
+}
 
 /// The namespaces a language's classes hold their members in, by name, and
 /// the one each mode of access reaches when its site states none. A
@@ -1376,9 +1379,9 @@ pub struct NamespaceId(pub u8);
 /// lives in that namespace instead (php's `const X` beside `$X` and `X()`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberSpaces {
+    /// By id: the first is where calls land untagged
+    /// (`NamespaceId::CALLABLES`).
     pub names: std::borrow::Cow<'static, [std::borrow::Cow<'static, str>]>,
-    /// Where a call, and a callable declaration, lives untagged.
-    pub callables: NamespaceId,
     /// Where a value read, and a stored declaration, lives untagged.
     pub values: NamespaceId,
 }
@@ -1394,7 +1397,6 @@ impl MemberSpaces {
     /// only a callable (Perl's sub beside a same-named `field`).
     pub const PER_FAMILY: MemberSpaces = MemberSpaces {
         names: std::borrow::Cow::Borrowed(&[std::borrow::Cow::Borrowed("callable"), std::borrow::Cow::Borrowed("value")]),
-        callables: NamespaceId(0),
         values: NamespaceId(1),
     };
     /// One namespace: a name is one member whatever its kind, so every ask
@@ -1403,7 +1405,6 @@ impl MemberSpaces {
     /// hides a base method of that name.
     pub const SHARED: MemberSpaces = MemberSpaces {
         names: std::borrow::Cow::Borrowed(&[std::borrow::Cow::Borrowed("member")]),
-        callables: NamespaceId(0),
         values: NamespaceId(0),
     };
 
@@ -1418,7 +1419,7 @@ impl MemberSpaces {
             Some(a) => a.search,
             None => SpaceSet::of(match ask.mode {
                 MemberMode::Value => self.values,
-                MemberMode::Callable => self.callables,
+                MemberMode::Callable => NamespaceId::CALLABLES,
             }),
         }
     }
@@ -1427,16 +1428,21 @@ impl MemberSpaces {
     pub fn of_decl(&self, kind: SymKind, space: Option<NamespaceId>) -> NamespaceId {
         space.unwrap_or(match MemberKind::of_sym(kind, None).mode {
             MemberMode::Value => self.values,
-            MemberMode::Callable => self.callables,
+            MemberMode::Callable => NamespaceId::CALLABLES,
         })
     }
 }
 
 /// A set of a language's member namespaces (at most 32).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct SpaceSet(pub u32);
 
 impl SpaceSet {
+    /// Its namespaces, by id.
+    pub fn iter(self) -> impl Iterator<Item = NamespaceId> {
+        (0..32u8).filter(move |i| self.0 & (1 << i) != 0).map(NamespaceId)
+    }
+
     pub fn of(id: NamespaceId) -> SpaceSet {
         SpaceSet(1 << id.0)
     }
@@ -1456,10 +1462,24 @@ impl SpaceSet {
 /// (`@space.<name>.illegal`: php's `$obj->x` finds a static `$x`, wrongly).
 /// Resolution searches every one; a landing in an illegal one resolves and
 /// is reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct SpaceAsk {
     pub search: SpaceSet,
     pub illegal: SpaceSet,
+}
+
+impl SpaceAsk {
+    /// One namespace, legally reached.
+    pub fn only(id: NamespaceId) -> SpaceAsk {
+        SpaceAsk { search: SpaceSet::of(id), illegal: SpaceSet::default() }
+    }
+
+    /// The namespaces to search, in the order a site's member is resolved
+    /// in: the legal ones, then the illegal ones.
+    pub fn in_order(self) -> impl Iterator<Item = NamespaceId> {
+        let legal = SpaceSet(self.search.0 & !self.illegal.0);
+        legal.iter().chain(self.illegal.iter())
+    }
 }
 
 /// How a member site uses what it names: reads a stored value or invokes a

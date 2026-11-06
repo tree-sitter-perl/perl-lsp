@@ -1196,7 +1196,7 @@ fn remap_spans(
     // Member writes settle through `expr_type_at_span` on the receiver and an
     // edge to the value's `Expr`, both of which speak original coords.
     for w in member_writes.iter_mut() {
-        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
     }
@@ -1244,10 +1244,10 @@ fn remap_spans(
         | WitnessAttachment::Expression(_)
         | WitnessAttachment::Symbol(_)
         | WitnessAttachment::HashKey { .. }
-        | WitnessAttachment::PackageSymbol { .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
-        | WitnessAttachment::Field { .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };

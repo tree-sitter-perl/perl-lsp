@@ -787,10 +787,7 @@ impl<'a> Builder<'a> {
         };
         for (method_name, return_expr) in p.return_method_declarations() {
             self.push_witness(crate::model::witnesses::Witness {
-                attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                    package: base_class.clone(),
-                    name: method_name.to_string(),
-                },
+                attachment: crate::model::witnesses::WitnessAttachment::returns_of(base_class.clone(), method_name.to_string()),
                 source: crate::model::witnesses::WitnessSource::Builder(
                     "parametric_return_expr".into(),
                 ),

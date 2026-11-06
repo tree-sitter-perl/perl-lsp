@@ -32,10 +32,7 @@ fn locally_backed_names_stay_off_the_residue() {
 fn a_bagged_name_with_no_backing_symbol_lands_in_the_residue() {
     let mut fa = build("package Foo;\nsub bar { 42 }\n");
     fa.witnesses.push(Witness {
-        attachment: WitnessAttachment::PackageSymbol {
-            package: "Foo".to_string(),
-            name: "phantom".to_string(),
-        },
+        attachment: WitnessAttachment::returns_of("Foo".to_string(), "phantom".to_string()),
         source: WitnessSource::Builder("test".into()),
         payload: WitnessPayload::Derivation,
         span: zero_span(),
@@ -71,10 +68,7 @@ fn a_slot_key_with_no_backing_ref_lands_in_the_residue() {
     let mut fa = build(src);
     for (key, expect_unrowed) in [("ghostkey", true), ("conn", false)] {
         fa.witnesses.push(Witness {
-            attachment: WitnessAttachment::Field {
-                owner: "Foo".to_string(),
-                name: key.to_string(),
-            },
+            attachment: WitnessAttachment::holds_of("Foo".to_string(), crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, key.to_string()),
             source: WitnessSource::Builder("test".into()),
             payload: WitnessPayload::Derivation,
             span: zero_span(),

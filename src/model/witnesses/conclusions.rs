@@ -39,24 +39,38 @@ use std::collections::HashMap;
 /// storage cost of a map with none of the benefit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConclusionKey {
-    MethodOnClass { class: String, name: String },
+    /// A member's identity and the question asked of it
+    /// (`WitnessAttachment::Member`).
+    Member {
+        owner: String,
+        space: crate::model::file_analysis::NamespaceId,
+        name: String,
+        aspect: super::types::MemberAspect,
+    },
     SubByName(String),
-    Field { owner: String, name: String },
     TypeName(String),
 }
 
 impl ConclusionKey {
+    /// The key of what a call of `owner`'s callable `name` returns.
+    pub fn returns_of(owner: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::Member {
+            owner: owner.into(),
+            space: crate::model::file_analysis::NamespaceId::CALLABLES,
+            name: name.into(),
+            aspect: super::types::MemberAspect::Returns,
+        }
+    }
+
     /// The portable projection of an attachment, or `None` when the
     /// attachment is file-internal.
     pub fn from_attachment(att: &WitnessAttachment) -> Option<Self> {
         match att {
-            WitnessAttachment::PackageSymbol { package, name } => Some(Self::MethodOnClass {
-                class: package.clone(),
-                name: name.clone(),
-            }),
-            WitnessAttachment::Field { owner, name } => Some(Self::Field {
+            WitnessAttachment::Member { owner, space, name, aspect } => Some(Self::Member {
                 owner: owner.clone(),
+                space: *space,
                 name: name.clone(),
+                aspect: *aspect,
             }),
             WitnessAttachment::TypeName(n) => Some(Self::TypeName(n.clone())),
             _ => None,
@@ -67,13 +81,11 @@ impl ConclusionKey {
     /// `None` for a key no attachment names.
     pub fn to_attachment(&self) -> Option<WitnessAttachment> {
         match self {
-            Self::MethodOnClass { class, name } => Some(WitnessAttachment::PackageSymbol {
-                package: class.clone(),
-                name: name.clone(),
-            }),
-            Self::Field { owner, name } => Some(WitnessAttachment::Field {
+            Self::Member { owner, space, name, aspect } => Some(WitnessAttachment::Member {
                 owner: owner.clone(),
+                space: *space,
                 name: name.clone(),
+                aspect: *aspect,
             }),
             Self::TypeName(n) => Some(WitnessAttachment::TypeName(n.clone())),
             Self::SubByName(_) => None,
@@ -285,13 +297,13 @@ impl ConclusionMap {
             // enumerated parent hold this member? The live chase composes that
             // way, so a verdict that skipped it would be answering a narrower
             // question than the one it replaces.
-            if let ConclusionKey::MethodOnClass { class, name } = key {
-                if let Some(t) = self.inherited(class, name, receiver, arity, args, 0) {
+            if let ConclusionKey::Member { owner: class, space, name, aspect: super::types::MemberAspect::Returns } = key {
+                if let Some(t) = self.inherited(class, *space, name, receiver, arity, args, 0) {
                     return t;
                 }
             }
             return match key {
-                ConclusionKey::MethodOnClass { class, .. } => {
+                ConclusionKey::Member { owner: class, aspect: super::types::MemberAspect::Returns, .. } => {
                     if self.1.contains(class) {
                         // Closed: every ancestor is declared here, so there is
                         // nowhere else an answer could have come from.
@@ -313,10 +325,7 @@ impl ConclusionMap {
                 // The live evaluator, not a copy of it. A second spelling of
                 // `ReturnExpr` semantics is a place for the baked answer to
                 // drift from the answer it is supposed to equal.
-                let att = WitnessAttachment::PackageSymbol {
-                    package: String::new(),
-                    name: String::new(),
-                };
+                let att = WitnessAttachment::returns_of(String::new(), String::new());
                 let q = ReducerQuery {
                     attachment: &att,
                     point: None,
@@ -363,6 +372,7 @@ impl ConclusionMap {
     fn inherited(
         &self,
         class: &str,
+        space: crate::model::file_analysis::NamespaceId,
         name: &str,
         receiver: Option<&InferredType>,
         arity: Option<u32>,
@@ -375,15 +385,17 @@ impl ConclusionMap {
             return None;
         }
         for parent in self.3.get(class)? {
-            let key = ConclusionKey::MethodOnClass {
-                class: parent.clone(),
+            let key = ConclusionKey::Member {
+                owner: parent.clone(),
+                space,
                 name: name.to_string(),
+                aspect: super::types::MemberAspect::Returns,
             };
             if self.0.contains_key(&key) {
                 crate::util::ghost_stats::count("concl.inherited_hit");
                 return Some(self.evaluate(&key, receiver, arity, args));
             }
-            if let Some(o) = self.inherited(parent, name, receiver, arity, args, depth + 1) {
+            if let Some(o) = self.inherited(parent, space, name, receiver, arity, args, depth + 1) {
                 return Some(o);
             }
         }
@@ -767,10 +779,7 @@ pub fn bake_in_context(
         }
         if let Some(pkg) = package {
             enumerate(
-                WitnessAttachment::PackageSymbol {
-                    package: pkg.clone(),
-                    name: name.clone(),
-                },
+                WitnessAttachment::returns_of(pkg.clone(), name.clone()),
                 &mut map,
             );
         }
@@ -1093,7 +1102,7 @@ fn census_self_only(bag: &WitnessBag, att: &WitnessAttachment) {
                     // documented residualizing-registry gap or something new.
                     crate::util::ghost_stats::count(match t {
                         WitnessAttachment::Symbol(_) => "selfonly.edge_to_symbol",
-                        WitnessAttachment::PackageSymbol { .. } => "selfonly.edge_to_pkgsym",
+                        WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. } => "selfonly.edge_to_pkgsym",
                         WitnessAttachment::Variable { .. } => "selfonly.edge_to_variable",
                         WitnessAttachment::Place(p) if p.is_variable() => "selfonly.edge_to_variable",
                         WitnessAttachment::Expression(_) => "selfonly.edge_to_expression",
@@ -1241,17 +1250,13 @@ fn sole_foreign_edge(
     let mut found: Option<ConclusionKey> = None;
     for w in &ws {
         match &w.payload {
-            super::types::WitnessPayload::Edge(WitnessAttachment::PackageSymbol {
-                package,
-                name,
-            }) if !local_packages.contains(package) => {
+            super::types::WitnessPayload::Edge(
+                att @ WitnessAttachment::Member { owner: package, aspect: super::types::MemberAspect::Returns, .. },
+            ) if !local_packages.contains(package) => {
                 if found.is_some() {
                     return None;
                 }
-                found = Some(ConclusionKey::MethodOnClass {
-                    class: package.clone(),
-                    name: name.clone(),
-                });
+                found = ConclusionKey::from_attachment(att);
             }
             // Anything else on this attachment means the edge is not the whole
             // story, and the registry decides between them.

@@ -2731,7 +2731,7 @@ fn python_member_call_is_an_invoke_on_its_receiver() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member }, .. } => Some(member.clone()),
+            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member, .. }, .. } => Some(member.clone()),
             _ => None,
         })
         .collect();

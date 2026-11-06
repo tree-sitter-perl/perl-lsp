@@ -57,10 +57,7 @@ pub fn query_sub_return_type(
             // writer's `Receiver` then evaluates to the fluent return,
             // matching what `$obj->writer()` would produce. A supplied
             // receiver passes through.
-            let att = WitnessAttachment::PackageSymbol {
-                package: class.clone(),
-                name: sub_name.to_string(),
-            };
+            let att = WitnessAttachment::returns_of(class.clone(), sub_name.to_string());
             let effective_receiver = receiver
                 .clone()
                 .or_else(|| Some(InferredType::ClassName(class.clone())));

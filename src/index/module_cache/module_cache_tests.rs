@@ -2090,10 +2090,7 @@ fn persisting_an_analysis_persists_its_conclusions() {
     assert!(!map.is_empty(), "an empty map round-tripped as success");
 
     use crate::model::witnesses::{ConclusionKey, Outcome};
-    let key = ConclusionKey::MethodOnClass {
-        class: "CR".into(),
-        name: "build".into(),
-    };
+    let key = ConclusionKey::returns_of("CR", "build");
     match map.evaluate(&key, None, None, &[]) {
         Outcome::Answer(t) => assert_eq!(
             t.class_name().as_deref(),

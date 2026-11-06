@@ -569,7 +569,7 @@ fn a_declared_property_type_is_the_members_value() {
     let statics = crate::model::file_analysis::MemberKind {
         mode: crate::model::file_analysis::MemberMode::Value,
         spaces: Some(crate::model::file_analysis::SpaceAsk {
-            search: crate::model::file_analysis::SpaceSet::of(fa.names().member_spaces.id_of("static_property").unwrap()),
+            search: crate::model::file_analysis::SpaceSet::of(fa.member_spaces().id_of("static_property").unwrap()),
             illegal: Default::default(),
         }),
     };
@@ -2795,8 +2795,48 @@ fn a_static_property_is_reached_through_its_own_side_and_illegally_through_the_o
             let Some(MethodResolution::Local { sym_id, .. }) = fa.resolve_member_in_ancestors("App\\Card", &r.target_name, None, want) else {
                 return None;
             };
-            want.reaches_illegally(fa.symbol(sym_id), &fa.names().member_spaces).then_some((r.span.start.row, r.target_name.as_str()))
+            want.reaches_illegally(fa.symbol(sym_id), fa.member_spaces()).then_some((r.span.start.row, r.target_name.as_str()))
         })
         .collect();
     assert_eq!(illegal, [(18, "count"), (19, "X")]);
+}
+
+const MEMBER_VALUES: &str = "<?php
+class Widget {}
+class Gadget {}
+class Gizmo {}
+
+class Box {
+    const X = 1;
+    public Widget $X;
+    public static Gadget $S;
+    public function X(): Gizmo {}
+    public function run(Box $o) {
+        $a = Box::X;
+        $b = $o->X;
+        $c = $o->X();
+        $d = Box::$S;
+        $e = $o->S;
+        return;
+    }
+}
+";
+
+/// A member's value is keyed by its identity, owner + namespace + name, not
+/// its spelling: the property `X` holds a Widget, its method returns a
+/// Gizmo, the constant `X` holds neither, and the static `$S` holds its
+/// Gadget whether reached legally or through the instance side.
+#[cfg(feature = "php")]
+#[test]
+fn a_members_value_is_its_own_namespaces() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(MEMBER_VALUES);
+    let end = at(MEMBER_VALUES, "return;", 0);
+    let ty = |v: &str| fa.inferred_type_via_bag(v, end);
+    assert_eq!(ty("b"), Some(T::ClassName("Widget".into())), "the property");
+    assert_eq!(ty("c"), Some(T::ClassName("Gizmo".into())), "the method's return");
+    assert_ne!(ty("a"), Some(T::ClassName("Widget".into())), "the constant is not the property");
+    assert_ne!(ty("a"), Some(T::ClassName("Gizmo".into())), "the constant is not the method");
+    assert_eq!(ty("d"), Some(T::ClassName("Gadget".into())), "the static property");
+    assert_eq!(ty("e"), Some(T::ClassName("Gadget".into())), "the static property, reached illegally");
 }

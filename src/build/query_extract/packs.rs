@@ -32,6 +32,10 @@ pub struct LangPack {
     /// What a construction's reference to its constructor is keyed by,
     /// registered by id with the lattice: resolution reads it, no file.
     pub construction: crate::model::file_analysis::ConstructionKey,
+    /// The namespaces the language's classes hold their members in,
+    /// registered by id with the lattice. Its names are the document's
+    /// `@space.<name>` vocabulary.
+    pub member_spaces: crate::model::file_analysis::MemberSpaces,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -118,7 +122,7 @@ pub struct LangPack {
 impl LangPack {
     /// What every file of this language shares, registered by its id.
     pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
-        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction)
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction, self.member_spaces.clone())
     }
 
     /// Every `&'static str` this pack declares, tagged with the field it
@@ -140,6 +144,9 @@ impl LangPack {
             lattice: _,
             type_display: _,
             construction: _,
+            // The document's own namespace words, checked against its
+            // `@space.<name>` captures (`bundled_documents_speak_the_vocabulary`).
+            member_spaces: _,
             shape_name: _,
             default_name: _,
             annot_type: _,

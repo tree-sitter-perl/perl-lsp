@@ -609,7 +609,7 @@ pub(super) fn symbol_defines_target(
                 && on_chain
                 && target
                     .member_kind
-                    .is_none_or(|k| k.admits_decl(sym.kind, sym.member_space, &analysis.names().member_spaces))
+                    .is_none_or(|k| k.admits_decl(sym.kind, sym.member_space, analysis.member_spaces()))
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -901,7 +901,7 @@ pub(super) fn collect_from_analysis(
     // class-keyed cache stays sound); the scanned file's namespace decides
     // which uses that family reaches.
     let chain_want = target.member_kind.unwrap_or(MemberKind::CALLABLE);
-    let namespace = &analysis.names().member_spaces;
+    let namespace = analysis.member_spaces();
     // Whether a call on `cn` asking for `member` reaches the target owned by
     // `pkg`. Under Hierarchy the override family is precomputed and a call
     // matches iff its class is in it — so `$child->m` and `$base->m` rename

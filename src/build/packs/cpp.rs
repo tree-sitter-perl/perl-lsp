@@ -14,7 +14,6 @@ pub fn cpp_pack() -> LangPack {
         // whether it is a data member or a member function. Calling a class
         // constructs it (a functional cast, `Foo(x)`).
         names: NameSpellings {
-            member_spaces: MemberSpaces::SHARED,
             class_call: ClassCall::Constructs,
             // TODO(construction-navigation): `Foo(x)` reaches no
             // constructor yet, so a constructor's references do not list it.
@@ -22,6 +21,8 @@ pub fn cpp_pack() -> LangPack {
         },
         functions: FunctionLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
+        // One member namespace (see `names`).
+        member_spaces: MemberSpaces::SHARED,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |_| None,

@@ -157,10 +157,7 @@ impl FileAnalysis {
             WitnessAttachment,
         };
         let framework = self.package_framework(class_name).unwrap_or(FrameworkFact::Plain);
-        let att = WitnessAttachment::PackageSymbol {
-            package: class_name.to_string(),
-            name: method_name.to_string(),
-        };
+        let att = WitnessAttachment::returns_of(class_name.to_string(), method_name.to_string());
         let ctx = self.bag_context(module_index);
         let q = ReducerQuery {
             attachment: &att,
@@ -555,7 +552,7 @@ impl FileAnalysis {
                     let full = idx.whole_present(cached);
                     let sym = full.symbols.iter().find(|s| {
                         matches!(s.kind, SymKind::Variable | SymKind::Field)
-                            && want.admits_decl(s.kind, s.member_space, &full.names().member_spaces)
+                            && want.admits_decl(s.kind, s.member_space, full.member_spaces())
                             && s.name == field
                             && s.package.as_deref() == Some(class.as_str())
                             && full.symbol_is_class_content(s)
@@ -756,7 +753,7 @@ impl FileAnalysis {
             | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => class.to_string(),
         };
-        crate::model::witnesses::WitnessAttachment::Field { owner, name: name.to_string() }
+        crate::model::witnesses::WitnessAttachment::holds_of(owner, self.member_spaces().values, name.to_string())
     }
 
     /// Route a field ACCESS ref — in any of Perl's varied forms — onto its
@@ -823,7 +820,7 @@ impl FileAnalysis {
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<NominalDomain> {
-        let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
+        let crate::model::witnesses::WitnessAttachment::Member { owner, aspect: crate::model::witnesses::MemberAspect::Holds, .. } =
             self.field_subject(class, field, module_index)
         else {
             return None;
@@ -856,7 +853,7 @@ impl FileAnalysis {
             domain_coherence, ReducedValue, ReducerQuery, ReducerRegistry, Witness,
             WitnessAttachment, WitnessBag, WitnessPayload, WitnessSource,
         };
-        let att = WitnessAttachment::Field { owner: owner.to_string(), name: field.to_string() };
+        let att = WitnessAttachment::holds_of(owner.to_string(), self.member_spaces().values, field.to_string());
         let mut bag = WitnessBag::new();
         for site in &self.pack.domain_sites {
             if site.slot != field {
@@ -920,7 +917,7 @@ impl FileAnalysis {
         // A site votes for one subject; a union receiver names several.
         let classes = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
         let class = classes.single()?;
-        let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
+        let crate::model::witnesses::WitnessAttachment::Member { owner, aspect: crate::model::witnesses::MemberAspect::Holds, .. } =
             self.field_subject(class, &site.slot, module_index)
         else {
             return None;

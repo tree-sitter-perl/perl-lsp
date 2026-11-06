@@ -170,10 +170,7 @@ impl<'a> Builder<'a> {
                             let method = crate::model::conventions::MethodToken::parse(mtext)
                                 .name()
                                 .to_string();
-                            let moc = crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                                package: cls.to_string(),
-                                name: method,
-                            };
+                            let moc = crate::model::witnesses::WitnessAttachment::returns_of(cls.to_string(), method);
                             if let Some(t) = self.bag_query_attachment_with(
                                 &moc,
                                 Some(arity),
@@ -227,7 +224,7 @@ impl<'a> Builder<'a> {
                     .clone();
                 let args = self.extract_call_args(node);
                 let (arity, receiver) = match &target {
-                    crate::model::witnesses::WitnessAttachment::PackageSymbol { .. } => {
+                    crate::model::witnesses::WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. } => {
                         let recv_ty = args
                             .first()
                             .and_then(|n| self.invocant_type_at_node(*n));
@@ -331,10 +328,7 @@ impl<'a> Builder<'a> {
                 // by `FieldValueReducer`) is the honest answer; otherwise
                 // untyped.
                 let class = base_ty.class_name()?.to_string();
-                self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::Field {
-                    owner: class,
-                    name: key,
-                })
+                self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::holds_of(class, crate::model::conventions::PERL_CONVENTIONS.member_spaces.values, key))
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
@@ -367,10 +361,7 @@ impl<'a> Builder<'a> {
                 // file miss, so it strictly adds answers (None → maybe Some).
                 let class = self.resolve_call_package(name, node.start_position())?;
                 self.bag_query_attachment_with(
-                    &crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                        package: class,
-                        name: bare.to_string(),
-                    },
+                    &crate::model::witnesses::WitnessAttachment::returns_of(class, bare.to_string()),
                     Some(arg_count),
                     None,
                 )

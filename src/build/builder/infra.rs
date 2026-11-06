@@ -409,7 +409,7 @@ impl<'a> Builder<'a> {
                     (Some(c), n) => (c.to_string(), n.to_string()),
                     (None, _) => (self.current_package.clone()?, raw),
                 };
-                Some(crate::model::witnesses::WitnessAttachment::PackageSymbol { package: class, name })
+                Some(crate::model::witnesses::WitnessAttachment::returns_of(class, name))
             }
             _ => None,
         }

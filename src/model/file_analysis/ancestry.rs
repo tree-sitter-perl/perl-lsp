@@ -595,7 +595,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
-        let namespace = &self.names().member_spaces;
+        let namespace = self.member_spaces();
         // A callable-only arm (plugin entities, typeglob installs, bridges)
         // answers only an ask that reaches callables.
         let reaches_callables = want.admits_decl(SymKind::Sub, None, namespace);
@@ -879,7 +879,7 @@ impl FileAnalysis {
         // instance `__dict__`, then the class.
         let slot_name = member.name().filter(|_| {
             self.names().instance_slots == InstanceSlots::BeforeClass
-                && want.admits_decl(SymKind::HashKeyDef, None, &self.names().member_spaces)
+                && want.admits_decl(SymKind::HashKeyDef, None, self.member_spaces())
         });
         if let Some(method_name) = slot_name {
             let mut slot: Option<MethodResolution> = None;

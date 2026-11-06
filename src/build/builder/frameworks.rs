@@ -153,10 +153,7 @@ impl<'a> Builder<'a> {
             end: Point { row: 0, column: 0 },
         };
         self.push_witness(crate::model::witnesses::Witness {
-            attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                package: class,
-                name: name.to_string(),
-            },
+            attachment: crate::model::witnesses::WitnessAttachment::returns_of(class, name.to_string()),
             source: crate::model::witnesses::WitnessSource::Builder(
                 "framework_accessor_returnexpr".into(),
             ),

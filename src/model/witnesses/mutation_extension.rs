@@ -76,7 +76,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
         });
         let (attachment, hops) = match (owner, &w.key) {
             (Some(owner), WriteKey::Hash(slot)) => {
-                (WitnessAttachment::Field { owner, name: slot.clone() }, w.path.clone())
+                (WitnessAttachment::holds_of(owner, ctx.member_spaces.values, slot.clone()), w.path.clone())
             }
             _ => (
                 WitnessAttachment::Place(Box::new(place)),

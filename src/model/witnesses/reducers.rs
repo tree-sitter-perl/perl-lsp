@@ -64,6 +64,9 @@ pub struct BagContext<'a> {
     /// The bag's language's subsumption rules (`conventions::lattice_for`): which
     /// cross-family types its joins fold into one another.
     pub lattice: &'a crate::model::file_analysis::LatticeRules,
+    /// The bag's language's member namespaces (`conventions::member_spaces_for`):
+    /// where a slot no declaration names lives.
+    pub member_spaces: &'a crate::model::file_analysis::MemberSpaces,
 }
 
 /// A bag's context is the order its joins read: its isa graph (local
@@ -84,6 +87,16 @@ impl crate::model::file_analysis::TypeOrder for BagContext<'_> {
 }
 
 /// The class order a query's joins read: its context's, else none.
+/// The namespaces of the querying bag's language; a context-free query
+/// keeps the default a language that declares none has.
+pub(crate) fn member_spaces<'q>(q: &'q ReducerQuery) -> &'q crate::model::file_analysis::MemberSpaces {
+    static DEFAULT: crate::model::file_analysis::MemberSpaces = crate::model::file_analysis::MemberSpaces::PER_FAMILY;
+    match q.context {
+        Some(ctx) => ctx.member_spaces,
+        None => &DEFAULT,
+    }
+}
+
 pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> &'q dyn crate::model::file_analysis::TypeOrder {
     match q.context {
         Some(ctx) => ctx,
@@ -791,7 +804,7 @@ impl WitnessReducer for PackageSymbolReducer {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::PackageSymbol { .. })
+        matches!(w.attachment, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. })
             && matches!(w.payload, WitnessPayload::InferredType(_))
     }
 
@@ -853,7 +866,7 @@ impl WitnessReducer for FieldValueReducer {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::Field { .. })
+        matches!(w.attachment, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. })
             && matches!(w.payload, WitnessPayload::InferredType(_))
     }
 
@@ -920,7 +933,7 @@ impl WitnessReducer for DomainCoherenceFold {
     }
 
     fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::Field { .. })
+        matches!(w.attachment, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. })
             && matches!(w.payload, WitnessPayload::DomainCompare { .. })
     }
 
@@ -1060,11 +1073,11 @@ impl WitnessReducer for ReturnExprReducer {
         matches!(
             w.attachment,
             WitnessAttachment::Symbol(_)
-                | WitnessAttachment::PackageSymbol { .. }
+                | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                 | WitnessAttachment::Expr(_)
                 | WitnessAttachment::Variable { .. }
                 | WitnessAttachment::Place(_)
-                | WitnessAttachment::Field { .. }
+                | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))
     }
 

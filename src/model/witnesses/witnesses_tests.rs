@@ -917,10 +917,7 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
     let mut bag = WitnessBag::new();
     // Parent::m is a fluent accessor returning its invocant.
     bag.push(Witness {
-        attachment: WitnessAttachment::PackageSymbol {
-            package: "Parent".into(),
-            name: "m".into(),
-        },
+        attachment: WitnessAttachment::returns_of("Parent", "m"),
         source: WitnessSource::Builder("test".into()),
         payload: WitnessPayload::ReturnExpr(ReturnExpr::Receiver),
         span: span(0, 0, 0, 0),
@@ -941,6 +938,8 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
         package_parents: &package_parents,
         app_surface_consumers: &consumers,
         lattice: &crate::model::conventions::PERL_CONVENTIONS.lattice,
+
+        member_spaces: &crate::model::file_analysis::MemberSpaces::PER_FAMILY,
     };
 
     let reg = ReducerRegistry::with_defaults();
@@ -950,10 +949,7 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
     // PackageSymbol{Parent, m} carrying each child's receiver.
     let mut state = QueryState::new();
 
-    let foo_att = WitnessAttachment::PackageSymbol {
-        package: "Foo".into(),
-        name: "m".into(),
-    };
+    let foo_att = WitnessAttachment::returns_of("Foo", "m");
     let foo_q = ReducerQuery {
         args: Vec::new(),        attachment: &foo_att,
         point: None,
@@ -964,10 +960,7 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
     };
     let foo_result = reg.query_rec(&bag, &foo_q, &mut state);
 
-    let bar_att = WitnessAttachment::PackageSymbol {
-        package: "Bar".into(),
-        name: "m".into(),
-    };
+    let bar_att = WitnessAttachment::returns_of("Bar", "m");
     let bar_q = ReducerQuery {
         args: Vec::new(),        attachment: &bar_att,
         point: None,
@@ -1171,10 +1164,10 @@ fn old_plugin_spelling_still_deserializes() {
             .expect("a plugin written against the pre-rename names must still parse");
     assert_eq!(
         old,
-        WitnessAttachment::PackageSymbol { package: "Foo".into(), name: "bar".into() },
+        WitnessAttachment::returns_of("Foo", "bar"),
         "the old spelling must map onto the renamed variant, not a different one",
     );
-    let want = WitnessAttachment::PackageSymbol { package: "Foo".into(), name: "bar".into() };
+    let want = WitnessAttachment::returns_of("Foo", "bar");
     for spelling in [
         r#"{"PackageSymbol":{"package":"Foo","name":"bar"}}"#,
         // `pkg` exists because `package` is a Rhai reserved keyword: unquoted
@@ -1212,18 +1205,18 @@ fn value_hop_chases_the_field_subject_and_method_hop_the_package_symbol() {
     push(&mut bag, var("v"), WitnessPayload::InferredType(InferredType::Numeric));
     push(
         &mut bag,
-        WitnessAttachment::Field { owner: "S".into(), name: "v".into() },
+        WitnessAttachment::holds_of("S", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "v"),
         WitnessPayload::Edge(var("v")),
     );
     push(
         &mut bag,
-        WitnessAttachment::PackageSymbol { package: "S".into(), name: "v".into() },
+        WitnessAttachment::returns_of("S", "v"),
         WitnessPayload::InferredType(InferredType::String),
     );
     push(
         &mut bag,
         var("$r"),
-        WitnessPayload::Projected { base: var("$s"), step: ProjectionStep::ValueHop { member: "v".into() } },
+        WitnessPayload::Projected { base: var("$s"), step: ProjectionStep::ValueHop { member: "v".into(), spaces: crate::model::file_analysis::SpaceAsk::only(crate::model::file_analysis::MemberSpaces::PER_FAMILY.values) } },
     );
     push(
         &mut bag,
@@ -1272,13 +1265,13 @@ fn value_hop_on_a_method_only_name_answers_nothing() {
     push(&mut bag, var("$s"), WitnessPayload::InferredType(InferredType::ClassName("S".into())));
     push(
         &mut bag,
-        WitnessAttachment::PackageSymbol { package: "S".into(), name: "m".into() },
+        WitnessAttachment::returns_of("S", "m"),
         WitnessPayload::InferredType(InferredType::String),
     );
     push(
         &mut bag,
         var("$r"),
-        WitnessPayload::Projected { base: var("$s"), step: ProjectionStep::ValueHop { member: "m".into() } },
+        WitnessPayload::Projected { base: var("$s"), step: ProjectionStep::ValueHop { member: "m".into(), spaces: crate::model::file_analysis::SpaceAsk::only(crate::model::file_analysis::MemberSpaces::PER_FAMILY.values) } },
     );
     let reg = ReducerRegistry::with_defaults();
     let att = var("$r");
@@ -1450,6 +1443,8 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
         package_parents: &packages,
         app_surface_consumers: &[],
         lattice: &crate::model::conventions::PERL_CONVENTIONS.lattice,
+
+        member_spaces: &crate::model::file_analysis::MemberSpaces::PER_FAMILY,
     };
     let att = var("$out");
     let q = ReducerQuery {

@@ -922,7 +922,7 @@ impl<'a> CandidateSet<'a> {
             // through the index, walking the family the use's syntax names.
             if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
-                let namespace = &analysis.names().member_spaces;
+                let namespace = analysis.member_spaces();
                 // A union receiver dispatches on every arm: each arm's
                 // definition is offered.
                 let mut found: Vec<RefLocation> = Vec::new();

@@ -10,6 +10,7 @@ pub fn r_pack() -> LangPack {
         names: NameSpellings::NONE,
         functions: FunctionLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
+        member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
         // A logical is a number in arithmetic (`TRUE + 1` is 2).
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |_| None,

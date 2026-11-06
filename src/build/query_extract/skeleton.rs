@@ -294,6 +294,9 @@ pub struct SlotWrite {
 pub struct MemberWrite {
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
+    /// The namespaces the written member may live in (`@space.*` on its
+    /// token), resolved like a read of it.
+    pub spaces: crate::model::file_analysis::SpaceAsk,
     pub value: crate::model::file_analysis::Span,
 }
 
@@ -946,7 +949,7 @@ impl SkeletonAnalysis {
                 if matches!(sym.kind, SymKind::Method) {
                     if let Some(class) = &sym.package {
                         bag.push(mk(
-                            WA::PackageSymbol { package: class.clone(), name: sym.name.clone() },
+                            WA::returns_of(class.clone(), sym.name.clone()),
                             WP::Edge(WA::Symbol(sym.id)),
                             sym.span,
                         ));
@@ -961,6 +964,35 @@ impl SkeletonAnalysis {
             // `Box<int>` is `int`).
             let field_types: std::collections::HashMap<(&str, crate::model::file_analysis::ScopeId), &InferredType> =
                 self.field_types.iter().map(|(n, sc, t)| ((n.as_str(), *sc), t)).collect();
+            // The place a member's facts bind to: the declaring symbol's,
+            // or its twin's when one token declared both (python's class
+            // body), the same choice a read of the name binds.
+            let place_of = |sym: &Symbol| {
+                let id = match sym.declared_with {
+                    Some(twin) if symbols[twin.0 as usize].scope == sym.scope => sym.id.min(twin),
+                    _ => sym.id,
+                };
+                WA::Place(Box::new(crate::model::file_analysis::Place::variable(
+                    crate::model::file_analysis::Binding::Lexical(id),
+                )))
+            };
+            let member_spaces = crate::model::conventions::member_spaces_for(self.language);
+            let declared: std::collections::HashMap<WA, WA> = symbols
+                .iter()
+                .filter(|s| matches!(s.kind, SymKind::Field))
+                .filter_map(|s| {
+                    let class = s.package.clone()?;
+                    let space = member_spaces.of_decl(s.kind, s.member_space);
+                    Some((WA::holds_of(class, space, s.name.clone()), place_of(s)))
+                })
+                .collect();
+            // A member declaration's own facts (its annotation, its
+            // initializer) were minted on its identity; they are its place's.
+            bag.rewrite(|w| {
+                if let Some(place) = declared.get(&w.attachment) {
+                    w.attachment = place.clone();
+                }
+            });
             for sym in symbols.iter().filter(|s| matches!(s.kind, SymKind::Field)) {
                 let Some(class) = &sym.package else { continue };
                 let deferred = field_types
@@ -969,12 +1001,13 @@ impl SkeletonAnalysis {
                     .and_then(|(t, ps)| param_return_expr(t, ps));
                 let pay = match deferred {
                     Some(re) => WP::ReturnExpr(re),
-                    None => WP::Edge(WA::Variable { name: sym.name.clone(), scope: sym.scope }),
+                    None => WP::Edge(place_of(sym)),
                 };
                 // Class-wide, like the declaration's own type witness: a
                 // method reads a member declared below it.
                 let span = self.scopes.get(sym.scope.0 as usize).map_or(sym.span, |sc| sc.span);
-                bag.push(mk(WA::Field { owner: class.clone(), name: sym.name.clone() }, pay, span));
+                let space = member_spaces.of_decl(sym.kind, sym.member_space);
+                bag.push(mk(WA::holds_of(class.clone(), space, sym.name.clone()), pay, span));
             }
             for w in receiver_witnesses.drain(..) {
                 bag.push(w);
@@ -1001,8 +1034,8 @@ impl SkeletonAnalysis {
                         && sym.package.as_deref() == Some(parent.as_str())
                     {
                         bag.push(mk(
-                            WA::PackageSymbol { package: child.clone(), name: sym.name.clone() },
-                            WP::Edge(WA::PackageSymbol { package: parent.clone(), name: sym.name.clone() }),
+                            WA::returns_of(child.clone(), sym.name.clone()),
+                            WP::Edge(WA::returns_of(parent.clone(), sym.name.clone())),
                             sym.span,
                         ));
                     }
@@ -1711,7 +1744,12 @@ impl SkeletonAnalysis {
                     }
                     None => WP::Projected {
                         base: WA::TypeName(class),
-                        step: crate::model::witnesses::ProjectionStep::ValueHop { member: name },
+                        step: crate::model::witnesses::ProjectionStep::ValueHop {
+                            member: name,
+                            spaces: crate::model::file_analysis::SpaceAsk::only(
+                                crate::model::conventions::member_spaces_for(self.language).values,
+                            ),
+                        },
                     },
                 };
                 bag.push(Witness {
@@ -1994,7 +2032,6 @@ fn settle_member_writes(
     writes: Vec<MemberWrite>,
     class_scopes: &[(String, crate::model::file_analysis::ScopeId)],
 ) {
-    use crate::model::file_analysis::{class_or_ancestor, SymKind};
     use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     // A receiver can be a member another write fills (`self.a.b = v` reads
     // `a`, which `self.a = A()` writes), so the writes settle to a fixed
@@ -2010,17 +2047,21 @@ fn settle_member_writes(
             else {
                 continue;
             };
-            let mut declared = None;
-            class_or_ancestor(&class, &fa.packages, |c| {
-                declared = fa.symbols_named(&w.member).iter().map(|&sid| fa.symbol(sid)).find(|m| {
-                    m.kind == SymKind::Field && m.package.as_deref() == Some(c)
-                });
-                declared.is_some()
-            });
+            let want = crate::model::file_analysis::MemberKind {
+                mode: crate::model::file_analysis::MemberMode::Value,
+                spaces: Some(w.spaces),
+            };
+            let declared = match fa.resolve_member_in_ancestors(&class, &w.member, None, want) {
+                Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) => Some(fa.symbol(sym_id)),
+                _ => None,
+            }
+            // Only a declared member has a place; a key a write itself
+            // minted (python's `self.x = …` HashKeyDef) is the write.
+            .filter(|m| m.kind == crate::model::file_analysis::SymKind::Field);
             let (attachment, scope) = match declared {
                 Some(m) => (WA::Place(Box::new(fa.declared_place(m.id))), Some(m.scope)),
                 None => (
-                    WA::Field { owner: class.clone(), name: w.member.clone() },
+                    WA::holds_of(class.clone(), w.spaces.in_order().next().unwrap_or(fa.member_spaces().values), w.member.clone()),
                     class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
                 ),
             };

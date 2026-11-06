@@ -456,7 +456,7 @@ fn despan(t: &InferredType) -> InferredType {
     match t {
         InferredType::CodeRef { return_edge } => InferredType::CodeRef {
             return_edge: match return_edge {
-                Some(WitnessAttachment::PackageSymbol { .. }) => return_edge.clone(),
+                Some(WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }) => return_edge.clone(),
                 _ => None,
             },
         },

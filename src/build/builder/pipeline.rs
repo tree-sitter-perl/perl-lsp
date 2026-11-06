@@ -1014,7 +1014,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             self.bag.push(Witness {
-                attachment: WitnessAttachment::Field { owner: class, name: key },
+                attachment: WitnessAttachment::holds_of(class, crate::model::conventions::PERL_CONVENTIONS.member_spaces.values, key),
                 source: WitnessSource::Builder("slot_write".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
                 span,

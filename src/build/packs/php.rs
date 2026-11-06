@@ -22,16 +22,16 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
-            // Methods, properties, static properties and constants are
-            // four namespaces: `X()`, `$obj->X`, `Foo::$X` and `Foo::X`
-            // never answer one another (`PhpSpace`).
-            member_spaces: PhpSpace::SPACES,
             ..NameSpellings::NONE
         },
         // A bare call names the function its namespace declares, else the
         // global one.
         functions: FunctionLookup::NamespaceThenGlobal,
         construction: ConstructionKey::Class,
+        // Methods, properties, static properties and constants are four
+        // namespaces: `X()`, `$obj->X`, `Foo::$X` and `Foo::X` never answer
+        // one another (`PhpSpace`).
+        member_spaces: PhpSpace::SPACES,
         lattice: PHP_LATTICE,
         type_display: display_type,
         shape_name: |raw| raw.to_string(),
@@ -63,6 +63,7 @@ pub fn php_pack() -> LangPack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PhpSpace {
+    /// First: calls land here untagged (`NamespaceId::CALLABLES`).
     Method,
     Property,
     StaticProperty,
@@ -77,7 +78,6 @@ impl PhpSpace {
             Cow::Borrowed("static_property"),
             Cow::Borrowed("constant"),
         ]),
-        callables: NamespaceId(PhpSpace::Method as u8),
         values: NamespaceId(PhpSpace::Property as u8),
     };
 }

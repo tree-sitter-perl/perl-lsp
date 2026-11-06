@@ -266,6 +266,8 @@ impl<'a> Builder<'a> {
                     package_parents: &self.package_parents,
                     app_surface_consumers: &self.app_surface_consumers,
                     lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
+
+                    member_spaces: crate::model::conventions::member_spaces_for(crate::model::conventions::PERL_LANGUAGE),
                 };
                 crate::model::witnesses::emit_mutation_extension_witnesses(
                     &mut self.bag,
@@ -1103,6 +1105,8 @@ impl<'a> Builder<'a> {
             package_parents: &self.package_parents,
             app_surface_consumers: &self.app_surface_consumers,
             lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
+
+            member_spaces: crate::model::conventions::member_spaces_for(crate::model::conventions::PERL_LANGUAGE),
         }
     }
 
@@ -1374,10 +1378,7 @@ impl<'a> Builder<'a> {
             if let Some(sym) = self.symbols.get(sym_id.0 as usize) {
                 if let Some(class) = sym.package.clone() {
                     to_push.push(Witness {
-                        attachment: WitnessAttachment::PackageSymbol {
-                            package: class,
-                            name: sym.name.clone(),
-                        },
+                        attachment: WitnessAttachment::returns_of(class, sym.name.clone()),
                         source: WitnessSource::Builder("arity_detection".into()),
                         payload: WitnessPayload::ReturnExpr(return_expr),
                         span: body_span,
@@ -1613,10 +1614,7 @@ impl<'a> Builder<'a> {
             let is_primary = method_on_class_seen.insert((class.clone(), sym.name.clone()));
             if is_primary {
                 writeback_witnesses.push(Witness {
-                    attachment: WitnessAttachment::PackageSymbol {
-                        package: class,
-                        name: sym.name.clone(),
-                    },
+                    attachment: WitnessAttachment::returns_of(class, sym.name.clone()),
                     source: WitnessSource::Builder("local_return".into()),
                     payload: WitnessPayload::Edge(WitnessAttachment::Symbol(sym.id)),
                     span: sym.span,
@@ -1646,10 +1644,7 @@ impl<'a> Builder<'a> {
                         continue;
                     }
                     writeback_witnesses.push(Witness {
-                        attachment: WitnessAttachment::PackageSymbol {
-                            package: class.clone(),
-                            name: sym.name.clone(),
-                        },
+                        attachment: WitnessAttachment::returns_of(class.clone(), sym.name.clone()),
                         source: WitnessSource::Builder("plugin_bridge".into()),
                         payload: WitnessPayload::Edge(WitnessAttachment::Symbol(*sym_id)),
                         span: zero,
@@ -1717,15 +1712,9 @@ impl<'a> Builder<'a> {
                         continue;
                     }
                     writeback_witnesses.push(Witness {
-                        attachment: WitnessAttachment::PackageSymbol {
-                            package: child.clone(),
-                            name: sym.name.clone(),
-                        },
+                        attachment: WitnessAttachment::returns_of(child.clone(), sym.name.clone()),
                         source: WitnessSource::Builder("inheritance".into()),
-                        payload: WitnessPayload::Edge(WitnessAttachment::PackageSymbol {
-                            package: parent.clone(),
-                            name: sym.name.clone(),
-                        }),
+                        payload: WitnessPayload::Edge(WitnessAttachment::returns_of(parent.clone(), sym.name.clone())),
                         span: zero,
                     });
                 }
@@ -1979,10 +1968,7 @@ impl<'a> Builder<'a> {
             };
             if let plugin::OverrideTarget::Method { class, name } = &ov.target {
                 self.push_witness(Witness {
-                    attachment: WitnessAttachment::PackageSymbol {
-                        package: class.clone(),
-                        name: name.clone(),
-                    },
+                    attachment: WitnessAttachment::returns_of(class.clone(), name.clone()),
                     source: WitnessSource::Plugin(plugin_id.clone()),
                     payload: payload.clone(),
                     span: zero,
