@@ -307,7 +307,7 @@ fn open_shape(open: &mut bool) -> bool {
 /// TODO(element-typed-array): a tuple is only right while nothing else
 /// writes the array; these writes move to an element-typed array when the
 /// lattice has one.
-fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option<InferredType> {
+pub(super) fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option<InferredType> {
     use crate::model::file_analysis::SharedKeys;
     let Some((first, rest)) = hops.split_first() else { return vtype.cloned() };
     match first {
@@ -319,6 +319,9 @@ fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option
             Some(InferredType::Sequence(vec![vivify(rest, vtype, open).unwrap_or(InferredType::Unknown)]))
         }
         WriteKey::Index(i) if *i > 0 => Some(InferredType::ArrayRef),
+        // A computed key still names the container it writes into.
+        WriteKey::AnyKey => Some(InferredType::HashWithKeys { keys: SharedKeys::new(Vec::new()), open: true }),
+        WriteKey::AnyIndex => Some(InferredType::ArrayRef),
         WriteKey::Index(_) | WriteKey::Unknown => None,
     }
 }

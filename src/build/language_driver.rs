@@ -1095,6 +1095,7 @@ fn remap_spans(
         template_params: _,
         // name/scope-keyed — no spans to fix.
         field_types: _,
+        member_decl_facts,
         return_sites,
         receivers,
         param_sigs,
@@ -1252,7 +1253,11 @@ fn remap_spans(
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };
-    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()) {
+    for (_, token, _, _) in member_decl_facts.iter_mut() {
+        *token = r(*token);
+    }
+    let decl_facts = member_decl_facts.iter_mut().map(|(_, _, _, w)| w);
+    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()).chain(decl_facts) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);

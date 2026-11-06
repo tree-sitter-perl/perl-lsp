@@ -270,14 +270,14 @@ impl<'a> Builder<'a> {
         let mut path = Vec::new();
         for hop in &outer_hops {
             let (k, _) = self.write_key_of(*hop);
-            let last = matches!(k, WriteKey::Unknown);
+            let last = !k.is_static();
             path.push(k);
             if last {
                 break;
             }
         }
         // The RHS types the written key only when the path reaches it.
-        let typed = path.len() == outer_hops.len() && path.last().map_or(true, |k| !matches!(k, WriteKey::Unknown));
+        let typed = path.len() == outer_hops.len() && path.last().map_or(true, WriteKey::is_static);
         self.key_writes.push(KeyWrite {
             var_text,
             key,
@@ -290,8 +290,8 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// What one element hop writes: a static hash key, a static index, or
-    /// `Unknown` for a dynamic one; with the key node's span.
+    /// What one element hop writes: a static hash key or index, or a
+    /// computed one (`AnyKey` / `AnyIndex`); with the key node's span.
     fn write_key_of(&self, elem: Node<'a>) -> (crate::model::file_analysis::WriteKey, Span) {
         use crate::model::file_analysis::WriteKey;
         let (field, key) = if elem.kind() == "array_element_expression" {
@@ -299,14 +299,14 @@ impl<'a> Builder<'a> {
             let key = idx
                 .and_then(|i| i.utf8_text(self.source).ok())
                 .and_then(|t| t.parse::<i32>().ok())
-                .map_or(WriteKey::Unknown, WriteKey::Index);
+                .map_or(WriteKey::AnyIndex, WriteKey::Index);
             (idx, key)
         } else {
             let k = elem.child_by_field_name("key");
             let key = k
                 .and_then(|k| self.extract_key_text(k))
                 .and_then(|(t, dynamic)| (!dynamic).then_some(t))
-                .map_or(WriteKey::Unknown, WriteKey::Hash);
+                .map_or(WriteKey::AnyKey, WriteKey::Hash);
             (k, key)
         };
         (key, node_to_span(field.unwrap_or(elem)))

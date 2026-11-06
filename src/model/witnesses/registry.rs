@@ -2118,7 +2118,16 @@ impl ReducerRegistry {
                 current = self.extension_base(bag, q, state, raw, &grown, at);
             }
             prev = Some(at);
-            let Some(base) = current.as_mut() else { continue };
+            let Some(base) = current.as_mut() else {
+                // Nothing stands under the write, so it creates the container
+                // its first hop names (Perl autovivifies `$o->{s}{$k} = …`),
+                // open because other writes may fill it too.
+                current = super::vivify(&x.hops, x.value.as_ref(), true);
+                if current.is_some() {
+                    last_effective = Some(i);
+                }
+                continue;
+            };
             let changed = if temporal {
                 super::extend_in_place(base, &x.hops, x.value.as_ref(), x.widen)
             } else {
