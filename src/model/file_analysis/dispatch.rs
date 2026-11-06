@@ -704,9 +704,22 @@ pub enum WriteKey {
     /// Static array index (direct arrow write, `$v->[N] = …`) —
     /// retypes the slot / appends at `len` on a `Sequence` tuple.
     Index(i32),
-    /// Dynamic key, slice, or escape — membership unknowable;
-    /// switches a `HashWithKeys` shape open.
+    /// Slice or escape — membership unknowable; switches a
+    /// `HashWithKeys` shape open.
     Unknown,
+    /// A hash key the write computes (`$v->{$k} = …`): the container is a
+    /// hash, which key it writes is unknowable.
+    AnyKey,
+    /// An index the write computes (`$v->[$i] = …`): the container is an
+    /// array, which slot it writes is unknowable.
+    AnyIndex,
+}
+
+impl WriteKey {
+    /// A hop the write names exactly — the path below it is still known.
+    pub fn is_static(&self) -> bool {
+        matches!(self, WriteKey::Hash(_) | WriteKey::Index(_))
+    }
 }
 
 /// A method call binding: `$var = $invocant->method()`. The variable's
