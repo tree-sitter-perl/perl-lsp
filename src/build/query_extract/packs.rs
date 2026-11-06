@@ -51,17 +51,12 @@ pub struct LangPack {
     /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
     #[allow(dead_code)]
     pub module_paths: fn(module: &str) -> Vec<String>,
-    /// Guard narrowing: given the guard token (`@narrow.guard` — a
-    /// function/operator like `isinstance`, `has_value`; `None` for the
-    /// token-less `if (opt)` truthiness form) and the type text, the
-    /// refined type that holds inside the guarded block, or `None` if this
-    /// guard doesn't narrow. The type text is the `@narrow.type` capture
-    /// when the guard names one (`dynamic_cast<Derived*>`), else the
-    /// subject's DECLARED type (the optional-engagement form reads
-    /// `std::optional<T>` off the declaration and peels `T`). The pack owns
-    /// "which guard means which refinement" (rule #10); core just scopes
-    /// the witness to the block.
-    pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
+    /// What a subject declared `declared` holds where an `@narrow.is` test
+    /// that names no type proves it engaged (`std::optional<T>` → `T`), or
+    /// `None` when the declared type holds nothing narrower. Which tests
+    /// prove what is the document's (`docs/adr/flow-narrowing.md`); this
+    /// reads a type spelling.
+    pub narrow_guard: fn(declared: &str) -> Option<InferredType>,
     /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
     /// `main`: reached through the ABI, never a source call site) — a
     /// zero-fan-in callable with one of these names is alive by contract.

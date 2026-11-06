@@ -342,10 +342,14 @@ own place where a narrowing gives that place a value
 a member a guard proves unset (`!isset($this->x)`, `$this->x === null`)
 is a lazy init, as `??=` is.
 
-An atom whose match carries its own positions is its own condition, with
-no refinement capture: the pack's `narrow_guard` reads its `@narrow.guard`
-token and type text (the `@narrow.type`, else the subject's declared
-type) and proves the result where it holds.
+Python's document declares `isinstance` and C++'s `dynamic_cast` as
+`@narrow.is` atoms naming their `@narrow.type`, read through the
+language's type spelling first (`isinstance(x, str)` is a string, not a
+class named `str`). C++'s `std::optional` engagement (the subject's own
+truth, or `has_value()`) names no type: its class is what the pack's
+`narrow_guard` peels off the subject's declared type. So `if not
+isinstance(x, T): return` and `if (!opt) return;` narrow the rest of
+their block.
 
 ## A tag is a value: `ref` names its subject
 

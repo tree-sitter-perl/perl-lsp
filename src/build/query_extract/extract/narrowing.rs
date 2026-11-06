@@ -164,36 +164,33 @@ fn regions_of(ad: &Adorned<'_, '_>, atom: &Event) -> Vec<(Span, bool)> {
 pub(super) fn finish(st: &mut ExtractState) {
     let n = &mut st.narrowing;
     let out = &mut st.out;
-    // An atom states its refinement (`@narrow.is` / `.set` / `.unset`) or
-    // leaves it to the pack's `narrow_guard`, which reads the guard token
-    // and the type text: the atom's own `@narrow.type`, else the subject's
-    // declared type (the optional-engagement form peels `T` from it).
-    // A match carrying its own positions is its own condition; any other
-    // atom is known where the conditions above it put it.
+    // An `is` atom's `@narrow.type` names a class, which the language's
+    // reading of a type spelling may know better (python's `str` is a
+    // string); with none, the subject is what its declared type holds once
+    // the test proves it engaged (the pack's `narrow_guard`: an optional's
+    // inner type). An atom is known where the conditions above it put it.
     let ad = st.adorned;
     let mut subjects = std::mem::take(&mut n.narrow_subjects);
     subjects.sort_by_key(|s| s.0);
     let mut pending = Vec::new();
     for (mid, subject, scope, annot) in subjects {
-        let kind = [NarrowCap::Is, NarrowCap::Set, NarrowCap::Unset]
+        let Some((kind, node)) = [NarrowCap::Is, NarrowCap::Set, NarrowCap::Unset]
             .into_iter()
-            .find_map(|k| ad.in_match(mid, Capture::Narrow(k)).map(|e| (k, e)));
-        let ty = ad.in_match(mid, Capture::Narrow(NarrowCap::Type)).map(|t| &t.text);
+            .find_map(|k| ad.in_match(mid, Capture::Narrow(k)).map(|e| (k, e)))
+        else {
+            continue;
+        };
         let atom = match kind {
-            Some((NarrowCap::Is, _)) => ty.and_then(|t| (st.pack.annot_type)(t)).map(Atom::Is),
-            Some((NarrowCap::Unset, _)) => Some(Atom::Unset),
-            Some(_) => Some(Atom::Set),
-            None => ty.or(annot.as_ref()).and_then(|ty| {
-                let guard = ad.in_match(mid, Capture::Narrow(NarrowCap::Guard)).map(|g| g.text.as_str());
-                (st.pack.narrow_guard)(guard, ty).map(Atom::Is)
-            }),
+            NarrowCap::Is => match ad.in_match(mid, Capture::Narrow(NarrowCap::Type)) {
+                Some(t) => Some((st.pack.annot_type)(&t.text).unwrap_or_else(|| InferredType::ClassName(t.text.clone()))),
+                None => annot.as_deref().and_then(st.pack.narrow_guard),
+            }
+            .map(Atom::Is),
+            NarrowCap::Unset => Some(Atom::Unset),
+            _ => Some(Atom::Set),
         };
         let Some(atom) = atom else { continue };
-        let own = positions(ad, mid);
-        let regions = match kind {
-            Some((_, node)) if own.is_empty() => regions_of(ad, node),
-            _ => own,
-        };
+        let regions = regions_of(ad, node);
         // A member subject (`isinstance(self.x, T)`) narrows its place, which
         // only the assembled analysis can root (`PackPlaces`). So may a bare
         // name: only assembly knows whether it is a local or a member of an

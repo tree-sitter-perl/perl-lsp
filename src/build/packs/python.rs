@@ -46,8 +46,7 @@ pub fn python_pack() -> LangPack {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
         },
-        // `isinstance(x, Foo)` narrows x to Foo inside the guard.
-        narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["."],

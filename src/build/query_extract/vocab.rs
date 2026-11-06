@@ -273,20 +273,18 @@ spelled! {
 }
 
 spelled! {
-    /// A guard's parts. An atom is a match naming its subject (`var`) and,
-    /// for a refinement the document states, what it proves (`is`, `set`,
-    /// `unset`, on the atom's node); connectives and positions are matches
-    /// of their own, joined to the atoms they hold by containment.
+    /// A guard's parts. An atom is a match naming its subject (`var`) and
+    /// what it proves (`is`, `set`, `unset`, on the atom's node);
+    /// connectives and positions are matches of their own, joined to the
+    /// atoms they hold by containment.
     pub enum NarrowCap {
         /// The subject the atom is about.
         Var = "var",
-        /// The type an `is` atom names, or the text the pack's
-        /// `narrow_guard` reads.
+        /// The type an `is` atom names.
         Type = "type",
-        /// The guard token the pack's `narrow_guard` reads.
-        Guard = "guard",
         /// The subject is the class `@narrow.type` names where the atom
-        /// holds; its failure proves nothing.
+        /// holds, or with none, what its declared type holds engaged (the
+        /// pack's `narrow_guard`); its failure proves nothing.
         Is = "is",
         /// The subject holds a value where the atom holds, the null value
         /// where it fails.
