@@ -330,6 +330,11 @@ rebind (a variable) or disturbance (a place). A failed `is` proves
 nothing; a passing `set` would strip the null from the incoming type,
 which needs a fold the pack tier lacks (TODO(narrow-set-strip)).
 
+PHP's document declares its atoms (`instanceof`; a single-argument
+`isset`, `!== null`; `=== null`, `is_null`), its connectives and its
+positions; a property of `$this` is a place of the method's object
+(`Binding::Receiver`), so a guard on it narrows the property's receiver.
+
 An atom whose match carries its own positions is its own condition, with
 no refinement capture: the pack's `narrow_guard` reads its `@narrow.guard`
 token and type text (the `@narrow.type`, else the subject's declared

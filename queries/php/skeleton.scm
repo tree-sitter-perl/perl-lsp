@@ -305,6 +305,85 @@
 (anonymous_function_use_clause
   (by_ref (variable_name (name) @closure.capture @def.assigned.name @def.hoist)) @def.assigned)
 
+; ---- guards ----
+; An atom states what a test proves of its subject, a local `$x` or a
+; property `$this->x`: `instanceof` that it is the class named, `isset`
+; and `!== null` that it holds a value, `=== null` and `is_null` that it
+; holds none. A multi-argument `isset` is a conjunction, so only a single
+; argument is an atom. Loose `==` / `!=` prove nothing: `0 == null` holds.
+((binary_expression
+   left: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]
+   operator: "instanceof"
+   right: [(name) (qualified_name)] @narrow.type) @narrow.is
+ (#not-eq? @narrow.var "this"))
+((function_call_expression
+   function: (name) @_fn
+   arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.set
+ (#eq? @_fn "isset")
+ (#not-eq? @narrow.var "this"))
+((binary_expression
+   left: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]
+   operator: "!=="
+   right: (null)) @narrow.set
+ (#not-eq? @narrow.var "this"))
+((binary_expression
+   left: (null)
+   operator: "!=="
+   right: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) @narrow.set
+ (#not-eq? @narrow.var "this"))
+((binary_expression
+   left: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]
+   operator: "==="
+   right: (null)) @narrow.unset
+ (#not-eq? @narrow.var "this"))
+((binary_expression
+   left: (null)
+   operator: "==="
+   right: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) @narrow.unset
+ (#not-eq? @narrow.var "this"))
+((function_call_expression
+   function: (name) @_fn
+   arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.unset
+ (#eq? @_fn "is_null")
+ (#not-eq? @narrow.var "this"))
+; A condition built of atoms decides them through its connectives.
+(unary_op_expression operator: "!") @narrow.not
+(binary_expression operator: ["&&" "and"]) @narrow.and
+(binary_expression operator: ["||" "or"]) @narrow.or
+(parenthesized_expression) @narrow.group
+; Where a condition decides what runs: an `if` or `elseif` body and a
+; loop body run where it holds, every later clause of the chain where it
+; fails; a ternary yields its body or its alternative; the right of `&&`
+; runs where the left holds, of `||` where it fails. An `if` whose body
+; only leaves the block, with no clause after it, leaves the rest of the
+; block to run where its condition fails.
+(if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
+(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(else_if_clause condition: (_) @narrow.cond body: (_) @narrow.then)
+(if_statement
+  alternative: (else_if_clause condition: (_) @narrow.cond)
+  alternative: (_) @narrow.else)
+(while_statement condition: (_) @narrow.cond body: (_) @narrow.then)
+(conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
+(conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(binary_expression left: (_) @narrow.cond operator: ["&&" "and"] right: (_) @narrow.then)
+(binary_expression left: (_) @narrow.cond operator: ["||" "or"] right: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  body: [
+    (return_statement)
+    (continue_statement)
+    (break_statement)
+    (exit_statement)
+    (expression_statement (throw_expression))
+    (compound_statement
+      . [(return_statement)
+         (continue_statement)
+         (break_statement)
+         (exit_statement)
+         (expression_statement (throw_expression))] .)]
+  !alternative) @narrow.exit
+
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the
 ; argument list rides the callee's match. `...$xs` passes any number of
