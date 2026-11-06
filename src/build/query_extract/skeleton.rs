@@ -38,12 +38,15 @@ pub struct SkelSymbol {
     /// def's parameter list (`@arity.sig`). `None` for non-callables and defs
     /// whose parameter list the query didn't capture. Flows to `Symbol.arity`.
     pub arity: Option<crate::model::file_analysis::ParamArity>,
-    /// The `package` came from an explicit `::` qualifier on an out-of-line def
-    /// (`Ret Class::m(){}`), not from lexical/sticky context. The class the
-    /// qualifier names is authoritative EVEN when its body lives in another file
-    /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
-    /// the enclosing namespace. Not serialized — a driver-internal marker.
-    pub qualifier_owned: bool,
+    /// The `package` is the owner the syntax states, not the lexical/sticky
+    /// context: an explicit `::` qualifier on an out-of-line def (`Ret
+    /// Class::m(){}`), authoritative EVEN when the class body lives in
+    /// another file (a header), or the class whose own scope the def is
+    /// declared in. `reanchor_truncated_containers` must not re-attribute
+    /// it — a class spelled other than its identity (`Hook<R (*)(A...)>`)
+    /// is no container it can locate. Not serialized — a driver-internal
+    /// marker.
+    pub owner_stated: bool,
     /// Declaration facts a capture minted rather than an attribute token
     /// (a receiver parameter). Or-ed onto the flags the kind and the
     /// attributes give.
@@ -525,10 +528,11 @@ impl SkeletonAnalysis {
         }
 
         for s in self.symbols.iter_mut() {
-            // An explicit `::` qualifier is authoritative — the owning class it
-            // names may live in a header not present here, so its absence as a
-            // local container is NOT a truncation fall-through to recover.
-            if s.qualifier_owned {
+            // A stated owner is authoritative: a `::` qualifier's class may
+            // live in a header not present here, and a class's own scope names
+            // its class however it is spelled, so neither is a truncation
+            // fall-through to recover.
+            if s.owner_stated {
                 continue;
             }
             let sb = pt(s.start);
