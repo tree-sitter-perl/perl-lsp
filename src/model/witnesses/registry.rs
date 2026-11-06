@@ -8,7 +8,7 @@ use super::*;
 /// Cycle guard + result memo key for recursive bag queries, keyed by
 /// `(bag_ptr, attachment, receiver_identity, arity_hint)`. Per-bag
 /// entries stay separate so a legitimate cross-bag query for the same
-/// attachment (the common `PackageSymbol{C, m}` jump into C's own bag)
+/// attachment (the common `Member{C, m}` jump into C's own bag)
 /// isn't misread as a cycle. The receiver **identity** + arity hint
 /// widen the key so two queries differing only in `receiver` /
 /// `arity_hint` aren't treated as duplicates — `UnionOnArgs` and
@@ -20,7 +20,7 @@ use super::*;
 /// resolve to different classes; a variant-only discriminant collapses
 /// them to one memo key and the memo hands Foo's answer to Bar (silent
 /// wrong type). A same-receiver diamond (the inheritance walk holds
-/// `q.receiver` constant within one `PackageSymbol` query) still hashes
+/// `q.receiver` constant within one `Member` query) still hashes
 /// to one key, so memoization still kills the exponential re-chase.
 ///
 /// A `Variable` is temporal — its reducer answers AT `q.point` — so its key
@@ -496,7 +496,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`PackageSymbol{class, name}` when `attributed`, `Field{owner, name}`
+/// (`Member{class, name}` when `attributed`, `Field{owner, name}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -574,7 +574,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
-/// on `PackageSymbol{package}` (an `Edge` into a class's
+/// on `Member{package}` (an `Edge` into a class's
 /// method): the receiver is that call's invocant, i.e. `class`. A fluent
 /// `ReturnExpr(Receiver)` substitutes the dispatch class.
 ///
@@ -747,9 +747,9 @@ impl ReducerRegistry {
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
-        // PackageSymbol primary-fallback after ReturnExprReducer so
+        // Member primary-fallback after ReturnExprReducer so
         // per-arity declarations win when one matches.
-        r.register(Box::new(PackageSymbolReducer));
+        r.register(Box::new(MemberReturnsReducer));
         // TypeName is a disjoint attachment shape (typedef/using aliases),
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
@@ -811,7 +811,7 @@ impl ReducerRegistry {
     pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
         let mut state = QueryState::new();
         // Is the CONCLUSION LAYER CLOSED for the shape that dominates
-        // cross-file traffic? A `PackageSymbol` answer that never reads an
+        // cross-file traffic? A `Member` answer that never reads an
         // `Expr(span)` witness could be served from stored conclusions; one
         // that does needs the raw derivation, so the bag has to come along.
         // Measured at the top-level query only — inner hops are the thing
@@ -1026,11 +1026,11 @@ impl ReducerRegistry {
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
-        // answer — `PackageSymbol{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
+        // answer — `Member{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
         // `TypeName(T)`: one ladder (`ClassLadder`, `class_fallback`) for
         // all four. Most cases are covered by build-time edge emission
-        // (local writeback emits `PackageSymbol(child, m) →
-        // Edge(PackageSymbol(parent, m))`; enrichment projects the same for
+        // (local writeback emits `Member(child, m) →
+        // Edge(Member(parent, m))`; enrichment projects the same for
         // cross-file parents), resolved by the generic edge-chase; the ladder
         // covers the residual: the class's other files, its ancestry, and
         // plugin-namespace bridges declared elsewhere.
@@ -1051,6 +1051,15 @@ impl ReducerRegistry {
         // nothing named it) rather than silence — silence would read as
         // by-value.
         if matches!(q.attachment, WitnessAttachment::Param { .. })
+            && !bag.for_attachment(q.attachment).is_empty()
+        {
+            return ReducedValue::Type(InferredType::Unknown);
+        }
+        // A member this class holds: its own witnesses (a declaration, a
+        // write) are present but untyped, so the member EXISTS here and
+        // shadows a parent's of the same name; `Unknown` says so where
+        // silence would read as absent and walk on.
+        if matches!(q.attachment, WitnessAttachment::Member { aspect: MemberAspect::Holds, .. })
             && !bag.for_attachment(q.attachment).is_empty()
         {
             return ReducedValue::Type(InferredType::Unknown);
@@ -2202,14 +2211,14 @@ impl ReducerRegistry {
                             })
                         }
                         _ => {
-                            // A `PackageSymbol{package,..}` reached through an edge is
+                            // A `Member{package,..}` reached through an edge is
                             // a fresh method dispatch: its receiver is that call's
                             // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
                             // substitutes the dispatch class — not whatever the outer
                             // query carried. Mirrors `query_sub_return_type`'s
                             // `effective_receiver`. The exception is an inheritance
-                            // hop (`PackageSymbol{child} → Edge(PackageSymbol{parent})`):
-                            // there the source is itself a `PackageSymbol`, and the
+                            // hop (`Member{child} → Edge(Member{parent})`):
+                            // there the source is itself a `Member`, and the
                             // child's receiver must carry through so an inherited fluent
                             // accessor returns the child, not where `has` was declared.
                             let redispatched = matches!(
@@ -2350,6 +2359,8 @@ impl ReducerRegistry {
                                             }
                                         })
                                     })
+                                    // An untyped slot is no value.
+                                    .filter(|t| !matches!(t, InferredType::Unknown))
                                 }
                                 ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
                                 ProjectionStep::Element => match t {
@@ -2423,7 +2434,10 @@ impl ReducerRegistry {
                                     // class's template parameters substitutes
                                     // the base's arguments.
                                     let class = t.class_name()?.to_string();
-                                    spaces.in_order().find_map(|space| {
+                                    // The first namespace holding the member
+                                    // answers, typed or not: an untyped legal
+                                    // member is still the one the read reaches.
+                                    let found = spaces.in_order().find_map(|space| {
                                         let att = WitnessAttachment::holds_of(class.clone(), space, member.clone());
                                         let sub_q = ReducerQuery {
                                             attachment: &att,
@@ -2441,7 +2455,8 @@ impl ReducerRegistry {
                                                 | ReducedValue::None => None,
                                             }
                                         })
-                                    })
+                                    });
+                                    found.filter(|t| !matches!(t, InferredType::Unknown))
                                 }
                             }
                         };

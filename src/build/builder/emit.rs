@@ -305,7 +305,7 @@ impl<'a> Builder<'a> {
             // syntax (`Foo->new` → `ClassName("Foo")`), bake. Otherwise
             // Edge to the call's `Expression(refidx)` attachment;
             // `emit_method_call_return_edges` re-emits
-            // `Edge(PackageSymbol{package, method})` there once
+            // `Edge(Member{package, method})` there once
             // `invocant_class` is filled, so the chase resolves through.
             "method_call_expression" => {
                 if let Some(class) = self.extract_constructor_class(node) {

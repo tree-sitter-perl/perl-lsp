@@ -927,7 +927,7 @@ impl<'a> Builder<'a> {
     /// procedural,
     /// but factored out as named methods. The reducer registry
     /// (`PluginOverrideReducer`, `ReturnExprReducer`,
-    /// `PackageSymbolReducer`, `SubReturnReducer`) lives in
+    /// `MemberReturnsReducer`, `SubReturnReducer`) lives in
     /// `witnesses.rs` and folds the bag at query time.
     pub(super) fn resolve_return_types(
         &mut self,
@@ -1049,7 +1049,7 @@ impl<'a> Builder<'a> {
     /// `Expr(span)` case; the coderef-call arm of
     /// `invocant_type_at_node` uses this to chase a CodeRef's
     /// `return_edge` (which can be `Expr(body_last)` for anon
-    /// literals or `PackageSymbol{package, name}` for `\&foo`).
+    /// literals or `Member{owner, name}` for `\&foo`).
     pub(super) fn bag_query_attachment(
         &self,
         att: &crate::model::witnesses::WitnessAttachment,
@@ -1201,7 +1201,7 @@ impl<'a> Builder<'a> {
 
     /// Step 2: emit a `UnionOnArgs` `ReturnExpr` per arity-
     /// discriminated sub on `Symbol(sub_id)` and
-    /// `PackageSymbol{package, name}`. The bag's `ReturnExprReducer`
+    /// `Member{owner, name}`. The bag's `ReturnExprReducer`
     /// dispatches the call's `arity_hint` against the union's
     /// branches.
     ///
@@ -1365,7 +1365,7 @@ impl<'a> Builder<'a> {
             }
             let return_expr = ReturnExpr::UnionOnArgs { branches: sorted };
             // The Symbol attachment carries it for in-file Symbol-
-            // keyed lookups. The PackageSymbol attachment mirrors
+            // keyed lookups. The Member attachment mirrors
             // for class-keyed dispatch (cross-file inheritance,
             // `\&Class::method` chase).
             let body_span = arms[0].1;
@@ -1522,7 +1522,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Step 7: writeback. Mirror per-sym answers onto
-    /// `PackageSymbol{package, name}` for the primary sym of each
+    /// `Member{owner, name}` for the primary sym of each
     /// `(class, name)` pair, plus plugin-namespace bridges and
     /// inheritance edges. The primary mirror is published as
     /// `Edge(Symbol(sid))` — pure edge, no value duplication. The
@@ -1530,7 +1530,7 @@ impl<'a> Builder<'a> {
     /// to the sym's own bag answer (UnionOnArgs, plugin override,
     /// arm fold, implicit-return edge), so any shape the sym carries
     /// surfaces uniformly. ReturnExpr declarations on
-    /// `PackageSymbol{package, name}` (from
+    /// `Member{owner, name}` (from
     /// `publish_class_accessor_union`) claim first and answer
     /// arity-aware queries; the writeback's Edge fills the
     /// no-arity-hint and Edge-fallback slots.
@@ -1574,7 +1574,7 @@ impl<'a> Builder<'a> {
         // and surface it in the name-keyed `return_types` map for
         // downstream consumers (call-binding propagation, hash-key
         // fixup). Writeback (below) mirrors per-sym answers onto
-        // `PackageSymbol` via edges.
+        // `Member` via edges.
         for sym in &self.symbols {
             if !matches!(sym.kind, SymKind::Sub | SymKind::Method) {
                 continue;
@@ -1583,7 +1583,7 @@ impl<'a> Builder<'a> {
                 self.type_provenance.insert(sym.id, prov.clone());
             }
         }
-        // Publish `PackageSymbol{package, name} → Edge(Symbol(sid))`
+        // Publish `Member{owner, name} → Edge(Symbol(sid))`
         // for the primary sym of each (class, name) pair. The edge
         // routes class-keyed queries to the sym's own bag answer
         // (UnionOnArgs, plugin override, arm fold, implicit-return
@@ -1624,7 +1624,7 @@ impl<'a> Builder<'a> {
         // Plugin-namespace bridges: each `PluginNamespace` declares
         // `bridges: [Class(C1), Class(C2), ...]` for entities that
         // should be reachable from those classes' method dispatch.
-        // Emit `PackageSymbol{C_i, entity.name} → Edge(Symbol(entity.id))`
+        // Emit `Member{C_i, entity.name} → Edge(Symbol(entity.id))`
         // edges so `find_method_return_type` resolves bridged
         // entities through the same bag path it uses for direct
         // class methods. Without these edges,
@@ -1653,24 +1653,24 @@ impl<'a> Builder<'a> {
             }
         }
         // Inheritance edges: for every (child, parent) entry in
-        // `package_parents`, emit `PackageSymbol(child, m) →
-        // Edge(PackageSymbol(parent, m))` for each method `m` known
+        // `package_parents`, emit `Member(child, m) →
+        // Edge(Member(parent, m))` for each method `m` known
         // on the parent (locally-declared or framework-synthesized).
         // The registry's edge-chase walks these the same way it
         // walks any other Edge — no procedural ancestor walker
         // needed in `query_rec`. Cross-file parents inherit via
         // the registry's existing cached-bag recursion in
-        // `query_rec`'s `PackageSymbol` arm: an edge into
-        // `PackageSymbol(P_cross, m)` re-enters `query` with the
+        // `query_rec`'s `Member` arm: an edge into
+        // `Member(P_cross, m)` re-enters `query` with the
         // same attachment shape, and the shared visited set closes
         // any mutual loops.
         //
         // Methods on the parent are enumerated locally — for parents
         // that are themselves cross-file the recursion delivers
         // their methods via the cached bag. Each local method-name
-        // emission is enough: when child's `PackageSymbol(C, m)`
+        // emission is enough: when child's `Member(C, m)`
         // bag has no local witness, the inheritance Edge points at
-        // `PackageSymbol(P, m)` and the registry follows it.
+        // `Member(P, m)` and the registry follows it.
         // Sorted by child: `package_parents` is a `HashMap`, so iterating it
         // raw lands these witnesses in hash order — which differs between two
         // builds of the same file, making the bag (and the cache blob minted
@@ -1687,7 +1687,7 @@ impl<'a> Builder<'a> {
             // inheritance edge, so the FIRST parent in `@ISA` order
             // wins (Perl's default DFS-MRO is left-to-right). Without
             // this dedup, two parents both defining `m` would push
-            // two edges on `PackageSymbol(child, m)` and the
+            // two edges on `Member(child, m)` and the
             // materializer's latest-wins reducer would silently pick
             // the second-emitted parent.
             // Seeded with the child's OWN method names: an override must
@@ -1954,7 +1954,7 @@ impl<'a> Builder<'a> {
             // "method `name` on `class` returns T" — independent of
             // whether that class is defined locally. Publish it on the
             // class-keyed attachment so a method call resolves through
-            // `PackageSymbolReducer` even when the home class (e.g.
+            // `MemberReturnsReducer` even when the home class (e.g.
             // `Mojolicious::Routes::Route`) lives in external @INC and
             // isn't indexed: the declarative type IS the answer, no
             // local symbol required. This is what lets a route-builder

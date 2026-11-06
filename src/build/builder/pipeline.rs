@@ -646,7 +646,7 @@ fn build_once(
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
     // Expression(refidx) chases resolve through to
-    // PackageSymbol{package, method} for any invocant freshly known.
+    // Member{package, method} for any invocant freshly known.
     // Then push array contributions: spans queryable through the
     // freshly-published edges.
     bphase!("emit_mc_return_edges", b.emit_method_call_return_edges());
@@ -941,7 +941,7 @@ impl<'a> Builder<'a> {
     /// walk via `push_type_constraint` and `bag.push` from the emit
     /// sites.
     ///
-    /// Method-call return edges (`Expression(refidx) → Edge(PackageSymbol{package, method})`)
+    /// Method-call return edges (`Expression(refidx) → Edge(Member{package, method})`)
     /// are emitted later — by `emit_method_call_return_edges` from
     /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {

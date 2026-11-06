@@ -119,12 +119,12 @@ impl<'a> Builder<'a> {
                 // accessors (Mojo::Base `has 'title' => 'default'`
                 // synthesizes a 0-arg getter returning String AND a
                 // 1-arg writer returning $self). Without it the
-                // PackageSymbol chase's `UnionOnArgs` reducer would
+                // Member chase's `UnionOnArgs` reducer would
                 // hit the writer's `Any`/`AtLeast(1)` arm regardless
                 // of how many args the call has.
                 //
                 // Receiver = the invocant's resolved type. Threads
-                // through `PackageSymbol` chases so
+                // through `Member` chases so
                 // `ReturnExpr::Operator(RowOf(Receiver))` (DBIC find)
                 // and `UnionOnArgs::Receiver` (Mojo writer) substitute
                 // to the right value-side answer.
@@ -156,7 +156,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 // (b) Receiver-relative projection (`->first`/`->create` →
-                //     RowOf) declared on `PackageSymbol{recv.class, method}`
+                //     RowOf) declared on `Member{recv.class, method}`
                 //     by `emit_parametric_return_expr_decls` (published in
                 //     the live walk, so it IS in the bag now). Query it with
                 //     the receiver threaded so `RowOf(Receiver)` projects to
@@ -192,7 +192,7 @@ impl<'a> Builder<'a> {
                 //
                 // Arity / receiver semantics depend on the target
                 // attachment shape:
-                //   - `PackageSymbol{...}` → the first arg IS the
+                //   - `Member{...}` → the first arg IS the
                 //     method's receiver (Perl's `\&Class::method`
                 //     semantics: invoking via coderef requires
                 //     passing the invocant as arg[0]). Drop it from
@@ -200,7 +200,7 @@ impl<'a> Builder<'a> {
                 //     `q.receiver` so `ReturnExpr::Receiver`
                 //     substitutes correctly. Also covers the
                 //     `\&foo` case (bare named sub) — today's
-                //     `coderef_return_edge_for` emits PackageSymbol
+                //     `coderef_return_edge_for` emits Member
                 //     even for non-method subs in the current
                 //     package; that's a known caveat (would be
                 //     wrong for a plain sub treated as a method),
@@ -329,6 +329,8 @@ impl<'a> Builder<'a> {
                 // untyped.
                 let class = base_ty.class_name()?.to_string();
                 self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::holds_of(class, crate::model::conventions::PERL_CONVENTIONS.member_spaces.values, key))
+                    // A slot present but untyped is no value.
+                    .filter(|t| !matches!(t, InferredType::Unknown))
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 if self.is_shift_call(node) {
@@ -357,7 +359,7 @@ impl<'a> Builder<'a> {
                 // `$r->under('/x')` — else the route value never brands and a
                 // partial `->to('#action')` downstream loses its inherited
                 // controller. Import map pins the class; the override lives on
-                // `PackageSymbol{package, verb}`. Only reached on a local/cross-
+                // `Member{package, verb}`. Only reached on a local/cross-
                 // file miss, so it strictly adds answers (None → maybe Some).
                 let class = self.resolve_call_package(name, node.start_position())?;
                 self.bag_query_attachment_with(

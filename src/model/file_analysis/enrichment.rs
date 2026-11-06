@@ -209,7 +209,7 @@ impl FileAnalysis {
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
                     // the builder's Method emit, plus the
-                    // `PackageSymbol{package,name}` mirror the fold writeback
+                    // `Member{package,name}` mirror the fold writeback
                     // would have pushed so cross-file return-type queries
                     // resolve the relationship shape.
                     mint.witnesses.push(Witness {
@@ -615,13 +615,13 @@ impl FileAnalysis {
         self.fix_chain_receiver_hash_key_owners(module_index);
 
         // Cross-file inheritance edges. Local writeback emits
-        // `PackageSymbol(child, m) → Edge(PackageSymbol(parent, m))`
+        // `Member(child, m) → Edge(Member(parent, m))`
         // for every method `m` declared on a *local* parent. When
         // the parent class lives in another file (or its methods
         // do, via further parent chaining), we read the cached
         // analysis here and project the same edge shape into the
         // local bag. The registry's edge-chase then follows
-        // `PackageSymbol(child, m) → PackageSymbol(parent_cross, m)`
+        // `Member(child, m) → Member(parent_cross, m)`
         // and re-enters the cached parent's bag via the existing
         // cross-file primary lookup in `query_rec`.
         if let Some(idx) = module_index {

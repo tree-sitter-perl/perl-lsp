@@ -968,14 +968,18 @@ impl<'a> CandidateSet<'a> {
                                 // view carries it — no per-query enrichment.
                                 let whole = idx.whole_present(&cached);
                                 // A stored member of the class: a data field or
-                                // an enum constant, not a sub.
+                                // an enum constant, not a sub. Legal namespaces
+                                // first, the illegal ones only as the fallback,
+                                // as the resolution itself walks.
                                 let stored_member = || {
-                                    whole.symbols().iter().find(|s| {
-                                        want.admits_decl(s.kind, s.member_space, namespace)
-                                            && MemberKind::of_symbol(s).mode == MemberMode::Value
-                                            && s.name == method
-                                            && s.package.as_deref() == Some(class.as_str())
-                                            && whole.symbol_is_class_content(s)
+                                    std::iter::once(want.legal()).chain(want.illegal_only()).find_map(|ask| {
+                                        whole.symbols().iter().find(|s| {
+                                            ask.admits_decl(s.kind, s.member_space, namespace)
+                                                && MemberKind::of_symbol(s).mode == MemberMode::Value
+                                                && s.name == method
+                                                && s.package.as_deref() == Some(class.as_str())
+                                                && whole.symbol_is_class_content(s)
+                                        })
                                     })
                                 };
                                 let stored_loc = |sym: &crate::model::file_analysis::Symbol| {

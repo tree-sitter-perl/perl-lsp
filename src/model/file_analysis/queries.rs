@@ -428,7 +428,7 @@ impl FileAnalysis {
 
     /// Resolve the inferred return type of a method call by its ref index
     /// (into `refs`). Reads the `Expression(refidx)` witnesses seeded by
-    /// the builder; `module_index` lets cross-file `PackageSymbol` edges
+    /// the builder; `module_index` lets cross-file `Member` edges
     /// (e.g. `$r->get(...)` where `get` lives in `Mojolicious::Routes`)
     /// chase through the registry's recursive walker.
     ///
@@ -519,7 +519,7 @@ impl FileAnalysis {
         };
         // Fallback for a chain receiver whose class the BUILDER couldn't
         // pin (so `emit_method_call_return_edges` never emitted the
-        // `Expression → Edge(PackageSymbol{package, method})` for this
+        // `Expression → Edge(Member{package, method})` for this
         // call): resolve the method's return via the receiver's class at
         // QUERY time. This is what lets a receiver-relative projection
         // — `$rs->search({...})->first` (RowOf on the fluent-search
@@ -693,7 +693,7 @@ impl FileAnalysis {
         // member ref whose invocant opens this span and whose token ends
         // inside it (the chain's last hop), type the receiver recursively
         // (strictly narrower span, bounded), and resolve the member's
-        // value on it — methods through `PackageSymbol` with the receiver
+        // value on it — methods through `Member` with the receiver
         // threaded (`ParamOf` substitutes), fields through the declared
         // type with params substituted.
         if let Some((inv, r)) = self

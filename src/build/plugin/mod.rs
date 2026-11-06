@@ -183,7 +183,7 @@ pub struct ArgInfo {
     /// ```
     ///
     /// Anon-sub origins yield the anon sub's `Symbol(sub_id)`; named-
-    /// sub references yield `PackageSymbol{package, name}`, which
+    /// sub references yield `Member{owner, name}`, which
     /// resolves through the bag's MRO + `module_index` machinery
     /// — so cross-file `\&Foo::bar` works without any consumer-
     /// side branching. `None` for genuinely opaque coderefs
@@ -392,7 +392,7 @@ pub enum EmitAction {
         ///
         ///   - `Expr(span)` for anon-sub bodies (the bag walks
         ///     the body's last-expression witnesses).
-        ///   - `PackageSymbol{package, name}` for named-sub
+        ///   - `Member{owner, name}` for named-sub
         ///     references (the bag's MRO + cross-file machinery
         ///     resolves it).
         ///

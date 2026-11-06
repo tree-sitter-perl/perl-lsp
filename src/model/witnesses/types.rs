@@ -72,7 +72,7 @@ pub enum WitnessAttachment {
     /// which keeps a plain struct tag or unknown class resolving to itself.
     /// Cross-file: the alias name is a Class symbol in its defining file,
     /// so `get_cached(name)` recurses into the header's bag (same shape as
-    /// the `PackageSymbol` bridge).
+    /// the `Member` bridge).
     TypeName(String),
     /// Parameter `index` of the callable `name` in `package`, AS A BINDING
     /// TARGET: the attachment a call site's argument aliases when the
@@ -129,22 +129,16 @@ pub enum WitnessAttachment {
     /// (`FileAnalysis::field_domain_for_owner`).
     ///
     /// **Plugin-facing.** Rhai manifests build this variant by NAME through
-    /// serde as `PackageSymbol` (or `MethodOnClass`); the aliases keep that
-    /// spelling an API. A manifest names no namespace or aspect: it states
-    /// what a call returns, in the namespace calls land in untagged
-    /// (`NamespaceId::CALLABLES`).
+    /// serde: `#{ Member: #{ owner: cls, name: m } }`. A manifest names no
+    /// namespace or aspect: it states what a call returns, in the namespace
+    /// calls land in untagged (`NamespaceId::CALLABLES`). The old spellings
+    /// (`PackageSymbol` / `MethodOnClass`, owner as `package` / `class` /
+    /// `pkg`) stay aliased, so a manifest written against them still reads.
     ///
-    /// **`package` is a Rhai reserved keyword — quote it, or write `pkg`:**
-    ///
-    /// ```text
-    /// #{ PackageSymbol: #{ "package": cls, name: m } }   // ok
-    /// #{ PackageSymbol: #{ pkg: cls,      name: m } }    // ok
-    /// #{ PackageSymbol: #{ package: cls,  name: m } }    // WHOLE SCRIPT DIES
-    /// ```
-    ///
-    /// Unquoted, the script fails to COMPILE, so the plugin loads not at all
-    /// — every emission it owns disappears, not just this edge. That is why
-    /// `pkg` is aliased: it is the spelling that cannot be got wrong.
+    /// **`package` is a Rhai reserved keyword**: an old manifest that writes
+    /// it unquoted (`#{ PackageSymbol: #{ package: cls, name: m } }`) fails
+    /// to COMPILE, so the plugin loads not at all — every emission it owns
+    /// disappears, not just this edge. `owner` cannot be got wrong.
     #[serde(alias = "PackageSymbol", alias = "MethodOnClass")]
     Member {
         #[serde(alias = "package", alias = "class", alias = "pkg")]
@@ -385,7 +379,7 @@ pub enum WitnessPayload {
     /// once on the symbol) and arity dispatch (Mojo `has`'s getter/writer
     /// collapse to a single `UnionOnArgs`).
     ///
-    /// Attached to `Symbol(_)` (per-sub) and `PackageSymbol{...}`
+    /// Attached to `Symbol(_)` (per-sub) and `Member{...}`
     /// (class-keyed). Latest wins, so a plugin override re-publishes over
     /// a build-time inference.
     ReturnExpr(ReturnExpr),

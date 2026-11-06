@@ -2824,7 +2824,7 @@ class Box {
 
 /// A member's value is keyed by its identity, owner + namespace + name, not
 /// its spelling: the property `X` holds a Widget, its method returns a
-/// Gizmo, the constant `X` holds neither, and the static `$S` holds its
+/// Gizmo, the constant `X` holds the number it is declared with, and the static `$S` holds its
 /// Gadget whether reached legally or through the instance side.
 #[cfg(feature = "php")]
 #[test]
@@ -2835,8 +2835,31 @@ fn a_members_value_is_its_own_namespaces() {
     let ty = |v: &str| fa.inferred_type_via_bag(v, end);
     assert_eq!(ty("b"), Some(T::ClassName("Widget".into())), "the property");
     assert_eq!(ty("c"), Some(T::ClassName("Gizmo".into())), "the method's return");
-    assert_ne!(ty("a"), Some(T::ClassName("Widget".into())), "the constant is not the property");
-    assert_ne!(ty("a"), Some(T::ClassName("Gizmo".into())), "the constant is not the method");
+    assert_eq!(ty("a"), Some(T::Numeric), "the constant holds what it is declared with");
     assert_eq!(ty("d"), Some(T::ClassName("Gadget".into())), "the static property");
     assert_eq!(ty("e"), Some(T::ClassName("Gadget".into())), "the static property, reached illegally");
+}
+
+const UNTYPED_LEGAL: &str = "<?php
+class Gadget {}
+class Base {
+    public static Gadget $v;
+}
+class Card extends Base {
+    public $v;
+    public function run(Card $c) {
+        $a = $c->v;
+        return;
+    }
+}
+";
+
+/// The member a read reaches is the first namespace that HOLDS it, typed
+/// or not: `$c->v` reaches the untyped property, so the parent's static
+/// `$v` (an illegal reach from `->`) never answers in its place.
+#[cfg(feature = "php")]
+#[test]
+fn an_untyped_legal_member_is_still_the_one_a_read_reaches() {
+    let fa = php(UNTYPED_LEGAL);
+    assert_eq!(fa.inferred_type_via_bag("a", at(UNTYPED_LEGAL, "return;", 0)), None);
 }

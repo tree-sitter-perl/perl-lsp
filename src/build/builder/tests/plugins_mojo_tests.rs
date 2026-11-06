@@ -1535,7 +1535,7 @@ app->helper(greet => sub {
 /// that returns a concrete class resolves its RETURN type identically
 /// from the app, the controller, AND a user-written app subclass —
 /// proving the single bridge target + synthetic-parent edge composes with
-/// the PackageSymbol type-resolution walk and that subclasses inherit the
+/// the Member type-resolution walk and that subclasses inherit the
 /// surface for free.
 #[test]
 fn plugin_mojo_helpers_return_type_via_app_surface() {

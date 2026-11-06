@@ -22,7 +22,7 @@ fn zero_span() -> Span {
 
 #[test]
 fn locally_backed_names_stay_off_the_residue() {
-    // The writeback attaches `PackageSymbol{Foo, bar}`; `bar` is a
+    // The writeback attaches `Member{Foo, bar}`; `bar` is a
     // row-visible symbol, so the rows can speak for it.
     let fa = build("package Foo;\nsub bar { 42 }\n");
     assert!(!fa.unrowed_attachment_names.iter().any(|n| n == "bar"));

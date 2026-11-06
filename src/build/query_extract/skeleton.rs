@@ -24,7 +24,7 @@ pub struct SkelSymbol {
     /// A match id, not a position in `symbols`, so it survives every dedup.
     pub pair: Option<usize>,
     /// Declared return type (`@rettype`), for methods/functions — drives
-    /// method-return resolution + chaining through PackageSymbol.
+    /// method-return resolution + chaining through Member.
     pub return_type: Option<InferredType>,
     /// Pointer/reference declarator stack, unravelled by the `deref` walk
     /// from a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
@@ -906,7 +906,7 @@ impl SkeletonAnalysis {
             }
             map
         };
-        // Writeback-lite: route method returns through PackageSymbol so
+        // Writeback-lite: route method returns through Member so
         // `box.getInner().` chains, inherited returns, and cross-file all
         // resolve via the SAME chase Perl uses — no bypass. Declared
         // returns need no fixpoint (the type is in the syntax); only the
@@ -1026,7 +1026,7 @@ impl SkeletonAnalysis {
                     ));
                 }
             }
-            // Inheritance edges: PackageSymbol{child,m} → Edge(parent,m), so
+            // Inheritance edges: Member{child,m} → Edge(parent,m), so
             // the registry walks the MRO for an inherited method's return.
             for (child, parent) in &self.parents {
                 for sym in &symbols {

@@ -1150,7 +1150,7 @@ fn census_self_only(bag: &WitnessBag, att: &WitnessAttachment) {
 /// The question is about the FOLD, not about this attachment — a fold ends
 /// wherever the edge chase ends — so the walk follows the edges the bag
 /// holds. Bounded by a seen-set and a depth cap because those edges are a
-/// graph, not a tree: the writeback's `PackageSymbol -> Edge(Symbol)` mirrors
+/// graph, not a tree: the writeback's `Member -> Edge(Symbol)` mirrors
 /// make cycles. A truncated walk answers `false`, so the verdict
 /// under-approximates rather than over-claims.
 ///

@@ -855,7 +855,7 @@ pub struct GatedSymbol {
     /// symbol is keyed under the emission's match-site package.
     pub on_class: Option<String>,
     /// Return type → a `Symbol(sid) → InferredType` Plugin-priority bag
-    /// witness pushed at apply (plus a `PackageSymbol{package,name}` mirror for
+    /// witness pushed at apply (plus a `Member{package,name}` mirror for
     /// class-scoped methods, so cross-file return-type queries reach it).
     pub return_type: Option<InferredType>,
 }

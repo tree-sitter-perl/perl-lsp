@@ -1220,7 +1220,7 @@ impl<'a> Builder<'a> {
     /// InferredType(Sequence(...))` witnesses. Runs once after
     /// `fold_to_fixed_point` (which fills `invocant_class`) +
     /// `emit_method_call_return_edges` (which publishes
-    /// `Expression(refidx) → Edge(PackageSymbol{...})`), so by
+    /// `Expression(refidx) → Edge(Member{...})`), so by
     /// the time we read each contribution's type, the method-call
     /// chain has resolved end-to-end. Each contribution's
     /// `Expr(span)` was queued by `emit_expr_witness` at walk time
@@ -1317,7 +1317,7 @@ impl<'a> Builder<'a> {
             // string's package prefix is authoritative for attribution:
             // `*{ 'DateTime::' . $sub } = __PACKAGE__->can($sub)` synthesizes
             // the tail under `DateTime`, not the file's own `current_package`
-            // (`DateTime::PP`), so `PackageSymbol{DateTime, _ymd2rd}` resolves.
+            // (`DateTime::PP`), so `Member{DateTime, _ymd2rd}` resolves.
             // Unqualified names stay under the current package.
             let (target_pkg, local) = match crate::model::file_analysis::split_qualified(&name, &crate::model::conventions::PERL_SPELLINGS) {
                 (Some(prefix), tail) if !prefix.is_empty() => {

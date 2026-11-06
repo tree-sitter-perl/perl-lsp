@@ -29,12 +29,12 @@ registry partitions on, and no per-pack strictness flag.
   the value rides the same subject. A read (`@expr.member`) is
   `Expr(read) → Projected{Expr(receiver), ValueHop{member}}`, which chases
   `Field{class, member}`; a call is an `Invoke` that dispatches
-  `PackageSymbol{class, member}` (`calls-are-invokes.md`). A field whose
+  `Member{class, member}` (`calls-are-invokes.md`). A field whose
   declared type mentions its class's template parameters pushes the
   deferred `ReturnExpr` instead of the edge, so the hop's receiver
   substitutes them (`item_: T` read on a `Box<int>` is `int`). The
   registry's `Field` fallback walks the owner's candidate
-  files and parents exactly as the `PackageSymbol` ladder does (no bridge
+  files and parents exactly as the `Member` ladder does (no bridge
   hop — a plugin entity is a callable). `FieldValueReducer` answers the
   materialized value and is registered ahead of `DomainCoherenceFold`, so
   the defeasible domain never becomes the type that flows.
