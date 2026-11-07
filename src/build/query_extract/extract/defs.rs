@@ -57,6 +57,28 @@ pub(super) fn flatten_nested<'t>(
     }
 }
 
+/// The scopes a `@flow.target` at `e` binds in. A target that is the name
+/// token defs in its match declare binds where each of them binds (php's
+/// promoted parameter is a property and a local on one token); any other
+/// binds in the innermost scope, or the def scope of the header it is
+/// written in (an annotated parameter).
+pub(super) fn binding_scopes(st: &ExtractState, e: &Event) -> Vec<ScopeId> {
+    let mut scopes: Vec<ScopeId> = st
+        .adorned
+        .on(e)
+        .filter(|t| t.match_id == e.match_id)
+        .filter_map(|t| match t.cap {
+            Capture::Def { kind, part: DefPart::Name } => Some(st.def_scope(kind)),
+            _ => None,
+        })
+        .collect();
+    scopes.dedup();
+    if scopes.is_empty() {
+        scopes.push(st.bind_scope());
+    }
+    scopes
+}
+
 pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let Capture::Def { kind, part: DefPart::Node } = e.cap else { return };
     let pack = st.pack;
@@ -120,9 +142,8 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        // A data member belongs to its class body even where it is written
-        // inside a callable.
-        scope: if matches!(kind, DefCap::Field | DefCap::Slot) { st.member_scope() } else { st.bind_scope() },
+        scope: st.def_scope(kind),
+        spelled: mine(Capture::Def { kind, part: DefPart::Spelled }).map(|t| t.text.clone()),
         pair: mine(Capture::DefPair).map(|_| e.match_id),
         // A def's header is code of the scope around it: its return type
         // is spelled there.

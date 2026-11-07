@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default)]
 pub(super) struct State {
-    /// Each `@flow.target`'s binding, by its match: the scope it binds in
-    /// is known only while the walk is at it.
-    flow_targets: BTreeMap<usize, (String, ScopeId, Point)>,
+    /// Each `@flow.target`'s binding, by its match: the scopes it binds in
+    /// are known only while the walk is at it.
+    flow_targets: BTreeMap<usize, (String, Vec<ScopeId>, Point)>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
@@ -30,7 +30,10 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     let ad = st.adorned;
     let cur_scope = st.cur_scope;
-    let bind_scope = st.bind_scope();
+    let target_scopes = match e.cap {
+        Capture::Flow(FlowCap::Target) => super::defs::binding_scopes(st, e),
+        _ => Vec::new(),
+    };
     let f = &mut st.flow;
     let out = &mut st.out;
     match e.cap {
@@ -74,15 +77,15 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(FlowCap::Target) => {
-            // a target a def's header declares (an annotated parameter)
-            // binds in the def's own scope
-            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), bind_scope, e.start));
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk).
             if let Some(annot) = ad.in_match(e.match_id, Capture::TypeAnnot) {
-                st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), bind_scope), annot.text.clone());
+                for &scope in &target_scopes {
+                    st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
+                }
             }
+            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), target_scopes, e.start));
         }
         Capture::Flow(FlowCap::Rebind) => {
             f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, e.start));
@@ -272,7 +275,8 @@ pub(super) fn finish(st: &mut ExtractState) {
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
-    for (&mid, (name, scope, at)) in &f.flow_targets {
+    let targets = f.flow_targets.iter().flat_map(|(&mid, (name, scopes, at))| scopes.iter().map(move |scope| (mid, name, scope, at)));
+    for (mid, name, scope, at) in targets {
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
         // Class-wide extent for a data member; the sequential decl point for a
         // local (see `field_scope_span`).

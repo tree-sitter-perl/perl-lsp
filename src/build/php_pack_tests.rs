@@ -482,6 +482,173 @@ class Broken implements Store {
     );
 }
 
+const MEMBERS: &str = "<?php
+namespace App;
+
+use Lib\\Clock;
+
+class Order {
+    public int $total = 0, $count;
+    protected static ?Clock $clock;
+    private readonly string $id;
+    var $legacy;
+    public int|string $key;
+    public function name() {}
+    public string $name;
+    public function __construct(private Clock $made, public readonly int &$qty = 1, $plain = 0) {}
+}
+";
+
+/// A property is a member of its class under its bare name; the `$` it is
+/// declared with is its listed spelling, and the name token alone is the
+/// span a rename rewrites.
+#[test]
+fn properties_are_members_of_their_class() {
+    use crate::model::file_analysis::SymbolFlags as F;
+    let fa = php(MEMBERS);
+    assert_eq!(
+        declared(&fa, SymKind::Field),
+        owned(&[
+            ("total", Some("App\\Order")),
+            ("count", Some("App\\Order")),
+            ("clock", Some("App\\Order")),
+            ("id", Some("App\\Order")),
+            ("legacy", Some("App\\Order")),
+            ("key", Some("App\\Order")),
+            ("name", Some("App\\Order")),
+            ("made", Some("App\\Order")),
+            ("qty", Some("App\\Order")),
+        ])
+    );
+    let field = |name: &str| fa.symbols().iter().find(|s| s.kind == SymKind::Field && s.name == name).unwrap();
+    assert_eq!(field("total").flags, F::empty());
+    assert_eq!(field("clock").flags, F::STATIC | F::NON_PUBLIC);
+    assert_eq!(field("made").flags, F::NON_PUBLIC);
+    assert_eq!(field("qty").flags, F::empty());
+    assert_eq!(field("id").attributes, ["readonly"]);
+    assert_eq!(field("qty").attributes, ["readonly"]);
+    assert_eq!(field("count").presentation.label.as_deref(), Some("$count"));
+    assert_eq!(field("qty").presentation.label.as_deref(), Some("$qty"));
+    let at = |s: &crate::model::file_analysis::Span| (s.start.row, s.start.column, s.end.column);
+    assert_eq!(at(&field("count").selection_span), (6, 28, 33));
+    assert_eq!(at(&field("qty").selection_span), (13, 75, 78));
+    // a promoted property belongs to the class body, not the constructor
+    let class_body = field("total").scope;
+    assert_eq!(field("made").scope, class_body);
+    assert_eq!(field("qty").scope, class_body);
+}
+
+/// A declared type is the member's value, read where a member access
+/// reads it; a class spelling resolves through the use-map. A property and
+/// a method of one name are separate families.
+#[test]
+fn a_declared_property_type_is_the_members_value() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(MEMBERS);
+    let order = T::ClassName("App\\Order".into());
+    let value = |m: &str| fa.field_value_type(&order, m, None);
+    assert_eq!(value("total"), Some(T::Numeric));
+    assert_eq!(value("count"), Some(T::Numeric));
+    assert_eq!(value("id"), Some(T::String));
+    assert_eq!(value("name"), Some(T::String));
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(value("clock"), or(T::ClassName("Lib\\Clock".into()), T::Undef), "`?T` is `T|null`");
+    assert_eq!(value("made"), Some(T::ClassName("Lib\\Clock".into())));
+    assert_eq!(value("qty"), Some(T::Numeric));
+    assert_eq!(value("legacy"), None);
+    assert_eq!(value("key"), or(T::Numeric, T::String), "a union is the join of its arms");
+    assert_eq!(value("plain"), None, "a plain parameter is no property");
+}
+
+/// An intersection or a DNF group names no single class, and an arm that
+/// can't be read types nothing rather than claiming the arms that can.
+#[test]
+fn a_type_with_an_unreadable_arm_types_nothing() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Box {
+    public Clock&Countable $both;
+    public (A&B)|null $group;
+    public array|string $mixed;
+    public ?string $maybe;
+}
+");
+    let boxed = T::ClassName("Box".into());
+    let value = |m: &str| fa.field_value_type(&boxed, m, None);
+    assert_eq!(value("both"), None);
+    assert_eq!(value("group"), None);
+    assert_eq!(value("mixed"), None);
+    assert_eq!(
+        value("maybe"),
+        crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered)
+    );
+}
+
+#[test]
+fn the_outline_lists_properties_under_their_class() {
+    let fa = php(MEMBERS);
+    let outline = fa.document_symbols();
+    let class = outline
+        .iter()
+        .flat_map(|o| std::iter::once(o).chain(&o.children))
+        .find(|o| o.name.ends_with("Order"))
+        .unwrap();
+    let names: Vec<&str> = class.children.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["$total", "$count", "$clock", "$id", "$legacy", "$key", "name", "$name", "__construct", "$made", "$qty"]
+    );
+    let ctor = class.children.iter().find(|c| c.name == "__construct").unwrap();
+    assert!(ctor.children.is_empty(), "the constructor lists none of its promoted properties");
+}
+
+/// A property's hover names it as it is listed, `$` and all.
+#[test]
+fn a_property_hovers_by_its_listed_name() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from("/fake/php/App/Order.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(MEMBERS));
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let at = tree_sitter::Point { row: 6, column: 17 };
+    let cs = resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path)), at, Some(&idx), OverrideScope::default()).with_source(MEMBERS);
+    let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap();
+    assert!(hover.contains("\n$total: "), "{hover}");
+}
+
+/// Rename from a property's declaration rewrites its bare name, never the
+/// `$` (a typed `$` is the sigil, not part of the name), and never the
+/// method that shares the name.
+#[test]
+fn a_property_renames_from_its_declaration() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use std::path::PathBuf;
+    let path = PathBuf::from("/fake/php/App/Order.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(MEMBERS));
+    let store = OpenDocs::new();
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let edits_from = |row: usize, column: usize| {
+        let at = tree_sitter::Point { row, column };
+        let cs = resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at, Some(&idx), OverrideScope::default());
+        let mut sites: Vec<(usize, usize, usize, String)> = cs
+            .rename_edits("$label")
+            .unwrap()
+            .into_iter()
+            .map(|(loc, text)| (loc.span.start.row, loc.span.start.column, loc.span.end.column, text))
+            .collect();
+        sites.sort();
+        sites
+    };
+    let edit = |r: usize, c: usize, e: usize| (r, c, e, "label".to_string());
+    assert_eq!(edits_from(12, 20), [edit(12, 19, 23)]);
+    assert_eq!(edits_from(13, 48), [edit(13, 47, 51)]);
+    assert_eq!(edits_from(11, 21), [edit(11, 20, 24)], "the method keeps to its family");
+}
+
 /// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:
 /// PHP constructs with `new`, so the call is no reference to the class
 /// and its value is no instance of it. (Python's `Foo()` is both —

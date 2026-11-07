@@ -14,6 +14,7 @@ const PYTHON_LATTICE: crate::model::file_analysis::LatticeRules =
 
 pub fn python_pack() -> LangPack {
     LangPack {
+        id: "python",
         query_source: include_str!("../../../queries/python/skeleton.scm"),
         // `.` qualifies, and a class spelling names what the file's imports
         // and its own module say it does (`User` after `from pkg.models

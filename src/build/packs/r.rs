@@ -5,6 +5,7 @@ use crate::model::file_analysis::NameSpellings;
 
 pub fn r_pack() -> LangPack {
     LangPack {
+        id: "r",
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         names: NameSpellings::NONE,
         // A logical is a number in arithmetic (`TRUE + 1` is 2).

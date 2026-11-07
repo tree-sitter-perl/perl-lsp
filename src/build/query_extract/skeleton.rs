@@ -16,6 +16,9 @@ pub struct SkelSymbol {
     /// Sticky `@context.package` value in force at the def site.
     pub package: Option<String>,
     pub scope: crate::model::file_analysis::ScopeId,
+    /// The declaration as written around its name token (`@def.<kind>.spelled`:
+    /// php's `$x` around the member name `x`), listed in place of the name.
+    pub spelled: Option<String>,
     /// The `@def.pair` match this def shares its name token with: the two
     /// defs carrying one id are one declaration (`Symbol::declared_with`).
     /// A match id, not a position in `symbols`, so it survives every dedup.
@@ -145,6 +148,8 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
+    /// The pack's language id (`LangPack::id`), stamped on the assembly.
+    pub language: &'static str,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -385,6 +390,18 @@ fn brace_body_extent(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 impl SkeletonAnalysis {
+    /// An empty skeleton of `pack`'s language: what extraction fills, and
+    /// what a file that never reached extraction assembles from.
+    pub fn for_pack(pack: &super::LangPack) -> Self {
+        // The analysis is stamped with the pack's language here, so its
+        // lattice is registered here too: every reader of the stamp finds it.
+        // Perl's rules are declared, never registered.
+        if pack.id != crate::model::conventions::PERL_LANGUAGE {
+            crate::model::conventions::register_lattice(pack.id, || pack.lattice.clone());
+        }
+        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), ..Default::default() }
+    }
+
     /// Re-anchor members that lost their enclosing container to a tree-sitter
     /// misparse — the re-anchor invariant (`docs/adr/config-superposition-declarations.md`).
     /// When a deep misparse truncates a `class_specifier`/`namespace` node
@@ -1620,6 +1637,7 @@ impl SkeletonAnalysis {
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
+        fa.language = self.language.to_string();
         // The extractor keys a variable's facts to the scope they were made
         // in; the assembled analysis knows each name's binding.
         fa.bind_variable_witnesses();
@@ -1826,7 +1844,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
             deprecation: None,
             doc: None,
             display: None,
-            label: None,
+            label: s.spelled.clone(),
         },
         attributes: {
             let mut a = s.attributes.clone();

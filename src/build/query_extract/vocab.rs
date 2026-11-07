@@ -181,6 +181,8 @@ spelled! {
     pub enum FlowCap {
         /// The assignment node (pattern anchor).
         Assign = "assign",
+        /// A name the value binds. A def's own name token binds where the
+        /// def does (a property's at its class body).
         Target = "target",
         Source = "source",
         /// A rebind with no direct inflowing value: a loop variable, which
@@ -350,11 +352,14 @@ spelled! {
 }
 
 /// Whether a `@def.<kind>` capture is the def node, its name token, or
+/// the whole written spelling around a name token that is only part of it
+/// (php's `$x` around `x`): the label the declaration is listed by, or
 /// the receiver a member def is written through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
     Node,
     Name,
+    Spelled,
     /// The receiver a slot def is written through (python's `self` in
     /// `self.x = …`): the slot belongs to the class the receiver is typed
     /// as at the write.
@@ -455,6 +460,7 @@ impl Capture {
             ["def", "pair"] => C::DefPair,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
             ["def", k, "receiver"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Receiver },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
@@ -468,7 +474,7 @@ impl Capture {
             ["alias", k] => C::Alias(AliasPart::parse(k)?),
             ["macro", "alias", k] => C::MacroAlias(AliasPart::parse(k)?),
             ["tmpl", k] => C::Tmpl(TmplCap::parse(k)?),
-            ["flow", k] => C::Flow(FlowCap::parse(k)?),
+            ["flow", rest @ ..] => C::Flow(FlowCap::parse(&rest.join("."))?),
             ["expr", "call"] => C::Expr(ExprCap::Call),
             ["expr", "lit", k] => C::Expr(ExprCap::Lit(LitKind::parse(k)?)),
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
@@ -520,6 +526,7 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
             C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
+            C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),

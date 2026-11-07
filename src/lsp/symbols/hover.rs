@@ -199,7 +199,7 @@ fn render_symbol_hover(
             };
             return format!(
                 "```{}\n{}: {}{}\n```\n\n*{}*",
-                language, sym.name, display, overlay, hover_kind_label(sym)
+                language, sym.listed_name(), display, overlay, hover_kind_label(sym)
             );
         }
     }
