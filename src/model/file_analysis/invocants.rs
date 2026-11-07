@@ -732,10 +732,9 @@ impl FileAnalysis {
     ///     the narrowing witness at the use-site point, ahead of the
     ///     functional chase (docs/adr/flow-narrowing.md); `is_element_
     ///     place` tells a real place from a scalar deref.
-    ///   * function-call receiver → the zero-arg return of the named sub
-    ///     (its ref spans only the name, invisible to the exact-span read).
     ///   * any recorded expression → `expr_type_at_span` (scalar/array/
-    ///     hash reads, baked literals, and chain receivers — its
+    ///     hash reads, baked literals, and call and chain receivers, each
+    ///     an `Expr` at its whole span — its
     ///     exact-span call-ref arm keeps Parametric flavors intact, so
     ///     DBIC row-class narrowing survives the hop).
     ///   * cross-file chain receiver → re-resolve the receiver's class
@@ -808,36 +807,6 @@ impl FileAnalysis {
             }
         }
 
-        // Function-call receiver (`create_user(5)->name`): the ref spans
-        // only the function NAME, so the exact-span read below can't see
-        // it — chase it here via `RefTable::call_at_start` (start-anchored,
-        // contained in the invocant). A method-call receiver is left to
-        // the exact-span read: its ref spans the whole receiver
-        // expression, and the start-anchored index deliberately holds the
-        // INNERMOST call at a point, which for a multi-hop chain is a
-        // strict prefix of the receiver — the wrong hop.
-        if let Some(span) = invocant_span {
-            if let Some(recv_idx) = self.refs.call_at_start(&span.start) {
-                let recv_span = self.refs[recv_idx].span;
-                let contained = recv_span.start == span.start
-                    && (recv_span.end.row, recv_span.end.column)
-                        <= (span.end.row, span.end.column);
-                let is_self = std::ptr::eq(&self.refs[recv_idx], r);
-                if contained && !is_self {
-                    if let RefKind::FunctionCall { .. } = &self.refs[recv_idx].kind {
-                        if let Some(t) = self.sub_return_type_at_arity(
-                            &self.refs[recv_idx].target_name,
-                            Some(0),
-                        ) {
-                            if !self.dispatch_classes_of(&t, module_index).is_empty() {
-                                return Some(t);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // The invocant's type, resolved tree-free from the bag at its
         // exact span. Covers every recorded shape: scalar/array/hash
         // reads, baked literals, and chain receivers — the exact-span
@@ -861,35 +830,31 @@ impl FileAnalysis {
         // `find_method_return_type` (ancestors + cross-file bridges via
         // the registry). This is the one structure-from-refs step the
         // bag can't pre-record, so it lives here, not in the builder.
+        // The receiver is the call spanning exactly the invocant — never
+        // a call that merely opens it, which under `$x->a->b->c` is an
+        // earlier hop.
         if let Some(span) = invocant_span {
-            if let Some(recv_idx) = self.refs.call_at_start(&span.start) {
-                let recv_span = self.refs[recv_idx].span;
-                let contained = recv_span.start == span.start
-                    && (recv_span.end.row, recv_span.end.column)
-                        <= (span.end.row, span.end.column);
-                let is_self = std::ptr::eq(&self.refs[recv_idx], r);
-                if contained && !is_self {
-                    if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
-                        let recv = &self.refs[recv_idx];
-                        let recv_method = recv.unqualified_target_name(self.names());
-                        let answers: Vec<InferredType> = self
-                            .receiver_classes(recv, module_index, ReceiverPolicy::Navigate)
-                            .into_iter()
-                            .filter_map(|recv_class| {
-                                if crate::model::conventions::is_constructor_name(recv_method) {
-                                    return Some(InferredType::ClassName(recv_class));
-                                }
-                                self.find_method_return_type(&recv_class, recv_method, module_index, None)
-                            })
-                            .collect();
-                        if let Some(t) = join_all(&answers, &self.type_order(module_index)) {
-                            return Some(t);
-                        }
-                        // A chain receiver's invocant text is the whole
-                        // receiver expression, never a variable or
-                        // bareword — the trailing rungs cannot answer it.
-                        return None;
+            if let Some(recv_idx) = self.refs.call_spanning(*span) {
+                if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
+                    let recv = &self.refs[recv_idx];
+                    let recv_method = recv.unqualified_target_name(self.names());
+                    let answers: Vec<InferredType> = self
+                        .receiver_classes(recv, module_index, ReceiverPolicy::Navigate)
+                        .into_iter()
+                        .filter_map(|recv_class| {
+                            if crate::model::conventions::is_constructor_name(recv_method) {
+                                return Some(InferredType::ClassName(recv_class));
+                            }
+                            self.find_method_return_type(&recv_class, recv_method, module_index, None)
+                        })
+                        .collect();
+                    if let Some(t) = join_all(&answers, &self.type_order(module_index)) {
+                        return Some(t);
                     }
+                    // A chain receiver's invocant text is the whole
+                    // receiver expression, never a variable or
+                    // bareword — the trailing rungs cannot answer it.
+                    return None;
                 }
             }
         }

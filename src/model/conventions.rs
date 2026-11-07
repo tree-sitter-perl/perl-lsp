@@ -55,13 +55,17 @@ pub struct LanguageConventions {
     pub lattice: LatticeRules,
     /// Whether the runtime owns a variable of this (sigil-led) name.
     special_variable: fn(&str) -> bool,
+    /// The language's own word for an engine type tag (`Bool` → php
+    /// `bool`); `None` keeps the engine's.
+    type_display: fn(&str) -> Option<&'static str>,
 }
 
 impl LanguageConventions {
-    /// A pack language's: its declared lattice. No pack declares variables
-    /// its runtime owns, so another language's `$_` is an ordinary name.
-    pub fn of_pack(lattice: LatticeRules) -> Self {
-        LanguageConventions { lattice, special_variable: no_special_variable }
+    /// A pack language's: its declared lattice and type words. No pack
+    /// declares variables its runtime owns, so another language's `$_` is
+    /// an ordinary name.
+    pub fn of_pack(lattice: LatticeRules, type_display: fn(&str) -> Option<&'static str>) -> Self {
+        LanguageConventions { lattice, special_variable: no_special_variable, type_display }
     }
 
     /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
@@ -69,10 +73,21 @@ impl LanguageConventions {
     pub fn is_special_variable(&self, name: &str) -> bool {
         (self.special_variable)(name)
     }
+
+    /// How a human surface spells the engine type tag `tag` in this
+    /// language; `None` keeps the engine's spelling.
+    pub fn type_label(&self, tag: &str) -> Option<&'static str> {
+        (self.type_display)(tag)
+    }
 }
 
 fn no_special_variable(_: &str) -> bool {
     false
+}
+
+/// The engine's tags are Perl's own words.
+fn engine_type_words(_: &str) -> Option<&'static str> {
+    None
 }
 
 /// Perl's conventions, declared beside its spellings and never registered.
@@ -81,6 +96,7 @@ fn no_special_variable(_: &str) -> bool {
 pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
     special_variable: is_special_variable,
+    type_display: engine_type_words,
 };
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
@@ -114,7 +130,11 @@ pub fn conventions_of(language: &str) -> &'static LanguageConventions {
 }
 
 static UNREGISTERED: LanguageConventions =
-    LanguageConventions { lattice: LatticeRules::new(&[]), special_variable: no_special_variable };
+    LanguageConventions {
+        lattice: LatticeRules::new(&[]),
+        special_variable: no_special_variable,
+        type_display: engine_type_words,
+    };
 
 fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {
     if language == PERL_LANGUAGE {

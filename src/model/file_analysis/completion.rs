@@ -1349,8 +1349,8 @@ fn cross_file_resolved(sub_info: &SubInfo<'_>) -> ResolvedSub<'static> {
     }
 }
 
-/// A language's spelling for an engine type tag (`PackFacts::type_display`
-/// as a function): `Some` renders the language's own word, `None` keeps the
+/// A language's spelling for an engine type tag
+/// (`LanguageConventions::type_label`): `Some` renders the language's own word, `None` keeps the
 /// engine's. Class names never pass through it — they are identities, not
 /// vocabulary — so the map is consulted per TAG at render time instead of
 /// re-tokenizing the rendered label (rule #13).
@@ -1398,7 +1398,12 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
             let marks: Vec<String> = marks.iter().map(|m| format!("{}={}", m.key, m.value)).collect();
             format!("{}<{}>", format_type_with(base, vocab), marks.join(", "))
         }
-        InferredType::Optional(inner) => format!("{}<{}>", tag("Maybe"), format_type_with(inner, vocab)),
+        // A language with its own word for the null value writes an
+        // optional as a union with it (php `?string` reads `string|null`).
+        InferredType::Optional(inner) => match vocab("Undef") {
+            Some(null) => format!("{}|{}", format_type_with(inner, vocab), null),
+            None => format!("{}<{}>", tag("Maybe"), format_type_with(inner, vocab)),
+        },
         InferredType::Undef => tag("Undef"),
         InferredType::Bool => tag("Bool"),
         InferredType::Unknown => tag("unknown"),

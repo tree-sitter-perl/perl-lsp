@@ -27,6 +27,7 @@ pub fn php_pack() -> LangPack {
         // global one.
         functions: FunctionLookup::NamespaceThenGlobal,
         lattice: PHP_LATTICE,
+        type_display: display_type,
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: declared_type,
@@ -47,12 +48,28 @@ pub fn php_pack() -> LangPack {
     }
 }
 
+/// PHP's word for an engine type tag: the keyword a declaration would read
+/// (`declared_type` read backwards). `int` and `float` share the engine's
+/// `Numeric`, so it reads as both.
+fn display_type(tag: &str) -> Option<&'static str> {
+    match tag {
+        "Numeric" => Some("int|float"),
+        "String" => Some("string"),
+        "Bool" => Some("bool"),
+        "HashRef" | "ArrayRef" => Some("array"),
+        "CodeRef" => Some("callable"),
+        "Undef" => Some("null"),
+        _ => None,
+    }
+}
+
 /// A declared type as written (`int`, `?Foo`, `\App\User`, `int|string`).
 /// A union is the join of its arms and `?T` is `T|null`; a spelling with
-/// an arm this can't read (an intersection, `self`, `array`) types nothing,
-/// rather than claiming the arms it can. `self` / `parent` name a class by
-/// where they are written rather than by spelling; a class spelling
-/// resolves through the use-map at its site.
+/// an arm this can't read (an intersection, `array`) types nothing, rather
+/// than claiming the arms it can. A lone `self` or `static` is marked
+/// `@type.enclosing` and never reaches here; inside a union it is an arm
+/// this can't read. A class spelling resolves through the use-map at its
+/// site.
 fn declared_type(text: &str) -> Option<InferredType> {
     let t = text.trim();
     let arms: Vec<&str> = match t.strip_prefix('?') {
@@ -79,7 +96,11 @@ fn arm_type(arm: &str) -> Option<InferredType> {
         "null" => Some(InferredType::Undef),
         // A callable's body is not in its type.
         "callable" => Some(InferredType::CodeRef { return_edge: None }),
-        "array" | "iterable" | "object" | "mixed" | "void" | "never" | "self" | "parent" => None,
+        "array" | "iterable" | "object" | "mixed" | "void" | "never" | "self" | "static" => None,
+        // TODO(parent-type): `parent` names the class's parent by where it
+        // is written; it goes through `Lookup::Super` with every other
+        // `parent` site (the `new` layer).
+        "parent" => None,
         // A class spelling is a name, possibly qualified; anything else
         // (an intersection or DNF group) names no single class.
         _ if !arm.is_empty() && arm.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\') => {

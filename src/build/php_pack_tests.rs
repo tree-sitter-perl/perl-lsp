@@ -596,10 +596,9 @@ class Box {
     assert_eq!(value("both"), None);
     assert_eq!(value("group"), None);
     assert_eq!(value("mixed"), None);
-    assert_eq!(
-        value("maybe"),
-        crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered)
-    );
+    let maybe = value("maybe");
+    assert_eq!(maybe, crate::model::file_analysis::join_all(&[T::String, T::Undef], &crate::model::file_analysis::Unordered));
+    assert_eq!(fa.render_type(&maybe.unwrap()), "string|null", "a nullable reads in PHP's words");
 }
 
 #[cfg(feature = "php")]
@@ -1334,6 +1333,257 @@ fn a_promoted_property_renames_from_a_read_in_another_file() {
         ws.renames("user.php", "made", 0),
         [site("Order.php", 2, 47), site("Order.php", 2, 56), site("Order.php", 3, 42), site("user.php", 1, 36)]
     );
+}
+
+const RETURNS: &str = "<?php
+namespace App;
+
+use Lib\\Clock;
+
+class Builder {
+    public function with(): static { return $this; }
+    public function again(): self { return $this; }
+    public function maybe(): ?Builder {}
+    public function nullable(): ?static {}
+    public function clock(): Clock {}
+    public function full(): \\Lib\\Clock {}
+    public function either(): Clock|int {}
+    public function nothing(): void {}
+    public function count(): int {}
+    public function bare() {}
+    public function run() {
+        $this->with()->again()->maybe()->nullable()->clock()->tick();
+    }
+}
+
+function make(): Builder {}
+make()->full()->tick();
+";
+
+const CLOCK: &str = "<?php
+namespace Lib;
+
+class Clock {
+    public function tick(): int {}
+}
+";
+
+/// A declared return is the callable's value: a class spelling resolves
+/// through the use-map, `self` and `static` name the class the method is
+/// written in, a nullable class is the class or null, a union is the join
+/// of its arms, and `void` or no declaration states no type.
+#[cfg(feature = "php")]
+#[test]
+fn a_declared_return_is_the_callables_value() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(RETURNS);
+    let ret = |m: &str| fa.find_method_return_type("App\\Builder", m, None, None);
+    let builder = Some(T::ClassName("App\\Builder".into()));
+    let clock = Some(T::ClassName("Lib\\Clock".into()));
+    assert_eq!(ret("with"), builder, "`static`");
+    assert_eq!(ret("again"), builder, "`self`");
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(ret("maybe"), or(T::ClassName("App\\Builder".into()), T::Undef), "a nullable class");
+    assert_eq!(ret("nullable"), builder, "a nullable `static`");
+    assert_eq!(ret("clock"), clock, "an imported class");
+    assert_eq!(ret("full"), clock, "a fully qualified class");
+    assert_eq!(ret("count"), Some(T::Numeric));
+    assert_eq!(ret("either"), or(T::ClassName("Lib\\Clock".into()), T::Numeric), "a union is the join of its arms");
+    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
+    assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
+    assert_eq!(ret("nothing"), None);
+    assert_eq!(ret("bare"), None);
+    assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
+}
+
+/// `self` and `static` name the class they are written in wherever a type
+/// is written: a parameter, a property, a promoted parameter, a closure's
+/// parameter, nullable or not.
+#[cfg(feature = "php")]
+#[test]
+fn self_names_the_enclosing_class_in_every_written_type() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php("<?php
+namespace App;
+
+class Node {
+    private ?self $next;
+    public function __construct(private self $peer) {}
+    public function link(self $other) {
+        $other->hop();
+        $this->next->hop();
+        $this->peer->hop();
+        $f = function (?self $n) { $n->hop(); };
+    }
+    public function hop() {}
+}
+");
+    let receivers: Vec<Option<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
+        .map(|r| fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string))
+        .collect();
+    let node = || Some("App\\Node".to_string());
+    assert_eq!(receivers, [node(), node(), node(), node()]);
+}
+
+/// A call's value is its callee's declared return, so a chain of calls
+/// types hop by hop: every receiver in `$this->with()->again()->…->tick()`
+/// is the class the previous call returns, and a free call's value starts
+/// a chain too.
+#[cfg(feature = "php")]
+#[test]
+fn a_call_chain_types_through_declared_returns() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(RETURNS);
+    let receivers: Vec<(&str, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| (r.target_name.as_str(), fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string)))
+        .collect();
+    let builder = || Some("App\\Builder".to_string());
+    let clock = || Some("Lib\\Clock".to_string());
+    assert_eq!(
+        receivers,
+        [
+            ("with", builder()),
+            ("again", builder()),
+            ("maybe", builder()),
+            ("nullable", builder()),
+            ("clock", builder()),
+            ("tick", clock()),
+            ("full", builder()),
+            ("tick", clock()),
+        ]
+    );
+}
+
+/// From a chained receiver, goto-def and rename reach the member of the
+/// class the previous call returns, in another file too, and hover on a
+/// call shows the return it resolves to.
+#[cfg(feature = "php")]
+#[test]
+fn a_chained_member_resolves_across_files_and_hovers_its_return() {
+    let ws = Workspace::new(&[("/fake/php/Lib/Clock.php", CLOCK), ("/fake/php/App/Builder.php", RETURNS)]);
+    let tick = vec![site("Clock.php", 4, 20)];
+    assert_eq!(ws.defs("Builder.php", "tick();\n    }", 0), tick, "a method chain");
+    assert_eq!(ws.defs("Builder.php", "full()->tick", 8), tick, "a chain from a free call");
+    assert_eq!(ws.defs("Builder.php", "clock()->tick", 0), vec![site("Builder.php", 10, 20)]);
+    assert_eq!(
+        ws.renames("Clock.php", "tick", 0),
+        [site("Builder.php", 17, 62), site("Builder.php", 22, 16), site("Clock.php", 4, 20)]
+    );
+
+    let fa = php(RETURNS);
+    let hover = fa.hover_info(at(RETURNS, "clock()->tick", 0), RETURNS, None).unwrap_or_default();
+    assert!(hover.contains("*returns: Lib\\Clock*"), "{hover}");
+    let hover = fa.hover_info(at(RETURNS, "with()->again", 0), RETURNS, None).unwrap_or_default();
+    assert!(hover.contains("*returns: App\\Builder*"), "{hover}");
+}
+
+/// Hover on a typed call into another file shows the method's declaration
+/// and the file it lives in, never `name: Type` as if it were a field; a
+/// property shows its type, and both read in PHP's words (`bool`, not the
+/// engine's `Bool`).
+#[cfg(feature = "php")]
+#[test]
+fn a_cross_file_member_call_hovers_as_its_declaration_in_php_words() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let handler = "<?php\nnamespace Lib;\n\nclass Handler {\n    public bool $on;\n    public function isHandling(int $level): bool {}\n}\n";
+    let runner = "<?php\nnamespace App;\n\nuse Lib\\Handler;\n\nclass Runner {\n    public function run(Handler $h) {\n        $h->isHandling(1);\n        return $h->on;\n    }\n}\n";
+    let root = std::env::temp_dir().join(format!("php-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for (name, src) in [("Handler.php", handler), ("Runner.php", runner)] {
+        std::fs::write(root.join(name), src).unwrap();
+        idx.insert_workspace_for_test(root.join(name), php(src));
+    }
+    let path = root.join("Runner.php");
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    let hover = |needle: &str| {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &file, key, at(runner, needle, 0), Some(&idx), OverrideScope::default()).with_source(runner);
+        crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap_or_default()
+    };
+    let call = hover("isHandling(1)");
+    let field = hover("on;");
+    std::fs::remove_dir_all(&root).ok();
+    assert!(call.contains("public function isHandling(int $level): bool"), "{call}");
+    assert!(call.contains("Handler.php"), "{call}");
+    assert!(!call.contains("*member*") && !call.contains("Bool"), "{call}");
+    assert!(field.contains("on: bool"), "{field}");
+}
+
+const FLUENT_BASE: &str = "<?php
+namespace Lib;
+
+class Query {
+    public function where(): static {}
+    public function first(): Row {}
+}
+
+class Row {
+    public function id(): int {}
+}
+";
+
+const FLUENT_CHILD: &str = "<?php
+namespace App;
+
+use Lib\\Query;
+
+class Users extends Query {
+    public function active(): static {}
+    public function run(Users $q) {
+        $q->active()->where()->first()->id();
+        $this->where()->first();
+    }
+}
+";
+
+/// An inherited method's declared return types a chain off the child, and
+/// a `static` return names the class the method is written in: `where()`
+/// declared on `Query` answers `Query`, wherever it is called from.
+#[cfg(feature = "php")]
+#[test]
+fn an_inherited_declared_return_types_the_chain_across_files() {
+    use crate::model::file_analysis::RefKind;
+    let ws = Workspace::new(&[("/fake/php/Lib/Query.php", FLUENT_BASE), ("/fake/php/App/Users.php", FLUENT_CHILD)]);
+    assert_eq!(ws.defs("Users.php", "where()->first()->id", 0), vec![site("Query.php", 4, 20)]);
+    assert_eq!(ws.defs("Users.php", "first()->id", 0), vec![site("Query.php", 5, 20)]);
+    assert_eq!(ws.defs("Users.php", "id()", 0), vec![site("Query.php", 9, 20)]);
+    assert_eq!(ws.defs("Users.php", "first();", 0), vec![site("Query.php", 5, 20)]);
+
+    let child = ws.idx.workspace_file_for_test(std::path::Path::new("/fake/php/App/Users.php")).unwrap();
+    let receivers: Vec<(&str, Option<String>)> = child
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
+        .map(|r| (r.target_name.as_str(), child.receiver_classes(r, Some(&ws.idx), crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string)))
+        .collect();
+    let s = |c: &str| Some(c.to_string());
+    assert_eq!(
+        receivers,
+        [
+            ("active", s("App\\Users")),
+            ("where", s("App\\Users")),
+            ("first", s("Lib\\Query")),
+            ("id", s("Lib\\Row")),
+            ("where", s("App\\Users")),
+            ("first", s("Lib\\Query")),
+        ]
+    );
+    // a call resolved in another file hovers with that file's declared
+    // return, once the file is enriched as an open document is
+    let mut open = (*child).clone();
+    open.enrich_imported_types_with_keys(Some(&ws.idx));
+    let hover = |needle: &str| open.hover_info(at(FLUENT_CHILD, needle, 0), FLUENT_CHILD, Some(&ws.idx)).unwrap_or_default();
+    assert!(hover("where()->first();").contains("*returns: Lib\\Query*"), "{}", hover("where()->first();"));
+    assert!(hover("first()->id").contains("*returns: Lib\\Row*"), "{}", hover("first()->id"));
 }
 
 /// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:

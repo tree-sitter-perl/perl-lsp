@@ -48,11 +48,14 @@ pub fn pack_hover_markdown(
                         .find(|a| analysis.dispatch_class_of(a, Some(midx)).as_deref() == Some(cn)),
                 }
             };
+            // A cross-file method's declaration is the projection's
+            // candidate, rendered from its own file.
+            let declaration = || cs.hover_candidate().and_then(|loc| render_candidate_hover(cs, &loc, language));
             let sections: Vec<String> = analysis
                 .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
                 .iter()
                 .filter_map(|cn| {
-                    member_hover_on(analysis, cn, field, want, arm_for(cn), source, language, midx)
+                    member_hover_on(analysis, cn, field, want, arm_for(cn), source, language, midx, &declaration)
                 })
                 .collect();
             if !sections.is_empty() {
@@ -351,6 +354,8 @@ fn perl_hover_named(
 
 /// One class's member hover: `field` on `cn`, `recv` the receiver value
 /// that dispatches there (its template args refine a param-shaped member).
+/// A method answers with its signature (`declaration` renders a cross-file
+/// one); only a field answers with its type.
 #[allow(clippy::too_many_arguments)]
 fn member_hover_on(
     analysis: &crate::model::file_analysis::FileAnalysis,
@@ -361,6 +366,7 @@ fn member_hover_on(
     source: &str,
     language: &str,
     midx: &dyn crate::model::file_analysis::CrossFileLookup,
+    declaration: &dyn Fn() -> Option<String>,
 ) -> Option<String> {
     // The ref's family picks the rung: a value read never answers
     // through a method's return.
@@ -394,14 +400,23 @@ fn member_hover_on(
             return Some(text);
         }
     }
-    // A param-typed member substitutes the same way (`T v_;` on
-    // `Box<int>` reads `v_: int`; a cross-file method's return
-    // lands here too, so the label stays kind-agnostic).
+    if want == crate::model::file_analysis::MemberKind::Callable {
+        // A cross-file method shows its declaration: here only when the
+        // receiver's arguments refine its return (`T get()` on `Box<int>`),
+        // which this section adds under it; otherwise the projection's
+        // candidate renders it.
+        let returns = substituted(analysis.find_method_return_type(cn, field, Some(midx), None))?;
+        let mut text = declaration()?;
+        text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&returns)));
+        return Some(text);
+    }
+    // A param-typed field substitutes the same way (`T v_;` on `Box<int>`
+    // reads `v_: int`).
     if let Some(sub) =
         substituted(analysis.field_type_on_class(cn, field, Some(midx)))
     {
         return Some(format!(
-            "```{}\n{}: {}\n```\n\n*member*",
+            "```{}\n{}: {}\n```\n\n*field*",
             language,
             field,
             analysis.render_type(&sub)

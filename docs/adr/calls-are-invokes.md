@@ -103,6 +103,20 @@ extra, whatever the pattern.
   reads the method's class and a free function's body names none.
   `static::` is late-bound in php; here it names the writing class, as
   `$this` does.
+- A pack callable's declared return (`@rettype`) is its `Symbol`'s value,
+  so every `Invoke` that resolves to it carries that type and a chain types
+  hop by hop. The spelling is read like a parameter's declared type (the
+  pack's `annot_type`, then the use-map at the return's site), and
+  `@type.enclosing` marks a written type naming the class it is written in
+  (php's `self`, `static`, nullable or not), in a return, a parameter or a
+  property alike: that class.
+  Like `static::`, a `static` return names the writing class, not the
+  receiver's.
+- A receiver is typed by the value at its exact span. Every call states
+  one at its whole span (Perl's builder and the packs' `@expr.call` alike),
+  so under `f()->a->b` the receiver of `b` is `f()->a`, never `f`, the
+  innermost call at its start. The cross-file fallback takes the call
+  spanning exactly the receiver (`RefTable::call_spanning`).
 - Perl's free calls mint `Function` too. The walk resolves a callee defined
   above the call; `resolve_forward_expr_witnesses` resolves one defined
   below it, and only a name still unresolved after that goes to the

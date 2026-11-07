@@ -206,6 +206,9 @@ struct Minted {
     /// A member read's (receiver span, member): what a place written here
     /// projects, so a write lands where the read looks.
     projects: Option<Box<(Span, String)>>,
+    /// On a def node: the `symbols` row it pushed, whose written return
+    /// resolves once every row is in (`defs::resolve_returns`).
+    return_row: Option<usize>,
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`
@@ -234,6 +237,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
+        | C::TypeEnclosing
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline
@@ -582,6 +586,8 @@ pub fn extract_in(
     // A parent may be written above the import that names it, so it
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
+    // A return type likewise.
+    defs::resolve_returns(&mut st);
     defs::dedup(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);

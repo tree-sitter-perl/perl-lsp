@@ -7,11 +7,22 @@ use super::*;
 use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 use std::collections::{BTreeMap, HashMap};
 
+/// A `@flow.target` as the walk found it.
+struct Target {
+    name: String,
+    /// The scopes it binds in.
+    scopes: Vec<ScopeId>,
+    at: Point,
+    /// The class a `@type.enclosing` annotation names: the one in force
+    /// where it is written.
+    enclosing: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
-    /// Each `@flow.target`'s binding, by its match: the scopes it binds in
-    /// are known only while the walk is at it.
-    flow_targets: BTreeMap<usize, (String, Vec<ScopeId>, Point)>,
+    /// Each `@flow.target`'s binding, by its match: what only the walk at
+    /// it knows.
+    flow_targets: BTreeMap<usize, Target>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
@@ -86,12 +97,17 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk).
+            let mut enclosing = None;
             if let Some(annot) = ad.in_match(e.match_id, Capture::TypeAnnot) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
                 }
+                if super::defs::names_enclosing(ad, annot) {
+                    enclosing = st.package.clone();
+                }
             }
-            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), target_scopes, e.start));
+            let target = Target { name: (pack.shape_name)(&e.text), scopes: target_scopes, at: e.start, enclosing };
+            f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
             f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, e.start));
@@ -293,8 +309,8 @@ pub(super) fn finish(st: &mut ExtractState) {
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
-    let targets = f.flow_targets.iter().flat_map(|(&mid, (name, scopes, at))| scopes.iter().map(move |scope| (mid, name, scope, at)));
-    for (mid, name, scope, at) in targets {
+    let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
+    for (mid, Target { name, at, enclosing, .. }, scope) in targets {
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
         // Class-wide extent for a data member; the sequential decl point for a
         // local (see `field_scope_span`).
@@ -308,8 +324,12 @@ pub(super) fn finish(st: &mut ExtractState) {
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let annot_type =
-                (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start));
+            // A type naming the class it is written in is that class, already
+            // an identity; any other spelling resolves at its site.
+            let annot_type = match enclosing {
+                Some(class) => Some(InferredType::ClassName(class.clone())),
+                None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
+            };
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }

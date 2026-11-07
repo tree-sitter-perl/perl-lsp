@@ -21,6 +21,7 @@ pub fn cpp_pack() -> LangPack {
         functions: FunctionLookup::Global,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
+        type_display: |_| None,
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

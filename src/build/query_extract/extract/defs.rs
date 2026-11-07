@@ -127,6 +127,19 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     if let Some(primary) = mine(Capture::SpecPrimary) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(&primary.text)));
     }
+    // A return naming the enclosing class is the def's own class, already an
+    // identity; any other spelling is a written type, resolved like a
+    // parameter's once the walk is done (`resolve_returns`).
+    let mut written_return = false;
+    let return_type = match mine(Capture::RetType) {
+        Some(t) if names_enclosing(ad, t) => pkg.clone().map(InferredType::ClassName),
+        Some(t) => {
+            let t = (pack.annot_type)(&t.text);
+            written_return = t.is_some();
+            t
+        }
+        None => None,
+    };
     // Flags another pattern states about the def's name token
     // (`@mark.<flag>`, `@ns.inline`).
     let on_name: Vec<&Event> = name_tok.map(|n| ad.on(n).collect()).unwrap_or_default();
@@ -145,11 +158,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         scope: st.def_scope(kind),
         spelled: mine(Capture::Def { kind, part: DefPart::Spelled }).map(|t| t.text.clone()),
         pair: mine(Capture::DefPair).map(|_| e.match_id),
-        // A def's header is code of the scope around it: its return type
-        // is spelled there.
-        return_type: mine(Capture::RetType)
-            .and_then(|t| (pack.annot_type)(&t.text))
-            .map(|t| written_type_at(&st.out, &pack.names, t, e.start)),
+        return_type,
         deref_stack: ad
             .of_match(e.match_id)
             .find_map(|t| match t.payload.as_deref() {
@@ -180,8 +189,33 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
-        None => st.out.symbols.push(symbol),
+        None => {
+            if written_return {
+                st.minted[ix].return_row = Some(st.out.symbols.len());
+            }
+            st.out.symbols.push(symbol);
+        }
     }
+}
+
+/// Resolve each written return to the identities it names at its site, the
+/// way a parameter's declared type is. Runs before dedup, while a symbol's
+/// index is still where its def pushed it.
+pub(super) fn resolve_returns(st: &mut ExtractState) {
+    let ad = st.adorned;
+    for (ix, e) in ad.events().iter().enumerate() {
+        let Some(i) = st.minted[ix].return_row else { continue };
+        let Some(site) = ad.in_match(e.match_id, Capture::RetType).map(|t| t.start) else { continue };
+        if let Some(t) = st.out.symbols[i].return_type.take() {
+            st.out.symbols[i].return_type = Some(written_type_at(&st.out, &st.pack.names, t, site));
+        }
+    }
+}
+
+/// Whether the written type `t` names the class it is written in: a
+/// `@type.enclosing` another pattern states on its node.
+pub(super) fn names_enclosing(ad: &Adorned, t: &Event) -> bool {
+    ad.on(t).any(|x| x.cap == Capture::TypeEnclosing)
 }
 
 /// Template params joined to their owner class — the owner shaped like a

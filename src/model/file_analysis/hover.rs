@@ -5,18 +5,13 @@
 use super::*;
 
 impl FileAnalysis {
-    /// This file's type vocabulary (`PackFacts.type_display`): a mapped
-    /// engine tag renders as the language's own spelling (php `array`, not
-    /// `HashRef`); an unmapped tag, every class name, and every Perl
-    /// analysis (empty map) pass through.
+    /// The file's language's type words (`LanguageConventions::type_label`):
+    /// a mapped engine tag renders as the language's own spelling (php
+    /// `array`, not `HashRef`); an unmapped tag, every class name, and every
+    /// Perl analysis pass through.
     fn type_vocab(&self) -> impl Fn(&str) -> Option<String> + '_ {
-        move |tag: &str| {
-            self.pack
-                .type_display
-                .iter()
-                .find(|(k, _)| k == tag)
-                .map(|(_, v)| v.clone())
-        }
+        let conventions = crate::model::conventions::conventions_of(&self.language);
+        move |tag: &str| conventions.type_label(tag).map(str::to_string)
     }
 
     /// THE type-label projection for human surfaces — hover, inlay hints,
@@ -36,7 +31,8 @@ impl FileAnalysis {
     /// inferred type — `None` when the pack has no native spelling for it
     /// (an ambiguous engine type, a class not visible by its leaf here, a
     /// composite). What a quick-fix may write into the source at `site`;
-    /// display vocabulary (`type_display`) is a different question.
+    /// display vocabulary (`LanguageConventions::type_label`) is a different
+    /// question.
     pub fn native_type_spelling(&self, ty: &InferredType, site: Point) -> Option<String> {
         if let InferredType::ClassName(n) = ty {
             let (ns, leaf) = split_qualified(n, self.names());

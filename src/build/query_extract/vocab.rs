@@ -438,7 +438,12 @@ pub enum Capture {
     Qualifier,
     /// An out-of-line function definition.
     OolDef,
+    /// A callable's declared return type, as written.
     RetType,
+    /// A written type (a declared return, a parameter's or property's
+    /// declared type) that names the class it is written in (php's `self`,
+    /// `static`), not a class by its spelling.
+    TypeEnclosing,
     TypeAnnot,
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
@@ -522,6 +527,7 @@ impl Capture {
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
+            ["type", "enclosing"] => C::TypeEnclosing,
             ["type", "annot"] => C::TypeAnnot,
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
@@ -586,6 +592,7 @@ impl fmt::Display for Capture {
             C::Qualifier => f.write_str("qualifier"),
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
+            C::TypeEnclosing => f.write_str("type.enclosing"),
             C::TypeAnnot => f.write_str("type.annot"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),

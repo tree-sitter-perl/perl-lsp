@@ -98,6 +98,12 @@ table. Which tokens these are is the document's: the extractor holds no
 receiver spelling. Bare `@receiver` is the declared receiver, a parameter
 (python's `self`).
 
+`@rettype` is a callable's declared return, captured in the def's match.
+`@type.enclosing` sits on any written type (a return, a parameter's or
+property's `@type.annot`) the document says names the class it is written
+in rather than a class by its spelling (php's `self`, `static`). It is a
+pattern of its own, joined to the writing site's capture by span.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:
