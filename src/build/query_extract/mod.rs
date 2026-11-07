@@ -57,6 +57,7 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
         return Ok(q);
     }
     let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
+    crate::build::query_predicates::check_source(source).map_err(|e| format!("query: {e}"))?;
     let captures = vocab::capture_table(query.capture_names()).map_err(|e| format!("query: {e}"))?;
     crate::build::query_predicates::check(&query, language, &[]).map_err(|e| format!("query: {e}"))?;
     vocab::check_links(&query, &captures).map_err(|e| match e {

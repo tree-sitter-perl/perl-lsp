@@ -394,10 +394,10 @@ impl SkeletonAnalysis {
     /// what a file that never reached extraction assembles from.
     pub fn for_pack(pack: &super::LangPack) -> Self {
         // The analysis is stamped with the pack's language here, so its
-        // lattice is registered here too: every reader of the stamp finds it.
-        // Perl's rules are declared, never registered.
+        // conventions are registered here too: every reader of the stamp
+        // finds them. Perl's are declared, never registered.
         if pack.id != crate::model::conventions::PERL_LANGUAGE {
-            crate::model::conventions::register_lattice(pack.id, || pack.lattice.clone());
+            crate::model::conventions::register_conventions(pack.id, || pack.conventions());
         }
         SkeletonAnalysis { language: pack.id, names: pack.names.clone(), ..Default::default() }
     }

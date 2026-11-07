@@ -216,6 +216,9 @@ pub enum ExprCap {
     Call,
     Lit(LitKind),
     ReadVar,
+    /// The name token of a variable read whose node also spells a sigil
+    /// (php's `x` in `$x`): the reference is the name, the value the node.
+    ReadVarName,
     ReturnValue,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
@@ -370,7 +373,8 @@ pub enum DefPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
-    /// The one name token two defs of this match declare together (python's
+    /// The one name token two defs of this match declare together (php's
+    /// promoted constructor parameter: the property and the local; python's
     /// class-body binding: the class's member and the name the body reads).
     /// They are one declaration, linked each way as `Symbol::declared_with`.
     DefPair,
@@ -478,6 +482,7 @@ impl Capture {
             ["expr", "call"] => C::Expr(ExprCap::Call),
             ["expr", "lit", k] => C::Expr(ExprCap::Lit(LitKind::parse(k)?)),
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
+            ["expr", "read", "var", "name"] => C::Expr(ExprCap::ReadVarName),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
@@ -524,9 +529,9 @@ impl fmt::Display for Capture {
         };
         match *self {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
-            C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
+            C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
@@ -541,6 +546,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Call) => f.write_str("expr.call"),
             C::Expr(ExprCap::Lit(k)) => write!(f, "expr.lit.{k}"),
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
+            C::Expr(ExprCap::ReadVarName) => f.write_str("expr.read.var.name"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),

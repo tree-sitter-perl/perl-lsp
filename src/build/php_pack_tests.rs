@@ -649,6 +649,298 @@ fn a_property_renames_from_its_declaration() {
     assert_eq!(edits_from(11, 21), [edit(11, 20, 24)], "the method keeps to its family");
 }
 
+/// Rename edits from `at` in a one-file workspace, as (row, start, end),
+/// through the driver that serves the file's language.
+#[cfg(any(feature = "php", feature = "cpp"))]
+fn renames_in(file: &str, src: &str, row: usize, column: usize) -> Vec<(usize, usize, usize)> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from(file);
+    let fa = LanguageRegistry::compiled().for_path(&path).unwrap().analyze(src);
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa);
+    let store = OpenDocs::new();
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let at = tree_sitter::Point { row, column };
+    let cs = resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at, Some(&idx), OverrideScope::default());
+    let mut sites: Vec<(usize, usize, usize)> = cs
+        .rename_edits("renamed")
+        .unwrap()
+        .into_iter()
+        .map(|(loc, text)| {
+            assert_eq!(text, "renamed");
+            (loc.span.start.row, loc.span.start.column, loc.span.end.column)
+        })
+        .collect();
+    sites.sort();
+    sites
+}
+
+#[cfg(feature = "php")]
+fn renames(src: &str, row: usize, column: usize) -> Vec<(usize, usize, usize)> {
+    renames_in("/fake/php/App/One.php", src, row, column)
+}
+
+const PARAMS: &str = "<?php
+namespace App;
+
+use Lib\\Clock;
+
+function tick(?Clock $at, int|Clock $n = 1, &$out, Clock ...$rest) {
+    return $at;
+}
+class Timer {
+    public function start(Clock $c) { $c; $at; return fn(int $c) => $c; }
+}
+";
+
+/// A parameter is a local of its callable under the name after its `$`;
+/// a closure's parameters are the closure's.
+#[test]
+fn parameters_are_locals_of_their_callable() {
+    let fa = php(PARAMS);
+    let locals: Vec<(String, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Variable)
+        .map(|s| (s.name.clone(), s.selection_span.start.column))
+        .collect();
+    let want: Vec<(String, usize)> =
+        [("at", 22), ("n", 37), ("out", 46), ("rest", 61), ("c", 33), ("c", 62)]
+            .iter()
+            .map(|(n, c)| (n.to_string(), *c))
+            .collect();
+    assert_eq!(locals, want);
+    let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
+    assert!(fa.scope_within_sub_body(at.scope));
+    let in_closure = fa.symbols().iter().filter(|s| s.name == "c").map(|s| s.scope).collect::<Vec<_>>();
+    assert_ne!(in_closure[0], in_closure[1], "the closure's parameter is its own");
+    assert!(fa.document_symbols().iter().all(|o| o.name != "at" && o.name != "c"));
+}
+
+/// A declared type is the parameter's value from its binding site: a class
+/// spelling resolves through the use-map, a union is the join of its arms.
+#[test]
+fn a_parameters_declared_type_is_its_value_in_the_body() {
+    use crate::model::file_analysis::InferredType as T;
+    use crate::model::witnesses::WitnessAttachment as WA;
+    let fa = php(PARAMS);
+    let body = tree_sitter::Point { row: 6, column: 12 };
+    let clock = || T::ClassName("Lib\\Clock".into());
+    let or = |a: T, b: T| crate::model::file_analysis::join_all(&[a, b], &crate::model::file_analysis::Unordered);
+    assert_eq!(fa.inferred_type_via_bag("at", body), or(clock(), T::Undef));
+    assert_eq!(fa.inferred_type_via_bag("n", body), or(T::Numeric, clock()));
+    assert_eq!(fa.inferred_type_via_bag("rest", body), None, "a variadic's type is its elements'");
+    let at = fa.symbols().iter().find(|s| s.name == "at").unwrap();
+    let declared: Vec<_> = fa
+        .witnesses
+        .for_attachment(&WA::Place(Box::new(fa.declared_place(at.id))))
+        .into_iter()
+        .map(|w| w.span.start)
+        .collect();
+    assert_eq!(declared, [at.selection_span.start], "the witness stands at the binding site");
+    // the read's value is the parameter's
+    let read = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 6, column: 11 },
+        end: tree_sitter::Point { row: 6, column: 14 },
+    };
+    assert_eq!(fa.expr_type_at_span(read, None), or(clock(), T::Undef));
+}
+
+/// A use of `$x` in the body is a reference to the parameter: the name
+/// token is the reference, so rename never touches the `$`. A read the
+/// callable declares no parameter for binds to nothing.
+#[test]
+fn a_parameter_use_binds_to_the_parameter() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(PARAMS);
+    let bound: Vec<(usize, usize, String)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable) && r.span.start.row > 5)
+        .filter_map(|r| {
+            let sym = fa.symbol(r.resolved_symbol()?);
+            let decl = format!("{}@{}", sym.name, sym.selection_span.start.column);
+            Some((r.span.start.row, r.span.start.column, decl))
+        })
+        .collect();
+    let row = |r: usize, c: usize, s: &str| (r, c, s.to_string());
+    assert!(bound.contains(&row(6, 12, "at@22")), "{bound:?}");
+    assert!(bound.contains(&row(9, 39, "c@33")), "{bound:?}");
+    assert!(bound.contains(&row(9, 69, "c@62")), "the closure's own: {bound:?}");
+    assert!(!bound.iter().any(|(r, c, _)| (*r, *c) == (9, 43)), "`$at` in the method is not tick's");
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn a_parameter_renames_by_its_name_token() {
+    assert_eq!(renames(PARAMS, 6, 13), [(5, 22, 24), (6, 12, 14)]);
+    assert_eq!(renames(PARAMS, 9, 39), [(9, 33, 34), (9, 39, 40)]);
+}
+
+const PROMOTED: &str = "<?php
+class Order {
+    public function __construct(private Clock $made) { $made->start(); }
+    public function age() { return $this->made; }
+}
+";
+
+/// A promoted constructor parameter is the property and the constructor's
+/// local on one token, one declaration: rename from either side rewrites
+/// the token and the body's uses alike.
+#[test]
+fn a_promoted_parameter_is_the_property_and_the_local_as_one() {
+    let fa = php(PROMOTED);
+    let field = fa.symbols().iter().find(|s| s.kind == SymKind::Field).unwrap();
+    let local = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "made").unwrap();
+    assert_eq!(field.declared_with, Some(local.id));
+    assert_eq!(local.declared_with, Some(field.id));
+    assert_eq!(field.selection_span, local.selection_span);
+    assert_ne!(field.scope, local.scope, "the property is the class's, the local the constructor's");
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn a_promoted_parameter_renames_as_one_from_either_side() {
+    let both = [(2, 47, 51), (2, 56, 60)];
+    assert_eq!(renames(PROMOTED, 2, 48), both, "from the declaration");
+    assert_eq!(renames(PROMOTED, 2, 57), both, "from a body use");
+}
+
+const BARE: &str = "<?php
+class A {
+    private int $x = 1;
+    public function f() { return $x; }
+    public function g(int $x) { return $x; }
+}
+trait T {
+    private $y;
+    public function h() { return $y; }
+}
+";
+
+/// PHP names a property only through a receiver, so a method's bare `$x`
+/// is a local of the method or nothing — never the property the class
+/// body declares (`@scope.direct`).
+#[test]
+fn a_bare_variable_in_a_method_never_names_a_property() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(BARE);
+    let bound = |row: usize, col: usize| {
+        let r = fa
+            .refs()
+            .iter()
+            .find(|r| matches!(r.kind, RefKind::Variable) && (r.span.start.row, r.span.start.column) == (row, col))
+            .unwrap_or_else(|| panic!("a ref at {row}:{col}"));
+        let bound = r.resolved_symbol().map(|id| (fa.symbol(id).kind, fa.symbol(id).selection_span.start.column));
+        let named = fa
+            .resolve_variable(&r.target_name, r.span.start)
+            .map(|s| (s.kind, s.selection_span.start.column));
+        assert_eq!(bound, named, "the bound ref and a by-name ask agree at {row}:{col}");
+        bound
+    };
+    assert_eq!(bound(3, 34), None, "no local `$x`: the property is not in force");
+    assert_eq!(bound(4, 40), Some((SymKind::Variable, 27)), "the parameter is");
+    assert_eq!(bound(8, 34), None, "a trait's property neither");
+}
+
+/// The promoted pair still binds in its constructor: the token is the
+/// constructor's local, and the local is in force in the constructor body.
+#[test]
+fn a_promoted_parameter_binds_in_its_constructor() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(PROMOTED);
+    let local = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "made").unwrap();
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::Variable) && (r.span.start.row, r.span.start.column) == (2, 56))
+        .unwrap();
+    assert_eq!(r.resolved_symbol(), Some(local.id));
+}
+
+const UNBOUND: &str = "<?php
+class C {
+    public $x;
+    public function foo() {}
+    public function m() { return $x; }
+    public function n() { return $foo; }
+}
+";
+
+/// A token a query captured but nothing binds has no definition: the
+/// by-word last resort is for tokens no query captures, so it never lands
+/// a method's bare `$x` on the property, or a bare `$foo` on the method
+/// its word spells.
+#[test]
+fn an_unbound_captured_token_has_no_definition() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from("/fake/php/App/C.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(UNBOUND));
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let defs = |row: usize, column: usize| {
+        let at = tree_sitter::Point { row, column };
+        assert!(file.ref_at(at).is_some(), "a query captured {row}:{column}");
+        resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at, Some(&idx), OverrideScope::default())
+            .with_source(UNBOUND)
+            .definitions()
+            .into_iter()
+            .map(|l| (l.span.start.row, l.span.start.column))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(defs(4, 34), [], "a bare `$x` is not the property");
+    assert_eq!(defs(5, 34), [], "a bare `$foo` is not the method");
+}
+
+/// Every class a type position names is a class reference through the
+/// use-map, so rename of the class rewrites property, parameter, nullable,
+/// union, qualified and return spellings.
+#[test]
+fn class_names_in_type_positions_are_class_references() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use std::path::PathBuf;
+    let src_clock = "<?php\nnamespace Lib;\nclass Clock {}\n";
+    let src_user = "<?php
+namespace App;
+use Lib\\Clock;
+class Job {
+    private ?Clock $clock;
+    public function __construct(private Clock $made) {}
+    public function at(Clock|int $c, \\Lib\\Clock $d, self $e): Clock { return $c; }
+}
+";
+    let (p_clock, p_user) = (PathBuf::from("/fake/php/Lib/Clock.php"), PathBuf::from("/fake/php/App/Job.php"));
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(p_clock.clone(), php(src_clock));
+    idx.insert_workspace_for_test(p_user.clone(), php(src_user));
+    let store = OpenDocs::new();
+    let clock = idx.workspace_file_for_test(&p_clock).unwrap();
+    let at = tree_sitter::Point { row: 2, column: 7 };
+    let cs = resolve(&store, &clock, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(p_clock.clone())), at, Some(&idx), OverrideScope::default());
+    let mut sites: Vec<(usize, usize)> = cs
+        .rename_edits("Timer")
+        .unwrap()
+        .into_iter()
+        .filter(|(loc, _)| matches!(&loc.key, FileKey::Path(p) if p.as_path() == p_user.as_path()))
+        .map(|(loc, _)| (loc.span.start.row, loc.span.start.column))
+        .collect();
+    sites.sort();
+    assert_eq!(sites, [(2, 8), (4, 13), (5, 40), (6, 23), (6, 42), (6, 62)]);
+}
+
+/// A sigil-less pack's local renames whole, its first letter included.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_cpp_local_renames_whole() {
+    let src = "int f(int abc) {\n  return abc + 1;\n}\n";
+    assert_eq!(renames_in("/fake/cpp/f.cpp", src, 1, 10), [(0, 10, 13), (1, 9, 12)]);
+}
+
 /// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:
 /// PHP constructs with `new`, so the call is no reference to the class
 /// and its value is no instance of it. (Python's `Foo()` is both —

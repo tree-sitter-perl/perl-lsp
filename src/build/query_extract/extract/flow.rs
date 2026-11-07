@@ -53,13 +53,19 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // builder's emit_expr_witness uses.
             let span = e.span();
             // …and a candidate local-var reference, resolved to its
-            // declaration in into_file_analysis (goto-def + hover).
-            out.var_reads.push(((pack.shape_name)(&e.text), cur_scope, span));
+            // declaration in into_file_analysis (goto-def + hover). Where the
+            // document names the read's name token, that token is the
+            // reference and the name; the node stays the value.
+            let (name, ref_span) = match ad.in_match(e.match_id, Capture::Expr(ExprCap::ReadVarName)) {
+                Some(token) => ((pack.shape_name)(&token.text), token.span()),
+                None => ((pack.shape_name)(&e.text), span),
+            };
+            out.var_reads.push((name.clone(), cur_scope, ref_span));
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
                 WitnessPayload::Edge(WitnessAttachment::Variable {
-                    name: (pack.shape_name)(&e.text),
+                    name,
                     scope: cur_scope,
                 }),
                 span,
