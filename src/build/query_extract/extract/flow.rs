@@ -239,6 +239,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     scope: cur_scope,
                     args,
                     constructs: false,
+                    forwards: in_match(Capture::Member(MemberCap::Forward)).is_some(),
                 });
             }
         }
@@ -261,6 +262,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     scope: cur_scope,
                     args,
                     constructs: true,
+                    forwards: false,
                 });
                 let invocant = match recv.payload.as_deref() {
                     Some(Payload::Recv(i)) => Some((recv.span(), i.clone())),

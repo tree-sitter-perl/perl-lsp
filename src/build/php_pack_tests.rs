@@ -1155,15 +1155,21 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
                 w.span.start.row,
                 name.clone(),
                 {
-                    assert_eq!(*lookup, Lookup::Receiver);
-                    match receiver {
-                        Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => {
+                    use crate::model::witnesses::WitnessAttachment as WA;
+                    match (lookup, receiver) {
+                        (Lookup::Receiver, Some(WA::Expr(recv))) => {
                             // The class the call dispatches on: a `?Timer` receiver is
                             // `Timer|null`, and a call reaches the `Timer` arm.
                             fa.expr_type_at_span(*recv, None)
                                 .and_then(|t| fa.dispatch_classes_of(&t, None).single().map(str::to_string))
                         }
-                        _ => None,
+                        // `self::m()` forwards: looked up from the class it
+                        // names, run on the method's own receiver.
+                        (Lookup::Named(class), Some(WA::Place(place))) => {
+                            assert!(place.is_variable() && matches!(place.root, crate::model::file_analysis::Binding::Receiver(_)));
+                            Some(class.clone())
+                        }
+                        other => panic!("unexpected call shape {other:?}"),
                     }
                 },
                 args.iter().flatten().map(|a| matches!(a, CallArg::Spread(_))).collect(),
@@ -2709,23 +2715,31 @@ fn this_is_typed_once() {
 
 /// A call on a receiver that names a class dispatches on the receiver's
 /// value, the one store of that class: no second, span-keyed copy picks a
-/// named lookup.
+/// named lookup. A forwarding call (`self::m()`) is the one that names its
+/// lookup's class, the class its token names, since its receiver is the
+/// method's own; the token's value is still that class.
 #[cfg(feature = "php")]
 #[test]
 fn a_class_receiver_dispatches_on_its_value() {
     use crate::model::witnesses::{Callee, Lookup, WitnessAttachment as WA, WitnessPayload as WP};
-    let fa = php("<?php\nclass A {\n  static function m() { return 1; }\n  function f() { return self::m(); }\n}\n");
-    let call = Span { start: Point::new(3, 24), end: Point::new(3, 33) };
-    let lookups: Vec<_> = fa
-        .witnesses
-        .for_attachment(&WA::Expr(call))
-        .into_iter()
-        .filter_map(|w| match &w.payload {
-            WP::Invoke { callee: Callee::Method { lookup, .. }, .. } => Some(lookup.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(lookups, [Lookup::Receiver]);
+    let fa = php("<?php\nclass A {\n  static function m() { return 1; }\n  function f() { return self::m(); }\n  function g() { return A::m(); }\n}\n");
+    let calls = |call: Span| -> Vec<_> {
+        fa.witnesses
+            .for_attachment(&WA::Expr(call))
+            .into_iter()
+            .filter_map(|w| match &w.payload {
+                WP::Invoke { callee: Callee::Method { lookup, .. }, receiver, .. } => Some((lookup.clone(), receiver.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let named = calls(Span { start: Point::new(4, 24), end: Point::new(4, 30) });
+    assert_eq!(named, [(Lookup::Receiver, Some(WA::Expr(Span { start: Point::new(4, 24), end: Point::new(4, 25) })))]);
+    let forwarded = calls(Span { start: Point::new(3, 24), end: Point::new(3, 33) });
+    assert!(
+        matches!(forwarded.as_slice(), [(Lookup::Named(c), Some(WA::Place(p)))] if c == "A" && p.is_variable()),
+        "{forwarded:?}"
+    );
     let recv = Span { start: Point::new(3, 24), end: Point::new(3, 28) };
     assert_eq!(fa.expr_type_at_span(recv, None), Some(InferredType::ClassName("A".into())));
 }
@@ -3530,6 +3544,103 @@ fn new_static_follows_the_receiver_and_new_self_stays() {
     let ret = |m: &str| fa.find_method_return_type("Base", m, None, None);
     assert_eq!(ret("fresh"), Some(T::ClassName("Base".into())));
     assert_eq!(ret("me"), Some(T::ClassName("Base".into())));
+}
+
+const FORWARD_PARENT: &str = "<?php
+class Base {
+    public static function make() { return new static(); }
+    public function base() {}
+}
+class Kid extends Base {
+    public static function viaParent() { return parent::make(); }
+    public function inst() { return parent::make(); }
+    public function kid() {}
+}
+class Grand extends Kid {
+    public function grand() {}
+}
+Kid::viaParent()->kid();
+Grand::viaParent()->grand();
+(new Grand())->inst()->grand();
+";
+
+/// `parent::m()` forwards the called class: the `static` in the method it
+/// reaches is still the class the outer call was made on, here and through
+/// an inherited caller, from a static method and an instance one alike.
+/// The `parent` token itself still names the parent.
+#[cfg(feature = "php")]
+#[test]
+fn a_parent_call_forwards_the_called_class() {
+    let fa = php(FORWARD_PARENT);
+    assert_eq!(
+        call_receivers(&fa),
+        calls_on(&[
+            ("make", "Base"),
+            ("make", "Base"),
+            ("viaParent", "Kid"),
+            ("kid", "Kid"),
+            ("viaParent", "Grand"),
+            ("grand", "Grand"),
+            ("inst", "Grand"),
+            ("grand", "Grand"),
+        ])
+    );
+    let ws = Workspace::new(&[("/fake/php/fwd.php", FORWARD_PARENT)]);
+    assert_eq!(ws.defs("fwd.php", "make(); }\n    public function inst", 0), vec![site("fwd.php", 2, 27)]);
+}
+
+/// The object a forwarding call runs on is read where the call is written,
+/// whatever point the question about it is asked from: here a local typed
+/// above the classes it calls.
+#[cfg(feature = "php")]
+#[test]
+fn a_forwarded_receiver_is_read_at_the_call() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+function first() {
+    $k = Kid::viaParent();
+    return $k;
+}
+class Base {
+    public static function make() { return new static(); }
+}
+class Kid extends Base {
+    public static function viaParent() { return parent::make(); }
+}
+";
+    let fa = php(src);
+    assert_eq!(fa.inferred_type_via_bag("k", at(src, "return $k", 0)), Some(T::ClassName("Kid".into())));
+}
+
+const FORWARD_SELF: &str = "<?php
+class Other {}
+class Base {
+    public static function make() { return new static(); }
+    public static function viaSelf() { return self::make(); }
+    public function base() {}
+}
+class Kid extends Base {
+    public static function make() { return new Other(); }
+    public function kid() {}
+}
+Kid::viaSelf()->kid();
+Base::viaSelf()->base();
+";
+
+/// `self::m()` looks `m` up from the class it is written in, so a
+/// subclass's override is not the method it runs, and it forwards the
+/// called class, so that method's `static` is the subclass the outer call
+/// was made on.
+#[cfg(feature = "php")]
+#[test]
+fn a_self_call_forwards_the_called_class() {
+    let fa = php(FORWARD_SELF);
+    assert_eq!(
+        call_receivers(&fa),
+        calls_on(&[("make", "Base"), ("viaSelf", "Kid"), ("kid", "Kid"), ("viaSelf", "Base"), ("base", "Base")])
+    );
+    let ws = Workspace::new(&[("/fake/php/fwd.php", FORWARD_SELF)]);
+    assert_eq!(ws.defs("fwd.php", "make(); }", 0), vec![site("fwd.php", 3, 27)]);
 }
 
 const STATIC_RETURN: &str = "<?php

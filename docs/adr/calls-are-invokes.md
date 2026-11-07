@@ -112,13 +112,19 @@ extra, whatever the pattern.
   `@receiver.super` names the parent the writing class's `@parent.super`
   edge marks (php's `parent`, its `extends`: never an interface or a
   trait), and `@receiver.declared` the class the same token anchors (php's
-  anonymous `class`). `parent::m()` dispatches on that class, as
-  `self::m()` does on the writing one.
-  TODO(lsb-forwarding): php's `self::m()` and `parent::m()` forward the
-  called class, so a `static` in `m` is still the subclass a call was made
-  on; here each passes the class it names as the receiver. Forwarding
-  needs a call whose lookup starts at the named class while its receiver
-  is the method's own, which no pack call site states yet.
+  anonymous `class`). A call whose receiver token the document marks
+  `@member.forward` (php's `self::m()` and `parent::m()`) forwards: it is
+  `Method { lookup: Named(class) }`, the class the token names, with the
+  calling method's own receiver place (`Binding::Receiver`) as its
+  receiver, the shape of Perl's `$self->Base::m()`. That place holds
+  `ReceiverOr` of its method's class, stated at the method once a call
+  forwards it, so a `static` in `m` is still the class the outer call was
+  made on (`Kid::viaParent()` → `parent::make()` → `new static` is a
+  `Kid`), and the writing class where no call says. The token keeps its
+  own value and its navigation: `self::X`, `parent::$x` and goto-def on
+  `parent::m` still read the class it names. An operand that is a storage
+  location, like that place, is read at the call that reads it, not at the
+  point an outer query asks from.
 - A construction (`@expr.construct`, php's `new Foo(…)`) is
   `Construct { lookup }` on its `@member.recv`: its value is an instance
   of the class the lookup names, whatever the constructor declares. A

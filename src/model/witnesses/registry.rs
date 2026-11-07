@@ -2614,7 +2614,7 @@ impl ReducerRegistry {
                     });
                 }
                 WitnessPayload::Invoke { callee, receiver, args } => {
-                    if let Some(t) = self.invoke(bag, q, state, callee, receiver.as_ref(), args.as_deref()) {
+                    if let Some(t) = self.invoke(bag, q, state, w.span.start, callee, receiver.as_ref(), args.as_deref()) {
                         out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
@@ -2631,17 +2631,19 @@ impl ReducerRegistry {
 
     /// Materialize `att` under `q`'s point and context, in an opaque frame:
     /// an `Invoke` operand is an input to this frame's answer, never the
-    /// answer itself.
+    /// answer itself. A storage location (`is_temporal`) is read where the
+    /// call at `site` reads it, not at the point the outer query asks from.
     fn operand_type(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
+        site: Point,
         att: &WitnessAttachment,
     ) -> Option<InferredType> {
         let sub_q = ReducerQuery {
             attachment: att,
-            point: q.point,
+            point: if att.is_temporal() { Some(site) } else { q.point },
             framework: q.framework,
             arity_hint: None,
             // The enclosing call's receiver still binds `$self` inside the
@@ -2659,16 +2661,18 @@ impl ReducerRegistry {
     /// The value of an `Invoke`: materialize the receiver and arguments,
     /// pick the lookup attachment, and query it with the receiver's full
     /// type and the argument types substituted.
+    #[allow(clippy::too_many_arguments)]
     fn invoke(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
+        site: Point,
         callee: &Callee,
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
-        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r));
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -2679,7 +2683,7 @@ impl ReducerRegistry {
         for a in args.unwrap_or_default() {
             match a {
                 CallArg::One(att) => arg_types.push(
-                    self.operand_type(bag, q, state, att).unwrap_or(InferredType::Unknown),
+                    self.operand_type(bag, q, state, site, att).unwrap_or(InferredType::Unknown),
                 ),
                 CallArg::Spread(_) => {
                     spread = true;
@@ -2715,9 +2719,9 @@ impl ReducerRegistry {
         match (callee, recv) {
             (Callee::Method { lookup: Lookup::Receiver, .. }, Some(t)) => t
                 .join_over_arms(class_order(q), |arm| {
-                    self.dispatch_invoke(bag, q, state, callee, Some(arm.clone()), arg_types.clone(), exact)
+                    self.dispatch_invoke(bag, q, state, site, callee, Some(arm.clone()), arg_types.clone(), exact)
                 }),
-            (_, recv) => self.dispatch_invoke(bag, q, state, callee, recv, arg_types, exact),
+            (_, recv) => self.dispatch_invoke(bag, q, state, site, callee, recv, arg_types, exact),
         }
     }
 
@@ -2729,6 +2733,7 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
+        site: Point,
         callee: &Callee,
         mut recv: Option<InferredType>,
         mut arg_types: Vec<InferredType>,
@@ -2788,7 +2793,7 @@ impl ReducerRegistry {
             }
             Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
-                let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
+                let target = self.operand_type(bag, q, state, site, att)?.callable_return_edge()?.clone();
                 // Invoking a method through a coderef passes its invocant as
                 // the first argument (`$cb->($obj, …)` for `\&Class::m`).
                 if recv.is_none() && matches!(target, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }) {

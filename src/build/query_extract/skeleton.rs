@@ -113,6 +113,9 @@ pub struct CallSite {
     /// The call constructs an instance of its receiver's class
     /// (`@expr.construct`).
     pub constructs: bool,
+    /// The call runs on its method's own receiver, its receiver token
+    /// naming only the class its lookup starts at (`@member.forward`).
+    pub forwards: bool,
 }
 
 /// A receiver token that names a class (`@receiver.*`). The class is
@@ -1185,6 +1188,9 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
+            // The methods whose receiver place a forwarding call reads, each
+            // given its value once.
+            let mut forwarded: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
             for site in &self.call_sites {
                 let (span, name) = (&site.span, &site.callee);
                 // Identity/projection macro: the call's value IS its n-th
@@ -1209,6 +1215,37 @@ impl SkeletonAnalysis {
                         })
                         .collect()
                 });
+                // A forwarding call (`@member.forward`) looks its method up
+                // from the class its token names and runs it on the calling
+                // method's own receiver: the object the call running that
+                // method was made on, its class where no call says.
+                let forward = site
+                    .receiver
+                    .filter(|_| site.forwards)
+                    .and_then(|recv| receiver_class.get(&recv).cloned())
+                    .zip(owning_method.get(site.scope.0 as usize).copied().flatten())
+                    .and_then(|(class, m)| Some((class, m, symbols[m.0 as usize].package.clone()?)));
+                if let Some((class, m, receiver_of)) = forward {
+                    use crate::model::file_analysis::{Binding, Place};
+                    let place = WA::Place(Box::new(Place::variable(Binding::Receiver(m))));
+                    if forwarded.insert(m) {
+                        bag.push(Witness {
+                            attachment: place.clone(),
+                            source: WitnessSource::Builder("receiver_place".into()),
+                            payload: WP::ReturnExpr(crate::model::witnesses::ReturnExpr::ReceiverOr(
+                                InferredType::ClassName(receiver_of),
+                            )),
+                            span: symbols[m.0 as usize].span,
+                        });
+                    }
+                    let callee = crate::model::witnesses::Callee::Method {
+                        name: name.clone(),
+                        lookup: crate::model::witnesses::Lookup::Named(class),
+                        constructs: false,
+                    };
+                    bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver: Some(place), args }, *span));
+                    continue;
+                }
                 // A member call dispatches on its receiver's type at query
                 // time; a free call's callee is the file's own definition
                 // when it has one.
