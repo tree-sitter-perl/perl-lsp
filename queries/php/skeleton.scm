@@ -20,16 +20,20 @@
 ; ---- classes, interfaces, traits ----
 ; One model kind; the body's members file under the class's identity. The
 ; keyword or modifier that says which flavour of class it is rides
-; @sym.attr, whose spelling is the flag it mints.
+; @sym.attr, whose spelling is the flag it mints. `@scope.direct` is PHP's
+; class-body rule: a member is only ever named through a receiver
+; (`$this->x`, `self::$x`, `static::f()`), never bare, so the body's names
+; are not in force inside its methods — a method's bare `$x` or `f()` looks
+; past the class.
 (class_declaration
   (abstract_modifier)? @sym.attr
-  name: (name) @def.class.name @context.class) @def.class @scope
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 (interface_declaration
   "interface" @sym.attr
-  name: (name) @def.class.name @context.class) @def.class @scope
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 (trait_declaration
   "trait" @sym.attr
-  name: (name) @def.class.name @context.class) @def.class @scope
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 
 ; ---- written types ----
 ; `self` and `static` name the class they are written in, and `parent` the
@@ -472,8 +476,9 @@
   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
 ; `new class(…) {…}` declares a class with no name, one per place it is
 ; written, and constructs it there: its `class` keyword anchors both. Its
-; parents and its body are a class's.
-(anonymous_class "class" @def.class.anchor @context.class) @def.class @scope
+; parents and its body are a class's, its body's names in force only for
+; code written directly in it, as a named class's are.
+(anonymous_class "class" @def.class.anchor @context.class) @def.class @scope.direct
 (anonymous_class
   "class" @def.class.anchor
   (base_clause
