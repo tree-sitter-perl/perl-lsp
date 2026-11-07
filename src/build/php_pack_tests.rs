@@ -2859,3 +2859,157 @@ function f(User $u) { $u->id = 2; }
     let found: Vec<_> = fa.misplaced_member_writes(None).into_iter().map(|w| w.span.start.row).collect();
     assert_eq!(found, [6]);
 }
+
+/// Each method-call receiver `m` is read on, by its row, as the class it
+/// dispatches on.
+#[cfg(feature = "php")]
+fn dispatch_rows(fa: &FileAnalysis, method: &str) -> Vec<(usize, Option<String>)> {
+    let mut out: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == method && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+        .collect();
+    out.sort();
+    out
+}
+
+/// `instanceof` proves its subject is the class named, through the
+/// use-map, where it holds: in the arm it enters, and after an `if` that
+/// leaves the block when it fails. A failed `instanceof` proves nothing.
+#[cfg(feature = "php")]
+#[test]
+fn instanceof_narrows_where_it_holds() {
+    let src = "<?php
+namespace App;
+use Lib\\Foo;
+function f($x, $y) {
+    if ($x instanceof Foo) {
+        $x->run();
+    } else {
+        $x->other();
+    }
+    $x->tail();
+    if (!$y instanceof Foo) {
+        return;
+    }
+    $y->run();
+}
+";
+    let fa = php(src);
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    assert_eq!(fa.inferred_type_via_bag("x", at(src, "$x->run", 0)), foo, "the arm it enters");
+    assert_eq!(fa.inferred_type_via_bag("x", at(src, "$x->other", 0)), None, "a failed test proves nothing");
+    assert_eq!(fa.inferred_type_via_bag("x", at(src, "$x->tail", 0)), None, "nothing after the `if`");
+    assert_eq!(fa.inferred_type_via_bag("y", at(src, "$y->run", 0)), foo, "the rest of the block after an exit");
+    assert_eq!(fa.inferred_type_via_bag("y", at(src, "return", 0)), None, "not the exit's own arm");
+}
+
+/// A property of `$this` is a place of the method's object: a guard on
+/// it narrows the member's receiver for dispatch, in the arm and after an
+/// early exit, until something may change it.
+#[cfg(feature = "php")]
+#[test]
+fn instanceof_narrows_a_property_of_this_for_dispatch() {
+    let src = "<?php
+class Base { public function run() {} }
+class Foo extends Base { public function run() {} }
+class Holder {
+    private Base $b;
+    public function f() {
+        if ($this->b instanceof Foo) {
+            $this->b->run();
+        }
+        $this->b->run();
+    }
+    public function g() {
+        if (!($this->b instanceof Foo)) throw new \\Exception();
+        $this->b->run();
+        $this->b = new Base();
+        $this->b->run();
+    }
+}
+";
+    let fa = php(src);
+    let class = |c: &str| Some(c.to_string());
+    assert_eq!(
+        dispatch_rows(&fa, "run"),
+        [(7, class("Foo")), (9, class("Base")), (13, class("Foo")), (15, class("Base"))]
+    );
+}
+
+/// `isset`, `!== null`, `=== null` and `is_null` decide whether the
+/// subject holds a value: where it holds none, it is the null value.
+#[cfg(feature = "php")]
+#[test]
+fn a_failed_isset_or_a_passing_null_test_is_the_null_value() {
+    let src = "<?php
+class Cache {
+    private ?array $items;
+    public function f($a, $b, $c, $d, $e) {
+        if (!isset($this->items)) {
+            $first = 1;
+        }
+        if (isset($a)) {
+            $one = 1;
+        } else {
+            $two = 2;
+        }
+        if ($b === null) { $three = 3; }
+        if (null !== $c) { $four = 4; } else { $five = 5; }
+        $z = is_null($d) ? 6 : 7;
+        if (!isset($e, $a)) { $eight = 8; }
+    }
+}
+";
+    let fa = php(src);
+    let method = fa.symbols().iter().find(|s| s.name == "f" && s.kind == SymKind::Method).unwrap().id;
+    let items = crate::model::file_analysis::Place {
+        root: crate::model::file_analysis::Binding::Receiver(method),
+        path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
+    };
+    let undef = Some(InferredType::Undef);
+    assert_eq!(fa.place_type_at(&items, at(src, "$first", 0), None), undef, "a property not set");
+    let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
+    assert_eq!(var("a", "$one"), None, "a passing isset strips nothing yet");
+    assert_eq!(var("a", "$two"), undef);
+    assert_eq!(var("b", "$three"), undef);
+    assert_eq!(var("c", "$four"), None);
+    assert_eq!(var("c", "$five"), undef);
+    assert_eq!(var("d", "6 :"), undef);
+    assert_eq!(var("d", "7;"), None);
+    assert_eq!(var("e", "$eight"), None, "a multi-argument isset is no atom");
+}
+
+/// A condition decides its atoms through its connectives: `&&` holding
+/// and `||` failing fix every side, a negation flips it, and an atom that
+/// is only an argument of the condition is none of it.
+#[cfg(feature = "php")]
+#[test]
+fn connectives_decide_the_atoms_they_hold() {
+    let src = "<?php
+function f($a, $b) {
+    if ($a instanceof Foo && $b instanceof Bar) { $both = 1; }
+    if (!$a instanceof Foo || !($b instanceof Bar)) { $either = 1; } else { $neither = 1; }
+    if ($a instanceof Foo || $b instanceof Bar) { $some = 1; }
+    if (!($a === null)) { $set = 1; } elseif ($b) { $later = 1; } else { $last = 1; }
+    if (check($a instanceof Foo)) { $arg = 1; }
+    $a instanceof Foo and $a->run();
+    $y = is_null($b) || $b->run();
+}
+";
+    let fa = php(src);
+    let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let undef = Some(InferredType::Undef);
+    assert_eq!((var("a", "$both"), var("b", "$both")), (class("Foo"), class("Bar")));
+    assert_eq!((var("a", "$either"), var("b", "$either")), (None, None));
+    assert_eq!((var("a", "$neither"), var("b", "$neither")), (class("Foo"), class("Bar")));
+    assert_eq!((var("a", "$some"), var("b", "$some")), (None, None));
+    assert_eq!(var("a", "$set"), None);
+    assert_eq!(var("a", "$later"), undef, "every later clause of the chain");
+    assert_eq!(var("a", "$last"), undef);
+    assert_eq!(var("a", "$arg"), None);
+    assert_eq!(var("a", "$a->run"), class("Foo"), "the right of `and`");
+    assert_eq!(var("b", "$b->run"), None, "the right of `||` holds the failed test: set");
+}

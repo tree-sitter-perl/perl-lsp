@@ -869,6 +869,19 @@ impl SkeletonAnalysis {
             }
             out
         };
+        // The method whose object a spelled receiver (`$this`, `this`) is:
+        // the nearest enclosing method body's, a closure inside one included.
+        let owning_method: Vec<Option<SymbolId>> = {
+            let mut out: Vec<Option<SymbolId>> = Vec::with_capacity(self.scopes.len());
+            for sc in &self.scopes {
+                let method = sc
+                    .owner
+                    .filter(|sid| symbols.get(sid.0 as usize).is_some_and(|s| matches!(s.kind, SymKind::Method)))
+                    .or_else(|| sc.parent.and_then(|p| out.get(p.0 as usize).copied().flatten()));
+                out.push(method);
+            }
+            out
+        };
         // What a use-map call names a function by (`function_identity`); the
         // earliest declaration of a name wins, as in `callee_sid`.
         let mut free_functions: FreeFunctions = Default::default();
@@ -1281,19 +1294,19 @@ impl SkeletonAnalysis {
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
             }
         }
-        // A spelled receiver (`this`) in a body that elides its receiver IS
-        // that receiver: `this->x` and a bare `x` are one place. The
-        // document states `this` as a token naming the enclosing class.
-        let spelled_receivers = self.receivers.iter().copied().chain(
-            self.receiver_sites
-                .iter()
-                .filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing))
-                .map(|r| (r.scope, r.span)),
-        );
-        for (scope, span) in spelled_receivers {
+        // A receiver parameter in a body that elides its receiver IS that
+        // receiver, and a spelled receiver (`this`, `$this`, a token the
+        // document states names the enclosing class) is its method's
+        // wherever it is written: `this->x` and a bare `x` are one place.
+        use crate::model::file_analysis::{Binding, Place};
+        for &(scope, span) in &self.receivers {
             if let Some(m) = elided_receiver.get(scope.0 as usize).copied().flatten() {
-                use crate::model::file_analysis::{Binding, Place};
                 var_at.entry(span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
+            }
+        }
+        for r in self.receiver_sites.iter().filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing)) {
+            if let Some(m) = owning_method.get(r.scope.0 as usize).copied().flatten() {
+                var_at.entry(r.span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
