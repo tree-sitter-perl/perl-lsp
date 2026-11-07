@@ -155,7 +155,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // f(..)` flow edge targets it. A member call (`recv.m(..)`)
             // carries its receiver, the `@member.recv` of the same match.
             let in_match = |cap: Capture| ad.in_match(e.match_id, cap);
+            // A callee named by its spelling (`ns::f(..)`) resolves by
+            // that spelling, which a free callee's lookup does not read
+            // yet: it mints no call value (`docs/adr/calls-are-invokes.md`).
             let callee = in_match(Capture::Ref(RefCap::Call))
+                .filter(|_| in_match(Capture::RefSpelled).is_none())
                 .map(|x| (x.text.clone(), None))
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;
@@ -191,6 +195,8 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     span,
                     receiver: recv.span(),
                     member: member.clone(),
+                    token: name.span(),
+                    written: false,
                 });
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
@@ -323,11 +329,22 @@ pub(super) fn finish(st: &mut ExtractState) {
     // decided by its receiver's type, which only the assembled analysis
     // answers (`skeleton::settle_member_writes`). A name's place is its
     // binding, which `@flow.target` writes and rebinds; a place no read
-    // projects (a call, a literal) takes nothing.
+    // projects (a call, a literal) takes nothing. The place is written
+    // whether or not a value flows in (a compound assignment states none),
+    // and once however many patterns name it: a plain `=` is both a write
+    // and a write of a value. The read itself is marked written here, while
+    // its span is still its own node's: a macro remap can fold the spans of
+    // an expansion onto one another.
+    let mut written = std::collections::HashSet::new();
+    let reads: std::collections::HashMap<Span, usize> =
+        out.member_reads.iter().enumerate().map(|(i, m)| (m.span, i)).collect();
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
         let read = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last();
-        if read.is_some() {
+        if read.is_some() && written.insert(place.span()) {
             out.place_writes.push(place.span());
+            if let Some(&i) = reads.get(&place.span()) {
+                out.member_reads[i].written = true;
+            }
         }
         if let (Some((receiver, member)), Some(value)) = (read, source_value_span(ad, &st.minted, place.match_id)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
