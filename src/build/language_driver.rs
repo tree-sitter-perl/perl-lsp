@@ -1197,8 +1197,9 @@ fn remap_spans(
         *receiver = rspan(*receiver);
         *value = rspan(*value);
     }
-    for w in place_writes.iter_mut() {
+    for (w, lands) in place_writes.iter_mut() {
         *w = rspan(*w);
+        *lands = r(*lands);
     }
     for n in place_narrowings.iter_mut() {
         let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;

@@ -1677,7 +1677,7 @@ impl Ref {
                     member_op: member_op.as_ref(),
                 })
             }
-            RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op } => {
+            RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op, .. } => {
                 Some(MemberSite {
                     invocant,
                     invocant_span: *invocant_span,
@@ -1685,6 +1685,15 @@ impl Ref {
                     member_op: member_op.as_ref(),
                 })
             }
+            _ => None,
+        }
+    }
+
+    /// The place a member value access denotes, where a narrowing gives it
+    /// a value.
+    pub fn access_place(&self) -> Option<&Place> {
+        match &self.kind {
+            RefKind::FieldAccess { place, .. } => place.as_deref(),
             _ => None,
         }
     }
@@ -2384,6 +2393,10 @@ pub enum RefKind {
         /// The member token alone (`r.span` may cover the whole access).
         member_name_span: Span,
         member_op: Option<(MemberOp, Span)>,
+        /// The place the access denotes (`$this->x` → the method's object →
+        /// `x`), where a narrowing gives that place a value; elsewhere the
+        /// place answers nothing and is not kept.
+        place: Option<Box<Place>>,
     },
     /// A name an import binds from another module (python's `from m import
     /// Foo`): a reference to the def the name resolves to, pinned through

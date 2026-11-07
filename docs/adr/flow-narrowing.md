@@ -334,6 +334,13 @@ PHP's document declares its atoms (`instanceof`; a single-argument
 `isset`, `!== null`; `=== null`, `is_null`), its connectives and its
 positions; a property of `$this` is a place of the method's object
 (`Binding::Receiver`), so a guard on it narrows the property's receiver.
+A write ends a place's narrowing where it lands, as it ends a variable's
+(an assignment's end, after every read it makes), so the written access
+reads the place as it held coming in. A member value access carries its
+own place where a narrowing gives that place a value
+(`Ref::access_place`), and the `readonly-write` rule asks it: a write to
+a member a guard proves unset (`!isset($this->x)`, `$this->x === null`)
+is a lazy init, as `??=` is.
 
 An atom whose match carries its own positions is its own condition, with
 no refinement capture: the pack's `narrow_guard` reads its `@narrow.guard`

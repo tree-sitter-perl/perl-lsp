@@ -3013,3 +3013,47 @@ function f($a, $b) {
     assert_eq!(var("a", "$a->run"), class("Foo"), "the right of `and`");
     assert_eq!(var("b", "$b->run"), None, "the right of `||` holds the failed test: set");
 }
+
+/// A write a guard proves lands where the member holds nothing is a lazy
+/// init, as `??=` is: `!isset`, `=== null` and the rest of a block after
+/// an `isset` exit all say so. The write itself ends what the guard
+/// proved, so a second write in the same arm is no init. A write from
+/// outside the class is outside its set scope whatever guards it.
+#[cfg(feature = "php")]
+#[test]
+fn a_write_where_a_guard_proves_the_member_unset_is_a_lazy_init() {
+    use crate::model::file_analysis::MisplacedWriteKind::{OutsideConstructor as InClass, OutsideFamily as Outside};
+    let src = "<?php
+class Lazy {
+    public readonly array $a;
+    public readonly ?array $b;
+    public readonly array $c;
+    public readonly array $d;
+    public readonly array $e;
+    public function get() {
+        if (!isset($this->a)) { $this->a = []; }
+        if ($this->b === null) {
+            $this->b = [];
+        }
+        if (isset($this->c)) {
+            return $this->c;
+        }
+        $this->c = [];
+        if (!isset($this->d)) { $this->d = []; $this->d = [1]; }
+        $this->e = [];
+    }
+}
+function prime(Lazy $l) {
+    if (!isset($l->a)) { $l->a = []; }
+}
+";
+    let fa = php(src);
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    let at = |row: usize, member: &str, kind| (row, member.to_string(), kind);
+    assert_eq!(found, [at(16, "d", InClass), at(17, "e", InClass), at(21, "a", Outside)]);
+}
+

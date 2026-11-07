@@ -260,9 +260,9 @@ pub struct SkeletonAnalysis {
     /// makes the access a place (`PackPlaces`).
     pub member_reads: Vec<MemberRead>,
     /// Member places an access writes (`obj.x = …`, `obj.x.clear()`), by
-    /// the written member read's span, value or not: what ends a narrowing
-    /// or a move of that place.
-    pub place_writes: Vec<crate::model::file_analysis::Span>,
+    /// the written member read's span, value or not, and where the write
+    /// lands: what ends a narrowing or a move of that place.
+    pub place_writes: Vec<(crate::model::file_analysis::Span, tree_sitter::Point)>,
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
     pub place_narrowings: Vec<PlaceNarrowing>,
@@ -1358,7 +1358,7 @@ impl SkeletonAnalysis {
         {
             let name_at: std::collections::HashMap<tree_sitter::Point, Span> =
                 places.name_reads().map(|s| (s.start, s)).collect();
-            place_writes.extend(self.flow_edges.iter().filter_map(|e| name_at.get(&e.target_at).copied()));
+            place_writes.extend(self.flow_edges.iter().filter_map(|e| Some((*name_at.get(&e.target_at)?, e.target_at))));
         }
         let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
             .into_iter()
@@ -1459,12 +1459,14 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
+                        let place = places.access(inv_span, &valued).map(Box::new);
                         let invocant = places.receiver(inv_span, invocant, &valued);
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
                             member_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
+                            place,
                         }
                     }
                     // `recv.f(…)`: the SAME MethodCall ref core resolves for
@@ -1630,6 +1632,7 @@ impl SkeletonAnalysis {
                             invocant_span: None,
                             member_name_span: *span,
                             member_op: None,
+                            place: None,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),
