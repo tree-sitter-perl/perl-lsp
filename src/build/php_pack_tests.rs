@@ -860,6 +860,42 @@ fn a_promoted_parameter_binds_in_its_constructor() {
     assert_eq!(r.resolved_symbol(), Some(local.id));
 }
 
+const UNBOUND: &str = "<?php
+class C {
+    public $x;
+    public function foo() {}
+    public function m() { return $x; }
+    public function n() { return $foo; }
+}
+";
+
+/// A token a query captured but nothing binds has no definition: the
+/// by-word last resort is for tokens no query captures, so it never lands
+/// a method's bare `$x` on the property, or a bare `$foo` on the method
+/// its word spells.
+#[test]
+fn an_unbound_captured_token_has_no_definition() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from("/fake/php/App/C.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(UNBOUND));
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let defs = |row: usize, column: usize| {
+        let at = tree_sitter::Point { row, column };
+        assert!(file.ref_at(at).is_some(), "a query captured {row}:{column}");
+        resolve(&store, &file, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at, Some(&idx), OverrideScope::default())
+            .with_source(UNBOUND)
+            .definitions()
+            .into_iter()
+            .map(|l| (l.span.start.row, l.span.start.column))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(defs(4, 34), [], "a bare `$x` is not the property");
+    assert_eq!(defs(5, 34), [], "a bare `$foo` is not the method");
+}
+
 /// Every class a type position names is a class reference through the
 /// use-map, so rename of the class rewrites property, parameter, nullable,
 /// union, qualified and return spellings.
