@@ -1653,10 +1653,73 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
 }
 
-/// A class reference answered by widening: the identity the file names,
-/// which nothing indexed declares, and the same-leaf class that stood in.
+/// A declaration a call lands on across files: the file, the declaring
+/// symbol's span, and the identity it is filed under.
+#[derive(Debug, Clone)]
+pub struct CalleeDecl {
+    pub module: std::sync::Arc<CachedModule>,
+    pub span: Span,
+    pub identity: String,
+}
+
+/// Where the function a call names (`FileAnalysis::function_identities`)
+/// is declared across files, with the widening verdict: the declarations
+/// of the first of its identities anything `index` holds declares — so a
+/// bare call reaches its namespace's function before the global one —
+/// else, in a use-map language, every function sharing its leaf, stamped
+/// widened, as a class identity nothing indexed declares widens
+/// (`ScopedLookup::use_map_candidates`): the over-approximation dirty code
+/// wants, said out loud by the caller.
+pub fn callee_declarations(
+    index: &dyn CrossFileLookup,
+    identities: &[String],
+    names: &NameSpellings,
+) -> (Vec<CalleeDecl>, bool) {
+    let declared_in = |c: std::sync::Arc<CachedModule>, matches: &dyn Fn(&FileAnalysis) -> Option<(Span, String)>| {
+        let fa = index.symbols_present(&c);
+        matches(&fa).map(|(span, identity)| CalleeDecl { module: c, span, identity })
+    };
+    for identity in identities {
+        let found: Vec<CalleeDecl> = index
+            .visible_def_candidates(identity)
+            .into_iter()
+            .filter_map(|c| {
+                declared_in(c, &|fa| fa.declared_callee(identity).map(|s| (s.selection_span, identity.clone())))
+            })
+            .collect();
+        if !found.is_empty() {
+            return (found, false);
+        }
+    }
+    let (Some(first), Some(_)) = (identities.first(), names.use_map_sep()) else {
+        return (Vec::new(), false);
+    };
+    let leaf = name_match_key(first, names);
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let widened: Vec<CalleeDecl> = index
+        .leaf_def_candidates(&leaf)
+        .into_iter()
+        .chain(index.def_candidates(&leaf))
+        .filter(|c| seen.insert(c.path.to_path_buf()))
+        .filter_map(|c| {
+            declared_in(c, &|fa| {
+                fa.symbols()
+                    .iter()
+                    .filter(|s| s.name == leaf && s.kind == SymKind::Sub)
+                    .map(|s| (s.selection_span, fa.linkage_identity(s).into_owned()))
+                    .find(|(_, identity)| !identities.contains(identity))
+            })
+        })
+        .collect();
+    let stood_in = !widened.is_empty();
+    (widened, stood_in)
+}
+
+/// A class or function reference answered by widening: the identity the
+/// file names, which nothing indexed declares, and the same-leaf one that
+/// stood in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WidenedClassRef {
+pub struct WidenedRef {
     pub span: Span,
     pub named: String,
     pub resolved: String,

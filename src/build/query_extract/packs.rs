@@ -18,8 +18,9 @@ pub struct LangPack {
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
     pub names: NameSpellings,
-    /// Where a bare function call finds its function. Read by the extractor
-    /// as it names each free call, so no file carries it.
+    /// Where a bare function call finds its function, registered by id
+    /// with the lattice: the extractor names each free call by it and
+    /// resolution looks across files by it, so no file carries it.
     pub functions: FunctionLookup,
     /// Which cross-family types the language's joins fold into one another
     /// (`docs/adr/union-types.md`). Registered by language id
@@ -117,7 +118,7 @@ pub struct LangPack {
 impl LangPack {
     /// What every file of this language shares, registered by its id.
     pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
-        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction, self.member_spaces.clone())
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction, self.member_spaces.clone(), self.functions)
     }
 
     /// Every `&'static str` this pack declares, tagged with the field it
@@ -221,21 +222,4 @@ pub(super) fn param_return_expr(
     }
 }
 
-/// Where a bare (unqualified) function call finds its function in a
-/// use-map language. A qualified call resolves like a class spelling in
-/// both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FunctionLookup {
-    /// The global function of that name.
-    ///
-    /// TODO(module-functions): Python files its functions by bare name, not
-    /// under their module, so a call names the leaf. Filed under the
-    /// module, a call would resolve through the use-map like a class
-    /// spelling (`from app.a import helper`).
-    #[default]
-    Global,
-    /// The namespace in force when it declares the function, else the
-    /// global namespace: PHP's fallback for an unqualified function. (A
-    /// `use function` row names one too; those rows are not read yet.)
-    NamespaceThenGlobal,
-}
+pub use crate::model::conventions::FunctionLookup;

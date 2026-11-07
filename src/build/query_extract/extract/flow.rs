@@ -226,7 +226,9 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     Some((name, Some(recv.span())))
                 });
             if let Some((token, receiver)) = callee {
-                let (callee, callee_at) = ((pack.shape_name)(&token.text), token.start);
+                // the callee as the match spells it, as its reference reads it
+                let written = in_match(Capture::RefSpelled).map_or(&token.text, |s| &s.text);
+                let (callee, callee_at) = ((pack.shape_name)(written), token.start);
                 let span = e.span();
                 let args = super::members::call_args(ad, e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {

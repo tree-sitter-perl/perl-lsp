@@ -501,9 +501,12 @@ pub enum Callee {
     /// function. `constructs`: in a language where calling a class
     /// constructs it, the class identity the name spells at the call, so a
     /// class declared under it in another file answers with an instance of
-    /// itself. Kept at the END for bincode variant-index stability (bump
+    /// itself. `fallback`: the name looked up when nothing indexed declares
+    /// `name` — the next a bare spelling may name in its language (PHP's
+    /// unqualified call: the namespace's function, then the global one).
+    /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
-    Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String> },
+    Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String>, fallback: Option<String> },
     /// A construction (`new Foo(…)`): an instance of the class `lookup`
     /// names. It runs that class's constructor, the member flagged
     /// `CONSTRUCTOR` in its MRO, whose name the site never spells. Kept at

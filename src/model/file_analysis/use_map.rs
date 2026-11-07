@@ -42,9 +42,9 @@ impl QualifiedName {
     }
 }
 
-/// One `use` row of a use-map language: the class it imports, the span of
-/// its name token, the alias it is bound under (`use A\B as C`), and the
-/// region it binds in.
+/// One `use` row of a use-map language: the name it imports, the span of
+/// its name token, the alias it is bound under (`use A\B as C`), the
+/// region it binds in, and the table it binds in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UseRow {
     pub span: Span,
@@ -55,12 +55,36 @@ pub struct UseRow {
     /// only from the import onward narrows this span's start; consumers
     /// only ever ask `binds_at`.
     pub reach: Span,
+    /// Which of the language's name tables the row binds in, as the
+    /// document states it.
+    pub table: NameTable,
 }
 
 impl UseRow {
     pub fn binds_at(&self, site: Point) -> bool {
         contains_point(&self.reach, site)
     }
+}
+
+/// The name table an import row binds in. A spelling is looked up in one
+/// table, so a class alias and a function alias of the same spelling never
+/// meet (php's `use A\f` beside `use function B\f`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum NameTable {
+    /// Classes, and the namespaces a qualified spelling's head names. A
+    /// language with one table for every name binds every row here.
+    #[default]
+    Class,
+    /// Free functions (php's `use function`).
+    Function,
+    /// Free constants (php's `use const`).
+    Constant,
+}
+
+/// The row of `rows` whose name token covers `span`: a token written inside
+/// an import row names that row's import, whatever the rows around it say.
+pub fn row_covering<'r>(rows: &'r [UseRow], span: &Span) -> Option<&'r UseRow> {
+    rows.iter().find(|row| super::pack_facts::span_within(span, &row.span))
 }
 
 /// The classes a file declares, asked by the scope each is declared
@@ -210,19 +234,52 @@ impl<'a> UseMap<'a> {
     }
 
     /// The class a single bare segment names: a class nested in a class
-    /// whose body the site sees first (`ScopeStep`), then an alias, then
-    /// an unaliased row's leaf — a row bound under an alias binds the
-    /// alias, never its leaf (`use A\Event as ScriptEvent` leaves `Event`
-    /// to the file's own namespace) — then the file's own namespace.
+    /// whose body the site sees first (`ScopeStep`), then a class row's
+    /// binding, then the file's own namespace.
     fn bind(&self, head: &str) -> QualifiedName {
         if let Some(nested) = self.scope_step.and_then(|step| step.member_class(head, self.sep)) {
             return nested;
         }
-        let rows = || self.rows.iter().filter(|r| self.site.is_none_or(|p| r.binds_at(p)));
+        self.row_binding(NameTable::Class, head)
+            .unwrap_or_else(|| QualifiedName::new(self.own_namespace.unwrap_or(""), head))
+    }
+
+    /// The name a row of `table` that reaches the site binds `head` to: an
+    /// alias, then an unaliased row's leaf — a row bound under an alias
+    /// binds the alias, never its leaf (`use A\Event as ScriptEvent` leaves
+    /// `Event` to the file's own namespace).
+    fn row_binding(&self, table: NameTable, head: &str) -> Option<QualifiedName> {
+        let rows = || self.rows.iter().filter(|r| r.table == table && self.site.is_none_or(|p| r.binds_at(p)));
         rows()
             .find(|r| r.alias.as_deref() == Some(head))
             .or_else(|| rows().find(|r| r.alias.is_none() && r.name.leaf == head))
             .map(|r| r.name.clone())
-            .unwrap_or_else(|| QualifiedName::new(self.own_namespace.unwrap_or(""), head))
+    }
+
+    /// The names a function or constant spelling may denote, in the order
+    /// the language looks them up. A qualified spelling names one, resolved
+    /// like a class spelling (its head through the class table: a namespace
+    /// alias is a class row); a bare one a row of `table` binds names that
+    /// row's; any other bare one is the language's `FunctionLookup` — the
+    /// global name, or the namespace in force first and then the global
+    /// one, whichever is declared.
+    pub fn free_name_ladder(
+        &self,
+        table: NameTable,
+        written: &str,
+        lookup: crate::model::conventions::FunctionLookup,
+    ) -> Vec<QualifiedName> {
+        use crate::model::conventions::FunctionLookup;
+        if written.contains(self.sep) {
+            return vec![self.resolve(written)];
+        }
+        if let Some(bound) = self.row_binding(table, written) {
+            return vec![bound];
+        }
+        let global = QualifiedName::new("", written);
+        match (lookup, self.own_namespace) {
+            (FunctionLookup::NamespaceThenGlobal, Some(own)) => vec![QualifiedName::new(own, written), global],
+            _ => vec![global],
+        }
     }
 }

@@ -1185,6 +1185,45 @@ impl FileAnalysis {
         }
     }
 
+    /// The identities the function a call or imported-name token `r` names
+    /// may have, in the order its language looks them up — the function
+    /// half of `spelled_identity`, through the same use-map. A token inside
+    /// one of the file's own function rows names the row's function; a
+    /// qualified spelling names one function, its qualifier resolved like a
+    /// class spelling's; a bare one a `use function` row binds names that
+    /// row's; any other bare one is the language's `FunctionLookup` (PHP's
+    /// namespace first, then the global function). A language without a
+    /// use-map names the leaf.
+    pub fn function_identities(&self, r: &Ref) -> Vec<String> {
+        let leaf = r.unqualified_target_name(self.names());
+        let Some(sep) = self.pack.names.use_map_sep() else {
+            return vec![leaf.to_string()];
+        };
+        if let Some(row) = self.pack.use_row_covering(&r.span).filter(|row| row.table == NameTable::Function) {
+            return vec![row.name.identity(sep)];
+        }
+        match self.use_map_in(r.span.start, r.scope) {
+            Some(map) => map
+                .free_name_ladder(NameTable::Function, &r.target_name, crate::model::conventions::conventions_of(&self.language).functions)
+                .iter()
+                .map(|q| q.identity(sep))
+                .collect(),
+            None => vec![leaf.to_string()],
+        }
+    }
+
+    /// This file's own declaration a call names under `identity` — the
+    /// function half of `find_type_decl`: a function, or a value a call can
+    /// name (a variable, an enumerator), filed under `identity`
+    /// (`linkage_identity`).
+    pub fn declared_callee(&self, identity: &str) -> Option<&Symbol> {
+        let leaf = name_match_key(identity, self.names());
+        self.symbols()
+            .iter()
+            .filter(|s| s.name == leaf)
+            .find(|s| matches!(s.kind, SymKind::Sub | SymKind::Variable | SymKind::Enumerator) && self.linkage_identity(s) == identity)
+    }
+
     /// The class a call-shaped token names, for a use-map language where
     /// calling a class constructs it (python's `from m import User`,
     /// `User()`; `NameSpellings::class_call`): the token's spelled
@@ -1220,28 +1259,42 @@ impl FileAnalysis {
             .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
     }
 
-    /// The class references in this file whose identity nothing indexed
-    /// declares, answered instead by a same-leaf class of another namespace
-    /// — the widened answers the `resolved-by-widening` lane says out loud.
-    /// `index` is this file's own scoped view; a scope that never widens
-    /// (every language but a use-map one) yields nothing. A class this file
-    /// declares itself is never widened, indexed or not.
-    pub fn widened_class_references(&self, index: &dyn CrossFileLookup) -> Vec<WidenedClassRef> {
+    /// The class and function references in this file whose identity
+    /// nothing indexed declares, answered instead by a same-leaf class or
+    /// function of another namespace — the widened answers the
+    /// `resolved-by-widening` lane says out loud. `index` is this file's own
+    /// scoped view; a scope that never widens (every language but a use-map
+    /// one) yields nothing. A name this file declares itself is never
+    /// widened, indexed or not.
+    pub fn widened_references(&self, index: &dyn CrossFileLookup) -> Vec<WidenedRef> {
         if self.names().use_map_sep().is_none() {
             return Vec::new();
         }
-        let mut verdicts: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let mut verdicts: std::collections::HashMap<Vec<String>, Option<(String, String)>> = std::collections::HashMap::new();
         let mut out = Vec::new();
-        for r in self.refs().iter().filter(|r| matches!(r.kind, RefKind::PackageRef)) {
-            let named = self.spelled_identity(r);
-            let stand_in = verdicts.entry(named.clone()).or_insert_with(|| {
-                if self.find_type_decl(&named).is_some() {
+        for r in self.refs().iter() {
+            let named = match r.kind {
+                RefKind::PackageRef => vec![self.spelled_identity(r)],
+                RefKind::FunctionCall | RefKind::ImportedName => self.function_identities(r),
+                _ => continue,
+            };
+            let class = matches!(r.kind, RefKind::PackageRef);
+            let verdict = verdicts.entry(named).or_insert_with_key(|named| {
+                let first = named.first()?.clone();
+                if class {
+                    if self.find_type_decl(&first).is_some() {
+                        return None;
+                    }
+                    return widened_class_stand_ins(index, &first, self.names()).into_iter().next().map(|w| (first, w.class));
+                }
+                if named.iter().any(|id| self.declared_callee(id).is_some()) {
                     return None;
                 }
-                widened_class_stand_ins(index, &named, self.names()).into_iter().next().map(|w| w.class)
+                let (decls, widened) = callee_declarations(index, named, self.names());
+                widened.then(|| decls.into_iter().next().map(|d| (first, d.identity))).flatten()
             });
-            if let Some(resolved) = stand_in {
-                out.push(WidenedClassRef { span: r.span, named, resolved: resolved.clone() });
+            if let Some((named, resolved)) = verdict {
+                out.push(WidenedRef { span: r.span, named: named.clone(), resolved: resolved.clone() });
             }
         }
         out
@@ -1318,7 +1371,7 @@ impl FileAnalysis {
         };
         let mut visible: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        for row in &self.pack.use_rows {
+        for row in self.pack.use_rows.iter().filter(|r| r.table == NameTable::Class) {
             let QualifiedName { namespace: ns, leaf } = &row.name;
             match &row.alias {
                 // An aliased row pins the alias spelling, never the real

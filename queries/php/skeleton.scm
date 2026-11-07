@@ -256,8 +256,8 @@
  (#not-has-parent? @expr.read.var scoped_property_access_expression)
  (#not-eq? @expr.read.var "$this"))
 ; `$this` is no local: it is the object the enclosing method runs on, an
-; instance of the method's class.
-((variable_name) @receiver.enclosing
+; instance of the method's class, and its name token refers to that object.
+((variable_name (name) @ref.receiver) @receiver.enclosing
  (#eq? @receiver.enclosing "$this"))
 
 ; A literal is a value of its own kind, stated only where that value flows
@@ -596,27 +596,69 @@
 (class_constant_access_expression . (qualified_name (name) @ref.type) @ref.spelled)
 
 ; ---- the use-map ----
-; A row binds a class unless its keyword says it binds a function or a
-; constant; those rows name no class, so they never enter the map. The
-; keyword is an anonymous token, so the row's own text excludes it. The
-; `.` anchor pins the name to the clause's first child, so the alias node
-; never matches as a second name. An imported class's leaf references the
-; class the row names, so a rename of the class rewrites the `use` line
-; too; the ref is the leaf alone, since the row it sits in already names
-; the class in full (`spelled_identity`).
-((namespace_use_declaration
+; A row binds in the table its keyword names: none the class table,
+; `function` the function table, `const` the constant table, so a class and
+; a function imported under one name never meet. A group's keyword covers
+; every clause in it; a clause outside a group, or in a group without one,
+; carries its own. The `.` anchor pins the name to the clause's first named
+; child, so the alias node never matches as a second name. An imported
+; class's leaf references the class the row names, so a rename of the class
+; rewrites the `use` line too; the ref is the leaf alone, since the row it
+; sits in already names the class in full (`spelled_identity`). An imported
+; function's leaf references the function the row names the same way.
+(namespace_use_declaration
   (namespace_use_clause
+    !type
     . [(name) @import.name @ref.type
        (qualified_name (name) @ref.type) @import.name]
-    alias: (name)? @import.alias) @_clause)
- (#not-match? @_clause "^(function|const)\\s"))
-; `use A\B\{C, D as E}`: each clause hangs off the shared prefix. A group
-; may carry the keyword for all its clauses or each clause its own.
-((namespace_use_declaration
+    alias: (name)? @import.alias))
+(namespace_use_declaration
+  (namespace_use_clause
+    type: "function" @import.function
+    . [(name) @import.name @ref.import
+       (qualified_name (name) @ref.import) @import.name]
+    alias: (name)? @import.alias))
+(namespace_use_declaration
+  (namespace_use_clause
+    type: "const" @import.constant
+    . [(name) (qualified_name)] @import.name
+    alias: (name)? @import.alias))
+; `use A\B\{C, D as E}`: each clause hangs off the shared prefix.
+(namespace_use_declaration
+  !type
   (namespace_name) @import.prefix
   body: (namespace_use_group
     (namespace_use_clause
+      !type
       . (name) @import.name @ref.type
-      alias: (name)? @import.alias) @_clause)) @_group
- (#not-match? @_group "^use\\s+(function|const)\\s")
- (#not-match? @_clause "^(function|const)\\s"))
+      alias: (name)? @import.alias)))
+(namespace_use_declaration
+  type: "function" @import.function
+  (namespace_name) @import.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      . (name) @import.name @ref.import
+      alias: (name)? @import.alias)))
+(namespace_use_declaration
+  type: "const" @import.constant
+  (namespace_name) @import.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      . (name) @import.name
+      alias: (name)? @import.alias)))
+(namespace_use_declaration
+  !type
+  (namespace_name) @import.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      type: "function" @import.function
+      . (name) @import.name @ref.import
+      alias: (name)? @import.alias)))
+(namespace_use_declaration
+  !type
+  (namespace_name) @import.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      type: "const" @import.constant
+      . (name) @import.name
+      alias: (name)? @import.alias)))

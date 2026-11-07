@@ -61,6 +61,29 @@ pub struct LanguageConventions {
     /// The namespaces its classes hold their members in
     /// (`docs/adr/member-kinds.md`).
     pub member_spaces: crate::model::file_analysis::MemberSpaces,
+    /// Where an unqualified, unimported function or constant spelling
+    /// finds its name.
+    pub functions: FunctionLookup,
+}
+
+/// Where a bare function (or constant) spelling no import row binds finds
+/// its name, in a use-map language. A qualified spelling resolves like a
+/// class spelling, and one an import row binds names that row's, in every
+/// language (`UseMap::free_name_ladder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FunctionLookup {
+    /// The global name of that spelling.
+    ///
+    /// TODO(module-functions): Python files its functions by bare name, not
+    /// under their module, so a call names the leaf. Filed under the
+    /// module, a call would resolve through the use-map like a class
+    /// spelling (`from app.a import helper`).
+    #[default]
+    Global,
+    /// The namespace in force first, then the global namespace: PHP's
+    /// fallback for an unqualified function or constant, decided at run
+    /// time by which of the two is declared.
+    NamespaceThenGlobal,
 }
 
 impl LanguageConventions {
@@ -72,8 +95,9 @@ impl LanguageConventions {
         type_display: fn(&str) -> Option<&'static str>,
         construction: ConstructionKey,
         member_spaces: crate::model::file_analysis::MemberSpaces,
+        functions: FunctionLookup,
     ) -> Self {
-        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction, member_spaces }
+        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction, member_spaces, functions }
     }
 
     /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
@@ -109,6 +133,7 @@ pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     construction: ConstructionKey::Constructor,
     // A call reaches a sub, never a `field` of the same name.
     member_spaces: MemberSpaces::PER_FAMILY,
+    functions: FunctionLookup::Global,
 };
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
@@ -148,6 +173,7 @@ static UNREGISTERED: LanguageConventions =
         type_display: engine_type_words,
         construction: ConstructionKey::Constructor,
         member_spaces: MemberSpaces::PER_FAMILY,
+        functions: FunctionLookup::Global,
     };
 
 fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {

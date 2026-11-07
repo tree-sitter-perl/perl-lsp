@@ -1,4 +1,4 @@
-use super::use_map::{QualifiedName, UseMap, UseRow};
+use super::use_map::{NameTable, QualifiedName, UseMap, UseRow};
 use super::Span;
 
 fn row(namespace: &str, leaf: &str, alias: Option<&str>) -> UseRow {
@@ -7,6 +7,7 @@ fn row(namespace: &str, leaf: &str, alias: Option<&str>) -> UseRow {
         name: QualifiedName::new(namespace, leaf),
         alias: alias.map(str::to_string),
         reach: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(99, 0) },
+        table: NameTable::Class,
     }
 }
 

@@ -209,7 +209,7 @@ impl PackFacts {
 
     /// The `use` row whose name token covers `span`, if any.
     pub fn use_row_covering(&self, span: &Span) -> Option<&UseRow> {
-        self.use_rows.iter().find(|row| span_within(span, &row.span))
+        super::row_covering(&self.use_rows, span)
     }
 
     /// The line an import quick-fix inserts at: right after the last import
@@ -256,7 +256,7 @@ impl PackFacts {
     }
 }
 
-fn span_within(inner: &Span, outer: &Span) -> bool {
+pub(super) fn span_within(inner: &Span, outer: &Span) -> bool {
     (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
         && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
 }

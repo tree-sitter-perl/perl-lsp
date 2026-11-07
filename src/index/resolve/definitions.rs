@@ -1055,8 +1055,35 @@ impl<'a> CandidateSet<'a> {
         // (`absl::StatusCode::kNotFound`) is already handled at the top by the
         // owner-anchored step (`qualifier_at_point` + `member_def_location`),
         // which fires unconditionally for pack routing before this tail.
+        //
+        // A call names a function by identity (`function_identities`): it
+        // lands on the first its language looks up that something declares,
+        // and on a same-leaf stand-in only when nothing does, labeled with
+        // the function it actually is.
         if let Some(r) = analysis.ref_at(point) {
-            if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName | RefKind::Variable) {
+            if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
+                let identities = analysis.function_identities(r);
+                let (decls, widened) = crate::model::file_analysis::callee_declarations(idx, &identities, analysis.names());
+                let mut decls = decls.into_iter().filter(|d| Url::from_file_path(&d.module.path).is_ok()).peekable();
+                if !widened {
+                    if let Some(d) = decls.next() {
+                        // A call resolving to a header PROTOTYPE offers the
+                        // bodied definition first (decl→def ranking).
+                        let loc = RefLocation::at(FileKey::Path(d.module.path.clone()), d.span, AccessKind::Declaration);
+                        return self.preferred_definitions(loc, &idx.whole_present(&d.module));
+                    }
+                } else if decls.peek().is_some() {
+                    let named = identities.first().map(String::as_str).unwrap_or_default();
+                    return decls
+                        .map(|d| {
+                            RefLocation::at(FileKey::Path(d.module.path.clone()), d.span, AccessKind::Declaration)
+                                .with_rewrite(SiteRewrite::Skip)
+                                .with_label(Some(format!("widened: `{}` stands in for `{}`", d.identity, named)))
+                        })
+                        .collect();
+                }
+            }
+            if matches!(r.kind, RefKind::Variable) {
                 let name = r.unqualified_target_name(analysis.names());
                 for cached in idx.visible_def_candidates(name) {
                     let whole = idx.whole_present(&cached);
