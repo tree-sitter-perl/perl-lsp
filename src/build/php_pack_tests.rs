@@ -847,6 +847,7 @@ trait T {
 /// PHP names a property only through a receiver, so a method's bare `$x`
 /// is a local of the method or nothing — never the property the class
 /// body declares (`@scope.direct`).
+#[cfg(feature = "php")]
 #[test]
 fn a_bare_variable_in_a_method_never_names_a_property() {
     use crate::model::file_analysis::RefKind;
@@ -871,6 +872,7 @@ fn a_bare_variable_in_a_method_never_names_a_property() {
 
 /// The promoted pair still binds in its constructor: the token is the
 /// constructor's local, and the local is in force in the constructor body.
+#[cfg(feature = "php")]
 #[test]
 fn a_promoted_parameter_binds_in_its_constructor() {
     use crate::model::file_analysis::RefKind;
