@@ -246,7 +246,7 @@
 (dictionary) @expr.lit.hashref
 
 ; Guard narrowing: `isinstance(x, Foo)` refines x to Foo over the arm it
-; enters, tagged `@narrow.arm` — an `if`/`elif` body, the value a conditional
+; enters, tagged `@narrow.then` — an `if`/`elif` body, the value a conditional
 ; expression yields when the test holds, the right of `and`. The pack's
 ; narrow_guard maps the guard + type token to the refinement; core attaches
 ; it in the guard's scope over the arm (an `if` body is no scope in Python).
@@ -255,14 +255,14 @@
   condition: (call
     function: (identifier) @narrow.guard
     arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  consequence: (block) @narrow.arm)
+  consequence: (block) @narrow.then)
 (elif_clause
   condition: (call
     function: (identifier) @narrow.guard
     arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  consequence: (block) @narrow.arm)
+  consequence: (block) @narrow.then)
 (conditional_expression
-  (_) @narrow.arm
+  (_) @narrow.then
   .
   "if"
   .
@@ -274,7 +274,7 @@
     function: (identifier) @narrow.guard
     arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
   operator: "and"
-  right: (_) @narrow.arm)
+  right: (_) @narrow.then)
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.
