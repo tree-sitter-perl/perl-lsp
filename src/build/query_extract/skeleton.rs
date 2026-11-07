@@ -95,8 +95,8 @@ pub struct SkelRef {
 #[derive(Debug, Clone)]
 pub struct CallSite {
     pub span: Span,
-    /// The callee as its token spells it: a member's name, a free call's
-    /// name token.
+    /// The callee as written: a member's name, a free call's name as its
+    /// match spells it (`@ref.spelled`, a qualified `\Lib\f`).
     pub callee: String,
     /// Where the callee's token starts: the site its name resolves at.
     pub callee_at: tree_sitter::Point,
@@ -906,14 +906,14 @@ impl SkeletonAnalysis {
         for s in symbols.iter().filter(|s| matches!(s.kind, SymKind::Sub)) {
             free_functions.entry((s.package.as_deref().unwrap_or(""), s.name.as_str())).or_insert(s.id);
         }
-        // A free call under a use-map, from its callee as written and where
-        // that token stands: the function it names and the identity a class
-        // of that spelling has there. Its `Invoke` and its reference (an
-        // imported name's too) each ask it of their own capture.
-        let free_call = |written: &str, at: tree_sitter::Point| {
-            let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at, &symbols)?;
-            let function = function_identity(&map, &names, functions, written, &free_functions);
-            Some((function, map.resolve(written).identity(map.sep)))
+        // A free call under a use-map, from its callee as written and the
+        // token it is written at: the functions it may name and the identity
+        // a class of that spelling has there. Its `Invoke` and its reference
+        // (an imported name's too) each ask it of their own capture.
+        let free_call = |written: &str, at: Span| {
+            let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at.start, &symbols)?;
+            let named = FreeCall::named(&map, functions, &self.use_rows, written, at, &free_functions);
+            Some((named, map.resolve(written).identity(map.sep)))
         };
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
@@ -1202,20 +1202,22 @@ impl SkeletonAnalysis {
                         };
                         (callee, Some(WA::Expr(recv)))
                     }
-                    None => match free_call(name, site.callee_at) {
-                        Some((fq, identity)) => {
+                    None => match free_call(name, Span { start: site.callee_at, end: site.callee_at }) {
+                        Some((named, identity)) => {
                             // under a use-map a class is filed under the
                             // identity its spelling names at the call
-                            let local = free_functions
-                                .get(&(fq.namespace.as_str(), fq.leaf.as_str()))
-                                .or_else(|| callee_sid.get(identity.as_str()))
-                                .copied();
+                            let sep = names.use_map_sep().unwrap_or_default();
+                            let local = named
+                                .local
+                                .map(|(_, sid)| sid)
+                                .or_else(|| callee_sid.get(identity.as_str()).copied());
                             (
                                 crate::model::witnesses::Callee::Function {
-                                    name: fq.leaf.clone(),
+                                    name: named.callee().identity(sep),
                                     local,
                                     member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
                                     constructs: calls_construct.then(|| identity.clone()),
+                                    fallback: named.fallback().map(|q| q.identity(sep)),
                                 },
                                 None,
                             )
@@ -1226,6 +1228,7 @@ impl SkeletonAnalysis {
                                 local: callee_sid.get(name.as_str()).copied(),
                                 member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
                                 constructs: calls_construct.then(|| name.clone()),
+                                fallback: None,
                             },
                             None,
                         ),
@@ -1468,9 +1471,11 @@ impl SkeletonAnalysis {
                     // Under a use-map a call, and an imported name, is pinned
                     // to its function's namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call | RefCap::Import => {
-                        if let Some((function, _)) = free_call(&r.name, r.start) {
-                            let namespace = function.namespace.clone();
-                            binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
+                        if let Some((named, _)) = free_call(&r.name, span) {
+                            binding = named
+                                .pinned()
+                                .filter(|f| !f.namespace.is_empty())
+                                .map(|f| RefBinding::Function { package: f.namespace.clone() });
                         }
                         match r.kind {
                             RefCap::Import => RefKind::ImportedName,
@@ -1545,6 +1550,13 @@ impl SkeletonAnalysis {
                             return None;
                         }
                         RefKind::PackageRef
+                    }
+                    // The object a method runs on, named where its body
+                    // spells it: a read of that method's receiver, which
+                    // declares nothing and is no variable of the body's.
+                    RefCap::Receiver => {
+                        binding = Some(RefBinding::Receiver(owning_method.get(r.scope.0 as usize).copied().flatten()?));
+                        RefKind::Variable
                     }
                     // A `goto` label resolves through `label_refs`; the
                     // remaining kinds stay skeleton-only rows.
@@ -1920,27 +1932,56 @@ impl SkeletonAnalysis {
     }
 }
 
-/// The free function `written` names at a use-map site, as its namespace
-/// and leaf: a qualified spelling resolves like a class spelling, a bare
-/// one by the language's `FunctionLookup`.
-fn function_identity(
-    map: &crate::model::file_analysis::UseMap,
-    names: &crate::model::file_analysis::NameSpellings,
-    functions: super::FunctionLookup,
-    written: &str,
-    free_functions: &FreeFunctions,
-) -> crate::model::file_analysis::QualifiedName {
-    use super::FunctionLookup;
-    use crate::model::file_analysis::QualifiedName;
-    if crate::model::file_analysis::split_qualified(written, names).0.is_some() {
-        return map.resolve(written);
+/// The free functions a call written at a use-map site may name: the
+/// language's lookup order over them (`UseMap::free_name_ladder`; a token
+/// inside a `use function` row names that row's), and the first of them
+/// this file declares, which stands for the rest — PHP runs the
+/// namespace's function where it is declared and only then the global one.
+struct FreeCall {
+    ladder: Vec<crate::model::file_analysis::QualifiedName>,
+    local: Option<(usize, crate::model::file_analysis::SymbolId)>,
+}
+
+impl FreeCall {
+    fn named(
+        map: &crate::model::file_analysis::UseMap,
+        functions: super::FunctionLookup,
+        rows: &[crate::model::file_analysis::UseRow],
+        written: &str,
+        at: Span,
+        free_functions: &FreeFunctions,
+    ) -> Self {
+        use crate::model::file_analysis::NameTable;
+        let ladder = match crate::model::file_analysis::row_covering(rows, &at).filter(|row| row.table == NameTable::Function) {
+            Some(row) => vec![row.name.clone()],
+            None => map.free_name_ladder(NameTable::Function, written, functions),
+        };
+        let local = ladder
+            .iter()
+            .enumerate()
+            .find_map(|(i, f)| free_functions.get(&(f.namespace.as_str(), f.leaf.as_str())).map(|&sid| (i, sid)));
+        FreeCall { ladder, local }
     }
-    match functions {
-        FunctionLookup::Global => QualifiedName::new("", written),
-        FunctionLookup::NamespaceThenGlobal => {
-            let own = map.own_namespace.unwrap_or("");
-            QualifiedName::new(if free_functions.contains_key(&(own, written)) { own } else { "" }, written)
+
+    /// The function the call names when it names one for certain: the one
+    /// this file declares, or the only one the spelling can name.
+    fn pinned(&self) -> Option<&crate::model::file_analysis::QualifiedName> {
+        match self.local {
+            Some((i, _)) => self.ladder.get(i),
+            None => self.ladder.first().filter(|_| self.ladder.len() == 1),
         }
+    }
+
+    /// The name the call's `Invoke` looks up: the declared one, else the
+    /// first the language tries.
+    fn callee(&self) -> &crate::model::file_analysis::QualifiedName {
+        &self.ladder[self.local.map_or(0, |(i, _)| i)]
+    }
+
+    /// The name looked up when nothing declares `callee`, for a call this
+    /// file does not resolve: the language's next.
+    fn fallback(&self) -> Option<&crate::model::file_analysis::QualifiedName> {
+        self.local.is_none().then(|| self.ladder.get(1)).flatten()
     }
 }
 

@@ -73,6 +73,11 @@ impl FileAnalysis {
                     if let Some(sym) = r.resolved_symbol().map(|id| self.symbol(id)).filter(|s| !s.is_mention()) {
                         return Some(sym.selection_span);
                     }
+                    // A spelled receiver is an instance of its method's
+                    // class: that class's declaration is what it names.
+                    if let Some(method) = r.receiver_method() {
+                        return self.symbol(method).package.as_deref().and_then(|class| self.find_type_decl(class));
+                    }
                 }
                 RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: pick the sub whose package
@@ -1138,6 +1143,8 @@ impl FileAnalysis {
     pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
+                // The language owns a spelled receiver's name (`$this`).
+                RefKind::Variable if r.receiver_method().is_some() => return None,
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
                 RefKind::FunctionCall | RefKind::ImportedName => {
                     // A CORE-bound ref is a builtin call keyword (`shift`,

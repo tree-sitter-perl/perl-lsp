@@ -121,19 +121,24 @@ use function App\\Helpers\\format;
 use function App\\Helpers\\{wrap};
 use const App\\Limits\\MAX;
 ");
-    let rows: Vec<(&str, &str, Option<&str>)> = fa
+    use crate::model::file_analysis::NameTable::{Class, Function};
+    let rows: Vec<_> = fa
         .pack
         .use_rows
         .iter()
-        .map(|r| (r.name.namespace.as_str(), r.name.leaf.as_str(), r.alias.as_deref()))
+        .map(|r| (r.table, r.name.namespace.as_str(), r.name.leaf.as_str(), r.alias.as_deref()))
         .collect();
     assert_eq!(
         rows,
         [
-            ("Illuminate\\Support", "Collection", None),
-            ("Vendor\\Pkg", "Speaker", Some("Talks")),
-            ("App\\Contracts", "Listener", None),
-            ("App\\Contracts", "Logger", Some("Log")),
+            (Class, "Illuminate\\Support", "Collection", None),
+            (Class, "Vendor\\Pkg", "Speaker", Some("Talks")),
+            (Class, "App\\Contracts", "Listener", None),
+            (Class, "App\\Contracts", "Logger", Some("Log")),
+            (Function, "App\\Contracts", "helper", None),
+            (Function, "App\\Helpers", "format", None),
+            (Function, "App\\Helpers", "wrap", None),
+            (crate::model::file_analysis::NameTable::Constant, "App\\Limits", "MAX", None),
         ]
     );
     // a use-map language's rows are not import paths
@@ -219,12 +224,13 @@ class User extends Model implements Speaker, \\Countable, Sub\\Local {
     assert_eq!(refs, want);
 }
 
-/// A `use function` / `use const` row names no class, whether its keyword
-/// sits on the statement (flat, or a whole group) or on one clause of a
-/// group: it is neither a use-map row nor a class reference.
+/// A `use function` / `use const` row binds in the function or constant
+/// table, whether its keyword sits on the clause, on a whole group, or on
+/// one clause of a group: it names no class, and an imported function's
+/// leaf is a reference to that function.
 #[cfg(feature = "php")]
 #[test]
-fn function_and_const_imports_are_neither_rows_nor_class_references() {
+fn function_and_const_imports_bind_in_their_own_tables() {
     use crate::model::file_analysis::RefKind;
     let fa = php("<?php
 namespace App;
@@ -234,15 +240,42 @@ use function Lib\\Fns\\{wrap, unwrap};
 use const Lib\\Limits\\{MAX};
 use Lib\\Mixed\\{function f, const C, Klass};
 ");
-    let rows: Vec<String> = fa.pack.use_rows.iter().map(|r| r.name.identity("\\")).collect();
-    assert_eq!(rows, ["Lib\\Mixed\\Klass"]);
-    let refs: Vec<&str> = fa
-        .refs()
-        .iter()
-        .filter(|r| matches!(r.kind, RefKind::PackageRef))
-        .map(|r| r.target_name.as_str())
-        .collect();
-    assert_eq!(refs, ["Klass"]);
+    use crate::model::file_analysis::NameTable::{Class, Constant, Function};
+    let rows: Vec<_> = fa.pack.use_rows.iter().map(|r| (r.table, r.name.identity("\\"))).collect();
+    let row = |t, n: &str| (t, n.to_string());
+    assert_eq!(
+        rows,
+        [
+            row(Function, "Lib\\helper"),
+            row(Constant, "Lib\\LIMIT"),
+            row(Function, "Lib\\Fns\\wrap"),
+            row(Function, "Lib\\Fns\\unwrap"),
+            row(Constant, "Lib\\Limits\\MAX"),
+            row(Function, "Lib\\Mixed\\f"),
+            row(Constant, "Lib\\Mixed\\C"),
+            row(Class, "Lib\\Mixed\\Klass"),
+        ]
+    );
+    let refs = |kind: RefKind| -> Vec<(String, Option<String>)> {
+        fa.refs()
+            .iter()
+            .filter(|r| r.kind == kind)
+            .map(|r| (r.target_name.clone(), r.resolved_package().map(str::to_string)))
+            .collect()
+    };
+    assert_eq!(refs(RefKind::PackageRef), [("Klass".to_string(), None)]);
+    let lib = |ns: &str| Some(format!("Lib{ns}"));
+    assert_eq!(
+        refs(RefKind::ImportedName),
+        [
+            ("helper".to_string(), lib("")),
+            ("wrap".to_string(), lib("\\Fns")),
+            ("unwrap".to_string(), lib("\\Fns")),
+            ("f".to_string(), lib("\\Mixed")),
+        ]
+    );
+    // no class of the leaf's spelling is what the row binds
+    assert_eq!(fa.class_spelling_identity("helper", tree_sitter::Point::new(7, 0)), "App\\helper");
 }
 
 /// A class's uses in another file are found by the identity they name:
@@ -1157,7 +1190,11 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
     );
     // `$this` is no local: no read of a variable `this`, and its value is
     // the method's class, in a closure of the method too
-    assert!(fa.refs().iter().all(|r| r.target_name != "this"));
+    // a reference that reads the method's receiver, declaring nothing
+    let reads: Vec<_> = fa.refs().iter().filter(|r| r.target_name == "this").collect();
+    assert!(!reads.is_empty());
+    assert!(reads.iter().all(|r| r.receiver_method().is_some() && r.resolved_symbol().is_none()), "{reads:?}");
+    assert!(fa.symbols().iter().all(|s| s.name != "this" && s.name != "$this"));
     let this = |needle: &str| {
         let start = at(CALLS, needle, 0);
         let span = crate::model::file_analysis::Span { start, end: tree_sitter::Point { column: start.column + 5, ..start } };
@@ -1276,10 +1313,11 @@ namespace Lib;
 function helper(...$xs) {}
 ";
 
-/// A free call is an `Invoke` of the function its name names, and its ref
-/// is pinned to that function's namespace: a bare name is the namespace in
-/// force's own function when the file declares one, else the global one; a
-/// qualified name resolves like a class spelling.
+/// A free call is an `Invoke` of the function its name names, by identity,
+/// and its ref is pinned to that function's namespace: a bare name is the
+/// namespace in force's own function when the file declares one, else that
+/// function falling back to the global one, and pins neither; a qualified
+/// name resolves like a class spelling.
 #[cfg(feature = "php")]
 #[test]
 fn a_free_call_is_an_invoke_of_its_function() {
@@ -1297,10 +1335,10 @@ strlen('x');
     assert_eq!(
         call_invokes(&fa),
         [
-            ("local".to_string(), true, Some(vec![false, true])),
-            ("helper".to_string(), false, Some(vec![false])),
-            ("helper".to_string(), false, Some(vec![])),
-            ("strlen".to_string(), false, Some(vec![false])),
+            ("App\\local".to_string(), None, true, Some(vec![false, true])),
+            ("Lib\\helper".to_string(), None, false, Some(vec![false])),
+            ("App\\Sub\\helper".to_string(), None, false, Some(vec![])),
+            ("App\\strlen".to_string(), Some("strlen".to_string()), false, Some(vec![false])),
         ]
     );
     let pins: Vec<(&str, Option<&str>)> = fa
@@ -1319,15 +1357,17 @@ strlen('x');
     assert_eq!(ws.defs("main.php", "local(1", 0), vec![site("main.php", 3, 9)]);
 }
 
-/// (callee, defined in this file, which arguments spread) of each free call.
-fn call_invokes(fa: &FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
+/// (callee, its fallback, defined in this file, which arguments spread) of
+/// each free call.
+fn call_invokes(fa: &FileAnalysis) -> Vec<(String, Option<String>, bool, Option<Vec<bool>>)> {
     use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
     fa.witnesses
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Function { name, local, .. }, args, .. } => Some((
+            WitnessPayload::Invoke { callee: Callee::Function { name, local, fallback, .. }, args, .. } => Some((
                 name.clone(),
+                fallback.clone(),
                 local.is_some(),
                 args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect()),
             )),
@@ -2237,7 +2277,7 @@ function make($a) {
 }
 ";
     let fa = php(src);
-    let locals: Vec<(String, bool)> = call_invokes(&fa).into_iter().map(|(n, local, _)| (n, local)).collect();
+    let locals: Vec<(String, bool)> = call_invokes(&fa).into_iter().map(|(n, _, local, _)| (n, local)).collect();
     assert_eq!(locals, [("foo".to_string(), false), ("bar".to_string(), false)]);
     let ws = Workspace::new(&[("/fake/php/A.php", src)]);
     assert_eq!(ws.defs("A.php", "foo(); $this", 0), Sites::new(), "no function `foo`");
@@ -2449,6 +2489,99 @@ fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
         Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "Vendor\\Model"
     ));
     assert!(php_widening(&idx, sub.0).is_empty());
+}
+
+const PHP_LIB_FNS: (&str, &str) =
+    ("/fake/php/Lib/lib.php", "<?php\nnamespace Lib;\nfunction helper() { return 1; }\nfunction only() {}\n");
+const PHP_OTHER_FNS: (&str, &str) = ("/fake/php/Other/other.php", "<?php\nnamespace Other;\nfunction helper() { return 'x'; }\n");
+
+/// A function is its namespace-qualified identity across files, as a class
+/// is: a `use function` row binds its leaf to the function it names, a
+/// qualified call names one function, and a same-leaf function of another
+/// namespace — even one that sorts first — never answers for it. A call
+/// whose identity nothing indexed declares widens to its leaf out loud.
+#[cfg(feature = "php")]
+#[test]
+fn a_function_is_its_identity_across_files() {
+    use tree_sitter::Point;
+    let a = (
+        "/fake/php/App/a.php",
+        "<?php\nnamespace App;\nuse function Other\\helper;\nfunction caller() {\n    helper();\n    \\Lib\\helper();\n    only();\n}\n",
+    );
+    let idx = php_indexed(&[PHP_LIB_FNS, PHP_OTHER_FNS, a]);
+    let lands = |at: Point| php_landing(&idx, a.0, at);
+    let other = (vec![("Other/other.php".to_string(), 2, None)], Some("Other/other.php".to_string()));
+    assert_eq!(lands(Point::new(4, 4)), other, "a bare call through its `use function` row");
+    assert_eq!(lands(Point::new(2, 19)), other, "the row's own leaf");
+    assert_eq!(lands(Point::new(5, 9)).0, [("Lib/lib.php".to_string(), 2, None)], "a qualified call");
+    assert_eq!(
+        lands(Point::new(6, 4)).0,
+        [("Lib/lib.php".to_string(), 3, Some("widened: `Lib\\only` stands in for `App\\only`".to_string()))]
+    );
+    let msg = "nothing indexed declares `App\\only`; resolved by its leaf to `Lib\\only`".to_string();
+    assert_eq!(php_widening(&idx, a.0), [(6, 4, msg)]);
+
+    // rename and references keep to the function: the row's leaf and the
+    // bare call go with `Other\helper`, the qualified call with `Lib\helper`
+    let ws = Workspace::new(&[PHP_LIB_FNS, PHP_OTHER_FNS, a]);
+    assert_eq!(
+        ws.renames("other.php", "helper", 0),
+        [site("a.php", 2, 19), site("a.php", 4, 4), site("other.php", 2, 9)]
+    );
+    assert_eq!(ws.renames("lib.php", "helper", 0), [site("a.php", 5, 9), site("lib.php", 2, 9)]);
+}
+
+/// An imported function's alias is its own spelling: a rename of the
+/// function rewrites the row's leaf and leaves the alias and the calls
+/// spelled with it alone, and a call through the alias still lands.
+#[cfg(feature = "php")]
+#[test]
+fn an_aliased_function_import_keeps_its_alias_on_rename() {
+    let a = ("/fake/php/App/a.php", "<?php\nnamespace App;\nuse function Lib\\helper as h;\nh();\n");
+    let idx = php_indexed(&[PHP_LIB_FNS, PHP_OTHER_FNS, a]);
+    assert_eq!(php_landing(&idx, a.0, tree_sitter::Point::new(3, 0)).0, [("Lib/lib.php".to_string(), 2, None)]);
+    let ws = Workspace::new(&[PHP_LIB_FNS, PHP_OTHER_FNS, a]);
+    assert_eq!(ws.renames("lib.php", "helper", 0), [site("a.php", 2, 17), site("lib.php", 2, 9)]);
+}
+
+/// A bare call looks up the namespace in force's function first and the
+/// global one only when the namespace declares none — PHP's own order,
+/// across files.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_call_tries_its_namespace_then_the_global_function() {
+    use tree_sitter::Point;
+    let global = ("/fake/php/0/global.php", "<?php\nfunction twice() {}\nfunction gone() {}\n");
+    let own = ("/fake/php/App/own.php", "<?php\nnamespace App;\nfunction twice() {}\n");
+    let b = ("/fake/php/App/b.php", "<?php\nnamespace App;\ntwice();\ngone();\n");
+    let idx = php_indexed(&[global, own, b]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(2, 0)).0, [("App/own.php".to_string(), 2, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(3, 0)).0, [("0/global.php".to_string(), 2, None)]);
+    assert!(php_widening(&idx, b.0).is_empty());
+}
+
+/// `$this` is a reference to the object its method runs on: hover names
+/// the enclosing class and goto-def lands on it, in a closure of the
+/// method too, and it is no name a rename may rewrite.
+#[cfg(feature = "php")]
+#[test]
+fn this_hovers_as_its_enclosing_class() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "<?php\nnamespace App;\nclass Box {\n    public function me() { return $this; }\n    public function later() { return fn() => $this; }\n}\n";
+    let path = "/fake/php/App/Box.php";
+    let idx = php_indexed(&[(path, src)]);
+    let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
+    let docs = OpenDocs::new();
+    for needle in ["this; }\n    public", "this; }\n}"] {
+        let point = at(src, needle, 0);
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(path)));
+        let cs = resolve(&docs, &fa, key, point, Some(&idx), OverrideScope::default()).with_source(src);
+        let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap_or_default();
+        assert!(hover.contains("class Box"), "{needle}: {hover}");
+        assert_eq!(php_landing(&idx, path, point).0, [("App/Box.php".to_string(), 2, None)], "{needle}");
+        assert_eq!(cs.renameable(), Ok(false), "{needle}");
+    }
 }
 
 /// (namespace, start row, end row) of every lane section, in write order.

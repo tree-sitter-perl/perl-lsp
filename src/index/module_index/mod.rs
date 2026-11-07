@@ -56,7 +56,7 @@ pub fn rehydration_miss_count() -> usize {
 /// (name, declares-a-Class) per visible symbol. Collected before any strip
 /// so the feeds and tie-breaks never read an emptied `symbols`.
 fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
-    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<std::borrow::Cow<'_, str>, usize> = std::collections::HashMap::new();
     let mut feed: Vec<(String, bool)> = Vec::new();
     for sym in analysis.symbols() {
         // The C-linkage surface (`FileAnalysis::is_linkage_visible`) —
@@ -66,13 +66,16 @@ fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
             continue;
         }
         let is_class = matches!(sym.kind, SymKind::Class);
-        match index.get(sym.name.as_str()) {
+        // The key another file names it by: a namespaced function's
+        // identity, never its bare leaf (`linkage_identity`).
+        let key = analysis.linkage_identity(sym);
+        match index.get(key.as_ref()) {
             // A file declaring both a value AND a Class under one name
             // ranks as a Class.
             Some(&i) => feed[i].1 |= is_class,
             None => {
-                index.insert(sym.name.as_str(), feed.len());
-                feed.push((sym.name.clone(), is_class));
+                feed.push((key.to_string(), is_class));
+                index.insert(key, feed.len() - 1);
             }
         }
     }
@@ -89,18 +92,17 @@ fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
     feed
 }
 
-/// The leaves a registration files a feed's classes under for widening
-/// (`IndexCore::leaf_defs`): each class identity's leaf, keyed the way the
-/// row store keys it (`name_match_key`), where it differs from the
-/// identity. Empty for a language whose class spellings are identities as
-/// written, which never widens.
+/// The leaves a registration files a feed's identities under for widening
+/// (`IndexCore::leaf_defs`): each class or namespaced function identity's
+/// leaf, keyed the way the row store keys it (`name_match_key`), where it
+/// differs from the identity. Empty for a language whose spellings are
+/// identities as written, which never widens.
 fn widening_leaves(names: &crate::model::file_analysis::NameSpellings, feed: &[(String, bool)]) -> Vec<String> {
     if names.use_map_sep().is_none() {
         return Vec::new();
     }
     let mut leaves: Vec<String> = feed
         .iter()
-        .filter(|(_, is_class)| *is_class)
         .filter_map(|(name, _)| {
             let leaf = crate::model::file_analysis::name_match_key(name, names);
             (leaf != *name).then_some(leaf)

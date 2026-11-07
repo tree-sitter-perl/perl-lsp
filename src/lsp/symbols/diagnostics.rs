@@ -21,11 +21,11 @@ pub mod codes {
     pub const READONLY_WRITE: &str = "readonly-write";
 }
 
-/// `resolved-by-widening`: a class reference whose identity nothing indexed
-/// declares, answered by a same-leaf class of another namespace
-/// (`FileAnalysis::widened_class_references`). Always on, because the
-/// widened answer is a guess every class-shaped verb now acts on; the
-/// lookup is the file's own scope, so only a use-map language reaches it.
+/// `resolved-by-widening`: a class or function reference whose identity
+/// nothing indexed declares, answered by a same-leaf one of another
+/// namespace (`FileAnalysis::widened_references`). Always on, because the
+/// widened answer is a guess every verb now acts on; the lookup is the
+/// file's own scope, so only a use-map language reaches it.
 pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
     use crate::build::language_driver::LanguageRegistry;
     use crate::model::file_analysis::{CrossFileLookup, PackVisibility};
@@ -35,7 +35,7 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
     let base: &dyn CrossFileLookup = module_index;
     let scoped = crate::index::resolve::origin_scope(base, analysis, None);
     analysis
-        .widened_class_references(&scoped)
+        .widened_references(&scoped)
         .into_iter()
         .map(|w| Diagnostic {
             range: span_to_range(w.span),

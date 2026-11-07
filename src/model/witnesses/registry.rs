@@ -37,7 +37,7 @@ type VisitedSet = std::collections::HashMap<VisitedKey, usize>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FanOut {
     Class(WitnessAttachment),
-    Free { name: String, class: Option<String> },
+    Free { names: Vec<String>, class: Option<String> },
 }
 /// A fan-out's identity: `VisitedKey` without the bag and the point (a
 /// fan-out is point-free).
@@ -2774,7 +2774,7 @@ impl ReducerRegistry {
                     .map(|package| WitnessAttachment::returns_of(package, name.clone()))
                     .collect()
             }
-            Callee::Function { name, local: None, constructs, .. } => {
+            Callee::Function { name, local: None, constructs, fallback, .. } => {
                 let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
                     // The definition is in another file, and no conclusion
                     // key names a free function, so a bake can't link it.
@@ -2783,7 +2783,8 @@ impl ReducerRegistry {
                     return None;
                 };
                 let arity = exact.then_some(arg_types.len() as u32);
-                return self.free_function_cross_file(ctx, name, constructs.as_deref(), arity, recv, &arg_types, state);
+                let names: Vec<&str> = std::iter::once(name.as_str()).chain(fallback.as_deref()).collect();
+                return self.free_function_cross_file(ctx, &names, constructs.as_deref(), arity, recv, &arg_types, state);
             }
             Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
@@ -2824,20 +2825,22 @@ impl ReducerRegistry {
         })
     }
 
-    /// The free function `name` as the files `ctx` can see it: a module
-    /// exporting it, then a pack's linkage-visible definitions. One ladder
-    /// for both entries — `query_sub_return_type`'s cross-file half and an
-    /// unresolved `Callee::Function` — and the chase shares `state`, so a
-    /// call that crosses back into a file already on the path stops at the
-    /// cycle guard instead of recursing through a fresh query. `class` is
-    /// the identity the call constructs if it names a class
+    /// The free function `names` names as the files `ctx` can see it: a
+    /// module exporting it, then a pack's linkage-visible definitions — the
+    /// first of `names` anything declares, in order (a bare call's
+    /// language-ordered identities, `Callee::Function::fallback`). One
+    /// ladder for both entries — `query_sub_return_type`'s cross-file half
+    /// and an unresolved `Callee::Function` — and the chase shares `state`,
+    /// so a call that crosses back into a file already on the path stops at
+    /// the cycle guard instead of recursing through a fresh query. `class`
+    /// is the identity the call constructs if it names a class
     /// (`Callee::Function::constructs`): a class declared under it is a
     /// callee too, whose value is an instance of itself.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn free_function_cross_file(
         &self,
         ctx: &BagContext,
-        name: &str,
+        names: &[&str],
         class: Option<&str>,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
@@ -2849,13 +2852,18 @@ impl ReducerRegistry {
             return None;
         }
         let key = (
-            FanOut::Free { name: name.to_string(), class: class.map(str::to_string) },
+            FanOut::Free { names: names.iter().map(|n| n.to_string()).collect(), class: class.map(str::to_string) },
             receiver_key(&receiver),
             arity_hint,
         );
         let v = state.fan_out_node(key, |state| {
-            self.free_function_fan_out(idx, name, class, arity_hint, receiver, args, state)
-                .map(ReducedValue::Type)
+            names.iter().enumerate().find_map(|(i, name)| {
+                // a class the call constructs answers on the first name only
+                let class = class.filter(|_| i == 0);
+                self.free_function_fan_out(idx, name, class, arity_hint, receiver.clone(), args, state)
+            })
+            .flatten()
+            .map(ReducedValue::Type)
         });
         match v {
             Some(ReducedValue::Type(t)) => Some(t),
@@ -2863,8 +2871,11 @@ impl ReducerRegistry {
         }
     }
 
-    /// The walk behind `free_function_cross_file`'s fan-out node. Each file
-    /// it decodes spends the session's consult budget, as the class ladder's
+    /// The walk behind `free_function_cross_file`'s fan-out node, for one of
+    /// its names: `None` when nothing it can see declares `name` (the next
+    /// name is asked), `Some(answer)` when something does — an untyped or
+    /// ambiguous declaration still stops the ladder. Each file it decodes
+    /// spends the session's consult budget, as the class ladder's
     /// candidates do.
     #[allow(clippy::too_many_arguments)]
     fn free_function_fan_out(
@@ -2876,13 +2887,15 @@ impl ReducerRegistry {
         receiver: Option<InferredType>,
         args: &[InferredType],
         state: &mut QueryState,
-    ) -> Option<InferredType> {
+    ) -> Option<Option<InferredType>> {
         use crate::model::file_analysis::{FileAnalysis, SymKind};
         use std::sync::Arc;
-        let is_callable = |s: &crate::model::file_analysis::Symbol| {
-            (s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method))
+        // filed under the name a call spells it by (`linkage_identity`)
+        let is_callable = |fa: &FileAnalysis, s: &crate::model::file_analysis::Symbol| {
+            (matches!(s.kind, SymKind::Sub | SymKind::Method) && fa.linkage_identity(s) == name)
                 || (class == Some(s.name.as_str()) && s.kind == SymKind::Class)
         };
+        let mut declared = false;
         // The callable's answer in its own file, under the caller's arity,
         // receiver and arguments. The copy is pinned: the memo keys on its
         // bag's address for the rest of this query.
@@ -2925,14 +2938,15 @@ impl ReducerRegistry {
             // split exporter's sub lives in whichever file defines it.
             for cached in idx.visible_def_candidates(&module_name) {
                 if !super::session::spend_consult(idx) {
-                    return None;
+                    return Some(None);
                 }
                 let full = idx.bag_present(&cached);
-                let Some(sym) = full.symbols().iter().find(|s| is_callable(s)).map(|s| s.id) else {
+                let Some(sym) = full.symbols().iter().find(|s| is_callable(&full, s)).map(|s| s.id) else {
                     continue;
                 };
+                declared = true;
                 match ask(&full, sym, state) {
-                    Some(t) => return Some(t),
+                    Some(t) => return Some(Some(t)),
                     None => retryable.push(cached),
                 }
             }
@@ -2943,18 +2957,18 @@ impl ReducerRegistry {
                 break;
             }
             if !super::session::spend_consult(idx) {
-                return None;
+                return Some(None);
             }
             let full = idx.bag_present(&cached);
             let enriched = idx.enriched_present(&cached);
             if Arc::ptr_eq(&enriched, &full) {
                 continue;
             }
-            let Some(sym) = enriched.symbols().iter().find(|s| is_callable(s)).map(|s| s.id) else {
+            let Some(sym) = enriched.symbols().iter().find(|s| is_callable(&enriched, s)).map(|s| s.id) else {
                 continue;
             };
             if let Some(t) = ask(&enriched, sym, state) {
-                return Some(t);
+                return Some(Some(t));
             }
         }
         // A pack callee defined in an INCLUDED file carries no export edge (C
@@ -2969,7 +2983,7 @@ impl ReducerRegistry {
         // definition agree. Transparent hosts (no rule known) skip the arm.
         let scope = idx.visibility_scope().map(|(p, v)| (p.to_string_lossy().into_owned(), v));
         if scope.is_none() && !idx.flat_scope() {
-            return None;
+            return declared.then_some(None);
         }
         let mut answer: Option<InferredType> = None;
         let mut candidates = idx.def_candidates(name);
@@ -2994,24 +3008,25 @@ impl ReducerRegistry {
                 continue;
             }
             if !super::session::spend_consult(idx) {
-                return None;
+                return Some(None);
             }
             let full = idx.bag_present(&cached);
             let Some(sym) = full
                 .symbols()
                 .iter()
-                .find(|s| is_callable(s) && full.is_linkage_visible(s))
+                .find(|s| is_callable(&full, s) && full.is_linkage_visible(s))
                 .map(|s| s.id)
             else {
                 continue;
             };
+            declared = true;
             match (ask(&full, sym, state), &answer) {
-                (Some(t), Some(existing)) if *existing != t => return None,
+                (Some(t), Some(existing)) if *existing != t => return Some(None),
                 (Some(t), None) => answer = Some(t),
                 _ => {}
             }
         }
-        answer
+        declared.then_some(answer)
     }
 
     /// Scope-chain variable lookup with an explicit visited set.

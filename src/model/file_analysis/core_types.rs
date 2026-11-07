@@ -1898,7 +1898,15 @@ impl Ref {
         match self.binding.as_ref()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) => None,
+            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::Receiver(_) => None,
+        }
+    }
+
+    /// The method whose receiver a spelled-receiver ref (`$this`) reads.
+    pub fn receiver_method(&self) -> Option<SymbolId> {
+        match self.binding.as_ref()? {
+            RefBinding::Receiver(method) => Some(*method),
+            _ => None,
         }
     }
 
@@ -2424,6 +2432,12 @@ pub enum RefBinding {
     /// against, plus the linked `Handler` symbol (first stacked def —
     /// `refs_to_symbol` walks all stacked defs separately).
     Handler { owner: HandlerOwner, sym: Option<SymbolId> },
+    /// A spelled receiver (`$this`): the object the method `SymbolId` runs
+    /// on, the root `Binding::Receiver` names. It declares no symbol of its
+    /// own, so it projects through `receiver_method`, never
+    /// `resolved_symbol`. Kept at the END for bincode variant-index
+    /// stability.
+    Receiver(SymbolId),
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.

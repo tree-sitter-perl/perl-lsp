@@ -45,7 +45,8 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
 4. **The loud half**: the `resolved-by-widening` diagnostics lane
    (`lsp::symbols::widening_diagnostics`, part of `pack_diagnostics`)
    fires on each class token whose identity nothing indexed declares and
-   a same-leaf class answers for (`FileAnalysis::widened_class_references`):
+   a same-leaf class answers for, and on each function token the same way
+   (`FileAnalysis::widened_references`):
    "nothing indexed declares `A\B`; resolved by its leaf to `X\B`". It
    sits on the reference that names the class — the parent clause, the
    `use` row's leaf — because that is where the fix is written. A member

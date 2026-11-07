@@ -118,6 +118,9 @@ spelled! {
         Key = "key",
         /// `goto LABEL`.
         Label = "label",
+        /// A token naming the object the enclosing method runs on (php's
+        /// `$this`): a read of that receiver, bound to the method.
+        Receiver = "receiver",
     }
 }
 
@@ -185,6 +188,12 @@ spelled! {
         /// The name an import binds in place of its own leaf
         /// (`use A\B as C`), joined to the import name by match.
         Alias = "alias",
+        /// The import name binds in the language's function table, apart
+        /// from its classes (php's `use function`), joined by match.
+        Function = "function",
+        /// The import name binds in the language's constant table (php's
+        /// `use const`), joined by match.
+        Constant = "constant",
     }
 }
 
