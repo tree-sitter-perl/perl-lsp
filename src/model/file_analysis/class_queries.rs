@@ -559,6 +559,95 @@ impl FileAnalysis {
         }
     }
 
+    /// Member writes made where the member may not be set. The rule, in
+    /// one place: a member's `SymbolFlags::set_scope` says what code may
+    /// write it — a closure written in a method counts as that method's
+    /// class — so a write from code outside it fails at runtime
+    /// (`MisplacedWriteKind::OutsideClass` / `OutsideFamily`). A write-once
+    /// (`READONLY`) member is set by a constructor, so a write its class
+    /// family makes where no constructor encloses it is
+    /// `OutsideConstructor`, unless the write only fills an unset member
+    /// (`AccessKind::WriteIfUnset`): a lazy initialisation. A site is
+    /// reported only when every class its receiver may be resolves the
+    /// member to a declaration that finds it misplaced: an untyped
+    /// receiver, or one arm that may be written there, is no finding.
+    pub fn misplaced_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<MisplacedWrite> {
+        let mut out = Vec::new();
+        for r in self.refs().iter() {
+            if !r.access.is_write() || MemberKind::of_ref(&r.kind) != Some(MemberKind::Value) {
+                continue;
+            }
+            let Some(site) = r.member_site() else { continue };
+            let writer = self.package_at(site.name_span.start);
+            // A trait's code runs as whichever class composes it, a class
+            // the site cannot name.
+            if writer.is_some_and(|w| self.declares_class_with(w, SymbolFlags::TRAIT)) {
+                continue;
+            }
+            let arms = self.receiver_classes(r, module_index, ReceiverPolicy::Stated);
+            if arms.is_empty() {
+                continue;
+            }
+            // TODO(readonly-after-cfg): with control flow modelled, an in-class write after the
+            // constructor has run is a second write: a certain error, not just a hint.
+            // TODO(readonly-after-cfg): an isset-guarded write is a lazy init too, once guards narrow.
+            let lazy = r.access == AccessKind::WriteIfUnset;
+            let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
+                self.scope(sc)
+                    .owner
+                    .is_some_and(|sym| self.symbol(sym).flags.contains(SymbolFlags::CONSTRUCTOR))
+            });
+            let member = r.unqualified_target_name(self.names());
+            let mut classes: Vec<String> = Vec::new();
+            let mut kind = MisplacedWriteKind::OutsideClass;
+            let reported = arms.iter().all(|cn| {
+                let Some(res) = self.resolve_field_in_ancestors(cn, member, module_index) else {
+                    return false;
+                };
+                // A member found on a same-leaf stranger is a guess, and a
+                // guess is no finding.
+                let flags = match &res {
+                    MethodResolution::Local { sym_id, .. } => self.symbol(*sym_id).flags,
+                    MethodResolution::CrossFile { widened: true, .. } => return false,
+                    MethodResolution::CrossFile { flags, .. } => *flags,
+                };
+                let scope = flags.set_scope();
+                let write_once = flags.contains(SymbolFlags::READONLY);
+                if scope == SetScope::Anywhere && (!write_once || in_constructor || lazy) {
+                    return false;
+                }
+                let declaring = res.class();
+                let in_family = writer.is_some_and(|w| self.class_isa(w, declaring, module_index));
+                let verdict = match scope {
+                    // A trait's member is its composer's own.
+                    SetScope::Class
+                        if writer != Some(declaring)
+                            && !(in_family && self.hit_class_declared(declaring, SymbolFlags::TRAIT, &res, module_index)) =>
+                    {
+                        MisplacedWriteKind::OutsideClass
+                    }
+                    SetScope::Family if !in_family => MisplacedWriteKind::OutsideFamily,
+                    // Only a write-once member has a place it is set in good
+                    // form; a write from outside the family to one any code
+                    // may set is what its set scope declares.
+                    _ if write_once && in_family && !in_constructor && !lazy => {
+                        MisplacedWriteKind::OutsideConstructor
+                    }
+                    _ => return false,
+                };
+                kind = kind.max(verdict);
+                if !classes.iter().any(|c| c == declaring) {
+                    classes.push(declaring.to_string());
+                }
+                true
+            });
+            if reported {
+                out.push(MisplacedWrite { span: site.name_span, member: member.to_string(), classes, kind });
+            }
+        }
+        out
+    }
+
     /// The type SPELLING a field's declared type edges to — the `TypeName(n)`
     /// target of the field's `Variable → Edge(TypeName(n))` witness (`op_type`
     /// declared `PERL_BITFIELD16` → `Some("PERL_BITFIELD16")`). This is the

@@ -1074,7 +1074,7 @@ impl FileAnalysis {
             if !(var_text.starts_with('$') || var_text.starts_with('%')) {
                 continue;
             }
-            if matches!(r.access, AccessKind::Write) {
+            if r.access.is_write() {
                 continue;
             }
             let Some(t) =

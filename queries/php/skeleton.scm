@@ -79,7 +79,8 @@
 ; declared with: `$obj->x` reads the member `x`. The `$x` it is written as
 ; is the spelling it is listed by. A declared type is the member's value,
 ; a union the join of its arms; an intersection names no single type, so
-; it is not captured. `readonly` is display vocabulary, no flag.
+; it is not captured. `readonly` is the attribute that makes the member
+; write-once.
 (property_declaration
   (readonly_modifier)? @sym.attr
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
@@ -118,11 +119,63 @@
     (by_ref (variable_name (name) @mark.non_public))
   ]
   (#any-of? @_visibility "private" "protected"))
+; A `(set)` visibility says where the member may be written from, apart
+; from where it may be read. A readonly member stating none is set by its
+; class and the classes extending it.
+((property_declaration
+  (visibility_modifier "public" (operation) @_set)
+  (property_element name: (variable_name (name) @mark.set_public)))
+ (#eq? @_set "set"))
+((property_declaration
+  (visibility_modifier "protected" (operation) @_set)
+  (property_element name: (variable_name (name) @mark.set_protected)))
+ (#eq? @_set "set"))
+((property_declaration
+  (visibility_modifier "private" (operation) @_set)
+  (property_element name: (variable_name (name) @mark.set_private)))
+ (#eq? @_set "set"))
+((property_promotion_parameter
+  visibility: (visibility_modifier "public" (operation) @_set)
+  name: [
+    (variable_name (name) @mark.set_public)
+    (by_ref (variable_name (name) @mark.set_public))
+  ])
+ (#eq? @_set "set"))
+((property_promotion_parameter
+  visibility: (visibility_modifier "protected" (operation) @_set)
+  name: [
+    (variable_name (name) @mark.set_protected)
+    (by_ref (variable_name (name) @mark.set_protected))
+  ])
+ (#eq? @_set "set"))
+((property_promotion_parameter
+  visibility: (visibility_modifier "private" (operation) @_set)
+  name: [
+    (variable_name (name) @mark.set_private)
+    (by_ref (variable_name (name) @mark.set_private))
+  ])
+ (#eq? @_set "set"))
 (method_declaration (static_modifier) name: (name) @mark.static)
 (property_declaration
   (static_modifier)
   (property_element name: (variable_name (name) @mark.static)))
 (method_declaration (abstract_modifier) name: (name) @mark.abstract)
+; Every property a `readonly class` declares is readonly, promoted ones too.
+(class_declaration
+  (readonly_modifier)
+  body: (declaration_list
+    (property_declaration
+      (property_element name: (variable_name (name) @mark.readonly)))))
+(class_declaration
+  (readonly_modifier)
+  body: (declaration_list
+    (method_declaration
+      parameters: (formal_parameters
+        (property_promotion_parameter
+          name: [
+            (variable_name (name) @mark.readonly)
+            (by_ref (variable_name (name) @mark.readonly))
+          ])))))
 ; A method declared without a body (an interface's, an abstract one) is
 ; a contract the composing class must provide.
 (method_declaration name: (name) @mark.contract !body)
@@ -242,6 +295,11 @@
 (assignment_expression left: (_) @flow.place right: (_) @flow.source) @flow.assign
 (reference_assignment_expression left: (_) @flow.place right: (_) @flow.source) @flow.assign
 (augmented_assignment_expression left: (_) @flow.place)
+; `??=` writes only while the place holds nothing: it initialises it.
+(augmented_assignment_expression left: (_) @flow.init operator: "??=")
+; An increment writes the place it reads, and an unset clears it.
+(update_expression argument: (_) @flow.place)
+(unset_statement (_) @flow.place)
 
 ; ---- closures ----
 ; `use ($x)` reads the variable of the code around the closure, and the

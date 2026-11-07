@@ -68,8 +68,9 @@ pub enum MethodResolution {
     ///
     /// `member` is the member's name as the declaration found spells it, so
     /// a by-role ask (`MemberKey::Constructor`) carries its answer out of
-    /// the walk that found it.
-    CrossFile { class: String, member: String, def_module: Option<String>, widened: bool },
+    /// the walk that found it, and `flags` are the declaration's own (empty
+    /// where the hit is a name-keyed lane with no declaration in hand).
+    CrossFile { class: String, member: String, def_module: Option<String>, widened: bool, flags: SymbolFlags },
 }
 
 impl MethodResolution {
@@ -333,7 +334,7 @@ impl FileAnalysis {
         // A written key is a known key even with no def: a keyed access is an
         // open container, so a literal's keys and later writes join the set.
         let written = self.refs.iter().filter(|r| {
-            r.access == AccessKind::Write
+            r.access.is_write()
                 && matches!(r.kind, RefKind::HashKeyAccess { .. })
                 && r.hash_key_owner().is_some_and(|o| o.found_by(owner))
         });

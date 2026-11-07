@@ -482,6 +482,11 @@ pub(super) fn finish(st: &mut ExtractState) {
             });
         }
     }
+    for init in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Init)) {
+        if let Some(read) = ad.on_ixs(init).filter_map(|i| st.minted[i].projects.as_deref()).last() {
+            out.init_sites.push(read.token);
+        }
+    }
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
     // narrowing cutoff (`Rebind` lowers to nothing — provenance only).
     for (name, scope, at, token) in std::mem::take(&mut f.flow_rebinds) {
