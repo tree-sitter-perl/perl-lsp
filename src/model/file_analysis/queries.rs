@@ -79,6 +79,26 @@ impl FileAnalysis {
         self.lookup_chain(from).bindings(&self.symbols).collect()
     }
 
+    /// Whether completion offers `sym` at `point`. A local its first write
+    /// declares (`SymbolFlags::SCOPE_WIDE`) binds from the top of its body,
+    /// but is offered only below that write in the body that writes it:
+    /// Perl's `my` rule. A body nested in it runs later, so there it is
+    /// offered wherever the write sits. Binding, goto-def and types keep
+    /// the scope-wide view.
+    ///
+    /// TODO(cfg-loop-locals): in a loop, a local read at the top and first
+    /// written further down is in force on the second pass but is not
+    /// offered above its write. Source order stands in for control flow
+    /// until the CFG work ("Model closures and scopes - with CFG next
+    /// version") gives reaching writes.
+    pub fn in_completion_view(&self, sym: &Symbol, point: Point) -> bool {
+        if !sym.flags.contains(SymbolFlags::SCOPE_WIDE) {
+            return true;
+        }
+        let body = self.scope_at(point).and_then(|s| callable_reach(&self.scopes, s).last());
+        body != Some(sym.scope) || sym.selection_span.start < point
+    }
+
     /// Get the scope struct by ID.
     pub fn scope(&self, id: ScopeId) -> &Scope {
         &self.scopes[id.0 as usize]

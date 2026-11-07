@@ -3742,3 +3742,33 @@ class Box {
     items.sort_by_key(|(l, k)| (l.clone(), format!("{k:?}")));
     assert_eq!(items, [("go".to_string(), Some(K::METHOD)), ("size".into(), Some(K::FIELD)), ("size".into(), Some(K::METHOD))]);
 }
+
+/// A local is offered below its first write in the body that writes it,
+/// as Perl offers a `my` below its declaration, though it binds from the
+/// top of the body.
+#[cfg(feature = "php")]
+#[test]
+fn a_local_is_offered_below_its_first_write() {
+    let src = "<?php
+function f($p) {
+    $early = 1;
+
+    $late = 2;
+
+    $late = 3;
+}
+";
+    let fa = php(src);
+    let offered = |row: usize| -> Vec<String> {
+        let mut out: Vec<String> = crate::lsp::symbols::in_scope_completion(&fa, tree_sitter::Point::new(row, 4))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| ["p", "early", "late"].contains(&l.as_str()))
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(offered(3), ["early", "p"], "above the first write");
+    assert_eq!(offered(5), ["early", "late", "p"], "below it");
+    assert!(fa.resolve_variable("late", tree_sitter::Point::new(3, 4)).is_some(), "it still binds from the top");
+}

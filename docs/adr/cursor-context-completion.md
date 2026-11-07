@@ -20,6 +20,17 @@ editor's job, not ours. This is pure `FileAnalysis` (`scope_at` →
 
 It is the fallback whenever the cursor is not a member access.
 
+A local a write declares for its whole body (php's, python's and R's,
+`SymbolFlags::SCOPE_WIDE`) binds from the top of that body, but is offered
+only below its first write in the body that writes it, as Perl offers a
+`my` below its declaration (`FileAnalysis::in_completion_view`). A body
+nested in it runs later, so there the local is offered wherever it is
+written; a python function is offered the module globals written below it.
+Binding, goto-def and types keep the scope-wide view. In a loop, a local
+read at the top and first written further down is not offered above that
+write (`TODO(cfg-loop-locals)`): source order stands in for control flow
+until the scope work has a CFG.
+
 ## Half 2: member access — the crux is the erased operator
 
 At the instant a user triggers completion the buffer reads `box.` /

@@ -233,7 +233,14 @@ pub fn in_scope_completion(analysis: &FileAnalysis, point: Point) -> Vec<Complet
     use std::collections::HashSet;
     let bound: HashSet<_> = analysis
         .scope_at(point)
-        .map(|s| analysis.bindings_seen_from(s).into_iter().map(|sym| sym.id).collect())
+        .map(|s| {
+            analysis
+                .bindings_seen_from(s)
+                .into_iter()
+                .filter(|sym| analysis.in_completion_view(sym, point))
+                .map(|sym| sym.id)
+                .collect()
+        })
         .unwrap_or_default();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut items = Vec::new();

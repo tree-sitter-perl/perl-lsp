@@ -1823,3 +1823,36 @@ fn an_untyped_member_read_poisons_a_return_join() {
     let fa = py_in(src, None);
     assert_eq!(fa.inferred_type_via_bag("r", Point { row: 11, column: 0 }), Some(InferredType::Unknown));
 }
+
+/// A local is offered below its first write in the body that writes it; a
+/// function reads a module global it runs after, so it is offered there
+/// wherever the global is written.
+#[test]
+fn a_local_is_offered_below_its_first_write() {
+    let src = "\
+def f():
+
+    early = 1
+
+    late = 2
+
+def g():
+    pass
+
+LIMIT = 3
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let offered = |row: usize, column: usize| -> Vec<String> {
+        let mut out: Vec<String> = crate::lsp::symbols::in_scope_completion(&fa, Point::new(row, column))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| ["early", "late", "LIMIT"].contains(&l.as_str()))
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(offered(1, 4), ["LIMIT"], "above the first writes");
+    assert_eq!(offered(3, 4), ["LIMIT", "early"]);
+    assert_eq!(offered(7, 4), ["LIMIT"], "a function reads the module global it runs after");
+    assert!(offered(9, 0).is_empty(), "module code above the global's write");
+}
