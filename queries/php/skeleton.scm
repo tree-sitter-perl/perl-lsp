@@ -20,16 +20,20 @@
 ; ---- classes, interfaces, traits ----
 ; One model kind; the body's members file under the class's identity. The
 ; keyword or modifier that says which flavour of class it is rides
-; @sym.attr, whose spelling is the flag it mints.
+; @sym.attr, whose spelling is the flag it mints. `@scope.direct` is PHP's
+; class-body rule: a member is only ever named through a receiver
+; (`$this->x`, `self::$x`, `static::f()`), never bare, so the body's names
+; are not in force inside its methods — a method's bare `$x` or `f()` looks
+; past the class.
 (class_declaration
   (abstract_modifier)? @sym.attr
-  name: (name) @def.class.name @context.class) @def.class @scope
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 (interface_declaration
   "interface" @sym.attr
-  name: (name) @def.class.name @context.class) @def.class @scope
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 (trait_declaration
   "trait" @sym.attr
-  name: (name) @def.class.name @context.class) @def.class @scope
+  name: (name) @def.class.name @context.class) @def.class @scope.direct
 
 ; ---- callables ----
 (function_definition name: (name) @def.sub.name) @def.sub
