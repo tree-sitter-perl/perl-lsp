@@ -832,6 +832,58 @@ fn a_promoted_parameter_renames_as_one_from_either_side() {
     assert_eq!(renames(PROMOTED, 2, 57), both, "from a body use");
 }
 
+const BARE: &str = "<?php
+class A {
+    private int $x = 1;
+    public function f() { return $x; }
+    public function g(int $x) { return $x; }
+}
+trait T {
+    private $y;
+    public function h() { return $y; }
+}
+";
+
+/// PHP names a property only through a receiver, so a method's bare `$x`
+/// is a local of the method or nothing — never the property the class
+/// body declares (`@scope.direct`).
+#[test]
+fn a_bare_variable_in_a_method_never_names_a_property() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(BARE);
+    let bound = |row: usize, col: usize| {
+        let r = fa
+            .refs()
+            .iter()
+            .find(|r| matches!(r.kind, RefKind::Variable) && (r.span.start.row, r.span.start.column) == (row, col))
+            .unwrap_or_else(|| panic!("a ref at {row}:{col}"));
+        let bound = r.resolved_symbol().map(|id| (fa.symbol(id).kind, fa.symbol(id).selection_span.start.column));
+        let named = fa
+            .resolve_variable(&r.target_name, r.span.start)
+            .map(|s| (s.kind, s.selection_span.start.column));
+        assert_eq!(bound, named, "the bound ref and a by-name ask agree at {row}:{col}");
+        bound
+    };
+    assert_eq!(bound(3, 34), None, "no local `$x`: the property is not in force");
+    assert_eq!(bound(4, 40), Some((SymKind::Variable, 27)), "the parameter is");
+    assert_eq!(bound(8, 34), None, "a trait's property neither");
+}
+
+/// The promoted pair still binds in its constructor: the token is the
+/// constructor's local, and the local is in force in the constructor body.
+#[test]
+fn a_promoted_parameter_binds_in_its_constructor() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(PROMOTED);
+    let local = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "made").unwrap();
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::Variable) && (r.span.start.row, r.span.start.column) == (2, 56))
+        .unwrap();
+    assert_eq!(r.resolved_symbol(), Some(local.id));
+}
+
 /// Every class a type position names is a class reference through the
 /// use-map, so rename of the class rewrites property, parameter, nullable,
 /// union, qualified and return spellings.
