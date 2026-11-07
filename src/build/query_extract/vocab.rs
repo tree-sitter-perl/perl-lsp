@@ -266,6 +266,19 @@ impl MemberOpCap {
 }
 
 spelled! {
+    /// A receiver token that names a class rather than holding a value the
+    /// file types: the token's value is that class, and a call on it
+    /// dispatches there.
+    pub enum ReceiverCap {
+        /// A class spelling (`Foo::m()`), resolved through the use-map.
+        Class = "class",
+        /// The class whose method the token is written in (`self::m()`,
+        /// `$this->m()`).
+        Enclosing = "enclosing",
+    }
+}
+
+spelled! {
     pub enum ArityCap {
         Args = "args",
         Arg = "arg",
@@ -411,6 +424,8 @@ pub enum Capture {
     /// (python's `self` parameter) or not (C++ `this`): the object, never a
     /// member and never a class spelling.
     Receiver,
+    /// A receiver token that names its class.
+    NamedReceiver(ReceiverCap),
     /// A fact the document states about the declaration at this name token.
     Mark(MarkCap),
     Arity(ArityCap),
@@ -495,6 +510,7 @@ impl Capture {
             ["param", "region"] => C::ParamRegion,
             ["receiver"] => C::Receiver,
             ["mark", k] => C::Mark(MarkCap::parse(k)?),
+            ["receiver", k] => C::NamedReceiver(ReceiverCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", rest @ ..] => C::Member(MemberCap::parse(&rest.join("."))?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
@@ -561,6 +577,7 @@ impl fmt::Display for Capture {
             C::MemberOp(k) => write!(f, "member.op.{k}"),
             C::Receiver => f.write_str("receiver"),
             C::Mark(k) => write!(f, "mark.{k}"),
+            C::NamedReceiver(k) => write!(f, "receiver.{k}"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),

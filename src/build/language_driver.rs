@@ -1082,6 +1082,7 @@ fn remap_spans(
         // Populated in enrich_skeleton (post-remap) already in original coords.
         macro_call_arg_spans: _,
         call_sites,
+        receiver_sites,
         specializations: _,
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
@@ -1094,6 +1095,7 @@ fn remap_spans(
         macro_body_member_reads: _,
         language: _,
         names: _,
+        functions: _,
         slot_writes,
         member_writes,
         member_reads,
@@ -1164,12 +1166,16 @@ fn remap_spans(
     // (the same call span) they land beside.
     for site in call_sites.iter_mut() {
         site.span = rspan(site.span);
+        site.callee_at = rspan(crate::model::file_analysis::Span { start: site.callee_at, end: site.callee_at }).start;
         if let Some(recv) = site.receiver.as_mut() {
             *recv = rspan(*recv);
         }
         for (arg, _) in site.args.iter_mut().flatten() {
             *arg = rspan(*arg);
         }
+    }
+    for site in receiver_sites.iter_mut() {
+        site.span = rspan(site.span);
     }
     for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
         *span = rspan(*span);

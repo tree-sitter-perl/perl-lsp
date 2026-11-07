@@ -165,19 +165,21 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // carries its receiver, the `@member.recv` of the same match.
             let in_match = |cap: Capture| ad.in_match(e.match_id, cap);
             let callee = in_match(Capture::Ref(RefCap::Call))
-                .map(|x| (x.text.clone(), None))
+                .map(|x| (x, None))
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;
                     let recv = in_match(Capture::Member(MemberCap::Recv))?;
-                    Some(((pack.shape_name)(&name.text), Some(recv.span())))
+                    Some((name, Some(recv.span())))
                 });
-            if let Some((callee, receiver)) = callee {
+            if let Some((token, receiver)) = callee {
+                let (callee, callee_at) = ((pack.shape_name)(&token.text), token.start);
                 let span = e.span();
                 st.minted[ix].value = true;
                 let args = super::members::call_args(ad, e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
                     callee,
+                    callee_at,
                     receiver,
                     scope: cur_scope,
                     args,
@@ -211,6 +213,16 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     span,
                 ));
             }
+        }
+        Capture::NamedReceiver(names) => {
+            // Which class the token names is answered once the use-map and
+            // the callables' owners are in (`into_file_analysis`).
+            out.receiver_sites.push(crate::build::query_extract::ReceiverSite {
+                span: e.span(),
+                scope: cur_scope,
+                names,
+                text: e.text.clone(),
+            });
         }
         // The assignment node anchors its pattern; its target and source
         // carry the meaning.

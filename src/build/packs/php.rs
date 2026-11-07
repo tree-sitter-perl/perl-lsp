@@ -23,6 +23,9 @@ pub fn php_pack() -> LangPack {
             class_call: ClassCall::FunctionCall,
             ..NameSpellings::NONE
         },
+        // A bare call names the function its namespace declares, else the
+        // global one.
+        functions: FunctionLookup::NamespaceThenGlobal,
         lattice: PHP_LATTICE,
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,

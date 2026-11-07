@@ -615,6 +615,28 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
     );
 }
 
+// A body that elides its receiver names its own method's class. A local
+// union's destructor mints no callable, so its bare names read no member of
+// the method around it.
+#[cfg(feature = "cpp")]
+#[test]
+fn an_unowned_body_reads_no_member_of_the_method_around_it() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessSource};
+    let src = "struct C { int inner_; void f() { int a = inner_; union U { ~U() { int b = inner_; } }; } };\n";
+    let fa = cpp_driver().analyze(src);
+    let reads: Vec<usize> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "implicit_field_read"))
+        .filter_map(|w| match w.attachment {
+            WA::Expr(sp) => Some(sp.start.column),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, [src.find("inner_; union").unwrap()], "only the method's own read is its member's");
+}
+
 // A callable with no declared return takes every `return` as an arm, and the
 // arms sit under the enrichment seal: enriching the file keeps its type.
 #[cfg(feature = "cpp")]
@@ -1021,4 +1043,20 @@ fn admits_refuses_files_another_driver_claims() {
         assert!(LanguageRegistry::admits(cpp, std::path::Path::new("Foo.pm")).is_err());
         assert!(LanguageRegistry::admits(cpp, std::path::Path::new("commands.def")).is_ok());
     }
+}
+
+// `this` is an instance of the class whose method it is written in, in-class
+// and out-of-line alike, never a class spelled `this`.
+#[cfg(feature = "cpp")]
+#[test]
+fn this_is_an_instance_of_the_methods_class() {
+    let src = "struct C { int x; int get() { return this->x; } int put(); };\nint C::put() { return this->x; }\n";
+    let fa = cpp_driver().analyze(src);
+    let classes: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "x" && r.member_site().is_some())
+        .map(|r| fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string))
+        .collect();
+    assert_eq!(classes, [Some("C".to_string()), Some("C".to_string())]);
 }
