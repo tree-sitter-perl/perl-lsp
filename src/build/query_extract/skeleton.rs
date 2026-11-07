@@ -1049,11 +1049,16 @@ impl SkeletonAnalysis {
                 }
             }
             // Inheritance edges: Member{child,m} → Edge(parent,m), so
-            // the registry walks the MRO for an inherited method's return.
+            // the registry walks the MRO for an inherited method's return. An
+            // override takes none: the call runs the child's own method, and a
+            // parent's answer beside it would stand in for it.
             for (child, parent) in &self.parents {
+                let own: std::collections::HashSet<String> =
+                    crate::model::file_analysis::own_method_names(&symbols, child).collect();
                 for sym in &symbols {
                     if matches!(sym.kind, SymKind::Method)
                         && sym.package.as_deref() == Some(parent.as_str())
+                        && !own.contains(&sym.name)
                     {
                         bag.push(mk(
                             WA::returns_of(child.clone(), sym.name.clone()),

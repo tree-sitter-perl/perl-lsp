@@ -3430,3 +3430,26 @@ fn a_literal_states_its_kind_only_where_its_value_flows() {
         assert_eq!(lit(idle), None, "`{idle}` flows nowhere");
     }
 }
+
+/// An override answers for its class: a parent declared in the same file
+/// never stands in for the child's own method.
+#[cfg(feature = "php")]
+#[test]
+fn an_override_answers_for_its_class() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Thing {}
+class Special {}
+class Base {
+    public function build(): Thing {}
+    public function keep(): Thing {}
+}
+class Kid extends Base {
+    public function build(): Special {}
+}
+");
+    let ret = |c: &str, m: &str| fa.find_method_return_type(c, m, None, None);
+    assert_eq!(ret("Kid", "build"), Some(T::ClassName("Special".into())));
+    assert_eq!(ret("Base", "build"), Some(T::ClassName("Thing".into())));
+    assert_eq!(ret("Kid", "keep"), Some(T::ClassName("Thing".into())), "an inherited method");
+}
