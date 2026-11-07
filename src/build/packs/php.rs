@@ -111,9 +111,9 @@ fn display_type(tag: &str) -> Option<&'static str> {
 /// A union is the join of its arms and `?T` is `T|null`; a spelling with
 /// an arm this can't read (an intersection, `array`) types nothing, rather
 /// than claiming the arms it can. A lone `self`, `static` or `parent` is
-/// marked `@type.enclosing` / `@type.super` and never reaches here; inside
-/// a union it is an arm this can't read. A class spelling resolves through
-/// the use-map at its site.
+/// marked `@type.enclosing` / `@type.called` / `@type.super` and never
+/// reaches here; inside a union it is an arm this can't read. A class
+/// spelling resolves through the use-map at its site.
 fn declared_type(text: &str) -> Option<InferredType> {
     let t = text.trim();
     let arms: Vec<&str> = match t.strip_prefix('?') {

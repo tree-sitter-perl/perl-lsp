@@ -23,9 +23,10 @@ pub struct SkelSymbol {
     /// defs carrying one id are one declaration (`Symbol::declared_with`).
     /// A match id, not a position in `symbols`, so it survives every dedup.
     pub pair: Option<usize>,
-    /// Declared return type (`@rettype`), for methods/functions — drives
-    /// method-return resolution + chaining through Member.
-    pub return_type: Option<InferredType>,
+    /// Declared return (`@rettype`), for methods/functions — drives
+    /// method-return resolution + chaining through Member. A type, or one
+    /// relative to the call (php's `static`, the receiver's class).
+    pub return_type: Option<crate::model::witnesses::ReturnExpr>,
     /// Pointer/reference declarator stack, unravelled by the `deref` walk
     /// from a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
@@ -450,7 +451,7 @@ impl SkeletonAnalysis {
     /// one its `@parent.super` edge names.
     pub fn relative_class(&self, rel: super::vocab::RelativeClass, class: &str) -> Option<String> {
         match rel {
-            super::vocab::RelativeClass::Enclosing => Some(class.to_string()),
+            super::vocab::RelativeClass::Enclosing | super::vocab::RelativeClass::Called => Some(class.to_string()),
             super::vocab::RelativeClass::Super => self
                 .super_parents
                 .iter()
@@ -929,6 +930,10 @@ impl SkeletonAnalysis {
             }
             map
         };
+        // The class each `@receiver.*` token names, by its span: its value's
+        // class where no call says otherwise, and the key a construction on
+        // it is retrieved under.
+        let mut receiver_class: std::collections::HashMap<Span, String> = std::collections::HashMap::new();
         // Writeback-lite: route method returns through Member so
         // `box.getInner().` chains, inherited returns, and cross-file all
         // resolve via the SAME chase Perl uses — no bypass. Declared
@@ -960,12 +965,17 @@ impl SkeletonAnalysis {
                         .package
                         .as_deref()
                         .and_then(|p| template_params.get(p));
-                    let pay = match class_params.and_then(|ps| param_return_expr(ret, ps)) {
-                        Some(re) => WP::ReturnExpr(re),
-                        None => match ret {
-                            InferredType::ClassName(cn) => WP::Edge(WA::TypeName(cn.clone())),
-                            other => WP::InferredType(other.clone()),
-                        },
+                    let pay = match ret {
+                        crate::model::witnesses::ReturnExpr::Concrete(ret) => {
+                            match class_params.and_then(|ps| param_return_expr(ret, ps)) {
+                                Some(re) => WP::ReturnExpr(re),
+                                None => match ret {
+                                    InferredType::ClassName(cn) => WP::Edge(WA::TypeName(cn.clone())),
+                                    other => WP::InferredType(other.clone()),
+                                },
+                            }
+                        }
+                        relative => WP::ReturnExpr(relative.clone()),
                     };
                     bag.push(mk(WA::Symbol(sym.id), pay, sym.span));
                 }
@@ -1124,11 +1134,14 @@ impl SkeletonAnalysis {
                 Some(map.resolve(written).identity(map.sep))
             };
             // A receiver token that names a class has that class as its
-            // value; a call on it dispatches on that value like on any
+            // value (a late-bound one, the receiver of the call that runs the
+            // code); a call on it dispatches on that value like on any
             // receiver's.
             for r in &self.receiver_sites {
                 let class = match r.names {
-                    super::vocab::ReceiverCap::Enclosing => method_class.get(r.scope.0 as usize).cloned().flatten(),
+                    super::vocab::ReceiverCap::Enclosing | super::vocab::ReceiverCap::Called => {
+                        method_class.get(r.scope.0 as usize).cloned().flatten()
+                    }
                     super::vocab::ReceiverCap::Class => {
                         Some(class_identity_at(&r.text, r.span.start).unwrap_or_else(|| r.text.clone()))
                     }
@@ -1143,10 +1156,11 @@ impl SkeletonAnalysis {
                         .map(|s| s.name.clone()),
                 };
                 let Some(class) = class else { continue };
+                receiver_class.insert(r.span, class.clone());
                 bag.push(Witness {
                     attachment: WA::Expr(r.span),
                     source: WitnessSource::Builder("receiver_class".into()),
-                    payload: WP::InferredType(InferredType::ClassName(class)),
+                    payload: r.names.value(class),
                     span: r.span,
                 });
             }
@@ -1359,7 +1373,11 @@ impl SkeletonAnalysis {
                 var_at.entry(span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
             }
         }
-        for r in self.receiver_sites.iter().filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing)) {
+        for r in self
+            .receiver_sites
+            .iter()
+            .filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing | super::vocab::ReceiverCap::Called))
+        {
             if let Some(m) = owning_method.get(r.scope.0 as usize).copied().flatten() {
                 var_at.entry(r.span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
             }
@@ -1581,17 +1599,12 @@ impl SkeletonAnalysis {
                     scope: r.scope,
                     // A construction's token names the class it constructs,
                     // so its reference is retrieved under the class
-                    // reference's key: the class its receiver's value states.
+                    // reference's key: the class its receiver token names.
                     target_name: match r.constructs {
                         true => r
                             .invocant
                             .as_ref()
-                            .and_then(|(at, _)| {
-                                bag.iter_attachment(&crate::model::witnesses::WitnessAttachment::Expr(*at)).find_map(|w| match &w.payload {
-                                    crate::model::witnesses::WitnessPayload::InferredType(InferredType::ClassName(c)) => Some(c.clone()),
-                                    _ => None,
-                                })
-                            })
+                            .and_then(|(at, _)| receiver_class.get(at).cloned())
                             .unwrap_or_else(|| r.name.clone()),
                         false => r.name.clone(),
                     },

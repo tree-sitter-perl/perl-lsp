@@ -160,7 +160,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         Some(t) => {
             let t = (pack.annot_type)(&t.text);
             written_return = t.is_some();
-            t
+            t.map(crate::model::witnesses::ReturnExpr::Concrete)
         }
         None => None,
     };
@@ -237,12 +237,14 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
         let t = match names_relative(ad, written) {
             Some(rel) => {
                 let class = st.out.symbols[i].package.clone();
-                class.and_then(|c| st.out.relative_class(rel, &c)).map(InferredType::ClassName)
+                class.and_then(|c| st.out.relative_class(rel, &c)).map(|c| rel.returns(c))
             }
-            None => st.out.symbols[i]
-                .return_type
-                .take()
-                .map(|t| written_type_at(&st.out, &st.pack.names, t, written.start)),
+            None => match st.out.symbols[i].return_type.take() {
+                Some(crate::model::witnesses::ReturnExpr::Concrete(t)) => Some(crate::model::witnesses::ReturnExpr::Concrete(
+                    written_type_at(&st.out, &st.pack.names, t, written.start),
+                )),
+                other => other,
+            },
         };
         st.out.symbols[i].return_type = t;
     }

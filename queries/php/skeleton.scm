@@ -36,14 +36,20 @@
   name: (name) @def.class.name @context.class) @def.class @scope.direct
 
 ; ---- written types ----
-; `self` and `static` name the class they are written in, and `parent` the
-; class it extends, nullable or not, wherever a type is written: a return,
-; a parameter, a property.
+; `self` names the class it is written in, and `parent` the class it
+; extends, nullable or not, wherever a type is written: a return, a
+; parameter, a property. `static` is late-bound: the class the call is made
+; on, the class it is written in where no call says.
 (([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.enclosing)
- (#any-of? @_class "self" "static"))
+ (#eq? @_class "self"))
+(([
+  (named_type (name) @_class)
+  (optional_type (named_type (name) @_class))
+ ] @type.called)
+ (#eq? @_class "static"))
 (([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
@@ -258,9 +264,10 @@
  (#not-has-parent? @expr.read.var scoped_property_access_expression)
  (#not-eq? @expr.read.var "$this"))
 ; `$this` is no local: it is the object the enclosing method runs on, an
-; instance of the method's class, and its name token refers to that object.
-((variable_name (name) @ref.receiver) @receiver.enclosing
- (#eq? @receiver.enclosing "$this"))
+; instance of the class the call is made on, and its name token refers to
+; that object.
+((variable_name (name) @ref.receiver) @receiver.called
+ (#eq? @receiver.called "$this"))
 
 ; A literal is a value of its own kind, stated only where that value flows
 ; on: into a write, a return, an argument, a declared initializer or an
@@ -459,17 +466,21 @@
 ; error, so it is looked for only when no instance property answers.
 (member_access_expression name: (name) @space.property @space.static_property.illegal)
 (nullsafe_member_access_expression name: (name) @space.property @space.static_property.illegal)
-; `Foo::$x` reads a static property of the class `Foo` names (`self::`,
-; `static::` the class the code is written in, `parent::` the one it
-; extends, `$obj::` the object's class), named without its `$`; finding
-; an instance property there is PHP's error.
+; `Foo::$x` reads a static property of the class `Foo` names (`self::`
+; the class the code is written in, `static::` the class the call is made
+; on, `parent::` the one it extends, `$obj::` the object's class), named
+; without its `$`; finding an instance property there is PHP's error.
 (scoped_property_access_expression
   scope: [(name) (qualified_name)] @member.recv @receiver.class
   name: (variable_name (name) @ref.member.value)) @expr.member
 ((scoped_property_access_expression
   scope: (relative_scope) @member.recv @receiver.enclosing
   name: (variable_name (name) @ref.member.value)) @expr.member
- (#any-of? @receiver.enclosing "self" "static"))
+ (#eq? @receiver.enclosing "self"))
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.called
+  name: (variable_name (name) @ref.member.value)) @expr.member
+ (#eq? @receiver.called "static"))
 ((scoped_property_access_expression
   scope: (relative_scope) @member.recv @receiver.super
   name: (variable_name (name) @ref.member.value)) @expr.member
@@ -487,7 +498,12 @@
 ((class_constant_access_expression
    . (relative_scope) @member.recv @receiver.enclosing
    . (name) @ref.member.value @space.constant) @expr.member
- (#any-of? @receiver.enclosing "self" "static")
+ (#eq? @receiver.enclosing "self")
+ (#not-eq? @ref.member.value "class"))
+((class_constant_access_expression
+   . (relative_scope) @member.recv @receiver.called
+   . (name) @ref.member.value @space.constant) @expr.member
+ (#eq? @receiver.called "static")
  (#not-eq? @ref.member.value "class"))
 ((class_constant_access_expression
    . (relative_scope) @member.recv @receiver.super
@@ -498,9 +514,9 @@
    . (variable_name) @member.recv
    . (name) @ref.member.value @space.constant) @expr.member
  (#not-eq? @ref.member.value "class"))
-; `Foo::m()` calls the method of the class `Foo` names; `self::` and
-; `static::` name the class whose method the call is written in, `parent::`
-; the class it extends.
+; `Foo::m()` calls the method of the class `Foo` names; `self::` names the
+; class whose method the call is written in, `static::` the class the call
+; running that method is made on, `parent::` the class it extends.
 (scoped_call_expression
   scope: [(name) (qualified_name)] @member.recv @receiver.class
   name: (name) @ref.member.call
@@ -509,7 +525,12 @@
   scope: (relative_scope) @member.recv @receiver.enclosing
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
- (#any-of? @receiver.enclosing "self" "static"))
+ (#eq? @receiver.enclosing "self"))
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.called
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+ (#eq? @receiver.called "static"))
 ((scoped_call_expression
   scope: (relative_scope) @member.recv @receiver.super
   name: (name) @ref.member.call
@@ -528,8 +549,9 @@
 ; `new Foo(…)` calls the constructor of the class `Foo` names on its
 ; arguments, and its value is an instance of that class; with no argument
 ; list it passes none. The class token is a reference to the class. `self`
-; and `static` name the class the method is written in, `parent` the class
-; it extends, and `new $cls` constructs whatever class the variable holds.
+; names the class the method is written in, `static` the class the call
+; running it is made on, `parent` the class it extends, and `new $cls`
+; constructs whatever class the variable holds.
 ((object_creation_expression
    . (name) @member.recv @receiver.class @ref.type
    (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
@@ -540,7 +562,11 @@
 ((object_creation_expression
    . (name) @member.recv @receiver.enclosing
    (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
- (#any-of? @receiver.enclosing "self" "static"))
+ (#eq? @receiver.enclosing "self"))
+((object_creation_expression
+   . (name) @member.recv @receiver.called
+   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+ (#eq? @receiver.called "static"))
 ((object_creation_expression
    . (name) @member.recv @receiver.super
    (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
@@ -575,9 +601,10 @@
     (arguments ((_) @arity.arg ","?)*)?)) @expr.construct @arity.args
 
 ; ---- class literals ----
-; `Foo::class` is the class `Foo` names, as a value; `self::class` and
-; `static::class` are the class the method is written in, `parent::class`
-; the class it extends. The class token
+; `Foo::class` is the class `Foo` names, as a value; `self::class` is the
+; class the method is written in, `static::class` the class the call
+; running it is made on, `parent::class` the class it extends. The class
+; token
 ; of a class literal and of a class constant `Foo::BAR` is a class
 ; reference.
 ((class_constant_access_expression
@@ -587,7 +614,12 @@
 ((class_constant_access_expression
    . (relative_scope) @receiver.enclosing
    . (name) @_member) @expr.class
- (#any-of? @receiver.enclosing "self" "static")
+ (#eq? @receiver.enclosing "self")
+ (#eq? @_member "class"))
+((class_constant_access_expression
+   . (relative_scope) @receiver.called
+   . (name) @_member) @expr.class
+ (#eq? @receiver.called "static")
  (#eq? @_member "class"))
 ((class_constant_access_expression
    . (relative_scope) @receiver.super

@@ -358,8 +358,13 @@ spelled! {
         /// A class spelling (`Foo::m()`), resolved through the use-map.
         Class = "class",
         /// The class whose method the token is written in (`self::m()`,
-        /// `$this->m()`).
+        /// cpp's `this`).
         Enclosing = "enclosing",
+        /// The class the call that runs the method is made on (php's
+        /// `$this`, `static::m()`, `new static`): late-bound, like Perl's
+        /// `$self`. Where no call supplies one, the class the method is
+        /// written in.
+        Called = "called",
         /// The class the enclosing class's `@parent.super` edge names (php's
         /// `parent`).
         Super = "super",
@@ -369,14 +374,49 @@ spelled! {
     }
 }
 
+impl ReceiverCap {
+    /// The token's value, given the class it resolves to.
+    pub fn value(self, class: String) -> crate::model::witnesses::WitnessPayload {
+        use crate::model::witnesses::{ReturnExpr, WitnessPayload};
+        match class_by_site(class, self == ReceiverCap::Called) {
+            ReturnExpr::Concrete(t) => WitnessPayload::InferredType(t),
+            late => WitnessPayload::ReturnExpr(late),
+        }
+    }
+}
+
 spelled! {
     /// A class a written type names by where it is written, not by its
     /// spelling. Resolved the way the same `@receiver.*` mark is.
     pub enum RelativeClass {
-        /// The class it is written in (php's `self`, `static`).
+        /// The class it is written in (php's `self`).
         Enclosing = "enclosing",
+        /// The class the call is made on, the class it is written in where
+        /// no call supplies one (php's `static`).
+        Called = "called",
         /// The class that class's `@parent.super` edge names (php's `parent`).
         Super = "super",
+    }
+}
+
+impl RelativeClass {
+    /// What a callable declaring this return returns, given the class the
+    /// mark resolves to.
+    pub fn returns(self, class: String) -> crate::model::witnesses::ReturnExpr {
+        class_by_site(class, self == RelativeClass::Called)
+    }
+}
+
+/// A class named by where it is written: that class, or, late-bound, the
+/// receiver of the call that runs the code (`ReceiverOr`, as Perl's
+/// `$self` and a receiver `bless` are), that class where no call supplies
+/// one.
+fn class_by_site(class: String, late_bound: bool) -> crate::model::witnesses::ReturnExpr {
+    use crate::model::witnesses::ReturnExpr;
+    let named = crate::model::file_analysis::InferredType::ClassName(class);
+    match late_bound {
+        true => ReturnExpr::ReceiverOr(named),
+        false => ReturnExpr::Concrete(named),
     }
 }
 

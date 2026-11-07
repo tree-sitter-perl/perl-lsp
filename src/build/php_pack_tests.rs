@@ -1600,8 +1600,8 @@ class Users extends Query {
 ";
 
 /// An inherited method's declared return types a chain off the child, and
-/// a `static` return names the class the method is written in: `where()`
-/// declared on `Query` answers `Query`, wherever it is called from.
+/// a `static` return names the class the call is made on: `where()`
+/// declared on `Query` and called on a `Users` answers `Users`.
 #[cfg(feature = "php")]
 #[test]
 fn an_inherited_declared_return_types_the_chain_across_files() {
@@ -1625,10 +1625,10 @@ fn an_inherited_declared_return_types_the_chain_across_files() {
         [
             ("active", s("App\\Users")),
             ("where", s("App\\Users")),
-            ("first", s("Lib\\Query")),
+            ("first", s("App\\Users")),
             ("id", s("Lib\\Row")),
             ("where", s("App\\Users")),
-            ("first", s("Lib\\Query")),
+            ("first", s("App\\Users")),
         ]
     );
     // a call resolved in another file hovers with that file's declared
@@ -1636,7 +1636,7 @@ fn an_inherited_declared_return_types_the_chain_across_files() {
     let mut open = (*child).clone();
     open.enrich_imported_types_with_keys(Some(&ws.idx));
     let hover = |needle: &str| open.hover_info(at(FLUENT_CHILD, needle, 0), FLUENT_CHILD, Some(&ws.idx)).unwrap_or_default();
-    assert!(hover("where()->first();").contains("*returns: Lib\\Query*"), "{}", hover("where()->first();"));
+    assert!(hover("where()->first();").contains("*returns: App\\Users*"), "{}", hover("where()->first();"));
     assert!(hover("first()->id").contains("*returns: Lib\\Row*"), "{}", hover("first()->id"));
 }
 
@@ -1935,7 +1935,8 @@ class Box extends Base {
 ";
 
 /// A construction's value is an instance of the class it names, through
-/// the use-map: `self` and `static` are the class the method is written in,
+/// the use-map: `self` is the class the method is written in, and so is
+/// `static` where no call says which class it is made on,
 /// `parent` the one it extends, `new $cls` the class the variable holds,
 /// and an anonymous class is its own class. A class literal is its class.
 #[cfg(feature = "php")]
@@ -1949,7 +1950,7 @@ fn a_construction_is_an_instance_of_its_class() {
     assert_eq!(ty("a"), class("Lib\\Clock"));
     assert_eq!(ty("b"), class("Lib\\Clock"), "fully qualified, without an argument list");
     assert_eq!(ty("c"), class("App\\Box"));
-    assert_eq!(ty("d"), class("App\\Box"), "`static` is the writing class");
+    assert_eq!(ty("d"), class("App\\Box"), "`static` asked with no call site");
     assert_eq!(ty("e"), class("App\\Base"));
     assert_eq!(ty("cls"), class("Lib\\Clock"), "a class literal");
     assert_eq!(ty("f"), class("Lib\\Clock"), "the class a variable holds");
@@ -3430,6 +3431,179 @@ fn a_literal_states_its_kind_only_where_its_value_flows() {
         assert_eq!(lit(idle), None, "`{idle}` flows nowhere");
     }
 }
+
+/// Each member call's name and the one class its receiver resolves to, in
+/// source order.
+#[cfg(feature = "php")]
+fn call_receivers(fa: &FileAnalysis) -> Vec<(String, Option<String>)> {
+    use crate::model::file_analysis::{ReceiverPolicy, RefKind};
+    fa.refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { constructs: false, .. }))
+        .map(|r| (r.target_name.clone(), fa.receiver_classes(r, None, ReceiverPolicy::Navigate).single().map(str::to_string)))
+        .collect()
+}
+
+#[cfg(feature = "php")]
+fn calls_on(pairs: &[(&str, &str)]) -> Vec<(String, Option<String>)> {
+    pairs.iter().map(|(m, c)| (m.to_string(), Some(c.to_string()))).collect()
+}
+
+const FLUENT_LSB: &str = "<?php
+class Base {
+    public static function make(): static { return new static(); }
+    public function with(): static { return $this; }
+}
+class Kid extends Base {
+    public function only() {}
+}
+Kid::make()->with()->only();
+Base::make()->with();
+$cls = Kid::class;
+$cls::make()->only();
+";
+
+/// A fluent builder's `static` follows the class each call is made on, the
+/// way Perl's `$self` does: `Kid::make()->with()` is a `Kid`, so `only`
+/// resolves on `Kid`, through a class held in a variable too.
+#[cfg(feature = "php")]
+#[test]
+fn a_fluent_chain_follows_the_class_the_call_is_made_on() {
+    let fa = php(FLUENT_LSB);
+    assert_eq!(
+        call_receivers(&fa),
+        calls_on(&[("make", "Kid"), ("with", "Kid"), ("only", "Kid"), ("make", "Base"), ("with", "Base"), ("make", "Kid"), ("only", "Kid")])
+    );
+    let ws = Workspace::new(&[("/fake/php/fluent.php", FLUENT_LSB)]);
+    assert_eq!(ws.defs("fluent.php", "only();\nBase", 0), vec![site("fluent.php", 6, 20)]);
+    assert_eq!(ws.defs("fluent.php", "only();\n", 0), vec![site("fluent.php", 6, 20)]);
+
+    // the builder, the subclass and the chain each in a file of their own,
+    // the bodies too: `return new static` and `return $this`
+    let base = "<?php\nnamespace Lib;\n\nclass Base {\n    public static function make() { return new static(); }\n    public function with() { return $this; }\n}\n";
+    let kid = "<?php\nnamespace App;\n\nuse Lib\\Base;\n\nclass Kid extends Base {\n    public function only() {}\n}\n";
+    let run = "<?php\nnamespace App;\n\nKid::make()->with()->only();\n";
+    let ws = Workspace::new(&[("/fake/php/Lib/Base.php", base), ("/fake/php/App/Kid.php", kid), ("/fake/php/App/run.php", run)]);
+    assert_eq!(ws.defs("run.php", "only()", 0), vec![site("Kid.php", 6, 20)]);
+    assert_eq!(ws.defs("run.php", "with()", 0), vec![site("Base.php", 5, 20)]);
+}
+
+const NEW_STATIC: &str = "<?php
+class Base {
+    public static function fresh() { return new static(); }
+    public static function plain() { return new self(); }
+    public function me() { return $this; }
+    public function base() {}
+}
+class Kid extends Base {
+    public function kid() {}
+}
+Kid::fresh()->kid();
+Kid::plain()->base();
+(new Kid())->me()->kid();
+Base::fresh()->base();
+";
+
+/// `new static` is an instance of the class the call is made on and `new
+/// self` of the class it is written in; `return $this` returns the object
+/// the call is made on.
+#[cfg(feature = "php")]
+#[test]
+fn new_static_follows_the_receiver_and_new_self_stays() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(NEW_STATIC);
+    assert_eq!(
+        call_receivers(&fa),
+        calls_on(&[
+            ("fresh", "Kid"),
+            ("kid", "Kid"),
+            ("plain", "Kid"),
+            ("base", "Base"),
+            ("me", "Kid"),
+            ("kid", "Kid"),
+            ("fresh", "Base"),
+            ("base", "Base"),
+        ])
+    );
+    // asked of the class itself, with no call site, each answers the class
+    // it is written in
+    let ret = |m: &str| fa.find_method_return_type("Base", m, None, None);
+    assert_eq!(ret("fresh"), Some(T::ClassName("Base".into())));
+    assert_eq!(ret("me"), Some(T::ClassName("Base".into())));
+}
+
+const STATIC_RETURN: &str = "<?php
+class Query {
+    public function where(): static {}
+    public function maybe(): ?static {}
+    public function again(): self {}
+    public function query() {}
+}
+class Users extends Query {
+    public function active() {}
+}
+function run(Users $u) {
+    $u->where()->active();
+    $u->maybe()->active();
+    $u->again()->query();
+}
+";
+
+/// A declared `static` return is the class the call is made on, nullable
+/// or not, and `self` the class the method is written in.
+#[cfg(feature = "php")]
+#[test]
+fn a_static_return_is_the_class_the_call_is_made_on() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(STATIC_RETURN);
+    assert_eq!(
+        call_receivers(&fa),
+        calls_on(&[
+            ("where", "Users"),
+            ("active", "Users"),
+            ("maybe", "Users"),
+            ("active", "Users"),
+            ("again", "Users"),
+            ("query", "Query"),
+        ])
+    );
+    assert_eq!(fa.find_method_return_type("Users", "where", None, None), Some(T::ClassName("Users".into())));
+    assert_eq!(fa.find_method_return_type("Query", "where", None, None), Some(T::ClassName("Query".into())));
+    assert_eq!(fa.find_method_return_type("Users", "again", None, None), Some(T::ClassName("Query".into())));
+}
+
+const STATIC_CALL: &str = "<?php
+class Thing { public function thing() {} }
+class Special { public function special() {} }
+class Base {
+    public static function create() { return static::build(); }
+    public static function pinned() { return self::build(); }
+    public static function build(): Thing {}
+}
+class Kid extends Base {
+    public static function build(): Special {}
+}
+Kid::create()->special();
+Base::create()->thing();
+Kid::pinned()->thing();
+";
+
+/// `static::m()` in an inherited method calls `m` of the class the call is
+/// made on, so a subclass's override answers; `self::m()` stays with the
+/// class the method is written in.
+#[cfg(feature = "php")]
+#[test]
+fn static_calls_in_an_inherited_method_dispatch_on_the_subclass() {
+    let fa = php(STATIC_CALL);
+    let receivers: Vec<(String, Option<String>)> =
+        call_receivers(&fa).into_iter().filter(|(m, _)| !matches!(m.as_str(), "build" | "create" | "pinned")).collect();
+    assert_eq!(receivers, calls_on(&[("special", "Special"), ("thing", "Thing"), ("thing", "Thing")]));
+    // in the body itself, with no call site, `static::` is the class the
+    // method is written in
+    let build: Vec<(String, Option<String>)> = call_receivers(&fa).into_iter().filter(|(m, _)| m == "build").collect();
+    assert_eq!(build, calls_on(&[("build", "Base"), ("build", "Base")]));
+}
+
 
 /// An override answers for its class: a parent declared in the same file
 /// never stands in for the child's own method.

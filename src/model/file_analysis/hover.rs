@@ -92,7 +92,16 @@ impl FileAnalysis {
                 let sub_info = whole.sub_info_view(mname)?;
                 let sig = format_cross_file_signature(mname, &sub_info);
                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label(class));
-                if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
+                // Asked of the class the call is made on first, as the local
+                // arm asks, so a receiver-relative return (`return $self`,
+                // php's `static`) names it; a member that ask cannot reach (a
+                // helper bridged in from another module) answers with its
+                // declaration's own return.
+                if let Some(rt) = self
+                    .find_method_return_type(cn, mname, module_index, None)
+                    .or_else(|| sub_info.return_type(Some(idx)))
+                    .filter(InferredType::is_known)
+                {
                     text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                 }
                 if let Some(doc) = sub_info.doc() {

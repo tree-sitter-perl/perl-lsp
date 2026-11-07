@@ -100,15 +100,25 @@ extra, whatever the pattern.
   `Lookup::Named`. The document says which tokens: `@receiver.class` on a
   class spelling (php's `Foo::m()`), resolved through the use-map at the
   site, and `@receiver.enclosing` on a token naming the class whose method
-  it is written in (php's `$this`, `self::`, `static::`): the class of
-  the nearest named callable around the token, so a closure in a method
-  reads the method's class and a free function's body names none.
-  `static::` is late-bound in php; here it names the writing class, as
-  `$this` does. `@receiver.super` names the parent the writing class's
-  `@parent.super` edge marks (php's `parent`, its `extends`: never an
-  interface or a trait), and `@receiver.declared` the class the same token
-  anchors (php's anonymous `class`). `parent::m()` dispatches on that
-  class, as `self::m()` does on the writing one.
+  it is written in (php's `self::`): the class of the nearest named
+  callable around the token, so a closure in a method reads the method's
+  class and a free function's body names none. `@receiver.called` is the
+  late-bound token (php's `$this`, `static::`, `new static`): the class
+  the call running the method is made on, the same class where no call
+  says. Its value is `ReturnExpr::ReceiverOr(class)`, Perl's `$self`
+  shape, and the registry threads each call's receiver into the callee's
+  body (`ReturnExprReducer`), so an inherited `static::m()` dispatches on
+  the subclass and `return new static` is an instance of it.
+  `@receiver.super` names the parent the writing class's `@parent.super`
+  edge marks (php's `parent`, its `extends`: never an interface or a
+  trait), and `@receiver.declared` the class the same token anchors (php's
+  anonymous `class`). `parent::m()` dispatches on that class, as
+  `self::m()` does on the writing one.
+  TODO(lsb-forwarding): php's `self::m()` and `parent::m()` forward the
+  called class, so a `static` in `m` is still the subclass a call was made
+  on; here each passes the class it names as the receiver. Forwarding
+  needs a call whose lookup starts at the named class while its receiver
+  is the method's own, which no pack call site states yet.
 - A construction (`@expr.construct`, php's `new Foo(…)`) is
   `Construct { lookup }` on its `@member.recv`: its value is an instance
   of the class the lookup names, whatever the constructor declares. A
@@ -150,14 +160,14 @@ extra, whatever the pattern.
   hop by hop. The spelling is read like a parameter's declared type (the
   pack's `annot_type`, then the use-map at the return's site), and
   `@type.enclosing` marks a written type naming the class it is written in
-  (php's `self`, `static`, nullable or not), in a return, a parameter or a
-  property alike: that class. `@type.super` marks one naming the class its
+  (php's `self`, nullable or not), in a return, a parameter or a property
+  alike: that class. `@type.called` marks one naming the class the call is
+  made on (php's `static`): a callable declaring it returns
+  `ReceiverOr(that class)`. `@type.super` marks one naming the class its
   `@parent.super` edge names (php's `parent`), resolved with the receiver
-  mark of the same name.
-  Like `static::`, a `static` return names the writing class, not the
-  receiver's. A callable that declares no return returns what its body
-  returns (`@expr.return.value`), each site an arm of the nearest callable
-  around it, so a closure's `return` is the closure's.
+  mark of the same name. A callable that declares no return returns what
+  its body returns (`@expr.return.value`), each site an arm of the nearest
+  callable around it, so a closure's `return` is the closure's.
   TODO(generator-returns): a php or python function that yields returns a
   generator whatever its `return` says; its arms do not know it yields.
 - A receiver is typed by the value at its exact span. Every call states

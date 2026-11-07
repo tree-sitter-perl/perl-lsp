@@ -101,15 +101,21 @@ call on it dispatches there: the token's `Expr` witness is the one store
 of that class, and the call's lookup reads it like any receiver's value.
 `class` names the class it spells (php's `Foo::m()`, through the use-map);
 `enclosing` names the class of the method the token is written in (php's
-`$this`, `self::`, `static::`, cpp's `this`), from the one method-class
-table. Which tokens these are is the document's: the extractor holds no
+`self::`, cpp's `this`), from the one method-class table; `called` is
+late-bound (php's `$this`, `static::`, `new static`): the class the call
+running the method is made on, that method's class where no call says. Its
+value is `ReturnExpr::ReceiverOr(class)`, the shape Perl's `$self` and a
+receiver `bless` take, so the call's receiver substitutes at every call
+site. Which tokens these are is the document's: the extractor holds no
 receiver spelling. Bare `@receiver` is the declared receiver, a parameter
 (python's `self`).
 
 `@rettype` is a callable's declared return, captured in the def's match.
 `@type.enclosing` sits on any written type (a return, a parameter's or
 property's `@type.annot`) the document says names the class it is written
-in rather than a class by its spelling (php's `self`, `static`);
+in rather than a class by its spelling (php's `self`); `@type.called` one
+naming the class the call is made on (php's `static`), so a callable
+declaring it returns `ReceiverOr` of the class it is written in;
 `@type.super` one naming the class that class's `@parent.super` edge names
 (php's `parent`). Each is a pattern of its own, joined to the writing
 site's capture by span. `@parent.super` is a `@parent` edge the document
