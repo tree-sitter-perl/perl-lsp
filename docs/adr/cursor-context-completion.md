@@ -60,12 +60,40 @@ Two properties make it cheap and exact:
   exact: tree-sitter reparses only the damaged region around the cursor,
   reusing the document tree `document.rs` already holds.
 
-Per-language config comes from `LangPack` — a single struct, not a
-branch. The member-access node kinds (`member_kinds`) and the "don't
-splice into strings/comments" set (`skip_kinds`) are the facts this seam
-reads, alongside the pack's other per-language config for the rest of
-completion. `LanguageDriver::lang_pack(language)` maps a driver id to its
-`LangPack`; `None` means the language gets in-scope completion only.
+Which node is a member access is the language's query document's answer,
+never a table: the sentinel runs the pack's compiled document over the
+reparse (`query_extract::CursorDocument`) and takes the match whose
+`@ref.member.value` / `@ref.member.call` token holds the sentinel. Its
+`@member.recv` is the receiver, its `@member.op` the operator token, and a
+receiver that is itself an access (`a.b.`, `f().`, `$x->m()->`) is typed by
+the same read, one hop at a time. `LanguageDriver::lang_pack(language)`
+maps a driver id to its `LangPack`; `None` means the language gets
+in-scope completion only. The "don't splice into strings/comments" set
+(`skip_kinds`) and the receiver peel are still pack tables.
+
+### What an operator offers
+
+A member written after an operator lives in some of the language's member
+namespaces (`member-kinds.md`), and the document says which: `@space.<name>`
+on the operator token. php's `->` and `?->` reach an object's methods and
+properties, `::` a class's methods and constants, and a `#set! member.word`
+on the same pattern adds a word that names no member (`Foo::class`). A
+token that states none (C++, Python) offers every namespace. Where the
+writer has put something between the operator and the name (php's `$` in
+`Foo::$x`), the access's form is chosen, so the namespaces its own name
+token searches are offered instead. Each namespace is gathered on its own
+(`complete_members_for_class`), so a child shadows its parent within a
+namespace and php's `count()` and `$count` are two members.
+
+### A receiver the written buffer leaves untyped
+
+The receiver types on the document's analysis of the buffer as written.
+At the end of a block, `Foo::` / `parent::` parse as an `ERROR` and no
+pattern says what `Foo` is, so nothing types it. Then the receiver types on
+an analysis of the buffer the sentinel finished (`completed`), which is the
+same document over the same receiver bytes: no second resolver of class
+spellings. It costs one analysis of the file, paid only when the written
+buffer has no answer.
 
 ### Receiver → members: tree-free, reusing the bag
 
@@ -90,7 +118,7 @@ class-body symbols with the class name (`symbol_in_class` reads `package`).
 
 `completionProvider.triggerCharacters` is the union of every served
 language's `LanguageDriver::trigger_chars()` (cpp adds `.`; `->`/`::` ride
-the existing `>`/`:`). The client auto-fires completion on the trigger and
+the existing `>`/`:`; php adds `$` for a variable and `Foo::$x`). The client auto-fires completion on the trigger and
 names it in `CompletionContext` — a free "is-this-member-access" signal at
 one slice-literal per language. It is a gate, not a solution: it never
 carries the receiver, which is exactly what the sentinel exists to

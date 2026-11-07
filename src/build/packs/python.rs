@@ -53,9 +53,7 @@ pub fn python_pack() -> LangPack {
         trigger_chars: &["."],
         recv_peel: &["parenthesized_expression"],
         simple_var_kinds: &["identifier"],
-        member_kinds: &["attribute"],
         skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
-        call_kinds: &["call"],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }

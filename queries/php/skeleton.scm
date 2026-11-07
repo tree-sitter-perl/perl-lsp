@@ -450,17 +450,21 @@
 ; `?->` reaches the same members. A dynamic name (`$x->$m()`) names none.
 (member_call_expression
   object: (_) @member.recv
+  "->" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 (nullsafe_member_call_expression
   object: (_) @member.recv
+  "?->" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 (member_access_expression
   object: (_) @member.recv
+  "->" @member.op
   name: (name) @ref.member.value) @expr.member
 (nullsafe_member_access_expression
   object: (_) @member.recv
+  "?->" @member.op
   name: (name) @ref.member.value) @expr.member
 ; `->` reads an instance property; finding a static one there is PHP's
 ; error, so it is looked for only when no instance property answers.
@@ -472,46 +476,56 @@
 ; without its `$`; finding an instance property there is PHP's error.
 (scoped_property_access_expression
   scope: [(name) (qualified_name)] @member.recv @receiver.class
+  "::" @member.op
   name: (variable_name (name) @ref.member.value)) @expr.member
 ((scoped_property_access_expression
   scope: (relative_scope) @member.recv @receiver.enclosing
+  "::" @member.op
   name: (variable_name (name) @ref.member.value)) @expr.member
  (#eq? @receiver.enclosing "self"))
 ((scoped_property_access_expression
   scope: (relative_scope) @member.recv @receiver.called
+  "::" @member.op
   name: (variable_name (name) @ref.member.value)) @expr.member
  (#eq? @receiver.called "static"))
 ((scoped_property_access_expression
   scope: (relative_scope) @member.recv @receiver.super
+  "::" @member.op
   name: (variable_name (name) @ref.member.value)) @expr.member
  (#eq? @receiver.super "parent"))
 (scoped_property_access_expression
   scope: (variable_name) @member.recv
+  "::" @member.op
   name: (variable_name (name) @ref.member.value)) @expr.member
 (scoped_property_access_expression
   name: (variable_name (name) @space.static_property @space.property.illegal))
 ; `Foo::X` reads a class constant, through the same receivers.
 ((class_constant_access_expression
    . [(name) (qualified_name)] @member.recv @receiver.class
+   "::" @member.op
    . (name) @ref.member.value @space.constant) @expr.member
  (#not-eq? @ref.member.value "class"))
 ((class_constant_access_expression
    . (relative_scope) @member.recv @receiver.enclosing
+   "::" @member.op
    . (name) @ref.member.value @space.constant) @expr.member
  (#eq? @receiver.enclosing "self")
  (#not-eq? @ref.member.value "class"))
 ((class_constant_access_expression
    . (relative_scope) @member.recv @receiver.called
+   "::" @member.op
    . (name) @ref.member.value @space.constant) @expr.member
  (#eq? @receiver.called "static")
  (#not-eq? @ref.member.value "class"))
 ((class_constant_access_expression
    . (relative_scope) @member.recv @receiver.super
+   "::" @member.op
    . (name) @ref.member.value @space.constant) @expr.member
  (#eq? @receiver.super "parent")
  (#not-eq? @ref.member.value "class"))
 ((class_constant_access_expression
    . (variable_name) @member.recv
+   "::" @member.op
    . (name) @ref.member.value @space.constant) @expr.member
  (#not-eq? @ref.member.value "class"))
 ; `Foo::m()` calls the method of the class `Foo` names; `self::` names the
@@ -519,31 +533,45 @@
 ; running that method is made on, `parent::` the class it extends.
 (scoped_call_expression
   scope: [(name) (qualified_name)] @member.recv @receiver.class
+  "::" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 ((scoped_call_expression
   scope: (relative_scope) @member.recv @receiver.enclosing
+  "::" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#eq? @receiver.enclosing "self"))
 ((scoped_call_expression
   scope: (relative_scope) @member.recv @receiver.called
+  "::" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#eq? @receiver.called "static"))
 ((scoped_call_expression
   scope: (relative_scope) @member.recv @receiver.super
+  "::" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#eq? @receiver.super "parent"))
 ; `$cls::m()` calls the method of whatever class the variable holds.
 (scoped_call_expression
   scope: (variable_name) @member.recv
+  "::" @member.op
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 ; The class a static call names is a class reference.
 (scoped_call_expression scope: (name) @ref.type)
 (scoped_call_expression scope: (qualified_name (name) @ref.type) @ref.spelled)
+
+; What an operator reaches: after `->` or `?->` one of the object's methods
+; or properties, after `::` one of the class's methods or constants, or
+; `class`, the class itself (`Foo::class`). A static property is written
+; `::$x`, its own form. Completion offers what the operator reaches.
+"->" @member.op.arrow @space.method @space.property
+"?->" @member.op.arrow @space.method @space.property
+("::" @space.method @space.constant
+ (#set! member.word "class"))
 
 ; ---- construction ----
 ; `new Foo(…)` calls the constructor of the class `Foo` names on its

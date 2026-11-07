@@ -48,12 +48,12 @@ pub fn php_pack() -> LangPack {
         narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: true,
-        trigger_chars: &[],
+        // `->` and `?->` end on `>`, `::` on `:`, and a variable and a
+        // static property (`Foo::$x`) start with `$`.
+        trigger_chars: &[">", ":", "$"],
         recv_peel: &[],
         simple_var_kinds: &[],
-        member_kinds: &[],
         skip_kinds: &[],
-        call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }

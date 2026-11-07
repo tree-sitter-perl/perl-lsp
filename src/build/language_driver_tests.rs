@@ -255,7 +255,7 @@ fn member_completion_filters_by_access_specifier() {
          private:\n  void Ref();\n  void Unref();\n  int rep_;\n\
          };\n",
     );
-    let outside_cands = fa.complete_members_for_class("Status", None, None);
+    let outside_cands = fa.complete_members_for_class("Status", None, None, None);
     let outside: Vec<&str> = outside_cands.iter().map(|c| c.label.as_str()).collect();
     assert!(outside.contains(&"ok"), "{outside:?}");
     assert!(outside.contains(&"Update"), "{outside:?}");
@@ -263,7 +263,7 @@ fn member_completion_filters_by_access_specifier() {
     assert!(!outside.contains(&"Unref"), "private method leaked: {outside:?}");
     assert!(!outside.contains(&"rep_"), "private field leaked: {outside:?}");
 
-    let inside = fa.complete_members_for_class("Status", None, Some("Status"));
+    let inside = fa.complete_members_for_class("Status", None, Some("Status"), None);
     let inside_labels: Vec<&str> = inside.iter().map(|c| c.label.as_str()).collect();
     for want in ["ok", "Update", "Ref", "Unref", "rep_"] {
         assert!(inside_labels.contains(&want), "{want} missing from self-access: {inside_labels:?}");
@@ -844,7 +844,7 @@ fn h13_field_receiver_member_slot_resolves() {
         parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
         let fa = cpp_driver().analyze(src);
-        let detected = detect_slot(&fa, &tree, src, point_after(src, marker), "cpp", None);
+        let detected = detect_slot(&fa, &tree, src, point_after(src, marker), "cpp", None, None);
         match detected.slot {
             Slot::Member { receiver, .. } => receiver
                 .receiver_type
@@ -904,7 +904,7 @@ class Iterator {\n\
     // `requesting`: None = completing from OUTSIDE the class (public only);
     // Some("Iterator") = from a method of the SAME class (privates too).
     let has = |n: &str, requesting: Option<&str>| {
-        fa.complete_members_for_class("Iterator", None, requesting)
+        fa.complete_members_for_class("Iterator", None, requesting, None)
             .iter()
             .any(|c| c.label == n)
     };

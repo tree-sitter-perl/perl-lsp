@@ -1115,9 +1115,10 @@ impl FileAnalysis {
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
         requesting_class: Option<&str>,
+        space: Option<NamespaceId>,
     ) {
         self.for_each_ancestor_class(class_name, module_index, |c| {
-            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, requesting_class);
+            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, requesting_class, space);
             std::ops::ControlFlow::Continue(())
         });
     }
@@ -1132,6 +1133,7 @@ impl FileAnalysis {
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
         requesting_class: Option<&str>,
+        space: Option<NamespaceId>,
     ) {
         // Access-specifier gate: visible from outside
         // `class_name`'s own body only when NOT tagged non-public.
@@ -1148,6 +1150,7 @@ impl FileAnalysis {
                 && !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. })
                 && (requesting_class == Some(class_name)
                     || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && self.lives_in(sym, space)
         };
 
         // Local methods in this class

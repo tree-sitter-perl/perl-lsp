@@ -97,9 +97,7 @@ pub fn cpp_pack() -> LangPack {
         // Shared with the member-block synth lane (rule #10).
         recv_peel: &["parenthesized_expression", "pointer_expression"],
         simple_var_kinds: &["identifier"],
-        member_kinds: &["field_expression"],
         skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
-        call_kinds: &["call_expression"],
         domain_compare_kinds: &["binary_expression"],
         domain_compare_ops: &["==", "!="],
     }

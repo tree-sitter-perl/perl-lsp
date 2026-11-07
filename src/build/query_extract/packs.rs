@@ -92,15 +92,8 @@ pub struct LangPack {
     /// to like its other node-kind tables. Extraction never reads it: the
     /// document states a written-name receiver as `@member.recv.name`.
     pub simple_var_kinds: &'static [&'static str],
-    /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
-    /// the cursor-completion path climbs to + types the receiver of. Empty =
-    /// no member-access completion (Perl uses `cursor_context`).
-    pub member_kinds: &'static [&'static str],
     /// Node kinds the sentinel must NOT splice into (string/char/comment).
     pub skip_kinds: &'static [&'static str],
-    /// Call-expression node kinds (`call_expression`/`call`) — a chained
-    /// receiver `f().attr` types through the call's inner member.
-    pub call_kinds: &'static [&'static str],
     /// Equality-comparison node kinds (`binary_expression`) whose operand
     /// may be a domain-typed field — the type-constrained-completion slot
     /// (`o->op_type == |` ranks the field's DOMAIN members first,
@@ -153,9 +146,7 @@ impl LangPack {
             trigger_chars,
             recv_peel,
             simple_var_kinds,
-            member_kinds,
             skip_kinds,
-            call_kinds,
             domain_compare_kinds,
             domain_compare_ops,
         } = self;
@@ -167,9 +158,7 @@ impl LangPack {
         list("trigger_chars", trigger_chars);
         list("recv_peel", recv_peel);
         list("simple_var_kinds", simple_var_kinds);
-        list("member_kinds", member_kinds);
         list("skip_kinds", skip_kinds);
-        list("call_kinds", call_kinds);
         list("domain_compare_kinds", domain_compare_kinds);
         list("domain_compare_ops", domain_compare_ops);
         out.retain(|(_, v)| !v.is_empty());

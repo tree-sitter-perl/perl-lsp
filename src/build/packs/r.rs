@@ -29,9 +29,7 @@ pub fn r_pack() -> LangPack {
         trigger_chars: &["$", "@", ":"],
         recv_peel: &[],
         simple_var_kinds: &[],
-        member_kinds: &[],
         skip_kinds: &[],
-        call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }

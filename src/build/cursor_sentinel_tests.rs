@@ -99,6 +99,26 @@ fn cpp_call_receiver() {
     assert_eq!(r.text, "make()");
 }
 
+/// PHP's member operators are the document's: `->`, the nullsafe `?->`
+/// and the scope operator `::` each open a member access, whose receiver is
+/// the one the document's match names.
+#[test]
+fn php_receivers_follow_the_document() {
+    let mut p = Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    let pack = crate::build::packs::php_pack();
+    for (src, marker, recv, arrow) in [
+        ("<?php $box-> }", "$box->", "$box", true),
+        ("<?php $box?-> }", "$box?->", "$box", true),
+        ("<?php Foo\\Bar:: }", "Foo\\Bar::", "Foo\\Bar", false),
+        ("<?php parent:: }", "parent::", "parent", false),
+        ("<?php $a->b()->c-> }", "$a->b()->c->", "$a->b()->c", true),
+    ] {
+        let r = receiver_at(&mut p, &pack, src, after(src, marker)).unwrap_or_else(|| panic!("a receiver in {src}"));
+        assert_eq!((r.text.as_str(), r.arrow), (recv, arrow), "{src}");
+    }
+}
+
 // ---- The free-anchor property: receiver offsets survive the splice ----
 
 #[test]

@@ -310,9 +310,14 @@ impl FileAnalysis {
         // Collect methods from this class and all ancestors. Perl has no
         // access-specifier concept, so no symbol here ever carries
         // "non_public" — `requesting_class: None` is a no-op gate.
-        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, None);
+        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, None, None);
 
         candidates
+    }
+
+    /// Whether `sym` is a member of namespace `space` (`None`: of any).
+    pub(super) fn lives_in(&self, sym: &Symbol, space: Option<NamespaceId>) -> bool {
+        space.is_none_or(|s| self.member_spaces().of_decl(sym.kind, sym.member_space) == s)
     }
 
     /// Push a class's DATA fields (class-body `Variable`/`Field` members,
@@ -326,6 +331,7 @@ impl FileAnalysis {
         candidates: &mut Vec<CompletionCandidate>,
         seen: &mut HashSet<String>,
         requesting_class: Option<&str>,
+        space: Option<NamespaceId>,
     ) {
         let class_body = self
             .symbols
@@ -348,7 +354,7 @@ impl FileAnalysis {
         };
         // An instance's slots first, as member access reads them.
         for sym in &self.symbols {
-            if self.slot_class_of(sym) == Some(cls) && seen.insert(sym.name.clone()) {
+            if self.slot_class_of(sym) == Some(cls) && self.lives_in(sym, space) && seen.insert(sym.name.clone()) {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
@@ -394,6 +400,7 @@ impl FileAnalysis {
                 // two-state (friend/protected-via-inheritance not modeled).
                 && (requesting_class == Some(cls)
                     || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && self.lives_in(sym, space)
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
@@ -417,6 +424,7 @@ impl FileAnalysis {
             if matches!(sym.kind, SymKind::Enumerator)
                 && self.symbol_in_class(sym.id, cls)
                 && (requesting_class == Some(cls) || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && self.lives_in(sym, space)
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
@@ -446,36 +454,46 @@ impl FileAnalysis {
     /// inside that SAME class's own body. A caller with no cursor context
     /// passes `None` and safely under-offers to "public only" — it never
     /// leaks a private member.
+    ///
+    /// `offers` is the member namespaces the access reaches (`None`: every
+    /// one the language declares). Each is gathered on its own, so a child
+    /// shadows its parent's member of one name within a namespace and
+    /// php's `count()` and `$count` are two members.
     pub fn complete_members_for_class(
         &self,
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         requesting_class: Option<&str>,
+        offers: Option<SpaceSet>,
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, requesting_class);
-        // Data members from this class AND its ancestors. A field lives in
-        // its class body scope (or a nested container body — inline unions);
-        // a Variable inside a Sub-kind scope is a local/param. Anchored on
-        // where each class's methods are declared — that IS the body scope,
-        // whichever node carries it.
-        self.for_each_ancestor_class(class_name, module_index, |cls| {
-            self.collect_class_fields(cls, &mut candidates, &mut seen, requesting_class);
-            // a class defined in ANOTHER file — pull its fields from the
-            // cached module so cross-file member completion is complete
-            // (methods already cross via collect_ancestor_methods).
-            if let Some(mi) = module_index {
-                // Every file declaring `cls` — fields of a reopened class
-                // live across the set (`seen` dedups).
-                for cached in mi.visible_def_candidates(cls) {
-                    mi.whole_present(&cached).collect_class_fields(
-                        cls, &mut candidates, &mut seen, requesting_class,
-                    );
+        let declared = (0..self.member_spaces().names.len()).filter_map(|i| u8::try_from(i).ok()).map(NamespaceId);
+        for space in declared.filter(|s| offers.is_none_or(|o| o.contains(*s))) {
+            let mut seen: HashSet<String> = HashSet::new();
+            let space = Some(space);
+            self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, requesting_class, space);
+            // Data members from this class AND its ancestors. A field lives in
+            // its class body scope (or a nested container body — inline unions);
+            // a Variable inside a Sub-kind scope is a local/param. Anchored on
+            // where each class's methods are declared — that IS the body scope,
+            // whichever node carries it.
+            self.for_each_ancestor_class(class_name, module_index, |cls| {
+                self.collect_class_fields(cls, &mut candidates, &mut seen, requesting_class, space);
+                // a class defined in ANOTHER file — pull its fields from the
+                // cached module so cross-file member completion is complete
+                // (methods already cross via collect_ancestor_methods).
+                if let Some(mi) = module_index {
+                    // Every file declaring `cls` — fields of a reopened class
+                    // live across the set (`seen` dedups).
+                    for cached in mi.visible_def_candidates(cls) {
+                        mi.whole_present(&cached).collect_class_fields(
+                            cls, &mut candidates, &mut seen, requesting_class, space,
+                        );
+                    }
                 }
-            }
-            std::ops::ControlFlow::Continue(())
-        });
+                std::ops::ControlFlow::Continue(())
+            });
+        }
         candidates
     }
 

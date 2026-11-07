@@ -1770,21 +1770,18 @@ fn pack_fields_name_no_grammar_shapes() {
     const TRIGGERS: &str =
         "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
          tokens by coincidence. A protocol vocabulary, not the language's syntax";
-    const CURSOR: &str = "moves when the cursor reads the document: which nodes are \
-         members, calls, bare variables, strings and comparisons is answered by the patterns \
-         that capture them";
+    const CURSOR: &str = "moves when the cursor reads the document, as it already does for \
+         member accesses: which nodes are bare variables, wrappers, strings and comparisons is \
+         answered by the patterns that capture them";
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
-        ("cpp", "call_kinds", 1, CURSOR),
         ("cpp", "domain_compare_kinds", 1, CURSOR),
         ("cpp", "domain_compare_ops", 2, CURSOR),
-        ("cpp", "member_kinds", 1, CURSOR),
         ("cpp", "recv_peel", 2, CURSOR),
         ("cpp", "simple_var_kinds", 1, CURSOR),
         ("cpp", "skip_kinds", 4, CURSOR),
         ("cpp", "trigger_chars", 3, TRIGGERS),
-        ("python", "call_kinds", 1, CURSOR),
-        ("python", "member_kinds", 1, CURSOR),
+        ("php", "trigger_chars", 3, TRIGGERS),
         ("python", "recv_peel", 1, CURSOR),
         ("python", "simple_var_kinds", 1, CURSOR),
         ("python", "skip_kinds", 4, CURSOR),
@@ -1833,7 +1830,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/synthetic.rs", 2, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
-        ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
+        ("build/cursor_sentinel.rs", 3, "the domain-comparison operands and the receiver peel over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
         ("cst.rs", 24, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
@@ -1868,7 +1865,7 @@ fn tree_steps_go_through_the_syntax_tree() {
         ("build/cpp_reparse/gather.rs", 2, "std::path::Path, not a tree"),
         ("build/cpp_reparse/synthetic.rs", 1, "the C++ reparse's own trees, outside any build forest"),
         ("build/cpp_reparse/validate.rs", 3, "the C++ reparse's own trees, outside any build forest"),
-        ("build/cursor_sentinel.rs", 3, "cursor time: one climb per request over the sentinel reparse"),
+        ("build/cursor_sentinel.rs", 2, "cursor time: one climb per request over the sentinel reparse"),
         ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
         ("build/walk_markers.rs", 3, "std::path::Path, not a tree"),
         ("lsp/backend/server.rs", 1, "std::path::Path, not a tree"),

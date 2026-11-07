@@ -129,6 +129,11 @@ still resolves (goto-def lands on the member PHP would use), and
 read. An untagged site searches the namespace its mode implies (a call
 the callables, a read the language's `values`).
 
+Completion after an operator offers the namespaces the operator reaches,
+which the document states on the operator token (`@space.<name>` there,
+`capture-vocabulary.md`), and gathers each namespace on its own, so a
+same-named member of each is offered once per namespace.
+
 The callable-only arms of the walk (plugin entities bridged to the class,
 cross-package typeglob installs, plugin bridges from other files) answer
 only an ask that reaches callables.

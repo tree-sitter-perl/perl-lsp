@@ -3656,3 +3656,89 @@ function clock() { return new Clock(); }
     assert_eq!(ret("declared"), Some(T::ClassName("Box".into())), "a declared return is the value");
     assert_eq!(fa.sub_return_type_at_arity("clock", Some(0)), clock, "a function");
 }
+
+/// The completion items at `|` in `src`, asked as the editor asks: the file
+/// indexed, the cursor's buffer the one written.
+#[cfg(feature = "php")]
+fn completions(src: &str) -> Vec<(String, Option<tower_lsp::lsp_types::CompletionItemKind>)> {
+    let at = src.find('|').expect("a cursor");
+    let src = format!("{}{}", &src[..at], &src[at + 1..]);
+    let row = src[..at].matches('\n').count();
+    let point = tree_sitter::Point { row, column: at - src[..at].rfind('\n').map_or(0, |n| n + 1) };
+    let path = std::path::PathBuf::from("complete.php");
+    let driver = crate::build::language_driver::LanguageRegistry::compiled();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze(&src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "php", Some(&canon), &idx);
+    items.into_iter().map(|i| (i.label, i.kind)).collect()
+}
+
+#[cfg(feature = "php")]
+fn labels(src: &str) -> Vec<String> {
+    let mut out: Vec<String> = completions(src).into_iter().map(|(l, _)| l).collect();
+    out.sort();
+    out
+}
+
+#[cfg(feature = "php")]
+const SHAPES: &str = "<?php
+namespace App;
+class Base {
+    public $shared;
+    public static $count = 0;
+    const LIMIT = 3;
+    public function greet() {}
+    public static function make(): static {}
+}
+class Kid extends Base {
+    public ?Kid $next;
+    public function run(Base $b) {
+        CURSOR
+    }
+}
+";
+
+/// After `->` or `?->` a member is one of the object's methods or
+/// properties; after `::` one of the class's methods or constants, or
+/// `class`; after `::$` one of its static properties.
+#[cfg(feature = "php")]
+#[test]
+fn member_completion_offers_what_the_operator_reaches() {
+    let at = |hole: &str| labels(&SHAPES.replace("CURSOR", hole));
+    let instance = ["greet", "make", "shared"];
+    assert_eq!(at("$b->|"), instance, "a typed parameter");
+    assert_eq!(at("$b?->|"), instance, "the nullsafe operator");
+    assert_eq!(at("$this->|"), ["greet", "make", "next", "run", "shared"], "the class the method is written in");
+    assert_eq!(at("$this->next->|"), ["greet", "make", "next", "run", "shared"], "a chain");
+    let statics = ["LIMIT", "class", "greet", "make"];
+    assert_eq!(at("Base::|"), statics, "a class name");
+    assert_eq!(at("parent::|"), statics, "the parent");
+    assert_eq!(at("self::|"), ["LIMIT", "class", "greet", "make", "run"], "the enclosing class");
+    assert_eq!(at("static::|"), ["LIMIT", "class", "greet", "make", "run"], "the called class");
+    assert_eq!(at("Base::make()->|"), instance, "a call on the class");
+    assert_eq!(at("self::$|"), ["count"], "a static property is written `::$x`");
+    assert_eq!(at("$b->gr|eet();"), instance, "completing in place of a member");
+}
+
+/// A member and a constant or property of one name are two members, each
+/// offered where its operator reaches it.
+#[cfg(feature = "php")]
+#[test]
+fn a_method_and_a_property_of_one_name_are_both_offered() {
+    use tower_lsp::lsp_types::CompletionItemKind as K;
+    let src = "<?php
+class Box {
+    public $size;
+    const size = 1;
+    public function size() {}
+    public function go() { $this->| }
+}
+";
+    let mut items = completions(src);
+    items.sort_by_key(|(l, k)| (l.clone(), format!("{k:?}")));
+    assert_eq!(items, [("go".to_string(), Some(K::METHOD)), ("size".into(), Some(K::FIELD)), ("size".into(), Some(K::METHOD))]);
+}

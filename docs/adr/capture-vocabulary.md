@@ -48,6 +48,12 @@ document fails that pack's tests instead of extracting nothing.
 A name starting with `_` follows tree-sitter's predicate-only convention
 (`@_const` under `#eq?`). It maps to `None`, and the driver never sees it.
 
+A `#set!` directive carries a word no node of the match spells, so its key
+is vocabulary too (`SettingKey`): an unknown key, or one with no value,
+fails the compile. `member.word` is the one key: a word the pattern's
+member operator may be followed by that names no member (php's
+`Foo::class`), which completion offers beside the members.
+
 ## Decision: structural predicates are a closed set too
 
 Core tree-sitter evaluates text predicates (`#eq?`, `#match?`,
@@ -166,6 +172,19 @@ does not exist yet.
 `@flow.place` is the left side of an assignment. When its own read
 projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
+
+## Decision: a member operator states what it reaches
+
+`@member.op` sits on the operator token of a member access's match.
+`@member.op.<which>` names the model's `MemberOp` on it, and `@space.<name>`
+on it names a namespace a member written after the operator lives in
+(php's `->`: methods and properties; `::`: methods and constants). On a
+member's name token `@space.<name>` is the namespaces the access searches;
+on its operator it is the namespaces the operator reaches, which is what
+completion offers there (`cursor-context-completion.md`). Extraction reads
+neither off the operator. The cursor reads both, with the access's
+receiver and name, off the same document run over its sentinel reparse
+(`CursorDocument`), so no node kind says which node is a member.
 
 ## Decision: a def with no name is named from its anchor
 

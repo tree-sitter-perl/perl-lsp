@@ -87,5 +87,9 @@ the fields the pack lane carries per file.
   left (`brace_scoped_members`) hold no strings and are not counted; each
   is a statement the document can make about itself, as receiver elision
   already is (`@scope.sub.implicit_receiver`).
-- The allowlists today are the cursor sentinel's node-kind tables, cpp's
-  receiver peel, and cpp's `main` entry point.
+- The cursor sentinel reads member accesses off the document
+  (`CursorDocument`): the receiver, the operator and what the operator
+  offers are the captures extraction already reads, so no node-kind table
+  says which node is a member or a call. The allowlists today are the
+  sentinel's remaining node-kind tables (bare variables, strings,
+  comparisons), the receiver peel, and cpp's `main` entry point.

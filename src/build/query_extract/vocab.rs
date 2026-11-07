@@ -351,6 +351,31 @@ impl MemberOpCap {
 }
 
 spelled! {
+    /// A `#set!` key: a word a pattern carries that no node of the match
+    /// spells.
+    pub enum SettingKey {
+        /// A word written after the member operator the pattern captures
+        /// that names no member (php's `Foo::class`).
+        MemberWord = "member.word",
+    }
+}
+
+/// Every `#set!` a document states uses a key of the vocabulary and gives
+/// it a value, so a misspelt key fails the compile instead of setting
+/// nothing.
+pub(super) fn check_settings(query: &tree_sitter::Query) -> Result<(), String> {
+    for p in 0..query.pattern_count() {
+        for s in query.property_settings(p) {
+            if SettingKey::parse(&s.key).is_none() || s.value.is_none() {
+                let at = query.start_byte_for_pattern(p);
+                return Err(format!("unknown setting #set! {} (pattern at byte {at})", s.key));
+            }
+        }
+    }
+    Ok(())
+}
+
+spelled! {
     /// A receiver token that names a class rather than holding a value the
     /// file types: the token's value is that class, and a call on it
     /// dispatches there.
