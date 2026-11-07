@@ -21,7 +21,7 @@ use crate::util::canonical_path::CanonicalPath;
 use tower_lsp::lsp_types::Url;
 
 use crate::model::file_analysis::{
-    AccessKind, CompletionCandidate, ConstructionKey, CrossFileLookup, FileAnalysis, HandlerOwner, MemberKind,
+    AccessKind, CompletionCandidate, ConstructionKey, CrossFileLookup, FileAnalysis, HandlerOwner, MemberKind, MemberMode,
     ReceiverPolicy, RefKind, Span, SymKind,
 };
 use crate::index::open_docs::{FileKey, OpenDocs};

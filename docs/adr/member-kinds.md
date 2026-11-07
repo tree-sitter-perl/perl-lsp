@@ -40,8 +40,8 @@ registry partitions on, and no per-pack strictness flag.
   the defeasible domain never becomes the type that flows.
 - **Walk.** `resolve_method_in_ancestors` asks for a `Callable`,
   `resolve_field_in_ancestors` for a `Value`; both are the one MRO walk,
-  and which declarations answer is the language's `MemberNamespace`
-  (`MemberKind::admits_decl`), declared on its `NameSpellings`.
+  and which declarations answer is the site's namespace set against the
+  language's declared namespaces (`MemberKind::admits_decl`).
   `field_value_type(receiver, member)` is the receiver-typed entry for a
   `FieldAccess`; `member_value_type(receiver, member, arity)` is the
   kind-less ladder (method return first, field fallback) for an asker
@@ -75,22 +75,44 @@ bare name token (what rename rewrites), and the written `$x` rides
 `@def.field.spelled` onto `Presentation::label`, the spelling the outline
 lists it by. No pack declares a sigil for the model to put back.
 
-## A language decides how its classes hold members
+## A language declares its member namespaces
 
-Whether a call can reach a stored member is a fact about the language,
-not about the call, so it is declared once per language and the walk
-reads it; nothing branches on a language.
+Which declarations a member access can reach is a fact about the
+language, so each language DECLARES its member namespaces and the walk
+reads them; nothing branches on a language. Core holds a namespace only
+as an opaque `NamespaceId` and compares sets of them (`SpaceSet`); the
+language owns the closed enum that names them (PHP's `PhpSpace`), so a
+language crate split moves the enum with the language and core never
+learns its members. The table (`MemberSpaces`) is declared on the
+language's `NameSpellings`. A call lands in
+namespace 0 (`NamespaceId::CALLABLES`) unless its site says otherwise.
 
-- **`PerFamily`** (Perl, and the neutral default): each ask is answered
-  by its own family. A Perl call reaches a sub, never a `field` of the
-  same name; a value read never resolves to a method, so `$php->sucks`
-  without parentheses on a class that only declares `sucks()` is an
-  undeclared property, not a resolved call.
-- **`Shared`** (C++, Python): one namespace holds data members and
-  member functions alike, and the nearest declaration of the name
+- **`PER_FAMILY`** (Perl, and the neutral default): `callable` and
+  `value`. A Perl call reaches a sub, never a `field` of the same name; a
+  value read never resolves to a method, so `$php->sucks` without
+  parentheses on a class that only declares `sucks()` is an undeclared
+  property, not a resolved call.
+- **`SHARED`** (C++, Python): one `member` namespace holds data members
+  and member functions alike, and the nearest declaration of the name
   answers either ask. `d.hook()` reads member `hook` and calls whatever
   it holds, and a derived `hook()` hides a base data member `hook` for a
   value read too.
+- **PHP**: `method`, `property`, `static_property`, `constant`. `Card::X`,
+  `$c->X` and `$c->X()` are three members of one name.
+
+The query document tags syntax with namespaces, so the capture states the
+rule and no code re-derives it (rule #15). `@space.<name>` on a
+declaration's name files it in that namespace; on a member site it adds
+the namespace to the site's search set. `@space.<name>.illegal` adds a
+namespace the site can reach only wrongly (PHP's `$obj->count` finding a
+static `$count`). Resolution (`resolve_member_key_in_ancestors`) walks the
+site's legal namespaces over the whole MRO first and the illegal ones only
+when none answers, so a legal member is never shadowed by an illegal one
+and the fallback costs nothing when the legal walk answers. An illegal hit
+still resolves (goto-def lands on the member PHP would use), and
+`MemberKind::reaches_illegally` is the fact a diagnostic and completion
+read. An untagged site searches the namespace its mode implies (a call
+the callables, a read the language's `values`).
 
 The callable-only arms of the walk (plugin entities bridged to the class,
 cross-package typeglob installs, plugin bridges from other files) answer

@@ -1,7 +1,8 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{join_all, ClassCall, ClassSpelling, ConstructionKey, InferredType, LatticeRules, NameSpellings};
+use crate::model::file_analysis::{join_all, ClassCall, ClassSpelling, ConstructionKey, InferredType, LatticeRules, MemberSpaces, NameSpellings, NamespaceId};
+use std::borrow::Cow;
 
 /// PHP's subsumption rules: none. `bool` is not an `int`, so `bool|int`
 /// is a union a signature spells.
@@ -21,6 +22,10 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
+            // Methods, properties, static properties and constants are
+            // four namespaces: `X()`, `$obj->X`, `Foo::$X` and `Foo::X`
+            // never answer one another (`PhpSpace`).
+            member_spaces: PhpSpace::SPACES,
             ..NameSpellings::NONE
         },
         // A bare call names the function its namespace declares, else the
@@ -51,6 +56,39 @@ pub fn php_pack() -> LangPack {
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
+    }
+}
+
+/// PHP's member namespaces, closed here; the model sees only their ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PhpSpace {
+    Method,
+    Property,
+    StaticProperty,
+    Constant,
+}
+
+impl PhpSpace {
+    const SPACES: MemberSpaces = MemberSpaces {
+        names: Cow::Borrowed(&[
+            Cow::Borrowed("method"),
+            Cow::Borrowed("property"),
+            Cow::Borrowed("static_property"),
+            Cow::Borrowed("constant"),
+        ]),
+        callables: NamespaceId(PhpSpace::Method as u8),
+        values: NamespaceId(PhpSpace::Property as u8),
+    };
+}
+
+impl TryFrom<NamespaceId> for PhpSpace {
+    type Error = NamespaceId;
+    fn try_from(id: NamespaceId) -> Result<Self, NamespaceId> {
+        [PhpSpace::Method, PhpSpace::Property, PhpSpace::StaticProperty, PhpSpace::Constant]
+            .into_iter()
+            .find(|s| *s as u8 == id.0)
+            .ok_or(id)
     }
 }
 

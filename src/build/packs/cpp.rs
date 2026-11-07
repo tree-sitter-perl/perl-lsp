@@ -1,7 +1,7 @@
 //! C/C++'s pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassCall, InferredType, MemberNamespace, NameSpellings};
+use crate::model::file_analysis::{ClassCall, InferredType, MemberSpaces, NameSpellings};
 
 /// C++'s scope-resolution separator, as the pack declares it.
 const CPP_SEP: &str = "::";
@@ -14,7 +14,7 @@ pub fn cpp_pack() -> LangPack {
         // whether it is a data member or a member function. Calling a class
         // constructs it (a functional cast, `Foo(x)`).
         names: NameSpellings {
-            member_namespace: MemberNamespace::Shared,
+            member_spaces: MemberSpaces::SHARED,
             class_call: ClassCall::Constructs,
             // TODO(construction-navigation): `Foo(x)` reaches no
             // constructor yet, so a constructor's references do not list it.

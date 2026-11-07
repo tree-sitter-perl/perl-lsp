@@ -325,7 +325,7 @@ impl FileAnalysis {
                 {
                     return Some(t);
                 }
-                let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
+                let Some(raw) = self.field_type_on_class(&class, member, module_index, MemberKind::CALLABLE) else {
                     continue;
                 };
                 return Some(self.substitute_member_type(raw, &class, &recv, module_index));
@@ -343,10 +343,11 @@ impl FileAnalysis {
         receiver: &InferredType,
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
     ) -> Option<InferredType> {
         receiver.join_over_arms(&self.type_order(module_index), |arm| {
             self.dispatch_ladder_of(arm, module_index).into_iter().find_map(|(class, recv)| {
-                let raw = self.field_type_on_class(&class, member, module_index)?;
+                let raw = self.field_type_on_class(&class, member, module_index, want)?;
                 Some(self.substitute_member_type(raw, &class, &recv, module_index))
             })
         })

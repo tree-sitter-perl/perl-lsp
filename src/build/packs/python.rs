@@ -3,7 +3,7 @@
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
     join_all, ClassCall, ClassSpelling, ConstructionKey, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType,
-    MemberNamespace, NameSpellings,
+    MemberSpaces, NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
@@ -28,7 +28,7 @@ pub fn python_pack() -> LangPack {
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(".")),
             class_spelling: ClassSpelling::UseMap,
-            member_namespace: MemberNamespace::Shared,
+            member_spaces: MemberSpaces::SHARED,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
             class_call: ClassCall::Constructs,
             instance_slots: InstanceSlots::BeforeClass,

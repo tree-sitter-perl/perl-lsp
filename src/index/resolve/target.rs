@@ -73,7 +73,7 @@ pub struct TargetRef {
     /// produced it: a `FieldAccess` cursor or a stored-member declaration
     /// is `Value`, a `MethodCall` cursor or a sub declaration `Callable`,
     /// and a target no cursor or declaration told about is `None` (both).
-    /// The declaring language's `MemberNamespace` decides what each family
+    /// The declaring language's `MemberSpaces` decides what each family
     /// matches (`docs/adr/member-kinds.md`).
     pub member_kind: Option<MemberKind>,
     /// Pack-language visibility identity: the canonical paths of the files
@@ -255,7 +255,7 @@ impl TargetRef {
                         origin,
                         class,
                         &name,
-                        Some(MemberKind::Callable),
+                        Some(MemberKind::CALLABLE),
                         module_index,
                         scope,
                     ),
@@ -277,7 +277,7 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
-                    member_kind: Some(MemberKind::Callable),
+                    member_kind: Some(MemberKind::CALLABLE),
                     constructed_classes: Vec::new(),
                 }
             }

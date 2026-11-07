@@ -92,7 +92,7 @@ pub(super) fn group_from_projections(
             target: TargetRef::owned_accessor(
                 m.method.clone(),
                 p.class.clone(),
-                MemberKind::Callable,
+                MemberKind::CALLABLE,
                 class_analysis,
                 module_index,
             ),

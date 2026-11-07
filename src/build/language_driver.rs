@@ -933,6 +933,7 @@ fn inject_member_blocks(
                 arity: None,
                 qualifier_owned: false,
                 flags: Default::default(),
+                member_space: None,
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1130,6 +1131,7 @@ fn remap_spans(
             arity: _,
             qualifier_owned: _,
             flags: _,
+            member_space: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
@@ -1153,6 +1155,7 @@ fn remap_spans(
             member_op,
             arg_count: _,
             constructs: _,
+            spaces: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member

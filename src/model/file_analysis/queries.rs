@@ -713,7 +713,7 @@ impl FileAnalysis {
                 // the method, a call never the field.
                 let t = match &r.kind {
                     RefKind::FieldAccess { .. } => {
-                        self.field_value_type(&recv_ty, member, module_index)
+                        self.field_value_type(&recv_ty, member, module_index, MemberKind::of_ref(&r.kind)?)
                     }
                     _ => self.member_value_type(&recv_ty, member, module_index, None),
                 };

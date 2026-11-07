@@ -1039,6 +1039,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         attributes: Vec::new(),
         arity: None,
         qualifier_owned: false,
+        member_space: None,
         flags: Default::default(),
     }
 }
@@ -3336,8 +3337,8 @@ struct S {
 ",
     );
     let s = InferredType::ClassName("S".into());
-    assert_eq!(fa.field_value_type(&s, "v_", None), Some(InferredType::Numeric));
-    assert_eq!(fa.field_value_type(&s, "size", None), None, "a callable is not a value member");
+    assert_eq!(fa.field_value_type(&s, "v_", None, crate::model::file_analysis::MemberKind::VALUE), Some(InferredType::Numeric));
+    assert_eq!(fa.field_value_type(&s, "size", None, crate::model::file_analysis::MemberKind::VALUE), None, "a callable is not a value member");
     assert_eq!(fa.member_value_type(&s, "size", None, None), Some(InferredType::Numeric));
 }
 

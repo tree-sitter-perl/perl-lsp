@@ -95,7 +95,7 @@ impl<'a> CandidateSet<'a> {
                     .and_then(|inv| self.origin.expr_type_at_span(inv, self.idx()))
                     .and_then(|t| {
                         let member = r.unqualified_target_name(self.origin.names());
-                        self.origin.field_value_type(&t, member, self.idx())
+                        self.origin.field_value_type(&t, member, self.idx(), MemberKind::of_ref(&r.kind)?)
                     })
                     .or_else(|| self.origin.expr_type_at_span(r.span, self.idx())),
                 _ => self.origin.expr_type_at_span(r.span, self.idx()),

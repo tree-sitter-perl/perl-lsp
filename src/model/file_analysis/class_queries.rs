@@ -535,10 +535,16 @@ impl FileAnalysis {
         class: &str,
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
     ) -> Option<InferredType> {
-        match self.resolve_field_in_ancestors(class, field, module_index)? {
+        match self.resolve_member_in_ancestors(class, field, module_index, want)? {
             MethodResolution::Local { sym_id, .. } => {
-                self.inferred_type_via_bag(field, self.symbol(sym_id).span.end)
+                let sym = self.symbol(sym_id);
+                // A stored member's value; a callable the ask reached has none.
+                if MemberKind::of_symbol(sym).mode != MemberMode::Value {
+                    return None;
+                }
+                self.inferred_type_via_bag(field, sym.span.end)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
@@ -549,6 +555,7 @@ impl FileAnalysis {
                     let full = idx.whole_present(cached);
                     let sym = full.symbols.iter().find(|s| {
                         matches!(s.kind, SymKind::Variable | SymKind::Field)
+                            && want.admits_decl(s.kind, s.member_space, &full.names().member_spaces)
                             && s.name == field
                             && s.package.as_deref() == Some(class.as_str())
                             && full.symbol_is_class_content(s)
@@ -574,7 +581,7 @@ impl FileAnalysis {
     pub fn misplaced_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<MisplacedWrite> {
         let mut out = Vec::new();
         for r in self.refs().iter() {
-            if !r.access.is_write() || MemberKind::of_ref(&r.kind) != Some(MemberKind::Value) {
+            if !r.access.is_write() || MemberKind::of_ref(&r.kind).map(|k| k.mode) != Some(MemberMode::Value) {
                 continue;
             }
             let Some(site) = r.member_site() else { continue };
