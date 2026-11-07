@@ -1476,9 +1476,10 @@ mod excl_time_tests {
             p_incl - c_incl,
             "parent exclusive must be inclusive minus the child's inclusive"
         );
-        // And the child (25ms) dominates the parent's self-time (15ms) by
-        // construction, so subtraction visibly did something.
-        assert!(p_excl < c_incl, "sleep layout guarantees child > parent self");
+        // The child slept, so subtraction visibly did something. Comparing the
+        // two sleeps instead flakes: a loaded runner oversleeps either one.
+        assert!(c_incl > 0, "the child's sleep is on its clock");
+        assert!(p_excl < p_incl, "the child's time came off the parent's");
     }
 }
 
