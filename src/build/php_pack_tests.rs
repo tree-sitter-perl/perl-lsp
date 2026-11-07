@@ -833,6 +833,58 @@ fn a_promoted_parameter_renames_as_one_from_either_side() {
     assert_eq!(renames(PROMOTED, 2, 57), both, "from a body use");
 }
 
+const BARE: &str = "<?php
+class A {
+    private int $x = 1;
+    public function f() { return $x; }
+    public function g(int $x) { return $x; }
+}
+trait T {
+    private $y;
+    public function h() { return $y; }
+}
+";
+
+/// PHP names a property only through a receiver, so a method's bare `$x`
+/// is a local of the method or nothing — never the property the class
+/// body declares (`@scope.direct`).
+#[test]
+fn a_bare_variable_in_a_method_never_names_a_property() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(BARE);
+    let bound = |row: usize, col: usize| {
+        let r = fa
+            .refs()
+            .iter()
+            .find(|r| matches!(r.kind, RefKind::Variable) && (r.span.start.row, r.span.start.column) == (row, col))
+            .unwrap_or_else(|| panic!("a ref at {row}:{col}"));
+        let bound = r.resolved_symbol().map(|id| (fa.symbol(id).kind, fa.symbol(id).selection_span.start.column));
+        let named = fa
+            .resolve_variable(&r.target_name, r.span.start)
+            .map(|s| (s.kind, s.selection_span.start.column));
+        assert_eq!(bound, named, "the bound ref and a by-name ask agree at {row}:{col}");
+        bound
+    };
+    assert_eq!(bound(3, 34), None, "no local `$x`: the property is not in force");
+    assert_eq!(bound(4, 40), Some((SymKind::Variable, 27)), "the parameter is");
+    assert_eq!(bound(8, 34), None, "a trait's property neither");
+}
+
+/// The promoted pair still binds in its constructor: the token is the
+/// constructor's local, and the local is in force in the constructor body.
+#[test]
+fn a_promoted_parameter_binds_in_its_constructor() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php(PROMOTED);
+    let local = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "made").unwrap();
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::Variable) && (r.span.start.row, r.span.start.column) == (2, 56))
+        .unwrap();
+    assert_eq!(r.resolved_symbol(), Some(local.id));
+}
+
 /// Every class a type position names is a class reference through the
 /// use-map, so rename of the class rewrites property, parameter, nullable,
 /// union, qualified and return spellings.
@@ -2111,6 +2163,49 @@ fn an_anonymous_class_is_a_class_of_its_own() {
     let classes: Vec<String> =
         two.symbols().iter().filter(|s| s.kind == SymKind::Class).map(|s| s.name.clone()).collect();
     assert_eq!(classes, ["class@anonymous:2:10", "class@anonymous:3:10"]);
+}
+
+/// A bare call in a method calls a function, never a method of the class:
+/// PHP calls a method only through a receiver (`$this->foo()`,
+/// `self::foo()`), so the class body's names are not in force in its
+/// methods — a named class's or an anonymous one's. An anonymous class's
+/// constructor arguments are code of the scope it is written in.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_call_in_a_method_never_names_a_method() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+class A {
+    public function foo() {}
+    public function g() { foo(); $this->foo(); }
+}
+function make($a) {
+    return new class($a) {
+        public function bar() {}
+        public function h() { bar(); }
+    };
+}
+";
+    let fa = php(src);
+    let locals: Vec<(String, bool)> = call_invokes(&fa).into_iter().map(|(n, local, _)| (n, local)).collect();
+    assert_eq!(locals, [("foo".to_string(), false), ("bar".to_string(), false)]);
+    let ws = Workspace::new(&[("/fake/php/A.php", src)]);
+    assert_eq!(ws.defs("A.php", "foo(); $this", 0), Sites::new(), "no function `foo`");
+    assert_eq!(ws.defs("A.php", "foo(); }", 0), vec![site("A.php", 2, 20)], "the receiver's method");
+    assert_eq!(ws.defs("A.php", "bar(); }", 0), Sites::new(), "no function `bar`");
+    let seen = |needle: &str| -> Vec<String> {
+        let scope = fa.scope_at(at(src, needle, 0)).unwrap();
+        fa.bindings_seen_from(scope).iter().map(|s| s.name.clone()).collect()
+    };
+    assert!(!seen("foo(); $this").iter().any(|n| n == "foo" || n == "g"), "{:?}", seen("foo(); $this"));
+    assert!(!seen("bar(); }").iter().any(|n| n == "bar" || n == "h"), "{:?}", seen("bar(); }"));
+    let a = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "a").unwrap();
+    let arg = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "a" && r.span.start.row == 6)
+        .unwrap();
+    assert_eq!(arg.resolved_symbol(), Some(a.id), "the argument reads the function's parameter");
 }
 
 /// An anonymous class has no spelling another file could write, so it is
