@@ -22,7 +22,7 @@ pub fn r_pack() -> LangPack {
         // resolves into the installed-library tree (a real install
         // would consult .libPaths() — not modeled here).
         module_paths: |m| vec![m.to_string()],
-        narrow_guard: |_, _| None,
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["$", "@", ":"],

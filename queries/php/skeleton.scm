@@ -315,11 +315,14 @@
 ; and `!== null` that it holds a value, `=== null` and `is_null` that it
 ; holds none. A multi-argument `isset` is a conjunction, so only a single
 ; argument is an atom. Loose `==` / `!=` prove nothing: `0 == null` holds.
+; `self`, `static` and `parent` name a class by where they are written,
+; which an atom's type does not read, so they narrow nothing.
 ((binary_expression
    left: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]
    operator: "instanceof"
    right: [(name) (qualified_name)] @narrow.type) @narrow.is
- (#not-eq? @narrow.var "this"))
+ (#not-eq? @narrow.var "this")
+ (#not-any-of? @narrow.type "self" "static" "parent"))
 ((function_call_expression
    function: (name) @_fn
    arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.set
