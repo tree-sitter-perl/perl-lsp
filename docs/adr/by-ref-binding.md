@@ -42,7 +42,7 @@ to nothing. Silence would read as by-value, and the undefined-variable
 lane would report the out-parameter — the exact false positive the
 side-table design carried.
 
-## Cross-file is the `Field` ladder
+## Cross-file is the `Member` ladder
 
 `ParamOf` resolves the receiver's class, then chases `Param{class,
 member, i}`; the registry's fallback walks the class's candidate files

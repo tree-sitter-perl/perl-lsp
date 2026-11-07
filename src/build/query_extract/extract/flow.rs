@@ -21,6 +21,10 @@ struct Target {
     /// A `@type.<relative>` annotation's mark and the class in force where
     /// it is written.
     relative: Option<(RelativeClass, String)>,
+    /// The namespace the token's `@space.*` names: a data member's
+    /// declaration is its member identity's, so two members of one name in
+    /// one class (php's `const X` and `$X`) never share a fact.
+    space: Option<crate::model::file_analysis::NamespaceId>,
 }
 
 #[derive(Default)]
@@ -132,7 +136,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     relative = Some((rel, class.clone()));
                 }
             }
-            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative };
+            let space = ad.on(e).find_map(|t| match t.cap {
+                Capture::Space { id, .. } => Some(id),
+                _ => None,
+            });
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative, space };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
@@ -305,8 +313,12 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             {
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
+                // The namespaces the member token's `@space.*` captures
+                // state; untagged, where a value read lands.
+                let spaces = super::refs::space_ask(ad.on(name))
+                    .unwrap_or(crate::model::file_analysis::SpaceAsk::only(pack.member_spaces.values));
                 st.minted[ix].projects =
-                    Some(Box::new(MemberRead { receiver: recv.span(), member: member.clone(), token: name.span() }));
+                    Some(Box::new(MemberRead { receiver: recv.span(), member: member.clone(), token: name.span(), spaces }));
                 out.member_reads.push(crate::build::query_extract::MemberRead {
                     span,
                     receiver: recv.span(),
@@ -317,7 +329,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     "skeleton-member",
                     WitnessPayload::Projected {
                         base: WitnessAttachment::Expr(recv.span()),
-                        step: crate::model::witnesses::ProjectionStep::ValueHop { member },
+                        step: crate::model::witnesses::ProjectionStep::ValueHop { member, spaces },
                     },
                     span,
                 ));
@@ -381,6 +393,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     let ad = st.adorned;
     let f = &mut st.flow;
     let out = &mut st.out;
+    let classes = &st.scopes;
     // A class/struct DATA MEMBER is visible throughout its class body
     // regardless of declaration order (C++ member lookup is not sequential:
     // a method reads a field declared later in a `private:` section below
@@ -407,8 +420,24 @@ pub(super) fn finish(st: &mut ExtractState) {
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
-    for (mid, Target { name, at, resets, token, relative, .. }, scope) in targets {
-        let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
+    // A member declaration's facts are its declaring token's
+    // (`SkeletonAnalysis::member_decl_facts`): `into_file_analysis` lowers
+    // them to the place of the symbol that token declares. Their fallback
+    // attachment is the member, owned by the class its scope names — the one
+    // the declaring symbol is filed under (`defs::handle`).
+    let mut member_decls: HashMap<(ScopeId, Point), (ScopeId, Point, String, WitnessAttachment)> = HashMap::new();
+    for (mid, Target { name, at, resets, token, relative, space, .. }, scope) in targets {
+        let owner = classes.class_of(*scope).filter(|_| field_scope_span.contains_key(&(name.clone(), *scope)));
+        let decl = owner.is_some().then(|| (*scope, *token, name.clone()));
+        let var = match owner {
+            Some(owner) => {
+                let space = st.pack.member_spaces.of_decl(crate::model::file_analysis::SymKind::Field, *space);
+                let att = WitnessAttachment::holds_of(owner, space, name.clone());
+                member_decls.insert((*scope, *at), (*scope, *token, name.clone(), att.clone()));
+                att
+            }
+            _ => WitnessAttachment::Variable { name: name.clone(), scope: *scope },
+        };
         // A data member's write in its class body is its initializer, not a
         // step in a sequence: its declared type holds class-wide, so nothing
         // there retires it.
@@ -442,12 +471,16 @@ pub(super) fn finish(st: &mut ExtractState) {
                 None => None,
             };
             if let Some(payload) = payload {
-                out.witnesses.push(Witness {
+                let w = Witness {
                     attachment: var.clone(),
                     source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
                     payload,
                     span: annot_span,
-                });
+                };
+                match decl {
+                    Some((scope, token, name)) => out.member_decl_facts.push((scope, token, name, w)),
+                    None => out.witnesses.push(w),
+                }
             }
         }
         if let Some(target_span) = source_value_span(ad, mid) {
@@ -479,6 +512,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: read.receiver,
                 member: read.member.clone(),
+                spaces: read.spaces,
                 value,
             });
         }
@@ -504,8 +538,14 @@ pub(super) fn finish(st: &mut ExtractState) {
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
-        if let Some(w) = fe.lower_to_witness() {
-            out.witnesses.push(w);
+        if let Some(mut w) = fe.lower_to_witness() {
+            match member_decls.get(&(fe.target_scope, fe.target_at)) {
+                Some((scope, token, name, att)) => {
+                    w.attachment = att.clone();
+                    out.member_decl_facts.push((*scope, *token, name.clone(), w));
+                }
+                None => out.witnesses.push(w),
+            }
         }
     }
 }

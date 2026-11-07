@@ -9,6 +9,11 @@ impl FileAnalysis {
         &self.pack.names
     }
 
+    /// The namespaces this file's language holds members in.
+    pub fn member_spaces(&self) -> &'static MemberSpaces {
+        crate::model::conventions::member_spaces_for(&self.language)
+    }
+
     /// Where `var` is bound inside `scope` — the earliest declaring
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
@@ -343,6 +348,8 @@ impl FileAnalysis {
             package_parents: &self.packages,
             app_surface_consumers: &self.plugin.app_surface_consumers,
             lattice: crate::model::conventions::lattice_for(&self.language),
+
+            member_spaces: crate::model::conventions::member_spaces_for(&self.language),
         }
     }
 
@@ -421,7 +428,7 @@ impl FileAnalysis {
 
     /// Resolve the inferred return type of a method call by its ref index
     /// (into `refs`). Reads the `Expression(refidx)` witnesses seeded by
-    /// the builder; `module_index` lets cross-file `PackageSymbol` edges
+    /// the builder; `module_index` lets cross-file `Member` edges
     /// (e.g. `$r->get(...)` where `get` lives in `Mojolicious::Routes`)
     /// chase through the registry's recursive walker.
     ///
@@ -512,7 +519,7 @@ impl FileAnalysis {
         };
         // Fallback for a chain receiver whose class the BUILDER couldn't
         // pin (so `emit_method_call_return_edges` never emitted the
-        // `Expression → Edge(PackageSymbol{package, method})` for this
+        // `Expression → Edge(Member{package, method})` for this
         // call): resolve the method's return via the receiver's class at
         // QUERY time. This is what lets a receiver-relative projection
         // — `$rs->search({...})->first` (RowOf on the fluent-search
@@ -529,7 +536,7 @@ impl FileAnalysis {
             .name()
             .to_string();
             let arity = self.refs[ref_idx].arg_count.map(|c| c as u32);
-            let moc = WitnessAttachment::PackageSymbol { package: class, name: method };
+            let moc = WitnessAttachment::returns_of(class, method);
             let mq = ReducerQuery {
                 attachment: &moc,
                 point: None,
@@ -686,7 +693,7 @@ impl FileAnalysis {
         // member ref whose invocant opens this span and whose token ends
         // inside it (the chain's last hop), type the receiver recursively
         // (strictly narrower span, bounded), and resolve the member's
-        // value on it — methods through `PackageSymbol` with the receiver
+        // value on it — methods through `Member` with the receiver
         // threaded (`ParamOf` substitutes), fields through the declared
         // type with params substituted.
         if let Some((inv, r)) = self
@@ -982,8 +989,7 @@ impl FileAnalysis {
 
     /// The place the variable or member `sym` declares.
     pub fn declared_place(&self, sym: SymbolId) -> Place {
-        let s = &self.symbols[sym.0 as usize];
-        Place::variable(self.variable_binding_of(&s.name, s.span.start, s.scope).0)
+        Place::variable(Binding::Lexical(self.binding_symbol(sym)))
     }
 
     /// The one symbol a binding is named by. A token that declares two

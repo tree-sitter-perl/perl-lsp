@@ -140,7 +140,7 @@ impl FileAnalysis {
     /// baseline counts. Called by `builder::build` after the witness
     /// bag has been moved in.
     ///
-    /// `Symbol(sym_id)` and `PackageSymbol{package, name}` return-type
+    /// `Symbol(sym_id)` and `Member{owner, name}` return-type
     /// witnesses for every local Sub/Method are already in the bag —
     /// published by `Builder::write_back_sub_return_types` at the
     /// end of the worklist (single emission point for "this sub's
@@ -155,7 +155,7 @@ impl FileAnalysis {
     ///
     /// What does NOT survive, and is easy to assume otherwise: a sub's RETURN
     /// TYPE. The fold's conclusion is published by
-    /// `write_back_sub_return_types` as a `PackageSymbol{..} -> Edge(Symbol(id))`
+    /// `write_back_sub_return_types` as a `Member{..} -> Edge(Symbol(id))`
     /// witness — in the bag, by the "edges, not values" invariant, since
     /// materialising it into a field would be the parallel store the worklist
     /// rules forbid. There is no `return_types` field to fall back on. So
@@ -319,7 +319,7 @@ impl FileAnalysis {
         let mut out: Vec<String> = Vec::new();
         for att in self.witnesses.attachments() {
             match att {
-                WitnessAttachment::PackageSymbol { package, name } => {
+                WitnessAttachment::Member { owner: package, name, aspect: crate::model::witnesses::MemberAspect::Returns, .. } => {
                     // A class with LOCAL parent edges (declared or dynamic)
                     // fails the pre-filter open at the gate battery for
                     // EVERY name, so its entries here would be dead weight —
@@ -341,7 +341,7 @@ impl FileAnalysis {
                         out.push(name.clone());
                     }
                 }
-                WitnessAttachment::Field { name: key, .. } => {
+                WitnessAttachment::Member { name: key, aspect: crate::model::witnesses::MemberAspect::Holds, .. } => {
                     if !ref_keys.contains(key)
                         && !ref_keys.contains(&super::name_match_key(key, self.names()))
                     {
@@ -542,7 +542,7 @@ impl FileAnalysis {
             }
             // Hover asks one question twice. `resolve_method_in_ancestors`
             // climbs to the DEFINING class; `find_method_return_type` then
-            // asks `PackageSymbol{access_class, name}`, whose reducer climbs
+            // asks `Member{access_class, name}`, whose reducer climbs
             // the same ancestry again inside the registry. Two walkers, one
             // question — and the second is handed the access class even
             // though the first already named the owner.
@@ -689,10 +689,7 @@ impl FileAnalysis {
                             // carry its OWN witness for this method, which the
                             // owner anchor then discards?
                             let local_att =
-                                crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                                    package: cn.clone(),
-                                    name: name.to_string(),
-                                };
+                                crate::model::witnesses::WitnessAttachment::returns_of(cn.clone(), name.to_string());
                             crate::util::ghost_stats::count(
                                 if self.witnesses.for_attachment(&local_att).is_empty() {
                                     "owner.lost.no_local_witness_on_access"
@@ -716,10 +713,7 @@ impl FileAnalysis {
                             );
                             // Owner anchor + the ACCESS class's framework: does
                             // restoring that one fact recover the answer?
-                            let att = crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                                package: owner.clone(),
-                                name: name.to_string(),
-                            };
+                            let att = crate::model::witnesses::WitnessAttachment::returns_of(owner.clone(), name.to_string());
                             let ctx = self.bag_context(module_index);
                             let q = crate::model::witnesses::ReducerQuery {
                                 attachment: &att,

@@ -2506,11 +2506,11 @@ fn loader_config_types_register_conf_cross_file() {
 }
 
 
-// ---- Field{owner, name}: one subject, source-agnostic across flavors ----
+// ---- Member{owner, name, Holds}: one subject, source-agnostic across flavors ----
 //
 // Every Perl field flavor (Moo `has`, classic `$self->{k}` hash slot, Corinna
 // `field`) and every access form (accessor call, hash-slot deref, field var)
-// projects onto the SAME language-generic `Field{owner, name}` bag primitive a
+// projects onto the SAME language-generic `Member{owner, name, Holds}` bag primitive a
 // C struct member uses — resolved via `field_subject_of_ref`, which dispatches
 // on the access SHAPE, never the field flavor (rule #10). These lock the
 // convergence the refs-splat relies on.
@@ -2526,7 +2526,7 @@ fn field_subject_named(fa: &FileAnalysis, name: &str, kind_is_hash: Option<bool>
             None => true,
         })
         .filter_map(|r| fa.field_subject_of_ref(r, None))
-        .filter(|att| matches!(att, WitnessAttachment::Field { name: n, .. } if n == name))
+        .filter(|att| matches!(att, WitnessAttachment::Member { name: n, aspect: crate::model::witnesses::MemberAspect::Holds, .. } if n == name))
         .collect()
 }
 
@@ -2543,7 +2543,7 @@ sub check   { my $self = shift; return $self->status eq 'ready'; }
 1;
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Widget".into(), name: "status".into() };
+    let want = WitnessAttachment::holds_of("Widget", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "status");
 
     let acc = field_subject_named(&fa, "status", Some(false));
     let hash = field_subject_named(&fa, "status", Some(true));
@@ -2566,7 +2566,7 @@ sub value { my $self = shift; return $self->{count}; }
 1;
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Counter".into(), name: "count".into() };
+    let want = WitnessAttachment::holds_of("Counter", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "count");
     let subs = field_subject_named(&fa, "count", Some(true));
     assert!(subs.len() >= 2, "expected >=2 count hash accesses, got {}", subs.len());
     for s in &subs {
@@ -2586,7 +2586,7 @@ class Point {
 }
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Point".into(), name: "x".into() };
+    let want = WitnessAttachment::holds_of("Point", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "x");
     let subs = field_subject_named(&fa, "x", None);
     assert!(!subs.is_empty(), "expected Corinna field-var uses to route to a subject");
     for s in &subs {
@@ -2611,7 +2611,7 @@ sub tag  { my $self = shift; return $self->{name}; }
 1;
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Animal".into(), name: "name".into() };
+    let want = WitnessAttachment::holds_of("Animal", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "name");
     let subs = field_subject_named(&fa, "name", None);
     assert!(subs.len() >= 3, "expected parent+child accesses, got {}", subs.len());
     for s in &subs {
@@ -3260,7 +3260,7 @@ fn a_member_ask_crosses_families_only_in_a_shared_namespace() {
         assert!(want.admits_ref(None, &MemberSpaces::PER_FAMILY), "a non-member use is not refused");
     }
     assert_eq!(
-        crate::model::conventions::PERL_SPELLINGS.member_spaces,
+        crate::model::conventions::PERL_CONVENTIONS.member_spaces,
         MemberSpaces::PER_FAMILY,
         "a Perl call reaches a sub, never a `field` of the same name"
     );

@@ -119,11 +119,16 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         st.minted[n].declares = true;
     }
     let qualifier = mine(Capture::Qualifier);
-    // An out-of-line def's qualifier names its owning class (the innermost
-    // scope), overriding the enclosing-namespace context.
-    let pkg = match through {
-        Some(_) => None,
-        None => qualifier.map(|q| q.text.clone()).or_else(|| st.package.clone()),
+    let scope = st.def_scope(kind, e.match_id);
+    // The owner the syntax states: an out-of-line def's qualifier names its
+    // owning class, overriding the enclosing-namespace context; a def in a
+    // class's own scope is that class's, by the identity the member
+    // declarations in it are minted under (`flow::finish`).
+    let stated = qualifier.map(|q| q.text.clone()).or_else(|| st.scopes.class_of(scope).map(str::to_string));
+    let (pkg, owner_stated) = match (&through, stated) {
+        (Some(_), _) => (None, false),
+        (None, Some(owner)) => (Some(owner), true),
+        (None, None) => (st.package.clone(), false),
     };
     let shaped = (pack.shape_name)(&name);
     // Under a use-map a class is filed under its identity, and its package
@@ -174,7 +179,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        scope: st.def_scope(kind, e.match_id),
+        scope,
         spelled: mine(Capture::Def { kind, part: DefPart::Spelled }).map(|t| t.text.clone()),
         pair: mine(Capture::DefPair).map(|_| e.match_id),
         return_type,
@@ -203,7 +208,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         // Filled by span association in `into_file_analysis` — the
         // `@arity.sig` match fires separately from this def name.
         arity: None,
-        qualifier_owned: qualifier.is_some(),
+        owner_stated,
         flags,
         member_space: on_name.iter().find_map(|t| match t.cap {
             Capture::Space { id, .. } => Some(id),

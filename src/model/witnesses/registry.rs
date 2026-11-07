@@ -8,7 +8,7 @@ use super::*;
 /// Cycle guard + result memo key for recursive bag queries, keyed by
 /// `(bag_ptr, attachment, receiver_identity, arity_hint)`. Per-bag
 /// entries stay separate so a legitimate cross-bag query for the same
-/// attachment (the common `PackageSymbol{C, m}` jump into C's own bag)
+/// attachment (the common `Member{C, m}` jump into C's own bag)
 /// isn't misread as a cycle. The receiver **identity** + arity hint
 /// widen the key so two queries differing only in `receiver` /
 /// `arity_hint` aren't treated as duplicates — `UnionOnArgs` and
@@ -20,7 +20,7 @@ use super::*;
 /// resolve to different classes; a variant-only discriminant collapses
 /// them to one memo key and the memo hands Foo's answer to Bar (silent
 /// wrong type). A same-receiver diamond (the inheritance walk holds
-/// `q.receiver` constant within one `PackageSymbol` query) still hashes
+/// `q.receiver` constant within one `Member` query) still hashes
 /// to one key, so memoization still kills the exponential re-chase.
 ///
 /// A `Variable` is temporal — its reducer answers AT `q.point` — so its key
@@ -29,7 +29,8 @@ use super::*;
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
-type VisitedSet = std::collections::HashSet<VisitedKey>;
+/// The keys on the current path, each with its depth on it.
+type VisitedSet = std::collections::HashMap<VisitedKey, usize>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
 /// candidate files (`class_candidates_node`), or a free function's exporters
 /// and linkage-visible definitions (`free_function_cross_file`).
@@ -65,6 +66,12 @@ struct ClassLadder<'a> {
     /// up front (the `MethodOnClass` bake), rather than letting each
     /// parent's own frame record its exit.
     rungs_on_parents: bool,
+    /// Whether a rung that holds the member but cannot type it ends the
+    /// walk. A call dispatches to the nearest definition whatever it
+    /// returns, so it does; a stored member's type is the nearest TYPED
+    /// declaration's up the walk, so an untyped one only says the member
+    /// exists there and the walk goes on (`ClassLadder::settles`).
+    untyped_settles: bool,
     /// The bake's residual-site tag (`note_bake_exit`).
     site: &'static str,
     /// The live consult's attribution tag (`mocsite.*`).
@@ -74,34 +81,26 @@ struct ClassLadder<'a> {
 impl<'a> ClassLadder<'a> {
     fn of(att: &'a WitnessAttachment) -> Option<ClassLadder<'a>> {
         Some(match att {
-            WitnessAttachment::PackageSymbol { package, name } => ClassLadder {
-                owner: package,
-                rows_member: Some((name, true)),
-                callable: Some(name),
-                rekey: Some(|att, p| match att {
-                    WitnessAttachment::PackageSymbol { name, .. } => {
-                        WitnessAttachment::PackageSymbol { package: p, name: name.clone() }
-                    }
-                    _ => unreachable!("rekey is minted from its own attachment"),
-                }),
-                rungs_on_parents: true,
-                site: "moc_primary",
-                fetch_tag: "mocsite.primary",
-            },
-            WitnessAttachment::Field { owner, name } => ClassLadder {
-                owner,
-                rows_member: Some((name, false)),
-                callable: None,
-                rekey: Some(|att, p| match att {
-                    WitnessAttachment::Field { name, .. } => {
-                        WitnessAttachment::Field { owner: p, name: name.clone() }
-                    }
-                    _ => unreachable!("rekey is minted from its own attachment"),
-                }),
-                rungs_on_parents: false,
-                site: "field",
-                fetch_tag: "mocsite.field",
-            },
+            WitnessAttachment::Member { owner, name, aspect, .. } => {
+                let returns = *aspect == MemberAspect::Returns;
+                ClassLadder {
+                    owner,
+                    rows_member: Some((name, returns)),
+                    callable: returns.then_some(name.as_str()),
+                    // A parent's member is the same member one class up:
+                    // same namespace, same name, same question.
+                    rekey: Some(|att, p| match att {
+                        WitnessAttachment::Member { space, name, aspect, .. } => {
+                            WitnessAttachment::Member { owner: p, space: *space, name: name.clone(), aspect: *aspect }
+                        }
+                        _ => unreachable!("rekey is minted from its own attachment"),
+                    }),
+                    rungs_on_parents: returns,
+                    untyped_settles: returns,
+                    site: if returns { "moc_primary" } else { "field" },
+                    fetch_tag: if returns { "mocsite.primary" } else { "mocsite.field" },
+                }
+            }
             WitnessAttachment::Param { package, .. } => ClassLadder {
                 owner: package,
                 rows_member: None,
@@ -113,6 +112,7 @@ impl<'a> ClassLadder<'a> {
                     _ => unreachable!("rekey is minted from its own attachment"),
                 }),
                 rungs_on_parents: false,
+                untyped_settles: true,
                 site: "param",
                 fetch_tag: "mocsite.param",
             },
@@ -123,6 +123,7 @@ impl<'a> ClassLadder<'a> {
                 // An alias names one type; the alias graph has no ancestry.
                 rekey: None,
                 rungs_on_parents: false,
+                untyped_settles: true,
                 site: "type_name",
                 fetch_tag: "mocsite.type_name",
             },
@@ -132,6 +133,38 @@ impl<'a> ClassLadder<'a> {
 
     fn arity(&self, q: &ReducerQuery) -> Option<u32> {
         self.callable.and(q.arity_hint)
+    }
+
+    /// Does a rung's answer end the walk? Any answer does, except an
+    /// untyped one where the ladder walks on past it (`untyped_settles`).
+    fn settles(&self, v: &ReducedValue) -> bool {
+        self.untyped_settles || !matches!(v, ReducedValue::Type(InferredType::Unknown))
+    }
+}
+
+/// The answers a ladder's rungs give, settled in walk order: the first that
+/// settles (`ClassLadder::settles`) is the walk's, and an unsettled one is
+/// kept as the walk's answer should nothing settle after it.
+#[derive(Default)]
+struct RungAnswers {
+    unsettled: Option<ReducedValue>,
+}
+
+impl RungAnswers {
+    /// `Some` when `v` ends the walk.
+    fn offer(&mut self, ladder: &ClassLadder, v: ReducedValue) -> Option<ReducedValue> {
+        if v == ReducedValue::None {
+            return None;
+        }
+        if ladder.settles(&v) {
+            return Some(v);
+        }
+        self.unsettled.get_or_insert(v);
+        None
+    }
+
+    fn rest(self) -> Option<ReducedValue> {
+        self.unsettled
     }
 }
 
@@ -372,6 +405,11 @@ pub(super) struct QueryState {
     memo: std::collections::HashMap<VisitedKey, MemoEntry>,
     /// Cuts seen so far in this query; read as a difference across a subtree.
     cuts: u64,
+    /// The shallowest path depth a cut beneath the current frame returned
+    /// to (`usize::MAX`: none). A frame at depth `d` whose subtree only cut
+    /// back to depth `d` or deeper closed every cycle it entered, so its
+    /// walk is complete; a cut to a shallower key left it open.
+    low_cut: usize,
     /// Where a BAKE's chase would have consulted the index, in the order the
     /// ladder reached them.
     ///
@@ -432,12 +470,13 @@ impl QueryState {
 
     pub(super) fn new() -> Self {
         QueryState {
-            visited: std::collections::HashSet::new(),
+            visited: VisitedSet::new(),
             fan_outs: std::collections::HashSet::new(),
             fan_out_memo: std::collections::HashMap::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
             cuts: 0,
+            low_cut: usize::MAX,
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
@@ -505,7 +544,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`PackageSymbol{class, name}` when `attributed`, `Field{owner, name}`
+/// (`Member{class, name}` when `attributed`, `Member{owner, name, Holds}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -583,7 +622,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
-/// on `PackageSymbol{package}` (an `Edge` into a class's
+/// on `Member{package}` (an `Edge` into a class's
 /// method): the receiver is that call's invocant, i.e. `class`. A fluent
 /// `ReturnExpr(Receiver)` substitutes the dispatch class.
 ///
@@ -756,14 +795,14 @@ impl ReducerRegistry {
         r.register(Box::new(BranchArmFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
-        // PackageSymbol primary-fallback after ReturnExprReducer so
+        // Member primary-fallback after ReturnExprReducer so
         // per-arity declarations win when one matches.
-        r.register(Box::new(PackageSymbolReducer));
+        r.register(Box::new(MemberReturnsReducer));
         // TypeName is a disjoint attachment shape (typedef/using aliases),
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
+        // The two `Member{.., Holds}` reducers claim disjoint PAYLOADS on one
         // attachment: FieldValueReducer the slot's materialized value edge
         // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
         // vote. Value first is load-bearing — the domain is a human-surface
@@ -820,19 +859,19 @@ impl ReducerRegistry {
     pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
         let mut state = QueryState::new();
         // Is the CONCLUSION LAYER CLOSED for the shape that dominates
-        // cross-file traffic? A `PackageSymbol` answer that never reads an
+        // cross-file traffic? A `Member` answer that never reads an
         // `Expr(span)` witness could be served from stored conclusions; one
         // that does needs the raw derivation, so the bag has to come along.
         // Measured at the top-level query only — inner hops are the thing
         // being counted, not separate questions.
-        let top_moc = matches!(q.attachment, WitnessAttachment::PackageSymbol { .. });
+        let top_moc = matches!(q.attachment, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. });
         if top_moc {
             // Attribution: what share of top-level moc queries are main-keyed?
             // Two buckets, not per-package keys — a script-heavy corpus mints
             // these from every plain call, and the question a fix must answer
             // is main's SHARE, not a cardinality-unbounded census.
             if crate::util::ghost_stats::enabled() {
-                if let WitnessAttachment::PackageSymbol { package, .. } = &q.attachment {
+                if let WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. } = &q.attachment {
                     crate::util::ghost_stats::count(if package == "main" {
                         "mocpkg.main"
                     } else {
@@ -945,6 +984,7 @@ impl ReducerRegistry {
             // truncates is not wrong, it is incomplete, so comparing a
             // conclusion against it proves nothing either way.
             state.poisoned = true;
+            state.low_cut = 0;
             // The LIVE counterpart of the poison above, and it has to be
             // thread-local rather than a `QueryState` field: the cap counts
             // frames across the whole THREAD, so it fires inside nested
@@ -974,6 +1014,8 @@ impl ReducerRegistry {
             let cached = std::sync::Arc::clone(cached);
             if *cut {
                 state.cuts += 1;
+                // Where that cut returned to is not recorded: assume the root.
+                state.low_cut = 0;
             }
             // Re-reaching an exiting subtree from inside a combining frame is
             // the same claim as reaching it there the first time; the memo must
@@ -996,16 +1038,22 @@ impl ReducerRegistry {
         // `key` has two owners (the visited set, transiently; the memo,
         // for the rest of the query). Clone once for visited, then move
         // the original into the memo store below.
-        if !state.visited.insert(key.clone()) {
+        let depth_on_path = state.visited.len();
+        if let Some(&target) = state.visited.get(&key) {
             state.cuts += 1;
+            state.low_cut = state.low_cut.min(target);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
+        state.visited.insert(key.clone(), depth_on_path);
+        let low_cut_outside = std::mem::replace(&mut state.low_cut, usize::MAX);
         let exits_before = state.residual.len();
         let poison_before = state.poisoned;
         let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
+        let body = self.query_rec_body(bag, q, depth_on_path, state);
+        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, body));
+        state.low_cut = state.low_cut.min(low_cut_outside);
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
         let cut = state.cuts > cuts_before
@@ -1026,20 +1074,22 @@ impl ReducerRegistry {
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
+        depth_on_path: usize,
         state: &mut QueryState,
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
-        if v != ReducedValue::None {
+        let ladder = ClassLadder::of(q.attachment);
+        if v != ReducedValue::None && ladder.as_ref().is_none_or(|l| l.settles(&v)) {
             return v;
         }
 
         // The class-keyed fallback for an attachment the local bag couldn't
-        // answer — `PackageSymbol{C, m}`, `Field{C, k}`, `Param{C, f, i}`,
-        // `TypeName(T)`: one ladder (`ClassLadder`, `class_fallback`) for
-        // all four. Most cases are covered by build-time edge emission
-        // (local writeback emits `PackageSymbol(child, m) →
-        // Edge(PackageSymbol(parent, m))`; enrichment projects the same for
+        // answer (or, for a stored member, couldn't type) — `Member{C, m}`
+        // of either aspect, `Param{C, f, i}`, `TypeName(T)`: one ladder
+        // (`ClassLadder`, `class_fallback`) for all three. Most cases are
+        // covered by build-time edge emission (local writeback emits
+        // `Member(child, m) → Edge(Member(parent, m))`; enrichment projects the same for
         // cross-file parents), resolved by the generic edge-chase; the ladder
         // covers the residual: the class's other files, its ancestry, and
         // plugin-namespace bridges declared elsewhere.
@@ -1052,7 +1102,7 @@ impl ReducerRegistry {
         // placement.
         if let Some(idx) = q.context.and_then(|c| c.module_index) {
             if !super::session::budget_available(idx) {
-                return ReducedValue::None;
+                return v;
             }
         }
         // `Param`: the callee's bag is the authority. Its own witness present
@@ -1064,9 +1114,23 @@ impl ReducerRegistry {
         {
             return ReducedValue::Type(InferredType::Unknown);
         }
-        if let Some(ladder) = ClassLadder::of(q.attachment) {
-            if let Some(v) = self.class_fallback(bag, q, state, &ladder) {
-                return v;
+        if let Some(ladder) = &ladder {
+            if let Some(found) = self.class_fallback(bag, q, state, ladder) {
+                return found;
+            }
+            // THE presence check. Nothing up the walk typed the member, but
+            // this class holds it (a declaration, a write): it exists, so the
+            // answer is `Unknown`, not the silence that would read as absent.
+            // A read site stops at the namespace that answers
+            // (`ProjectionStep::ValueHop`), so this is also what keeps a read
+            // of a legal member out of the illegal namespaces. A walk the
+            // cycle guard cut ABOVE this frame (`$self->{k} ||= Foo->new`
+            // reached from the expression reads the member it writes) did not
+            // finish, so it settles nothing: the member's value is the rest of
+            // that cycle, which the frame it started from folds.
+            if !ladder.untyped_settles && !bag.for_attachment(q.attachment).is_empty() {
+                let complete = state.low_cut >= depth_on_path;
+                return if complete { ReducedValue::Type(InferredType::Unknown) } else { v };
             }
         }
 
@@ -1111,10 +1175,13 @@ impl ReducerRegistry {
         ladder: &ClassLadder,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
+        let mut rungs = RungAnswers::default();
         match ctx.module_index {
             Some(idx) => {
                 if let Some(v) = self.class_candidates_node(bag, q, state, ctx, idx, ladder) {
-                    return Some(v);
+                    if let Some(v) = rungs.offer(ladder, v) {
+                        return Some(v);
+                    }
                 }
             }
             None => {
@@ -1131,10 +1198,12 @@ impl ReducerRegistry {
         }
         if let Some(rekey) = ladder.rekey {
             if let Some(v) = self.class_ancestry(bag, q, state, ctx, ladder, rekey) {
-                return Some(v);
+                if let Some(v) = rungs.offer(ladder, v) {
+                    return Some(v);
+                }
             }
         }
-        Self::class_bridges(ctx, ladder)
+        Self::class_bridges(ctx, ladder).or_else(|| rungs.rest())
     }
 
     /// Hop (1) of `class_fallback` as a fan-out node (`fan_out_node`). Only
@@ -1185,6 +1254,7 @@ impl ReducerRegistry {
                 )));
             }
         }
+        let mut rungs = RungAnswers::default();
         for p in parents {
             let parent_att = rekey(q.attachment, p);
             let sub_q = ReducerQuery {
@@ -1197,11 +1267,11 @@ impl ReducerRegistry {
                 context: q.context,
             };
             let v = self.query_rec(bag, &sub_q, state);
-            if *v != ReducedValue::None {
-                return Some((*v).clone());
+            if let Some(v) = rungs.offer(ladder, (*v).clone()) {
+                return Some(v);
             }
         }
-        None
+        rungs.rest()
     }
 
     /// Hop (3) of `class_fallback`: callable entities other files' plugin
@@ -1323,6 +1393,7 @@ impl ReducerRegistry {
         // The sweep-tier spelling of the same key — shared across files and
         // workers where a batch sweep opened the store (SweepAnswerGuard).
         let verdict_key = super::ConsultVerdictKey::of(&memo_q);
+        let mut rungs = RungAnswers::default();
         for cached in super::session::visible_def_candidates(idx, package).iter() {
             // Rehydrate the target file's bag if its resident copy
             // was Slice-2-evicted; the cross-file chase reads its
@@ -1338,6 +1409,8 @@ impl ReducerRegistry {
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
                         lattice: crate::model::conventions::lattice_for(&full.language),
+
+                        member_spaces: crate::model::conventions::member_spaces_for(&full.language),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -1365,8 +1438,8 @@ impl ReducerRegistry {
             if let Some(hit) =
                 super::session::candidate_answer(idx, &cached.path, &memo_q)
             {
-                if *hit != ReducedValue::None {
-                    return Some((*hit).clone());
+                if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
+                    return Some(v);
                 }
                 continue;
             }
@@ -1374,8 +1447,8 @@ impl ReducerRegistry {
             // another file's build already derived this sweep.
             if let Some(hit) = idx.sweep_consult_answer(&cached.path, &verdict_key) {
                 super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit);
-                if *hit != ReducedValue::None {
-                    return Some((*hit).clone());
+                if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
+                    return Some(v);
                 }
                 continue;
             }
@@ -1463,7 +1536,10 @@ impl ReducerRegistry {
                                 idx, &cached.path, &memo_q, &v,
                             );
                             idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
-                            return Some(v);
+                            match rungs.offer(ladder, v) {
+                                Some(v) => return Some(v),
+                                None => continue,
+                            }
                         }
                         // ABSENT. The spec lets this mean a proven
                         // `None` and skip the candidate outright —
@@ -1626,7 +1702,10 @@ impl ReducerRegistry {
                                         idx.remember_sweep_consult(
                                             &cached.path, &verdict_key, &v,
                                         );
-                                        return Some(v);
+                                        match rungs.offer(ladder, v) {
+                                            Some(v) => return Some(v),
+                                            None => continue,
+                                        }
                                     }
                                 }
                                 None => {
@@ -1723,6 +1802,8 @@ impl ReducerRegistry {
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
                         lattice: crate::model::conventions::lattice_for(&full.language),
+
+                        member_spaces: crate::model::conventions::member_spaces_for(&full.language),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -1895,7 +1976,7 @@ impl ReducerRegistry {
                         != QUERY_REC_TRUNCATIONS.with(|c| c.get())
                     {
                         Some("concl.follow_break_truncated")
-                    } else if state.visited.contains(&candidate_key) {
+                    } else if state.visited.contains_key(&candidate_key) {
                         Some("concl.follow_break_guarded")
                     } else {
                         None
@@ -1953,12 +2034,12 @@ impl ReducerRegistry {
             }
             super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v);
             idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
-            if v != ReducedValue::None {
+            if let Some(v) = rungs.offer(ladder, v) {
                 return Some(v);
             }
         }
 
-        None
+        rungs.rest()
     }
 
     /// Resolve every Edge witness on `q.attachment` to an `InferredType`
@@ -1995,7 +2076,7 @@ impl ReducerRegistry {
     /// later reads take. Every other witness keeps its bag order, and the
     /// grown shapes follow them (`splice_grown`).
     ///
-    /// A `Field` is not temporal: its writes are arms of one value, so each
+    /// A `Holds` member is not temporal: its writes are arms of one value, so each
     /// grown shape JOINS the value it grew from, as the slot's other arms do.
     #[inline(never)]
     fn lower_extensions(
@@ -2037,7 +2118,16 @@ impl ReducerRegistry {
                 current = self.extension_base(bag, q, state, raw, &grown, at);
             }
             prev = Some(at);
-            let Some(base) = current.as_mut() else { continue };
+            let Some(base) = current.as_mut() else {
+                // Nothing stands under the write, so it creates the container
+                // its first hop names (Perl autovivifies `$o->{s}{$k} = …`),
+                // open because other writes may fill it too.
+                current = super::vivify(&x.hops, x.value.as_ref(), true);
+                if current.is_some() {
+                    last_effective = Some(i);
+                }
+                continue;
+            };
             let changed = if temporal {
                 super::extend_in_place(base, &x.hops, x.value.as_ref(), x.widen)
             } else {
@@ -2096,7 +2186,7 @@ impl ReducerRegistry {
 
     /// The value standing under a segment's first delta at `at`: what a read
     /// there answers from every other witness of the place plus the shapes
-    /// earlier segments grew. A `Field` reads its whole value, the class
+    /// earlier segments grew. A `Holds` member reads its whole value, the class
     /// ladder included, since the slot's other writes may live elsewhere.
     fn extension_base(
         &self,
@@ -2207,25 +2297,25 @@ impl ReducerRegistry {
                             })
                         }
                         _ => {
-                            // A `PackageSymbol{package,..}` reached through an edge is
+                            // A `Member{package,..}` reached through an edge is
                             // a fresh method dispatch: its receiver is that call's
                             // invocant (`class`), so a fluent `ReturnExpr(Receiver)`
                             // substitutes the dispatch class — not whatever the outer
                             // query carried. Mirrors `query_sub_return_type`'s
                             // `effective_receiver`. The exception is an inheritance
-                            // hop (`PackageSymbol{child} → Edge(PackageSymbol{parent})`):
-                            // there the source is itself a `PackageSymbol`, and the
+                            // hop (`Member{child} → Edge(Member{parent})`):
+                            // there the source is itself a `Member`, and the
                             // child's receiver must carry through so an inherited fluent
                             // accessor returns the child, not where `has` was declared.
                             let redispatched = matches!(
                                 target,
-                                WitnessAttachment::PackageSymbol { .. }
+                                WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                             ) && !matches!(
                                 q.attachment,
-                                WitnessAttachment::PackageSymbol { .. }
+                                WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                             );
                             let receiver = match target {
-                                WitnessAttachment::PackageSymbol { package, .. }
+                                WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                                     if redispatched =>
                                 {
                                     fresh_dispatch_receiver(&q.receiver, package, q.context)
@@ -2330,17 +2420,14 @@ impl ReducerRegistry {
                                     t.key_value_type(k).flatten().cloned().or_else(|| {
                                         // Class-typed base: the structural
                                         // literal can't answer, but a typed
-                                        // slot WRITE can — `Field{class,
-                                        // key}`, local or (via the arm in
+                                        // slot WRITE can — `Member{class,
+                                        // key, Holds}`, local or (via the arm in
                                         // query_rec_body) cross-file and up
                                         // the ancestry. The read drills
                                         // through the registry, never a
                                         // baked value.
                                         let owner = t.class_name()?.to_string();
-                                        let att = WitnessAttachment::Field {
-                                            owner,
-                                            name: k.clone(),
-                                        };
+                                        let att = WitnessAttachment::holds_of(owner, super::reducers::member_spaces(q).values, k.clone());
                                         let sub_q = ReducerQuery {
                                             attachment: &att,
                                             point: q.point,
@@ -2418,16 +2505,25 @@ impl ReducerRegistry {
                                         })
                                     })
                                 }
-                                ProjectionStep::ValueHop { member } => {
-                                    // A value read chases `Field{class, member}`,
-                                    // the slot's own subject, so a same-named
-                                    // callable's return never answers it (a call
-                                    // is an `Invoke`). The base type IS the
-                                    // receiver, so a slot typed by the class's
-                                    // template parameters substitutes the base's
-                                    // arguments.
-                                    t.class_name().map(str::to_string).and_then(|class| {
-                                        let att = WitnessAttachment::Field { owner: class, name: member.clone() };
+                                ProjectionStep::ValueHop { member, spaces } => {
+                                    // A value read asks what the member HOLDS,
+                                    // so a same-named callable's return never
+                                    // answers it (a call is an `Invoke`). It
+                                    // asks each namespace its site may land in,
+                                    // the legal ones first over the whole MRO
+                                    // and the illegal ones only when none
+                                    // answers, so the member it reads is the
+                                    // one resolution picks. The base type IS
+                                    // the receiver, so a slot typed by the
+                                    // class's template parameters substitutes
+                                    // the base's arguments.
+                                    let class = t.class_name()?.to_string();
+                                    // The first namespace holding the member
+                                    // answers, typed or not: an untyped legal
+                                    // member is still the one the read
+                                    // reaches, and its `Unknown` flows.
+                                    spaces.in_order().find_map(|space| {
+                                        let att = WitnessAttachment::holds_of(class.clone(), space, member.clone());
                                         let sub_q = ReducerQuery {
                                             attachment: &att,
                                             point: q.point,
@@ -2596,7 +2692,7 @@ impl ReducerRegistry {
         // (its own or inherited, in any file) hides every free function of
         // the name, with the class itself as the receiver.
         if let Callee::Function { name, member_of: Some(class), .. } = callee {
-            let att = WitnessAttachment::PackageSymbol { package: class.clone(), name: name.clone() };
+            let att = WitnessAttachment::returns_of(class.clone(), name.clone());
             let sub_q = ReducerQuery {
                 attachment: &att,
                 point: q.point,
@@ -2675,7 +2771,7 @@ impl ReducerRegistry {
                 }
                 classes
                     .into_iter()
-                    .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
+                    .map(|package| WitnessAttachment::returns_of(package, name.clone()))
                     .collect()
             }
             Callee::Function { name, local: None, constructs, .. } => {
@@ -2694,7 +2790,7 @@ impl ReducerRegistry {
                 let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
                 // Invoking a method through a coderef passes its invocant as
                 // the first argument (`$cb->($obj, …)` for `\&Class::m`).
-                if recv.is_none() && matches!(target, WitnessAttachment::PackageSymbol { .. }) {
+                if recv.is_none() && matches!(target, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }) {
                     if !arg_types.is_empty() {
                         recv = Some(arg_types.remove(0));
                     }
@@ -2800,6 +2896,8 @@ impl ReducerRegistry {
                 package_parents: &full.packages,
                 app_surface_consumers: &full.plugin.app_surface_consumers,
                 lattice: crate::model::conventions::lattice_for(&full.language),
+
+                member_spaces: crate::model::conventions::member_spaces_for(&full.language),
             };
             let att = WitnessAttachment::Symbol(sym);
             let q = ReducerQuery {

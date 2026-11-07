@@ -828,12 +828,12 @@ fn closed_dep_return_type_resolves_through_enriched_overlay() {
         "resolved through B's OWN import of C: {t:?}"
     );
 
-    // Seam 2: the PackageSymbol cross-file primary — B::make as a method
+    // Seam 2: the Member cross-file primary — B::make as a method
     // call target.
     let t2 = a
         .analysis
         .find_method_return_type("B", "make", Some(&idx), None)
-        .expect("PackageSymbol chase must fill through the overlay");
+        .expect("Member chase must fill through the overlay");
     assert_eq!(t2.class_name().as_deref(), Some("Widget"));
 }
 
@@ -938,7 +938,7 @@ fn enriched_present_default_is_the_raw_bag() {
 
 /// Build a `FileAnalysis` and cache it under `module_name` with a plugin
 /// namespace bridging to `bridge_class`, its entity being the named sub.
-/// Exercises the bridged-entity hop of the `PackageSymbol` fallback.
+/// Exercises the bridged-entity hop of the `Member` fallback.
 fn cache_bridged(
     idx: &ModuleIndex,
     module_name: &str,
@@ -976,7 +976,7 @@ fn cache_bridged(
 }
 
 /// Seam (a): a plugin-bridged entity whose return type materializes ONLY
-/// after the bridging file is itself enriched. The `PackageSymbol` bridged
+/// after the bridging file is itself enriched. The `Member` bridged
 /// hop queries the bridging file's RAW bag first (dead-ends — `render`'s
 /// value chains through the bridging file's import of C), then falls back to
 /// the enriched overlay copy, which resolves it.
@@ -1010,7 +1010,7 @@ fn bridged_entity_return_resolves_through_enriched_overlay() {
         "fixture must dead-end on the raw bag"
     );
 
-    // PackageSymbol{Painter, render}: hop (1)/(2) find nothing (no Painter
+    // Member{Painter, render}: hop (1)/(2) find nothing (no Painter
     // module, no parents); the bridged hop (3) retries through the enriched
     // overlay and resolves Widget.
     let t = idx_find_method_return(&idx, "Painter", "render");
@@ -1021,7 +1021,7 @@ fn bridged_entity_return_resolves_through_enriched_overlay() {
     );
 }
 
-/// Route a `PackageSymbol{package, name}` query from a throwaway consumer FA
+/// Route a `Member{owner, name}` query from a throwaway consumer FA
 /// through the index (the bridged hop needs a `BagContext` with the index).
 fn idx_find_method_return(
     idx: &ModuleIndex,
@@ -1034,12 +1034,12 @@ fn idx_find_method_return(
         .find_method_return_type(class, method, Some(idx), None)
 }
 
-/// Seam (b), primary (hop 1): the cross-file `Field{owner, name}` primary —
+/// Seam (b), primary (hop 1): the cross-file `Member{owner, name, Holds}` primary —
 /// a typed slot WRITE in the class's OWN file, read from a consumer, resolves
 /// through the extracted `attempt` closure. (The enriched-retry twin of this
 /// hop is dormant today: Perl slot seeds are build-gated on a resolvable RHS,
 /// so a seed that exists already answers on the raw bag. The retry is wired
-/// for symmetry with the PackageSymbol primary; this test guards the refactor
+/// for symmetry with the Member primary; this test guards the refactor
 /// that extracted its `attempt` closure.)
 #[test]
 fn cross_file_slot_type_primary_resolves_hop1() {
@@ -1056,7 +1056,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     let tree = parser.parse(app_src, None).unwrap();
     let fa = crate::build::builder::build(&tree, app_src.as_bytes());
 
-    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `Field{Store, conn}`
+    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `Member{Store, conn, Holds}`
     // into Store's own file (hop 1) and found the `Conn->new` slot write.
     let t = fa.inferred_type_via_bag_ctx(
         "$c",
@@ -1675,7 +1675,7 @@ fn purging_a_never_fed_module_is_a_no_op_not_a_wipe() {
 // ---- the resolution session (docs/adr/resolution-session.md) ----
 
 /// One backward walk asks the same cross-file question at every call site.
-/// Without the session each ask re-derives the whole `PackageSymbol`
+/// Without the session each ask re-derives the whole `Member`
 /// lattice; with it the candidate's contribution is derived ONCE and the
 /// answer must not move. Both halves are asserted here — a memo whose
 /// failure mode is a wrong answer needs the answer pinned, not just the

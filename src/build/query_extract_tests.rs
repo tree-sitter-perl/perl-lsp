@@ -1038,7 +1038,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
-        qualifier_owned: false,
+        owner_stated: false,
         member_space: None,
         flags: Default::default(),
     }
@@ -2506,7 +2506,7 @@ struct S {
 // ---- Domain typing (int-used-as-enum): a storage slot's DOMAIN recovered
 // from usage. `op_type` is stored `uint16_t` but always compared against
 // `enum opcode` values — the sites fold onto the language-generic
-// `Field{owner, name}` subject via `DomainCoherenceFold`. ----
+// `Member{owner, name, Holds}` subject via `DomainCoherenceFold`. ----
 
 #[test]
 fn cpp_domain_typing_field_folds_to_enum() {
@@ -2786,7 +2786,7 @@ fn python_member_call_is_an_invoke_on_its_receiver() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member }, .. } => Some(member.clone()),
+            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member, .. }, .. } => Some(member.clone()),
             _ => None,
         })
         .collect();
@@ -3047,7 +3047,7 @@ fn cpp_out_of_line_multilevel_qualifier_def_owns_inner_class() {
         .find(|s| s.name == "InitAlt")
         .expect("multi-level-qualified out-of-line def is extracted");
     assert_eq!(m.package.as_deref(), Some("Inst"));
-    assert!(m.qualifier_owned, "package came from the `::` qualifier");
+    assert!(m.owner_stated, "package came from the `::` qualifier");
 }
 
 #[test]
@@ -3074,6 +3074,84 @@ fn cpp_out_of_line_arbitrary_declarator_nesting_and_qualifier_depth() {
     assert_eq!(m.package.as_deref(), Some("Inner"));
 }
 
+/// A class spelled other than its identity (`Hook<R (*)(A...)>` files as
+/// `Hook<R(*)(A...)>`) is no container re-anchoring can locate, so its own
+/// scope is what names its members' owner: the declaration facts, the
+/// method and the implicit-`this` read all agree on it.
+#[test]
+fn a_partial_specs_members_are_owned_by_the_class_its_scope_names() {
+    let src = "namespace ns {\ntemplate <typename T> class Hook;\ntemplate <typename R, typename... A>\nclass Hook<R (*)(A...)> {\n public:\n  int read() const { return k; }\n private:\n  int k;\n};\n}\n";
+    let mut skel = cpp_skel(src);
+    skel.reanchor_truncated_containers(src);
+    let fa = skel.into_file_analysis();
+    let owner = |name: &str| fa.symbols().iter().find(|s| s.name == name).and_then(|s| s.package.clone());
+    assert_eq!(owner("k").as_deref(), Some("Hook<R(*)(A...)>"));
+    assert_eq!(owner("read").as_deref(), Some("Hook<R(*)(A...)>"));
+    let read = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 5, column: 28 },
+        end: tree_sitter::Point { row: 5, column: 29 },
+    };
+    assert_eq!(fa.expr_type_at_span(read, None), Some(crate::model::file_analysis::InferredType::Numeric));
+}
+
+/// Two declarations of one member (`#if` arms) are two symbols, and each
+/// keeps the facts its own token declared: neither place takes the other's
+/// type, whichever is declared last.
+#[test]
+fn each_declaration_of_a_member_keeps_its_own_facts() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+    let src = "class H {\n#if A\n  int v_;\n#else\n  bool v_;\n#endif\n};\n";
+    let fa = cpp_skel(src).into_file_analysis();
+    let declared: Vec<Vec<crate::model::file_analysis::InferredType>> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "v_")
+        .map(|s| {
+            fa.witnesses
+                .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
+                .iter()
+                .filter_map(|w| match &w.payload {
+                    WP::InferredType(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    use crate::model::file_analysis::InferredType as T;
+    assert_eq!(declared, vec![vec![T::Numeric], vec![T::Bool]]);
+}
+
+/// A macro's expansion declares several members at its one call-site token
+/// (remapping lands each expanded name on the call), and each still keeps
+/// the facts its own name declared.
+#[test]
+fn members_declared_at_one_token_keep_their_own_facts() {
+    use crate::model::file_analysis::InferredType as T;
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+    let src = "class H {\n  int a;\n  bool c;\n};\n";
+    let mut skel = cpp_skel(src);
+    let call = tree_sitter::Point { row: 1, column: 2 };
+    for s in skel.symbols.iter_mut().filter(|s| s.name == "a" || s.name == "c") {
+        s.name_start = call;
+    }
+    for fact in skel.member_decl_facts.iter_mut() {
+        fact.1 = call;
+    }
+    let fa = skel.into_file_analysis();
+    let declared = |n: &str| -> Vec<T> {
+        let s = fa.symbols().iter().find(|s| s.name == n).unwrap();
+        fa.witnesses
+            .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WP::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!((declared("a"), declared("c")), (vec![T::Numeric], vec![T::Bool]));
+}
+
 /// F8: an out-of-line method whose owning class is declared in a HEADER (absent
 /// here) is NOT a truncation fall-through — the `::` qualifier is authoritative,
 /// so re-anchoring must leave `RE2::Init`'s package as `RE2`, not upgrade it to
@@ -3083,7 +3161,7 @@ fn cpp_out_of_line_arbitrary_declarator_nesting_and_qualifier_depth() {
 fn reanchor_keeps_qualifier_owner_when_class_body_absent() {
     let src = "namespace re2 {\nvoid RE2::Init(const char* p) { }\n}\n";
     let mut init = sksym(src, DefCap::Method, "Init", 0, Some("RE2"));
-    init.qualifier_owned = true;
+    init.owner_stated = true;
     let mut skel = SkeletonAnalysis::default();
     skel.symbols = vec![sksym(src, DefCap::Package, "re2", 0, None), init];
     skel.reanchor_truncated_containers(src);

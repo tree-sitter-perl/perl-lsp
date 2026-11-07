@@ -931,7 +931,7 @@ fn inject_member_blocks(
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
-                qualifier_owned: false,
+                owner_stated: false,
                 flags: Default::default(),
                 member_space: None,
             });
@@ -1095,6 +1095,7 @@ fn remap_spans(
         template_params: _,
         // name/scope-keyed — no spans to fix.
         field_types: _,
+        member_decl_facts,
         return_sites,
         receivers,
         param_sigs,
@@ -1129,7 +1130,7 @@ fn remap_spans(
             deref_stack: _,
             attributes: _,
             arity: _,
-            qualifier_owned: _,
+            owner_stated: _,
             flags: _,
             member_space: _,
         } = s;
@@ -1196,7 +1197,7 @@ fn remap_spans(
     // Member writes settle through `expr_type_at_span` on the receiver and an
     // edge to the value's `Expr`, both of which speak original coords.
     for w in member_writes.iter_mut() {
-        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
     }
@@ -1245,14 +1246,18 @@ fn remap_spans(
         | WitnessAttachment::Expression(_)
         | WitnessAttachment::Symbol(_)
         | WitnessAttachment::HashKey { .. }
-        | WitnessAttachment::PackageSymbol { .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
-        | WitnessAttachment::Field { .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };
-    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()) {
+    for (_, token, _, _) in member_decl_facts.iter_mut() {
+        *token = r(*token);
+    }
+    let decl_facts = member_decl_facts.iter_mut().map(|(_, _, _, w)| w);
+    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()).chain(decl_facts) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);

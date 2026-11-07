@@ -704,9 +704,22 @@ pub enum WriteKey {
     /// Static array index (direct arrow write, `$v->[N] = …`) —
     /// retypes the slot / appends at `len` on a `Sequence` tuple.
     Index(i32),
-    /// Dynamic key, slice, or escape — membership unknowable;
-    /// switches a `HashWithKeys` shape open.
+    /// Slice or escape — membership unknowable; switches a
+    /// `HashWithKeys` shape open.
     Unknown,
+    /// A hash key the write computes (`$v->{$k} = …`): the container is a
+    /// hash, which key it writes is unknowable.
+    AnyKey,
+    /// An index the write computes (`$v->[$i] = …`): the container is an
+    /// array, which slot it writes is unknowable.
+    AnyIndex,
+}
+
+impl WriteKey {
+    /// A hop the write names exactly — the path below it is still known.
+    pub fn is_static(&self) -> bool {
+        matches!(self, WriteKey::Hash(_) | WriteKey::Index(_))
+    }
 }
 
 /// A method call binding: `$var = $invocant->method()`. The variable's
@@ -855,7 +868,7 @@ pub struct GatedSymbol {
     /// symbol is keyed under the emission's match-site package.
     pub on_class: Option<String>,
     /// Return type → a `Symbol(sid) → InferredType` Plugin-priority bag
-    /// witness pushed at apply (plus a `PackageSymbol{package,name}` mirror for
+    /// witness pushed at apply (plus a `Member{package,name}` mirror for
     /// class-scoped methods, so cross-file return-type queries reach it).
     pub return_type: Option<InferredType>,
 }

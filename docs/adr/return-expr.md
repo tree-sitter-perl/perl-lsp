@@ -19,7 +19,7 @@ The pre-existing pieces:
 - **Arity dispatch** lived in `FluentArityDispatch` — a bespoke
   reducer claiming `TypeObservation::ArityReturn { arg_count,
   return_type }` witnesses keyed on `Symbol(_)` and
-  `PackageSymbol{package, name}`. Each framework's accessor synth
+  `Member{package, name}`. Each framework's accessor synth
   pushed its own observations; `SubReturnReducer` had an
   `arity_hint.is_some()` short-circuit so getter-vs-writer
   dispatch reached the class-keyed arm.
@@ -56,7 +56,7 @@ pub enum ArgGuard { Empty, Exact(u32), AtLeast(N), AtMost(N), Any }
 ```
 
 Subs publish one `ReturnExpr` on whichever attachment carries the
-answer (`Symbol(sid)` for per-sym, `PackageSymbol{package, name}`
+answer (`Symbol(sid)` for per-sym, `Member{package, name}`
 for cross-symbol class-keyed dispatch). `ReturnExprReducer`
 evaluates against a `ReducerQuery` — substituting `q.receiver` for
 `Receiver` placeholders, dispatching `UnionOnArgs` against
@@ -123,7 +123,7 @@ emission or through `ReturnExpr` substitution.
 When two symbols with the same name carry distinct per-arity
 returns (Mojo getter + writer at arities 0 and 1), per-Symbol
 attachments aren't enough — class-keyed lookups
-(`PackageSymbol{package, name}`) need to disambiguate. The helper
+(`Member{package, name}`) need to disambiguate. The helper
 emits one multi-arm `UnionOnArgs` on the class slot:
 
 ```
@@ -171,7 +171,7 @@ edge exactly like named subs.
 ## One evaluator across every call shape
 
 `emit_parametric_return_expr_decls` (`builder.rs`) declares per-flavor
-projections once on `PackageSymbol{base, method}`;
+projections once on `Member{base, method}`;
 `ParametricType::return_method_declarations` (`file_analysis.rs`) is the
 per-flavor table; arity dispatch is `ReturnExpr::UnionOnArgs` evaluated by
 `ReturnExprReducer` (`witnesses.rs`), which runs before `SubReturnReducer`
@@ -222,7 +222,7 @@ sequence flavors land.
 
 The DBIC-as-plugin port (`prompt-dbic-as-plugin.md`) was gated
 on this ADR. With `Operator(RowOf(Receiver))` declared once per
-flavor and threaded through `PackageSymbol{base, method}`, the
+flavor and threaded through `Member{base, method}`, the
 plugin's emission becomes one `return_method_declarations()`
 return — no per-call-site walker, no per-method allowlist. The
 remaining gate is type-system encoding for axis dispatch.
