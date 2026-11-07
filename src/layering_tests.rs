@@ -1926,7 +1926,6 @@ fn raw_scope_climbs_are_containment_only() {
         ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
         ("build/query_extract/extract/mod.rs", 1, "def_scope: a hoisted def is filed in the scope around the one it is written in"),
-        ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of"),
         ("model/file_analysis/core_types.rs", 1, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank"),
         ("model/file_analysis/class_queries.rs", 3, "a member's declaring scope inside its class body; package_at's innermost scope that names a package; whether a member write sits inside a constructor body, its closures included"),
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),

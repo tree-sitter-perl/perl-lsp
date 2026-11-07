@@ -51,9 +51,11 @@
  (#eq? @_class "parent"))
 
 ; ---- callables ----
-; A declared return is the callable's value at every call.
+; A declared return is the callable's value at every call; without one,
+; what its body returns is. A closure's `return` is the closure's own.
 (function_definition name: (name) @def.sub.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.sub
 (method_declaration name: (name) @def.method.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.method
+(return_statement (_) @expr.return.value)
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own. A function, a method or a closure sees no
 ; variable of the code around it but the ones its `use` clause names; an

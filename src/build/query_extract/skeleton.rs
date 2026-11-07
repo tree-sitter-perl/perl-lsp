@@ -1993,15 +1993,15 @@ impl FreeCall {
 /// A file's free functions by (namespace, leaf); the global namespace is `""`.
 type FreeFunctions<'a> = std::collections::HashMap<(&'a str, &'a str), crate::model::file_analysis::SymbolId>;
 
-/// The callable whose body a scope sits in: the nearest scope up the chain
-/// that names its callable.
+/// The callable whose body a scope sits in: the nearest callable around it
+/// (`callable_reach`), so a return in a closure is the closure's, and one
+/// that names no callable owns nothing.
 fn owning_callable(
     scopes: &[crate::model::file_analysis::Scope],
     scope: crate::model::file_analysis::ScopeId,
 ) -> Option<crate::model::file_analysis::SymbolId> {
-    crate::model::file_analysis::scope_chain_of(scopes, scope)
-        .into_iter()
-        .find_map(|sc| scopes.get(sc.0 as usize).and_then(|s| s.owner))
+    let body = crate::model::file_analysis::callable_reach(scopes, scope).last()?;
+    scopes.get(body.0 as usize).filter(|s| s.kind.is_callable())?.owner
 }
 
 /// Settle each write through a receiver. Its owner is the class the

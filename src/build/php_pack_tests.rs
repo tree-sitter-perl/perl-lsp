@@ -3453,3 +3453,32 @@ class Kid extends Base {
     assert_eq!(ret("Base", "build"), Some(T::ClassName("Thing".into())));
     assert_eq!(ret("Kid", "keep"), Some(T::ClassName("Thing".into())), "an inherited method");
 }
+
+/// A callable that declares no return returns what its body returns; a
+/// closure's `return` is the closure's, never the callable's around it.
+#[cfg(feature = "php")]
+#[test]
+fn an_undeclared_return_is_what_the_body_returns() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Clock { public function tick() {} }
+class Box {
+    public function clock() { return new Clock(); }
+    public function sorted(array $xs) {
+        usort($xs, function ($a, $b) { return 1; });
+        $f = function () { return new Box(); };
+        return new Clock();
+    }
+    public function maker() { return function () { return new Clock(); }; }
+    public function declared(): Box { return new Clock(); }
+}
+function clock() { return new Clock(); }
+");
+    let clock = Some(T::ClassName("Clock".into()));
+    let ret = |m: &str| fa.find_method_return_type("Box", m, None, None);
+    assert_eq!(ret("clock"), clock);
+    assert_eq!(ret("sorted"), clock, "the closures' returns are their own");
+    assert_eq!(ret("maker"), None, "a closure is no `Clock`");
+    assert_eq!(ret("declared"), Some(T::ClassName("Box".into())), "a declared return is the value");
+    assert_eq!(fa.sub_return_type_at_arity("clock", Some(0)), clock, "a function");
+}

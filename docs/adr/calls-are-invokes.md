@@ -155,7 +155,11 @@ extra, whatever the pattern.
   `@parent.super` edge names (php's `parent`), resolved with the receiver
   mark of the same name.
   Like `static::`, a `static` return names the writing class, not the
-  receiver's.
+  receiver's. A callable that declares no return returns what its body
+  returns (`@expr.return.value`), each site an arm of the nearest callable
+  around it, so a closure's `return` is the closure's.
+  TODO(generator-returns): a php or python function that yields returns a
+  generator whatever its `return` says; its arms do not know it yields.
 - A receiver is typed by the value at its exact span. Every call states
   one at its whole span (Perl's builder and the packs' `@expr.call` alike),
   so under `f()->a->b` the receiver of `b` is `f()->a`, never `f`, the

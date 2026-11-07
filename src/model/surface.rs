@@ -212,6 +212,21 @@ impl Surface {
             entry.parents = parents;
             entry.is_role = *is_role;
         }
+        // A class the pack named for it (`ANONYMOUS`) has no spelling another
+        // file could write (`is_linkage_visible`), and its minted name
+        // stands for where it is written: neither it, nor what it declares,
+        // nor a value that may be one of it is cross-file visible.
+        let anonymous: std::collections::HashSet<&str> = feed
+            .symbols
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SymKind::Package | SymKind::Class | SymKind::Module)
+                    && s.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS)
+            })
+            .map(|s| s.name.as_str())
+            .collect();
+        let names_anonymous =
+            |t: &InferredType| t.receiver_arms().iter().any(|a| a.class_name().is_some_and(|c| anonymous.contains(c)));
         for sym in feed.symbols {
             match sym.kind {
                 SymKind::Package | SymKind::Class | SymKind::Module => {
@@ -262,6 +277,7 @@ impl Surface {
                         ret: feed
                             .analysis
                             .symbol_return_type_via_bag(sym.id, None)
+                            .filter(|t| !names_anonymous(t))
                             .map(|t| despan(&t)),
                         hash_keys,
                     };
@@ -312,19 +328,6 @@ impl Surface {
                 _ => {}
             }
         }
-        // A class the pack named for it (`ANONYMOUS`) has no spelling another
-        // file could write (`is_linkage_visible`), and its minted name
-        // stands for where it is written: neither it nor what it declares is
-        // cross-file visible.
-        let anonymous: std::collections::HashSet<&str> = feed
-            .symbols
-            .iter()
-            .filter(|s| {
-                matches!(s.kind, SymKind::Package | SymKind::Class | SymKind::Module)
-                    && s.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS)
-            })
-            .map(|s| s.name.as_str())
-            .collect();
         by_pkg.retain(|name, _| !anonymous.contains(name.as_str()));
         let mut packages: Vec<PackageSurface> = by_pkg.into_values().collect();
         let sort_values = |vs: &mut Vec<ValueSurface>| {
