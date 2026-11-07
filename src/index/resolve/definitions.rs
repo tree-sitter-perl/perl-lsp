@@ -1137,8 +1137,11 @@ impl<'a> CandidateSet<'a> {
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named
-        // type/namespace def.
-        if self.pack {
+        // type/namespace def. A captured token that every lane above left
+        // unresolved has no definition: by word, it would land on whatever
+        // shares its spelling, out of scope or not (a method's bare `$x` on
+        // a PHP property).
+        if self.pack && analysis.ref_at(point).is_none() {
             if let Some(source) = self.source {
                 if let Some(word) = word_at_point(source, point) {
                     if let Some(loc) = self.type_def_location(word, idx) {
