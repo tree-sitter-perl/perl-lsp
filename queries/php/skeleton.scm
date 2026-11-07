@@ -336,8 +336,9 @@
   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
 ; `new class(…) {…}` declares a class with no name, one per place it is
 ; written, and constructs it there: its `class` keyword anchors both. Its
-; parents and its body are a class's.
-(anonymous_class "class" @def.class.anchor @context.class) @def.class @scope
+; parents and its body are a class's, its body's names in force only for
+; code written directly in it, as a named class's are.
+(anonymous_class "class" @def.class.anchor @context.class) @def.class @scope.direct
 (anonymous_class
   "class" @def.class.anchor
   (base_clause

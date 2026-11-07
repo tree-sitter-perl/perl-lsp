@@ -2164,6 +2164,49 @@ fn an_anonymous_class_is_a_class_of_its_own() {
     assert_eq!(classes, ["class@anonymous:2:10", "class@anonymous:3:10"]);
 }
 
+/// A bare call in a method calls a function, never a method of the class:
+/// PHP calls a method only through a receiver (`$this->foo()`,
+/// `self::foo()`), so the class body's names are not in force in its
+/// methods — a named class's or an anonymous one's. An anonymous class's
+/// constructor arguments are code of the scope it is written in.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_call_in_a_method_never_names_a_method() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+class A {
+    public function foo() {}
+    public function g() { foo(); $this->foo(); }
+}
+function make($a) {
+    return new class($a) {
+        public function bar() {}
+        public function h() { bar(); }
+    };
+}
+";
+    let fa = php(src);
+    let locals: Vec<(String, bool)> = call_invokes(&fa).into_iter().map(|(n, local, _)| (n, local)).collect();
+    assert_eq!(locals, [("foo".to_string(), false), ("bar".to_string(), false)]);
+    let ws = Workspace::new(&[("/fake/php/A.php", src)]);
+    assert_eq!(ws.defs("A.php", "foo(); $this", 0), Sites::new(), "no function `foo`");
+    assert_eq!(ws.defs("A.php", "foo(); }", 0), vec![site("A.php", 2, 20)], "the receiver's method");
+    assert_eq!(ws.defs("A.php", "bar(); }", 0), Sites::new(), "no function `bar`");
+    let seen = |needle: &str| -> Vec<String> {
+        let scope = fa.scope_at(at(src, needle, 0)).unwrap();
+        fa.bindings_seen_from(scope).iter().map(|s| s.name.clone()).collect()
+    };
+    assert!(!seen("foo(); $this").iter().any(|n| n == "foo" || n == "g"), "{:?}", seen("foo(); $this"));
+    assert!(!seen("bar(); }").iter().any(|n| n == "bar" || n == "h"), "{:?}", seen("bar(); }"));
+    let a = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "a").unwrap();
+    let arg = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "a" && r.span.start.row == 6)
+        .unwrap();
+    assert_eq!(arg.resolved_symbol(), Some(a.id), "the argument reads the function's parameter");
+}
+
 /// An anonymous class has no spelling another file could write, so it is
 /// not part of the file's cross-file surface: two files with one at the
 /// same place keep two classes.
