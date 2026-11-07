@@ -2,8 +2,8 @@
 
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
-    join_all, ClassCall, ClassSpelling, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType, MemberNamespace,
-    NameSpellings,
+    join_all, ClassCall, ClassSpelling, ConstructionKey, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType,
+    MemberNamespace, NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
@@ -20,7 +20,8 @@ pub fn python_pack() -> LangPack {
         // and its own module say it does (`User` after `from pkg.models
         // import User`). An import is a statement that runs, so it binds
         // from where it is written; a leading `.` climbs from the file's
-        // package. Calling a class constructs it. One member namespace: the
+        // package. Calling a class constructs it, so the call is keyed by
+        // the class and runs its `__init__`. One member namespace: the
         // nearest declaration of a name wins, whether it is a data member
         // or a member function. An instance holds its own attributes (the
         // slots `self.x = …` writes), read before its class's members.
@@ -34,11 +35,12 @@ pub fn python_pack() -> LangPack {
             ..NameSpellings::NONE
         },
         functions: FunctionLookup::Global,
+        construction: ConstructionKey::Class,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
         type_display: |_| None,
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _| None,
         annot_type: annotation_type,
         module_paths: |m| {
             let base = m.replace('.', "/");

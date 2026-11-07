@@ -78,6 +78,9 @@ pub struct SkelRef {
     /// counted from the argument list the same match captured. Flows to
     /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
+    /// A member call that constructs (`new Foo(…)`): its token spells the
+    /// class, not the member it calls.
+    pub constructs: bool,
 }
 
 /// One `@expr.call` site.
@@ -98,6 +101,9 @@ pub struct CallSite {
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
     pub args: Option<Vec<(Span, bool)>>,
+    /// The call constructs an instance of its receiver's class
+    /// (`@expr.construct`).
+    pub constructs: bool,
 }
 
 /// A receiver token that names a class (`@receiver.*`). The class is
@@ -132,6 +138,8 @@ pub struct SkeletonAnalysis {
     pub witnesses: Vec<crate::model::witnesses::Witness>,
     /// (child class, parent class) inheritance edges — `@parent` captures.
     pub parents: Vec<(String, String)>,
+    /// The `parents` edges the document marks `@parent.super`, by index.
+    pub super_parents: Vec<usize>,
     /// (specialization, primary) family edges — a `@spec.primary` capture in
     /// a class-def match whose name is a template spelling. Rides onto
     /// `FileAnalysis.pack.specializes`; the graph's `Specializes` edge derives from
@@ -418,6 +426,20 @@ fn brace_body_extent(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 impl SkeletonAnalysis {
+    /// The class `rel` names written in `class`: the class itself, or the
+    /// one its `@parent.super` edge names.
+    pub fn relative_class(&self, rel: super::vocab::RelativeClass, class: &str) -> Option<String> {
+        match rel {
+            super::vocab::RelativeClass::Enclosing => Some(class.to_string()),
+            super::vocab::RelativeClass::Super => self
+                .super_parents
+                .iter()
+                .map(|&i| &self.parents[i])
+                .find(|(child, _)| child == class)
+                .map(|(_, parent)| parent.clone()),
+        }
+    }
+
     /// An empty skeleton of `pack`'s language: what extraction fills, and
     /// what a file that never reached extraction assembles from.
     pub fn for_pack(pack: &super::LangPack) -> Self {
@@ -852,8 +874,8 @@ impl SkeletonAnalysis {
         }
         // A free call under a use-map, from its callee as written and where
         // that token stands: the function it names and the identity a class
-        // of that spelling has there. Its `Invoke` and its reference each ask
-        // it of their own capture.
+        // of that spelling has there. Its `Invoke` and its reference (an
+        // imported name's too) each ask it of their own capture.
         let free_call = |written: &str, at: tree_sitter::Point| {
             let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at, &symbols)?;
             let function = function_identity(&map, &names, functions, written, &free_functions);
@@ -1042,6 +1064,15 @@ impl SkeletonAnalysis {
                     super::vocab::ReceiverCap::Class => {
                         Some(class_identity_at(&r.text, r.span.start).unwrap_or_else(|| r.text.clone()))
                     }
+                    super::vocab::ReceiverCap::Super => method_class
+                        .get(r.scope.0 as usize)
+                        .cloned()
+                        .flatten()
+                        .and_then(|class| self.relative_class(super::vocab::RelativeClass::Super, &class)),
+                    super::vocab::ReceiverCap::Declared => symbols
+                        .iter()
+                        .find(|s| s.kind == SymKind::Class && s.selection_span == r.span)
+                        .map(|s| s.name.clone()),
                 };
                 let Some(class) = class else { continue };
                 bag.push(Witness {
@@ -1100,14 +1131,14 @@ impl SkeletonAnalysis {
                 // time; a free call's callee is the file's own definition
                 // when it has one.
                 let (callee, receiver) = match site.receiver {
-                    Some(recv) => (
-                        crate::model::witnesses::Callee::Method {
-                            name: name.clone(),
-                            lookup: crate::model::witnesses::Lookup::Receiver,
-                            constructs: false,
-                        },
-                        Some(WA::Expr(recv)),
-                    ),
+                    Some(recv) => {
+                        let lookup = crate::model::witnesses::Lookup::Receiver;
+                        let callee = match site.constructs {
+                            true => crate::model::witnesses::Callee::Construct { lookup },
+                            false => crate::model::witnesses::Callee::Method { name: name.clone(), lookup, constructs: false },
+                        };
+                        (callee, Some(WA::Expr(recv)))
+                    }
                     None => match free_call(name, site.callee_at) {
                         Some((fq, identity)) => {
                             // under a use-map a class is filed under the
@@ -1369,14 +1400,17 @@ impl SkeletonAnalysis {
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
                 let kind = match r.kind {
-                    // Under a use-map a call is pinned to its function's
-                    // namespace (`\Lib\f()` → `Lib`).
-                    RefCap::Call => {
+                    // Under a use-map a call, and an imported name, is pinned
+                    // to its function's namespace (`\Lib\f()` → `Lib`).
+                    RefCap::Call | RefCap::Import => {
                         if let Some((function, _)) = free_call(&r.name, r.start) {
                             let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
-                        RefKind::FunctionCall
+                        match r.kind {
+                            RefCap::Import => RefKind::ImportedName,
+                            _ => RefKind::FunctionCall,
+                        }
                     }
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
                     // the full path rides `target_name`, the qualifier the
@@ -1427,6 +1461,7 @@ impl SkeletonAnalysis {
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
                             named_by_string: false,
+                            constructs: r.constructs,
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a
@@ -1458,7 +1493,22 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    target_name: r.name.clone(),
+                    // A construction's token names the class it constructs,
+                    // so its reference is retrieved under the class
+                    // reference's key: the class its receiver's value states.
+                    target_name: match r.constructs {
+                        true => r
+                            .invocant
+                            .as_ref()
+                            .and_then(|(at, _)| {
+                                bag.iter_attachment(&crate::model::witnesses::WitnessAttachment::Expr(*at)).find_map(|w| match &w.payload {
+                                    crate::model::witnesses::WitnessPayload::InferredType(InferredType::ClassName(c)) => Some(c.clone()),
+                                    _ => None,
+                                })
+                            })
+                            .unwrap_or_else(|| r.name.clone()),
+                        false => r.name.clone(),
+                    },
                     access,
                     binding,
                     folded_from: None,

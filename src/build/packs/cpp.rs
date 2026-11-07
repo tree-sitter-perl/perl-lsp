@@ -16,9 +16,12 @@ pub fn cpp_pack() -> LangPack {
         names: NameSpellings {
             member_namespace: MemberNamespace::Shared,
             class_call: ClassCall::Constructs,
+            // TODO(construction-navigation): `Foo(x)` reaches no
+            // constructor yet, so a constructor's references do not list it.
             ..NameSpellings::with_separator(CPP_SEP)
         },
         functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |_| None,
@@ -30,8 +33,8 @@ pub fn cpp_pack() -> LangPack {
         // an anonymous inline union has no name token of its own; the
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
-        default_name: |kind| match kind {
-            DefCap::UnionField => Some("(union)"),
+        default_name: |kind, _| match kind {
+            DefCap::UnionField => Some("(union)".to_string()),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the

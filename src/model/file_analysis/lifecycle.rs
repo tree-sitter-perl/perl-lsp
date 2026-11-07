@@ -474,16 +474,15 @@ impl FileAnalysis {
             // shared resolve leaves it in the session's receiver memo for the
             // readers after this stamp; what goes on the ref is below.
             let (classes, source) = self.resolve_receiver_shared(r, module_index);
-            let member = r.unqualified_target_name(self.names());
             let arms = classes
                 .into_iter()
                 .map(|cn| {
-                    let resolved = match &r.kind {
-                        RefKind::FieldAccess { .. } => {
-                            self.resolve_field_in_ancestors(&cn, member, module_index)
-                        }
-                        _ => self.resolve_method_in_ancestors(&cn, member, module_index),
+                    let want = match &r.kind {
+                        RefKind::FieldAccess { .. } => MemberKind::Value,
+                        _ => MemberKind::Callable,
                     };
+                    let resolved =
+                        self.resolve_member_key_in_ancestors(&cn, r.member_key(self.names()), module_index, want);
                     match resolved {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,

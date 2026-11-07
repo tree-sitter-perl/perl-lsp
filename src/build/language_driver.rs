@@ -1073,6 +1073,7 @@ fn remap_spans(
         scopes,
         witnesses,
         parents: _,
+        super_parents: _,
         var_reads,
         var_writes,
         write_sites,
@@ -1150,6 +1151,7 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            constructs: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member

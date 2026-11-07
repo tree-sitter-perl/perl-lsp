@@ -85,7 +85,7 @@ $d->ping;
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "ping".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
 
     // Rename uses EDITABLE — workspace-only, no dep scan.
@@ -161,7 +161,7 @@ $b->ping;
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "ping".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
 
     // EDITABLE mask — rename never scans deps.
@@ -233,7 +233,7 @@ $g->hello;
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "hello".to_string(),
         kind: TargetKind::Method { class: "Greeter".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
 
     // references uses references_mask_for (EDITABLE when def in workspace).

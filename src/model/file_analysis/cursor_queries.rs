@@ -74,7 +74,7 @@ impl FileAnalysis {
                         return Some(sym.selection_span);
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: pick the sub whose package
                     // matches the ref's resolved_package. When the
                     // call pinned a specific package (import or
@@ -311,7 +311,7 @@ impl FileAnalysis {
             for r in self.refs() {
                 if r.resolved_symbol().is_some() { continue; }
                 match (&r.kind, &sym.kind) {
-                        (RefKind::FunctionCall, SymKind::Sub) => {
+                        (RefKind::FunctionCall | RefKind::ImportedName, SymKind::Sub) => {
                             // Match the bare callable name so qualified call
                             // sites (`Foo::baz()`, target_name "Foo::baz")
                             // pair with `sub baz`; `resolved_package` (the
@@ -1125,7 +1125,12 @@ impl FileAnalysis {
             return None;
         };
         let mut token = *span;
-        let qual = r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
+        // A construction's token is its class's spelling, already the whole
+        // name span; its name is the class identity, never the token's text.
+        let qual = match r.constructs() {
+            true => 0,
+            false => r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len()),
+        };
         token.start.column = token.start.column.saturating_sub(qual);
         contains_point(&token, point).then_some(r)
     }
@@ -1134,7 +1139,7 @@ impl FileAnalysis {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // A CORE-bound ref is a builtin call keyword (`shift`,
                     // `keys`, ...). It has an identity — the in-file
                     // occurrence union serves highlights/references — but no
@@ -1172,11 +1177,14 @@ impl FileAnalysis {
                         {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
-                            return Some(RenameKind::Method {
-                                name: r.unqualified_target_name(self.names()).to_string(),
-                                class,
-                                member: MemberKind::of_ref(&r.kind),
-                            });
+                            // A construction names its class's constructor.
+                            if let Some(name) = self.called_member(r, &class, module_index) {
+                                return Some(RenameKind::Method {
+                                    name: name.into_owned(),
+                                    class,
+                                    member: MemberKind::of_ref(&r.kind),
+                                });
+                            }
                         }
                     }
                     // Invocant unresolvable (or cursor in args) — try symbol-at
@@ -1329,7 +1337,7 @@ impl FileAnalysis {
         for r in self.refs() {
             if r.target_name != old_name { continue; }
             match &r.kind {
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     if r.resolved_package() == scope.as_deref() {
                         edits.push((r.span, new_name.to_string()));
                     }

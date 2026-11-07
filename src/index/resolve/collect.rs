@@ -2,6 +2,7 @@
 //! target matching (`symbol_defines_target`), `references_mask_for`, and the
 //! raw-word / pack def-path helpers.
 use super::*;
+use crate::model::file_analysis::MemberKey;
 
 /// The identifier under `point` in `source`, or `None` if the cursor is not
 /// on a `[A-Za-z0-9_]` word. Byte-scan (macros vanish from the analysis under
@@ -528,7 +529,7 @@ pub(super) fn span_is_folded_name(
 ) -> bool {
     analysis.refs().iter().any(|r| {
         (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-            || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
+            || (include_calls && matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName)))
             && r.span == span
             && r.target_name != literal_name
     })
@@ -889,17 +890,44 @@ pub(super) fn collect_from_analysis(
         return;
     }
 
-    // `name` is constant across all refs in this call (it is `target.name`), so
-    // the only varying key is the invocant class. Cache chains keyed by class to
-    // avoid an O(refs × ancestor_depth) DFS on large files with many same-method
-    // calls against the same class.
-    let mut rename_chain_cache: std::collections::HashMap<String, Vec<String>> =
+    // The member is constant across all refs in this call (the target's name,
+    // or the constructor role for a construction), so the varying key is the
+    // invocant class plus which of the two the ref asks for. Cache chains by
+    // that pair to avoid an O(refs × ancestor_depth) DFS on large files with
+    // many same-method calls against the same class.
+    let mut rename_chain_cache: std::collections::HashMap<(String, bool), Vec<String>> =
         std::collections::HashMap::new();
     // The chain walks the target's family (constant per call, so the
     // class-keyed cache stays sound); the scanned file's namespace decides
     // which uses that family reaches.
     let chain_want = target.member_kind.unwrap_or(MemberKind::Callable);
     let namespace = analysis.names().member_namespace;
+    // Whether a call on `cn` asking for `member` reaches the target owned by
+    // `pkg`. Under Hierarchy the override family is precomputed and a call
+    // matches iff its class is in it — so `$child->m` and `$base->m` rename
+    // together (every family member descends from the root, so inheriting
+    // without overriding is covered by membership). The family walk runs
+    // INVERSE edges from the origin file, which can miss aliases declared
+    // elsewhere (perl5's `typedef struct op OP` lives in perl.h, so `OP`
+    // isn't in `op`'s computed family) — the UPWARD chain from the call's
+    // class needs no inverse index, so a class whose chain reaches the
+    // family is admitted too. Under Dispatch the call matches only if it
+    // dispatches to THIS def: `$child->m` reaches an ancestor target via the
+    // per-class chain, unrelated same-named methods stay out.
+    let mut reaches_target = |cn: &str, member: MemberKey<'_>, pkg: &str| -> bool {
+        let mut chain = || {
+            rename_chain_cache
+                .entry((cn.to_string(), matches!(member, MemberKey::Constructor)))
+                .or_insert_with(|| analysis.member_rename_chain(cn, member, chain_want, module_index))
+                .clone()
+        };
+        if target.scope == OverrideScope::Hierarchy {
+            target.method_classes.iter().any(|c| c == cn)
+                || chain().iter().any(|c| target.method_classes.iter().any(|f| f == c))
+        } else {
+            cn == pkg || chain().iter().any(|c| c == pkg)
+        }
+    };
 
     // Pack (closure-carrying) files speak C++'s relative name lookup and may
     // carry only partial namespace attribution — `pkg_agrees` reads this.
@@ -958,19 +986,35 @@ pub(super) fn collect_from_analysis(
         TargetKind::Method { class } => Some(Some(class.clone())),
         _ => None,
     };
-    // Only the target key's bucket can hold a match — a use spelled through
-    // a delegating macro is bucketed under the delegate's key too. Walked in
-    // ref order so `out` keeps the vec's order (the final sort is by start
-    // point, and same-start refs — a chain's outer call and its receiver —
-    // rely on insertion order).
-    let target_key = crate::model::file_analysis::name_match_key(&target.name, analysis.names());
+    // Only the key buckets for the target (and, for a constructor, the
+    // classes it constructs) can hold a match — a use spelled through a
+    // delegating macro is bucketed under the delegate's key too. The union
+    // is walked in ref order so `out` keeps the vec's order (the final sort
+    // is by start point, and same-start refs — a chain's outer call and its
+    // receiver — rely on insertion order).
+    let mut keyed: Vec<usize> = Vec::new();
+    for k in target.retrieval_keys(analysis.names()) {
+        keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
+    }
+    keyed.sort_unstable();
+    keyed.dedup();
     let delegable = matches!(
         target.kind,
         TargetKind::Sub { .. } | TargetKind::Method { .. } | TargetKind::FileScopeValue
     );
     let all_refs = analysis.refs();
-    for &ri in analysis.ref_indices_keyed(&target_key) {
+    for &ri in &keyed {
         let r = &all_refs[ri];
+        // Where calling a class constructs it (python's `Foo()`), a call
+        // whose name is a class runs that class's constructor, as php's
+        // `new Foo` does: the class it constructs, asked only for a
+        // constructor target. An `ImportedName` names the class and runs
+        // nothing, so its kind keeps it out.
+        let call_constructs = (!target.constructed_classes.is_empty()
+            && matches!(r.kind, RefKind::FunctionCall))
+        .then(|| analysis.class_named_by_call(r, module_index))
+        .flatten();
+        let construction = r.constructs() || call_constructs.is_some();
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
@@ -979,14 +1023,18 @@ pub(super) fn collect_from_analysis(
         // Where calling a class constructs it, a call-shaped token can name
         // a class too (`class_named_by_call`), so a class target reads it
         // as one.
-        let call_names_class = matches!(r.kind, RefKind::FunctionCall)
+        let call_names_class = matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName)
             && matches!(target.kind, TargetKind::Package)
             && analysis.pack.names.class_call_sep().is_some();
         let name_matches = if matches!(r.kind, RefKind::PackageRef) || call_names_class {
             // A class token names the class its file's use-map says it
             // does; the target is that identity.
             analysis.spelled_identity(r) == target.name
-        } else if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
+        } else if construction {
+            // A construction is keyed by its class; whether it runs this
+            // constructor is the dispatch check below.
+            !target.constructed_classes.is_empty()
+        } else if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1010,8 +1058,11 @@ pub(super) fn collect_from_analysis(
         // invariant. Filter is a single scope comparison.
         let mut also_on: Vec<String> = Vec::new();
         let matches_kind = alias_matched || match (&target.kind, &r.kind) {
+            (TargetKind::Method { class }, RefKind::FunctionCall) if call_constructs.is_some() => {
+                call_constructs.as_deref().is_some_and(|cn| reaches_target(cn, MemberKey::Constructor, class))
+            }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
-             RefKind::FunctionCall) => {
+             RefKind::FunctionCall | RefKind::ImportedName) => {
                 // callable_scope_for_refs is derived from the same target.kind
                 // match above; a mismatch means malformed input rather than a
                 // real match, so skip this ref instead of asserting the invariant.
@@ -1100,7 +1151,7 @@ pub(super) fn collect_from_analysis(
                 {
                     continue;
                 }
-                let method = r.unqualified_target_name(analysis.names());
+                let member = r.member_key(analysis.names());
                 {
                     // A union receiver dispatches on every arm, so the
                     // site references each arm's member.
@@ -1108,43 +1159,7 @@ pub(super) fn collect_from_analysis(
                     let mut unmatched: Vec<String> = Vec::new();
                     let matched = match scope {
                         Some(pkg) => resolved_classes.into_iter().fold(false, |any, cn| {
-                            let hit = {
-                                if target.scope == OverrideScope::Hierarchy {
-                                    // The override family is precomputed; a call
-                                    // matches iff its invocant is in it — so
-                                    // `$child->m` and `$base->m` rename together.
-                                    // (Every family member is a descendant of the
-                                    // root, so inheriting-without-override calls are
-                                    // covered by membership.) The family walk runs
-                                    // INVERSE edges from the origin file, which can
-                                    // miss aliases declared elsewhere (perl5's
-                                    // `typedef struct op OP` lives in perl.h, so
-                                    // `OP` isn't in `op`'s computed family) — the
-                                    // UPWARD chain from the invocant's class needs
-                                    // no inverse index, so admit a class whose
-                                    // chain reaches the family.
-                                    target.method_classes.iter().any(|c| c == &cn)
-                                        || rename_chain_cache
-                                            .entry(cn.clone())
-                                            .or_insert_with(|| {
-                                                analysis.member_rename_chain(&cn, method, chain_want, module_index)
-                                            })
-                                            .iter()
-                                            .any(|c| target.method_classes.iter().any(|f| f == c))
-                                } else {
-                                    // Dispatch: the call matches only if it
-                                    // dispatches to THIS def — `$child->m` reaches an
-                                    // ancestor target via the per-invocant chain,
-                                    // unrelated same-named methods stay out.
-                                    cn == *pkg || rename_chain_cache
-                                        .entry(cn.clone())
-                                        .or_insert_with(|| {
-                                            analysis.member_rename_chain(&cn, method, chain_want, module_index)
-                                        })
-                                        .iter()
-                                        .any(|c| c == pkg)
-                                }
-                            };
+                            let hit = reaches_target(&cn, member, pkg);
                             // A class the site may be and the target is not:
                             // only a matched site (some other class hit) keeps it.
                             if !hit {
@@ -1161,7 +1176,7 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
-            (TargetKind::Package, RefKind::FunctionCall) => call_names_class,
+            (TargetKind::Package, RefKind::FunctionCall | RefKind::ImportedName) => call_names_class,
             // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared
@@ -1209,7 +1224,7 @@ pub(super) fn collect_from_analysis(
                 }
             },
             (TargetKind::FileScopeValue, RefKind::PackageRef) => true,
-            (TargetKind::FileScopeValue, RefKind::FunctionCall) => {
+            (TargetKind::FileScopeValue, RefKind::FunctionCall | RefKind::ImportedName) => {
                 r.resolved_package().is_none()
             }
             (
@@ -1291,6 +1306,9 @@ pub(super) fn collect_from_analysis(
             let span = r.member_site().map_or(r.span, |m| m.name_span);
             let rewrite = if alias_matched {
                 SiteRewrite::ThroughMacro
+            } else if construction {
+                // A construction's token spells the class, not the member.
+                SiteRewrite::Construction
             } else if !also_on.is_empty() {
                 SiteRewrite::Shared { also_on: std::mem::take(&mut also_on) }
             } else {

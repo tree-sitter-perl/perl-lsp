@@ -130,6 +130,7 @@ fn equal_span_first_write_wins() {
             },
             member_op: None,
             named_by_string: false,
+            constructs: false,
         },
         span,
         scope: ScopeId(0),

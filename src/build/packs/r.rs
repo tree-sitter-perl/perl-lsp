@@ -9,11 +9,12 @@ pub fn r_pack() -> LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         names: NameSpellings::NONE,
         functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // A logical is a number in arithmetic (`TRUE + 1` is 2).
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |_| None,
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _| None,
         annot_type: |_| None,
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.

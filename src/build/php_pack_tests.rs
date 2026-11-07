@@ -1855,6 +1855,414 @@ fn a_call_on_a_variable_resolves_across_files() {
     assert_eq!(ws.defs("Box.php", "stop()", 0), vec![site("Timer.php", 4, 20)]);
 }
 
+const NEW: &str = "<?php
+namespace App;
+
+use Lib\\Clock;
+
+class Base {
+    public function __construct(int $n) {}
+}
+class Box extends Base {
+    public function __construct(Clock $c) {}
+    public function make(Clock $k) {
+        $a = new Clock(1);
+        $b = new \\Lib\\Clock;
+        $c = new self(new Clock());
+        $d = new static($k);
+        $e = new parent(2);
+        $cls = Clock::class;
+        $f = new $cls();
+        $g = $cls::tick();
+        $h = new class($a) extends Base {
+            public function hi() { return $this; }
+        };
+        $h->hi();
+        $i = self::class;
+    }
+}
+";
+
+/// A construction's value is an instance of the class it names, through
+/// the use-map: `self` and `static` are the class the method is written in,
+/// `parent` the one it extends, `new $cls` the class the variable holds,
+/// and an anonymous class is its own class. A class literal is its class.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_is_an_instance_of_its_class() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(NEW);
+    let end = at(NEW, "    }\n}", 0);
+    let class = |c: &str| Some(T::ClassName(c.into()));
+    let ty = |v: &str| fa.inferred_type_via_bag(v, end);
+    assert_eq!(ty("a"), class("Lib\\Clock"));
+    assert_eq!(ty("b"), class("Lib\\Clock"), "fully qualified, without an argument list");
+    assert_eq!(ty("c"), class("App\\Box"));
+    assert_eq!(ty("d"), class("App\\Box"), "`static` is the writing class");
+    assert_eq!(ty("e"), class("App\\Base"));
+    assert_eq!(ty("cls"), class("Lib\\Clock"), "a class literal");
+    assert_eq!(ty("f"), class("Lib\\Clock"), "the class a variable holds");
+    assert_eq!(ty("h"), class("App\\class@anonymous:20:18"));
+    assert_eq!(ty("i"), class("App\\Box"));
+}
+
+const PARENT: &str = "<?php
+namespace App;
+interface Shape {}
+trait Named { public function name(): string { return ''; } }
+class Base {
+    public function base(): self { return $this; }
+}
+class Kid extends Base implements Shape {
+    use Named;
+    public parent $p;
+    public function own(parent $q): ?parent {
+        $a = parent::base();
+        $b = parent::class;
+        $c = new parent();
+        $d = $q;
+        $e = $this->p;
+        return $a;
+    }
+}
+class Lone implements Shape {
+    public function f(): parent {
+        $x = new parent();
+        $y = parent::class;
+        $z = new $u();
+    }
+}
+";
+
+/// `parent` names the class the writing class extends, wherever it is
+/// written: a call's receiver, a class literal, a construction, and a
+/// written type. A class that extends nothing has no `parent`, whatever
+/// it implements or uses.
+#[cfg(feature = "php")]
+#[test]
+fn parent_names_the_class_extended() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(PARENT);
+    let base = Some(T::ClassName("App\\Base".into()));
+    let kid_end = at(PARENT, "        return $a;", 0);
+    let ty = |v: &str, at| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("a", kid_end), base, "`parent::m()` dispatches on the extended class");
+    assert_eq!(ty("b", kid_end), base, "`parent::class`");
+    assert_eq!(ty("c", kid_end), base, "`new parent`");
+    assert_eq!(ty("d", kid_end), base, "a parameter typed `parent`");
+    assert_eq!(ty("e", kid_end), base, "a property typed `parent`");
+    let ret = |class: &str, m: &str| fa.find_method_return_type(class, m, None, None);
+    assert_eq!(ret("App\\Kid", "own"), base, "a nullable `parent` return");
+    // an interface or a trait is never what `parent` names
+    let lone_end = at(PARENT, "        $z = new $u();", 0);
+    assert_eq!(ty("x", lone_end), None);
+    assert_eq!(ty("y", lone_end), None);
+    // a construction whose class nothing types answers nothing, and its
+    // ref on the class token is not its own receiver
+    assert_eq!(ty("z", at(PARENT, "$z = new $u();\n", 15)), None);
+    assert_eq!(ret("App\\Lone", "f"), None);
+}
+
+/// A construction is an `Invoke` of the constructor on the class its
+/// receiver's value is, with its arguments, and a reference on its class
+/// token keyed by that class, never by a constructor name.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_calls_its_classs_constructor() {
+    use crate::model::witnesses::{Callee, Lookup, WitnessPayload};
+    let fa = php(NEW);
+    let calls: Vec<(String, usize)> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Construct { lookup }, receiver, args } => {
+                // the class is the receiver's value, the one store of it
+                assert_eq!(*lookup, Lookup::Receiver);
+                let on = match receiver {
+                    Some(crate::model::witnesses::WitnessAttachment::Expr(recv)) => fa
+                        .expr_type_at_span(*recv, None)
+                        .and_then(|t| t.class_name().map(str::to_string))
+                        .unwrap_or_else(|| "untyped".to_string()),
+                    _ => "untyped".to_string(),
+                };
+                Some((on, args.as_ref().map_or(0, Vec::len)))
+            }
+            _ => None,
+        })
+        .collect();
+    let want: Vec<(String, usize)> = [
+        ("Lib\\Clock", 1),
+        ("Lib\\Clock", 0),
+        ("App\\Box", 1),
+        ("Lib\\Clock", 0),
+        ("App\\Box", 1),
+        ("App\\Base", 1),
+        ("Lib\\Clock", 0),
+        ("App\\class@anonymous:20:18", 1),
+    ]
+    .iter()
+    .map(|(c, n)| (c.to_string(), *n))
+    .collect();
+    assert_eq!(calls, want);
+    let sites: Vec<(usize, usize, &str)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.constructs())
+        .map(|r| (r.span.start.row, r.span.start.column, r.target_name.as_str()))
+        .collect();
+    assert_eq!(
+        sites,
+        [
+            (11, 17, "Lib\\Clock"),
+            (12, 17, "Lib\\Clock"),
+            (13, 17, "App\\Box"),
+            (13, 26, "Lib\\Clock"),
+            (14, 17, "App\\Box"),
+            (15, 17, "App\\Base"),
+            // TODO(dynamic-construction-retrieval): no class is known where
+            // the site is minted, so it keys by its spelling and a
+            // cross-file references walk does not retrieve it.
+            (17, 17, "$cls"),
+            (19, 17, "App\\class@anonymous:20:18"),
+        ]
+    );
+}
+
+/// The class token of a construction is the class: goto-def and a class
+/// rename reach it. The site is a reference to the constructor, which
+/// `self`, `static` and `parent` reach, and which rename leaves alone,
+/// since no site spells its name.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_names_its_class_and_reaches_its_constructor() {
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW), ("/fake/php/Lib/Clock.php", CLOCK)]);
+    let clock = vec![site("Clock.php", 3, 6)];
+    assert_eq!(ws.defs("Box.php", "Clock(1)", 0), clock);
+    assert_eq!(ws.defs("Box.php", "\\Lib\\Clock;", 5), clock);
+    assert_eq!(ws.defs("Box.php", "Clock::class", 0), clock);
+    assert_eq!(ws.defs("Box.php", "self(new", 0), vec![site("Box.php", 9, 20)]);
+    assert_eq!(ws.defs("Box.php", "parent(2)", 0), vec![site("Box.php", 6, 20)]);
+    assert_eq!(ws.defs("Box.php", "tick();", 0), vec![site("Clock.php", 4, 20)], "a class a variable holds");
+    let refs = ws.ask("Box.php", "__construct(Clock", 0, |cs| Workspace::sites(cs.references()));
+    // The constructor's references are its override family's: `parent`
+    // and the anonymous subclass construct `Base`'s.
+    let family = [(6, 20), (9, 20), (13, 17), (14, 17), (15, 17), (19, 17)];
+    assert_eq!(refs, family.map(|(r, c)| site("Box.php", r, c)));
+    assert!(ws.ask("Box.php", "__construct(Clock", 0, |cs| cs.rename_edits("make").is_err()));
+    let renamed = ws.renames("Clock.php", "Clock {", 0);
+    let in_box: Vec<(usize, usize)> =
+        renamed.iter().filter(|(f, ..)| f == "Box.php").map(|&(_, r, c)| (r, c)).collect();
+    assert_eq!(in_box, [(3, 8), (9, 32), (10, 25), (11, 17), (12, 22), (13, 26), (16, 15)]);
+}
+
+const MODEL: &str = "<?php
+namespace Lib;
+
+class Model {
+    public function __construct(array $a = []) {}
+}
+";
+
+const MODELS: &str = "<?php
+namespace App;
+
+use Lib\\Model;
+
+class User extends Model {}
+class Post extends Model {
+    public function __construct() {}
+}
+class Admin extends User {}
+";
+
+const MAKES: &str = "<?php
+namespace App;
+
+$u = new User();
+$p = new Post();
+$a = new Admin();
+$m = new \\Lib\\Model([]);
+";
+
+/// A construction runs the constructor its class declares or inherits,
+/// found by its flag, in whichever file declares it: a constructor's
+/// references are the constructions of the classes that inherit it, from
+/// files that never spell its name, and a class that overrides it
+/// constructs through its own.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_reaches_an_inherited_constructor_across_files() {
+    let ws = Workspace::new(&[
+        ("/fake/php/Lib/Model.php", MODEL),
+        ("/fake/php/App/Models.php", MODELS),
+        ("/fake/php/App/Makes.php", MAKES),
+    ]);
+    // The override family (the default scope) takes in `Post`'s, whose
+    // constructions are its own.
+    let family = vec![
+        site("Makes.php", 3, 9),
+        site("Makes.php", 4, 9),
+        site("Makes.php", 5, 9),
+        site("Makes.php", 6, 9),
+        site("Model.php", 4, 20),
+        site("Models.php", 7, 20),
+    ];
+    assert_eq!(ws.ask("Model.php", "__construct", 0, |cs| Workspace::sites(cs.references())), family);
+    assert_eq!(ws.ask("Models.php", "__construct", 0, |cs| Workspace::sites(cs.references())), family);
+    // Dispatch keeps to the constructions that run it: `User` and `Admin`
+    // inherit `Model`'s, `Post` runs its own.
+    let dispatch = |file: &str| {
+        use crate::index::open_docs::FileKey;
+        use crate::index::resolve::{resolve, OverrideScope};
+        let (path, src) = ws.files.iter().find(|(p, _)| p.ends_with(file)).unwrap();
+        let fa = ws.idx.workspace_file_for_test(path).unwrap();
+        let cs = resolve(&ws.store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), at(src, "__construct", 0), Some(&ws.idx), OverrideScope::Dispatch);
+        Workspace::sites(cs.references())
+    };
+    assert_eq!(
+        dispatch("Model.php"),
+        [site("Makes.php", 3, 9), site("Makes.php", 5, 9), site("Makes.php", 6, 9), site("Model.php", 4, 20)]
+    );
+    assert_eq!(dispatch("Models.php"), [site("Makes.php", 4, 9), site("Models.php", 7, 20)]);
+    // A constructor is retrieved under the classes that may construct
+    // through it, from the in-memory class graph.
+    let model = ws.idx.workspace_file_for_test(&std::path::PathBuf::from("/fake/php/Lib/Model.php")).unwrap();
+    let target = crate::index::resolve::TargetRef::method(
+        "__construct".into(),
+        "Lib\\Model".into(),
+        None,
+        &model,
+        Some(&ws.idx),
+        crate::index::resolve::OverrideScope::Dispatch,
+    );
+    let mut keys = target.retrieval_keys(model.names());
+    keys.sort();
+    let mut want: Vec<String> = ["__construct", "Lib\\Model", "App\\User", "App\\Post", "App\\Admin"]
+        .iter()
+        .map(|n| crate::model::file_analysis::name_match_key(n, model.names()))
+        .collect();
+    want.sort();
+    want.dedup();
+    assert_eq!(keys, want);
+    // The stamp freezes the class each construction dispatches on, keyed by
+    // that class's identity.
+    let fa = ws.idx.workspace_file_for_test(&std::path::PathBuf::from("/fake/php/App/Makes.php")).unwrap();
+    let stamped: Vec<(&str, Option<&str>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.constructs())
+        .map(|r| (r.target_name.as_str(), r.method_target().map(|e| e.invocant_class())))
+        .collect();
+    assert_eq!(
+        stamped,
+        [
+            ("App\\User", Some("App\\User")),
+            ("App\\Post", Some("App\\Post")),
+            ("App\\Admin", Some("App\\Admin")),
+            ("Lib\\Model", Some("Lib\\Model")),
+        ]
+    );
+}
+
+/// A class constructs whether or not it declares a constructor, so a
+/// construction is never an unresolved method, whatever its class token
+/// spells.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_is_never_an_unresolved_method() {
+    let fa = php("<?php\nclass Plain { public function go() {} }\n$p = new Plain();\nPlain::gone();\n");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let messages: Vec<String> = crate::lsp::symbols::collect_diagnostics(&fa, &idx, Default::default())
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    // `gone` shows the lane runs on this class.
+    assert_eq!(messages, ["'gone' is not defined in Plain"]);
+}
+
+/// An anonymous class is a class of its own, named by where it is written:
+/// its members, its parents and `$this` are its, and its construction
+/// dispatches on it.
+#[cfg(feature = "php")]
+#[test]
+fn an_anonymous_class_is_a_class_of_its_own() {
+    let fa = php(NEW);
+    let anon = "App\\class@anonymous:20:18";
+    let sym = fa.symbols().iter().find(|s| s.name == anon).expect("the anonymous class");
+    assert_eq!((sym.kind, sym.selection_span.start.row, sym.selection_span.start.column), (SymKind::Class, 19, 17));
+    assert!(sym.attributes.iter().any(|a| a == "anonymous"));
+    assert_eq!(fa.declared_parents(anon), ["App\\Base"]);
+    let hi = fa.symbols().iter().find(|s| s.name == "hi").unwrap();
+    assert_eq!(hi.package.as_deref(), Some(anon));
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW)]);
+    assert_eq!(ws.defs("Box.php", "hi();", 0), vec![site("Box.php", 20, 28)]);
+    // two anonymous classes are two classes
+    let two = php("<?php\n$a = new class {};\n$b = new class {};\n");
+    let classes: Vec<String> =
+        two.symbols().iter().filter(|s| s.kind == SymKind::Class).map(|s| s.name.clone()).collect();
+    assert_eq!(classes, ["class@anonymous:2:10", "class@anonymous:3:10"]);
+}
+
+/// A bare call in a method calls a function, never a method of the class:
+/// PHP calls a method only through a receiver (`$this->foo()`,
+/// `self::foo()`), so the class body's names are not in force in its
+/// methods — a named class's or an anonymous one's. An anonymous class's
+/// constructor arguments are code of the scope it is written in.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_call_in_a_method_never_names_a_method() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+class A {
+    public function foo() {}
+    public function g() { foo(); $this->foo(); }
+}
+function make($a) {
+    return new class($a) {
+        public function bar() {}
+        public function h() { bar(); }
+    };
+}
+";
+    let fa = php(src);
+    let locals: Vec<(String, bool)> = call_invokes(&fa).into_iter().map(|(n, local, _)| (n, local)).collect();
+    assert_eq!(locals, [("foo".to_string(), false), ("bar".to_string(), false)]);
+    let ws = Workspace::new(&[("/fake/php/A.php", src)]);
+    assert_eq!(ws.defs("A.php", "foo(); $this", 0), Sites::new(), "no function `foo`");
+    assert_eq!(ws.defs("A.php", "foo(); }", 0), vec![site("A.php", 2, 20)], "the receiver's method");
+    assert_eq!(ws.defs("A.php", "bar(); }", 0), Sites::new(), "no function `bar`");
+    let seen = |needle: &str| -> Vec<String> {
+        let scope = fa.scope_at(at(src, needle, 0)).unwrap();
+        fa.bindings_seen_from(scope).iter().map(|s| s.name.clone()).collect()
+    };
+    assert!(!seen("foo(); $this").iter().any(|n| n == "foo" || n == "g"), "{:?}", seen("foo(); $this"));
+    assert!(!seen("bar(); }").iter().any(|n| n == "bar" || n == "h"), "{:?}", seen("bar(); }"));
+    let a = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == "a").unwrap();
+    let arg = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "a" && r.span.start.row == 6)
+        .unwrap();
+    assert_eq!(arg.resolved_symbol(), Some(a.id), "the argument reads the function's parameter");
+}
+
+/// An anonymous class has no spelling another file could write, so it is
+/// not part of the file's cross-file surface: two files with one at the
+/// same place keep two classes.
+#[cfg(feature = "php")]
+#[test]
+fn an_anonymous_class_is_not_linkage_visible() {
+    let fa = php(NEW);
+    let anon = fa.symbols().iter().find(|s| s.name == "App\\class@anonymous:20:18").unwrap();
+    assert!(!fa.is_linkage_visible(anon));
+    let base = fa.symbols().iter().find(|s| s.name == "App\\Base").unwrap();
+    assert!(fa.is_linkage_visible(base));
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW), ("/fake/php/App/Crate.php", NEW)]);
+    assert_eq!(ws.defs("Box.php", "hi();", 0), vec![site("Box.php", 20, 28)]);
+    assert_eq!(ws.defs("Crate.php", "hi();", 0), vec![site("Crate.php", 20, 28)]);
+}
+
 /// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:
 /// PHP constructs with `new`, so the call is no reference to the class
 /// and its value is no instance of it. (Python's `Foo()` is both —

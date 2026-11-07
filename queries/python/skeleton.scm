@@ -35,6 +35,14 @@
   name: (identifier) @def.sub.name
   return_type: (type)? @rettype) @def.sub
 
+; The method calling the class runs; its name belongs to the language.
+((class_definition
+  body: (block
+    [(function_definition name: (identifier) @mark.constructor)
+     (decorated_definition
+       definition: (function_definition name: (identifier) @mark.constructor))]))
+ (#eq? @mark.constructor "__init__"))
+
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).
@@ -152,7 +160,7 @@
 ; Imported names are references to the remote def — this single
 ; pattern is what makes cross-file RENAME rewrite the import line too.
 (import_from_statement
-  name: (dotted_name (identifier) @ref.call))
+  name: (dotted_name (identifier) @ref.import))
 
 ; A variable belongs to the function it is assigned in: the first write
 ; declares it, and every later write and every read in the body is that

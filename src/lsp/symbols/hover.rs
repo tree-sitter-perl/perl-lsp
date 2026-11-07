@@ -28,7 +28,6 @@ pub fn pack_hover_markdown(
         .and_then(|r| Some((r, crate::model::file_analysis::MemberKind::of_ref(&r.kind)?)))
     {
         if let Some(midx) = module_index {
-            let field = r.unqualified_target_name(analysis.names());
             // The receiver's full VALUE (not just its dispatch class): a
             // template instance's args refine a param-shaped member type
             // (`T get()` on a `Box<int>` receiver → `int`) — shown only when
@@ -55,7 +54,9 @@ pub fn pack_hover_markdown(
                 .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
                 .iter()
                 .filter_map(|cn| {
-                    member_hover_on(analysis, cn, field, want, arm_for(cn), source, language, midx, &declaration)
+                    // A construction names each class's constructor.
+                    let field = analysis.called_member(r, cn, Some(midx))?;
+                    member_hover_on(analysis, cn, &field, want, arm_for(cn), source, language, midx, &declaration)
                 })
                 .collect();
             if !sections.is_empty() {
@@ -287,7 +288,7 @@ fn perl_hover_named(
     }
 
     let r = analysis.ref_at(point)?;
-    if !matches!(r.kind, RefKind::FunctionCall { .. }) {
+    if !matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
         return None;
     }
     if crate::model::builtins::is_builtin(&r.target_name) {

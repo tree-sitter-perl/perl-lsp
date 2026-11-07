@@ -437,6 +437,7 @@ impl<'a> Builder<'a> {
                         method_name_span: span,
                         member_op: None,
                         named_by_string: false,
+                        constructs: false,
                     },
                     span,
                     scope: self.current_scope(),

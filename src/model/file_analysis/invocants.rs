@@ -26,7 +26,7 @@ impl FileAnalysis {
                         return Some((sym.id, true));
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Qualified calls carry the full path in `target_name`;
                     // symbols are keyed by bare name + the `Function` binding.
                     if let Some(sid) = self
@@ -832,9 +832,10 @@ impl FileAnalysis {
         // bag can't pre-record, so it lives here, not in the builder.
         // The receiver is the call spanning exactly the invocant — never
         // a call that merely opens it, which under `$x->a->b->c` is an
-        // earlier hop.
+        // earlier hop, and never the call itself: a construction's ref
+        // sits on its class token, which is also its receiver.
         if let Some(span) = invocant_span {
-            if let Some(recv_idx) = self.refs.call_spanning(*span) {
+            if let Some(recv_idx) = self.refs.call_spanning(*span).filter(|&i| !std::ptr::eq(&self.refs[i], r)) {
                 if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
                     let recv = &self.refs[recv_idx];
                     let recv_method = recv.unqualified_target_name(self.names());

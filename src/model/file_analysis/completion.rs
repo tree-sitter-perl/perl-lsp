@@ -65,7 +65,11 @@ pub enum MethodResolution {
     /// nothing. The answer still lands (dirty real-world editing wants it),
     /// but it is confidently wrong whenever the code is, so the diagnostics
     /// lane reads this flag and says so (`docs/prompt-class-identity.md`).
-    CrossFile { class: String, def_module: Option<String>, widened: bool },
+    ///
+    /// `member` is the member's name as the declaration found spells it, so
+    /// a by-role ask (`MemberKey::Constructor`) carries its answer out of
+    /// the walk that found it.
+    CrossFile { class: String, member: String, def_module: Option<String>, widened: bool },
 }
 
 impl MethodResolution {

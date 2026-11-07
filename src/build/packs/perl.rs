@@ -8,14 +8,15 @@ pub fn perl_pack() -> LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         names: crate::model::conventions::PERL_SPELLINGS,
         functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
         lattice: crate::model::conventions::PERL_CONVENTIONS.lattice.clone(),
         type_display: |_| None,
         // The builder stores variable symbols WITH sigil. Nothing to
         // re-attach: def.var captures the whole `(scalar)` node, so the
         // raw text already carries it.
         shape_name: |raw| raw.to_string(),
-        default_name: |kind| match kind {
-            DefCap::Anon => Some("(anon)"),
+        default_name: |kind, _| match kind {
+            DefCap::Anon => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,

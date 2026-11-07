@@ -125,12 +125,15 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let mname = mr.unqualified_target_name(self.names());
-                            // One section per class the receiver may be.
+                            // One section per class the receiver may be; a
+                            // construction asks each for its constructor.
                             let sections: Vec<String> = self
                                 .receiver_classes(mr, module_index, ReceiverPolicy::Edge)
                                 .iter()
-                                .filter_map(|cn| self.method_hover_on(cn, mname, Some(&r.target_name), source, module_index))
+                                .filter_map(|cn| {
+                                    let mname = self.called_member(mr, cn, module_index)?;
+                                    self.method_hover_on(cn, &mname, Some(&r.target_name), source, module_index)
+                                })
                                 .collect();
                             if !sections.is_empty() {
                                 return Some(sections.join("\n\n---\n\n"));
@@ -146,7 +149,7 @@ impl FileAnalysis {
                         return Some(self.format_symbol_hover_at(sym, source, point, module_index));
                     }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: hover shows the sub whose
                     // package matches what the ref resolved to. Qualified
                     // calls match on the bare tail (symbols are keyed by
@@ -159,12 +162,15 @@ impl FileAnalysis {
                 }
                 RefKind::MethodCall { .. } => {
                     // One section per class the receiver may be, from the
-                    // same receiver projection find_def / refs_to read.
-                    let method = r.unqualified_target_name(self.names());
+                    // same receiver projection find_def / refs_to read; a
+                    // construction asks each for its constructor.
                     let sections: Vec<String> = self
                         .receiver_classes(r, module_index, ReceiverPolicy::Edge)
                         .iter()
-                        .filter_map(|cn| self.method_hover_on(cn, method, None, source, module_index))
+                        .filter_map(|cn| {
+                            let method = self.called_member(r, cn, module_index)?;
+                            self.method_hover_on(cn, &method, None, source, module_index)
+                        })
                         .collect();
                     if !sections.is_empty() {
                         return Some(sections.join("\n\n---\n\n"));

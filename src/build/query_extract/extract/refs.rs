@@ -41,5 +41,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         invocant,
         member_op,
         arg_count,
+        constructs: false,
     });
 }

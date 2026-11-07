@@ -298,7 +298,7 @@ impl<'a> CandidateSet<'a> {
             RefKind::MethodCall { .. } => {
                 Some(analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate).single()?.to_string())
             }
-            RefKind::FunctionCall => r.resolved_package().map(str::to_string).or_else(|| {
+            RefKind::FunctionCall | RefKind::ImportedName => r.resolved_package().map(str::to_string).or_else(|| {
                 analysis.find_definition(self.point, Some(idx)).and_then(|sp| {
                     analysis
                         .symbols()
@@ -923,12 +923,14 @@ impl<'a> CandidateSet<'a> {
             if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
                 let namespace = analysis.names().member_namespace;
-                // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
-                let method = r.unqualified_target_name(analysis.names());
                 // A union receiver dispatches on every arm: each arm's
                 // definition is offered.
                 let mut found: Vec<RefLocation> = Vec::new();
                 for cn in analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate) {
+                    // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named
+                    // class; a construction calls its class's constructor.
+                    let Some(called) = analysis.called_member(r, &cn, Some(idx)) else { continue };
+                    let method: &str = &called;
                     let on_class = |cn: String| -> Vec<RefLocation> {
                         // The invocant resolved (e.g. a plugin-bridged route token
                         // → controller class) but the controller lives in THIS
@@ -1049,7 +1051,7 @@ impl<'a> CandidateSet<'a> {
         // owner-anchored step (`qualifier_at_point` + `member_def_location`),
         // which fires unconditionally for pack routing before this tail.
         if let Some(r) = analysis.ref_at(point) {
-            if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::Variable) {
+            if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName | RefKind::Variable) {
                 let name = r.unqualified_target_name(analysis.names());
                 for cached in idx.visible_def_candidates(name) {
                     let whole = idx.whole_present(&cached);

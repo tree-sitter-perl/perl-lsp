@@ -29,12 +29,18 @@ pub struct LangPack {
     /// (`Bool` → `bool`), registered by id with the lattice; `None` keeps
     /// the engine's.
     pub type_display: fn(tag: &str) -> Option<&'static str>,
+    /// What a construction's reference to its constructor is keyed by,
+    /// registered by id with the lattice: resolution reads it, no file.
+    pub construction: crate::model::file_analysis::ConstructionKey,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
     pub shape_name: fn(raw: &str) -> String,
-    /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: DefCap) -> Option<&'static str>,
+    /// Name for defs with no name token (anonymous subs, anonymous
+    /// classes), given where the def or its `@def.<kind>.anchor` starts. A
+    /// kind whose instances must stay distinct spells the position in;
+    /// a structure-only default (`(anon)`, `(union)`) ignores it.
+    pub default_name: fn(kind: DefCap, at: Point) -> Option<String>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
@@ -112,7 +118,7 @@ pub struct LangPack {
 impl LangPack {
     /// What every file of this language shares, registered by its id.
     pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
-        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display)
+        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction)
     }
 
     /// Every `&'static str` this pack declares, tagged with the field it
@@ -133,6 +139,7 @@ impl LangPack {
             functions: _,
             lattice: _,
             type_display: _,
+            construction: _,
             shape_name: _,
             default_name: _,
             annot_type: _,

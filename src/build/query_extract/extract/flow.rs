@@ -18,9 +18,9 @@ struct Target {
     resets: bool,
     /// The target token's own start.
     token: Point,
-    /// The class a `@type.enclosing` annotation names: the one in force
-    /// where it is written.
-    enclosing: Option<String>,
+    /// A `@type.<relative>` annotation's mark and the class in force where
+    /// it is written.
+    relative: Option<(RelativeClass, String)>,
 }
 
 #[derive(Default)]
@@ -123,16 +123,16 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk).
-            let mut enclosing = None;
+            let mut relative = None;
             if let Some(annot) = ad.in_match(e.match_id, Capture::TypeAnnot) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
                 }
-                if super::defs::names_enclosing(ad, annot) {
-                    enclosing = st.package.clone();
+                if let (Some(rel), Some(class)) = (super::defs::names_relative(ad, annot), st.package.as_ref()) {
+                    relative = Some((rel, class.clone()));
                 }
             }
-            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, enclosing };
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
@@ -228,7 +228,58 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     receiver,
                     scope: cur_scope,
                     args,
+                    constructs: false,
                 });
+            }
+        }
+        Capture::Expr(ExprCap::Construct) => {
+            // The site calls the constructor on the class its receiver
+            // names, and the call's own reference sits on that token: it
+            // spells the class, so the class's own reference keeps the
+            // token for the cursor and for a class rename. Which member is
+            // the constructor is the class's `@mark.constructor` flag, asked
+            // where the class is in hand; the token names only the class.
+            if let Some(recv) = ad.in_match(e.match_id, Capture::Member(MemberCap::Recv)) {
+                let span = e.span();
+                let args = super::members::call_args(ad, e.match_id);
+                let arg_count = args.as_ref().map(Vec::len);
+                out.call_sites.push(crate::build::query_extract::CallSite {
+                    span,
+                    callee: recv.text.clone(),
+                    callee_at: recv.start,
+                    receiver: Some(recv.span()),
+                    scope: cur_scope,
+                    args,
+                    constructs: true,
+                });
+                let invocant = match recv.payload.as_deref() {
+                    Some(Payload::Recv(i)) => Some((recv.span(), i.clone())),
+                    _ => None,
+                };
+                out.refs.push(SkelRef {
+                    kind: RefCap::MemberCall,
+                    name: recv.text.clone(),
+                    start: recv.start,
+                    end: recv.end,
+                    scope: cur_scope,
+                    invocant,
+                    member_op: None,
+                    arg_count,
+                    constructs: true,
+                });
+            }
+        }
+        Capture::Expr(ExprCap::Class) => {
+            // The value is the class the match's receiver token names.
+            let recv = ad.of_match(e.match_id).find(|x| matches!(x.cap, Capture::NamedReceiver(_)));
+            if let Some(recv) = recv {
+                let span = e.span();
+                out.witnesses.push(skeleton_witness(
+                    WitnessAttachment::Expr(span),
+                    "skeleton-class",
+                    WitnessPayload::Edge(WitnessAttachment::Expr(recv.span())),
+                    span,
+                ));
             }
         }
         Capture::Expr(ExprCap::Wrapper) => {
@@ -355,7 +406,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
-    for (mid, Target { name, at, resets, token, enclosing, .. }, scope) in targets {
+    for (mid, Target { name, at, resets, token, relative, .. }, scope) in targets {
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
         // A data member's write in its class body is its initializer, not a
         // step in a sequence: its declared type holds class-wide, so nothing
@@ -375,10 +426,10 @@ pub(super) fn finish(st: &mut ExtractState) {
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            // A type naming the class it is written in is that class, already
-            // an identity; any other spelling resolves at its site.
-            let annot_type = match enclosing {
-                Some(class) => Some(InferredType::ClassName(class.clone())),
+            // A type naming a class by where it is written is that class,
+            // already an identity; any other spelling resolves at its site.
+            let annot_type = match relative {
+                Some((rel, class)) => out.relative_class(*rel, class).map(InferredType::ClassName),
                 None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
             };
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {

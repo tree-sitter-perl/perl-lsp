@@ -1556,6 +1556,48 @@ def f():
     );
 }
 
+/// `__init__` is the constructor by its flag, so a class that declares
+/// none constructs through the one it inherits; a module-level function
+/// of that name is no constructor.
+#[test]
+fn init_is_the_constructor_a_class_inherits() {
+    let m = module(&["app"], false);
+    let fa = py_in(
+        "class Base:\n    def __init__(self, n):\n        pass\nclass Kid(Base):\n    pass\nclass Deco:\n    @staticmethod\n    def __init__(self):\n        pass\ndef __init__():\n    pass\n",
+        Some(&m),
+    );
+    let flagged: Vec<(usize, bool)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "__init__")
+        .map(|s| (s.selection_span.start.row, s.is_constructor()))
+        .collect();
+    assert_eq!(flagged, [(1, true), (7, true), (9, false)]);
+    assert_eq!(fa.constructor_of("app.Kid", None), Some(("app.Base".to_string(), "__init__".to_string())));
+    assert_eq!(fa.constructor_of("app.Deco", None), Some(("app.Deco".to_string(), "__init__".to_string())));
+}
+
+/// A name `from m import` binds is a reference to the def it names, pinned
+/// as a call to it is, but its kind says it is an import: it calls
+/// nothing, so no call lane reads it and it never constructs the class
+/// it names.
+#[test]
+fn an_imported_name_is_its_own_kind_pinned_like_a_call() {
+    use crate::model::file_analysis::RefKind;
+    let m = module(&["app"], false);
+    let fa = py_in("from lib.model import Model
+m = Model()
+", Some(&m));
+    let sites: Vec<(usize, bool, Option<&str>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "Model" && matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName))
+        .map(|r| (r.span.start.row, matches!(r.kind, RefKind::FunctionCall), r.resolved_package()))
+        .collect();
+    assert_eq!(sites.iter().map(|&(row, call, _)| (row, call)).collect::<Vec<_>>(), [(0, false), (1, true)]);
+    assert_eq!(sites[0].2, sites[1].2, "the import is pinned as the call is");
+}
+
 /// A receiver expression is typed by its value, never read as a class
 /// spelling: `self.either` (written two classes) is either class,
 /// `self.unknown` (never written) types nothing, and a class name read

@@ -312,6 +312,20 @@ impl Surface {
                 _ => {}
             }
         }
+        // A class the pack named for it (`ANONYMOUS`) has no spelling another
+        // file could write (`is_linkage_visible`), and its minted name
+        // stands for where it is written: neither it nor what it declares is
+        // cross-file visible.
+        let anonymous: std::collections::HashSet<&str> = feed
+            .symbols
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SymKind::Package | SymKind::Class | SymKind::Module)
+                    && s.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS)
+            })
+            .map(|s| s.name.as_str())
+            .collect();
+        by_pkg.retain(|name, _| !anonymous.contains(name.as_str()));
         let mut packages: Vec<PackageSurface> = by_pkg.into_values().collect();
         let sort_values = |vs: &mut Vec<ValueSurface>| {
             vs.sort_by(|a, b| (&a.name, a.kind).cmp(&(&b.name, b.kind)));

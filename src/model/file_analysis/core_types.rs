@@ -454,6 +454,22 @@ pub enum EnclosingClass {
     NamespaceInForce,
 }
 
+/// What a construction's reference to its constructor is keyed by, so a
+/// constructor's references know where to look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ConstructionKey {
+    /// The constructor's own name: the site calls it by name (Perl's
+    /// `Foo->new`), like any other call.
+    #[default]
+    Constructor,
+    /// The class the site spells (php's `new Foo`, python's `Foo()`): the
+    /// site never names its constructor, so a constructor's references are
+    /// retrieved under the classes that construct through it — a
+    /// `RefKind::MethodCall::constructs` ref, or a call whose name is a
+    /// class where calling a class constructs it.
+    Class,
+}
+
 /// What a call whose callee names a class means in a language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ClassCall {
@@ -646,7 +662,7 @@ bitflags::bitflags! {
         /// instance's class.
         const TRAIT = 1 << 16;
         /// The method a construction invokes (Perl's `new`, php
-        /// `__construct`). A construction can reach it without naming it, so
+        /// `__construct`, python `__init__`). A construction can reach it without naming it, so
         /// no reference to it is not evidence that it is dead.
         const CONSTRUCTOR = 1 << 17;
         /// A callable declared for a composer to provide (a Perl role's
@@ -1232,6 +1248,44 @@ impl Symbol {
     }
 }
 
+/// What a member walk looks for on each class of an MRO: a member by its
+/// name, or the class's constructor — the callable its language flags
+/// `CONSTRUCTOR`, whatever it is called (`__construct`, `__init__`). A
+/// construction spells its class, never its constructor, so it asks by
+/// role (`Ref::member_key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKey<'a> {
+    Named(&'a str),
+    Constructor,
+}
+
+impl<'a> MemberKey<'a> {
+    /// Does `sym` answer this key (its name or its role)? The kind and
+    /// class gates stay the walk's.
+    pub fn admits(self, sym: &Symbol) -> bool {
+        match self {
+            MemberKey::Named(n) => sym.name == n,
+            MemberKey::Constructor => sym.is_constructor(),
+        }
+    }
+
+    /// The name this key asks for, when it asks by name: the lanes keyed
+    /// by name (the row prefilter, typeglob installs, plugin bridges)
+    /// answer only these.
+    pub fn name(self) -> Option<&'a str> {
+        match self {
+            MemberKey::Named(n) => Some(n),
+            MemberKey::Constructor => None,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for MemberKey<'a> {
+    fn from(name: &'a str) -> Self {
+        MemberKey::Named(name)
+    }
+}
+
 /// Which family a member belongs to: a stored value or a callable. An ask
 /// carries the family of the fact that produced it, a declaration the
 /// family of its symbol kind (`docs/adr/member-kinds.md`).
@@ -1665,7 +1719,24 @@ impl Ref {
     /// companion of the class token's own ref — the stacked-refs fork in
     /// `docs/open-forks.md` is where a second case would reopen the shape.
     pub fn is_cursor_companion(&self, pack: &PackFacts) -> bool {
-        self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+        self.constructs() || self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+    }
+
+    /// A construction site's call of the constructor (`RefKind::MethodCall`'s
+    /// `constructs`).
+    pub fn constructs(&self) -> bool {
+        matches!(self.kind, RefKind::MethodCall { constructs: true, .. })
+    }
+
+    /// The member a member-site ref asks its class for: the one its token
+    /// names, or — at a construction, whose token spells the class — the
+    /// class's constructor.
+    pub fn member_key(&self, names: &NameSpellings) -> MemberKey<'_> {
+        if self.constructs() {
+            MemberKey::Constructor
+        } else {
+            MemberKey::Named(self.unqualified_target_name(names))
+        }
     }
 
     /// Whether matching this ref against a target consults only the frozen
@@ -1748,9 +1819,10 @@ impl Ref {
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
+            RefKind::ImportedName => 8,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
-            RefKind::FunctionCall => {
+            RefKind::FunctionCall | RefKind::ImportedName => {
                 (1, self.resolved_package().map(str::to_string))
             }
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
@@ -2189,6 +2261,15 @@ pub enum RefKind {
         /// callable (PHPUnit providers, key/value pairs).
         #[serde(default)]
         named_by_string: bool,
+        /// The site constructs an instance of the invocant's class (php's
+        /// `new Foo(…)`): it calls the constructor, but its token spells
+        /// the class, so `target_name` is the class identity (the class
+        /// reference's key) and the member is asked by role
+        /// (`MemberKey::Constructor`). A reference to the constructor that
+        /// rename never rewrites, and a cursor companion of the class's own
+        /// reference.
+        #[serde(default)]
+        constructs: bool,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the
@@ -2231,6 +2312,14 @@ pub enum RefKind {
         member_name_span: Span,
         member_op: Option<(MemberOp, Span)>,
     },
+    /// A name an import binds from another module (python's `from m import
+    /// Foo`): a reference to the def the name resolves to, pinned through
+    /// `Ref::binding` as a call to it is, so goto-def, references and
+    /// rename reach the import line. It calls nothing: no call hierarchy,
+    /// fan-out, arity or unresolved-call lane reads it, and it never runs a
+    /// class's constructor. Kept at the END for bincode variant-index
+    /// stability.
+    ImportedName,
 }
 
 /// The receiver half of a member access, whatever the member's kind — the

@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
+use crate::model::file_analysis::{ClassSpelling, ConstructionKey, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
 /// Perl's namespace separator. Source-side Perl code (the builder, the CST
 /// view, the cursor detector) spells it through this; a consumer that serves
@@ -58,14 +58,20 @@ pub struct LanguageConventions {
     /// The language's own word for an engine type tag (`Bool` → php
     /// `bool`); `None` keeps the engine's.
     type_display: fn(&str) -> Option<&'static str>,
+    /// What a construction's reference to its constructor is keyed by.
+    pub construction: ConstructionKey,
 }
 
 impl LanguageConventions {
     /// A pack language's: its declared lattice and type words. No pack
     /// declares variables its runtime owns, so another language's `$_` is
     /// an ordinary name.
-    pub fn of_pack(lattice: LatticeRules, type_display: fn(&str) -> Option<&'static str>) -> Self {
-        LanguageConventions { lattice, special_variable: no_special_variable, type_display }
+    pub fn of_pack(
+        lattice: LatticeRules,
+        type_display: fn(&str) -> Option<&'static str>,
+        construction: ConstructionKey,
+    ) -> Self {
+        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction }
     }
 
     /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
@@ -97,6 +103,8 @@ pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
     special_variable: is_special_variable,
     type_display: engine_type_words,
+    // `Foo->new` calls its constructor by name.
+    construction: ConstructionKey::Constructor,
 };
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
@@ -134,6 +142,7 @@ static UNREGISTERED: LanguageConventions =
         lattice: LatticeRules::new(&[]),
         special_variable: no_special_variable,
         type_display: engine_type_words,
+        construction: ConstructionKey::Constructor,
     };
 
 fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {

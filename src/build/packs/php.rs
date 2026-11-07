@@ -1,7 +1,7 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{join_all, ClassCall, ClassSpelling, InferredType, LatticeRules, NameSpellings};
+use crate::model::file_analysis::{join_all, ClassCall, ClassSpelling, ConstructionKey, InferredType, LatticeRules, NameSpellings};
 
 /// PHP's subsumption rules: none. `bool` is not an `int`, so `bool|int`
 /// is a union a signature spells.
@@ -26,10 +26,16 @@ pub fn php_pack() -> LangPack {
         // A bare call names the function its namespace declares, else the
         // global one.
         functions: FunctionLookup::NamespaceThenGlobal,
+        construction: ConstructionKey::Class,
         lattice: PHP_LATTICE,
         type_display: display_type,
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        // An anonymous class is one class per place it is written: PHP
+        // names it `class@anonymous` and where it stands.
+        default_name: |kind, at| match kind {
+            DefCap::Class => Some(format!("class@anonymous:{}:{}", at.row + 1, at.column + 1)),
+            _ => None,
+        },
         annot_type: declared_type,
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.
@@ -66,10 +72,10 @@ fn display_type(tag: &str) -> Option<&'static str> {
 /// A declared type as written (`int`, `?Foo`, `\App\User`, `int|string`).
 /// A union is the join of its arms and `?T` is `T|null`; a spelling with
 /// an arm this can't read (an intersection, `array`) types nothing, rather
-/// than claiming the arms it can. A lone `self` or `static` is marked
-/// `@type.enclosing` and never reaches here; inside a union it is an arm
-/// this can't read. A class spelling resolves through the use-map at its
-/// site.
+/// than claiming the arms it can. A lone `self`, `static` or `parent` is
+/// marked `@type.enclosing` / `@type.super` and never reaches here; inside
+/// a union it is an arm this can't read. A class spelling resolves through
+/// the use-map at its site.
 fn declared_type(text: &str) -> Option<InferredType> {
     let t = text.trim();
     let arms: Vec<&str> = match t.strip_prefix('?') {
@@ -96,11 +102,7 @@ fn arm_type(arm: &str) -> Option<InferredType> {
         "null" => Some(InferredType::Undef),
         // A callable's body is not in its type.
         "callable" => Some(InferredType::CodeRef { return_edge: None }),
-        "array" | "iterable" | "object" | "mixed" | "void" | "never" | "self" | "static" => None,
-        // TODO(parent-type): `parent` names the class's parent by where it
-        // is written; it goes through `Lookup::Super` with every other
-        // `parent` site (the `new` layer).
-        "parent" => None,
+        "array" | "iterable" | "object" | "mixed" | "void" | "never" | "self" | "static" | "parent" => None,
         // A class spelling is a name, possibly qualified; anything else
         // (an intersection or DNF group) names no single class.
         _ if !arm.is_empty() && arm.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\\') => {

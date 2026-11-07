@@ -57,7 +57,10 @@ with a stated not-cross-file-visible reason):
   silently; the equality-net tests (reformat/body-edit → equal;
   return-type/method/parent/export/import change → unequal; bincode
   roundtrip) are the regression net. File-internal attachment identities
-  inside a type (a `CodeRef` body edge) are sanitized by `despan`.
+  inside a type (a `CodeRef` body edge) are sanitized by `despan`. A
+  class the pack names for it (`ANONYMOUS`, php's `class@anonymous:R:C`)
+  is off the Surface with everything it declares: no other file can spell
+  it, and its name stands for where it is written.
 - **Typed fields, not display strings** (rule #10's lossy-string form).
   `return: Option<InferredType>`, never `"returns Foo"`. Consumers project.
 - **Derived from the post-fold `FileAnalysis`**, emitted by the builder as

@@ -27,7 +27,15 @@ directions cannot disagree.
 `Capture::parse` turns a name into a `Capture`. Nothing else reads a
 capture name: the driver, the pack hooks and the projection all match on
 the enum. A pack hook that depends on a kind takes the typed kind
-(`default_name: fn(DefCap)`).
+(`default_name: fn(DefCap, Point)`).
+
+No literal is read back out of the document. A construction
+(`@expr.construct`) never names its constructor: it keys on the class its
+receiver spells, and the constructor is whichever member of that class's
+MRO carries the `CONSTRUCTOR` flag `@mark.constructor` mints
+(`MemberKey::Constructor`). The `#eq?` that picks the constructor's name
+stays in the document, where the grammar can check it, and nothing on the
+Rust side spells it a second time.
 
 ## Decision: the vocabulary is checked when the query compiles
 
@@ -101,8 +109,12 @@ receiver spelling. Bare `@receiver` is the declared receiver, a parameter
 `@rettype` is a callable's declared return, captured in the def's match.
 `@type.enclosing` sits on any written type (a return, a parameter's or
 property's `@type.annot`) the document says names the class it is written
-in rather than a class by its spelling (php's `self`, `static`). It is a
-pattern of its own, joined to the writing site's capture by span.
+in rather than a class by its spelling (php's `self`, `static`);
+`@type.super` one naming the class that class's `@parent.super` edge names
+(php's `parent`). Each is a pattern of its own, joined to the writing
+site's capture by span. `@parent.super` is a `@parent` edge the document
+marks as the one its parent keyword names (php's `extends`, not an
+`implements` or a trait `use`).
 
 `@expr.wrapper` sits on a node whose value is its one content's
 (`@expr.wrapper.inner`, parentheses in every pack): its `Expr` is an edge
@@ -148,6 +160,17 @@ does not exist yet.
 `@flow.place` is the left side of an assignment. When its own read
 projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
+
+## Decision: a def with no name is named from its anchor
+
+`@def.<kind>.anchor` is the token that opens a def written without a name
+(php's `class` in `new class {…}`). The pack's `default_name(kind, at)`
+names it from the anchor's position, so two anonymous classes in a file
+are two classes (`class@anonymous:20:18`), and the def carries the
+`anonymous` attribute. The match's `@context.*` and `@parent` read that
+name, so its members file under it and its parents edge from it.
+`@receiver.declared` on the same token makes the token's value that class.
+A structure-only default (`(anon)`, `(union)`) ignores the position.
 
 ## Decision: a kind's meaning lives on the kind
 

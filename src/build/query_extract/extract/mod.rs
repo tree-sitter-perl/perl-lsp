@@ -155,11 +155,19 @@ impl<'a, 't> Adorned<'a, 't> {
 
     /// The captures in `list`'s subtree that are its own: a list of the
     /// same tag nested in it (a call in an argument, a callback's
-    /// parameters) holds its own items, so its subtree is skipped.
+    /// parameters) holds its own items, so its subtree is skipped. An item
+    /// whose own match states its list belongs to that list wherever it
+    /// sits: a construction tagged a list on its own node (php's `new A(new
+    /// B)`) is an item of the list around it, not of itself.
     fn list_items<'e>(&'e self, list: &'e Event) -> impl Iterator<Item = &'e Event> + 'e {
         let mut nested_end = 0;
         self.within(list).filter_map(move |ix| {
             let t = &self.events()[ix];
+            if t.cap != list.cap {
+                if let Some(own) = self.in_match(t.match_id, list.cap) {
+                    return (own.site == list.site).then_some(t);
+                }
+            }
             if ix < nested_end {
                 return None;
             }
@@ -236,7 +244,7 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent | C::ParentSuper => Family::Scopes,
         C::Def { .. }
         | C::DefPair
         | C::DefHoist
@@ -244,7 +252,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
-        | C::TypeEnclosing
+        | C::TypeRelative(_)
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline

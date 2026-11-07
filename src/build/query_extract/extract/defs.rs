@@ -8,8 +8,18 @@ use std::collections::HashMap;
 /// minted it: a pattern that names the class again (its `@context.class`,
 /// a `@parent` match) reads it rather than minting it a second time.
 pub(super) fn class_of_match<'s>(st: &'s ExtractState, match_id: usize) -> Option<&'s str> {
-    let name = st.adorned.in_match(match_id, Capture::Def { kind: DefCap::Class, part: DefPart::Name })?;
+    let class = |part| st.adorned.in_match(match_id, Capture::Def { kind: DefCap::Class, part });
+    let name = class(DefPart::Name).or_else(|| class(DefPart::Anchor))?;
     st.class_on(name)
+}
+
+/// The name a match's anchored def (`@def.<kind>.anchor`) is given — the
+/// pack's `default_name` at the anchor token — which its context names.
+pub(super) fn anchored_name(st: &ExtractState, match_id: usize) -> Option<String> {
+    st.adorned.of_match(match_id).find_map(|t| match t.cap {
+        Capture::Def { kind, part: DefPart::Anchor } => (st.pack.default_name)(kind, t.start),
+        _ => None,
+    })
 }
 
 /// `@ool.def`: a function definition whose declared name may be qualified
@@ -84,13 +94,19 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     let ad = st.adorned;
     let mine = |cap: Capture| ad.in_match(e.match_id, cap);
-    // The name token, or for a nameless def the language's default name
-    // (a zero-width token) or the def's own text.
+    // The name token; for a def named from its anchor, the language's
+    // default name at the anchor token; for a nameless def the language's
+    // default name (a zero-width token) or the def's own text.
     let name_ix = ad.in_match_ix(e.match_id, Capture::Def { kind, part: DefPart::Name });
-    let (name, name_ix, defaulted) = match (name_ix, (pack.default_name)(kind)) {
-        (Some(n), _) => (ad.events()[n].text.clone(), Some(n), false),
-        (None, Some(default)) => (default.to_string(), None, true),
-        (None, None) => (e.text.clone(), Some(ix), false),
+    let anchor = ad.in_match_ix(e.match_id, Capture::Def { kind, part: DefPart::Anchor }).and_then(|a| {
+        let named = (pack.default_name)(kind, ad.events()[a].start)?;
+        Some((named, a))
+    });
+    let (name, name_ix, defaulted) = match (name_ix, anchor, (pack.default_name)(kind, e.start)) {
+        (Some(n), ..) => (ad.events()[n].text.clone(), Some(n), false),
+        (None, Some((named, a)), _) => (named, Some(a), true),
+        (None, None, Some(default)) => (default, None, true),
+        (None, None, None) => (e.text.clone(), Some(ix), false),
     };
     let name_tok = name_ix.map(|n| &ad.events()[n]);
     let (name_start, name_end) = name_tok.map_or((e.start, e.start), |n| (n.start, n.end));
@@ -127,12 +143,15 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     if let Some(primary) = mine(Capture::SpecPrimary) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(&primary.text)));
     }
-    // A return naming the enclosing class is the def's own class, already an
-    // identity; any other spelling is a written type, resolved like a
-    // parameter's once the walk is done (`resolve_returns`).
+    // A written return resolves like a parameter's type once the walk is
+    // done (`resolve_returns`): a spelling at its site, a relative mark
+    // through the class the def is written in.
     let mut written_return = false;
     let return_type = match mine(Capture::RetType) {
-        Some(t) if names_enclosing(ad, t) => pkg.clone().map(InferredType::ClassName),
+        Some(t) if names_relative(ad, t).is_some() => {
+            written_return = pkg.is_some();
+            None
+        }
         Some(t) => {
             let t = (pack.annot_type)(&t.text);
             written_return = t.is_some();
@@ -205,17 +224,28 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
     let ad = st.adorned;
     for (ix, e) in ad.events().iter().enumerate() {
         let Some(i) = st.minted[ix].return_row else { continue };
-        let Some(site) = ad.in_match(e.match_id, Capture::RetType).map(|t| t.start) else { continue };
-        if let Some(t) = st.out.symbols[i].return_type.take() {
-            st.out.symbols[i].return_type = Some(written_type_at(&st.out, &st.pack.names, t, site));
-        }
+        let Some(written) = ad.in_match(e.match_id, Capture::RetType) else { continue };
+        let t = match names_relative(ad, written) {
+            Some(rel) => {
+                let class = st.out.symbols[i].package.clone();
+                class.and_then(|c| st.out.relative_class(rel, &c)).map(InferredType::ClassName)
+            }
+            None => st.out.symbols[i]
+                .return_type
+                .take()
+                .map(|t| written_type_at(&st.out, &st.pack.names, t, written.start)),
+        };
+        st.out.symbols[i].return_type = t;
     }
 }
 
-/// Whether the written type `t` names the class it is written in: a
-/// `@type.enclosing` another pattern states on its node.
-pub(super) fn names_enclosing(ad: &Adorned, t: &Event) -> bool {
-    ad.on(t).any(|x| x.cap == Capture::TypeEnclosing)
+/// The class the written type `t` names by where it is written: a
+/// `@type.<relative>` another pattern states on its node.
+pub(super) fn names_relative(ad: &Adorned, t: &Event) -> Option<RelativeClass> {
+    ad.on(t).find_map(|x| match x.cap {
+        Capture::TypeRelative(rel) => Some(rel),
+        _ => None,
+    })
 }
 
 /// Variables declared by being written (`@def.assigned`). In source order,

@@ -133,6 +133,7 @@ impl<'a> Builder<'a> {
                 method_name_span: node_to_span(io.method),
                 member_op: None,
                 named_by_string: false,
+                constructs: false,
             },
             node_to_span(node),
             method.clone(),
@@ -252,7 +253,7 @@ impl<'a> Builder<'a> {
                                 method_name_span,
                                 member_op: None,
                                 named_by_string: false,
-
+                                constructs: false,
                             },
                             node_to_span(node),
                             rname,
@@ -276,7 +277,7 @@ impl<'a> Builder<'a> {
                         method_name_span,
                         member_op: None,
                         named_by_string: false,
-
+                        constructs: false,
                     },
                     node_to_span(node),
                     name.clone(),

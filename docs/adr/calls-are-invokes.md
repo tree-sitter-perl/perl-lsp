@@ -8,13 +8,15 @@ receiver, args }`, on the call's own attachment. Every operand is an
 attachment the registry materializes under the query that holds the index,
 so the callee is chosen at query time, never fixed when the file was built.
 
-## Decision: one call shape, three callees
+## Decision: one call shape, four callees
 
 `Callee` names what is called:
 
 - `Method { name, lookup, constructs }`: a named method, looked up on the
   receiver's class, the writer's parents (`SUPER::`), or a named class.
 - `Value(att)`: whatever callable `att` holds (`$cb->(…)`).
+- `Construct { lookup }`: a construction, an instance of the class `lookup`
+  names. It runs that class's constructor, which the site never spells.
 - `Function { name, local, member_of }`: a free name. `local` is the
   in-file definition the producer resolved the name to, a class named as a
   callable included (a functional cast or constructor). `None` sends the
@@ -102,14 +104,56 @@ extra, whatever the pattern.
   the nearest named callable around the token, so a closure in a method
   reads the method's class and a free function's body names none.
   `static::` is late-bound in php; here it names the writing class, as
-  `$this` does.
+  `$this` does. `@receiver.super` names the parent the writing class's
+  `@parent.super` edge marks (php's `parent`, its `extends`: never an
+  interface or a trait), and `@receiver.declared` the class the same token
+  anchors (php's anonymous `class`). `parent::m()` dispatches on that
+  class, as `self::m()` does on the writing one.
+- A construction (`@expr.construct`, php's `new Foo(…)`) is
+  `Construct { lookup }` on its `@member.recv`: its value is an instance
+  of the class the lookup names, whatever the constructor declares. A
+  receiver token that names a class (`Foo`, `self`, `parent`) is a
+  `Named` lookup; `new $cls` dispatches on the variable's value, so
+  `$cls = Foo::class; new $cls` is a `Foo`. The constructor it runs is the
+  member flagged `CONSTRUCTOR` (`@mark.constructor`) in that class's MRO,
+  local or cross-file (`resolve_constructor_in_ancestors`), asked by role
+  (`MemberKey::Constructor`), never by a name. The site's reference is a
+  `MethodCall` with `constructs: true` on the receiver token, keyed by the
+  class identity the token spells, the same key as the class's own
+  `PackageRef` there, so it adds no ref row. The PostFold stamp freezes the
+  class it dispatches on. The language states that its constructions key
+  by class (`LanguageConventions::construction`, `ConstructionKey::Class`), so a
+  constructor's references retrieve under its class and every class
+  inheriting it (`TargetRef::retrieval_keys`, from the in-memory class
+  graph) and match a site whose class's constructor walk reaches it; Perl
+  calls `new` by name and retrieves under the name alone. The companion is a cursor companion, so the token
+  navigates to the class, and never rewritable, since it spells the
+  class, so a rename of the constructor refuses. A `new $cls` whose class
+  no producer knows keys by its spelling, so only an in-file walk finds it
+  (`TODO(dynamic-construction-retrieval)`). Python's `Foo()` and C++'s
+  `Foo(x)` are a `Function` whose `constructs` names the class: a class
+  that answers the call answers with an instance of itself. Python also
+  keys its constructions by class, but mints no companion: whether a call
+  names a class is known only at query time (the class may live in another
+  file), so the matcher admits, for a constructor target, a call whose
+  name resolves to a class
+  (`class_named_by_call`) whose constructor walk reaches it. Such a site
+  is never rewritable either. An imported name (`@ref.import`, python's
+  `from m import Foo`) is a `FunctionCall` reference to the def it names,
+  pinned like a call, that the extractor marks `Ref::import_name`: it
+  calls nothing, so it constructs nothing. C++ keys by constructor until a constructor
+  walk stops at the declaring class (`TODO(construction-navigation)`).
+- A class literal (`@expr.class`, php's `Foo::class`) is an edge to its
+  `@receiver.*` token's value, the class.
 - A pack callable's declared return (`@rettype`) is its `Symbol`'s value,
   so every `Invoke` that resolves to it carries that type and a chain types
   hop by hop. The spelling is read like a parameter's declared type (the
   pack's `annot_type`, then the use-map at the return's site), and
   `@type.enclosing` marks a written type naming the class it is written in
   (php's `self`, `static`, nullable or not), in a return, a parameter or a
-  property alike: that class.
+  property alike: that class. `@type.super` marks one naming the class its
+  `@parent.super` edge names (php's `parent`), resolved with the receiver
+  mark of the same name.
   Like `static::`, a `static` return names the writing class, not the
   receiver's.
 - A receiver is typed by the value at its exact span. Every call states
