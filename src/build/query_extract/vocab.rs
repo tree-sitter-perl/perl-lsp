@@ -44,6 +44,11 @@ spelled! {
         Var = "var",
         /// A parameter or block local.
         Local = "local",
+        /// A variable declared by being written (php's `$x = …`, python's
+        /// and R's `x = …`): the first such def of a name in its callable is
+        /// the declaration, unless a declaration the write reaches is
+        /// already in force; every other one is a write of that declaration.
+        Assigned = "assigned",
         /// A struct/class data member.
         Field = "field",
         /// An instance slot: a key of the per-instance store a write through
@@ -112,6 +117,10 @@ spelled! {
         Sub = "sub",
         /// A sub body whose bare names may elide the member receiver.
         SubImplicitReceiver = "sub.implicit_receiver",
+        /// A sub body that sees no variable of the scopes around it but the
+        /// ones it captures (`@closure.capture`): php's functions, methods
+        /// and closures.
+        SubClosed = "sub.closed",
         /// A scope whose names are in force only for code written
         /// DIRECTLY in it: a callable nested inside looks a name up in the
         /// scopes around the scope, never in it. Python's class body says
@@ -179,7 +188,10 @@ spelled! {
 
 spelled! {
     pub enum FlowCap {
-        /// The assignment node (pattern anchor).
+        /// The assignment node of a write that replaces its target's value:
+        /// every target of the match is written at the node's end, once the
+        /// value has been read, and everything believed about it before
+        /// dies there.
         Assign = "assign",
         /// A name the value binds. A def's own name token binds where the
         /// def does (a property's at its class body).
@@ -225,6 +237,10 @@ pub enum ExprCap {
     /// A member value read (`recv.field`): its `@member.recv` and
     /// `@ref.member.value` share the match.
     Member,
+    /// A node whose value is its one content's (`(x)`): its
+    /// `@expr.wrapper.inner` shares the match.
+    Wrapper,
+    WrapperInner,
 }
 
 spelled! {
@@ -391,12 +407,19 @@ pub enum Capture {
     /// class-body binding: the class's member and the name the body reads).
     /// They are one declaration, linked each way as `Symbol::declared_with`.
     DefPair,
+    /// The match's def declares in the scope around the one it is written
+    /// in (php's `use (&$x)` creates `$x` in the function around the
+    /// closure).
+    DefHoist,
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
     /// resolves by the spelling and rewrites only the leaf.
     RefSpelled,
     Scope(ScopeCap),
+    /// A variable a closure takes from the scope around it (php's
+    /// `use ($x)`): the closure sees that name through its closed boundary.
+    ClosureCapture,
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
@@ -482,6 +505,7 @@ impl Capture {
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
             ["def", "pair"] => C::DefPair,
+            ["def", "hoist"] => C::DefHoist,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
@@ -490,6 +514,8 @@ impl Capture {
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
+            ["scope", "sub", "closed"] => C::Scope(ScopeCap::SubClosed),
+            ["closure", "capture"] => C::ClosureCapture,
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
@@ -506,6 +532,8 @@ impl Capture {
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
+            ["expr", "wrapper"] => C::Expr(ExprCap::Wrapper),
+            ["expr", "wrapper", "inner"] => C::Expr(ExprCap::WrapperInner),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
@@ -554,6 +582,8 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::DefPair => f.write_str("def.pair"),
+            C::DefHoist => f.write_str("def.hoist"),
+            C::ClosureCapture => f.write_str("closure.capture"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
@@ -572,6 +602,8 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
+            C::Expr(ExprCap::Wrapper) => f.write_str("expr.wrapper"),
+            C::Expr(ExprCap::WrapperInner) => f.write_str("expr.wrapper.inner"),
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Arm => f.write_str("arm"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
@@ -674,8 +706,17 @@ impl DefCap {
             DefCap::Field => SymKind::Field,
             DefCap::Slot => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
-            DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
+            DefCap::Var | DefCap::Local | DefCap::Assigned | DefCap::Label | DefCap::UnionField => {
+                SymKind::Variable
+            }
         }
+    }
+
+    /// A def every assignment of a name mints (`@def.var`,
+    /// `@def.assigned`): a more specific def at the same token (R's
+    /// `f <- function…` is a sub) stands in for it.
+    pub fn is_general(self) -> bool {
+        matches!(self, DefCap::Var | DefCap::Assigned)
     }
 
     /// The structural marker a def of this kind carries onto

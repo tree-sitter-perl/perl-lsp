@@ -28,6 +28,9 @@ of comparing its name against a per-language list. `CONSTRUCTOR`,
 `__construct`, every method declared without a body, and a class whose
 body declares a catch-all. Perl mints the first two where it mints the
 symbol, from its `new` convention and from a role's `requires`.
+`SCOPE_WIDE` is the kind of def that minted it: a variable `@def.assigned`
+declares is in force across its scope, so the binding rule
+(`variable_use`) reads it off the symbol.
 
 A `@mark` also states a declared attribute whose token is not the
 canonical spelling (`private` and `protected` both mean `non_public`) or

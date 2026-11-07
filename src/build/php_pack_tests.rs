@@ -995,8 +995,11 @@ impl Workspace {
     fn new(files: &[(&str, &'static str)]) -> Self {
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
         let files: Vec<_> = files.iter().map(|(p, src)| (std::path::PathBuf::from(p), *src)).collect();
+        // Through the driver that serves the file, which stamps its
+        // language: the pack's lexical lanes read it.
+        let driver = crate::build::language_driver::LanguageRegistry::compiled();
         for (path, src) in &files {
-            idx.insert_workspace_for_test(path.clone(), php(src));
+            idx.insert_workspace_for_test(path.clone(), driver.for_path(path).unwrap().analyze(src));
         }
         Workspace { idx, store: crate::index::open_docs::OpenDocs::new(), files }
     }
@@ -1584,6 +1587,272 @@ fn an_inherited_declared_return_types_the_chain_across_files() {
     let hover = |needle: &str| open.hover_info(at(FLUENT_CHILD, needle, 0), FLUENT_CHILD, Some(&ws.idx)).unwrap_or_default();
     assert!(hover("where()->first();").contains("*returns: Lib\\Query*"), "{}", hover("where()->first();"));
     assert!(hover("first()->id").contains("*returns: Lib\\Row*"), "{}", hover("first()->id"));
+}
+
+
+const VARS: &str = "<?php
+namespace App;
+
+use Lib\\Clock;
+use Lib\\Timer;
+
+class Box {
+    public ?Clock $clock;
+    public function clock(): Clock {}
+    public function run(Timer $t, array $xs) {
+        $b = $this->clock();
+        $b->tick();
+        if ($t) { $d = $b; }
+        $d->tick();
+        $b = $t;
+        $b->stop();
+        foreach ($xs as $k => $v) { $v; }
+        $this->clock = $b;
+        $f = function () use ($b, &$z) { $e = $b; return $e; };
+        $g = fn() => $d;
+        $z;
+        $e;
+        $i = $this->clock()[0];
+    }
+}
+";
+
+const TIMER: &str = "<?php
+namespace Lib;
+
+class Timer {
+    public function stop() {}
+}
+";
+
+/// A body that sees no variable around it answers no type for one: a
+/// function's `$config` is not the script's, and a method's bare `$peer`
+/// is not the property a promoted parameter declares.
+#[cfg(feature = "php")]
+#[test]
+fn a_closed_body_types_no_variable_of_the_code_around_it() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+namespace App;
+
+class Clock { public function tick() {} }
+function clock(): Clock {}
+
+$config = clock();
+function f() { return $config; }
+class Box {
+    public function __construct(private Clock $peer) {}
+    public function m() { return $peer; }
+}
+";
+    let fa = php(src);
+    let clock = Some(T::ClassName("App\\Clock".into()));
+    assert_eq!(fa.inferred_type_via_bag("config", at(src, "; }", 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("config", at(src, "\nfunction f", 0)), clock, "the script's own");
+    assert_eq!(fa.inferred_type_via_bag("peer", at(src, "; }\n}", 0)), None);
+}
+
+/// (name, row, column) of every local `Variable` the analysis declares.
+fn locals(fa: &FileAnalysis) -> Vec<(String, usize, usize)> {
+    fa.symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Variable)
+        .map(|s| (s.name.clone(), s.selection_span.start.row, s.selection_span.start.column))
+        .collect()
+}
+
+/// A variable is its function's: the first write declares it, a write in
+/// a branch is no block of its own, and every later write is a write of
+/// that declaration. A closure's own writes are its own, and `use (&$z)`
+/// declares `$z` in the function around the closure.
+#[cfg(feature = "php")]
+#[test]
+fn a_write_declares_its_variable_once_per_function() {
+    let fa = php(VARS);
+    let mut got = locals(&fa);
+    got.sort();
+    let want: Vec<(String, usize, usize)> = [
+        ("b", 10, 9),
+        ("d", 12, 19),
+        ("e", 18, 42),
+        ("f", 18, 9),
+        ("g", 19, 9),
+        ("i", 22, 9),
+        ("k", 16, 25),
+        ("t", 9, 31),
+        ("v", 16, 31),
+        ("xs", 9, 41),
+        ("z", 18, 36),
+    ]
+    .iter()
+    .map(|(n, r, c)| (n.to_string(), *r, *c))
+    .collect();
+    assert_eq!(got, want);
+    let scope_of = |n: &str| fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.name == n).unwrap().scope;
+    assert_eq!(scope_of("d"), scope_of("b"), "a branch is no scope of its own");
+    assert_eq!(scope_of("z"), scope_of("b"), "a by-reference capture declares around the closure");
+    assert_ne!(scope_of("e"), scope_of("b"), "a closure's write is the closure's");
+}
+
+/// A by-name ask agrees with the binding a read carries: a read above the
+/// write that declares its variable (a loop's) binds to that declaration,
+/// and `resolve_variable` there names it too.
+#[cfg(feature = "php")]
+#[test]
+fn a_by_name_ask_names_the_declaration_the_read_binds() {
+    let src = "<?php\nfunction f($xs) {\n    foreach ($xs as $v) {\n        if ($acc) { $acc->add($v); }\n        $acc = $v;\n    }\n}\n";
+    let fa = php(src);
+    let read = Point::new(3, 13);
+    let bound = fa.ref_at(read).and_then(|r| r.resolved_symbol()).expect("the read binds");
+    assert_eq!(fa.symbol(bound).selection_span.start, Point::new(4, 9), "to the declaring write");
+    assert_eq!(fa.resolve_variable("acc", read).map(|s| s.id), Some(bound));
+}
+
+/// A caught exception is an instance of the one class its clause names; a
+/// clause naming several states no single type.
+#[cfg(feature = "php")]
+#[test]
+fn a_caught_exception_is_its_clauses_class() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php\nfunction f() {\n    try {} catch (Oops $e) { $e; }\n    try {} catch (A | B $u) { $u; }\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("e", Point::new(2, 30)), Some(T::ClassName("Oops".into())));
+    assert_eq!(fa.inferred_type_via_bag("u", Point::new(3, 31)), None);
+}
+
+/// A variable's value is what was last written to it: an assignment edges
+/// to its right-hand side, so a declared return flows through it, a write
+/// replaces what came before, and a value inside the right-hand side (a
+/// subscripted call) is not the variable's.
+#[cfg(feature = "php")]
+#[test]
+fn a_variables_value_flows_from_its_last_write() {
+    use crate::model::file_analysis::{InferredType as T, Span};
+    let fa = php(VARS);
+    let recv = |needle: &str| {
+        let start = at(VARS, needle, 0);
+        let end = tree_sitter::Point { column: start.column + 2, ..start };
+        fa.expr_type_at_span(Span { start, end }, None)
+    };
+    let clock = Some(T::ClassName("Lib\\Clock".into()));
+    assert_eq!(recv("$b->tick"), clock, "a declared return");
+    assert_eq!(recv("$d->tick"), clock, "through another variable");
+    assert_eq!(recv("$b->stop"), Some(T::ClassName("Lib\\Timer".into())), "the later write replaces the earlier");
+    assert_eq!(fa.inferred_type_via_bag("i", at(VARS, "    }\n}", 0)), None, "a subscripted call is not its value");
+    // the closure reads the captured variable's value where it is written
+    assert_eq!(fa.inferred_type_via_bag("e", at(VARS, "return $e", 7)), Some(T::ClassName("Lib\\Timer".into())));
+}
+
+/// Every use of a variable in its function is a reference to its one
+/// declaration: rename rewrites the declaration, the later writes, the
+/// reads above and below them, a closure's capture and its body's use, and
+/// an arrow function's read. A closure's own variable stays the closure's.
+#[cfg(feature = "php")]
+#[test]
+fn a_local_renames_with_every_write_and_read_in_its_function() {
+    let at = |needle: &str| at(VARS, needle, 1);
+    let renames = |p: tree_sitter::Point| renames(VARS, p.row, p.column);
+    let sites = |rows: &[(usize, usize)]| rows.iter().map(|&(r, c)| (r, c, c + 1)).collect::<Vec<_>>();
+    let b = sites(&[(10, 9), (11, 9), (12, 24), (14, 9), (15, 9), (17, 24), (18, 31), (18, 47)]);
+    assert_eq!(renames(at("$b = $t")), b, "from a later write");
+    assert_eq!(renames(at("$b; return")), b, "from the closure's use");
+    assert_eq!(renames(at("$b, &")), b, "from the capture");
+    assert_eq!(renames(at("$d->tick")), sites(&[(12, 19), (13, 9), (19, 22)]), "an arrow function sees the function's");
+    assert_eq!(renames(at("$e = $b")), sites(&[(18, 42), (18, 58)]), "the closure's own");
+    assert_eq!(renames(at("$z;")), sites(&[(18, 36), (20, 9)]), "declared by the by-reference capture");
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", VARS)]);
+    assert_eq!(ws.defs("Box.php", "$b->stop", 1), vec![site("Box.php", 10, 9)]);
+    assert_eq!(ws.defs("Box.php", "$e;\n        $i", 1), vec![], "no variable of the closure's");
+}
+
+/// Highlight tells a write from a read, and `$this->p = v` writes the
+/// property.
+#[cfg(feature = "php")]
+#[test]
+fn a_write_highlights_as_a_write() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", VARS)]);
+    let mut kinds: Vec<(usize, usize, AccessKind)> = ws.ask("Box.php", "$b->stop", 1, |cs| {
+        cs.highlights().into_iter().map(|l| (l.span.start.row, l.span.start.column, l.access)).collect()
+    });
+    kinds.sort_by_key(|&(r, c, _)| (r, c));
+    assert_eq!(kinds[0], (10, 9, AccessKind::Declaration));
+    assert_eq!(kinds[3], (14, 9, AccessKind::Write));
+    assert!(kinds.iter().filter(|k| k.2 == AccessKind::Read).count() == kinds.len() - 2, "{kinds:?}");
+    let fa = php(VARS);
+    let clock: Vec<(usize, AccessKind)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "clock")
+        .map(|r| (r.span.start.row, r.access))
+        .collect();
+    assert_eq!(clock, [(17, AccessKind::Write)]);
+}
+
+/// An assignment writes the place its left side denotes: `$this->p = v`
+/// gives the property `v`'s value and writes its token, and a compound
+/// write writes it too.
+#[cfg(feature = "php")]
+#[test]
+fn an_assignment_writes_the_member_its_left_side_reads() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let fa = php("<?php
+namespace App;
+
+class Clock { public function tick() {} }
+function clock(): Clock {}
+
+class Box {
+    public $c;
+    public $n;
+    public function fill() {
+        $this->c = clock();
+        $this->n += 1;
+        $this->c->tick();
+    }
+}
+");
+    let access = |name: &str| -> Vec<(usize, AccessKind)> {
+        fa.refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == name)
+            .map(|r| (r.span.start.row, r.access))
+            .collect()
+    };
+    assert_eq!(access("c"), [(10, AccessKind::Write), (12, AccessKind::Read)]);
+    assert_eq!(access("n"), [(11, AccessKind::Write)]);
+    let tick = fa.refs().iter().find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "tick").unwrap();
+    assert_eq!(fa.receiver_classes(tick, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string).as_deref(), Some("App\\Clock"));
+}
+
+/// A function sees no variable of the file around it: the script's
+/// `$config` and the function's are two variables.
+#[cfg(feature = "php")]
+#[test]
+fn a_function_sees_no_variable_of_the_code_around_it() {
+    let src = "<?php\n$config = 1;\nfunction f() { $config = 2; return $config; }\n$config;\n";
+    let fa = php(src);
+    assert_eq!(locals(&fa), [("config".to_string(), 1, 1), ("config".to_string(), 2, 16)]);
+    let bound = |row: usize| {
+        let r = fa.refs().iter().find(|r| r.span.start.row == row && r.target_name == "config").unwrap();
+        fa.symbol(r.resolved_symbol().unwrap()).selection_span.start.row
+    };
+    assert_eq!(bound(2), 2);
+    assert_eq!(bound(3), 1);
+}
+
+/// A variable's call dispatches on the value written to it, in another
+/// file too.
+#[cfg(feature = "php")]
+#[test]
+fn a_call_on_a_variable_resolves_across_files() {
+    let ws = Workspace::new(&[
+        ("/fake/php/App/Box.php", VARS),
+        ("/fake/php/Lib/Clock.php", CLOCK),
+        ("/fake/php/Lib/Timer.php", TIMER),
+    ]);
+    assert_eq!(ws.defs("Box.php", "tick();\n        if", 0), vec![site("Clock.php", 4, 20)]);
+    assert_eq!(ws.defs("Box.php", "tick();\n        $b", 0), vec![site("Clock.php", 4, 20)]);
+    assert_eq!(ws.defs("Box.php", "stop()", 0), vec![site("Timer.php", 4, 20)]);
 }
 
 /// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:

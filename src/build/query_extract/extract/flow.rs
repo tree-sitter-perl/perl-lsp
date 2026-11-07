@@ -12,7 +12,12 @@ struct Target {
     name: String,
     /// The scopes it binds in.
     scopes: Vec<ScopeId>,
+    /// Where the write lands (`written_at`).
     at: Point,
+    /// Whether the write resets the binding where it lands.
+    resets: bool,
+    /// The target token's own start.
+    token: Point,
     /// The class a `@type.enclosing` annotation names: the one in force
     /// where it is written.
     enclosing: Option<String>,
@@ -26,11 +31,31 @@ pub(super) struct State {
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
-    pub(super) flow_rebinds: Vec<(String, ScopeId, Point)>,
+    pub(super) flow_rebinds: Vec<(String, ScopeId, Point, Point)>,
     /// Usage-site evidence awaiting the rebind cutoff, which reads the
     /// finished flow edges (`narrowing::finish`): the observed name, its
     /// scope, the observation, and its region before the cutoff.
     pub(super) observations: Vec<(String, ScopeId, crate::model::witnesses::TypeObservation, Span)>,
+}
+
+/// Where a target event's write lands, and whether it lands there as a
+/// reset. A `@flow.assign` match writes at its assignment's end, after every
+/// read the assignment makes, and resets the variable there
+/// (`docs/adr/flow-narrowing.md`); any other target is bound at its own token.
+fn written_at(ad: &Adorned, e: &Event) -> (Point, bool) {
+    match ad.in_match(e.match_id, Capture::Flow(FlowCap::Assign)) {
+        Some(a) => (a.end, true),
+        None => (e.start, false),
+    }
+}
+
+fn reset(witnesses: &mut Vec<Witness>, name: String, scope: ScopeId, at: Point) {
+    witnesses.push(Witness {
+        attachment: WitnessAttachment::Variable { name, scope },
+        source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
+        payload: WitnessPayload::Reset,
+        span: Span { start: at, end: at },
+    });
 }
 
 fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: WitnessPayload, span: Span) -> Witness {
@@ -50,7 +75,6 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     match e.cap {
         Capture::Expr(ExprCap::Lit(lit)) => {
             let span = e.span();
-            st.minted[ix].value = true;
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
@@ -94,6 +118,8 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(FlowCap::Target) => {
+            let name = (pack.shape_name)(&e.text);
+            let (at, resets) = written_at(ad, e);
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk).
@@ -106,11 +132,15 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     enclosing = st.package.clone();
                 }
             }
-            let target = Target { name: (pack.shape_name)(&e.text), scopes: target_scopes, at: e.start, enclosing };
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, enclosing };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
-            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, e.start));
+            let (at, resets) = written_at(ad, e);
+            if resets {
+                reset(&mut out.witnesses, (pack.shape_name)(&e.text), cur_scope, at);
+            }
+            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, e.start));
         }
         Capture::AnonAggMember => {
             // A field typed by an anonymous aggregate: its members are
@@ -190,7 +220,6 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             if let Some((token, receiver)) = callee {
                 let (callee, callee_at) = ((pack.shape_name)(&token.text), token.start);
                 let span = e.span();
-                st.minted[ix].value = true;
                 let args = super::members::call_args(ad, e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
@@ -200,6 +229,18 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     scope: cur_scope,
                     args,
                 });
+            }
+        }
+        Capture::Expr(ExprCap::Wrapper) => {
+            // A wrapper's value is its content's: an edge, so a source or
+            // receiver written in parens reads what it wraps.
+            if let Some(inner) = ad.in_match(e.match_id, Capture::Expr(ExprCap::WrapperInner)) {
+                out.witnesses.push(skeleton_witness(
+                    WitnessAttachment::Expr(e.span()),
+                    "skeleton",
+                    WitnessPayload::Edge(WitnessAttachment::Expr(inner.span())),
+                    e.span(),
+                ));
             }
         }
         Capture::Expr(ExprCap::Member) => {
@@ -212,8 +253,8 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             {
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
-                st.minted[ix].value = true;
-                st.minted[ix].projects = Some(Box::new((recv.span(), member.clone())));
+                st.minted[ix].projects =
+                    Some(Box::new(MemberRead { receiver: recv.span(), member: member.clone(), token: name.span() }));
                 out.member_reads.push(crate::build::query_extract::MemberRead {
                     span,
                     receiver: recv.span(),
@@ -254,7 +295,7 @@ pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
     let ad = st.adorned;
     let shape = Capture::Expr(ExprCap::Shape);
     let mut seen = std::collections::HashSet::new();
-    for (ix, e) in ad.events().iter().enumerate() {
+    for e in ad.events() {
         if e.cap != shape || !seen.insert(e.site) {
             continue;
         }
@@ -269,7 +310,6 @@ pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
         let mut keys: Vec<(String, Option<Box<InferredType>>)> =
             key_ixs.iter().map(|&k| (ad.events()[k].text.clone(), None)).collect();
         keys.dedup_by(|a, b| a.0 == b.0);
-        st.minted[ix].value = true;
         let span = e.span();
         st.out.witnesses.push(skeleton_witness(
             WitnessAttachment::Expr(span),
@@ -306,12 +346,23 @@ pub(super) fn finish(st: &mut ExtractState) {
         .filter(|s| s.kind == DefCap::Field)
         .filter_map(|s| out.scopes.get(s.scope.0 as usize).map(|sc| ((s.name.clone(), s.scope), sc.span)))
         .collect();
+    // A write of a name some earlier def declares replaces its value.
+    let reassigned: std::collections::HashSet<(&str, Point)> =
+        out.var_writes.iter().map(|(n, _, sp)| (n.as_str(), sp.start)).collect();
+    let reassigns = |name: &str, token: &Point| reassigned.contains(&(name, *token));
+    let mut edges = Vec::new();
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
-    for (mid, Target { name, at, enclosing, .. }, scope) in targets {
+    for (mid, Target { name, at, resets, token, enclosing, .. }, scope) in targets {
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
+        // A data member's write in its class body is its initializer, not a
+        // step in a sequence: its declared type holds class-wide, so nothing
+        // there retires it.
+        if *resets && !field_scope_span.contains_key(&(name.clone(), *scope)) {
+            reset(&mut out.witnesses, name.clone(), *scope, *at);
+        }
         // Class-wide extent for a data member; the sequential decl point for a
         // local (see `field_scope_span`).
         let annot_span = field_scope_span
@@ -347,17 +398,17 @@ pub(super) fn finish(st: &mut ExtractState) {
                 });
             }
         }
-        if let Some(target_span) = source_value_span(ad, &st.minted, mid) {
+        if let Some(target_span) = source_value_span(ad, mid) {
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
-            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+            edges.push(crate::model::file_analysis::FlowEdge {
                 target_name: name.clone(),
                 target_scope: *scope,
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
-                reassigns: false,
+                reassigns: reassigns(name, token),
             });
         }
     }
@@ -365,32 +416,34 @@ pub(super) fn finish(st: &mut ExtractState) {
     // decided by its receiver's type, which only the assembled analysis
     // answers (`skeleton::settle_member_writes`). A name's place is its
     // binding, which `@flow.target` writes and rebinds; a place no read
-    // projects (a call, a literal) takes nothing.
+    // projects (a call, a literal) takes nothing. The member token of a
+    // projected place is written, not read, whether or not a value flows in
+    // (`$o->n += 1`).
     for place in ad.by_match().filter(|e| e.cap == Capture::Flow(FlowCap::Place)) {
-        let read = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last();
-        if read.is_some() {
-            out.place_writes.push(place.span());
-        }
-        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(ad, &st.minted, place.match_id)) {
+        let Some(read) = ad.on_ixs(place).filter_map(|i| st.minted[i].projects.as_deref()).last() else { continue };
+        out.write_sites.push(read.token);
+        out.place_writes.push(place.span());
+        if let Some(value) = source_value_span(ad, place.match_id) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
-                receiver: *receiver,
-                member: member.clone(),
+                receiver: read.receiver,
+                member: read.member.clone(),
                 value,
             });
         }
     }
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
     // narrowing cutoff (`Rebind` lowers to nothing — provenance only).
-    for (name, scope, at) in std::mem::take(&mut f.flow_rebinds) {
-        out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+    for (name, scope, at, token) in std::mem::take(&mut f.flow_rebinds) {
+        edges.push(crate::model::file_analysis::FlowEdge {
+            reassigns: reassigns(&name, &token),
             target_name: name,
             target_scope: scope,
             target_at: at,
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
-            reassigns: false,
         });
     }
+    out.flow_edges.extend(edges);
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
@@ -401,17 +454,11 @@ pub(super) fn finish(st: &mut ExtractState) {
 }
 
 /// The span whose witness is match `mid`'s inflowing value: its
-/// `@flow.source`, narrowed onto the outermost value the source holds when
-/// the source node itself carries no witness (paren wrappers).
-fn source_value_span(ad: &Adorned, minted: &[Minted], mid: usize) -> Option<Span> {
-    let src = ad.in_match(mid, Capture::Flow(FlowCap::Source))?;
-    Some(
-        ad.within(src)
-            .filter(|&ix| minted[ix].value)
-            .map(|ix| &ad.events()[ix])
-            .max_by_key(|v| ad.width(v))
-            .map_or(src.span(), Event::span),
-    )
+/// `@flow.source` node. A wrapper (`(5)`) carries its content's value as an
+/// edge (`@expr.wrapper`), and a value merely inside the source — an
+/// argument, an operand — is not its value.
+fn source_value_span(ad: &Adorned, mid: usize) -> Option<Span> {
+    ad.in_match(mid, Capture::Flow(FlowCap::Source)).map(Event::span)
 }
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.

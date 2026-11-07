@@ -150,6 +150,13 @@ pub struct SkeletonAnalysis {
     /// to the nearest visible Variable declaration by lexical scope walk →
     /// local goto-def + hover. Resolution runs in `into_file_analysis`.
     pub var_reads: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
+    /// Writes of a variable a def the write can see already declares (a
+    /// `@def.assigned` that is not its name's first): (name, scope, name
+    /// token span). Each resolves like a read and is minted as a write.
+    pub var_writes: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
+    /// The member tokens assignments write (a `@flow.place` whose read
+    /// projects a member): the reference at each is a write.
+    pub write_sites: Vec<crate::model::file_analysis::Span>,
     /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
     /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —
     /// scope-chain walk WITHOUT the declared-before constraint (a forward
@@ -614,7 +621,7 @@ impl SkeletonAnalysis {
             });
         }
         let mut bag = crate::model::witnesses::WitnessBag::default();
-        for w in self.witnesses {
+        for w in std::mem::take(&mut self.witnesses) {
             bag.push(w);
         }
         // Associate each callable def with its parameter arity: the def's OWN
@@ -1137,17 +1144,16 @@ impl SkeletonAnalysis {
         // visible Variable declaration by the lookup walk → local
         // goto-def + hover. Declarations are already Variable symbols
         // (`@def.local`/`@def.var`; a python class-body binding's Variable
-        // twin); fields are members, reached through a receiver.
+        // twin); fields are members, reached through a receiver. A variable
+        // a write declares is its callable's from the top of the body, so a
+        // read above its first write (a loop's) reaches it.
         let mut defs_by_name: std::collections::HashMap<
-            String,
-            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId)>,
+            &str,
+            Vec<(crate::model::file_analysis::ScopeId, crate::model::file_analysis::VariableDecl<'_, SymbolId>)>,
         > = std::collections::HashMap::new();
         for s in &symbols {
-            if matches!(s.kind, SymKind::Variable) {
-                defs_by_name
-                    .entry(s.name.clone())
-                    .or_default()
-                    .push((s.scope, s.selection_span, s.id));
+            if let Some(d) = s.variable_decl() {
+                defs_by_name.entry(s.name.as_str()).or_default().push((s.scope, d));
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
@@ -1164,27 +1170,55 @@ impl SkeletonAnalysis {
         // resolves the same way a bare call does). rule #7: the token gets a
         // ref whether or not the def is local.
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
-        for (name, read_scope, read_span) in &self.var_reads {
-            let rp = (read_span.start.row, read_span.start.column);
-            let resolved = defs_by_name.get(name).and_then(|cands| {
-                // a scope whose names are in force only for code written
-                // directly in it is not on a nested callable's chain
-                for sc in crate::model::file_analysis::lookup_chain(&self.scopes, *read_scope).scopes() {
-                    // nearest decl of this name in THIS scope level, declared at
-                    // or before the read (latest-wins for redeclaration).
-                    let mut best: Option<((usize, usize), SymbolId)> = None;
-                    for (dscope, dspan, did) in cands {
-                        let dp = (dspan.start.row, dspan.start.column);
-                        if *dscope == sc && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
-                            best = Some((dp, *did));
-                        }
-                    }
-                    if let Some((_, did)) = best {
-                        return Some(did);
-                    }
-                }
-                None
+        // The binders' one rule (`variable_use`); a use it finds no
+        // declaration for is unresolved.
+        let resolve_var = |name: &String, chain: crate::model::file_analysis::LookupChain, span: &Span| {
+            let decls = defs_by_name.get(name.as_str())?;
+            let decls_in = |sc| decls.iter().filter(move |(s, _)| *s == sc).map(|(_, d)| *d);
+            match crate::model::file_analysis::variable_use(name, span.start, chain, None, &names, decls_in) {
+                crate::model::file_analysis::VariableUse::Declared(id) => Some(id),
+                crate::model::file_analysis::VariableUse::Global { .. } | crate::model::file_analysis::VariableUse::GatedOur => None,
+            }
+        };
+        // A token an assignment writes is that write, not a read of it.
+        let written: std::collections::HashSet<(Point, Point)> = self
+            .var_writes
+            .iter()
+            .map(|(_, _, sp)| (sp.start, sp.end))
+            .chain(
+                self.symbols
+                    .iter()
+                    .filter(|s| s.kind == DefCap::Assigned)
+                    .map(|s| (s.name_start, s.name_end)),
+            )
+            .collect();
+        for (name, write_scope, write_span) in &self.var_writes {
+            local_refs.push(crate::model::file_analysis::Ref {
+                kind: crate::model::file_analysis::RefKind::Variable,
+                span: *write_span,
+                scope: *write_scope,
+                target_name: name.clone(),
+                access: crate::model::file_analysis::AccessKind::Write,
+                binding: resolve_var(
+                    name,
+                    crate::model::file_analysis::write_lookup_chain(&self.scopes, *write_scope, name),
+                    write_span,
+                )
+                .map(crate::model::file_analysis::RefBinding::Symbol),
+                folded_from: None,
+                arg_count: None,
             });
+        }
+        for (name, read_scope, read_span) in &self.var_reads {
+            // A written token denotes the place it writes, which the places
+            // below need; its ref is the write's.
+            let is_write = written.contains(&(read_span.start, read_span.end));
+            let chain = if is_write {
+                crate::model::file_analysis::write_lookup_chain(&self.scopes, *read_scope, name)
+            } else {
+                crate::model::file_analysis::variable_lookup_chain(&self.scopes, *read_scope, name)
+            };
+            let resolved = resolve_var(name, chain, read_span);
             use crate::model::file_analysis::{Binding, PathStep, Place};
             let place = match resolved {
                 Some(did) => Some(Place::variable(Binding::Lexical(did))),
@@ -1195,6 +1229,9 @@ impl SkeletonAnalysis {
             };
             if let Some(place) = place {
                 var_at.insert(*read_span, place);
+            }
+            if is_write {
+                continue;
             }
             match resolved {
                 Some(did) => local_refs.push(crate::model::file_analysis::Ref {
@@ -1229,10 +1266,10 @@ impl SkeletonAnalysis {
         // Variable on the lookup chain, NO declared-before constraint (a
         // forward goto is valid).
         for (name, ref_scope, ref_span) in &self.label_refs {
-            let Some(cands) = defs_by_name.get(name) else { continue };
+            let Some(cands) = defs_by_name.get(name.as_str()) else { continue };
             let resolved: Option<SymbolId> = crate::model::file_analysis::lookup_chain(&self.scopes, *ref_scope)
                 .scopes()
-                .find_map(|sc| cands.iter().find(|(dscope, ..)| *dscope == sc).map(|(_, _, did)| *did));
+                .find_map(|sc| cands.iter().find(|(s, _)| *s == sc).map(|(_, d)| d.id));
             if let Some(did) = resolved {
                 local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
@@ -1261,6 +1298,8 @@ impl SkeletonAnalysis {
                 )
             })
             .collect();
+        let write_sites: std::collections::HashSet<(Point, Point)> =
+            self.write_sites.iter().map(|sp| (sp.start, sp.end)).collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
         // A plain assignment to a name (`head_ = …`) writes the place that
@@ -1411,12 +1450,16 @@ impl SkeletonAnalysis {
                     | RefCap::Var
                     | RefCap::Key => return None,
                 };
+                let access = match write_sites.contains(&(r.start, r.end)) {
+                    true => crate::model::file_analysis::AccessKind::Write,
+                    false => crate::model::file_analysis::AccessKind::Read,
+                };
                 Some(crate::model::file_analysis::Ref {
                     kind,
                     span,
                     scope: r.scope,
                     target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    access,
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
@@ -1740,7 +1783,13 @@ impl SkeletonAnalysis {
         // Last, over the assembled analysis: an owner is a type, and the
         // registry answers types from the whole bag.
         declare_slots(&mut fa, slot_writes, &class_scopes);
+        let writes_members = !member_writes.is_empty();
         settle_member_writes(&mut fa, member_writes, &class_scopes);
+        // A settled write types the receivers that read the member, and the
+        // seal's stamp froze them before it landed.
+        if writes_members {
+            fa.stamp_method_call_targets(None);
+        }
         fa
     }
 }
@@ -1804,12 +1853,13 @@ fn owning_callable(
 /// owner is a late binding (`fold.rs` `resolve_hash_key_owners` /
 /// `fixup_call_bound_hash_key_owners`, `cursor_queries.rs`
 /// `deferred_hash_key_owner`), and "declared" becomes the first write
-/// whose decided owner is the class. It lands with the php variables stack
-/// (php-5's `unify_assigned`, `TODO(assigned-unify)`), possibly on the
-/// query-delayed-facts deferred carrier.
+/// whose decided owner is the class, possibly on the query-delayed-facts
+/// deferred carrier.
 ///
-/// TODO(assigned-unify): php's `unify_assigned` (held php-5) is this rule
-/// for variables over the lookup chain; the two passes become one there.
+/// TODO(assigned-unify): `unify_assigned` (extraction) is this rule for
+/// variables over the write lookup chain. The two become one pass once a
+/// slot's owner is a late binding too (`TODO(slot-owner-deferred)`): until
+/// then a slot's owner needs the assembled analysis, a variable's does not.
 fn declare_slots(
     fa: &mut crate::model::file_analysis::FileAnalysis,
     mut writes: Vec<SlotWrite>,
@@ -1988,6 +2038,11 @@ fn symbol_flags_of(kind: DefCap, attributes: &[String]) -> SymbolFlags {
     let mut flags = SymbolFlags::empty();
     if let Some(f) = kind.marker().and_then(|m| SymbolFlags::try_from(m).ok()) {
         flags.insert(f);
+    }
+    // A variable an assignment declares is its callable's from the top of
+    // the body (`defs::unify_assigned`).
+    if kind == DefCap::Assigned {
+        flags.insert(SymbolFlags::SCOPE_WIDE);
     }
     // A `@sym.attr` token is source text (cpp's `register`, a php `#[Attr]`
     // name): a spelling the table does not know is display-only, never an

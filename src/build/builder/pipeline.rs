@@ -114,6 +114,8 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             package: Some("main".to_string()),
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             hints: Vec::new(),
         }],

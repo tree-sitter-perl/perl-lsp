@@ -905,6 +905,8 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             hints: Vec::new(),
         });
@@ -1072,6 +1074,8 @@ fn remap_spans(
         witnesses,
         parents: _,
         var_reads,
+        var_writes,
+        write_sites,
         label_refs,
         flow_edges,
         moved_from,
@@ -1158,7 +1162,10 @@ fn remap_spans(
             *sp = rspan(*sp);
         }
     }
-    for (_, _, span) in var_reads.iter_mut() {
+    for (_, _, span) in var_reads.iter_mut().chain(var_writes.iter_mut()) {
+        *span = rspan(*span);
+    }
+    for span in write_sites.iter_mut() {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after

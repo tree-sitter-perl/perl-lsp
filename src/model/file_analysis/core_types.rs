@@ -116,6 +116,15 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// A body that sees no variable of the code around it but the ones it
+    /// captures (`@scope.sub.closed`: php's functions, methods and
+    /// closures). Read through `variable_lookup_chain`.
+    #[serde(default)]
+    pub closed: bool,
+    /// The names a closed body takes from the code around it
+    /// (`@closure.capture`, php's `use ($x)`).
+    #[serde(default)]
+    pub captures: Vec<String>,
     /// The names declared in this scope are in force only for code
     /// written directly in it (`@scope.direct`): a use inside a callable,
     /// or inside another such scope, nested here looks past the scope, as
@@ -192,6 +201,13 @@ pub enum ScopeKind {
     Block,
     /// `for my $x (...) { }` — loop variable scoped to block.
     ForLoop { var: String },
+}
+
+impl ScopeKind {
+    /// A callable's body: the boundary `callable_reach` ends at.
+    pub fn is_callable(&self) -> bool {
+        matches!(self, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+    }
 }
 
 // ---- Package context ----
@@ -641,6 +657,11 @@ bitflags::bitflags! {
         /// `__call` / `__get`): it has no closed member surface to check a
         /// name against.
         const DYNAMIC_MEMBERS = 1 << 19;
+        /// A variable declared for its whole scope, wherever it is written
+        /// (a function-scoped variable its first write declares, php's
+        /// `$x = …`): a use above the write reaches it. Minted from a
+        /// capture (`@def.assigned`), never spelled as an attribute.
+        const SCOPE_WIDE = 1 << 20;
     }
 }
 
@@ -1083,6 +1104,28 @@ pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -
 }
 
 impl Symbol {
+    /// What the symbol declares for a variable use of its name to bind
+    /// (`variable_use`): a variable, or a field declared as one (Corinna's
+    /// `field $x`, in lexical view of its methods). A global minted from
+    /// its uses declares nothing (a use reaches it as a global), and a
+    /// member reached through a receiver is no variable.
+    pub fn variable_decl(&self) -> Option<VariableDecl<'_, SymbolId>> {
+        let declared = match (self.kind, &self.detail) {
+            (_, SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. }) => false,
+            (SymKind::Variable, _) | (SymKind::Field, SymbolDetail::Field { .. }) => true,
+            _ => false,
+        };
+        declared.then(|| VariableDecl {
+            id: self.id,
+            view: InView { from: self.selection_span.start, ..self.in_view() },
+            gate: match &self.detail {
+                SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => self.package.as_deref(),
+                _ => None,
+            },
+            scope_wide: self.flags.contains(SymbolFlags::SCOPE_WIDE),
+        })
+    }
+
     /// The name listing views (outline, hover) show the symbol by.
     pub fn listed_name(&self) -> &str {
         self.presentation.label.as_deref().unwrap_or(&self.name)

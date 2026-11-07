@@ -99,13 +99,17 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 id,
                 parent: Some(parent),
                 kind: match scope_cap {
-                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver => ScopeKind::Sub { name: String::new() },
+                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver | ScopeCap::SubClosed => {
+                        ScopeKind::Sub { name: String::new() }
+                    }
                     ScopeCap::Block | ScopeCap::Direct | ScopeCap::Header => ScopeKind::Block,
                 },
                 span: e.span(),
                 package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                closed: scope_cap == ScopeCap::SubClosed,
+                captures: Vec::new(),
                 direct: scope_cap == ScopeCap::Direct,
                 hints: Vec::new(),
             });
@@ -168,6 +172,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                     }
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, value));
+            }
+        }
+        Capture::ClosureCapture => {
+            let name = (pack.shape_name)(&e.text);
+            let captures = &mut st.out.scopes[st.cur_scope.0 as usize].captures;
+            if !captures.contains(&name) {
+                captures.push(name);
             }
         }
         Capture::Parent => {

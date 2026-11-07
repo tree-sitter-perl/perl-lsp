@@ -49,10 +49,12 @@
 (function_definition name: (name) @def.sub.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.sub
 (method_declaration name: (name) @def.method.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.method
 ; Parameters and locals are body content, not members. A closure's
-; parameters are its own.
-(function_definition) @scope.sub
-(method_declaration) @scope.sub
-(anonymous_function) @scope.sub
+; parameters are its own. A function, a method or a closure sees no
+; variable of the code around it but the ones its `use` clause names; an
+; arrow function sees every one.
+(function_definition) @scope.sub.closed
+(method_declaration) @scope.sub.closed
+(anonymous_function) @scope.sub.closed
 (arrow_function) @scope.sub
 
 ; ---- parameters ----
@@ -185,6 +187,62 @@
 ; instance of the method's class.
 ((variable_name) @receiver.enclosing
  (#eq? @receiver.enclosing "$this"))
+
+; Parentheses hold the value they wrap.
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
+
+; ---- writes ----
+; A variable belongs to its function: the first write declares it, and
+; every later write and every read in the body is that one variable. A
+; write lands once the assignment has read what it reads, and replaces
+; what the variable held.
+(assignment_expression
+  left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
+  right: (_) @flow.source) @flow.assign
+(reference_assignment_expression
+  left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
+  right: (_) @flow.source) @flow.assign
+; A compound write keeps the kind of value the variable holds; a
+; destructuring and a loop write values they do not name.
+(augmented_assignment_expression
+  left: (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+(assignment_expression
+  left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)) @flow.assign
+(assignment_expression
+  left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned .))) @flow.assign
+(foreach_statement . (_) . [
+  (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned
+  (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+  (pair . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+  (pair (_) . [
+    (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned
+    (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+  ] .)
+])
+; A caught exception is an instance of the class the clause names; a
+; clause naming several (`A | B`) names no single type.
+(catch_clause
+  type: (type_list . (named_type) @type.annot .)
+  name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned)
+(global_declaration (variable_name (name) @def.assigned.name) @def.assigned)
+(static_variable_declaration
+  name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
+  value: (_)? @flow.source)
+; An assignment writes the place its left side denotes, whatever that is
+; (`$x->p = v` writes the property); a compound one writes it too, with a
+; value it does not name.
+(assignment_expression left: (_) @flow.place right: (_) @flow.source) @flow.assign
+(reference_assignment_expression left: (_) @flow.place right: (_) @flow.source) @flow.assign
+(augmented_assignment_expression left: (_) @flow.place)
+
+; ---- closures ----
+; `use ($x)` reads the variable of the code around the closure, and the
+; closure body sees it by that name. `use (&$x)` binds it there,
+; declaring it when nothing there does yet.
+(anonymous_function_use_clause (variable_name (name) @closure.capture))
+(anonymous_function_use_clause
+  (by_ref (variable_name (name) @closure.capture @def.assigned.name @def.hoist)) @def.assigned)
 
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the

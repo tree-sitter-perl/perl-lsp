@@ -370,9 +370,9 @@ pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = S
     std::iter::from_fn(move || {
         let id = next?;
         let scope = &scopes[id.0 as usize];
-        next = match scope.kind {
-            ScopeKind::Sub { .. } | ScopeKind::Method { .. } => None,
-            _ => scope.parent,
+        next = match scope.kind.is_callable() {
+            true => None,
+            false => scope.parent,
         };
         Some(id)
     })
@@ -386,15 +386,87 @@ pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = S
 ///   directly in the scope, so only the innermost direct scope within
 ///   `from`'s `callable_reach` is on the chain. From a method of a Python
 ///   class, or a class nested in it, the class body is not.
+/// - a closed body (`Scope::closed`): a VARIABLE's walk ends at a body
+///   that sees no variable around it, unless it captures the name
+///   (`variable_lookup_chain`). Names that are not variables (subs,
+///   classes) walk past it.
 pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
+    lookup_chain_through(scopes, from, |_| false)
+}
+
+/// Where a use of the variable `name` in `from` looks it up: `lookup_chain`,
+/// ended by a closed body that does not capture `name`.
+pub fn variable_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
+    lookup_chain_through(scopes, from, |id| {
+        let scope = &scopes[id.0 as usize];
+        scope.closed && !scope.captures.iter().any(|c| c == name)
+    })
+}
+
+/// Where a write of the variable `name` in `from` finds the variable it
+/// writes: no further than its own callable, unless the callable captures
+/// `name`. A write binds in its own callable even where a read would see
+/// past it (a Python or R closure reads the variables around it, and
+/// assigning one makes a local).
+///
+/// TODO(write-capture-declarations): Python's `nonlocal x` / `global x`
+/// and R's `<<-` are captures for writes; nothing states them yet, so such
+/// a write binds a local.
+pub fn write_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
+    lookup_chain_through(scopes, from, |id| {
+        let scope = &scopes[id.0 as usize];
+        scope.kind.is_callable() && !scope.captures.iter().any(|c| c == name)
+    })
+}
+
+/// `lookup_chain`, ended at the first scope `shut` answers for.
+fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> LookupChain {
     let direct = callable_reach(scopes, from).find(|&id| scopes[id.0 as usize].direct);
     let mut chain = scope_chain_of(scopes, from);
+    if let Some(end) = chain.iter().position(|&id| shut(id)) {
+        chain.truncate(end + 1);
+    }
     chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
     LookupChain(chain)
 }
 
-/// What a Perl variable use names. THE binding rule: the builder's binder
-/// mints from it and `FileAnalysis::variable_binding` answers from it, so a
+/// One declaration a variable use may name, as `variable_use` weighs it
+/// (`Symbol::variable_decl`).
+#[derive(Debug, Clone, Copy)]
+pub struct VariableDecl<'a, I> {
+    pub id: I,
+    /// Where a use sees it.
+    pub view: InView,
+    /// The package an `our` is visible from.
+    pub gate: Option<&'a str>,
+    /// Declared for its whole scope, wherever it is written (a variable an
+    /// assignment declares, `SymbolFlags::SCOPE_WIDE`).
+    pub scope_wide: bool,
+}
+
+impl<I> VariableDecl<'_, I> {
+    /// Whether a use at `at` sees it: in view there, or scope-wide.
+    pub fn in_force(&self, at: Point) -> bool {
+        self.scope_wide || self.view.at(at)
+    }
+}
+
+/// Of the declarations one scope holds, the one a use at `at` names: the
+/// latest of those in force there (in view at it, or scope-wide), the
+/// earliest of equals.
+pub fn latest_in_force<'a, I>(decls: impl IntoIterator<Item = VariableDecl<'a, I>>, at: Point) -> Option<VariableDecl<'a, I>> {
+    let mut best: Option<VariableDecl<'a, I>> = None;
+    for d in decls {
+        if d.in_force(at) && best.as_ref().is_none_or(|b| d.view.from > b.view.from) {
+            best = Some(d);
+        }
+    }
+    best
+}
+
+/// What a variable use names. THE binding rule, for every language: each
+/// binder mints from it (Perl's `resolve_variable_refs`, a pack's skeleton
+/// conversion) and `FileAnalysis::variable_binding` answers from it, so a
 /// by-name ask and a bound ref agree on identity by construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariableUse {
@@ -409,9 +481,10 @@ pub enum VariableUse {
     GatedOur,
 }
 
-/// Resolve the variable use `name` written at `at`. `decls_in(scope)`
-/// lists the variables `scope` declares under `name` as `(id, in_view,
-/// gate)`, the gate being the package an `our` is visible from.
+/// Resolve the variable use `name` written at `at`: along `chain`, the
+/// nearest scope holding a declaration in force there that the use can
+/// reach. `decls_in(scope)` lists the variables `scope` declares under
+/// `name`.
 pub fn variable_use<'a, I>(
     name: &str,
     at: Point,
@@ -421,7 +494,7 @@ pub fn variable_use<'a, I>(
     decls_in: impl Fn(ScopeId) -> I,
 ) -> VariableUse
 where
-    I: IntoIterator<Item = (SymbolId, InView, Option<&'a str>)>,
+    I: IntoIterator<Item = VariableDecl<'a, SymbolId>>,
 {
     // The qualifier names the package directly, so the lexical chain is
     // irrelevant and a `my` of the same name is never the answer.
@@ -430,18 +503,15 @@ where
     }
     let mut gated_our = false;
     for scope in chain.scopes() {
-        let mut found = None;
-        for (id, in_view, gate) in decls_in(scope) {
-            if !in_view.at(at) {
-                continue;
+        let reachable = decls_in(scope).into_iter().filter(|d| match d.gate {
+            Some(pkg) if pkg != use_package.unwrap_or("main") => {
+                gated_our |= d.in_force(at);
+                false
             }
-            match gate {
-                Some(pkg) if pkg != use_package.unwrap_or("main") => gated_our = true,
-                _ => found = Some(id),
-            }
-        }
-        if let Some(id) = found {
-            return VariableUse::Declared(id);
+            _ => true,
+        });
+        if let Some(d) = latest_in_force(reachable, at) {
+            return VariableUse::Declared(d.id);
         }
     }
     if gated_our {

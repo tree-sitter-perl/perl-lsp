@@ -70,10 +70,12 @@
     object: (identifier) @def.slot.receiver
     attribute: (identifier) @def.slot.name) @def.slot)
 
-; An assignment writes the place its left side denotes, whatever that is.
+; An assignment writes the place its left side denotes, whatever that is; a
+; compound one writes it too, with a value it does not name.
 (assignment
   left: (_) @flow.place
   right: (_) @flow.source) @flow.assign
+(augmented_assignment left: (_) @flow.place)
 
 ; An augmented assignment and a `del` leave what they name without the
 ; value a guard proved, whatever it is: a name rebinds (to the operator's
@@ -152,18 +154,26 @@
 (import_from_statement
   name: (dotted_name (identifier) @ref.call))
 
-; Assignment IS declaration in Python — the same identifier is both
-; the def and the flow target.
+; A variable belongs to the function it is assigned in: the first write
+; declares it, and every later write and every read in the body is that
+; one variable. A write lands once the assignment has read what it reads.
 (assignment
-  left: (identifier) @def.var.name @def.var @flow.target
-  right: (_) @flow.source) @flow.assign
+  left: (identifier) @def.assigned.name @flow.target
+  right: (_) @flow.source) @def.assigned @flow.assign
 
 ; Annotated assignment: `x: int = ...` — ring 3 is partly IN the tree
 ; here; the annotation emits a direct type witness via the pack's
-; annot_type predicate.
+; annot_type predicate. With a value it is a write, landing once the value
+; is read; a bare `x: int` writes nothing, so its declared type holds from
+; its token and no write replaces it.
 (assignment
   left: (identifier) @flow.target
-  type: (type) @type.annot)
+  type: (type) @type.annot
+  right: (_)) @flow.assign
+(assignment
+  left: (identifier) @flow.target
+  type: (type) @type.annot
+  !right)
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
 ; type yet) so the narrowing cutoff ends a region at the loop.
@@ -218,6 +228,9 @@
  (#not-has-parent? @expr.read.var attribute))
 (attribute object: (identifier) @expr.read.var)
 
+; Parentheses hold the value they wrap.
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
 (string) @expr.lit.string
 (integer) @expr.lit.number
 (float) @expr.lit.number

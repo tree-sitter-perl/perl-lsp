@@ -323,7 +323,7 @@ y = x
         .collect();
     assert!(names.contains(&(DefCap::Class, "Greeter".into())), "{names:?}");
     assert!(names.contains(&(DefCap::Sub, "greet".into())), "{names:?}");
-    assert!(names.contains(&(DefCap::Var, "x".into())), "{names:?}");
+    assert!(names.contains(&(DefCap::Assigned, "x".into())), "{names:?}");
     assert_eq!(skel.imports, vec!["os"]);
 
     let fa = skel.into_file_analysis();
@@ -596,7 +596,8 @@ fn operator_evidence_ends_at_a_rebind() {
         .filter(|w| matches!(w.payload, WitnessPayload::Observation(_)))
         .collect();
     assert_eq!(obs.len(), 1);
-    assert_eq!(obs[0].span.end, tree_sitter::Point { row: 2, column: 0 }, "cut at `$x = g()`");
+    // A write lands at its assignment's end, once the right side is read.
+    assert_eq!(obs[0].span.end, tree_sitter::Point { row: 2, column: 8 }, "cut where `$x = g()` lands");
 }
 
 #[test]
@@ -692,11 +693,11 @@ fn r_outline_imports_and_s3_names() {
     // convention layer (print.myclass IS print on myclass) is a later
     // pack predicate, but the outline is already right.
     assert_eq!(subs, vec!["add_one", "print.myclass"]);
-    // params + locals are vars, the function names are NOT doubled
+    // params + locals are variables, the function names are NOT doubled
     let vars: Vec<&str> = skel
         .symbols
         .iter()
-        .filter(|s| s.kind == DefCap::Var)
+        .filter(|s| s.kind.sym_kind() == crate::model::file_analysis::SymKind::Variable)
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(vars, vec!["x", "y", "obj"]);
@@ -3399,11 +3400,28 @@ fn cpp_call_arg_count_skips_comments() {
 // The receiver stays an expression: the parens are how it was written.
 #[test]
 fn cpp_receiver_peel_skips_comments() {
-    let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
-    let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
-    let (span, invocant) = call.invocant.as_ref().unwrap();
-    assert_eq!(*invocant, crate::model::conventions::Invocant::expr("w"));
-    assert_eq!(span.start, Point::new(1, 25));
+    let fa = cpp_fa("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
+    let call = fa.refs().iter().find(|r| r.target_name == "spin" && r.member_site().is_some()).expect("spin member ref");
+    assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())));
+}
+
+// A receiver in parentheses (or behind `*` / `&`) is the wrapper node
+// itself, read through the wrapper's edge to what it holds: the document
+// states which nodes hold their content's value, and no Rust table peels
+// them a second time. Every pack places the receiver on the same node.
+#[test]
+fn a_wrapped_receiver_is_read_through_its_wrapper() {
+    let fa = cpp_fa("struct W { void spin(); };\nvoid g() { W w; W* p; (w).spin(); (*p).spin(); (&w)->spin(); }\n");
+    let calls: Vec<_> = fa.refs().iter().filter(|r| r.target_name == "spin" && r.member_site().is_some()).collect();
+    assert_eq!(calls.len(), 3);
+    for (call, col) in calls.iter().zip([22, 34, 47]) {
+        assert_eq!(call.member_site().unwrap().invocant_span.unwrap().start, Point::new(1, col), "the wrapper is the receiver");
+        assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())), "col {col}");
+    }
+    let (fa, _) = python_fa("class W:\n    def spin(self):\n        pass\n\nw = W()\n(w).spin()\n");
+    let call = fa.refs().iter().find(|r| r.target_name == "spin" && r.member_site().is_some()).expect("spin");
+    assert_eq!(call.member_site().unwrap().invocant_span.unwrap().start, Point::new(5, 0), "the wrapper is the receiver");
+    assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())));
 }
 
 // `this` is the object of the class whose body it is in, not a class named

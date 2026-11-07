@@ -104,6 +104,51 @@ property's `@type.annot`) the document says names the class it is written
 in rather than a class by its spelling (php's `self`, `static`). It is a
 pattern of its own, joined to the writing site's capture by span.
 
+`@expr.wrapper` sits on a node whose value is its one content's
+(`@expr.wrapper.inner`, parentheses in every pack): its `Expr` is an edge
+to the content's, so a source or a receiver written in parentheses reads
+what it wraps. A value merely inside a source (an argument, an operand) is
+never the source's.
+
+## Decision: a function-scoped variable is declared by its first write
+
+A language whose variables belong to their function rather than a block
+(php, python, R) has no declaration syntax: `$x = …` declares `$x` when no
+declaration the write reaches is in force, and is a write of that
+declaration otherwise. The document says so per pattern: `@def.assigned`
+marks such a write. After dedup, `defs::unify_assigned` walks those defs
+in source order; the first one per name that reaches nothing is the
+declaration, re-anchored to the callable around it (`callable_reach`, or
+the file), and is visible from the top of that body, so a read above it in
+a loop reaches it. Every other one becomes a `var_writes` row, minted as a
+`Variable` ref with `AccessKind::Write`. The declaration carries
+`SymbolFlags::SCOPE_WIDE`. One rule, the model's `variable_use`
+(`model/file_analysis/dispatch.rs`, with `latest_in_force` per scope),
+answers the unification, the writes and the reads for every language: each
+binder mints its refs from it and `FileAnalysis::variable_binding` /
+`resolve_variable` answer by name from it, over the declarations
+`Symbol::variable_decl` states. It walks two chains of the model's: a read
+looks along `variable_lookup_chain`, which a closed
+body ends unless it captures the name; a write along `write_lookup_chain`,
+which any callable ends unless it captures the name, because assigning a
+name a python or R closure reads from around it makes a local. The
+model's type queries take the read chain too, so a closed body answers no
+type for a variable around it.
+
+`@scope.sub.closed` is a callable body that sees no variable of the code
+around it (php's functions, methods and closures; an arrow function is a
+plain `@scope.sub` and sees the enclosing function's): `Scope::closed`.
+`@closure.capture` is a name such a body takes from around it (`use
+($x)`), on `Scope::captures`: the chain continues past the closed body for
+that name alone.
+`@def.hoist` files the match's def in the scope around the one it is
+written in, so `use (&$x)` declares `$x` in the enclosing function when it
+does not exist yet.
+
+`@flow.place` is the left side of an assignment. When its own read
+projects a member (`$o->p`, `self.p`), that member takes the value and its
+token is written, not read.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:
@@ -147,8 +192,9 @@ walk visits sites in preorder, a site's captures by tie rank then match
 order. Beside the tree sits only match → captures, because a match spans
 nodes: every capture a pattern made is one lookup from any other
 (`in_match`). The walk records what it minted on each capture (`Minted`: a
-value witness, a declaring name, a class's identity, a member read's
-projection), so a capture of any match asks the node it names.
+declaring name, a class's identity, a member read's projection, the row a
+def's written return settles), so a capture of any match asks the node it
+names.
 
 A handler therefore keeps no join table. The state a family keeps is only
 what the walk alone knows when it reaches an event: the scope a target

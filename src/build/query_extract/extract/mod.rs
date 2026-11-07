@@ -196,19 +196,25 @@ impl<'a, 't> Adorned<'a, 't> {
 /// match — that names the same node to ask, instead of re-deriving it.
 #[derive(Default)]
 struct Minted {
-    /// A value witness on its span: a flow source narrows onto it.
-    value: bool,
     /// The name token of a def that declares it: a ref inside is the
     /// declaration, not a use.
     declares: bool,
     /// The identity a class def filed itself under.
     class: Option<Box<str>>,
-    /// A member read's (receiver span, member): what a place written here
-    /// projects, so a write lands where the read looks.
-    projects: Option<Box<(Span, String)>>,
+    /// A member read: what a place written here projects, so a write
+    /// lands where the read looks.
+    projects: Option<Box<MemberRead>>,
     /// On a def node: the `symbols` row it pushed, whose written return
     /// resolves once every row is in (`defs::resolve_returns`).
     return_row: Option<usize>,
+}
+
+/// A member read (`@expr.member`): the receiver it reads through, the
+/// member's name, and the token that names it.
+struct MemberRead {
+    receiver: Span,
+    member: String,
+    token: Span,
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`
@@ -230,9 +236,10 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
         | C::DefPair
+        | C::DefHoist
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget
@@ -342,10 +349,12 @@ impl ExtractState<'_, '_> {
         self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
     }
 
-    /// The scope a def of `kind` at the current event binds in. A data
-    /// member belongs to its class body even where it is written inside a
-    /// callable (php's constructor-promoted property).
-    fn def_scope(&self, kind: DefCap) -> ScopeId {
+    /// The scope a def of `kind`, declared in match `match_id` at the
+    /// current event, binds in. A data member belongs to its class body even
+    /// where it is written inside a callable (php's constructor-promoted
+    /// property); a hoisted def (`@def.hoist`) to the scope around the one
+    /// it is written in.
+    fn def_scope(&self, kind: DefCap, match_id: usize) -> ScopeId {
         match kind {
             DefCap::Field | DefCap::Slot => self.member_scope(),
             DefCap::Sub
@@ -355,13 +364,20 @@ impl ExtractState<'_, '_> {
             | DefCap::Package
             | DefCap::Var
             | DefCap::Local
+            | DefCap::Assigned
             | DefCap::Constant
             | DefCap::Enumerator
             | DefCap::Label
             | DefCap::Macro
             | DefCap::Reexport
             | DefCap::Union
-            | DefCap::UnionField => self.bind_scope(),
+            | DefCap::UnionField => match self.adorned.in_match(match_id, Capture::DefHoist).is_some() {
+                true => crate::model::file_analysis::scope_chain_of(&self.out.scopes, self.cur_scope)
+                    .get(1)
+                    .copied()
+                    .unwrap_or(self.cur_scope),
+                false => self.bind_scope(),
+            },
         }
     }
 
@@ -481,6 +497,8 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        closed: false,
+        captures: Vec::new(),
         direct: false,
         hints: Vec::new(),
     });
@@ -500,7 +518,7 @@ pub fn extract_in(
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut flat),
             Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut flat),
             Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
-                flat.push(members::flatten_recv(node, cap, pack, source, match_id))
+                flat.push(members::flatten_recv(node, cap, source, match_id))
             }
             Capture::Qualifier => flat.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => flat.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
@@ -589,6 +607,8 @@ pub fn extract_in(
     // A return type likewise.
     defs::resolve_returns(&mut st);
     defs::dedup(&mut st);
+    // Reads the deduped defs; the flow lane reads the writes it finds.
+    defs::unify_assigned(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

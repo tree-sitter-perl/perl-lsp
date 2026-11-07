@@ -68,7 +68,7 @@ pub(super) fn binding_scopes(st: &ExtractState, e: &Event) -> Vec<ScopeId> {
         .on(e)
         .filter(|t| t.match_id == e.match_id)
         .filter_map(|t| match t.cap {
-            Capture::Def { kind, part: DefPart::Name } => Some(st.def_scope(kind)),
+            Capture::Def { kind, part: DefPart::Name } => Some(st.def_scope(kind, e.match_id)),
             _ => None,
         })
         .collect();
@@ -155,7 +155,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        scope: st.def_scope(kind),
+        scope: st.def_scope(kind, e.match_id),
         spelled: mine(Capture::Def { kind, part: DefPart::Spelled }).map(|t| t.text.clone()),
         pair: mine(Capture::DefPair).map(|_| e.match_id),
         return_type,
@@ -218,6 +218,48 @@ pub(super) fn names_enclosing(ad: &Adorned, t: &Event) -> bool {
     ad.on(t).any(|x| x.cap == Capture::TypeEnclosing)
 }
 
+/// Variables declared by being written (`@def.assigned`). In source order,
+/// a write declares its name only when no declaration the write reaches
+/// (`write_lookup_chain`) is in force there — a parameter, an earlier
+/// write, the variable around a closure that captures it. The declaration
+/// is its callable's (or, outside any callable, the file's), so every use
+/// in the body reaches it whatever the order. Every other write is a
+/// `var_writes` row of the declaration it reaches.
+pub(super) fn unify_assigned(st: &mut ExtractState) {
+    use crate::model::file_analysis::{callable_reach, latest_in_force, write_lookup_chain, InView, ScopeId, SymKind, VariableDecl};
+    let out = &mut st.out;
+    if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
+        return;
+    }
+    // Every other Variable def declares where it is written, from its token on.
+    let mut decls: HashMap<String, Vec<(ScopeId, VariableDecl<'static, ()>)>> = HashMap::new();
+    let decl = |at, scope_wide| VariableDecl { id: (), view: InView::from(at), gate: None, scope_wide };
+    for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == SymKind::Variable) {
+        decls.entry(s.name.clone()).or_default().push((s.scope, decl(s.name_start, false)));
+    }
+    let mut order: Vec<usize> = (0..out.symbols.len()).filter(|&i| out.symbols[i].kind == DefCap::Assigned).collect();
+    order.sort_by_key(|&i| out.symbols[i].name_start);
+    let mut keep = vec![true; out.symbols.len()];
+    for i in order {
+        let s = &out.symbols[i];
+        let chain = write_lookup_chain(&out.scopes, s.scope, &s.name);
+        // The binders' per-scope rule (`variable_use`), along the write chain.
+        let seen = decls.get(&s.name).is_some_and(|d| {
+            chain.scopes().any(|sc| latest_in_force(d.iter().filter(|(ds, _)| *ds == sc).map(|(_, d)| *d), s.name_start).is_some())
+        });
+        if seen {
+            keep[i] = false;
+            out.var_writes.push((s.name.clone(), s.scope, Span { start: s.name_start, end: s.name_end }));
+        } else {
+            let home = callable_reach(&out.scopes, s.scope).last().unwrap_or(s.scope);
+            decls.entry(s.name.clone()).or_default().push((home, decl(s.name_start, true)));
+            out.symbols[i].scope = home;
+        }
+    }
+    let mut it = keep.iter();
+    out.symbols.retain(|_| *it.next().unwrap());
+}
+
 /// Template params joined to their owner class — the owner shaped like a
 /// def name (a partial spec's spelling canonicalizes) so the key matches
 /// the Class symbol's identity. Source order = the `ParamOf` index axis.
@@ -244,16 +286,16 @@ pub(super) fn join_template_params(st: &mut ExtractState) {
 pub(super) fn dedup(st: &mut ExtractState) {
     let symbols = &mut st.out.symbols;
     // The defs a pair declares at one token are both kept, and stand in
-    // for any other match's def of the same kind there.
-    let paired: std::collections::HashSet<(usize, usize, DefCap)> = symbols
+    // for any other match's def of the same model kind there.
+    let paired: std::collections::HashSet<(usize, usize, crate::model::file_analysis::SymKind)> = symbols
         .iter()
         .filter(|s| s.pair.is_some())
-        .map(|s| (s.name_start.row, s.name_start.column, s.kind))
+        .map(|s| (s.name_start.row, s.name_start.column, s.kind.sym_kind()))
         .collect();
     let mut best: HashMap<(usize, usize, Option<DefCap>), usize> = HashMap::new();
     let mut keep = vec![true; symbols.len()];
     for (i, sym) in symbols.iter().enumerate() {
-        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind)) {
+        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind.sym_kind())) {
             keep[i] = false;
             continue;
         }
@@ -263,7 +305,7 @@ pub(super) fn dedup(st: &mut ExtractState) {
                 best.insert(key, i);
             }
             Some(&j) => {
-                let (gen_i, gen_j) = (symbols[i].kind == DefCap::Var, symbols[j].kind == DefCap::Var);
+                let (gen_i, gen_j) = (symbols[i].kind.is_general(), symbols[j].kind.is_general());
                 let upgrade_ret = symbols[i].kind == symbols[j].kind
                     && symbols[i].return_type.is_some()
                     && symbols[j].return_type.is_none();

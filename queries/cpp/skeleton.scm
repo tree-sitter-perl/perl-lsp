@@ -853,6 +853,12 @@
 (type_identifier) @ref.type
 
 ; ---- literals + variable reads (the edge-chase substrate) ----
+; Parentheses hold the value they wrap, and so, for the class a member
+; access dispatches on, do `*p` and `&o` (pointer-ness is the declarator
+; stack's, not the type's).
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
+(pointer_expression argument: (_) @expr.wrapper.inner) @expr.wrapper
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool
@@ -902,6 +908,9 @@
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
+; TODO(declared-type-across-writes): no `@flow.assign`, so the write binds at
+; `x`, before the rhs reads it. The anchor would land it after, but its
+; reset retires `x`'s declared type, which in C++ holds for life.
 (assignment_expression
   left: (identifier) @flow.target
   right: (_) @flow.source)
