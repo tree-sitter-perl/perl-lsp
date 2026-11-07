@@ -332,6 +332,10 @@ spelled! {
         /// a class, and its operator can be checked by its name.
         RecvName = "recv.name",
         Op = "op",
+        /// A call through this receiver runs on the calling method's own
+        /// receiver: the token says only where the lookup starts (php's
+        /// `self::m()` and `parent::m()`, which forward the called class).
+        Forward = "forward",
     }
 }
 

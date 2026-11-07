@@ -108,7 +108,10 @@ value is `ReturnExpr::ReceiverOr(class)`, the shape Perl's `$self` and a
 receiver `bless` take, so the call's receiver substitutes at every call
 site. Which tokens these are is the document's: the extractor holds no
 receiver spelling. Bare `@receiver` is the declared receiver, a parameter
-(python's `self`).
+(python's `self`). `@member.forward` beside a call's `@member.recv` says
+the call runs on the calling method's own receiver, the token naming only
+the class its lookup starts at (php's `self::m()` and `parent::m()`, which
+forward the called class).
 
 `@rettype` is a callable's declared return, captured in the def's match.
 `@type.enclosing` sits on any written type (a return, a parameter's or

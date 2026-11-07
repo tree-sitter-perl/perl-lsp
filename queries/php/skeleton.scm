@@ -516,13 +516,16 @@
  (#not-eq? @ref.member.value "class"))
 ; `Foo::m()` calls the method of the class `Foo` names; `self::` names the
 ; class whose method the call is written in, `static::` the class the call
-; running that method is made on, `parent::` the class it extends.
+; running that method is made on, `parent::` the class it extends. A call
+; through `self::` or `parent::` forwards: it runs on the calling method's
+; own object, so a `static` in the method it reaches is still the class
+; the outer call was made on.
 (scoped_call_expression
   scope: [(name) (qualified_name)] @member.recv @receiver.class
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 ((scoped_call_expression
-  scope: (relative_scope) @member.recv @receiver.enclosing
+  scope: (relative_scope) @member.recv @member.forward @receiver.enclosing
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#eq? @receiver.enclosing "self"))
@@ -532,7 +535,7 @@
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#eq? @receiver.called "static"))
 ((scoped_call_expression
-  scope: (relative_scope) @member.recv @receiver.super
+  scope: (relative_scope) @member.recv @member.forward @receiver.super
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#eq? @receiver.super "parent"))
