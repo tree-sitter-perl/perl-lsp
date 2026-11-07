@@ -3156,7 +3156,8 @@ class Box {
 
 /// A member's value is keyed by its identity, owner + namespace + name, not
 /// its spelling: the property `X` holds a Widget, its method returns a
-/// Gizmo, the constant `X` holds neither, and the static `$S` holds its
+/// Gizmo, the constant `X` holds the number it is declared with, and the
+/// static `$S` holds its
 /// Gadget whether reached legally or through the instance side.
 #[cfg(feature = "php")]
 #[test]
@@ -3167,8 +3168,7 @@ fn a_members_value_is_its_own_namespaces() {
     let ty = |v: &str| fa.inferred_type_via_bag(v, end);
     assert_eq!(ty("b"), Some(T::ClassName("Widget".into())), "the property");
     assert_eq!(ty("c"), Some(T::ClassName("Gizmo".into())), "the method's return");
-    assert_ne!(ty("a"), Some(T::ClassName("Widget".into())), "the constant is not the property");
-    assert_ne!(ty("a"), Some(T::ClassName("Gizmo".into())), "the constant is not the method");
+    assert_eq!(ty("a"), Some(T::Numeric), "the constant holds what it is declared with");
     assert_eq!(ty("d"), Some(T::ClassName("Gadget".into())), "the static property");
     assert_eq!(ty("e"), Some(T::ClassName("Gadget".into())), "the static property, reached illegally");
 }
@@ -3225,4 +3225,75 @@ fn an_untyped_redeclaration_takes_the_parents_type() {
         fa.inferred_type_via_bag("a", at(UNTYPED_REDECLARED, "return;", 0)),
         Some(T::ClassName("Gadget".into()))
     );
+}
+
+const LITERALS: &str = "<?php
+class Conf {
+    public $name = 'app';
+    public $port = 8080;
+    public function run() {
+        $a = 1.5;
+        $b = \"x{$a}\";
+        $c = true;
+        $d = $this->name;
+        $e = $this->port;
+        return;
+    }
+}
+";
+
+/// A literal is a value of its own kind, and an untyped property holds the
+/// value it is initialized with.
+#[cfg(feature = "php")]
+#[test]
+fn a_literal_types_and_an_initializer_flows_into_its_property() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(LITERALS);
+    let end = at(LITERALS, "return;", 0);
+    let ty = |v: &str| fa.inferred_type_via_bag(v, end);
+    assert_eq!(ty("a"), Some(T::Numeric));
+    assert_eq!(ty("b"), Some(T::String));
+    assert_eq!(ty("c"), Some(T::Bool));
+    assert_eq!(ty("d"), Some(T::String), "the initializer of an untyped property");
+    assert_eq!(ty("e"), Some(T::Numeric));
+}
+
+const FLOWING_LITERALS: &str = "<?php
+class K {
+    const C = 11;
+    public $p = 12;
+    public function f($q = 13) {
+        static $s = 14;
+        $a = 15;
+        $a += 16;
+        g(17);
+        $b = $a + 18;
+        $c = -19;
+        $d = [20 => 21];
+        switch ($a) { case 22: break; }
+        return 23;
+    }
+}
+";
+
+/// A literal states its kind only where its value flows on: a write, a
+/// return, an argument, a declared initializer, an operand. One nothing
+/// reads that way (an array key or element, a `case` label, a parameter's
+/// default) states nothing.
+#[cfg(feature = "php")]
+#[test]
+fn a_literal_states_its_kind_only_where_its_value_flows() {
+    use crate::model::file_analysis::{InferredType as T, Span};
+    let fa = php(FLOWING_LITERALS);
+    let lit = |needle: &str| {
+        let start = at(FLOWING_LITERALS, needle, 0);
+        let end = tree_sitter::Point { column: start.column + needle.len(), ..start };
+        fa.expr_type_at_span(Span { start, end }, None)
+    };
+    for flowing in ["11", "12", "14", "15", "16", "17", "18", "19", "23"] {
+        assert_eq!(lit(flowing), Some(T::Numeric), "`{flowing}` flows on");
+    }
+    for idle in ["13", "20", "21", "22"] {
+        assert_eq!(lit(idle), None, "`{idle}` flows nowhere");
+    }
 }

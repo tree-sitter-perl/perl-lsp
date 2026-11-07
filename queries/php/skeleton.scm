@@ -85,17 +85,19 @@
   (readonly_modifier)? @sym.attr
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
   (property_element
-    name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
+    name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled
+    default_value: (_)? @flow.source) @def.field)
 ; A static property lives apart from the instance ones: `$obj->x` and
 ; `Foo::$x` land in different namespaces.
 (property_declaration
   (static_modifier)
   (property_element name: (variable_name (name) @space.static_property)))
 ; A class constant is a member of its own namespace: `const X` beside a
-; property `$X` and a method `X()` is a third member. It never changes.
+; property `$X` and a method `X()` is a third member. It never changes, so
+; its value is the one it is declared with.
 (declaration_list
   (const_declaration
-    (const_element (name) @def.field.name @space.constant) @def.field))
+    (const_element (name) @def.field.name @space.constant @flow.target . (_) @flow.source) @def.field))
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
@@ -257,6 +259,23 @@
 ; instance of the method's class.
 ((variable_name) @receiver.enclosing
  (#eq? @receiver.enclosing "$this"))
+
+; A literal is a value of its own kind, stated only where that value flows
+; on: into a write, a return, an argument, a declared initializer or an
+; operator. A literal nothing reads that way (an array element or key, a
+; `case` label, a parameter's default) would cost a fact no query asks for.
+([(integer) (float)] @expr.lit.number
+ (#has-parent? @expr.lit.number assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
+([(string) (encapsed_string)] @expr.lit.string
+ (#has-parent? @expr.lit.string assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
+((boolean) @expr.lit.bool
+ (#has-parent? @expr.lit.bool assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
 
 ; Parentheses hold the value they wrap.
 ((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
