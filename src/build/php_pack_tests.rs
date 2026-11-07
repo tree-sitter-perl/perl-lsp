@@ -886,6 +886,7 @@ fn a_promoted_parameter_binds_in_its_constructor() {
     assert_eq!(r.resolved_symbol(), Some(local.id));
 }
 
+#[cfg(feature = "php")]
 const UNBOUND: &str = "<?php
 class C {
     public $x;
@@ -899,6 +900,7 @@ class C {
 /// by-word last resort is for tokens no query captures, so it never lands
 /// a method's bare `$x` on the property, or a bare `$foo` on the method
 /// its word spells.
+#[cfg(feature = "php")]
 #[test]
 fn an_unbound_captured_token_has_no_definition() {
     use crate::index::open_docs::{FileKey, OpenDocs};
