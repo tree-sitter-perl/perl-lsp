@@ -156,13 +156,19 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // own type IS that container (the anon hop is identity) —
             // `u->data.ping` types `u->data` as U and finds `ping` there.
             // TypeName (not ClassName) so a typedef'd container chases.
+            // It is the field's declared type, so a write never retypes it,
+            // and the declaring token's fact (`member_decl_facts`), so a
+            // flattened member of the same name (redis `struct { … *lp; }
+            // lp;`) never takes it.
             if let Some(owner) = &st.package {
-                out.witnesses.push(skeleton_witness(
-                    WitnessAttachment::Variable { name: (pack.shape_name)(&e.text), scope: cur_scope },
-                    "skeleton-anon-agg",
-                    WitnessPayload::Edge(WitnessAttachment::TypeName(owner.clone())),
-                    Span { start: e.start, end: e.start },
-                ));
+                let name = (pack.shape_name)(&e.text);
+                let w = Witness {
+                    attachment: WitnessAttachment::Variable { name: name.clone(), scope: cur_scope },
+                    source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
+                    payload: WitnessPayload::Edge(WitnessAttachment::TypeName(owner.clone())),
+                    span: Span { start: e.start, end: e.start },
+                };
+                out.member_decl_facts.push((cur_scope, e.start, name, w));
             }
         }
         Capture::Domain(DomainCap::Slot) => {
