@@ -69,7 +69,8 @@ extra, whatever the pattern.
 ## Current state
 
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
-  qualified pack call (`@ref.qcall`) mints no call value yet.
+  qualified pack call (`@ref.call` named by its `@ref.spelled`) mints
+  no call value yet outside a use-map.
 - Under a use-map a free function is its namespace's
   (`function_identity`): a qualified spelling (`@ref.call` under
   `@ref.spelled`, php's `\Lib\f()`) resolves like a class spelling, and a

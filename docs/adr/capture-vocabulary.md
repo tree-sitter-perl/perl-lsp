@@ -257,8 +257,14 @@ a write lands where a read of the same expression looks, at any depth
 (`self.a.b.c = v` writes `c` of the class `self.a.b` is). A name's place
 is its binding, which `@flow.target` writes and rebinds; a left side no
 read projects (a subscript, until element reads are minted; a tuple,
-until destructuring pairs its elements) takes nothing. A member read's
-place is the member of the class the receiver's value is
+until destructuring pairs its elements) takes nothing. The member token
+of a place a member read projects is a `Write` ref, whether or not a value
+flows in (the token rides `MemberRead`, the written place is one of
+`place_writes`, the same writes that end a move or a narrowing): C++
+marks every assignment's left side a place and gives only `=` its
+`@flow.source`, so `q->n += 1` writes `n` and states no value, and a
+reset call's member receiver (`o.v.clear()`) is a write too. A
+member read's place is the member of the class the receiver's value is
 (`skeleton::settle_member_writes`, after the slots, adopted into the
 sealed baseline with `FileAnalysis::adopt_witnesses`). A
 member the file declares on that class or an ancestor takes the write
@@ -320,8 +326,12 @@ So the document states each level once, as a link: `@link.from.<walk>` on
 a node and `@link.<rel>` on the node one level away, by a closed set of
 relations (`inner`, `declares`, `scope`, `name`, `base`). The `<walk>` suffix
 names the walk the link belongs to, from a closed set (`ool`, `qualifier`,
-`deref`), and each walk has a root capture (`@ool.def`, `@qualifier`,
-`@nested.target`). The `deref` walk also reads `@deref.*` marks, which say
+`deref`, `spelled`), and each walk has a root capture (`@ool.def`,
+`@qualifier`, `@nested.target`, `@ref.spelled`). The `spelled` walk carries
+a reference its match names by the whole spelling from the node the
+document tagged down to the token it rewrites (`f` in `a::b::f<T>`), and
+mints the scopes it passes as the reference's qualifier, so no consumer
+splits the spelling to recover them. The `deref` walk also reads `@deref.*` marks, which say
 what a level is rather than where it leads (`docs/adr/pointer-stack.md`). The driver
 records every link while it flattens the matches, keyed by walk and node id.
 A walk starts at its root's node and follows only its own links

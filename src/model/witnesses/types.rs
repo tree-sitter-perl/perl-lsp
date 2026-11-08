@@ -241,6 +241,34 @@ impl WitnessPayload {
 }
 
 impl WitnessPayload {
+    /// Does a temporal read decide this witness by position alone? The live
+    /// window (`LiveWindow`) admits it at or after the latest write before
+    /// the read and retires it otherwise; no reducer reads it past that, and
+    /// an edge it does not admit is never chased. `WitnessBag::live_at`
+    /// skips the ones the window retires, so a payload a reducer reads
+    /// outside the window — or that the chase lowers wherever it sits — is
+    /// not windowed. Exhaustive, so a new payload has to answer.
+    pub fn is_windowed(&self) -> bool {
+        match self {
+            WitnessPayload::Edge(_)
+            | WitnessPayload::Reset
+            | WitnessPayload::InferredType(_)
+            | WitnessPayload::Observation(_) => true,
+            WitnessPayload::ReturnExpr(_)
+            | WitnessPayload::Projected { .. }
+            | WitnessPayload::Invoke { .. }
+            | WitnessPayload::Tuple(_)
+            | WitnessPayload::Extend(_)
+            | WitnessPayload::Fact { .. }
+            | WitnessPayload::Derivation
+            | WitnessPayload::Custom { .. }
+            | WitnessPayload::DomainCompare { .. }
+            | WitnessPayload::BrandOverlay { .. } => false,
+        }
+    }
+}
+
+impl WitnessPayload {
     /// Every attachment this payload reaches, mutably — edge targets, call
     /// operands, and the attachments inside a carried type. Exhaustive so a
     /// new attachment-bearing shape can't be skipped by a span rewrite.
