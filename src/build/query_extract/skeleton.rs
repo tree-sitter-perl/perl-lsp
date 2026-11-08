@@ -1573,22 +1573,10 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    // A construction's token names the class it constructs,
-                    // so its reference is retrieved under the class
-                    // reference's key: the class its receiver's value states.
-                    target_name: match r.constructs {
-                        true => r
-                            .invocant
-                            .as_ref()
-                            .and_then(|(at, _)| {
-                                bag.iter_attachment(&crate::model::witnesses::WitnessAttachment::Expr(*at)).find_map(|w| match &w.payload {
-                                    crate::model::witnesses::WitnessPayload::InferredType(InferredType::ClassName(c)) => Some(c.clone()),
-                                    _ => None,
-                                })
-                            })
-                            .unwrap_or_else(|| r.name.clone()),
-                        false => r.name.clone(),
-                    },
+                    // A construction is re-keyed to its class by the receiver
+                    // stamp (`stamp_method_call_targets`), once its receiver's
+                    // value has settled.
+                    target_name: r.name.clone(),
                     access,
                     binding,
                     folded_from: None,
