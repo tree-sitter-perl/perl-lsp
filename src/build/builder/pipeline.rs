@@ -277,6 +277,14 @@ pub(super) fn build_with_plugins_inner(
             })
         });
     }
+    #[cfg(test)]
+    if crate::model::witnesses::live_window_equiv_enabled() {
+        super::walk::assert_analyses_agree("live-window", &fa, || {
+            crate::model::witnesses::without_live_window(|| {
+                build_once(tree, source, plugins.clone(), extra_re_fold)
+            })
+        });
+    }
     crate::build::equiv_dump::record(source, None, &fa);
     fa
 }
