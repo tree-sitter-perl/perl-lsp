@@ -137,9 +137,10 @@ fn perl_chain(links: usize) -> String {
 /// reading them all is quadratic.
 #[test]
 fn a_chain_build_reads_each_write_a_bounded_number_of_times() {
-    // Under the equivalence net every build has a window-off twin, which
-    // is the quadratic read this pins; the net checks answers, not cost.
-    if live_window_equiv_enabled() {
+    // Under either equivalence net every build has a twin (window off, or
+    // memo off) that pays the quadratic read this pins; the nets check
+    // answers, not cost.
+    if live_window_equiv_enabled() || fold_memo_equiv_enabled() {
         return;
     }
     let cost = |links| {

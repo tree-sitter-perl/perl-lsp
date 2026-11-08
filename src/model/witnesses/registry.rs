@@ -29,7 +29,9 @@ use super::*;
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
-type VisitedSet = std::collections::HashSet<VisitedKey>;
+/// Each on-path key with its position on the path (`QueryState::path_len`
+/// when it entered), so a cut can say which frame it closed at.
+type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
 /// candidate files (`class_candidates_node`), or a free function's exporters
 /// and linkage-visible definitions (`free_function_cross_file`).
@@ -157,8 +159,22 @@ thread_local! {
         const { std::cell::RefCell::new((false, Vec::new())) };
 }
 
-/// `(value, recorded_exit, cut)` — see `QueryState::memo`.
-type MemoEntry = (std::sync::Arc<ReducedValue>, bool, bool);
+/// `(value, recorded_exit, taint)` — see `QueryState::memo`.
+type MemoEntry = (std::sync::Arc<ReducedValue>, bool, u32);
+
+/// The `QueryState::low_cut` a memoized answer replays when it is reused.
+/// Path positions start at 1, so both tainted marks sit at or above the root.
+struct Taint;
+
+impl Taint {
+    const CLEAN: u32 = u32::MAX;
+    /// Shaped by a frame above the answer's own. Which frame is not kept, so
+    /// a reuse claims the shallowest one it could be: the root, whose answer
+    /// is a fresh query by definition.
+    const PATH: u32 = 1;
+    /// The depth cap fired beneath it: no frame above is complete either.
+    const TRUNCATED: u32 = 0;
+}
 
 /// What a fold-memo answer depends on beyond the per-query key and the
 /// generations the memo holds: the framework and arguments the per-query memo
@@ -219,7 +235,9 @@ thread_local! {
 /// answers can only change when the bag or the parent graph does, and
 /// build-time queries run with no module index, so nothing outside the file
 /// can move them. Any write to either moves its generation and empties the
-/// memo, and only subtrees that were never cut short are stored.
+/// memo, and only answers no frame above them shaped are stored: a subtree
+/// cut short by the depth cap, or by a cycle that closed above it, depends on
+/// the path it was reached from.
 ///
 /// A pass (the receiver stamp) asks one query per member access, and a flow
 /// chain (`$x = $x->add()` N times) makes each one re-walk every link before
@@ -392,7 +410,7 @@ fn fold_memo_probe(
         crate::util::ghost_stats::count("residual.memo_under_opaque");
         state.poisoned = true;
     }
-    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, false));
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, Taint::CLEAN));
     Ok(cached)
 }
 
@@ -455,8 +473,8 @@ pub(super) struct QueryState {
     /// The cross-file fan-outs on the current path, and the answers of those
     /// already walked this query (`fan_out_node`). The bag-free twins of
     /// `visited` and `memo`.
-    fan_outs: std::collections::HashSet<FanOutKey>,
-    fan_out_memo: std::collections::HashMap<FanOutKey, std::sync::Arc<ReducedValue>>,
+    fan_outs: std::collections::HashMap<FanOutKey, u32>,
+    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, u32)>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -471,13 +489,19 @@ pub(super) struct QueryState {
     /// would have poisoned a re-entry from inside a combining frame — so the
     /// fact has to be carried on the entry instead of re-derived.
     ///
-    /// The second flag is "this subtree was cut short": a cycle guard returned
-    /// for an on-path key, or the depth cap fired, somewhere beneath it. Such a
-    /// value depends on the path it was reached from, so it may be reused
-    /// inside this query (the memo always has) but never by another one.
+    /// The taint is the `low_cut` a hit replays (`Taint`): `CLEAN` for a
+    /// value no frame above it shaped, which is what a fresh query of the key
+    /// computes. Any other value depends on the path it was reached from, so
+    /// it may be reused inside this query (the memo always has) but never by
+    /// another one.
     memo: std::collections::HashMap<VisitedKey, MemoEntry>,
-    /// Cuts seen so far in this query; read as a difference across a subtree.
-    cuts: u64,
+    /// Frames on the current path: the next frame's position. Starts at 1, so
+    /// the root is position 1 and 0 lies above every frame.
+    path_len: u32,
+    /// The shallowest path position a cut has closed at since the innermost
+    /// open frame entered (`CLEAN` when none). A frame whose subtree's mark is
+    /// at or below its own position closed every cycle itself.
+    low_cut: u32,
     /// Where a BAKE's chase would have consulted the index, in the order the
     /// ladder reached them.
     ///
@@ -522,28 +546,65 @@ impl QueryState {
         key: FanOutKey,
         walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
     ) -> Option<ReducedValue> {
-        if let Some(v) = self.fan_out_memo.get(&key) {
+        if let Some((v, taint)) = self.fan_out_memo.get(&key) {
+            self.low_cut = self.low_cut.min(*taint);
             return (**v != ReducedValue::None).then(|| (**v).clone());
         }
-        if !self.fan_outs.insert(key.clone()) {
-            self.cuts += 1;
+        if let Some(&at) = self.fan_outs.get(&key) {
+            self.close_cut_at(at);
             return None;
         }
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        let (pos, outer_low) = self.enter_frame();
+        self.fan_outs.insert(key.clone(), pos);
         let v = walk(self);
         self.fan_outs.remove(&key);
+        let taint = self.leave_frame(pos, outer_low, truncations_before);
         self.fan_out_memo
-            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
+            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), taint));
         v
+    }
+
+    /// A cycle guard returned for the frame at path position `at`.
+    fn close_cut_at(&mut self, at: u32) {
+        self.low_cut = self.low_cut.min(at);
+    }
+
+    /// Push a frame: its position, and the mark its subtree restarts from.
+    fn enter_frame(&mut self) -> (u32, u32) {
+        let pos = self.path_len;
+        self.path_len += 1;
+        (pos, std::mem::replace(&mut self.low_cut, Taint::CLEAN))
+    }
+
+    /// Pop the frame at `pos` and fold its subtree's mark into the enclosing
+    /// one. Returns the taint its answer carries: `CLEAN` when every cut
+    /// beneath it closed at this frame or deeper, so the answer is what a
+    /// fresh query of this frame's key computes (the subtree reached nothing
+    /// above it); `PATH` when a cut closed above it; `TRUNCATED` when the
+    /// depth cap fired anywhere beneath it, in this state or a nested one.
+    fn leave_frame(&mut self, pos: u32, outer_low: u32, truncations_before: u64) -> u32 {
+        self.path_len -= 1;
+        let low = self.low_cut;
+        self.low_cut = outer_low.min(low);
+        if low == Taint::TRUNCATED || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
+            Taint::TRUNCATED
+        } else if low < pos {
+            Taint::PATH
+        } else {
+            Taint::CLEAN
+        }
     }
 
     pub(super) fn new() -> Self {
         QueryState {
-            visited: std::collections::HashSet::new(),
-            fan_outs: std::collections::HashSet::new(),
+            visited: std::collections::HashMap::new(),
+            fan_outs: std::collections::HashMap::new(),
             fan_out_memo: std::collections::HashMap::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
-            cuts: 0,
+            path_len: 1,
+            low_cut: Taint::CLEAN,
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
@@ -1081,6 +1142,7 @@ impl ReducerRegistry {
             // truncates is not wrong, it is incomplete, so comparing a
             // conclusion against it proves nothing either way.
             state.poisoned = true;
+            state.low_cut = Taint::TRUNCATED;
             // The LIVE counterpart of the poison above, and it has to be
             // thread-local rather than a `QueryState` field: the cap counts
             // frames across the whole THREAD, so it fires inside nested
@@ -1106,11 +1168,9 @@ impl ReducerRegistry {
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
-        if let Some((cached, recorded_exit, cut)) = state.memo.get(&key) {
+        if let Some((cached, recorded_exit, taint)) = state.memo.get(&key) {
             let cached = std::sync::Arc::clone(cached);
-            if *cut {
-                state.cuts += 1;
-            }
+            state.low_cut = state.low_cut.min(*taint);
             // Re-reaching an exiting subtree from inside a combining frame is
             // the same claim as reaching it there the first time; the memo must
             // not launder it into a rung just because the first reach happened
@@ -1132,30 +1192,32 @@ impl ReducerRegistry {
         // `key` has two owners (the visited set, transiently; the memo,
         // for the rest of the query). Clone once for visited, then move
         // the original into the memo store below.
-        if !state.visited.insert(key.clone()) {
-            state.cuts += 1;
+        if let Some(&at) = state.visited.get(&key) {
+            state.close_cut_at(at);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
         let exits_before = state.residual.len();
         let poison_before = state.poisoned;
-        let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        let (pos, outer_low) = state.enter_frame();
+        state.visited.insert(key.clone(), pos);
         #[cfg(test)]
         QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
         let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
-        let cut = state.cuts > cuts_before
-            || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before;
         state.visited.remove(&key);
-        if let (Some(fk), false) = (fold_key, cut) {
+        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        // A cycle closed at this frame or beneath it is part of this key's
+        // own answer: a fresh query of the key cuts in the same place.
+        if let (Some(fk), Taint::CLEAN) = (fold_key, taint) {
             fold_memo_store(fk, q, &result, recorded_exit);
         }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
-        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, cut));
+        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
@@ -2033,7 +2095,7 @@ impl ReducerRegistry {
                         != QUERY_REC_TRUNCATIONS.with(|c| c.get())
                     {
                         Some("concl.follow_break_truncated")
-                    } else if state.visited.contains(&candidate_key) {
+                    } else if state.visited.contains_key(&candidate_key) {
                         Some("concl.follow_break_guarded")
                     } else {
                         None
@@ -3333,3 +3395,7 @@ fn follow_one(
 #[cfg(test)]
 #[path = "consult_prefilter_tests.rs"]
 mod consult_prefilter_tests;
+
+#[cfg(test)]
+#[path = "cut_closure_tests.rs"]
+mod cut_closure_tests;

@@ -69,3 +69,45 @@ fn a_restamp_reduces_each_link_once() {
     let (short, long) = (cost(60), cost(120));
     assert!(long < short * 3, "60 links reduced {short} attachments, 120 reduced {long}: superlinear");
 }
+
+/// `x = x.add()` with the write landing at its target: each read of `x`
+/// reaches its own statement's write, so every chase cuts a cycle at the
+/// read it started from. That cut is part of the read's own answer, and
+/// sharing the answer keeps the stamp linear in the chain rather than cubic.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_cpp_reassignment_chain_types_every_call_at_linear_cost() {
+    // Built and stamped, with the attachments that cost.
+    let build = |src: &str| {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let before = crate::model::witnesses::query_rec_bodies();
+        let skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &crate::build::packs::cpp_pack());
+        (skel.unwrap().into_file_analysis(), crate::model::witnesses::query_rec_bodies() - before)
+    };
+    let receivers = |fa: &FileAnalysis| -> Vec<Vec<String>> {
+        fa.refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "add")
+            .map(|r| fa.receiver_classes(r, None, ReceiverPolicy::Navigate).into_iter().collect())
+            .collect()
+    };
+    let chain = |links| {
+        let mut src = String::from("struct A { A add(); };\nvoid f() {\n  A x;\n");
+        for _ in 0..links {
+            src.push_str("  x = x.add();\n");
+        }
+        src + "}\n"
+    };
+    let src = chain(60);
+    let (fa, short) = build(&src);
+    // The memos change cost, never an answer.
+    let (control, _) = crate::model::witnesses::without_fold_memo(|| build(&src));
+    assert_eq!(receivers(&fa), receivers(&control));
+    let got = receivers(&fa);
+    assert_eq!(got.len(), 60);
+    assert!(got.iter().all(|c| c.as_slice() == ["A"]), "{got:?}");
+    let (_, long) = build(&chain(120));
+    assert!(long < short * 3, "60 links reduced {short} attachments, 120 reduced {long}: superlinear");
+}
