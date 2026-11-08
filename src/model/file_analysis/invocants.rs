@@ -833,10 +833,9 @@ impl FileAnalysis {
         // bag can't pre-record, so it lives here, not in the builder.
         // The receiver is the call spanning exactly the invocant — never
         // a call that merely opens it, which under `$x->a->b->c` is an
-        // earlier hop, and never the call itself: a construction's ref
-        // sits on its class token, which is also its receiver.
+        // earlier hop.
         if let Some(span) = invocant_span {
-            if let Some(recv_idx) = self.refs.call_spanning(*span).filter(|&i| !std::ptr::eq(&self.refs[i], r)) {
+            if let Some(recv_idx) = self.refs.call_spanning(*span) {
                 if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
                     let recv = &self.refs[recv_idx];
                     let recv_method = recv.unqualified_target_name(self.names());
