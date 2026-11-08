@@ -2078,10 +2078,7 @@ fn a_construction_calls_its_classs_constructor() {
             (13, 26, "Lib\\Clock"),
             (14, 17, "App\\Box"),
             (15, 17, "App\\Base"),
-            // TODO(dynamic-construction-retrieval): no class is known where
-            // the site is minted, so it keys by its spelling and a
-            // cross-file references walk does not retrieve it.
-            (17, 17, "$cls"),
+            (17, 17, "Lib\\Clock"),
             (19, 17, "App\\class@anonymous:20:18"),
         ]
     );
@@ -2112,6 +2109,37 @@ fn a_construction_names_its_class_and_reaches_its_constructor() {
     let in_box: Vec<(usize, usize)> =
         renamed.iter().filter(|(f, ..)| f == "Box.php").map(|&(_, r, c)| (r, c)).collect();
     assert_eq!(in_box, [(3, 8), (9, 32), (10, 25), (11, 17), (12, 22), (13, 26), (16, 15)]);
+}
+
+const NEW_BY_VARIABLE: &str = "<?php
+namespace App;
+
+use Lib\\Timer;
+
+class Maker {
+    public function make() {
+        $cls = Timer::class;
+        return new $cls(1);
+    }
+}
+";
+
+const NEW_BY_VARIABLE_CLASS: &str = "<?php
+namespace Lib;
+
+class Timer {
+    public function __construct(int $n) {}
+}
+";
+
+/// A construction through a variable is keyed by the class the variable
+/// holds, so the constructor's references reach it from another file.
+#[cfg(feature = "php")]
+#[test]
+fn a_constructor_reaches_a_construction_through_a_variable_in_another_file() {
+    let ws = Workspace::new(&[("/fake/php/App/Maker.php", NEW_BY_VARIABLE), ("/fake/php/Lib/Timer.php", NEW_BY_VARIABLE_CLASS)]);
+    let refs = ws.ask("Timer.php", "__construct", 0, |cs| Workspace::sites(cs.references()));
+    assert_eq!(refs, vec![site("Maker.php", 8, 19), site("Timer.php", 4, 20)]);
 }
 
 const MODEL: &str = "<?php
