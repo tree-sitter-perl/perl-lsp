@@ -4002,3 +4002,199 @@ fn the_finished_buffer_is_analyzed_only_where_the_written_one_failed_to_parse() 
     let parsed = "<?php\nfunction f($u) {\n  $u->go();\n}\n";
     assert_eq!(ask(parsed, "$u->"), (None, 0));
 }
+
+const HOVERS: &str = "<?php
+namespace App;
+
+/**
+ * A box of things.
+ */
+class Foo {
+    /** How many. */
+    public int $n;
+
+    /**
+     * Make a Foo.
+     *
+     * @param int $n the count
+     */
+    public function __construct(int $n) { $this->n = $n; }
+
+    /** Twice the count. */
+    public function twice(): int { return $this->n * 2; }
+
+    // Not a docblock.
+    public function me() { return $this; }
+
+    /** @return static */
+    public function tagged() { return $this; }
+}
+
+class Bar {}
+
+/** Build one. */
+function make(int $k): Foo { return new Foo($k); }
+
+function run() {
+    $f = new Foo(1);
+    $g = $f->twice();
+    $f = new Bar();
+    return [$f, $g];
+}
+";
+
+/// The hover at `needle` (+`offset`) in the indexed file `path`.
+#[cfg(feature = "php")]
+fn php_hover(idx: &crate::index::module_index::ModuleIndex, path: &str, src: &str, needle: &str, offset: usize) -> String {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from(path)));
+    let docs = OpenDocs::new();
+    let cs = resolve(&docs, &fa, key, at(src, needle, offset), Some(idx), OverrideScope::default()).with_source(src);
+    crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap_or_default()
+}
+
+/// Every local is listed — in hover and the outline — by the `$x` it is
+/// written as, whichever site declares it, and the spelling costs none of
+/// the facts the site's other captures state.
+#[cfg(feature = "php")]
+#[test]
+fn a_local_is_listed_by_its_written_spelling_at_every_declaring_site() {
+    let src = "<?php
+function all(int $p, ...$v) {
+    $a = 1;
+    $r = &$a;
+    $c ??= 2;
+    [$l1, $l2] = [1, 2];
+    ['k' => $kv] = ['k' => 1];
+    foreach ([1] as $e) {}
+    foreach ([1] as &$br) {}
+    foreach ([1] as $fk => $fv) {}
+    foreach ([1] as $gk => &$gv) {}
+    try {} catch (\\Exception $ex) {}
+    global $gl;
+    static $st = 1;
+    $fn = function () use (&$hoisted) {};
+}
+class P { public function __construct(private int $promo) {} }
+$top = 1;
+";
+    let fa = php(src);
+    let names = [
+        "p", "v", "a", "r", "c", "l1", "l2", "kv", "e", "br", "fk", "fv", "gk", "gv", "ex", "gl", "st", "fn", "hoisted", "promo", "top",
+    ];
+    for name in names {
+        let syms: Vec<_> = fa.symbols().iter().filter(|s| s.name == name).collect();
+        assert!(!syms.is_empty(), "`${name}` is declared");
+        for s in syms {
+            assert_eq!(s.listed_name(), format!("${name}"), "{:?}", s.kind);
+        }
+    }
+    let ty = |name: &str, needle: &str| fa.inferred_type_via_bag(name, at(src, needle, 0)).map(|t| fa.render_type(&t));
+    // the value each write's `@flow.target` states still lands
+    assert_eq!(ty("a", "$fn = "), Some("int|float".to_string()));
+    assert_eq!(ty("st", "$fn = "), Some("int|float".to_string()));
+    assert_eq!(ty("ex", "{}\n    global"), Some("Exception".to_string()));
+    assert_eq!(ty("p", "$fn = "), Some("int|float".to_string()));
+    assert_eq!(ty("promo", "{} }"), Some("int|float".to_string()));
+    // a by-reference capture still declares in the function around the closure
+    let hoisted = fa.symbols().iter().find(|s| s.name == "hoisted").unwrap();
+    let all = fa.symbols().iter().find(|s| s.name == "all").unwrap();
+    assert!(crate::model::file_analysis::contains_point(&all.span, fa.scope(hoisted.scope).span.start));
+    assert_ne!(fa.scope(hoisted.scope).span, fa.scope(fa.scope_at(at(src, "use (&", 0)).unwrap()).span);
+    // a script's top-level local is in the outline as written
+    assert!(fa.document_symbols().iter().any(|o| o.name == "$top"));
+}
+
+/// A typed local hovers by its `$x`, and at a write it hovers the value
+/// that write gives — the write lands after its right side is read, so
+/// the cursor on its left side is before it.
+#[cfg(feature = "php")]
+#[test]
+fn a_write_hovers_the_value_it_writes() {
+    let path = "/fake/php/App/hovers.php";
+    let idx = php_indexed(&[(path, HOVERS)]);
+    let hover = |needle: &str| php_hover(&idx, path, HOVERS, needle, 1);
+    assert!(hover("$f = new Foo").contains("\n$f: App\\Foo\n"), "{}", hover("$f = new Foo"));
+    assert!(hover("$g = $f").contains("\n$g: int|float\n"), "{}", hover("$g = $f"));
+    assert!(hover("$f = new Bar").contains("\n$f: App\\Bar\n"), "{}", hover("$f = new Bar"));
+    // a read between the writes holds the first
+    assert!(hover("$f->twice").contains("\n$f: App\\Foo\n"), "{}", hover("$f->twice"));
+    assert!(hover("$f, $g]").contains("\n$f: App\\Bar\n"), "{}", hover("$f, $g]"));
+}
+
+/// A docblock directly before a declaration is its documentation: its
+/// description, without the frame or the tags. Any other comment, or a
+/// docblock of tags alone, documents nothing.
+#[cfg(feature = "php")]
+#[test]
+fn a_docblock_documents_the_declaration_it_precedes() {
+    let fa = php(HOVERS);
+    let doc = |name: &str| fa.symbols().iter().find(|s| s.name == name).and_then(|s| s.doc().map(str::to_string));
+    assert_eq!(doc("App\\Foo").as_deref(), Some("A box of things."));
+    assert_eq!(doc("n").as_deref(), Some("How many."));
+    assert_eq!(doc("__construct").as_deref(), Some("Make a Foo."));
+    assert_eq!(doc("twice").as_deref(), Some("Twice the count."));
+    assert_eq!(doc("make").as_deref(), Some("Build one."));
+    assert_eq!(doc("me"), None);
+    assert_eq!(doc("tagged"), None);
+    assert_eq!(doc("App\\Bar"), None);
+}
+
+/// A callable hovers as Perl's does: its declaration, where it lives, what
+/// it returns (declared or inferred) and its docblock — at its
+/// declaration and at a call alike.
+#[cfg(feature = "php")]
+#[test]
+fn a_callable_hovers_its_owner_return_and_docblock() {
+    let path = "/fake/php/App/hovers.php";
+    let idx = php_indexed(&[(path, HOVERS)]);
+    let hover = |needle: &str, offset: usize| php_hover(&idx, path, HOVERS, needle, offset);
+    let twice = hover("twice(): int", 0);
+    assert!(twice.contains("public function twice(): int"), "{twice}");
+    assert!(twice.contains("*class App\\Foo*\n\n*returns: int|float*\n\nTwice the count."), "{twice}");
+    assert_eq!(hover("twice();", 0), twice, "a call shows what the declaration does");
+    let me = hover("me()", 0);
+    assert!(me.contains("*class App\\Foo*\n\n*returns: App\\Foo*"), "an inferred return: {me}");
+    assert!(!me.contains("Not a docblock"), "{me}");
+    let make = hover("make(int", 0);
+    assert!(make.contains("*function*\n\n*namespace App*\n\n*returns: App\\Foo*\n\nBuild one."), "{make}");
+    let n = hover("$n;", 1);
+    assert!(n.contains("$n: int|float") && n.ends_with("How many."), "{n}");
+}
+
+/// A construction's class token is the class — what goto-def lands on —
+/// and the call of the class's constructor, shown under it as a member
+/// call to it is: its declaration, class and docblock. In another file
+/// too.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_hovers_its_class_and_constructor() {
+    let path = "/fake/php/App/hovers.php";
+    let idx = php_indexed(&[(path, HOVERS)]);
+    let hover = php_hover(&idx, path, HOVERS, "Foo(1)", 0);
+    let (class, ctor) = hover.split_once("\n\n---\n\n").unwrap_or_else(|| panic!("{hover}"));
+    assert!(class.starts_with("```php\nclass Foo\n```\n\n*class*") && class.ends_with("A box of things."), "{class}");
+    assert!(ctor.contains("public function __construct(int $n)"), "{ctor}");
+    assert!(ctor.contains("*class App\\Foo*") && ctor.ends_with("Make a Foo."), "{ctor}");
+    // a class with no constructor is the class alone
+    let bar = php_hover(&idx, path, HOVERS, "Bar()", 0);
+    assert!(!bar.contains("---"), "{bar}");
+
+    let lib = "<?php\nnamespace Lib;\n\nclass Handler {\n    /** Wrap a level. */\n    public function __construct(int $level) {}\n}\n";
+    let app = "<?php\nnamespace App;\n\nuse Lib\\Handler;\n\nfunction go() { return new Handler(1); }\n";
+    let root = std::env::temp_dir().join(format!("php-ctor-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let files: Vec<(String, &str)> =
+        [("Handler.php", lib), ("go.php", app)].iter().map(|(n, s)| (root.join(n).to_string_lossy().to_string(), *s)).collect();
+    for (p, s) in &files {
+        std::fs::write(p, s).unwrap();
+    }
+    let idx = php_indexed(&files.iter().map(|(p, s)| (p.as_str(), *s)).collect::<Vec<_>>());
+    let hover = php_hover(&idx, &files[1].0, app, "Handler(1)", 0);
+    std::fs::remove_dir_all(&root).ok();
+    let (_, ctor) = hover.split_once("\n\n---\n\n").unwrap_or_else(|| panic!("{hover}"));
+    assert!(ctor.contains("public function __construct(int $level)"), "{ctor}");
+    assert!(ctor.contains("*class Lib\\Handler*") && ctor.contains("Wrap a level.") && ctor.contains("Handler.php"), "{ctor}");
+}

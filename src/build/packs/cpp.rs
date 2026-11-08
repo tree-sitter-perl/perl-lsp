@@ -79,6 +79,7 @@ pub fn cpp_pack() -> LangPack {
                 }
             }
         },
+        doc_text: |_| None,
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.

@@ -1033,6 +1033,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
         spelled: None,
+        doc: None,
         pair: None,
         return_type: None,
         deref_stack: Vec::new(),

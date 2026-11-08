@@ -49,6 +49,11 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
+    /// The documentation a `@doc` comment's text states (php's docblock
+    /// description, its decoration and tags stripped), or `None` when it
+    /// says nothing. Which comments document which declarations is the
+    /// document's.
+    pub doc_text: fn(comment: &str) -> Option<String>,
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -139,6 +144,7 @@ impl LangPack {
             shape_name: _,
             default_name: _,
             annot_type: _,
+            doc_text: _,
             module_paths: _,
             narrow_guard: _,
             entrypoint_symbols,

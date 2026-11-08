@@ -1130,9 +1130,16 @@ pub struct FlowEdge {
     /// Target binding name (sigiled, as the bag keys variables).
     pub target_name: String,
     pub target_scope: ScopeId,
-    /// The target's site, for the lowered witness's span (temporal ordering).
+    /// Where the write lands, for the lowered witness's span (temporal
+    /// ordering).
     #[serde(with = "PointDef")]
     pub target_at: Point,
+    /// The token the write names its target by, where its producer states
+    /// it (the pack extractor; the Perl builder states none,
+    /// `TODO(perl-write-token)`): what the token denotes is the value the
+    /// write leaves at `target_at` (`FileAnalysis::write_lands_at`).
+    #[serde(default)]
+    pub target_token: Option<Span>,
     /// The source expression's span — resolved to a type at query time via
     /// `expr_type_at_span`, and the value-provenance anchor.
     pub source: Span,
@@ -1232,6 +1239,16 @@ impl Symbol {
             },
             scope_wide: self.flags.contains(SymbolFlags::SCOPE_WIDE),
         })
+    }
+
+    /// The declaration's documentation, from whichever of its two homes
+    /// the producer wrote (`docs/PARKED.md`, "Two homes for a
+    /// declaration's documentation text").
+    pub fn doc(&self) -> Option<&str> {
+        match &self.detail {
+            SymbolDetail::Sub { doc: Some(d), .. } => Some(d),
+            _ => self.presentation.doc.as_deref(),
+        }
     }
 
     /// The name listing views (outline, hover) show the symbol by.

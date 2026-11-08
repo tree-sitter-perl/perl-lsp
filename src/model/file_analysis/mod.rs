@@ -49,6 +49,7 @@ mod class_queries;
 mod cursor_queries;
 mod invocants;
 mod hover;
+pub(crate) use hover::callable_hover_tail;
 mod sym_index;
 mod completion;
 pub use completion::*;

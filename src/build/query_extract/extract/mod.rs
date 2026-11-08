@@ -261,6 +261,8 @@ fn family(cap: Capture) -> Family {
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline
+        | C::Doc
+        | C::DocOf
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
@@ -451,8 +453,9 @@ fn record_matches<'t>(
                 Some(Capture::Deref(level)) => links.mark_level(c.node, level),
                 Some(Capture::DerefLeaf(def)) => links.mark_leaf(c.node, def),
                 // A wildcard also matches the grammar's extras (a comment),
-                // which are never code: no capture lands on one.
-                Some(_) if c.node.is_extra() => {}
+                // which are never code: no capture lands on one but the
+                // `@doc` that names a comment for what it says.
+                Some(cap) if c.node.is_extra() && cap != Capture::Doc => {}
                 Some(cap) => captured.push((c.node, cap, match_counter)),
             }
         }

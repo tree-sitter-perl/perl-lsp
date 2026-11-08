@@ -42,6 +42,7 @@ pub fn php_pack() -> LangPack {
             _ => None,
         },
         annot_type: declared_type,
+        doc_text: docblock_description,
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.
         module_paths: |_| Vec::new(),
@@ -105,6 +106,25 @@ fn display_type(tag: &str) -> Option<&'static str> {
         "Undef" => Some("null"),
         _ => None,
     }
+}
+
+/// A docblock's description: the text before its first tag, the `/** */`
+/// frame and each line's leading `*` stripped. A block of tags alone
+/// (`/** @var int */`) describes nothing.
+fn docblock_description(comment: &str) -> Option<String> {
+    let body = comment.strip_prefix("/**")?;
+    let body = body.strip_suffix("*/").unwrap_or(body);
+    let lines: Vec<&str> = body
+        .lines()
+        .map(|l| {
+            let l = l.trim();
+            l.strip_prefix('*').map_or(l, |rest| rest.strip_prefix(' ').unwrap_or(rest)).trim_end()
+        })
+        .take_while(|l| !l.starts_with('@'))
+        .collect();
+    let text = lines.join("\n");
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// A declared type as written (`int`, `?Foo`, `\App\User`, `int|string`).

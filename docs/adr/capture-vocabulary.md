@@ -92,6 +92,13 @@ what is written, the whole written spelling (`@def.<kind>.spelled`, php's
 twin of `@ref.spelled`: the token keys and is rewritten, the spelling is
 read.
 
+A declaration's documentation is a match of its own: `@doc` on the comment
+and `@doc.of` on the name token of the declaration it documents, the way a
+`@mark.<flag>` states a fact about a name token. The document says which
+comments document which declarations (php: a `/**` comment directly before
+one); the pack's `doc_text` reads what the comment says. A comment is a
+grammar extra no other capture lands on.
+
 A variable read splits the same way. `@expr.read.var` is the node whose
 value the read is; `@expr.read.var.name`, when the node also writes a sigil
 (php's `$x`), is the token that is the reference, the name the read

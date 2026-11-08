@@ -15,6 +15,22 @@ impl FileAnalysis {
             .min_by_key(|r| (span_size(&r.span), r.is_cursor_companion(&self.pack) as u8))
     }
 
+    /// Where the write whose target token holds `point` lands — the point
+    /// from which the token's variable holds the value that write gives.
+    /// `None` off a written token.
+    pub fn write_lands_at(&self, point: Point) -> Option<Point> {
+        self.flow_edges
+            .iter()
+            .find(|fe| fe.target_token.is_some_and(|t| contains_point(&t, point)))
+            .map(|fe| fe.target_at)
+    }
+
+    /// The construction a class token at `point` makes (`new Foo(…)`): the
+    /// cursor companion `ref_at` passes over for the token's own reference.
+    pub fn construction_at(&self, point: Point) -> Option<&Ref> {
+        self.refs.iter().find(|r| r.constructs() && contains_point(&r.span, point))
+    }
+
     /// Find the symbol whose selection_span contains the point.
     pub fn symbol_at(&self, point: Point) -> Option<&Symbol> {
         // A mention is anchored on a use, which declares nothing.

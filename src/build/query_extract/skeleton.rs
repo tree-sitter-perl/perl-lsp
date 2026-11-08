@@ -19,6 +19,9 @@ pub struct SkelSymbol {
     /// The declaration as written around its name token (`@def.<kind>.spelled`:
     /// php's `$x` around the member name `x`), listed in place of the name.
     pub spelled: Option<String>,
+    /// The documentation the document attaches to the def's name token
+    /// (`@doc.of`), as the pack's `doc_text` reads it.
+    pub doc: Option<String>,
     /// The `@def.pair` match this def shares its name token with: the two
     /// defs carrying one id are one declaration (`Symbol::declared_with`).
     /// A match id, not a position in `symbols`, so it survives every dedup.
@@ -2233,7 +2236,7 @@ fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol 
             hide_in_outline: symbol_flags_of(s.kind, &s.attributes)
                 .contains(SymbolFlags::INCLUDE_GUARD),
             deprecation: None,
-            doc: None,
+            doc: s.doc.clone(),
             display: None,
             label: s.spelled.clone(),
         },

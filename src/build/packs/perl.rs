@@ -21,6 +21,7 @@ pub fn perl_pack() -> LangPack {
             _ => None,
         },
         annot_type: |_| None,
+        doc_text: |_| None,
         module_paths: |m| vec![crate::model::conventions::perl_module_rel_path(m)],
         narrow_guard: |_| None,
         entrypoint_symbols: &[],

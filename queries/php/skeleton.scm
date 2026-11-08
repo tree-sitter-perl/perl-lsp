@@ -74,13 +74,14 @@
 ; ---- parameters ----
 ; A parameter is a local of its callable, named like every variable by
 ; the token after its `$`: a read of `$x` references `x` and leaves the
-; `$` alone. Its declared type is its value from the binding site on. A
-; variadic's declared type is its elements', so the local stays untyped.
+; `$` alone. The `$x` it is written as is the spelling it is listed by.
+; Its declared type is its value from the binding site on. A variadic's
+; declared type is its elements', so the local stays untyped.
 (simple_parameter
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
-  name: (variable_name (name) @def.local.name @flow.target)) @def.local
+  name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local
 (variadic_parameter
-  name: (variable_name (name) @def.local.name)) @def.local
+  name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
 
 ; ---- properties ----
 ; A property is a data member of its class, named without the `$` it is
@@ -117,10 +118,25 @@
   readonly: (readonly_modifier)? @sym.attr
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
   name: [
-    (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled
+    (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled @def.local.spelled
     (by_ref
-      (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled)
+      (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled @def.local.spelled)
   ]) @def.field @def.local @def.pair
+
+; ---- documentation ----
+; A docblock (`/** … */`) written directly before a declaration documents
+; it: a class, a callable, a property, a class constant. Any other comment
+; documents nothing.
+(((comment) @doc
+  .
+  [(class_declaration name: (name) @doc.of)
+   (interface_declaration name: (name) @doc.of)
+   (trait_declaration name: (name) @doc.of)
+   (function_definition name: (name) @doc.of)
+   (method_declaration name: (name) @doc.of)
+   (property_declaration (property_element name: (variable_name (name) @doc.of)))
+   (const_declaration (const_element (name) @doc.of))])
+ (#match? @doc "^/\\*\\*"))
 
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.
@@ -317,40 +333,40 @@
 
 ; ---- writes ----
 ; A variable belongs to its function: the first write declares it, and
-; every later write and every read in the body is that one variable. A
-; write lands once the assignment has read what it reads, and replaces
-; what the variable held.
+; every later write and every read in the body is that one variable. It
+; is listed by the `$x` it is written as. A write lands once the
+; assignment has read what it reads, and replaces what the variable held.
 (assignment_expression
-  left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
+  left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled
   right: (_) @flow.source) @flow.assign
 (reference_assignment_expression
-  left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
+  left: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled
   right: (_) @flow.source) @flow.assign
 ; A compound write keeps the kind of value the variable holds; a
 ; destructuring and a loop write values they do not name.
 (augmented_assignment_expression
-  left: (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+  left: (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
 (assignment_expression
-  left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)) @flow.assign
+  left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)) @flow.assign
 (assignment_expression
-  left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned .))) @flow.assign
+  left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled .))) @flow.assign
 (foreach_statement . (_) . [
-  (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned
-  (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
-  (pair . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+  (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled
+  (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
+  (pair . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
   (pair (_) . [
-    (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned
-    (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned)
+    (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled
+    (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
   ] .)
 ])
 ; A caught exception is an instance of the class the clause names; a
 ; clause naming several (`A | B`) names no single type.
 (catch_clause
   type: (type_list . (named_type) @type.annot .)
-  name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned)
-(global_declaration (variable_name (name) @def.assigned.name) @def.assigned)
+  name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled)
+(global_declaration (variable_name (name) @def.assigned.name) @def.assigned @def.assigned.spelled)
 (static_variable_declaration
-  name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned
+  name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled
   value: (_)? @flow.source)
 ; An assignment writes the place its left side denotes, whatever that is
 ; (`$x->p = v` writes the property); a compound one writes it too, with a
@@ -370,7 +386,7 @@
 ; declaring it when nothing there does yet.
 (anonymous_function_use_clause (variable_name (name) @closure.capture))
 (anonymous_function_use_clause
-  (by_ref (variable_name (name) @closure.capture @def.assigned.name @def.hoist)) @def.assigned)
+  (by_ref (variable_name (name) @closure.capture @def.assigned.name @def.hoist) @def.assigned.spelled) @def.assigned)
 
 ; ---- guards ----
 ; An atom states what a test proves of its subject, a local `$x` or a

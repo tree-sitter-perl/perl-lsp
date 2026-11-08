@@ -926,6 +926,7 @@ fn inject_member_blocks(
                 package: Some(base.macro_name.clone()),
                 scope: scope_id,
                 spelled: None,
+                doc: None,
                 pair: None,
                 return_type: None,
                 deref_stack: m.deref_stack.clone(),
@@ -1122,6 +1123,7 @@ fn remap_spans(
             package: _,
             scope: _,
             spelled: _,
+            doc: _,
             pair: _,
             return_type: _,
             deref_stack: _,
@@ -1268,11 +1270,15 @@ fn remap_spans(
             target_name: _,
             target_scope: _,
             target_at,
+            target_token,
             source,
             extraction: _,
             reassigns: _,
         } = fe;
         *target_at = r(*target_at);
+        if let Some(t) = target_token {
+            *t = rspan(*t);
+        }
         *source = rspan(*source);
     }
     for (_, _, span) in label_refs.iter_mut() {

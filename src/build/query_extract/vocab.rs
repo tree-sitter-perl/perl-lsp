@@ -642,6 +642,11 @@ pub enum Capture {
     SpecPrimary,
     /// An inline namespace's name token.
     NsInline,
+    /// A documentation comment (`@doc`), and the name token of the
+    /// declaration it documents (`@doc.of`), in a match of their own: the
+    /// declaration reads its doc off its name token, as a `@mark.<flag>`.
+    Doc,
+    DocOf,
     /// A member namespace the declaration or member site at this token
     /// lives in or may land in, by the pack's own namespace names
     /// (`@space.<name>`, `@space.<name>.illegal`). Resolved against the
@@ -737,6 +742,8 @@ impl Capture {
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
             ["ns", "inline"] => C::NsInline,
+            ["doc"] => C::Doc,
+            ["doc", "of"] => C::DocOf,
             ["anonagg", "member"] => C::AnonAggMember,
             ["link", "from", w] => C::LinkFrom(LinkWalk::parse(w)?),
             ["deref", "leaf", k] => C::DerefLeaf(DefCap::parse(k)?),
@@ -810,6 +817,8 @@ impl fmt::Display for Capture {
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),
+            C::Doc => f.write_str("doc"),
+            C::DocOf => f.write_str("doc.of"),
             C::Space { id, illegal } => write!(f, "space#{}{}", id.0, if illegal { ".illegal" } else { "" }),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),

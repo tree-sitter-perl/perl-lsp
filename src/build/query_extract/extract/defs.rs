@@ -181,6 +181,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         package: pkg,
         scope,
         spelled: mine(Capture::Def { kind, part: DefPart::Spelled }).map(|t| t.text.clone()),
+        doc: on_name
+            .iter()
+            .filter(|t| t.cap == Capture::DocOf)
+            .find_map(|t| ad.in_match(t.match_id, Capture::Doc))
+            .and_then(|d| (pack.doc_text)(&d.text)),
         pair: mine(Capture::DefPair).map(|_| e.match_id),
         return_type,
         deref_stack: ad

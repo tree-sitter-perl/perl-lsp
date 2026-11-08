@@ -4,6 +4,23 @@
 
 use super::*;
 
+/// What a callable's hover says under its declaration, in the order every
+/// language shows it: where it lives (`*class Foo*`), what it returns, its
+/// documentation.
+pub(crate) fn callable_hover_tail(owner: Option<(&str, &str)>, returns: Option<&str>, doc: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some((word, name)) = owner {
+        out.push_str(&format!("\n\n*{} {}*", word, name));
+    }
+    if let Some(rt) = returns {
+        out.push_str(&format!("\n\n*returns: {}*", rt));
+    }
+    if let Some(d) = doc {
+        out.push_str(&format!("\n\n{}", d));
+    }
+    out
+}
+
 impl FileAnalysis {
     /// The file's language's type words (`LanguageConventions::type_label`):
     /// a mapped engine tag renders as the language's own spelling (php
@@ -72,14 +89,16 @@ impl FileAnalysis {
             Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
                 let sym = self.symbol(sym_id);
                 let line = source_line_at(source, sym.selection_span.start.row);
-                let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label(defining_class));
-                if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None).filter(InferredType::is_known) {
-                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                }
-                if let SymbolDetail::Sub { doc: Some(ref d), .. } = sym.detail {
-                    text.push_str(&format!("\n\n{}", d));
-                }
-                Some(text)
+                let returns = self
+                    .find_method_return_type(cn, mname, module_index, None)
+                    .filter(InferredType::is_known)
+                    .map(|rt| self.render_type(&rt));
+                let doc = matches!(sym.detail, SymbolDetail::Sub { .. }).then(|| sym.doc()).flatten();
+                Some(format!(
+                    "```perl\n{}\n```{}",
+                    line.trim(),
+                    callable_hover_tail(Some(("class", &class_label(defining_class))), returns.as_deref(), doc)
+                ))
             }
             Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
                 let idx = module_index?;
@@ -91,23 +110,21 @@ impl FileAnalysis {
                 let whole = idx.bag_present(&cached);
                 let sub_info = whole.sub_info_view(mname)?;
                 let sig = format_cross_file_signature(mname, &sub_info);
-                let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label(class));
                 // Asked of the class the call is made on first, as the local
                 // arm asks, so a receiver-relative return (`return $self`,
                 // php's `static`) names it; a member that ask cannot reach (a
                 // helper bridged in from another module) answers with its
                 // declaration's own return.
-                if let Some(rt) = self
+                let returns = self
                     .find_method_return_type(cn, mname, module_index, None)
                     .or_else(|| sub_info.return_type(Some(idx)))
                     .filter(InferredType::is_known)
-                {
-                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                }
-                if let Some(doc) = sub_info.doc() {
-                    text.push_str(&format!("\n\n{}", doc));
-                }
-                Some(text)
+                    .map(|rt| self.render_type(&rt));
+                Some(format!(
+                    "```perl\n{}\n```{}",
+                    sig,
+                    callable_hover_tail(Some(("class", &class_label(class))), returns.as_deref(), sub_info.doc())
+                ))
             }
             None => None,
         }
@@ -491,17 +508,17 @@ impl FileAnalysis {
             // owning package. Without this, two same-named subs in
             // different packages both render identical hover text
             // and the user can't tell which one the LSP resolved to.
-            if let Some(pkg) = sym.package.as_deref() {
-                text.push_str(&format!("\n\n*package {}*", pkg));
-            }
-            if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
-                if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None).filter(InferredType::is_known) {
-                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                }
-                if let Some(d) = doc {
-                    text.push_str(&format!("\n\n{}", d));
-                }
-            }
+            let is_sub = matches!(sym.detail, SymbolDetail::Sub { .. });
+            let returns = is_sub
+                .then(|| self.symbol_return_type_via_bag(sym.id, None))
+                .flatten()
+                .filter(InferredType::is_known)
+                .map(|rt| self.render_type(&rt));
+            text.push_str(&callable_hover_tail(
+                sym.package.as_deref().map(|p| ("package", p)),
+                returns.as_deref(),
+                is_sub.then(|| sym.doc()).flatten(),
+            ));
         }
 
         text

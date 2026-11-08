@@ -1897,3 +1897,28 @@ fn a_build_stamp_reduces_each_link_once() {
     let (short, long) = (cost(60), cost(120));
     assert!(long < short * 3, "60 links reduced {short} attachments, 120 reduced {long}: superlinear");
 }
+
+/// A name's hover at its write is the value that write gives: the write
+/// lands once its right side is read, after the cursor on its left. A
+/// method's hover names its class and what it returns.
+#[cfg(feature = "python")]
+#[test]
+fn a_write_hovers_the_value_it_writes() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "class Foo:\n    def me(self):\n        return self\n\nclass Bar:\n    pass\n\nf = Foo()\nf = Bar()\ng = f\n";
+    let (t, idx) = indexed("write-hover", &[("m.py", src)]);
+    let path = t.0.join("m.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let hover = |at: Point| {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone()));
+        let cs = resolve(&store, &fa, key, at, Some(&idx), OverrideScope::default()).with_source(src);
+        crate::lsp::symbols::pack_hover_markdown(&cs, "python").unwrap_or_default()
+    };
+    assert!(hover(Point::new(7, 0)).contains("\nf: m.Foo\n"), "{}", hover(Point::new(7, 0)));
+    assert!(hover(Point::new(8, 0)).contains("\nf: m.Bar\n"), "{}", hover(Point::new(8, 0)));
+    assert!(hover(Point::new(9, 4)).contains("\nf: m.Bar\n"), "{}", hover(Point::new(9, 4)));
+    let me = hover(Point::new(1, 8));
+    assert!(me.ends_with("*method*\n\n*class m.Foo*\n\n*returns: m.Foo*"), "{me}");
+}

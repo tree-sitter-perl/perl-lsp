@@ -49,7 +49,9 @@ pub fn pack_hover_markdown(
             };
             // A cross-file method's declaration is the projection's
             // candidate, rendered from its own file.
-            let declaration = || cs.hover_candidate().and_then(|loc| render_candidate_hover(cs, &loc, language));
+            let declaration = |via: &CallView<'_>, defining: &str| {
+                cs.hover_candidate().and_then(|loc| render_candidate_hover(cs, &loc, language, Some((via, defining))))
+            };
             let sections: Vec<String> = analysis
                 .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
                 .iter()
@@ -64,11 +66,44 @@ pub fn pack_hover_markdown(
             }
         }
     }
+    let token = pack_token_hover(cs, language)?;
+    // A construction's class token (`new Foo(…)`) is the class — goto-def's
+    // landing, shown first — and the call of its constructor, shown under
+    // it as the call a member access to it would show.
+    let construction = analysis.construction_at(point).zip(module_index).and_then(|(r, midx)| {
+        let sections: Vec<String> = analysis
+            .receiver_classes(r, Some(midx), ReceiverPolicy::Navigate)
+            .iter()
+            .filter_map(|cn| {
+                let ctor = analysis.called_member(r, cn, Some(midx))?;
+                // No projection candidate names the constructor: a
+                // cross-file one renders from the file declaring it.
+                let declaration =
+                    |via: &CallView<'_>, defining: &str| cross_file_member_hover(&ctor, defining, via, language, midx);
+                let callable = crate::model::file_analysis::MemberKind::CALLABLE;
+                member_hover_on(analysis, cn, &ctor, callable, None, source, language, midx, &declaration)
+            })
+            .collect();
+        (!sections.is_empty()).then(|| sections.join("\n\n---\n\n"))
+    });
+    Some(match construction {
+        Some(ctor) => format!("{token}\n\n---\n\n{ctor}"),
+        None => token,
+    })
+}
+
+/// The hover of the token under the cursor when no member access answers
+/// it: the projection's candidate, else the declaration at the cursor.
+fn pack_token_hover(cs: &crate::index::resolve::CandidateSet, language: &str) -> Option<String> {
+    let analysis = cs.origin_analysis();
+    let source = cs.origin_source()?;
+    let point = cs.cursor();
+    let module_index = cs.scoped_index();
     // The projection's answer: present the top-ranked definition candidate —
     // what goto-def would jump to — wherever it lives (macro variants,
     // template/spec ladders, locals, cross-file functions all arrive here).
     if let Some(loc) = cs.hover_candidate() {
-        if let Some(text) = render_candidate_hover(cs, &loc, language) {
+        if let Some(text) = render_candidate_hover(cs, &loc, language, None) {
             return Some(text);
         }
     }
@@ -76,10 +111,47 @@ pub fn pack_hover_markdown(
     // symbol under the cursor directly (its own type point + scope).
     if let Some(sym) = analysis.symbol_at(point) {
         return Some(render_symbol_hover(
-            sym, source, &sym.span.start, language, analysis, point, module_index,
+            sym, source, &sym.span.start, language, analysis, value_point(analysis, point), module_index, None,
         ));
     }
     None
+}
+
+/// Where the value a token at `point` denotes is read: a written token
+/// denotes what its write leaves, which lands after the token (an
+/// assignment lands once its right side is read); any other token, what
+/// holds at the token.
+fn value_point(analysis: &FileAnalysis, point: Point) -> Point {
+    analysis.write_lands_at(point).unwrap_or(point)
+}
+
+/// What a call knows about the callable it reaches that the declaration
+/// alone does not: the class the call is made on and the return the call
+/// gives there (a receiver-relative or template-substituted one).
+struct CallView<'a> {
+    class: &'a str,
+    returns: Option<InferredType>,
+}
+
+/// The callable `member` of class `defining`, declared in another file,
+/// rendered from that file for the call `via`.
+fn cross_file_member_hover(
+    member: &str,
+    defining: &str,
+    via: &CallView<'_>,
+    language: &str,
+    midx: &dyn crate::model::file_analysis::CrossFileLookup,
+) -> Option<String> {
+    let cached = midx.candidate_defining_sub_in_package(defining, defining, member)?;
+    let whole = midx.whole_present(&cached);
+    let sym = whole.symbols().iter().find(|s| {
+        s.name == member && matches!(s.kind, FaSymKind::Sub | FaSymKind::Method) && s.package.as_deref() == Some(defining)
+    })?;
+    let text = crate::util::text::read_source(&cached.path).ok()?;
+    let fname = cached.path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let mut out = render_symbol_hover(sym, &text, &sym.span.start, language, &whole, sym.span.start, Some(midx), Some(via));
+    out.push_str(&format!("\n\n— `{}`", fname));
+    Some(out)
 }
 
 /// Render the hover projection's candidate: the symbol declared at the
@@ -92,7 +164,14 @@ fn render_candidate_hover(
     cs: &crate::index::resolve::CandidateSet,
     loc: &crate::index::resolve::RefLocation,
     language: &str,
+    via: Option<(&CallView<'_>, &str)>,
 ) -> Option<String> {
+    // Rendered for a call, the candidate must be the declaration the call
+    // resolved to (`defining`'s member), not another class's.
+    let call = |sym: &crate::model::file_analysis::Symbol| match via {
+        Some((v, defining)) => (sym.package.as_deref() == Some(defining)).then_some(Some(v)),
+        None => Some(None),
+    };
     let module_index = cs.scoped_index();
     let sym_at = |a: &FileAnalysis| -> Option<usize> {
         a.symbols()
@@ -111,8 +190,12 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(analysis) {
             let sym = &analysis.symbols()[i];
             return Some(render_symbol_hover(
-                sym, source, &sym.span.start, language, analysis, cs.cursor(), module_index,
+                sym, source, &sym.span.start, language, analysis, value_point(analysis, cs.cursor()), module_index,
+                call(sym)?,
             ));
+        }
+        if via.is_some() {
+            return None;
         }
         let line = source.lines().nth(loc.span.start.row)?.trim();
         return (!line.is_empty()).then(|| format!("```{}\n{}\n```", language, line));
@@ -131,11 +214,14 @@ fn render_candidate_hover(
             let sym = &whole.symbols()[i];
             let mut out = render_symbol_hover(
                 sym, &text, &sym.span.start, language, &whole, sym.span.start,
-                module_index,
+                module_index, call(sym)?,
             );
             out.push_str(&format!("\n\n— `{}`", fname));
             return Some(out);
         }
+    }
+    if via.is_some() {
+        return None;
     }
     let line = text.lines().nth(loc.span.start.row)?.trim();
     (!line.is_empty()).then(|| format!("```{}\n{}\n```\n\n— `{}`", language, line, fname))
@@ -169,6 +255,9 @@ fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
     }
 }
 
+/// `via` is the call the hover is made at, when it is made at one: its
+/// class and its return stand for the declaration's own.
+#[allow(clippy::too_many_arguments)]
 fn render_symbol_hover(
     sym: &crate::model::file_analysis::Symbol,
     source: &str,
@@ -177,7 +266,14 @@ fn render_symbol_hover(
     analysis: &FileAnalysis,
     type_point: Point,
     module_index: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
+    via: Option<&CallView<'_>>,
 ) -> String {
+    let doc = |out: &mut String| {
+        if let Some(d) = sym.doc() {
+            out.push_str("\n\n");
+            out.push_str(d);
+        }
+    };
     if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field | FaSymKind::Enumerator) {
         if let Some(ty) = analysis
             .inferred_type_via_bag_ctx(&sym.name, type_point, module_index)
@@ -201,10 +297,12 @@ fn render_symbol_hover(
                 }
                 _ => String::new(),
             };
-            return format!(
+            let mut out = format!(
                 "```{}\n{}: {}{}\n```\n\n*{}*",
                 language, sym.listed_name(), display, overlay, hover_kind_label(sym)
             );
+            doc(&mut out);
+            return out;
         }
     }
     let line = source.lines().nth(line_at.row).unwrap_or("").trim();
@@ -215,6 +313,31 @@ fn render_symbol_hover(
             out.push_str(&format!("\n\n*{}*", attr));
         }
     }
+    if !matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method) {
+        doc(&mut out);
+        return out;
+    }
+    // Where it lives: the class a call is made on (and the one declaring
+    // the member, where that differs), else the declaration's own owner —
+    // a method's class, a function's namespace.
+    let defining = sym.package.as_deref();
+    let owner = match (via, defining) {
+        (Some(v), Some(d)) if v.class != d => Some(format!("{} (from {})", v.class, d)),
+        (Some(v), _) => Some(v.class.to_string()),
+        (None, d) => d.map(str::to_string),
+    };
+    let word = if via.is_some() || sym.kind == FaSymKind::Method { "class" } else { "namespace" };
+    let returns = match via {
+        Some(v) => v.returns.clone(),
+        None => analysis.symbol_return_type_via_bag_ctx(sym.id, None, module_index),
+    }
+    .filter(InferredType::is_known)
+    .map(|rt| analysis.render_type(&rt));
+    out.push_str(&crate::model::file_analysis::callable_hover_tail(
+        owner.as_deref().map(|o| (word, o)),
+        returns.as_deref(),
+        sym.doc(),
+    ));
     out
 }
 
@@ -267,7 +390,7 @@ pub fn perl_hover_markdown(
     // `PackageRef` whose package lives in another file, which the ladder's
     // local `symbols_named` sweep can never see.
     let loc = cs.hover_candidate()?;
-    render_candidate_hover(cs, &loc, "perl")
+    render_candidate_hover(cs, &loc, "perl", None)
 }
 
 /// The name-keyed Perl ladder: whatever the model can render from the ref or
@@ -355,8 +478,9 @@ fn perl_hover_named(
 
 /// One class's member hover: `field` on `cn`, `recv` the receiver value
 /// that dispatches there (its template args refine a param-shaped member).
-/// A method answers with its signature (`declaration` renders a cross-file
-/// one); only a field answers with its type.
+/// A method answers with its signature and the return the call gives on
+/// `cn` (`declaration` renders a cross-file one, given the call and the
+/// class declaring the member); only a field answers with its type.
 #[allow(clippy::too_many_arguments)]
 fn member_hover_on(
     analysis: &crate::model::file_analysis::FileAnalysis,
@@ -367,7 +491,7 @@ fn member_hover_on(
     source: &str,
     language: &str,
     midx: &dyn crate::model::file_analysis::CrossFileLookup,
-    declaration: &dyn Fn() -> Option<String>,
+    declaration: &dyn Fn(&CallView<'_>, &str) -> Option<String>,
 ) -> Option<String> {
     // The ref's family picks the rung: a value read never answers
     // through a method's return.
@@ -382,34 +506,30 @@ fn member_hover_on(
         })?;
         (raw.as_ref() != Some(&sub)).then_some(sub)
     };
-    if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-        analysis.resolve_member_in_ancestors(cn, field, Some(midx), want)
-    {
+    // The return the call gives on `cn`: asked of `cn`, so a
+    // receiver-relative return (php's `static`) names it, and refined by
+    // the receiver's template arguments where they change it.
+    let call_returns = || {
+        let raw = analysis.find_method_return_type(cn, field, Some(midx), None);
+        substituted(raw.clone()).or(raw)
+    };
+    let resolution = analysis.resolve_member_in_ancestors(cn, field, Some(midx), want);
+    if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) = resolution {
         let sym = analysis.symbol(sym_id);
         if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
-            let mut text = render_symbol_hover(
-                sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx),
-            );
-            if let Some(rt) = substituted(
-                analysis.find_method_return_type(cn, field, Some(midx), None),
-            ) {
-                text.push_str(&format!(
-                    "\n\n*returns: {}*",
-                    analysis.render_type(&rt)
-                ));
-            }
-            return Some(text);
+            let via = CallView { class: cn, returns: call_returns() };
+            return Some(render_symbol_hover(
+                sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx), Some(&via),
+            ));
         }
     }
     if want.mode == crate::model::file_analysis::MemberMode::Callable {
-        // A cross-file method shows its declaration: here only when the
-        // receiver's arguments refine its return (`T get()` on `Box<int>`),
-        // which this section adds under it; otherwise the projection's
-        // candidate renders it.
-        let returns = substituted(analysis.find_method_return_type(cn, field, Some(midx), None))?;
-        let mut text = declaration()?;
-        text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&returns)));
-        return Some(text);
+        // A cross-file method shows its declaration, rendered from its own
+        // file for this call.
+        let crate::model::file_analysis::MethodResolution::CrossFile { class, .. } = resolution? else {
+            return None;
+        };
+        return declaration(&CallView { class: cn, returns: call_returns() }, &class);
     }
     // A param-typed field substitutes the same way (`T v_;` on `Box<int>`
     // reads `v_: int`).

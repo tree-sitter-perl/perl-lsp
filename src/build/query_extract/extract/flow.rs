@@ -510,6 +510,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 target_name: name.clone(),
                 target_scope: *scope,
                 target_at: *at,
+                target_token: Some(*token),
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
                 reassigns: reassigns(name, &token.start),
@@ -569,6 +570,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             target_name: name,
             target_scope: scope,
             target_at: at,
+            target_token: Some(token),
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
         });
