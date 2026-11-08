@@ -111,3 +111,44 @@ fn a_cpp_reassignment_chain_types_every_call_at_linear_cost() {
     let (_, long) = build(&chain(120));
     assert!(long < short * 3, "60 links reduced {short} attachments, 120 reduced {long}: superlinear");
 }
+
+/// `x = x.add()` writes x at the assignment's end, after its right side has
+/// read the x before it, so each call's receiver is the previous link's
+/// value, one hop back. A chain far past the registry's depth cap still
+/// types every call, and the build reduces each link a bounded number of
+/// times.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_cpp_chain_past_the_depth_cap_types_every_call_at_linear_cost() {
+    let chain = |links| {
+        let mut src = String::from("struct A { A add(); };\nvoid f() {\n  A x;\n");
+        for _ in 0..links {
+            src.push_str("  x = x.add();\n");
+        }
+        src + "}\n"
+    };
+    // Built, with the attachments the build reduced.
+    let build = |links| {
+        let src = chain(links);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(&src, None).unwrap();
+        let before = crate::model::witnesses::query_rec_bodies();
+        let skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &crate::build::packs::cpp_pack());
+        (skel.unwrap().into_file_analysis(), crate::model::witnesses::query_rec_bodies() - before)
+    };
+    let links = 600;
+    let (fa, _) = build(links);
+    let receivers: Vec<Vec<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "add")
+        .map(|r| fa.receiver_classes(r, None, ReceiverPolicy::Navigate).into_iter().collect())
+        .collect();
+    assert_eq!(receivers.len(), links);
+    let lost: Vec<usize> =
+        receivers.iter().enumerate().filter(|(_, c)| c.as_slice() != ["A"]).map(|(i, _)| i).collect();
+    assert!(lost.is_empty(), "{} of {links} calls lost their receiver; first {:?}", lost.len(), lost.first());
+    let (short, long) = (build(150).1, build(300).1);
+    assert!(long < short * 3, "150 links reduced {short} attachments, 300 reduced {long}: superlinear");
+}
