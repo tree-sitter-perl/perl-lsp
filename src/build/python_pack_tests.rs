@@ -1823,3 +1823,44 @@ fn an_untyped_member_read_poisons_a_return_join() {
     let fa = py_in(src, None);
     assert_eq!(fa.inferred_type_via_bag("r", Point { row: 11, column: 0 }), Some(InferredType::Unknown));
 }
+
+/// `x0 = A()` then `x{i+1} = x{i}.add()`: each call's receiver flows
+/// through every call before it.
+fn python_chain(links: usize) -> String {
+    let mut src = String::from("class A:\n    def add(self):\n        return self\n\ndef f():\n    x0 = A()\n");
+    for i in 0..links {
+        src.push_str(&format!("    x{} = x{i}.add()\n", i + 1));
+    }
+    src
+}
+
+/// The build's receiver stamp answers each link of a flow chain once: past
+/// the registry's depth cap, a per-call walk of the whole chain left the late
+/// calls with no receiver at all.
+#[test]
+fn every_call_on_a_long_chain_gets_a_receiver() {
+    let fa = py_in(&python_chain(300), None);
+    let receivers: Vec<Option<&str>> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "add" && r.member_site().is_some())
+        .map(|r| r.method_target().map(|t| t.invocant_class()))
+        .collect();
+    assert_eq!(receivers.len(), 300);
+    let lost = receivers.iter().filter(|c| **c != Some("A")).count();
+    assert_eq!(lost, 0, "{lost} of 300 calls have no receiver");
+}
+
+/// Deterministic cost pin for the build stamp: a chain twice as long costs
+/// about twice as much; re-walking the prefix per call would be four times.
+#[test]
+fn a_build_stamp_reduces_each_link_once() {
+    let cost = |links| {
+        let src = python_chain(links);
+        let before = crate::model::witnesses::query_rec_bodies();
+        py_in(&src, None);
+        crate::model::witnesses::query_rec_bodies() - before
+    };
+    let (short, long) = (cost(60), cost(120));
+    assert!(long < short * 3, "60 links reduced {short} attachments, 120 reduced {long}: superlinear");
+}

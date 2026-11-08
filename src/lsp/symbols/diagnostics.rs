@@ -182,6 +182,7 @@ pub fn collect_diagnostics(
     // Two lints read every member access's receiver; one resolution serves
     // both. Rides the caller's session when it opened one.
     let _session = crate::model::witnesses::ResolutionSession::enter_with_receivers(module_index);
+    let _pass = analysis.query_pass(Some(module_index));
     let mut diagnostics = Vec::new();
 
     // Plugin-emitted diagnostics (pattern lints) — already decided at
