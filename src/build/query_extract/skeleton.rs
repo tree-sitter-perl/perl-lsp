@@ -277,9 +277,9 @@ pub struct SkeletonAnalysis {
     /// member. A receiver that is itself a member read, down to a variable,
     /// makes the access a place (`PackPlaces`).
     pub member_reads: Vec<MemberRead>,
-    /// Member places an access writes (`obj.x = …`, `obj.x.clear()`), by
-    /// the written member read's span, value or not, and where the write
-    /// lands: what ends a narrowing or a move of that place.
+    /// Places an access writes (`obj.x = …`, `obj.x.clear()`, `head_ = …`),
+    /// by the written token's span, value or not, and where the write lands:
+    /// what ends a narrowing or a move of that place.
     pub place_writes: Vec<(crate::model::file_analysis::Span, tree_sitter::Point)>,
     /// Guard narrowings whose subject is a member read: rooted, cut off and
     /// attached to their place in `into_file_analysis`.
@@ -1461,15 +1461,7 @@ impl SkeletonAnalysis {
             self.init_sites.iter().map(|sp| (sp.start, sp.end)).collect();
         let member_reads = std::mem::take(&mut self.member_reads);
         let places = super::places::PackPlaces::new(var_at, &member_reads);
-        // A plain assignment to a name (`head_ = …`) writes the place that
-        // name denotes, as much as a member assignment does: its target is
-        // the name read at the edge's target point.
-        let mut place_writes = std::mem::take(&mut self.place_writes);
-        {
-            let name_at: std::collections::HashMap<tree_sitter::Point, Span> =
-                places.name_reads().map(|s| (s.start, s)).collect();
-            place_writes.extend(self.flow_edges.iter().filter_map(|e| Some((*name_at.get(&e.target_at)?, e.target_at))));
-        }
+        let place_writes = std::mem::take(&mut self.place_writes);
         let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
             .into_iter()
             .filter_map(|m| {

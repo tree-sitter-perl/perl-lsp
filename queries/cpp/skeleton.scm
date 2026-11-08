@@ -905,15 +905,19 @@
 (assignment_expression
   left: (field_expression) @flow.place)
 
-; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
-; FlowEdge (like a declaration's init) so the moved-from region AND the
-; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
-; TODO(declared-type-across-writes): no `@flow.assign`, so the write binds at
-; `x`, before the rhs reads it. The anchor would land it after, but its
-; reset retires `x`'s declared type, which in C++ holds for life.
+; `x = rhs` writes x once the rhs has read it and replaces what x held, so
+; `x = x.next()` reads the old x on its right.
+; TODO(declared-bounds): the write retires `T x`'s declared type, so an
+; untyped rhs reads unknown (/mnt/project-files/design/php-held-prs/declared-contracts.md).
 (assignment_expression
   left: (identifier) @flow.target
-  right: (_) @flow.source)
+  operator: "="
+  right: (_) @flow.source) @flow.assign
+; A compound write keeps the kind of value x holds.
+(assignment_expression
+  left: (identifier) @flow.rebind
+  operator: _ @_op
+  (#not-eq? @_op "="))
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.

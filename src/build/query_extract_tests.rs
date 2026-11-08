@@ -2605,6 +2605,64 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
         .into_file_analysis()
 }
 
+/// `x = x.add()` reads the x before the write on its right, so each call's
+/// receiver is the previous link's value, one hop back. Each call chases its
+/// whole prefix, so the chain stays inside the registry's depth cap.
+#[test]
+fn every_call_on_a_reassignment_chain_has_its_receiver() {
+    use crate::model::file_analysis::{ReceiverPolicy, RefKind};
+    let links = 150;
+    let mut src = String::from("struct A { A add(); };\nvoid f() {\n  A x;\n");
+    for _ in 0..links {
+        src.push_str("  x = x.add();\n");
+    }
+    src.push_str("}\n");
+    let fa = cpp_fa(&src);
+    let receivers: Vec<Vec<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "add")
+        .map(|r| fa.receiver_classes(r, None, ReceiverPolicy::Navigate).into_iter().collect())
+        .collect();
+    assert_eq!(receivers.len(), links);
+    let lost: Vec<usize> =
+        receivers.iter().enumerate().filter(|(_, c)| c.as_slice() != ["A"]).map(|(i, _)| i).collect();
+    assert!(lost.is_empty(), "{} of {links} calls lost their receiver; first {:?}", lost.len(), lost.first());
+}
+
+/// The receiver class of the first call to `method`.
+fn cpp_receiver_of(fa: &crate::model::file_analysis::FileAnalysis, method: &str) -> Vec<String> {
+    use crate::model::file_analysis::{ReceiverPolicy, RefKind};
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == method)
+        .unwrap_or_else(|| panic!("no call to {method}"));
+    fa.receiver_classes(r, None, ReceiverPolicy::Navigate).into_iter().collect()
+}
+
+/// A write lands after its value: the right side reads what x held, and the
+/// write replaces it.
+#[test]
+fn a_reassignment_writes_after_its_right_side() {
+    let line = "void f() { auto x = A(); x = x.toB(); x.b(); }";
+    let fa = cpp_fa(&format!("struct B {{ int b(); }};\nstruct A {{ B toB(); }};\n{line}\n"));
+    let rhs = line.find("x.toB()").unwrap();
+    let write = fa.flow_edges.iter().find(|e| e.source.start == tree_sitter::Point::new(2, rhs)).expect("the write's edge");
+    assert_eq!(write.target_at, tree_sitter::Point::new(2, rhs + "x.toB()".len()));
+    assert_eq!(cpp_receiver_of(&fa, "toB"), ["A"]);
+    assert_eq!(cpp_receiver_of(&fa, "b"), ["B"]);
+}
+
+/// A compound write names no value of its own, so x keeps its kind.
+#[test]
+fn a_compound_write_keeps_the_declared_type() {
+    use crate::model::file_analysis::Extraction;
+    let fa = cpp_fa("struct S { S& operator+=(int); int m(); };\nvoid f() { S s; s += 1; s.m(); }\n");
+    assert!(fa.flow_edges.iter().any(|e| e.target_name == "s" && e.extraction == Extraction::Rebind));
+    assert_eq!(cpp_receiver_of(&fa, "m"), ["S"]);
+}
+
 /// A functional cast `Foo(1)` is an instance of the class it calls, as
 /// Python's `Foo()` is (`python_pack_tests::calling_a_class_names_it`).
 #[test]

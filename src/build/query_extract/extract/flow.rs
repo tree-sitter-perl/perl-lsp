@@ -16,8 +16,8 @@ struct Target {
     at: Point,
     /// Whether the write resets the binding where it lands.
     resets: bool,
-    /// The target token's own start.
-    token: Point,
+    /// The target token.
+    token: Span,
     /// A `@type.<relative>` annotation's mark and the class in force where
     /// it is written.
     relative: Option<(RelativeClass, String)>,
@@ -34,8 +34,9 @@ pub(super) struct State {
     flow_targets: BTreeMap<usize, Target>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
-    /// cutoff sees them, exactly like Perl's `foreach` var.
-    pub(super) flow_rebinds: Vec<(String, ScopeId, Point, Point)>,
+    /// cutoff sees them, exactly like Perl's `foreach` var. By name, scope,
+    /// where the write lands, and the token.
+    pub(super) flow_rebinds: Vec<(String, ScopeId, Point, Span)>,
     /// Usage-site evidence awaiting the rebind cutoff, which reads the
     /// finished flow edges (`narrowing::finish`): the observed name, its
     /// scope, the observation, and its region before the cutoff.
@@ -140,7 +141,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 Capture::Space { id, .. } => Some(id),
                 _ => None,
             });
-            let target = Target { name, scopes: target_scopes, at, resets, token: e.start, relative, space };
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), relative, space };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
@@ -148,7 +149,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             if resets {
                 reset(&mut out.witnesses, (pack.shape_name)(&e.text), cur_scope, at);
             }
-            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, e.start));
+            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, e.span()));
         }
         Capture::AnonAggMember => {
             // A field typed by an anonymous aggregate: its members are
@@ -432,12 +433,12 @@ pub(super) fn finish(st: &mut ExtractState) {
     let mut member_decls: HashMap<(ScopeId, Point), (ScopeId, Point, String, WitnessAttachment)> = HashMap::new();
     for (mid, Target { name, at, resets, token, relative, space, .. }, scope) in targets {
         let owner = classes.class_of(*scope).filter(|_| field_scope_span.contains_key(&(name.clone(), *scope)));
-        let decl = owner.is_some().then(|| (*scope, *token, name.clone()));
+        let decl = owner.is_some().then(|| (*scope, token.start, name.clone()));
         let var = match owner {
             Some(owner) => {
                 let space = st.pack.member_spaces.of_decl(crate::model::file_analysis::SymKind::Field, *space);
                 let att = WitnessAttachment::holds_of(owner, space, name.clone());
-                member_decls.insert((*scope, *at), (*scope, *token, name.clone(), att.clone()));
+                member_decls.insert((*scope, *at), (*scope, token.start, name.clone(), att.clone()));
                 att
             }
             _ => WitnessAttachment::Variable { name: name.clone(), scope: *scope },
@@ -497,8 +498,15 @@ pub(super) fn finish(st: &mut ExtractState) {
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
-                reassigns: reassigns(name, token),
+                reassigns: reassigns(name, &token.start),
             });
+        }
+    }
+    // A name a value flows into is written where the write lands; its token
+    // denotes the place written.
+    for (&mid, t) in &f.flow_targets {
+        if source_value_span(ad, mid).is_some() {
+            out.place_writes.push((t.token, t.at));
         }
     }
     // A place is whatever its own read projects. A member read's target is
@@ -529,8 +537,9 @@ pub(super) fn finish(st: &mut ExtractState) {
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
     // narrowing cutoff (`Rebind` lowers to nothing — provenance only).
     for (name, scope, at, token) in std::mem::take(&mut f.flow_rebinds) {
+        out.place_writes.push((token, at));
         edges.push(crate::model::file_analysis::FlowEdge {
-            reassigns: reassigns(&name, &token),
+            reassigns: reassigns(&name, &token.start),
             target_name: name,
             target_scope: scope,
             target_at: at,
