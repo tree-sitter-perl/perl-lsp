@@ -270,7 +270,9 @@ impl RefTable {
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
-            if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
+            // A construction's ref sits on its class token, whose value is
+            // the class: the constructed value is the `new` expression's.
+            if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) && !r.constructs() {
                 self.calls_by_span.push(i);
             }
             if member_hop_key(r).is_some() {
