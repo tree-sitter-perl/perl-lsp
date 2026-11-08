@@ -3974,3 +3974,26 @@ fn the_finished_buffer_is_analyzed_only_where_the_written_one_failed_to_parse() 
     let parsed = "<?php\nfunction f($u) {\n  $u->go();\n}\n";
     assert_eq!(ask(parsed, "$u->"), (None, 0));
 }
+
+/// The build's receiver stamp answers each link of a flow chain once: past
+/// the registry's depth cap, a per-call walk of the whole chain left the late
+/// calls with no receiver at all.
+#[cfg(feature = "php")]
+#[test]
+fn every_call_on_a_long_chain_gets_a_receiver() {
+    let mut src = String::from("<?php\nclass A { public function add(): static { return $this; } }\nfunction f() { $x = new A();\n");
+    for _ in 0..300 {
+        src.push_str("$x = $x->add();\n");
+    }
+    src.push_str("}\n");
+    let fa = php(&src);
+    let receivers: Vec<Option<&str>> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "add" && r.member_site().is_some())
+        .map(|r| r.method_target().map(|t| t.invocant_class()))
+        .collect();
+    assert_eq!(receivers.len(), 300);
+    let lost = receivers.iter().filter(|c| **c != Some("A")).count();
+    assert_eq!(lost, 0, "{lost} of 300 calls have no receiver");
+}
