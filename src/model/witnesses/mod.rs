@@ -58,6 +58,13 @@ pub struct WitnessBag {
     /// facts, wherever its writes were made.
     #[serde(skip)]
     var_scopes: HashMap<String, Vec<crate::model::file_analysis::ScopeId>>,
+    /// Each temporal attachment's witnesses in source order, so a read at a
+    /// point finds the writes in force there without walking the rest
+    /// (`live_at`). Only for an attachment of `SPAN_ORDER_MIN` witnesses or
+    /// more: below that the whole read is as cheap as the window, and the
+    /// order would be memory every small variable pays.
+    #[serde(skip)]
+    spans: HashMap<WitnessAttachment, SpanOrder>,
     /// Names this bag's content: every mutation draws a fresh value from
     /// [`next_generation`], so a memo that outlives one query can tell
     /// whether the bag it answered from is still the bag being asked.
@@ -95,6 +102,111 @@ fn witness_hash(w: &Witness) -> u64 {
     h.0.finish()
 }
 
+/// Does `w` hold at `point` of its attachment's lifetime? A zero-width
+/// fact is a point fact that stands from its site on; a region (a fact made
+/// in a nested block) holds only inside its span.
+pub(crate) fn reaches(w: &Witness, point: Point) -> bool {
+    w.span.start == w.span.end || (w.span.start <= point && point <= w.span.end)
+}
+
+const SPAN_ORDER_MIN: usize = 16;
+
+/// One temporal attachment's witnesses ordered by source position, for
+/// `WitnessBag::live_at`. Bag indices throughout.
+#[derive(Debug, Default, Clone)]
+struct SpanOrder {
+    /// Windowed witnesses by `(span.start, bag index)`.
+    windowed: Vec<usize>,
+    /// The write markers, by the same order.
+    resets: Vec<usize>,
+    /// Witnesses whose payload is not windowed: always read.
+    kept: Vec<usize>,
+    /// Point facts, which every read holds wherever it is asked.
+    zero_width: usize,
+    /// A witness the order can't reason about: a ranged write marker (a
+    /// write is a point) or a delta the extension lowering reads whole.
+    opaque: bool,
+}
+
+impl SpanOrder {
+    /// Count the witness at `idx` in, at the end of its lists.
+    fn note(&mut self, w: &Witness, idx: usize) {
+        if w.span.start == w.span.end {
+            self.zero_width += 1;
+        }
+        match &w.payload {
+            WitnessPayload::Extend(_) => self.opaque = true,
+            WitnessPayload::Reset if w.span.start != w.span.end => self.opaque = true,
+            _ => {}
+        }
+        if matches!(w.payload, WitnessPayload::Reset) {
+            self.resets.push(idx);
+        }
+        if w.payload.is_windowed() {
+            self.windowed.push(idx);
+        } else {
+            self.kept.push(idx);
+        }
+    }
+
+    /// `note` for the witness just pushed at `idx`, moved back to its place:
+    /// witnesses mostly land in source order, so the move is short.
+    fn file(&mut self, ws: &[Witness], idx: usize) {
+        self.note(&ws[idx], idx);
+        let at = ws[idx].span.start;
+        for v in [&mut self.windowed, &mut self.resets] {
+            if v.last() != Some(&idx) {
+                continue;
+            }
+            let mut i = v.len() - 1;
+            while i > 0 && ws[v[i - 1]].span.start > at {
+                v.swap(i - 1, i);
+                i -= 1;
+            }
+        }
+    }
+
+    /// The order over `members`, an attachment's witnesses in bag order.
+    fn of(ws: &[Witness], members: &[usize]) -> Self {
+        let mut order = SpanOrder::default();
+        for &i in members {
+            order.note(&ws[i], i);
+        }
+        order.windowed.sort_by_key(|&i| (ws[i].span.start, i));
+        order.resets.sort_by_key(|&i| (ws[i].span.start, i));
+        order
+    }
+
+    fn live_at<'b>(&self, ws: &'b [Witness], point: Point) -> Option<Vec<&'b Witness>> {
+        // With fewer than two point facts the full read can hold a sole
+        // witness, and only the caller can count it.
+        if self.opaque || self.zero_width < 2 {
+            return None;
+        }
+        let start = |i: usize| ws[i].span.start;
+        let upto = self.resets.partition_point(|&i| start(i) <= point);
+        let latest = upto.checked_sub(1).map(|k| start(self.resets[k]));
+        // The earliest write, kept when the latest one retires what precedes
+        // it: it is what says something was bound before.
+        let first = self.resets.first().copied().filter(|&i| latest.is_some_and(|l| start(i) < l));
+        let lo = match (first, latest) {
+            (Some(_), Some(l)) => self.windowed.partition_point(|&i| start(i) < l),
+            _ => 0,
+        };
+        let hi = self.windowed.partition_point(|&i| start(i) <= point);
+        let mut picked: Vec<usize> = self.windowed[lo..hi].to_vec();
+        picked.extend(first);
+        picked.extend(self.kept.iter().copied());
+        picked.retain(|&i| reaches(&ws[i], point));
+        picked.sort_unstable();
+        Some(picked.into_iter().map(|i| &ws[i]).collect())
+    }
+
+    fn heap_bytes(&self) -> usize {
+        (self.windowed.capacity() + self.resets.capacity() + self.kept.capacity()) * std::mem::size_of::<usize>()
+    }
+}
+
 impl<'de> Deserialize<'de> for WitnessBag {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -111,6 +223,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
             witnesses: on_disk.witnesses,
             index: HashMap::new(),
             var_scopes: HashMap::new(),
+            spans: HashMap::new(),
             generation: 0,
             content: None,
         };
@@ -136,6 +249,11 @@ impl WitnessBag {
         let mut idx_bytes = self.index.capacity() * idx_entry;
         for v in self.index.values() {
             idx_bytes += v.capacity() * std::mem::size_of::<usize>();
+        }
+        let span_entry = std::mem::size_of::<(WitnessAttachment, SpanOrder)>() + 1;
+        idx_bytes += self.spans.capacity() * span_entry;
+        for o in self.spans.values() {
+            idx_bytes += o.heap_bytes();
         }
         (vec_bytes, idx_bytes)
     }
@@ -190,10 +308,20 @@ impl WitnessBag {
             }
         }
         slot.push(idx);
+        let ordered = (w.attachment.is_temporal() && slot.len() >= SPAN_ORDER_MIN).then(|| w.attachment.clone());
         if let Some(c) = &mut self.content {
             *c = c.wrapping_add(witness_hash(&w));
         }
         self.witnesses.push(w);
+        if let Some(att) = ordered {
+            match self.spans.get_mut(&att) {
+                Some(order) => order.file(&self.witnesses, idx),
+                None => {
+                    let order = SpanOrder::of(&self.witnesses, &self.index[&att]);
+                    self.spans.insert(att, order);
+                }
+            }
+        }
         idx
     }
 
@@ -246,6 +374,7 @@ impl WitnessBag {
         crate::util::ghost_stats::count_by("bag.rebuild_index_witnesses", self.witnesses.len() as u64);
         self.index.clear();
         self.var_scopes.clear();
+        self.spans.clear();
         for (i, w) in self.witnesses.iter().enumerate() {
             let slot = self.index.entry(w.attachment.clone()).or_default();
             if slot.is_empty() {
@@ -255,6 +384,26 @@ impl WitnessBag {
             }
             slot.push(i);
         }
+        for (att, members) in &self.index {
+            if att.is_temporal() && members.len() >= SPAN_ORDER_MIN {
+                self.spans.insert(att.clone(), SpanOrder::of(&self.witnesses, members));
+            }
+        }
+    }
+
+    /// The witnesses of temporal `att` that can bear on a read at `point`,
+    /// in bag order, already narrowed to those reaching `point`
+    /// (`reaches`) — or `None` when the order can't prove the rest inert
+    /// and the caller must read them all.
+    ///
+    /// A read at `point` sees the latest write at or before it; a windowed
+    /// payload (`WitnessPayload::is_windowed`) before that write is retired
+    /// once an earlier write already answers "was anything bound before",
+    /// and one after `point` is not there yet. Every other payload is kept
+    /// wherever it sits. It answers only for an attachment with two point
+    /// facts, so the full read it stands for never holds a sole witness.
+    pub(crate) fn live_at(&self, att: &WitnessAttachment, point: Point) -> Option<Vec<&Witness>> {
+        self.spans.get(att)?.live_at(&self.witnesses, point)
     }
 
     /// Rewrite every witness in place, keeping push order.
@@ -377,3 +526,6 @@ impl WitnessBag {
 #[cfg(test)]
 #[path = "witnesses_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod live_window_tests;

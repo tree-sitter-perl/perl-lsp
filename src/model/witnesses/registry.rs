@@ -293,6 +293,39 @@ pub(crate) fn fold_memo_equiv_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
 }
 
+/// `PERL_LSP_NO_LIVE_WINDOW=1` (or `without_live_window` in tests) makes a
+/// temporal read walk every witness of its attachment instead of the ones
+/// `WitnessBag::live_at` keeps: the A/B control, and the check that the
+/// window changes no answer.
+pub(crate) fn live_window_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_LIVE_WINDOW").is_some());
+    #[cfg(test)]
+    let disabled = disabled || LIVE_WINDOW_FORCED_OFF.with(|c| c.get());
+    disabled
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_WINDOW_FORCED_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn without_live_window<R>(f: impl FnOnce() -> R) -> R {
+    let prev = LIVE_WINDOW_FORCED_OFF.with(|c| c.replace(true));
+    let out = f();
+    LIVE_WINDOW_FORCED_OFF.with(|c| c.set(prev));
+    out
+}
+
+/// `PERL_LSP_LIVE_WINDOW_EQUIV=1 cargo test` rebuilds every file the suite
+/// touches with the live window off and asserts the analyses agree.
+#[cfg(test)]
+pub(crate) fn live_window_equiv_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PERL_LSP_LIVE_WINDOW_EQUIV").as_deref() == Ok("1"))
+}
+
 impl Drop for FoldMemoScope<'_> {
     fn drop(&mut self) {
         let outer = self.outer.take();
@@ -811,6 +844,18 @@ pub(crate) fn query_rec_bodies() -> u64 {
     QUERY_REC_BODIES.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    static MATERIALIZE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Witnesses this thread's materializations read: the per-query width the
+/// cost pins measure. Read as a difference.
+#[cfg(test)]
+pub(crate) fn materialize_reads() -> u64 {
+    MATERIALIZE_READS.with(|c| c.get())
+}
+
 #[derive(Default)]
 pub struct ReducerRegistry {
     reducers: Vec<Box<dyn WitnessReducer>>,
@@ -860,6 +905,12 @@ impl ReducerRegistry {
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
+    }
+
+    /// The reducers that claim `w`, by name.
+    #[cfg(test)]
+    pub(crate) fn claimants(&self, w: &Witness) -> Vec<&str> {
+        self.reducers.iter().filter(|r| r.claims(w)).map(|r| r.name()).collect()
     }
 
     pub fn register(&mut self, r: Box<dyn WitnessReducer>) {
@@ -2064,13 +2115,37 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> Vec<Witness> {
+        // A variable written N times would otherwise cost N on every read of
+        // it, and a chain of `$x = $x->m` reads it once per write.
+        let point = q.point.filter(|_| q.attachment.is_temporal() && !live_window_disabled());
+        if let Some(live) = point.and_then(|p| bag.live_at(q.attachment, p)) {
+            return self.materialize_raw(bag, q, state, live, false);
+        }
         let raw = bag.for_attachment(q.attachment);
         if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
             let grown = self.lower_extensions(bag, q, state, &raw);
             let grown = Self::grown_witnesses(&raw, &grown);
-            return self.materialize_raw(bag, q, state, Self::splice_grown(&raw, &grown));
+            return self.materialize_reaching(bag, q, state, Self::splice_grown(&raw, &grown));
         }
-        self.materialize_raw(bag, q, state, raw)
+        self.materialize_reaching(bag, q, state, raw)
+    }
+
+    /// `materialize_raw` over the witnesses of `raw` that reach the query
+    /// point.
+    fn materialize_reaching(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        mut raw: Vec<&Witness>,
+    ) -> Vec<Witness> {
+        // A variable's fact made in a nested block is a region that ends
+        // with the block: past it, the fact is not there at all.
+        if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
+            raw.retain(|w| super::reaches(w, p));
+        }
+        let sole = raw.len() == 1;
+        self.materialize_raw(bag, q, state, raw, sole)
     }
 
     /// Replace a place's `Extend` deltas with the shapes they grow: each
@@ -2205,7 +2280,7 @@ impl ReducerRegistry {
             context: q.context,
         };
         let materialized = state.in_opaque_frame(|state| {
-            self.materialize_raw(bag, &base_q, state, Self::splice_grown(raw, &grown))
+            self.materialize_reaching(bag, &base_q, state, Self::splice_grown(raw, &grown))
         });
         let answer = match self.reduce_materialized(&materialized, &base_q) {
             ReducedValue::None => ClassLadder::of(q.attachment)
@@ -2233,23 +2308,22 @@ impl ReducerRegistry {
         ReducedValue::None
     }
 
+    /// `sole_witness`: is this attachment's value a pass-through of ONE
+    /// sub-chase, or a fold over several? With siblings present, whatever a
+    /// sub-chase answers is combined with them before this frame returns, so
+    /// no single exit key names this frame's answer. Counted over every
+    /// witness reaching the point, including any `raw` leaves out.
     fn materialize_raw(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
-        mut raw: Vec<&Witness>,
+        raw: Vec<&Witness>,
+        sole_witness: bool,
     ) -> Vec<Witness> {
-        // A variable's fact made in a nested block is a region that ends
-        // with the block: past it, the fact is not there at all.
-        if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
-            raw.retain(|w| w.span.start == w.span.end || (w.span.start <= p && p <= w.span.end));
-        }
-        // Is this attachment's value a pass-through of ONE sub-chase, or a fold
-        // over several? With siblings present, whatever a sub-chase answers is
-        // combined with them before this frame returns, so no single exit key
-        // names this frame's answer.
-        let sole_witness = raw.len() == 1;
+        crate::util::ghost_stats::count_by("materialize.witnesses_read", raw.len() as u64);
+        #[cfg(test)]
+        MATERIALIZE_READS.with(|c| c.set(c.get() + raw.len() as u64));
         let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         for &w in raw.iter() {
