@@ -941,8 +941,7 @@ impl SkeletonAnalysis {
             map
         };
         // The class each `@receiver.*` token names, by its span: its value's
-        // class where no call says otherwise, and the key a construction on
-        // it is retrieved under.
+        // class where no call says otherwise.
         let mut receiver_class: std::collections::HashMap<Span, String> = std::collections::HashMap::new();
         // Writeback-lite: route method returns through Member so
         // `box.getInner().` chains, inherited returns, and cross-file all
@@ -1625,17 +1624,10 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    // A construction's token names the class it constructs,
-                    // so its reference is retrieved under the class
-                    // reference's key: the class its receiver token names.
-                    target_name: match r.constructs {
-                        true => r
-                            .invocant
-                            .as_ref()
-                            .and_then(|(at, _)| receiver_class.get(at).cloned())
-                            .unwrap_or_else(|| r.name.clone()),
-                        false => r.name.clone(),
-                    },
+                    // A construction is re-keyed to its class by the receiver
+                    // stamp (`stamp_method_call_targets`), once its receiver's
+                    // value has settled.
+                    target_name: r.name.clone(),
                     access,
                     binding,
                     folded_from: None,
