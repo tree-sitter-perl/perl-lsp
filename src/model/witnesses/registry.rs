@@ -165,7 +165,8 @@ type MemoEntry = (std::sync::Arc<ReducedValue>, bool, bool);
 /// holds fixed for one query, and which scope table the context reads.
 type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
 
-/// The answers for one generation of the bag and of the parent graph.
+/// The answers for one generation of the bag and of the parent graph (and,
+/// for a pass over a finished analysis, of the lookup it resolves under).
 /// Generations never repeat, so when either moves on every entry is dead;
 /// holding only the current one keeps the memo bounded by the queries between
 /// two pushes, not by the whole build.
@@ -173,16 +174,45 @@ type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
 struct FoldMemo {
     generation: u64,
     parents_generation: u64,
+    epoch: u64,
+    /// `None`: a build's memo, which admits any bag the build reaches but no
+    /// query that can reach an index. `Some`: a pass's, which admits exactly
+    /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
+    owner: Option<PassOwner>,
     answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>,
 }
 
+/// What a pass-scoped memo may answer for. Addresses, not ids: the scope
+/// borrows both for its whole life, so neither can be freed and reused under
+/// it. Every other bag a cross-file chase reaches (a candidate file, an
+/// enriched overlay copy) can be, which is why only this one is admitted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PassOwner {
+    bag: usize,
+    index: Option<usize>,
+}
+
+fn lookup_addr(idx: &dyn crate::model::file_analysis::CrossFileLookup) -> usize {
+    idx as *const dyn crate::model::file_analysis::CrossFileLookup as *const () as usize
+}
+
+impl FoldMemo {
+    fn admits(&self, bag: &WitnessBag, index: Option<&dyn crate::model::file_analysis::CrossFileLookup>) -> bool {
+        match self.owner {
+            None => index.is_none(),
+            Some(o) => o.bag == bag as *const _ as usize && o.index == index.map(lookup_addr),
+        }
+    }
+}
+
 thread_local! {
-    /// The build's memo, shared by every top-level query while a
-    /// `FoldMemoScope` is open. `None` outside a build.
+    /// The open build's or pass's memo, shared by every top-level query it
+    /// admits while a `FoldMemoScope` is open. `None` outside both.
     static FOLD_MEMO: std::cell::RefCell<Option<FoldMemo>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Shares resolved sub-answers across the top-level queries of one build.
+/// Shares resolved sub-answers across the top-level queries of one build, or
+/// of one pass over a finished analysis.
 ///
 /// The fold asks the same questions many times: every pass, every iteration,
 /// and every call in a chain re-types the chain's prefix. Within a build the
@@ -190,17 +220,44 @@ thread_local! {
 /// build-time queries run with no module index, so nothing outside the file
 /// can move them. Any write to either moves its generation and empties the
 /// memo, and only subtrees that were never cut short are stored.
-pub(crate) struct FoldMemoScope {
+///
+/// A pass (the receiver stamp) asks one query per member access, and a flow
+/// chain (`$x = $x->add()` N times) makes each one re-walk every link before
+/// it: quadratic, and past `QUERY_REC_DEPTH_CAP` the late links answer
+/// nothing. Sharing settled links makes each one answered once.
+pub(crate) struct FoldMemoScope<'a> {
     outer: Option<FoldMemo>,
+    _owner: std::marker::PhantomData<&'a WitnessBag>,
 }
 
-impl FoldMemoScope {
+impl FoldMemoScope<'static> {
     /// `PERL_LSP_NO_FOLD_MEMO=1` leaves the scope closed: the A/B control,
     /// and the check that the memo changes no answer.
     pub(crate) fn enter() -> Self {
-        let fresh = (!build_memos_disabled()).then(FoldMemo::default);
+        Self::open(None)
+    }
+}
+
+impl<'a> FoldMemoScope<'a> {
+    /// A scope for a pass of queries on `bag` under `module_index`, both held
+    /// unchanged for the scope's life. Only queries on that bag under that
+    /// lookup are shared: a cross-file sub-answer folded into one of them is
+    /// a value, but the bag it came from is not pinned, so it is never a key.
+    /// A moved `resolution_epoch` empties the memo, as it does the session's.
+    pub(crate) fn for_pass(
+        bag: &'a WitnessBag,
+        module_index: Option<&'a dyn crate::model::file_analysis::CrossFileLookup>,
+    ) -> Self {
+        Self::open(Some(PassOwner {
+            bag: bag as *const _ as usize,
+            index: module_index.map(lookup_addr),
+        }))
+    }
+
+    fn open(owner: Option<PassOwner>) -> Self {
+        let fresh = (!build_memos_disabled()).then(|| FoldMemo { owner, ..FoldMemo::default() });
         let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
-        FoldMemoScope { outer }
+        FoldMemoScope { outer, _owner: std::marker::PhantomData }
     }
 }
 
@@ -236,17 +293,18 @@ pub(crate) fn fold_memo_equiv_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
 }
 
-impl Drop for FoldMemoScope {
+impl Drop for FoldMemoScope<'_> {
     fn drop(&mut self) {
         let outer = self.outer.take();
         FOLD_MEMO.with(|m| *m.borrow_mut() = outer);
     }
 }
 
-/// True while a `FoldMemoScope` is open with the memo on. Build-time memos
-/// that live beside it ride the same scope, kill switch and equivalence net.
+/// True while a build's `FoldMemoScope` is open with the memo on. Build-time
+/// memos that live beside it ride the same scope, kill switch and equivalence
+/// net; a pass's scope is not a build's.
 pub(crate) fn fold_memo_open() -> bool {
-    FOLD_MEMO.with(|m| m.borrow().is_some())
+    FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.owner.is_none()))
 }
 
 /// Answer `q` from the fold memo, or hand back the generations and key to
@@ -264,18 +322,16 @@ fn fold_memo_probe(
     key: &VisitedKey,
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
-    if !FOLD_MEMO.with(|m| m.borrow().is_some()) {
+    let index = q.context.and_then(|ctx| ctx.module_index);
+    if !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
         return Err(None);
     }
-    let scopes = match q.context {
-        Some(ctx) if ctx.module_index.is_some() => return Err(None),
-        Some(ctx) => ctx.scopes.as_ptr() as usize,
-        None => 0,
-    };
+    let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
     let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
     let stamp = FoldMemoStamp {
         generation: bag.generation(),
         parents_generation: q.context.map(|ctx| ctx.package_parents.generation()),
+        epoch: index.map(|idx| idx.resolution_epoch()),
     };
     let fk = (key.clone(), q.framework, args, scopes);
     let hit = FOLD_MEMO.with(|m| {
@@ -286,6 +342,9 @@ fn fold_memo_probe(
             memo.generation = stamp.generation;
             if let Some(parents_generation) = stamp.parents_generation {
                 memo.parents_generation = parents_generation;
+            }
+            if let Some(epoch) = stamp.epoch {
+                memo.epoch = epoch;
             }
             return None;
         }
@@ -305,21 +364,35 @@ fn fold_memo_probe(
 }
 
 /// The generations a probe saw. A query without a context reads no parent
-/// graph, so it leaves the memo's parent generation alone.
+/// graph, so it leaves the memo's parent generation alone; one without an
+/// index reads no other file, so it leaves the epoch alone.
 struct FoldMemoStamp {
     generation: u64,
     parents_generation: Option<u64>,
+    epoch: Option<u64>,
 }
 
 impl FoldMemoStamp {
     fn matches(&self, memo: &FoldMemo) -> bool {
         memo.generation == self.generation
             && self.parents_generation.map_or(true, |p| p == memo.parents_generation)
+            && self.epoch.map_or(true, |e| e == memo.epoch)
     }
 }
 
 #[inline(never)]
-fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Arc<ReducedValue>, recorded_exit: bool) {
+fn fold_memo_store(
+    fk: Box<(FoldMemoStamp, FoldMemoKey)>,
+    q: &ReducerQuery,
+    result: &std::sync::Arc<ReducedValue>,
+    recorded_exit: bool,
+) {
+    // A walk out of consult budget answers from what it already had, which
+    // no cut records; the budget never comes back within a walk, so "still
+    // available now" means it was available for the whole subtree.
+    if q.context.and_then(|ctx| ctx.module_index).is_some_and(super::session::budget_spent) {
+        return;
+    }
     let (stamp, fk) = *fk;
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
@@ -726,6 +799,18 @@ pub(crate) fn query_rec_truncations() -> u64 {
     QUERY_REC_TRUNCATIONS.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    static QUERY_REC_BODIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Attachments this thread actually reduced, memo hits excluded: the work a
+/// region did, deterministically, for the cost pins. Read as a difference.
+#[cfg(test)]
+pub(crate) fn query_rec_bodies() -> u64 {
+    QUERY_REC_BODIES.with(|c| c.get())
+}
+
 #[derive(Default)]
 pub struct ReducerRegistry {
     reducers: Vec<Box<dyn WitnessReducer>>,
@@ -1005,6 +1090,8 @@ impl ReducerRegistry {
         let poison_before = state.poisoned;
         let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        #[cfg(test)]
+        QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
         let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
@@ -1012,7 +1099,7 @@ impl ReducerRegistry {
             || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before;
         state.visited.remove(&key);
         if let (Some(fk), false) = (fold_key, cut) {
-            fold_memo_store(fk, &result, recorded_exit);
+            fold_memo_store(fk, q, &result, recorded_exit);
         }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
