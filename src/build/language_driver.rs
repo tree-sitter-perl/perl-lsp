@@ -1144,6 +1144,7 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            qualifier: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member
@@ -1190,9 +1191,10 @@ fn remap_spans(
         *region = rspan(*region);
     }
     for m in member_reads.iter_mut() {
-        let crate::build::query_extract::MemberRead { span, receiver, member: _ } = m;
+        let crate::build::query_extract::MemberRead { span, receiver, member: _, token, written: _ } = m;
         *span = rspan(*span);
         *receiver = rspan(*receiver);
+        *token = rspan(*token);
     }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
