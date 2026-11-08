@@ -3008,6 +3008,36 @@ fn cpp_out_of_line_arbitrary_declarator_nesting_and_qualifier_depth() {
     assert_eq!(m.package.as_deref(), Some("Inner"));
 }
 
+/// A qualified call nests a qualifier per segment and a template call's name
+/// sits under its arguments; the `spelled` walk puts the ref on the name
+/// token either way and mints the scopes it passed as the qualifier.
+#[test]
+fn cpp_qualified_call_ref_sits_on_its_name_token() {
+    let src = "int main() {\n  a::b::f(1);\n  ns::g<std::pair<int, int>>(2);\n  ::h();\n}\n";
+    let fa = cpp_fa(src);
+    let call = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == name && matches!(r.kind, crate::model::file_analysis::RefKind::FunctionCall))
+            .unwrap_or_else(|| panic!("a call ref named {name}"))
+    };
+    let token = |r: &crate::model::file_analysis::Ref| {
+        let line = src.lines().nth(r.span.start.row).unwrap();
+        assert_eq!(r.span.start.row, r.span.end.row);
+        line[r.span.start.column..r.span.end.column].to_string()
+    };
+    let package = |r: &crate::model::file_analysis::Ref| match &r.binding {
+        Some(crate::model::file_analysis::RefBinding::Function { package }) => package.clone(),
+        other => panic!("a Function binding, got {other:?}"),
+    };
+    let f = call("a::b::f");
+    assert_eq!((token(f), package(f)), ("f".to_string(), "a::b".to_string()));
+    let g = call("ns::g<std::pair<int, int>>");
+    assert_eq!((token(g), package(g)), ("g".to_string(), "ns".to_string()));
+    let h = call("::h");
+    assert_eq!((token(h), package(h)), ("h".to_string(), String::new()));
+}
+
 /// F8: an out-of-line method whose owning class is declared in a HEADER (absent
 /// here) is NOT a truncation fall-through — the `::` qualifier is authoritative,
 /// so re-anchoring must leave `RE2::Init`'s package as `RE2`, not upgrade it to
@@ -3426,6 +3456,7 @@ fn a_wrapped_receiver_is_read_through_its_wrapper() {
 
 // `this` is the object of the class whose body it is in, not a class named
 // `this`: its value types from the eliding body, never from its spelling.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_this_reads_the_enclosing_class() {
     use crate::build::language_driver::LanguageRegistry;
@@ -3460,4 +3491,178 @@ fn python_call_arg_count_skips_comments() {
     let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
     let call = skel.refs.iter().find(|r| r.name == "f" && r.invocant.is_some()).expect("f member call ref");
     assert_eq!(call.arg_count, Some(2));
+}
+
+/// An assignment writes the member its left side reads, through any
+/// receiver and with any assignment operator: the member token is a write,
+/// and highlight tells it from a read.
+#[test]
+fn cpp_a_member_an_assignment_writes_is_a_write() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use crate::model::file_analysis::AccessKind;
+    let p = std::path::PathBuf::from("/x/write.cpp");
+    let src = "\
+struct Foo { int spin(); };
+struct H {
+    Foo* p;
+    int n;
+    void init(H& o, H* q) {
+        this->p = 0;
+        o.n = 1;
+        q->n += 2;
+        int k = q->n + this->p->spin();
+    }
+};
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let accesses = |name: &str| -> Vec<(usize, AccessKind)> {
+        fa.refs()
+            .iter()
+            .filter(|r| r.target_name == name && r.member_site().is_some())
+            .map(|r| (r.span.start.row, r.access))
+            .collect()
+    };
+    assert_eq!(accesses("p"), vec![(5, AccessKind::Write), (8, AccessKind::Read)]);
+    assert_eq!(accesses("n"), vec![(6, AccessKind::Write), (7, AccessKind::Write), (8, AccessKind::Read)]);
+    let store = OpenDocs::new();
+    let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(p.clone()));
+    let mut seen: Vec<(usize, AccessKind)> = resolve(&store, &fa, key, Point::new(6, 10), None, OverrideScope::default())
+        .highlights()
+        .into_iter()
+        .map(|l| (l.span.start.row, l.access))
+        .collect();
+    seen.sort_by_key(|&(row, _)| row);
+    assert_eq!(
+        seen,
+        vec![(3, AccessKind::Declaration), (6, AccessKind::Write), (7, AccessKind::Write), (8, AccessKind::Read)],
+        "highlight from a written member sees the writes as writes",
+    );
+}
+
+/// A reset call gives its member receiver a value again (`o.v.clear()`), the
+/// same place write that ends a move of `o.v`: its member token is a write
+/// too.
+#[test]
+fn cpp_a_reset_call_writes_its_member_receiver() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::AccessKind;
+    let p = std::path::PathBuf::from("/x/reset.cpp");
+    let src = "\
+struct V { void clear(); int size(); };
+struct H { V v; };
+void f(H& o) {
+    o.v.clear();
+    int n = o.v.size();
+}
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let v: Vec<(usize, AccessKind)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "v" && r.member_site().is_some())
+        .map(|r| (r.span.start.row, r.access))
+        .collect();
+    assert_eq!(v, vec![(3, AccessKind::Write), (4, AccessKind::Read)]);
+}
+
+/// A member write gives the member its value: one this file declares keeps
+/// its declared type over what is written, and one it does not declare
+/// (its class is only forward-declared here) takes the written value.
+#[test]
+fn cpp_a_member_write_is_an_assignment_to_the_member() {
+    use crate::build::language_driver::LanguageRegistry;
+    let p = std::path::PathBuf::from("/x/value.cpp");
+    let src = "\
+struct Foo { int spin(); };
+struct Bar { int turn(); };
+Bar* make_bar();
+struct Remote;
+struct H {
+    Foo* p;
+    void init(Remote* r) {
+        r->q = make_bar();
+        this->p = make_bar();
+    }
+    void use(Remote* r) {
+        auto a = r->q;
+        auto b = this->p;
+        return;
+    }
+};
+";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let at = Point::new(13, 8);
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("a"), Some(InferredType::ClassName("Bar".into())), "an undeclared member takes its write");
+    assert_eq!(ty("b"), Some(InferredType::ClassName("Foo".into())), "a declared member keeps its type");
+}
+
+/// The owner each member write on `row` gave its value: the declared
+/// member it filled, or the `class.member` slot of an undeclared one.
+fn member_write_owners(path: &str, src: &str, row: usize) -> Vec<String> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::Binding;
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+    let p = std::path::PathBuf::from(path);
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let mut owners: Vec<String> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(t) if t == "member_write"))
+        .filter(|w| matches!(&w.payload, WP::Edge(WA::Expr(sp)) if sp.start.row == row))
+        .map(|w| match &w.attachment {
+            WA::Place(place) => match &place.root {
+                Binding::Lexical(id) if place.path.is_empty() => format!("declared {}", fa.symbol(*id).name),
+                other => format!("{other:?} {:?}", place.path),
+            },
+            WA::Field { owner, name } => format!("{owner}.{name}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    owners.sort();
+    owners
+}
+
+/// A write whose value retypes its own receiver settles: `a->b = a` makes
+/// `a->b` a `Node`, so `a->b->b = make_other()` fills `Node.b`, which then
+/// holds two classes and types `a->b` as nothing. A pass that replaced each
+/// round's facts with the next would drop that write every other round and
+/// end, at its bound, without it; the rounds accumulate, so the write keeps
+/// the owner it was given.
+#[test]
+fn cpp_a_write_that_retypes_its_own_receiver_keeps_its_owner() {
+    let src = "\
+struct Node;
+struct Other { int n; };
+Other* make_other();
+void f(Node* a) {
+    a->b = a;
+    a->b->b = make_other();
+}
+";
+    assert_eq!(member_write_owners("/x/retype.cpp", src, 4), vec!["Node.b".to_string()]);
+    assert_eq!(member_write_owners("/x/retype.cpp", src, 5), vec!["Node.b".to_string()]);
+}
+
+/// redis `it->lp.lp = o->ptr`: `lp` names both a union's member and the
+/// field of the struct that member is. A declared member's place is its
+/// binding, never its name, so writing a `zset` into the field leaves the
+/// union's member, the receiver, as declared: the write has one owner.
+#[test]
+fn cpp_a_member_named_like_its_receiver_is_its_own_place() {
+    let src = "\
+typedef struct redisObject { void *ptr; } robj;
+typedef struct zset { int n; } zset;
+typedef struct { union _iterset { struct { unsigned char *lp; } lp; } set; } iter_t;
+typedef union _iterset iterset;
+void g(robj *z, zset *zs) { z->ptr = zs; }
+void f(robj *o, iter_t *op) {
+    iterset *it = &op->set;
+    it->lp.lp = o->ptr;
+}
+";
+    assert_eq!(member_write_owners("/x/retype.c", src, 7), vec!["declared lp".to_string()]);
 }
