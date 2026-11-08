@@ -35,6 +35,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             arg_count: Some(st.adorned.of_match(*mid).filter(|t| t.cap == Capture::Cmd(CmdCap::Arg)).count()),
             constructs: false,
             spaces: None,
+            qualifier: None,
         });
     }
 }
