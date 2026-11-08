@@ -43,7 +43,8 @@ gold asserts answers, these measure behaviour at scale — wall, RSS, and the
 pathologies no fixture reproduces. Every scaling limit in
 `docs/scaling-limits.md` came from them, and none reproduced on synthetic
 input. `corpus/bootstrap.sh` reconstructs all nine on a fresh box (idempotent;
-`corpus/bootstrap.sh "" FHEM` for one). `./kick.sh` opens one in an editor
+`corpus/bootstrap.sh "" FHEM` for one). PHP has its own eleven, `corpus/php/bootstrap.sh`
+(`$PHP_CORPORA`, default `~/php-corpora`; `corpus/php/README.md`). `./kick.sh` opens one in an editor
 without typing paths — `--nodeps`, `--dry`, `--debug`.
 
 `$PERL_CORPORA` (default `~/perl-corpora`) is the ONE root both scripts read:
