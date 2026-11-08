@@ -29,8 +29,9 @@ use super::*;
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
-/// The keys on the current path, each with its depth on it.
-type VisitedSet = std::collections::HashMap<VisitedKey, usize>;
+/// Each on-path key with its position on the path (`QueryState::path_len`
+/// when it entered), so a cut can say which frame it closed at.
+type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
 /// candidate files (`class_candidates_node`), or a free function's exporters
 /// and linkage-visible definitions (`free_function_cross_file`).
@@ -190,15 +191,30 @@ thread_local! {
         const { std::cell::RefCell::new((false, Vec::new())) };
 }
 
-/// `(value, recorded_exit, cut)` — see `QueryState::memo`.
-type MemoEntry = (std::sync::Arc<ReducedValue>, bool, bool);
+/// `(value, recorded_exit, taint)` — see `QueryState::memo`.
+type MemoEntry = (std::sync::Arc<ReducedValue>, bool, u32);
+
+/// The `QueryState::low_cut` a memoized answer replays when it is reused.
+/// Path positions start at 1, so both tainted marks sit at or above the root.
+struct Taint;
+
+impl Taint {
+    const CLEAN: u32 = u32::MAX;
+    /// Shaped by a frame above the answer's own. Which frame is not kept, so
+    /// a reuse claims the shallowest one it could be: the root, whose answer
+    /// is a fresh query by definition.
+    const PATH: u32 = 1;
+    /// The depth cap fired beneath it: no frame above is complete either.
+    const TRUNCATED: u32 = 0;
+}
 
 /// What a fold-memo answer depends on beyond the per-query key and the
 /// generations the memo holds: the framework and arguments the per-query memo
 /// holds fixed for one query, and which scope table the context reads.
 type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
 
-/// The answers for one generation of the bag and of the parent graph.
+/// The answers for one generation of the bag and of the parent graph (and,
+/// for a pass over a finished analysis, of the lookup it resolves under).
 /// Generations never repeat, so when either moves on every entry is dead;
 /// holding only the current one keeps the memo bounded by the queries between
 /// two pushes, not by the whole build.
@@ -206,34 +222,92 @@ type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
 struct FoldMemo {
     generation: u64,
     parents_generation: u64,
+    epoch: u64,
+    /// `None`: a build's memo, which admits any bag the build reaches but no
+    /// query that can reach an index. `Some`: a pass's, which admits exactly
+    /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
+    owner: Option<PassOwner>,
     answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>,
 }
 
+/// What a pass-scoped memo may answer for. Addresses, not ids: the scope
+/// borrows both for its whole life, so neither can be freed and reused under
+/// it. Every other bag a cross-file chase reaches (a candidate file, an
+/// enriched overlay copy) can be, which is why only this one is admitted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PassOwner {
+    bag: usize,
+    index: Option<usize>,
+}
+
+fn lookup_addr(idx: &dyn crate::model::file_analysis::CrossFileLookup) -> usize {
+    idx as *const dyn crate::model::file_analysis::CrossFileLookup as *const () as usize
+}
+
+impl FoldMemo {
+    fn admits(&self, bag: &WitnessBag, index: Option<&dyn crate::model::file_analysis::CrossFileLookup>) -> bool {
+        match self.owner {
+            None => index.is_none(),
+            Some(o) => o.bag == bag as *const _ as usize && o.index == index.map(lookup_addr),
+        }
+    }
+}
+
 thread_local! {
-    /// The build's memo, shared by every top-level query while a
-    /// `FoldMemoScope` is open. `None` outside a build.
+    /// The open build's or pass's memo, shared by every top-level query it
+    /// admits while a `FoldMemoScope` is open. `None` outside both.
     static FOLD_MEMO: std::cell::RefCell<Option<FoldMemo>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Shares resolved sub-answers across the top-level queries of one build.
+/// Shares resolved sub-answers across the top-level queries of one build, or
+/// of one pass over a finished analysis.
 ///
 /// The fold asks the same questions many times: every pass, every iteration,
 /// and every call in a chain re-types the chain's prefix. Within a build the
 /// answers can only change when the bag or the parent graph does, and
 /// build-time queries run with no module index, so nothing outside the file
 /// can move them. Any write to either moves its generation and empties the
-/// memo, and only subtrees that were never cut short are stored.
-pub(crate) struct FoldMemoScope {
+/// memo, and only answers no frame above them shaped are stored: a subtree
+/// cut short by the depth cap, or by a cycle that closed above it, depends on
+/// the path it was reached from.
+///
+/// A pass (the receiver stamp) asks one query per member access, and a flow
+/// chain (`$x = $x->add()` N times) makes each one re-walk every link before
+/// it: quadratic, and past `QUERY_REC_DEPTH_CAP` the late links answer
+/// nothing. Sharing settled links makes each one answered once.
+pub(crate) struct FoldMemoScope<'a> {
     outer: Option<FoldMemo>,
+    _owner: std::marker::PhantomData<&'a WitnessBag>,
 }
 
-impl FoldMemoScope {
+impl FoldMemoScope<'static> {
     /// `PERL_LSP_NO_FOLD_MEMO=1` leaves the scope closed: the A/B control,
     /// and the check that the memo changes no answer.
     pub(crate) fn enter() -> Self {
-        let fresh = (!build_memos_disabled()).then(FoldMemo::default);
+        Self::open(None)
+    }
+}
+
+impl<'a> FoldMemoScope<'a> {
+    /// A scope for a pass of queries on `bag` under `module_index`, both held
+    /// unchanged for the scope's life. Only queries on that bag under that
+    /// lookup are shared: a cross-file sub-answer folded into one of them is
+    /// a value, but the bag it came from is not pinned, so it is never a key.
+    /// A moved `resolution_epoch` empties the memo, as it does the session's.
+    pub(crate) fn for_pass(
+        bag: &'a WitnessBag,
+        module_index: Option<&'a dyn crate::model::file_analysis::CrossFileLookup>,
+    ) -> Self {
+        Self::open(Some(PassOwner {
+            bag: bag as *const _ as usize,
+            index: module_index.map(lookup_addr),
+        }))
+    }
+
+    fn open(owner: Option<PassOwner>) -> Self {
+        let fresh = (!build_memos_disabled()).then(|| FoldMemo { owner, ..FoldMemo::default() });
         let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
-        FoldMemoScope { outer }
+        FoldMemoScope { outer, _owner: std::marker::PhantomData }
     }
 }
 
@@ -269,17 +343,51 @@ pub(crate) fn fold_memo_equiv_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
 }
 
-impl Drop for FoldMemoScope {
+/// `PERL_LSP_NO_LIVE_WINDOW=1` (or `without_live_window` in tests) makes a
+/// temporal read walk every witness of its attachment instead of the ones
+/// `WitnessBag::live_at` keeps: the A/B control, and the check that the
+/// window changes no answer.
+pub(crate) fn live_window_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_LIVE_WINDOW").is_some());
+    #[cfg(test)]
+    let disabled = disabled || LIVE_WINDOW_FORCED_OFF.with(|c| c.get());
+    disabled
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_WINDOW_FORCED_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn without_live_window<R>(f: impl FnOnce() -> R) -> R {
+    let prev = LIVE_WINDOW_FORCED_OFF.with(|c| c.replace(true));
+    let out = f();
+    LIVE_WINDOW_FORCED_OFF.with(|c| c.set(prev));
+    out
+}
+
+/// `PERL_LSP_LIVE_WINDOW_EQUIV=1 cargo test` rebuilds every file the suite
+/// touches with the live window off and asserts the analyses agree.
+#[cfg(test)]
+pub(crate) fn live_window_equiv_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PERL_LSP_LIVE_WINDOW_EQUIV").as_deref() == Ok("1"))
+}
+
+impl Drop for FoldMemoScope<'_> {
     fn drop(&mut self) {
         let outer = self.outer.take();
         FOLD_MEMO.with(|m| *m.borrow_mut() = outer);
     }
 }
 
-/// True while a `FoldMemoScope` is open with the memo on. Build-time memos
-/// that live beside it ride the same scope, kill switch and equivalence net.
+/// True while a build's `FoldMemoScope` is open with the memo on. Build-time
+/// memos that live beside it ride the same scope, kill switch and equivalence
+/// net; a pass's scope is not a build's.
 pub(crate) fn fold_memo_open() -> bool {
-    FOLD_MEMO.with(|m| m.borrow().is_some())
+    FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.owner.is_none()))
 }
 
 /// Answer `q` from the fold memo, or hand back the generations and key to
@@ -297,18 +405,16 @@ fn fold_memo_probe(
     key: &VisitedKey,
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
-    if !FOLD_MEMO.with(|m| m.borrow().is_some()) {
+    let index = q.context.and_then(|ctx| ctx.module_index);
+    if !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
         return Err(None);
     }
-    let scopes = match q.context {
-        Some(ctx) if ctx.module_index.is_some() => return Err(None),
-        Some(ctx) => ctx.scopes.as_ptr() as usize,
-        None => 0,
-    };
+    let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
     let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
     let stamp = FoldMemoStamp {
         generation: bag.generation(),
         parents_generation: q.context.map(|ctx| ctx.package_parents.generation()),
+        epoch: index.map(|idx| idx.resolution_epoch()),
     };
     let fk = (key.clone(), q.framework, args, scopes);
     let hit = FOLD_MEMO.with(|m| {
@@ -319,6 +425,9 @@ fn fold_memo_probe(
             memo.generation = stamp.generation;
             if let Some(parents_generation) = stamp.parents_generation {
                 memo.parents_generation = parents_generation;
+            }
+            if let Some(epoch) = stamp.epoch {
+                memo.epoch = epoch;
             }
             return None;
         }
@@ -333,26 +442,40 @@ fn fold_memo_probe(
         crate::util::ghost_stats::count("residual.memo_under_opaque");
         state.poisoned = true;
     }
-    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, false));
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, Taint::CLEAN));
     Ok(cached)
 }
 
 /// The generations a probe saw. A query without a context reads no parent
-/// graph, so it leaves the memo's parent generation alone.
+/// graph, so it leaves the memo's parent generation alone; one without an
+/// index reads no other file, so it leaves the epoch alone.
 struct FoldMemoStamp {
     generation: u64,
     parents_generation: Option<u64>,
+    epoch: Option<u64>,
 }
 
 impl FoldMemoStamp {
     fn matches(&self, memo: &FoldMemo) -> bool {
         memo.generation == self.generation
             && self.parents_generation.map_or(true, |p| p == memo.parents_generation)
+            && self.epoch.map_or(true, |e| e == memo.epoch)
     }
 }
 
 #[inline(never)]
-fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Arc<ReducedValue>, recorded_exit: bool) {
+fn fold_memo_store(
+    fk: Box<(FoldMemoStamp, FoldMemoKey)>,
+    q: &ReducerQuery,
+    result: &std::sync::Arc<ReducedValue>,
+    recorded_exit: bool,
+) {
+    // A walk out of consult budget answers from what it already had, which
+    // no cut records; the budget never comes back within a walk, so "still
+    // available now" means it was available for the whole subtree.
+    if q.context.and_then(|ctx| ctx.module_index).is_some_and(super::session::budget_spent) {
+        return;
+    }
     let (stamp, fk) = *fk;
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
@@ -382,8 +505,8 @@ pub(super) struct QueryState {
     /// The cross-file fan-outs on the current path, and the answers of those
     /// already walked this query (`fan_out_node`). The bag-free twins of
     /// `visited` and `memo`.
-    fan_outs: std::collections::HashSet<FanOutKey>,
-    fan_out_memo: std::collections::HashMap<FanOutKey, std::sync::Arc<ReducedValue>>,
+    fan_outs: std::collections::HashMap<FanOutKey, u32>,
+    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, u32)>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -398,18 +521,19 @@ pub(super) struct QueryState {
     /// would have poisoned a re-entry from inside a combining frame — so the
     /// fact has to be carried on the entry instead of re-derived.
     ///
-    /// The second flag is "this subtree was cut short": a cycle guard returned
-    /// for an on-path key, or the depth cap fired, somewhere beneath it. Such a
-    /// value depends on the path it was reached from, so it may be reused
-    /// inside this query (the memo always has) but never by another one.
+    /// The taint is the `low_cut` a hit replays (`Taint`): `CLEAN` for a
+    /// value no frame above it shaped, which is what a fresh query of the key
+    /// computes. Any other value depends on the path it was reached from, so
+    /// it may be reused inside this query (the memo always has) but never by
+    /// another one.
     memo: std::collections::HashMap<VisitedKey, MemoEntry>,
-    /// Cuts seen so far in this query; read as a difference across a subtree.
-    cuts: u64,
-    /// The shallowest path depth a cut beneath the current frame returned
-    /// to (`usize::MAX`: none). A frame at depth `d` whose subtree only cut
-    /// back to depth `d` or deeper closed every cycle it entered, so its
-    /// walk is complete; a cut to a shallower key left it open.
-    low_cut: usize,
+    /// Frames on the current path: the next frame's position. Starts at 1, so
+    /// the root is position 1 and 0 lies above every frame.
+    path_len: u32,
+    /// The shallowest path position a cut has closed at since the innermost
+    /// open frame entered (`CLEAN` when none). A frame whose subtree's mark is
+    /// at or below its own position closed every cycle itself.
+    low_cut: u32,
     /// Where a BAKE's chase would have consulted the index, in the order the
     /// ladder reached them.
     ///
@@ -454,29 +578,65 @@ impl QueryState {
         key: FanOutKey,
         walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
     ) -> Option<ReducedValue> {
-        if let Some(v) = self.fan_out_memo.get(&key) {
+        if let Some((v, taint)) = self.fan_out_memo.get(&key) {
+            self.low_cut = self.low_cut.min(*taint);
             return (**v != ReducedValue::None).then(|| (**v).clone());
         }
-        if !self.fan_outs.insert(key.clone()) {
-            self.cuts += 1;
+        if let Some(&at) = self.fan_outs.get(&key) {
+            self.close_cut_at(at);
             return None;
         }
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        let (pos, outer_low) = self.enter_frame();
+        self.fan_outs.insert(key.clone(), pos);
         let v = walk(self);
         self.fan_outs.remove(&key);
+        let taint = self.leave_frame(pos, outer_low, truncations_before);
         self.fan_out_memo
-            .insert(key, std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)));
+            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), taint));
         v
+    }
+
+    /// A cycle guard returned for the frame at path position `at`.
+    fn close_cut_at(&mut self, at: u32) {
+        self.low_cut = self.low_cut.min(at);
+    }
+
+    /// Push a frame: its position, and the mark its subtree restarts from.
+    fn enter_frame(&mut self) -> (u32, u32) {
+        let pos = self.path_len;
+        self.path_len += 1;
+        (pos, std::mem::replace(&mut self.low_cut, Taint::CLEAN))
+    }
+
+    /// Pop the frame at `pos` and fold its subtree's mark into the enclosing
+    /// one. Returns the taint its answer carries: `CLEAN` when every cut
+    /// beneath it closed at this frame or deeper, so the answer is what a
+    /// fresh query of this frame's key computes (the subtree reached nothing
+    /// above it); `PATH` when a cut closed above it; `TRUNCATED` when the
+    /// depth cap fired anywhere beneath it, in this state or a nested one.
+    fn leave_frame(&mut self, pos: u32, outer_low: u32, truncations_before: u64) -> u32 {
+        self.path_len -= 1;
+        let low = self.low_cut;
+        self.low_cut = outer_low.min(low);
+        if low == Taint::TRUNCATED || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
+            Taint::TRUNCATED
+        } else if low < pos {
+            Taint::PATH
+        } else {
+            Taint::CLEAN
+        }
     }
 
     pub(super) fn new() -> Self {
         QueryState {
-            visited: VisitedSet::new(),
-            fan_outs: std::collections::HashSet::new(),
+            visited: std::collections::HashMap::new(),
+            fan_outs: std::collections::HashMap::new(),
             fan_out_memo: std::collections::HashMap::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
-            cuts: 0,
-            low_cut: usize::MAX,
+            path_len: 1,
+            low_cut: Taint::CLEAN,
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
@@ -765,6 +925,30 @@ pub(crate) fn query_rec_truncations() -> u64 {
     QUERY_REC_TRUNCATIONS.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    static QUERY_REC_BODIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Attachments this thread actually reduced, memo hits excluded: the work a
+/// region did, deterministically, for the cost pins. Read as a difference.
+#[cfg(test)]
+pub(crate) fn query_rec_bodies() -> u64 {
+    QUERY_REC_BODIES.with(|c| c.get())
+}
+
+#[cfg(test)]
+thread_local! {
+    static MATERIALIZE_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Witnesses this thread's materializations read: the per-query width the
+/// cost pins measure. Read as a difference.
+#[cfg(test)]
+pub(crate) fn materialize_reads() -> u64 {
+    MATERIALIZE_READS.with(|c| c.get())
+}
+
 #[derive(Default)]
 pub struct ReducerRegistry {
     reducers: Vec<Box<dyn WitnessReducer>>,
@@ -814,6 +998,12 @@ impl ReducerRegistry {
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
+    }
+
+    /// The reducers that claim `w`, by name.
+    #[cfg(test)]
+    pub(crate) fn claimants(&self, w: &Witness) -> Vec<&str> {
+        self.reducers.iter().filter(|r| r.claims(w)).map(|r| r.name()).collect()
     }
 
     pub fn register(&mut self, r: Box<dyn WitnessReducer>) {
@@ -984,7 +1174,7 @@ impl ReducerRegistry {
             // truncates is not wrong, it is incomplete, so comparing a
             // conclusion against it proves nothing either way.
             state.poisoned = true;
-            state.low_cut = 0;
+            state.low_cut = Taint::TRUNCATED;
             // The LIVE counterpart of the poison above, and it has to be
             // thread-local rather than a `QueryState` field: the cap counts
             // frames across the whole THREAD, so it fires inside nested
@@ -1010,13 +1200,9 @@ impl ReducerRegistry {
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
-        if let Some((cached, recorded_exit, cut)) = state.memo.get(&key) {
+        if let Some((cached, recorded_exit, taint)) = state.memo.get(&key) {
             let cached = std::sync::Arc::clone(cached);
-            if *cut {
-                state.cuts += 1;
-                // Where that cut returned to is not recorded: assume the root.
-                state.low_cut = 0;
-            }
+            state.low_cut = state.low_cut.min(*taint);
             // Re-reaching an exiting subtree from inside a combining frame is
             // the same claim as reaching it there the first time; the memo must
             // not launder it into a rung just because the first reach happened
@@ -1038,34 +1224,32 @@ impl ReducerRegistry {
         // `key` has two owners (the visited set, transiently; the memo,
         // for the rest of the query). Clone once for visited, then move
         // the original into the memo store below.
-        let depth_on_path = state.visited.len();
-        if let Some(&target) = state.visited.get(&key) {
-            state.cuts += 1;
-            state.low_cut = state.low_cut.min(target);
+        if let Some(&at) = state.visited.get(&key) {
+            state.close_cut_at(at);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
-        state.visited.insert(key.clone(), depth_on_path);
-        let low_cut_outside = std::mem::replace(&mut state.low_cut, usize::MAX);
         let exits_before = state.residual.len();
         let poison_before = state.poisoned;
-        let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let body = self.query_rec_body(bag, q, depth_on_path, state);
-        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, body));
-        state.low_cut = state.low_cut.min(low_cut_outside);
+        let (pos, outer_low) = state.enter_frame();
+        state.visited.insert(key.clone(), pos);
+        #[cfg(test)]
+        QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
+        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
-        let cut = state.cuts > cuts_before
-            || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before;
         state.visited.remove(&key);
-        if let (Some(fk), false) = (fold_key, cut) {
-            fold_memo_store(fk, &result, recorded_exit);
+        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        // A cycle closed at this frame or beneath it is part of this key's
+        // own answer: a fresh query of the key cuts in the same place.
+        if let (Some(fk), Taint::CLEAN) = (fold_key, taint) {
+            fold_memo_store(fk, q, &result, recorded_exit);
         }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
-        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, cut));
+        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
@@ -1074,7 +1258,7 @@ impl ReducerRegistry {
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
-        depth_on_path: usize,
+        pos: u32,
         state: &mut QueryState,
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
@@ -1129,7 +1313,7 @@ impl ReducerRegistry {
             // finish, so it settles nothing: the member's value is the rest of
             // that cycle, which the frame it started from folds.
             if !ladder.untyped_settles && !bag.for_attachment(q.attachment).is_empty() {
-                let complete = state.low_cut >= depth_on_path;
+                let complete = state.low_cut >= pos;
                 return if complete { ReducedValue::Type(InferredType::Unknown) } else { v };
             }
         }
@@ -2058,13 +2242,37 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> Vec<Witness> {
+        // A variable written N times would otherwise cost N on every read of
+        // it, and a chain of `$x = $x->m` reads it once per write.
+        let point = q.point.filter(|_| q.attachment.is_temporal() && !live_window_disabled());
+        if let Some(live) = point.and_then(|p| bag.live_at(q.attachment, p)) {
+            return self.materialize_raw(bag, q, state, live, false);
+        }
         let raw = bag.for_attachment(q.attachment);
         if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
             let grown = self.lower_extensions(bag, q, state, &raw);
             let grown = Self::grown_witnesses(&raw, &grown);
-            return self.materialize_raw(bag, q, state, Self::splice_grown(&raw, &grown));
+            return self.materialize_reaching(bag, q, state, Self::splice_grown(&raw, &grown));
         }
-        self.materialize_raw(bag, q, state, raw)
+        self.materialize_reaching(bag, q, state, raw)
+    }
+
+    /// `materialize_raw` over the witnesses of `raw` that reach the query
+    /// point.
+    fn materialize_reaching(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        mut raw: Vec<&Witness>,
+    ) -> Vec<Witness> {
+        // A variable's fact made in a nested block is a region that ends
+        // with the block: past it, the fact is not there at all.
+        if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
+            raw.retain(|w| super::reaches(w, p));
+        }
+        let sole = raw.len() == 1;
+        self.materialize_raw(bag, q, state, raw, sole)
     }
 
     /// Replace a place's `Extend` deltas with the shapes they grow: each
@@ -2208,7 +2416,7 @@ impl ReducerRegistry {
             context: q.context,
         };
         let materialized = state.in_opaque_frame(|state| {
-            self.materialize_raw(bag, &base_q, state, Self::splice_grown(raw, &grown))
+            self.materialize_reaching(bag, &base_q, state, Self::splice_grown(raw, &grown))
         });
         let answer = match self.reduce_materialized(&materialized, &base_q) {
             ReducedValue::None => ClassLadder::of(q.attachment)
@@ -2236,23 +2444,22 @@ impl ReducerRegistry {
         ReducedValue::None
     }
 
+    /// `sole_witness`: is this attachment's value a pass-through of ONE
+    /// sub-chase, or a fold over several? With siblings present, whatever a
+    /// sub-chase answers is combined with them before this frame returns, so
+    /// no single exit key names this frame's answer. Counted over every
+    /// witness reaching the point, including any `raw` leaves out.
     fn materialize_raw(
         &self,
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
-        mut raw: Vec<&Witness>,
+        raw: Vec<&Witness>,
+        sole_witness: bool,
     ) -> Vec<Witness> {
-        // A variable's fact made in a nested block is a region that ends
-        // with the block: past it, the fact is not there at all.
-        if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
-            raw.retain(|w| w.span.start == w.span.end || (w.span.start <= p && p <= w.span.end));
-        }
-        // Is this attachment's value a pass-through of ONE sub-chase, or a fold
-        // over several? With siblings present, whatever a sub-chase answers is
-        // combined with them before this frame returns, so no single exit key
-        // names this frame's answer.
-        let sole_witness = raw.len() == 1;
+        crate::util::ghost_stats::count_by("materialize.witnesses_read", raw.len() as u64);
+        #[cfg(test)]
+        MATERIALIZE_READS.with(|c| c.set(c.get() + raw.len() as u64));
         let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         for &w in raw.iter() {
@@ -3296,3 +3503,7 @@ fn follow_one(
 #[cfg(test)]
 #[path = "consult_prefilter_tests.rs"]
 mod consult_prefilter_tests;
+
+#[cfg(test)]
+#[path = "cut_closure_tests.rs"]
+mod cut_closure_tests;

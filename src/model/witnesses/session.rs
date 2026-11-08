@@ -486,6 +486,18 @@ pub(super) fn budget_available(idx: &dyn CrossFileLookup) -> bool {
     .unwrap_or(true)
 }
 
+/// Has this walk run out of consult budget? `budget_available` without its
+/// side effects, for a caller deciding whether an answer is whole.
+/// No walk open (or one on another lookup) has no budget to spend.
+pub(super) fn budget_spent(idx: &dyn CrossFileLookup) -> bool {
+    let id = idx as *const dyn CrossFileLookup as *const () as usize;
+    SESSION.with(|s| {
+        s.borrow().as_ref().filter(|st| st.index_id == id).is_some_and(|st| {
+            st.exhausted || st.fuel == 0 || st.deadline.is_some_and(|d| std::time::Instant::now() >= d)
+        })
+    })
+}
+
 fn note_exhausted(st: &mut SessionState, out_of_time: bool) {
     if !st.exhausted {
         st.exhausted = true;

@@ -79,7 +79,7 @@ pub struct SkelRef {
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
     /// so operator-correctness is a ref query, not a separate walk.
     pub member_op: Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>,
-    /// Written argument count at a call ref (`call`/`qcall`/`member.call`),
+    /// Written argument count at a call ref (`call`/`member.call`),
     /// counted from the argument list the same match captured. Flows to
     /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
@@ -89,6 +89,10 @@ pub struct SkelRef {
     /// The member namespaces `@space.<name>` captures on the member token
     /// state.
     pub spaces: Option<crate::model::file_analysis::SpaceAsk>,
+    /// The scopes a spelled reference is qualified by (`a::b` in
+    /// `a::b::f(...)`), as the `spelled` walk read them off its levels;
+    /// `None` for a reference written unqualified.
+    pub qualifier: Option<String>,
 }
 
 /// One `@expr.call` site.
@@ -310,12 +314,15 @@ pub struct MemberWrite {
 }
 
 /// A member read (`recv.x`, `recv->x`): the whole access, the receiver
-/// expression, and the member's name.
+/// expression, the member's name, the member token its ref sits on, and
+/// whether an access writes the place it denotes (one of `place_writes`).
 #[derive(Debug, Clone)]
 pub struct MemberRead {
     pub span: crate::model::file_analysis::Span,
     pub receiver: crate::model::file_analysis::Span,
     pub member: String,
+    pub token: crate::model::file_analysis::Span,
+    pub written: bool,
 }
 
 /// A `std::move(x)` call: the subject as written and its node, the call,
@@ -1410,6 +1417,10 @@ impl SkeletonAnalysis {
                 places.name_reads().map(|s| (s.start, s)).collect();
             place_writes.extend(self.flow_edges.iter().filter_map(|e| Some((*name_at.get(&e.target_at)?, e.target_at))));
         }
+        // A written member place's member token is a write: references and
+        // highlight tell it from a read.
+        let written_members: std::collections::HashSet<Span> =
+            member_reads.iter().filter(|m| m.written).map(|m| m.token).collect();
         let move_sites: Vec<crate::model::file_analysis::MoveSite> = std::mem::take(&mut self.moved_from)
             .into_iter()
             .filter_map(|m| {
@@ -1463,48 +1474,31 @@ impl SkeletonAnalysis {
             .refs
             .iter()
             .filter_map(|r| {
-                use crate::model::file_analysis::{RefBinding, RefKind};
+                use crate::model::file_analysis::{AccessKind, RefBinding, RefKind};
                 use super::vocab::RefCap;
-                let mut span = Span { start: r.start, end: r.end };
+                let span = Span { start: r.start, end: r.end };
                 let mut binding = None;
+                let mut access = AccessKind::Read;
                 let kind = match r.kind {
                     // Under a use-map a call, and an imported name, is pinned
                     // to its function's namespace (`\Lib\f()` → `Lib`).
+                    // Elsewhere a qualified call (`fmt::format_to(...)`) is
+                    // Perl parity: the whole spelling rides `target_name`,
+                    // the qualifier the `Function` binding, and the ref sits
+                    // on the bare name token (the rename/highlight unit; also
+                    // what claims the `@expr.read.var` at the same start).
                     RefCap::Call | RefCap::Import => {
-                        if let Some((named, _)) = free_call(&r.name, span) {
-                            binding = named
+                        binding = match free_call(&r.name, span) {
+                            Some((named, _)) => named
                                 .pinned()
                                 .filter(|f| !f.namespace.is_empty())
-                                .map(|f| RefBinding::Function { package: f.namespace.clone() });
-                        }
+                                .map(|f| RefBinding::Function { package: f.namespace.clone() }),
+                            None => r.qualifier.clone().map(|package| RefBinding::Function { package }),
+                        };
                         match r.kind {
                             RefCap::Import => RefKind::ImportedName,
                             _ => RefKind::FunctionCall,
                         }
-                    }
-                    // Qualified call (`fmt::format_to(...)`): Perl parity —
-                    // the full path rides `target_name`, the qualifier the
-                    // `Function` binding, and the span narrows to the bare
-                    // name token (the rename/highlight unit; also what
-                    // suppresses the `@expr.read.var` duplicate at the same
-                    // start). The tail segment is an identifier, so it never
-                    // spans rows — the end-anchored column math is safe.
-                    //
-                    // TODO(cpp-qualified-call-spelled): this is `@ref.call` on
-                    // the leaf token plus `@ref.spelled` on the path, as php's
-                    // qualified calls are, but cpp nests a qualifier per
-                    // segment (`a::b::f` is `a::(b::f)`, a template call's
-                    // leaf one level deeper), so the leaf needs a link walk
-                    // down the `name:` fields the document can state.
-                    RefCap::QCall => {
-                        let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
-                        let pkg = pkg?;
-                        span.start = tree_sitter::Point {
-                            row: r.end.row,
-                            column: r.end.column.saturating_sub(bare.len()),
-                        };
-                        binding = Some(RefBinding::Function { package: pkg.to_string() });
-                        RefKind::FunctionCall
                     }
                     // `recv.field` / `recv->field`: a value read. The
                     // invocant types query-time via
@@ -1513,6 +1507,9 @@ impl SkeletonAnalysis {
                         let (inv_span, invocant) = r.invocant.clone()?;
                         let place = places.access(inv_span, &valued).map(Box::new);
                         let invocant = places.receiver(inv_span, invocant, &valued);
+                        if written_members.contains(&span) {
+                            access = AccessKind::Write;
+                        }
                         RefKind::FieldAccess {
                             invocant,
                             invocant_span: Some(inv_span),
@@ -1565,11 +1562,13 @@ impl SkeletonAnalysis {
                     | RefCap::Var
                     | RefCap::Key => return None,
                 };
-                let access = match (write_sites.contains(&(r.start, r.end)), init_sites.contains(&(r.start, r.end))) {
-                    (true, true) => crate::model::file_analysis::AccessKind::WriteIfUnset,
-                    (true, false) => crate::model::file_analysis::AccessKind::Write,
-                    (false, _) => crate::model::file_analysis::AccessKind::Read,
-                };
+                let site = (r.start, r.end);
+                if write_sites.contains(&site) {
+                    access = AccessKind::Write;
+                }
+                if matches!(access, AccessKind::Write) && init_sites.contains(&site) {
+                    access = AccessKind::WriteIfUnset;
+                }
                 Some(crate::model::file_analysis::Ref {
                     kind,
                     span,
@@ -2101,11 +2100,22 @@ fn settle_member_writes(
     use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     // A receiver can be a member another write fills (`self.a.b = v` reads
     // `a`, which `self.a = A()` writes), so the writes settle to a fixed
-    // point, clear-and-emit: each round re-derives every write against the
-    // bag the last round left. Each round that moves settles a write it
-    // could not before or retypes one, so the writes' count bounds it.
-    let mut settled: Vec<Witness> = Vec::new();
+    // point: each round re-derives every write against the bag the rounds
+    // before it left, and keeps only what no earlier round stated. The
+    // rounds accumulate rather than clear-and-emit: a write whose value
+    // retypes its own receiver (redis `it->lp.lp = o->ptr`, where `lp`
+    // names both the struct member and its field) flips its owner every
+    // round, and a replacing pass never settles. A write a later round
+    // retypes keeps the owner an earlier one gave it too, an
+    // over-approximation that ends once no round adds a fact.
+    if writes.is_empty() {
+        return;
+    }
+    let _t = crate::util::ghost_stats::ScopedNs::start("member_write::settle");
+    let mut stated: std::collections::HashSet<(WA, Span)> = Default::default();
+    let mut rounds = 0u64;
     for _ in 0..=writes.len() {
+        rounds += 1;
         let mut values = Vec::new();
         for w in &writes {
             let Some(class) =
@@ -2131,6 +2141,9 @@ fn settle_member_writes(
                     class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
                 ),
             };
+            if !stated.insert((attachment.clone(), w.value)) {
+                continue;
+            }
             values.push(Witness {
                 attachment,
                 source: WitnessSource::Builder(MEMBER_WRITE.into()),
@@ -2138,15 +2151,16 @@ fn settle_member_writes(
                 span: scope.map_or(w.value, |scope| fa.scope(scope).span),
             });
         }
-        let same = |a: &[Witness], b: &[Witness]| {
-            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.attachment == y.attachment && x.span == y.span)
-        };
-        if same(&values, &settled) {
-            return;
+        if values.is_empty() {
+            break;
         }
-        fa.witnesses.remove_by_source_tag(MEMBER_WRITE);
-        settled = values.clone();
         fa.adopt_witnesses(values);
+    }
+    // Once per file, so attributing to the file is cheap: which file pays
+    // the rounds is the question the counters answer.
+    for (tag, n) in [("member_write::writes", writes.len() as u64), ("member_write::rounds", rounds)] {
+        crate::util::ghost_stats::count_by(tag, n);
+        crate::util::ghost_stats::count_for_file(tag, n);
     }
 }
 
