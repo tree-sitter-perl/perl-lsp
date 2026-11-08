@@ -855,6 +855,21 @@ impl Drop for ResolvePass<'_> {
     }
 }
 
+impl FileAnalysis {
+    /// Shares settled registry answers across the queries of one pass over
+    /// this analysis under `module_index` — the receiver stamp, a file's
+    /// lints. A pass asks one query per site, and a site whose value flows
+    /// through earlier ones (`$x = $x->add()`, N times) re-walks every one of
+    /// them: quadratic, and past the registry's depth cap the late sites
+    /// answer nothing. Holds `self` immutable for its life.
+    pub(crate) fn query_pass<'a>(
+        &'a self,
+        module_index: Option<&'a dyn CrossFileLookup>,
+    ) -> crate::model::witnesses::FoldMemoScope<'a> {
+        crate::model::witnesses::FoldMemoScope::for_pass(&self.witnesses, module_index)
+    }
+}
+
 /// Depth budget for a genuinely (non-cyclic) deep chain — the occurs check
 /// is the primary termination guarantee. Not a stack guard: both resolvers
 /// enter through `with_stack_headroom`, so the stack grows past any cap.
@@ -951,6 +966,8 @@ mod tests;
 mod call_ref_index_tests;
 #[cfg(test)]
 mod use_map_tests;
+#[cfg(test)]
+mod query_pass_tests;
 #[cfg(test)]
 mod dispatch_tests;
 
