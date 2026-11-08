@@ -170,6 +170,28 @@ impl RefTable {
         self.refs.push(r);
     }
 
+    /// Re-key ref `i` to `target_name`, moving it between `by_key` buckets
+    /// so the lookups stay what a rebuild would make them.
+    pub fn rekey(&mut self, i: usize, target_name: String, names: &NameSpellings) {
+        let old = self.refs[i].match_key(names);
+        self.refs[i].target_name = target_name;
+        let new = self.refs[i].match_key(names);
+        if old == new {
+            return;
+        }
+        if let Some(bucket) = self.by_key.get_mut(&old) {
+            bucket.retain(|&j| j != i);
+            if bucket.is_empty() {
+                self.by_key.remove(&old);
+            }
+        }
+        // A delegate key already buckets the ref there.
+        let bucket = self.by_key.entry(new).or_default();
+        if let Err(at) = bucket.binary_search(&i) {
+            bucket.insert(at, i);
+        }
+    }
+
     /// Ref indexes whose `match_key` is `key`, in ref order.
     pub fn by_key(&self, key: &str) -> &[usize] {
         self.by_key.get(key).map_or(&[], |v| v.as_slice())
