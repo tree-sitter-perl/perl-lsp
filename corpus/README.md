@@ -2,6 +2,7 @@
 
 Nine large open-source Perl applications, kept because each one measures
 something the others do not. Reconstruct on any box with `corpus/bootstrap.sh`.
+The PHP corpus has its own set and script: `php/README.md`.
 
 ```
 corpus/bootstrap.sh                  # ~/perl-corpora/{bulk,deps}
