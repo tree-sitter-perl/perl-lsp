@@ -232,10 +232,12 @@ pub struct MemberCompletionCtx {
 
 ///
 /// The receiver types on `analysis`, the buffer as written. Where that
-/// leaves it untyped (`Foo::` at the end of a block parses as an ERROR, so
-/// no pattern stated what `Foo` is), it types on `completed`'s analysis of
-/// the buffer the sentinel finished: the same document over the same
-/// receiver bytes, paid for only when the written buffer has no answer.
+/// leaves it untyped and the written buffer failed to parse the access
+/// (`Foo::` at the end of a block is an ERROR, so no pattern stated what
+/// `Foo` is), it types on `completed`'s analysis of the buffer the sentinel
+/// finished: the same document over the same receiver bytes. A site the
+/// written buffer parsed was matched there already, so the finished buffer
+/// can say nothing more about it and is never analyzed.
 #[allow(clippy::too_many_arguments)]
 pub fn member_completion_ctx_incremental(
     parser: &mut Parser,
@@ -267,8 +269,13 @@ pub fn member_completion_ctx_incremental(
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
     // `formatter<int>`) is made HERE, while the index is in hand.
+    let site_end = site.op.map_or(site.recv.end_byte(), |op| op.end_byte());
     let receiver_type = resolve_node_type(site.recv, &doc, cfg, &patched, analysis, module_index)
-        .or_else(|| resolve_node_type(site.recv, &doc, cfg, &patched, &completed(&patched), module_index))
+        .or_else(|| {
+            parsed_as_error(old, site.recv.start_byte(), site_end)
+                .then(|| resolve_node_type(site.recv, &doc, cfg, &patched, &completed(&patched), module_index))
+                .flatten()
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let facts = doc.facts(&site);
     let op_fix = site.op.and_then(|op| operator_fix(op, site.recv, facts.op?, &patched, analysis, cfg));
@@ -285,6 +292,33 @@ pub fn member_completion_ctx_incremental(
         (facts.offers, facts.words)
     };
     Some(MemberCompletionCtx { receiver_type, op_fix, op: facts.op.unwrap_or(MemberOp::Dot), offers, words })
+}
+
+/// Whether the bytes `start..end` of `written` sit in, or overlap, a span
+/// the parser could not read (an ERROR node): the parser's own verdict on
+/// the site, whatever kinds surround it. One descent from the root toward
+/// the site, so no step climbs.
+fn parsed_as_error(written: &Tree, start: usize, end: usize) -> bool {
+    let mut node = written.root_node();
+    loop {
+        if node.is_error() {
+            return true;
+        }
+        let mut cur = node.walk();
+        let mut covering = None;
+        for c in node.children(&mut cur).filter(|c| c.start_byte() < end && c.end_byte() > start) {
+            if c.is_error() {
+                return true;
+            }
+            if c.start_byte() <= start && c.end_byte() >= end {
+                covering = Some(c);
+            }
+        }
+        match covering {
+            Some(c) => node = c,
+            None => return false,
+        }
+    }
 }
 
 /// The domain-comparison completion context: the cursor sits after an

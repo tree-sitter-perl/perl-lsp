@@ -104,7 +104,13 @@ pattern says what `Foo` is, so nothing types it. Then the receiver types on
 an analysis of the buffer the sentinel finished (`completed`), which is the
 same document over the same receiver bytes: no second resolver of class
 spellings. It costs one analysis of the file, paid only when the written
-buffer has no answer.
+buffer has no answer AND failed to parse the access: the receiver through
+its operator is, sits in, or holds an `ERROR` node of the written tree.
+A site the written buffer parsed was matched there already, so the
+finished buffer would type it no differently; an untyped `$u` in `$u->go()`
+stays untyped without the second analysis. Ungated, that analysis ran for
+every untyped receiver and took the composer completion census from 899 s
+to 1,209 s.
 
 ### Receiver → members: tree-free, reusing the bag
 

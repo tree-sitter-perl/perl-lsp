@@ -3883,3 +3883,34 @@ function f($p) {
     assert_eq!(offered(5), ["early", "late", "p"], "below it");
     assert!(fa.resolve_variable("late", tree_sitter::Point::new(3, 4)).is_some(), "it still binds from the top");
 }
+
+/// A receiver the written buffer leaves untyped is typed on the buffer the
+/// sentinel finished only where the written one failed to parse the
+/// access: `Foo::` at the end of a block is an ERROR, so the finished
+/// buffer types `Foo`; `$u->go()` parsed, so its untyped `$u` stays
+/// untyped and the finished buffer is never analyzed.
+#[cfg(feature = "php")]
+#[test]
+fn the_finished_buffer_is_analyzed_only_where_the_written_one_failed_to_parse() {
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("t.php")).unwrap();
+    let ask = |src: &str, cursor_after: &str| {
+        let cursor = src.find(cursor_after).unwrap() + cursor_after.len();
+        let fa = driver.analyze(src);
+        let mut parser = driver.make_parser();
+        let tree = parser.parse(src, None).unwrap();
+        let analyzed = std::cell::Cell::new(0);
+        let completed = |patched: &str| {
+            analyzed.set(analyzed.get() + 1);
+            driver.analyze(patched)
+        };
+        let ctx = crate::build::cursor_sentinel::member_completion_ctx_incremental(
+            &mut parser, &php_pack(), src, &tree, cursor, &fa, None, &completed,
+        )
+        .unwrap();
+        (ctx.receiver_type.and_then(|t| t.class_name().map(str::to_string)), analyzed.get())
+    };
+    let error = "<?php\nclass Foo { const X = 1; }\nfunction f() {\n  Foo::\n}\n";
+    assert_eq!(ask(error, "  Foo::"), (Some("Foo".to_string()), 1));
+    let parsed = "<?php\nfunction f($u) {\n  $u->go();\n}\n";
+    assert_eq!(ask(parsed, "$u->"), (None, 0));
+}
