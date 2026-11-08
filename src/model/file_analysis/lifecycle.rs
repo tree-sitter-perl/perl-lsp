@@ -781,7 +781,21 @@ impl FileAnalysis {
             // session memo's.
             let edge_only = module_index.is_some() && target.single().is_none();
             if !keeps_old && !edge_only {
+                // A construction's token names the class it constructs, so
+                // the site is retrieved under the class its receiver's value
+                // settles to (`new $cls` as much as `new Foo`), decided here
+                // where that value is settled. A receiver of several classes
+                // keeps the token's spelling.
+                // TODO(construction-union-retrieval): one key cannot carry a
+                // union, so such a site is retrieved by no constructor.
+                let class = match self.refs[i].constructs() {
+                    true => target.single().map(|t| t.invocant_class().to_string()),
+                    false => None,
+                };
                 self.refs[i].bind_receiver(target);
+                if let Some(class) = class {
+                    self.refs.rekey(i, class, &self.pack.names);
+                }
             }
         }
     }
