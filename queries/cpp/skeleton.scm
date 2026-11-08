@@ -684,13 +684,20 @@
   function: (identifier) @ref.call
   arguments: (argument_list) @arity.args) @expr.call
 
-; qualified calls (`fmt::format_to(...)`, `detail::vformat_to(...)`,
-; `Widget::create(...)`): the whole path is captured; extraction narrows the
-; ref span to the bare name token and carries the qualifier as
-; `resolved_package` — the namespace-participation half of gr identity.
+; qualified calls (`fmt::format_to(...)`, `a::b::f(...)`,
+; `Widget::create(...)`, `ns::f<T>(...)`) are named by their whole spelling
+; and rewritten at the name token; the scopes they pass are the qualifier the
+; ref resolves in — the namespace-participation half of gr identity.
 (call_expression
-  function: (qualified_identifier) @ref.qcall
+  function: (qualified_identifier) @ref.call @ref.spelled
   arguments: (argument_list) @arity.args) @expr.call
+; The `spelled` walk, rooted at each @ref.spelled: a qualifier nests per
+; segment (`a::b::f` is `a::(b::f)`), each level naming its scope, and a
+; template call's name sits under its argument list (`f` in `f<T>`).
+(qualified_identifier scope: (_) @link.scope) @link.from.spelled
+(qualified_identifier name: (_) @link.name) @link.from.spelled
+(template_function name: (_) @link.base) @link.from.spelled
+(template_method name: (_) @link.base) @link.from.spelled
 
 (function_declarator parameters: (parameter_list) @arity.sig)
 ; each declared parameter of a signature is required, defaulted, or takes
@@ -900,11 +907,6 @@
     field: (field_identifier) @_m)
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
-; A write to a member gives that place a value again: it ends a narrowing or
-; a move of the member. It states no value: the member's is its declaration's.
-(assignment_expression
-  left: (field_expression) @flow.place)
-
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
@@ -913,6 +915,18 @@
 ; reset retires `x`'s declared type, which in C++ holds for life.
 (assignment_expression
   left: (identifier) @flow.target
+  right: (_) @flow.source)
+
+; An assignment writes the place its left side denotes, whatever that is: a
+; member read's place is the member of the class its receiver is
+; (`this->p = v`, `o.p = v`, `q->p += 1`). A write gives that place a value
+; again, so it ends a narrowing or a move of the member. Every assignment
+; operator writes the place; only `=` states the value it takes.
+(assignment_expression
+  left: (_) @flow.place)
+(assignment_expression
+  left: (_) @flow.place
+  operator: "="
   right: (_) @flow.source)
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
