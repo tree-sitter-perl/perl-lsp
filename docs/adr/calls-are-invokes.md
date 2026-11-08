@@ -135,19 +135,22 @@ extra, whatever the pattern.
   member flagged `CONSTRUCTOR` (`@mark.constructor`) in that class's MRO,
   local or cross-file (`resolve_constructor_in_ancestors`), asked by role
   (`MemberKey::Constructor`), never by a name. The site's reference is a
-  `MethodCall` with `constructs: true` on the receiver token, keyed by the
-  class identity the token spells, the same key as the class's own
-  `PackageRef` there, so it adds no ref row. The PostFold stamp freezes the
-  class it dispatches on. The language states that its constructions key
+  `MethodCall` with `constructs: true` on the receiver token. The stamp
+  that freezes the class it dispatches on (`stamp_method_call_targets`)
+  also keys it by that class, so the key is decided where the receiver's
+  value settles: `new $cls` keys by the class `$cls` holds, and a class
+  token by the identity it spells, the same key as the class's own
+  `PackageRef` there, so it adds no ref row. The language states that its constructions key
   by class (`LanguageConventions::construction`, `ConstructionKey::Class`), so a
   constructor's references retrieve under its class and every class
   inheriting it (`TargetRef::retrieval_keys`, from the in-memory class
   graph) and match a site whose class's constructor walk reaches it; Perl
   calls `new` by name and retrieves under the name alone. The companion is a cursor companion, so the token
   navigates to the class, and never rewritable, since it spells the
-  class, so a rename of the constructor refuses. A `new $cls` whose class
-  no producer knows keys by its spelling, so only an in-file walk finds it
-  (`TODO(dynamic-construction-retrieval)`). Python's `Foo()` and C++'s
+  class, so a rename of the constructor refuses. A receiver that settles
+  to several classes, or to one only the index knows, keeps the token's
+  spelling as its key, so no constructor retrieves it
+  (`TODO(construction-union-retrieval)`). Python's `Foo()` and C++'s
   `Foo(x)` are a `Function` whose `constructs` names the class: a class
   that answers the call answers with an instance of itself. Python also
   keys its constructions by class, but mints no companion: whether a call
