@@ -307,10 +307,10 @@ impl FileAnalysis {
             }
         }
 
-        // Collect methods from this class and all ancestors. Perl has no
-        // access-specifier concept, so no symbol here ever carries
-        // "non_public" — `requesting_class: None` is a no-op gate.
-        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, None, None);
+        // Collect methods from this class and all ancestors. No Perl symbol
+        // is private or protected, so the site outside every class names
+        // them all.
+        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, &NamingSite::outside(), None);
 
         candidates
     }
@@ -330,7 +330,7 @@ impl FileAnalysis {
         cls: &str,
         candidates: &mut Vec<CompletionCandidate>,
         seen: &mut HashSet<String>,
-        requesting_class: Option<&str>,
+        site: &NamingSite,
         space: Option<NamespaceId>,
     ) {
         let class_body = self
@@ -395,11 +395,7 @@ impl FileAnalysis {
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
                 && !sym.flags.contains(SymbolFlags::ANONYMOUS)
-                // access-specifier gate: a non-public member
-                // completes only from inside its OWN class's lexical body —
-                // two-state (friend/protected-via-inheritance not modeled).
-                && (requesting_class == Some(cls)
-                    || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && site.may_name(sym.flags, cls)
                 && self.lives_in(sym, space)
                 && seen.insert(sym.name.clone())
             {
@@ -423,7 +419,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Enumerator)
                 && self.symbol_in_class(sym.id, cls)
-                && (requesting_class == Some(cls) || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && site.may_name(sym.flags, cls)
                 && self.lives_in(sym, space)
                 && seen.insert(sym.name.clone())
             {
@@ -449,11 +445,10 @@ impl FileAnalysis {
     /// the real members. Methods (and inherited ones) come from the shared
     /// ancestor walk; fields are this class's `Variable`/`Field` symbols.
     /// `requesting_class` is the class the completion CURSOR is lexically
-    /// inside (`None` from free-standing code) — the access-specifier gate:
-    /// a non-public member offers only when the cursor is
-    /// inside that SAME class's own body. A caller with no cursor context
-    /// passes `None` and safely under-offers to "public only" — it never
-    /// leaks a private member.
+    /// inside (`None` from free-standing code) — the access gate: a private
+    /// member offers only inside its own class, a protected one inside its
+    /// class or a descendant. A caller with no cursor context passes `None`
+    /// and safely under-offers to "public only".
     ///
     /// `offers` is the member namespaces the access reaches (`None`: every
     /// one the language declares). Each is gathered on its own, so a child
@@ -467,18 +462,19 @@ impl FileAnalysis {
         offers: Option<SpaceSet>,
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
+        let site = NamingSite::in_class(self, requesting_class, module_index);
         let declared = (0..self.member_spaces().names.len()).filter_map(|i| u8::try_from(i).ok()).map(NamespaceId);
         for space in declared.filter(|s| offers.is_none_or(|o| o.contains(*s))) {
             let mut seen: HashSet<String> = HashSet::new();
             let space = Some(space);
-            self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, requesting_class, space);
+            self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, &site, space);
             // Data members from this class AND its ancestors. A field lives in
             // its class body scope (or a nested container body — inline unions);
             // a Variable inside a Sub-kind scope is a local/param. Anchored on
             // where each class's methods are declared — that IS the body scope,
             // whichever node carries it.
             self.for_each_ancestor_class(class_name, module_index, |cls| {
-                self.collect_class_fields(cls, &mut candidates, &mut seen, requesting_class, space);
+                self.collect_class_fields(cls, &mut candidates, &mut seen, &site, space);
                 // a class defined in ANOTHER file — pull its fields from the
                 // cached module so cross-file member completion is complete
                 // (methods already cross via collect_ancestor_methods).
@@ -487,7 +483,7 @@ impl FileAnalysis {
                     // live across the set (`seen` dedups).
                     for cached in mi.visible_def_candidates(cls) {
                         mi.whole_present(&cached).collect_class_fields(
-                            cls, &mut candidates, &mut seen, requesting_class, space,
+                            cls, &mut candidates, &mut seen, &site, space,
                         );
                     }
                 }
@@ -644,20 +640,20 @@ impl FileAnalysis {
                 };
                 let scope = flags.set_scope();
                 let write_once = flags.contains(SymbolFlags::READONLY);
-                if scope == SetScope::Anywhere && (!write_once || in_constructor || lazy) {
+                if scope == AccessScope::Anywhere && (!write_once || in_constructor || lazy) {
                     return false;
                 }
                 let declaring = res.class();
                 let in_family = writer.is_some_and(|w| self.class_isa(w, declaring, module_index));
                 let verdict = match scope {
                     // A trait's member is its composer's own.
-                    SetScope::Class
+                    AccessScope::Class
                         if writer != Some(declaring)
                             && !(in_family && self.hit_class_declared(declaring, SymbolFlags::TRAIT, &res, module_index)) =>
                     {
                         MisplacedWriteKind::OutsideClass
                     }
-                    SetScope::Family if !in_family => MisplacedWriteKind::OutsideFamily,
+                    AccessScope::Family if !in_family => MisplacedWriteKind::OutsideFamily,
                     // Only a write-once member has a place it is set in good
                     // form; a write from outside the family to one any code
                     // may set is what its set scope declares.

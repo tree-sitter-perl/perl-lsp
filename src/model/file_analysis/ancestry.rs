@@ -1114,11 +1114,11 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
-        requesting_class: Option<&str>,
+        site: &NamingSite,
         space: Option<NamespaceId>,
     ) {
         self.for_each_ancestor_class(class_name, module_index, |c| {
-            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, requesting_class, space);
+            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, site, space);
             std::ops::ControlFlow::Continue(())
         });
     }
@@ -1132,11 +1132,10 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         candidates: &mut Vec<CompletionCandidate>,
         seen_names: &mut HashSet<String>,
-        requesting_class: Option<&str>,
+        site: &NamingSite,
         space: Option<NamespaceId>,
     ) {
-        // Access-specifier gate: visible from outside
-        // `class_name`'s own body only when NOT tagged non-public.
+        // Access gate: the member's access scope admits the naming site.
         // Callability gate on the same closure so every enumeration loop in
         // this walk (local, plugin-namespace, cross-file) shares it: an
         // anonymous sub (`*__HM_DEDUP = sub () {0}`) is a symbol in the
@@ -1148,8 +1147,7 @@ impl FileAnalysis {
                 // MRO and is invisible cross-file. The point-aware `&name`
                 // lane (`complete_lexical_methods_at`) owns offering it.
                 && !matches!(&sym.detail, SymbolDetail::Sub { lexical: true, .. })
-                && (requesting_class == Some(class_name)
-                    || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && site.may_name(sym.flags, class_name)
                 && self.lives_in(sym, space)
         };
 
@@ -1314,4 +1312,40 @@ pub fn own_method_names<'a>(
         (matches!(s.kind, SymKind::Sub | SymKind::Method) && s.package.as_deref() == Some(class))
             .then(|| s.name.clone())
     })
+}
+
+/// The code naming a member: the class it is written in (`None` for
+/// free-standing code) and every class that class descends from, walked
+/// once so each member's access scope is a set lookup.
+pub(crate) struct NamingSite {
+    class: Option<String>,
+    lineage: HashSet<String>,
+}
+
+impl NamingSite {
+    /// Code outside every class: it names public members only.
+    pub(crate) fn outside() -> Self {
+        NamingSite { class: None, lineage: HashSet::new() }
+    }
+
+    /// Code written in `class` (`None`: outside every class), its lineage
+    /// the MRO walk every other ancestry question takes.
+    pub(crate) fn in_class(fa: &FileAnalysis, class: Option<&str>, module_index: Option<&dyn CrossFileLookup>) -> Self {
+        let Some(class) = class else { return Self::outside() };
+        let mut lineage = HashSet::new();
+        fa.for_each_ancestor_class(class, module_index, |c| {
+            lineage.insert(c.to_string());
+            std::ops::ControlFlow::Continue(())
+        });
+        NamingSite { class: Some(class.to_string()), lineage }
+    }
+
+    /// May this site name a member of `declaring` with these flags?
+    pub(crate) fn may_name(&self, flags: SymbolFlags, declaring: &str) -> bool {
+        match flags.access_scope() {
+            AccessScope::Anywhere => true,
+            AccessScope::Class => self.class.as_deref() == Some(declaring),
+            AccessScope::Family => self.lineage.contains(declaring),
+        }
+    }
 }

@@ -270,6 +270,32 @@ fn member_completion_filters_by_access_specifier() {
     }
 }
 
+/// A `protected:` member is offered inside its class and the classes
+/// derived from it; a `private:` one inside its own class only.
+#[cfg(feature = "cpp")]
+#[test]
+fn member_completion_offers_protected_to_derived_classes() {
+    let fa = cpp_driver().analyze(
+        "class Base {\n\
+         public:\n  int open;\n\
+         protected:\n  int kin;\n  void Normalize();\n\
+         private:\n  int mine;\n  void Secret();\n\
+         };\n\
+         class Kid : public Base {\n\
+         public:\n  void Run();\n\
+         };\n",
+    );
+    let labels = |class: &str, from: Option<&str>| {
+        let mut out: Vec<String> =
+            fa.complete_members_for_class(class, None, from, None).into_iter().map(|c| c.label).collect();
+        out.sort();
+        out
+    };
+    assert_eq!(labels("Kid", Some("Kid")), ["Normalize", "Run", "kin", "open"], "a derived class");
+    assert_eq!(labels("Base", Some("Base")), ["Normalize", "Secret", "kin", "mine", "open"], "its own class");
+    assert_eq!(labels("Kid", None), ["Run", "open"], "outside the hierarchy");
+}
+
 #[cfg(feature = "cpp")]
 fn sym_in<'a>(
     fa: &'a crate::model::file_analysis::FileAnalysis,

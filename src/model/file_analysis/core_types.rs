@@ -623,8 +623,9 @@ bitflags::bitflags! {
         const ABSTRACT = 1 << 2;
         /// A default-named container (`(union)`): structure, not an addressable name.
         const ANONYMOUS = 1 << 3;
-        /// Not public: completes only from inside its own class's body.
-        const NON_PUBLIC = 1 << 4;
+        /// Named only from its declaring class's own code
+        /// (`SymbolFlags::access_scope`).
+        const PRIVATE = 1 << 4;
         /// A union container: its body nests its members in the outline.
         const UNION = 1 << 5;
         /// An `extern` declaration: a definition elsewhere is the landing.
@@ -685,12 +686,16 @@ bitflags::bitflags! {
         /// A storage slot only its declaring class may write (php
         /// `private(set)`).
         const SET_PRIVATE = 1 << 24;
+        /// Named only from its declaring class's code and its descendants'
+        /// (`SymbolFlags::access_scope`).
+        const PROTECTED = 1 << 25;
     }
 }
 
-/// Where a storage slot may be written from (`SymbolFlags::set_scope`).
+/// Where a member may be reached from: named at all
+/// (`SymbolFlags::access_scope`), or written (`SymbolFlags::set_scope`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetScope {
+pub enum AccessScope {
     Anywhere,
     /// The declaring class and its descendants.
     Family,
@@ -699,19 +704,32 @@ pub enum SetScope {
 }
 
 impl SymbolFlags {
+    /// Where the member these flags describe may be named from: its
+    /// declaring class alone when private, the class and its descendants
+    /// when protected, else anywhere.
+    pub fn access_scope(self) -> AccessScope {
+        if self.contains(SymbolFlags::PRIVATE) {
+            AccessScope::Class
+        } else if self.contains(SymbolFlags::PROTECTED) {
+            AccessScope::Family
+        } else {
+            AccessScope::Anywhere
+        }
+    }
+
     /// Where the slot these flags describe may be written from: its stated
     /// set scope, else its class family for a write-once slot, else
-    /// anywhere. `NON_PUBLIC` is not consulted: a non-public member with
+    /// anywhere. `access_scope` is not consulted: a private member with
     /// no set scope answers `Anywhere`.
-    pub fn set_scope(self) -> SetScope {
+    pub fn set_scope(self) -> AccessScope {
         if self.contains(SymbolFlags::SET_PUBLIC) {
-            SetScope::Anywhere
+            AccessScope::Anywhere
         } else if self.contains(SymbolFlags::SET_PRIVATE) {
-            SetScope::Class
+            AccessScope::Class
         } else if self.intersects(SymbolFlags::SET_PROTECTED | SymbolFlags::READONLY) {
-            SetScope::Family
+            AccessScope::Family
         } else {
-            SetScope::Anywhere
+            AccessScope::Anywhere
         }
     }
 }
@@ -753,7 +771,8 @@ impl TryFrom<&str> for SymbolFlags {
             "interface" => SymbolFlags::INTERFACE,
             "abstract" => SymbolFlags::ABSTRACT,
             "anonymous" => SymbolFlags::ANONYMOUS,
-            "non_public" => SymbolFlags::NON_PUBLIC,
+            "private" => SymbolFlags::PRIVATE,
+            "protected" => SymbolFlags::PROTECTED,
             "union" => SymbolFlags::UNION,
             "extern" => SymbolFlags::EXTERN,
             "inline" => SymbolFlags::INLINE,
@@ -1036,10 +1055,10 @@ pub struct MisplacedWrite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MisplacedWriteKind {
     /// Code outside the declaring class of a member only that class may
-    /// set (`SetScope::Class`): the write fails at runtime.
+    /// set (`AccessScope::Class`): the write fails at runtime.
     OutsideClass,
     /// Code outside the declaring class and its descendants
-    /// (`SetScope::Family`): the write fails at runtime.
+    /// (`AccessScope::Family`): the write fails at runtime.
     OutsideFamily,
     /// Code of the class family that no constructor encloses, writing a
     /// write-once member it may set.

@@ -293,8 +293,8 @@ pub struct PackDriver {
     input_fingerprint: Option<fn() -> u64>,
     /// `public:`/`private:`/`protected:` region scan (C preprocessor-free
     /// languages only; `None` when the language has no access-specifier
-    /// concept). Stamps a `non_public` attribute on member symbols so
-    /// completion can filter by visibility.
+    /// concept). Stamps each member symbol's access flag so completion
+    /// can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
     /// The module a file is, for a language that names modules by path
     /// (python). Asks the walk's marker snapshot, else the disk, so it
@@ -636,8 +636,8 @@ impl PackDriver {
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
-        // member symbol non-public when its declaration falls under
-        // `private:`/`protected:`.
+        // member symbol private or protected when its declaration falls
+        // under `private:`/`protected:`.
         if let Some(f) = self.access_regions {
             let regions = crate::util::timings::phase("cpp.access_regions", || f(parser, source));
             stamp_access_regions(fa, &regions);
@@ -959,10 +959,10 @@ fn inject_member_blocks(
     }
 }
 
-/// Tag every member symbol whose declaration falls inside a non-public
-/// access region with a `"non_public"` attribute — a
-/// value-borne fact on the symbol, so member completion filters by asking
-/// the symbol, never by re-deriving visibility from a name/kind guess.
+/// Stamp every member symbol with the access flag of the region its
+/// declaration falls inside — a value-borne fact on the symbol, so member
+/// completion filters by asking the symbol, never by re-deriving
+/// visibility from a name/kind guess.
 /// Span containment (not equality) because a region's span is the whole
 /// declaration node (`field_declaration`/`function_definition`) while a
 /// Method/Sub Symbol's own span can be the narrower body-having node.
@@ -977,18 +977,15 @@ fn stamp_access_regions(fa: &mut FileAnalysis, regions: &[crate::build::cpp_repa
         if sym.package.is_none() {
             continue;
         }
-        let non_public = regions
+        let access = regions
             .iter()
             .filter(|r| contains(&r.span, &sym.span))
             .min_by_key(|r| {
                 let s = r.span;
                 (s.end.row - s.start.row, s.end.column.saturating_sub(s.start.column))
             })
-            .is_some_and(|r| r.non_public);
-        if non_public && !sym.flags.contains(crate::model::file_analysis::SymbolFlags::NON_PUBLIC) {
-            sym.attributes.push("non_public".to_string());
-            sym.flags.insert(crate::model::file_analysis::SymbolFlags::NON_PUBLIC);
-        }
+            .map_or(crate::model::file_analysis::SymbolFlags::empty(), |r| r.access);
+        sym.flags.insert(access);
     }
 }
 

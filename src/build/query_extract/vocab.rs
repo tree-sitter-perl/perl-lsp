@@ -72,13 +72,15 @@ spelled! {
 spelled! {
     /// What a `@mark.<flag>` states about the declaration whose NAME token
     /// it captures. The document says it in a pattern of its own, so a
-    /// modifier in any order, a keyword that is not the flag's spelling
-    /// (`private` → non-public) and a fact about a class read off its body
-    /// all reach the symbol as the flag `flag` names.
+    /// modifier in any order, a keyword stated somewhere else (a `readonly
+    /// class` makes each property readonly) and a fact about a class read
+    /// off its body all reach the symbol as the flag `flag` names.
     pub enum MarkCap {
         Static = "static",
         Abstract = "abstract",
-        NonPublic = "non_public",
+        /// Where a member may be named from (php `private` / `protected`).
+        Private = "private",
+        Protected = "protected",
         Constructor = "constructor",
         Contract = "contract",
         DynamicMembers = "dynamic_members",
@@ -931,7 +933,8 @@ impl MarkCap {
         match self {
             MarkCap::Static => F::STATIC,
             MarkCap::Abstract => F::ABSTRACT,
-            MarkCap::NonPublic => F::NON_PUBLIC,
+            MarkCap::Private => F::PRIVATE,
+            MarkCap::Protected => F::PROTECTED,
             MarkCap::Constructor => F::CONSTRUCTOR,
             MarkCap::Contract => F::CONTRACT,
             MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,

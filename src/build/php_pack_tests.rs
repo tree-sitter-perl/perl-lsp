@@ -479,8 +479,8 @@ trait Proxy { public function __get($n) {} }
 ");
     let flags = |name: &str| fa.symbols().iter().find(|s| s.name.ends_with(name)).unwrap().flags;
     assert_eq!(flags("__construct"), F::CONSTRUCTOR);
-    assert_eq!(flags("make"), F::STATIC | F::NON_PUBLIC);
-    assert_eq!(flags("find"), F::STATIC | F::NON_PUBLIC);
+    assert_eq!(flags("make"), F::STATIC | F::PRIVATE);
+    assert_eq!(flags("find"), F::STATIC | F::PROTECTED);
     assert_eq!(flags("save"), F::ABSTRACT | F::CONTRACT);
     assert_eq!(flags("plain"), F::empty());
     assert_eq!(flags("load"), F::CONTRACT);
@@ -571,10 +571,10 @@ fn properties_are_members_of_their_class() {
     );
     let field = |name: &str| fa.symbols().iter().find(|s| s.kind == SymKind::Field && s.name == name).unwrap();
     assert_eq!(field("total").flags, F::empty());
-    assert_eq!(field("clock").flags, F::STATIC | F::NON_PUBLIC);
-    assert_eq!(field("made").flags, F::NON_PUBLIC);
+    assert_eq!(field("clock").flags, F::STATIC | F::PROTECTED);
+    assert_eq!(field("made").flags, F::PRIVATE);
     assert_eq!(field("qty").flags, F::READONLY);
-    assert_eq!(field("id").flags, F::NON_PUBLIC | F::READONLY);
+    assert_eq!(field("id").flags, F::PRIVATE | F::READONLY);
     assert_eq!(field("id").attributes, ["readonly"]);
     assert_eq!(field("qty").attributes, ["readonly"]);
     assert_eq!(field("count").presentation.label.as_deref(), Some("$count"));
@@ -2922,7 +2922,7 @@ function outside(Point $q) {
 #[cfg(feature = "php")]
 #[test]
 fn set_visibility_is_the_members_set_scope() {
-    use crate::model::file_analysis::{SetScope, SymbolFlags as F};
+    use crate::model::file_analysis::{AccessScope, SymbolFlags as F};
     let fa = php(SET_SCOPES);
     let flags = |name: &str| {
         fa.symbols()
@@ -2939,10 +2939,10 @@ fn set_visibility_is_the_members_set_scope() {
     let scope = |name: &str| flags(name).set_scope();
     assert_eq!(
         ["open", "own", "kin", "mine", "p"].map(scope),
-        [SetScope::Anywhere, SetScope::Class, SetScope::Family, SetScope::Class, SetScope::Class]
+        [AccessScope::Anywhere, AccessScope::Class, AccessScope::Family, AccessScope::Class, AccessScope::Class]
     );
-    assert_eq!(php(READONLY).symbols().iter().find(|s| s.name == "x").unwrap().flags.set_scope(), SetScope::Family);
-    assert_eq!(php(READONLY).symbols().iter().find(|s| s.name == "plain").unwrap().flags.set_scope(), SetScope::Anywhere);
+    assert_eq!(php(READONLY).symbols().iter().find(|s| s.name == "x").unwrap().flags.set_scope(), AccessScope::Family);
+    assert_eq!(php(READONLY).symbols().iter().find(|s| s.name == "plain").unwrap().flags.set_scope(), AccessScope::Anywhere);
 }
 
 /// A write outside the member's set scope fails, whether or not the member
@@ -3833,6 +3833,66 @@ fn member_completion_offers_what_the_operator_reaches() {
     assert_eq!(at("Base::make()->|"), instance, "a call on the class");
     assert_eq!(at("self::$|"), ["count"], "a static property is written `::$x`");
     assert_eq!(at("$b->gr|eet();"), instance, "completing in place of a member");
+}
+
+#[cfg(feature = "php")]
+const ACCESS: &str = "<?php
+namespace App;
+class Base {
+    public $open;
+    protected $kin;
+    private $mine;
+    const OPEN = 1;
+    protected const KIN = 2;
+    private const MINE = 3;
+    public function greet() {}
+    protected function normalize() {}
+    private function secret() {}
+    public function __construct(protected int $made, private int $own) {}
+    public function here() { HERE }
+}
+class Kid extends Base {
+    public function run(Base $b) { KID }
+}
+class Stranger {
+    public function run(Base $b) { STRANGER }
+}
+";
+
+/// A private member is named only from its own class, a protected one
+/// from its class and the classes extending it, a public one anywhere.
+#[cfg(feature = "php")]
+#[test]
+fn a_protected_member_is_offered_in_its_class_and_descendants() {
+    let at = |hole: &str, cursor: &str| {
+        let mut src = ACCESS.to_string();
+        for h in ["HERE", "KID", "STRANGER"] {
+            src = src.replace(h, if h == hole { cursor } else { "" });
+        }
+        labels(&src)
+    };
+    assert_eq!(
+        at("HERE", "$this->|"),
+        ["__construct", "greet", "here", "kin", "made", "mine", "normalize", "open", "own", "secret"],
+        "its own class names every member"
+    );
+    assert_eq!(
+        at("KID", "$this->|"),
+        ["__construct", "greet", "here", "kin", "made", "normalize", "open", "run"],
+        "a subclass names the protected, not the private"
+    );
+    assert_eq!(
+        at("KID", "$b->|"),
+        ["__construct", "greet", "here", "kin", "made", "normalize", "open"],
+        "on any receiver of the family"
+    );
+    assert_eq!(
+        at("KID", "parent::|"),
+        ["KIN", "OPEN", "__construct", "class", "greet", "here", "normalize"],
+        "the parent's protected methods and constants"
+    );
+    assert_eq!(at("STRANGER", "$b->|"), ["__construct", "greet", "here", "open"], "outside the family");
+    assert_eq!(at("STRANGER", "Base::|"), ["OPEN", "__construct", "class", "greet", "here"], "outside the family");
 }
 
 /// A member and a constant or property of one name are two members, each

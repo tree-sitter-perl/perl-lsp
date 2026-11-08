@@ -1433,14 +1433,14 @@ fn language_spellings_have_one_home() {
     let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp, Layer::Build]);
     let seen = count_lines(&files, &|l| twinned.iter().any(|a| l.contains(a.as_str())));
     let allow: &[(&str, usize, &str)] = &[
-        ("build/cpp_reparse/defs.rs", 4, "the C++ keyword table: grammar vocabulary in the pack's own tier"),
+        ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table: grammar vocabulary in the pack's own tier"),
         ("build/packs/php.rs", 1, "`static` as a type keyword inside a declared union (`static|null`): the pack parsing its own type spelling, not the attribute"),
-        ("build/language_driver.rs", 2, "the driver mints two pack attributes (`include_guard`, `non_public`): the minting side"),
+        ("build/language_driver.rs", 1, "the driver mints the pack attribute `include_guard`: the minting side"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
-        ("build/query_extract/vocab.rs", 18, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
+        ("build/query_extract/vocab.rs", 19, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
         ("model/conventions.rs", 2, "Perl's own attribute spellings (`field_attribute_flag`), mapped onto the canonical names: Perl's home"),
-        ("model/file_analysis/core_types.rs", 21, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
+        ("model/file_analysis/core_types.rs", 22, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
         ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub: display text (the fact itself is read as a flag)"),
@@ -1572,7 +1572,7 @@ fn one_table_maps_spellings_to_flags() {
         l.trim_start().starts_with('"') && l.contains("=> SymbolFlags::")
     });
     let allow: &[(&str, usize, &str)] =
-        &[("model/file_analysis/core_types.rs", 20, "the canonical table itself")];
+        &[("model/file_analysis/core_types.rs", 21, "the canonical table itself")];
     let drift = allowlist_drift("spelling → flag tables", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }

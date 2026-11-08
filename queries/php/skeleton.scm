@@ -124,21 +124,46 @@
 
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.
+; Where a member may be named from: `private` its class alone, `protected`
+; its class and the classes extending it.
 (method_declaration
   (visibility_modifier) @_visibility
-  name: (name) @mark.non_public
-  (#any-of? @_visibility "private" "protected"))
+  name: (name) @mark.private
+  (#eq? @_visibility "private"))
 (property_declaration
   (visibility_modifier) @_visibility
-  (property_element name: (variable_name (name) @mark.non_public))
-  (#any-of? @_visibility "private" "protected"))
+  (property_element name: (variable_name (name) @mark.private))
+  (#eq? @_visibility "private"))
 (property_promotion_parameter
   visibility: (visibility_modifier) @_visibility
   name: [
-    (variable_name (name) @mark.non_public)
-    (by_ref (variable_name (name) @mark.non_public))
+    (variable_name (name) @mark.private)
+    (by_ref (variable_name (name) @mark.private))
   ]
-  (#any-of? @_visibility "private" "protected"))
+  (#eq? @_visibility "private"))
+(const_declaration
+  (visibility_modifier) @_visibility
+  (const_element (name) @mark.private)
+  (#eq? @_visibility "private"))
+(method_declaration
+  (visibility_modifier) @_visibility
+  name: (name) @mark.protected
+  (#eq? @_visibility "protected"))
+(property_declaration
+  (visibility_modifier) @_visibility
+  (property_element name: (variable_name (name) @mark.protected))
+  (#eq? @_visibility "protected"))
+(property_promotion_parameter
+  visibility: (visibility_modifier) @_visibility
+  name: [
+    (variable_name (name) @mark.protected)
+    (by_ref (variable_name (name) @mark.protected))
+  ]
+  (#eq? @_visibility "protected"))
+(const_declaration
+  (visibility_modifier) @_visibility
+  (const_element (name) @mark.protected)
+  (#eq? @_visibility "protected"))
 ; A `(set)` visibility says where the member may be written from, apart
 ; from where it may be read. A readonly member stating none is set by its
 ; class and the classes extending it.
