@@ -71,19 +71,19 @@ What it reuses from `misplaced_member_writes`, unchanged: the writer's class
 (`receiver_classes(.., ReceiverPolicy::Stated)`) and the every-arm rule, the
 member lookup (`resolve_field_in_ancestors`, `resolve_method_in_ancestors`
 for calls) and its widened-guess skip, and the family test (`class_isa`).
-The axis is the read visibility the member's flags state:
-`SymbolFlags::NON_PUBLIC` (two-state) on this layer, and
-`SymbolFlags::access_scope()` over `PRIVATE` / `PROTECTED` once it lands,
-which returns the same `Class` / `Family` / `Anywhere` enum `set_scope`
-returns. The verdict is the same match with `access_scope` in place of
-`set_scope`. New: the `DYNAMIC_MEMBERS` skip (a class with `__get` /
+The axis is the read visibility the member's flags state,
+`SymbolFlags::access_scope()` over `PRIVATE` / `PROTECTED`, which returns
+the same `AccessScope` (`Class` / `Family` / `Anywhere`) `set_scope`
+returns; completion already asks it through `NamingSite::may_name`
+(`ancestry.rs`), which is the predicate the diagnostic should share. New: the `DYNAMIC_MEMBERS` skip (a class with `__get` /
 `__call` answers any name), and method calls and class constants
 (`Foo::LIMIT`) alongside value access.
 
 PHP's protected check (`zend_check_protected`) passes in either direction
 along the parent chain: a parent's code may reach a protected member its
-child declares. `class_isa(writer, declaring)` tests one direction only; the
-family test both diagnostics share should test both.
+child declares. `class_isa(writer, declaring)` and `NamingSite`'s lineage
+test one direction only; the family test both diagnostics share should test
+both.
 
 ## `Closure::bind` / `bindTo` / `Closure::call` scope (`TODO(closure-bind-scope)`)
 
