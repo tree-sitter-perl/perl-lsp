@@ -3189,6 +3189,44 @@ function f($x, $y) {
     assert_eq!(fa.inferred_type_via_bag("y", at(src, "return", 0)), None, "not the exit's own arm");
 }
 
+/// An `if` with no later clause whose body ENDS in a statement that leaves
+/// the block leaves the rest of the block to run where its condition
+/// fails: `die` in either spelling, `exit`, and an exit after work or a
+/// comment. A body that may fall through, or a chain with another clause,
+/// says nothing past the `if`.
+#[cfg(feature = "php")]
+#[test]
+fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let exits = [
+        ("die(\"x\");", "die()"),
+        ("{ die; }", "a bare die"),
+        ("{ exit; }", "exit"),
+        ("exit(1);", "exit()"),
+        ("{\n        // why\n        return;\n    }", "a comment before the exit"),
+        ("{ log_it(); return; }", "work, then the exit"),
+        ("{ if ($z) { log_it(); } throw new \\Exception(); }", "a nested block, then the exit"),
+    ];
+    for (body, why) in exits {
+        let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
+        let fa = php(&src);
+        assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let falls_through = [
+        ("{ log_it(); }", "no exit"),
+        ("{ return; log_it(); }", "an exit that is not the last statement"),
+        ("{ if ($z) { return; } }", "an exit only in a nested block"),
+        ("{ return; } else { log_it(); }", "an else clause"),
+        ("{ return; } elseif ($z) { log_it(); }", "an elseif clause"),
+        ("{ diet(); }", "a call that is not die"),
+    ];
+    for (body, why) in falls_through {
+        let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
+        let fa = php(&src);
+        assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
 /// A property of `$this` is a place of the method's object: a guard on
 /// it narrows the member's receiver for dispatch, in the arm and after an
 /// early exit, until something may change it.

@@ -261,9 +261,10 @@
 ; Where a condition decides what runs: an `if` or `elif` body runs where it
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
-; where the left holds, of `or` where it fails. An `if` whose body only
-; leaves the block, with no clause after it, leaves the rest of the block
-; to run where its condition fails.
+; where the left holds, of `or` where it fails. An `if` whose body ends in
+; a statement that leaves the block, with no clause after it, leaves the
+; rest of the block to run where its condition fails: what runs before
+; that statement ends there too, or leaves sooner.
 (if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
@@ -282,10 +283,12 @@
   (_) @narrow.else)
 (boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
 (boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
+; TODO(noreturn-callee): `sys.exit()` and any call that never returns
+; leave too, which only a fact on the callee can say.
 (if_statement
   condition: (_) @narrow.cond
   consequence: (block
-    . [(return_statement) (raise_statement) (continue_statement) (break_statement)] .)
+    [(return_statement) (raise_statement) (continue_statement) (break_statement)] .)
   !alternative) @narrow.exit
 
 ; `return EXPR` — the returned expression carries its own witness; this marks

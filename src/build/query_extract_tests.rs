@@ -2249,6 +2249,85 @@ void f(Base* b, std::optional<Widget> o) {
 }
 
 #[test]
+fn a_pack_exit_is_the_last_statement_of_the_body() {
+    // An `if` body that ENDS in a statement leaving the block never falls
+    // through, whatever runs before that statement: a comment, a call, a
+    // nested block. One whose last statement stays narrows nothing after.
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let src = "\
+class Foo:
+    pass
+def f(x):
+    if not isinstance(x, Foo):
+        # why
+        return
+    x.run()
+def g(x, z):
+    if not isinstance(x, Foo):
+        if z:
+            log()
+        raise ValueError()
+    x.run()
+def h(x):
+    if not isinstance(x, Foo):
+        log()
+    x.run()
+def k(x):
+    if not isinstance(x, Foo):
+        return
+        log()
+    x.run()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    let rows: Vec<usize> = src.lines().enumerate().filter(|(_, l)| l.contains("x.run()")).map(|(i, _)| i).collect();
+    let at = |row| fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 });
+    assert_eq!(at(rows[0]), class("Foo"), "a comment, then return");
+    assert_eq!(at(rows[1]), class("Foo"), "a nested block, then raise");
+    assert_ne!(at(rows[2]), class("Foo"), "no exit");
+    assert_ne!(at(rows[3]), class("Foo"), "an exit that is not the last statement");
+
+    let src = "\
+void f(std::optional<Widget> o) {
+    if (!o) {
+        // why
+        return;
+    }
+    o->run();
+}
+void g(std::optional<Widget> o) {
+    if (!o) {
+        log();
+        throw 1;
+    }
+    o->run();
+}
+void h(std::optional<Widget> o) {
+    if (!o) {
+        log();
+    }
+    o->run();
+}
+void k(std::optional<Widget> o) {
+    if (!o) {
+        return;
+        log();
+    }
+    o->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let rows: Vec<usize> = src.lines().enumerate().filter(|(_, l)| l.contains("o->run()")).map(|(i, _)| i).collect();
+    let at = |row| fa.inferred_type_via_bag("o", tree_sitter::Point { row, column: 4 });
+    assert_eq!(at(rows[0]), class("Widget"), "a comment, then return");
+    assert_eq!(at(rows[1]), class("Widget"), "a call, then throw");
+    assert_ne!(at(rows[2]), class("Widget"), "no exit");
+    assert_ne!(at(rows[3]), class("Widget"), "an exit that is not the last statement");
+}
+
+#[test]
 fn cpp_optional_same_name_narrows_to_own_inner_type_per_function() {
     // GOAL-3 regression: `annot_text_by_var` is keyed by (name, SCOPE), so two
     // functions each with a `std::optional<...> opt` of a DIFFERENT inner type

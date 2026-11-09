@@ -447,8 +447,13 @@
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
 ; runs where the left holds, of `||` where it fails. An `if` whose body
-; only leaves the block, with no clause after it, leaves the rest of the
-; block to run where its condition fails.
+; ends in a statement that leaves the block, with no clause after it,
+; leaves the rest of the block to run where its condition fails: what runs
+; before that statement ends there too, or leaves sooner. `die` and a
+; called `exit` are calls by the grammar's reading (`die;` a bare name),
+; and the language reserves both words, so their spelling names them.
+; A comment after the leaving statement is a named child too, and hides
+; it from the closing anchor.
 (if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
 (if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (else_if_clause condition: (_) @narrow.cond body: (_) @narrow.then)
@@ -469,12 +474,20 @@
     (exit_statement)
     (expression_statement (throw_expression))
     (compound_statement
-      . [(return_statement)
-         (continue_statement)
-         (break_statement)
-         (exit_statement)
-         (expression_statement (throw_expression))] .)]
+      [(return_statement)
+       (continue_statement)
+       (break_statement)
+       (exit_statement)
+       (expression_statement (throw_expression))] .)]
   !alternative) @narrow.exit
+((if_statement
+   condition: (_) @narrow.cond
+   body: [
+     (expression_statement [(function_call_expression function: (name) @_exit) (name) @_exit])
+     (compound_statement
+       (expression_statement [(function_call_expression function: (name) @_exit) (name) @_exit]) .)]
+   !alternative) @narrow.exit
+ (#any-of? @_exit "die" "exit"))
 
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the

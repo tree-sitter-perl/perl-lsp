@@ -1018,8 +1018,10 @@
 ; Where a condition decides what runs: an `if` body runs where it holds,
 ; its `else` where it fails; a ternary yields its consequence or its
 ; alternative; the right of `&&` runs where the left holds, of `||` where
-; it fails. An `if` whose body only leaves the block, with no `else`,
-; leaves the rest of the block to run where its condition fails. The
+; it fails. An `if` whose body ends in a statement that leaves the
+; block, with no `else`, leaves the rest of the block to run where its
+; condition fails: what runs before that statement ends there too, or
+; leaves sooner. The
 ; edge-driven cutoff ends a narrowing at any rebind.
 (if_statement condition: (condition_clause value: (_) @narrow.cond) consequence: (_) @narrow.then)
 (if_statement condition: (condition_clause value: (_) @narrow.cond) alternative: (_) @narrow.else)
@@ -1027,15 +1029,18 @@
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
+; TODO(noreturn-callee): `std::abort()`, `exit()` and a `[[noreturn]]`
+; callee leave too, which only a fact on the callee can say.
 (if_statement
   condition: (condition_clause value: (_) @narrow.cond)
   consequence: [
     (return_statement)
+    (co_return_statement)
     (throw_statement)
     (continue_statement)
     (break_statement)
     (compound_statement
-      . [(return_statement) (throw_statement) (continue_statement) (break_statement)] .)]
+      [(return_statement) (co_return_statement) (throw_statement) (continue_statement) (break_statement)] .)]
   !alternative) @narrow.exit
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----

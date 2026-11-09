@@ -145,6 +145,7 @@ fn positions(ad: &Adorned<'_, '_>, mid: usize) -> Vec<(Span, bool)> {
             Capture::Narrow(NarrowCap::Then) => Some((e.span(), true)),
             Capture::Narrow(NarrowCap::Else) => Some((e.span(), false)),
             Capture::Narrow(NarrowCap::Exit) => {
+                // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
                 let block = ad.tree.node(e.site).enclosing_sites().next()?;
                 Some((Span { start: e.end, end: block.ts().end_position() }, false))
             }

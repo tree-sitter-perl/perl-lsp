@@ -320,7 +320,17 @@ fails) or `@narrow.unset` (the swap). A **connective** is a node marked
 parenthesis). A **position** match marks a condition `@narrow.cond` and
 what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
 it fails, and `@narrow.exit` is a statement that leaves its block unless
-the condition fails, so the rest of that block runs where it fails. An
+the condition fails, so the rest of that block runs where it fails. Each
+document marks an `if` with no later clause whose body is, or ENDS in, a
+statement that leaves (the closing anchor alone: what runs before it ends
+there too or leaves sooner, so a leading comment or a logging call does
+not hide the exit). A comment AFTER the exit inside the body is a named
+child the anchor counts, and tree-sitter does not honour an anchor after
+a quantified `(comment)*`, so that spelling narrows nothing. PHP names
+`die` (a call, or a bare `die;`) and a called `exit` by spelling, which
+the language reserves; a call that never returns by its callee's nature
+(`sys.exit()`, `std::abort()`, `[[noreturn]]`) needs a fact on the
+callee (`TODO(noreturn-callee)`). An
 atom climbs to each condition above it through connectives alone (an
 atom inside a call argument is no part of the condition), and the
 connectives on the way decide its value in each of the condition's
