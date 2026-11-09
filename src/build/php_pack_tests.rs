@@ -1488,6 +1488,63 @@ class Node {
     assert_eq!(receivers, [node(), node(), node(), node()]);
 }
 
+/// `self` and `parent` name a class only inside a class body: a method's
+/// return, parameter and caught exception name the class around it (or
+/// the one it extends), through a nested closure too, while a free
+/// function's name none, whatever namespace holds it.
+#[cfg(feature = "php")]
+#[test]
+fn self_and_parent_name_no_class_outside_a_class_body() {
+    use crate::model::file_analysis::{InferredType as T, RefKind};
+    let fa = php("<?php
+namespace App;
+
+class Base { public function hop() {} }
+class Node extends Base {
+    public function me(): self {}
+    public function up(): parent {}
+    public function link(self $other, parent $up) {
+        try {} catch (self $e) { $e->hop(); }
+        $other->hop();
+        $up->hop();
+        $f = function (self $n) { $n->hop(); };
+    }
+}
+function made(): self {}
+function loose(self $x, parent $y) {
+    try {} catch (self $e) { $e->hop(); }
+    $x->hop();
+    $y->hop();
+}
+");
+    let ret = |m: &str| fa.find_method_return_type("App\\Node", m, None, None);
+    assert_eq!(ret("me"), Some(T::ClassName("App\\Node".into())));
+    assert_eq!(ret("up"), Some(T::ClassName("App\\Base".into())));
+    assert_eq!(fa.sub_return_type_at_arity("made", Some(0)), None, "a free function's `self`");
+    let receivers: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
+        .map(|r| {
+            let class = fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate);
+            (r.span.start.row, class.single().map(str::to_string))
+        })
+        .collect();
+    let class = |c: &str| Some(c.to_string());
+    assert_eq!(
+        receivers,
+        [
+            (8, class("App\\Node")),
+            (9, class("App\\Node")),
+            (10, class("App\\Base")),
+            (11, class("App\\Node")),
+            (16, None),
+            (17, None),
+            (18, None),
+        ]
+    );
+}
+
 /// A call's value is its callee's declared return, so a chain of calls
 /// types hop by hop: every receiver in `$this->with()->again()->…->tick()`
 /// is the class the previous call returns, and a free call's value starts

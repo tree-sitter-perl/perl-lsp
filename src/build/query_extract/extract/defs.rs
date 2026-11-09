@@ -150,11 +150,13 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     }
     // A written return resolves like a parameter's type once the walk is
     // done (`resolve_returns`): a spelling at its site, a relative mark
-    // through the class the def is written in.
+    // through the class body the def is written in, which only the walk
+    // knows; outside every class body the mark names none.
     let mut written_return = false;
     let return_type = match mine(Capture::RetType) {
         Some(t) if names_relative(ad, t).is_some() => {
-            written_return = pkg.is_some();
+            st.minted[ix].return_home = super::scopes::enclosing_class(st).map(str::to_string);
+            written_return = st.minted[ix].return_home.is_some();
             None
         }
         Some(t) => {
@@ -241,7 +243,7 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
         let Some(written) = ad.in_match(e.match_id, Capture::RetType) else { continue };
         let t = match names_relative(ad, written) {
             Some(rel) => {
-                let class = st.out.symbols[i].package.clone();
+                let class = st.minted[ix].return_home.take();
                 class.and_then(|c| st.out.relative_class(rel, &c)).map(|c| rel.returns(c))
             }
             None => match st.out.symbols[i].return_type.take() {

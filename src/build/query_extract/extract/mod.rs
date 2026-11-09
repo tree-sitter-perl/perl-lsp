@@ -218,6 +218,9 @@ struct Minted {
     /// On a def node: the `symbols` row it pushed, whose written return
     /// resolves once every row is in (`defs::resolve_returns`).
     return_row: Option<usize>,
+    /// On a def node whose written return names a class by where it is
+    /// written (`@type.<relative>`): the class body the def is written in.
+    return_home: Option<String>,
 }
 
 /// A member read (`@expr.member`): the receiver it reads through, the

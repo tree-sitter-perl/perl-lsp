@@ -18,9 +18,9 @@ struct Target {
     resets: bool,
     /// The target token.
     token: Span,
-    /// A `@type.<relative>` annotation's mark and the class in force where
-    /// it is written.
-    relative: Option<(RelativeClass, String)>,
+    /// A `@type.<relative>` annotation's mark and the class body it is
+    /// written in; outside every class body the mark names none.
+    relative: Option<(RelativeClass, Option<String>)>,
     /// The namespace the token's `@space.*` names: a data member's
     /// declaration is its member identity's, so two members of one name in
     /// one class (php's `const X` and `$X`) never share a fact.
@@ -71,9 +71,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     let ad = st.adorned;
     let cur_scope = st.cur_scope;
-    let target_scopes = match e.cap {
-        Capture::Flow(FlowCap::Target) => super::defs::binding_scopes(st, e),
-        _ => Vec::new(),
+    let (target_scopes, enclosing) = match e.cap {
+        Capture::Flow(FlowCap::Target) => {
+            (super::defs::binding_scopes(st, e), super::scopes::enclosing_class(st).map(str::to_string))
+        }
+        _ => (Vec::new(), None),
     };
     let f = &mut st.flow;
     let out = &mut st.out;
@@ -133,9 +135,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
                 }
-                if let (Some(rel), Some(class)) = (super::defs::names_relative(ad, annot), st.package.as_ref()) {
-                    relative = Some((rel, class.clone()));
-                }
+                relative = super::defs::names_relative(ad, annot).map(|rel| (rel, enclosing));
             }
             let space = ad.on(e).find_map(|t| match t.cap {
                 Capture::Space { id, .. } => Some(id),
@@ -478,7 +478,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             // A type naming a class by where it is written is that class,
             // already an identity; any other spelling resolves at its site.
             let annot_type = match relative {
-                Some((rel, class)) => out.relative_class(*rel, class).map(InferredType::ClassName),
+                Some((rel, class)) => class.as_ref().and_then(|c| out.relative_class(*rel, c)).map(InferredType::ClassName),
                 None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
             };
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
