@@ -179,10 +179,10 @@ pub struct SkeletonAnalysis {
     /// token declares — so two declarations of one member (`#if` arms, one
     /// struct name defined in two function bodies) keep their own facts.
     pub member_decl_facts: Vec<(crate::model::file_analysis::ScopeId, Point, String, crate::model::witnesses::Witness)>,
-    /// Variable reads (`@expr.read.var`): (name, scope, span). Each resolves
-    /// to the nearest visible Variable declaration by lexical scope walk →
-    /// local goto-def + hover. Resolution runs in `into_file_analysis`.
-    pub var_reads: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
+    /// Variable reads (`@expr.read.var`). Each resolves to the nearest
+    /// visible Variable declaration by lexical scope walk → local goto-def +
+    /// hover. Resolution runs in `into_file_analysis`.
+    pub var_reads: Vec<VarRead>,
     /// Writes of a variable a def the write can see already declares (a
     /// `@def.assigned` that is not its name's first): (name, scope, name
     /// token span). Each resolves like a read and is minted as a write.
@@ -330,6 +330,25 @@ pub struct MemberRead {
     pub member: String,
     pub token: crate::model::file_analysis::Span,
     pub written: bool,
+}
+
+/// A variable read: its name, the scope it is read in, the whole value
+/// expression (php's `$x`, which a member read names as its receiver) and
+/// the name token its reference sits on (`x`). Where the document names no
+/// separate token the two are one span.
+#[derive(Debug, Clone)]
+pub struct VarRead {
+    pub name: String,
+    pub scope: crate::model::file_analysis::ScopeId,
+    pub span: crate::model::file_analysis::Span,
+    pub token: crate::model::file_analysis::Span,
+}
+
+impl VarRead {
+    /// A read whose token is its whole value.
+    pub fn token(name: String, scope: crate::model::file_analysis::ScopeId, span: crate::model::file_analysis::Span) -> Self {
+        VarRead { name, scope, span, token: span }
+    }
 }
 
 /// A `std::move(x)` call: the subject as written and its node, the call,
@@ -1319,11 +1338,12 @@ impl SkeletonAnalysis {
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
-        // The place each name read denotes, by the read's span: the root of
-        // the places built on it. A name no declaration in reach claims, in
-        // a body that elides its receiver, is a member of that receiver —
-        // C++'s lookup order, locals before members.
-        let mut var_at: std::collections::HashMap<Span, crate::model::file_analysis::Place> =
+        // The place each name read denotes, by the read's value span (what a
+        // member read names as its receiver), with the read's token: the
+        // root of the places built on it. A name no declaration in reach
+        // claims, in a body that elides its receiver, is a member of that
+        // receiver — C++'s lookup order, locals before members.
+        let mut var_at: std::collections::HashMap<Span, (crate::model::file_analysis::Place, Span)> =
             std::collections::HashMap::new();
         // Reads that found no LOCAL decl — a Variable ref is still minted for
         // each (below, once call/member spans are known) so query-time
@@ -1371,7 +1391,7 @@ impl SkeletonAnalysis {
                 arg_count: None,
             });
         }
-        for (name, read_scope, read_span) in &self.var_reads {
+        for super::VarRead { name, scope: read_scope, span: value_span, token: read_span } in &self.var_reads {
             // A written token denotes the place it writes, which the places
             // below need; its ref is the write's.
             let is_write = written.contains(&(read_span.start, read_span.end));
@@ -1390,7 +1410,7 @@ impl SkeletonAnalysis {
                 }),
             };
             if let Some(place) = place {
-                var_at.insert(*read_span, place);
+                var_at.insert(*value_span, (place, *read_span));
             }
             if is_write {
                 continue;
@@ -1416,7 +1436,7 @@ impl SkeletonAnalysis {
         use crate::model::file_analysis::{Binding, Place};
         for &(scope, span) in &self.receivers {
             if let Some(m) = elided_receiver.get(scope.0 as usize).copied().flatten() {
-                var_at.entry(span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
+                var_at.entry(span).or_insert_with(|| (Place::variable(Binding::Receiver(m)), span));
             }
         }
         for r in self
@@ -1425,7 +1445,7 @@ impl SkeletonAnalysis {
             .filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing | super::vocab::ReceiverCap::Called))
         {
             if let Some(m) = owning_method.get(r.scope.0 as usize).copied().flatten() {
-                var_at.entry(r.span).or_insert_with(|| Place::variable(Binding::Receiver(m)));
+                var_at.entry(r.span).or_insert_with(|| (Place::variable(Binding::Receiver(m)), r.span));
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching

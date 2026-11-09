@@ -3241,6 +3241,156 @@ function f($a, $b) {
     assert_eq!(var("b", "$b->run"), None, "the right of `||` holds the failed test: set");
 }
 
+/// A property of a local is a place of that local, as one of `$this` is
+/// of the method's object: a guard on it narrows the member's receiver
+/// for dispatch, in the arm and after an early exit, until a write of the
+/// property or of the local, or the local handed on whole, may change it.
+#[cfg(feature = "php")]
+#[test]
+fn instanceof_narrows_a_property_of_a_local_for_dispatch() {
+    let src = "<?php
+class Base { public function run() {} }
+class Foo extends Base { public function run() {} }
+class Holder { public Base $b; }
+function f(Holder $h) {
+    if ($h->b instanceof Foo) {
+        $h->b->run();
+    }
+    $h->b->run();
+    if (!($h->b instanceof Foo)) return;
+    $h->b->run();
+    $h = new Holder();
+    $h->b->run();
+}
+function g(Holder $h) {
+    if ($h->b instanceof Foo) {
+        $h->b->run();
+        $h->b = new Base();
+        $h->b->run();
+    }
+    if ($h->b instanceof Foo) {
+        touch($h);
+        $h->b->run();
+    }
+}
+";
+    let fa = php(src);
+    let class = |c: &str| Some(c.to_string());
+    assert_eq!(
+        dispatch_rows(&fa, "run"),
+        [
+            (6, class("Foo")),
+            (8, class("Base")),
+            (10, class("Foo")),
+            (12, class("Base")),
+            (16, class("Foo")),
+            (18, class("Base")),
+            (22, class("Base")),
+        ]
+    );
+}
+
+/// `isset` and the null tests decide whether a local's property holds a
+/// value, as they do a property of `$this`.
+#[cfg(feature = "php")]
+#[test]
+fn a_null_test_on_a_property_of_a_local_is_the_null_value() {
+    let src = "<?php
+class Cache { public ?array $items; }
+function g(Cache $c) {
+    if (!isset($c->items)) { $first = 1; }
+    if ($c->items === null) { $second = 1; }
+    if ($c->items !== null) { $third = 1; } else { $fourth = 1; }
+    if (is_null($c->items)) { $fifth = 1; }
+    $last = 1;
+}
+";
+    let fa = php(src);
+    let c = fa.symbols().iter().find(|s| s.name == "c" && s.kind == SymKind::Variable).unwrap().id;
+    let items = crate::model::file_analysis::Place {
+        root: crate::model::file_analysis::Binding::Lexical(c),
+        path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
+    };
+    let ty = |needle| fa.place_type_at(&items, at(src, needle, 0), None);
+    let undef = Some(InferredType::Undef);
+    assert_eq!(ty("$first"), undef, "a property not set");
+    assert_eq!(ty("$second"), undef);
+    assert_eq!(ty("$third"), None, "a passing test strips nothing yet");
+    assert_eq!(ty("$fourth"), undef);
+    assert_eq!(ty("$fifth"), undef);
+    assert_eq!(ty("$last"), None, "nothing after the `if`");
+}
+
+/// `self`, `static` and `parent` on the right of `instanceof` name a class
+/// by where the guard is written: the class around it, the class around it
+/// again (the class the call is made on is that class or one beneath it),
+/// and the class it extends. Each is an identity, never respelled through
+/// the use-map. Outside a class they name none.
+#[cfg(feature = "php")]
+#[test]
+fn instanceof_self_static_and_parent_narrow_to_the_class_they_name() {
+    let src = "<?php
+namespace App;
+class Base { public function run() {} }
+class Mid extends Base {
+    private Base $b;
+    public function f($x, $y, $z) {
+        if ($x instanceof self) { $x->run(); }
+        if ($y instanceof static) { $y->run(); }
+        if ($z instanceof parent) { $z->run(); }
+        if ($this->b instanceof self) { $this->b->run(); }
+    }
+}
+function loose($w) {
+    if ($w instanceof self) { $w->run(); }
+}
+";
+    let fa = php(src);
+    let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(var("x", "$x->run"), class("App\\Mid"));
+    assert_eq!(var("y", "$y->run"), class("App\\Mid"));
+    assert_eq!(var("z", "$z->run"), class("App\\Base"));
+    assert_eq!(var("w", "$w->run"), None);
+    let dispatch: Vec<_> = dispatch_rows(&fa, "run").into_iter().filter(|(row, _)| *row == 9).collect();
+    assert_eq!(dispatch, [(9, Some("App\\Mid".to_string()))]);
+}
+
+/// A local's reference and its rename sit on its name, after the `$`,
+/// however its properties are read and guarded.
+#[cfg(feature = "php")]
+#[test]
+fn a_local_read_through_its_properties_is_referenced_by_its_name() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+function f(Holder $h) {
+    if ($h->b instanceof Foo) { $h->b->run(); }
+    $h = new Holder();
+    return $h;
+}
+";
+    let fa = php(src);
+    let mut vars: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable))
+        .map(|r| (r.span.start.row, r.span.start.column, r.span.end.column))
+        .collect();
+    vars.sort();
+    assert_eq!(vars, [(1, 19, 20), (2, 9, 10), (2, 33, 34), (3, 5, 6), (4, 12, 13)]);
+    let ws = Workspace::new(&[("locals.php", src)]);
+    assert_eq!(
+        ws.renames("locals.php", "$h)", 1),
+        [
+            site("locals.php", 1, 19),
+            site("locals.php", 2, 9),
+            site("locals.php", 2, 33),
+            site("locals.php", 3, 5),
+            site("locals.php", 4, 12),
+        ]
+    );
+}
+
 /// A write a guard proves lands where the member holds nothing is a lazy
 /// init, as `??=` is: `!isset`, `=== null` and the rest of a block after
 /// an `isset` exit all say so. The write itself ends what the guard

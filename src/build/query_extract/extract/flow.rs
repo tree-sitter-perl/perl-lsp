@@ -100,7 +100,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 Some(token) => ((pack.shape_name)(&token.text), token.span()),
                 None => ((pack.shape_name)(&e.text), span),
             };
-            out.var_reads.push((name.clone(), cur_scope, ref_span));
+            out.var_reads.push(crate::build::query_extract::VarRead { name: name.clone(), scope: cur_scope, span, token: ref_span });
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",

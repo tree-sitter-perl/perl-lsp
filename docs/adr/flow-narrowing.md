@@ -333,7 +333,14 @@ which needs a fold the pack tier lacks (TODO(narrow-set-strip)).
 PHP's document declares its atoms (`instanceof`; a single-argument
 `isset`, `!== null`; `=== null`, `is_null`), its connectives and its
 positions; a property of `$this` is a place of the method's object
-(`Binding::Receiver`), so a guard on it narrows the property's receiver.
+(`Binding::Receiver`), so a guard on it narrows the property's receiver,
+and a property of a local is a place of that local. A variable read roots
+its places at its value (`$x`, the node a member read names as its
+receiver), while its reference stays on the name token (`x`). `self`,
+`static` and `parent` on the right of `instanceof` carry the
+`@type.enclosing|called|super` marks a written type does, so the atom
+names the class around the guard or the one it extends; `static` names the
+class around it, since the class the call is made on lies beneath it.
 A write ends a place's narrowing where it lands, as it ends a variable's
 (an assignment's end, after every read it makes), so the written access
 reads the place as it held coming in. A member value access carries its

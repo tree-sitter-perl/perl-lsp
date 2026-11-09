@@ -573,7 +573,7 @@ impl PackDriver {
             // parens or not (`#define X foo` then `X(a)`), so it is a site.
             for (name, span) in body_refs.name_refs {
                 expanded_sites.insert(span);
-                skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span));
+                skel.var_reads.push(crate::build::query_extract::VarRead::token(name, crate::model::file_analysis::ScopeId(0), span));
             }
             // Field/member uses inside bodies (`->op_next`) — untyped here (the
             // receiver is a macro param), resolved to the declaring class and
@@ -1169,7 +1169,11 @@ fn remap_spans(
             *sp = rspan(*sp);
         }
     }
-    for (_, _, span) in var_reads.iter_mut().chain(var_writes.iter_mut()) {
+    for read in var_reads.iter_mut() {
+        read.span = rspan(read.span);
+        read.token = rspan(read.token);
+    }
+    for (_, _, span) in var_writes.iter_mut() {
         *span = rspan(*span);
     }
     for span in write_sites.iter_mut().chain(init_sites.iter_mut()) {
@@ -1468,7 +1472,7 @@ fn mint_erased_macro_reads(
             }
         }
         minted.insert(span);
-        skel.var_reads.push((name, scope, span));
+        skel.var_reads.push(crate::build::query_extract::VarRead::token(name, scope, span));
     }
     minted
 }

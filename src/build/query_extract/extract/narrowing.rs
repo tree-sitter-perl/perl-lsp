@@ -5,15 +5,27 @@
 use super::*;
 use std::collections::HashMap;
 
+/// A guard subject as the walk reaches it. The narrowing attaches in the
+/// guard's scope, like the Perl walker's, and the declared type resolves up
+/// the guard's own scope chain, both known only while the walk is there.
+/// The arm can precede the guard in source (`a if isinstance(x, T) else
+/// b`), so the join waits for `finish`.
+struct Subject {
+    mid: usize,
+    name: String,
+    /// The scope the guard sits in.
+    scope: ScopeId,
+    /// The subject's declared type text.
+    annot: Option<String>,
+    /// A `@type.<relative>` mark on the guard's type and the class the
+    /// guard is written in, which the mark names a class through; outside
+    /// every class it names none.
+    relative: Option<(RelativeClass, Option<String>)>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
-    /// Guard subjects as the walk reaches them: (match, subject, the scope
-    /// the guard sits in, its declared type text). The narrowing attaches
-    /// in the guard's scope, like the Perl walker's, and the declared type
-    /// resolves up the guard's own scope chain, both known only while the
-    /// walk is there. The arm can precede the guard in source (`a if
-    /// isinstance(x, T) else b`), so the join waits for `finish`.
-    narrow_subjects: Vec<(usize, String, ScopeId, Option<String>)>,
+    narrow_subjects: Vec<Subject>,
     /// (var name, declaring scope) → its declared-type text, joined per
     /// declaration match. Feeds the token-less optional-engagement narrowing
     /// (`if (opt)`): the guard names no type, so the refinement reads the
@@ -37,6 +49,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Capture::ParamRegion => st.out.param_regions.push(e.span()),
         Capture::Narrow(NarrowCap::Var) => {
             let subject = (st.pack.shape_name)(&e.text);
+            let relative = st
+                .adorned
+                .in_match(e.match_id, Capture::Narrow(NarrowCap::Type))
+                .and_then(|t| super::defs::names_relative(st.adorned, t))
+                .map(|rel| (rel, super::scopes::enclosing_class(st).map(str::to_string)));
             let n = &mut st.narrowing;
             // Innermost declaration first, so a same-named var in a sibling
             // function never supplies the declared type.
@@ -45,7 +62,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 .iter()
                 .rev()
                 .find_map(|&(_, sid)| n.annot_text_by_var.get(&(subject.clone(), sid)).cloned());
-            n.narrow_subjects.push((e.match_id, subject, st.cur_scope, annot));
+            n.narrow_subjects.push(Subject { mid: e.match_id, name: subject, scope: st.cur_scope, annot, relative });
         }
         Capture::Move(MoveCap::Call) => {
             // Drop moves inside an unevaluated operand
@@ -166,14 +183,16 @@ pub(super) fn finish(st: &mut ExtractState) {
     let out = &mut st.out;
     // An `is` atom's `@narrow.type` names a class, which the language's
     // reading of a type spelling may know better (python's `str` is a
-    // string); with none, the subject is what its declared type holds once
-    // the test proves it engaged (the pack's `narrow_guard`: an optional's
-    // inner type). An atom is known where the conditions above it put it.
+    // string), or one named by where the guard is written (php's `self`),
+    // already an identity; with none, the subject is what its declared type
+    // holds once the test proves it engaged (the pack's `narrow_guard`: an
+    // optional's inner type). An atom is known where the conditions above
+    // it put it.
     let ad = st.adorned;
     let mut subjects = std::mem::take(&mut n.narrow_subjects);
-    subjects.sort_by_key(|s| s.0);
+    subjects.sort_by_key(|s| s.mid);
     let mut pending = Vec::new();
-    for (mid, subject, scope, annot) in subjects {
+    for Subject { mid, name: subject, scope, annot, relative } in subjects {
         let Some((kind, node)) = [NarrowCap::Is, NarrowCap::Set, NarrowCap::Unset]
             .into_iter()
             .find_map(|k| ad.in_match(mid, Capture::Narrow(k)).map(|e| (k, e)))
@@ -181,9 +200,14 @@ pub(super) fn finish(st: &mut ExtractState) {
             continue;
         };
         let atom = match kind {
-            NarrowCap::Is => match ad.in_match(mid, Capture::Narrow(NarrowCap::Type)) {
-                Some(t) => Some((st.pack.annot_type)(&t.text).unwrap_or_else(|| InferredType::ClassName(t.text.clone()))),
-                None => annot.as_deref().and_then(st.pack.narrow_guard),
+            NarrowCap::Is => match (ad.in_match(mid, Capture::Narrow(NarrowCap::Type)), &relative) {
+                (Some(_), Some((rel, class))) => {
+                    class.as_ref().and_then(|c| out.relative_class(*rel, c)).map(InferredType::ClassName)
+                }
+                (Some(t), None) => {
+                    Some((st.pack.annot_type)(&t.text).unwrap_or_else(|| InferredType::ClassName(t.text.clone())))
+                }
+                (None, _) => annot.as_deref().and_then(st.pack.narrow_guard),
             }
             .map(Atom::Is),
             NarrowCap::Unset => Some(Atom::Unset),
@@ -199,7 +223,10 @@ pub(super) fn finish(st: &mut ExtractState) {
         let member = node.is_some_and(|v| ad.on_ixs(v).any(|i| st.minted[i].projects.is_some()));
         for (region, holds) in regions {
             let Some(refined) = atom.proves(holds) else { continue };
-            let refined = written_type_at(out, &st.pack.names, refined, region.start);
+            let refined = match relative {
+                Some(_) => refined,
+                None => written_type_at(out, &st.pack.names, refined, region.start),
+            };
             if let Some(v) = node {
                 out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
                     subject: v.span(),
