@@ -67,6 +67,46 @@ fn narrow_logical_or_exit() {
 }
 
 #[test]
+fn narrow_block_form_exit_narrows_the_remainder() {
+    // An `if`/`unless` with no other arm whose block ends in an exit is the
+    // block spelling of `return unless G`: the rest of the block runs where
+    // the block was not entered. What runs before the exit, a comment
+    // included, ends there too.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    for (src, why) in [
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { return; }\n    $x->layout;\n}", "unless BLOCK return"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    if (!$x->isa('Widget')) { die \"x\" }\n    $x->layout;\n}", "if !G BLOCK die"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { warn 'no'; return }\n    $x->layout;\n}", "work, then the exit"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) {\n        # why\n        exit 1;\n    }\n    $x->layout;\n}", "a comment, then exit"),
+    ] {
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : undef;\n    if (!defined $x) { die \"x\" }\n    $x->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"), "`!defined` exit strips the undef");
+}
+
+#[test]
+fn narrow_block_form_without_exit_narrows_nothing_after() {
+    // A block that may fall through, or a chain with another arm, says
+    // nothing about the rest of the block.
+    for (src, why) in [
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { warn 'no'; }\n    $x->layout;\n}", "no exit"),
+        ("package P;\nsub f {\n    my ($x, $y) = @_;\n    unless ($x->isa('Widget')) { return if $y; }\n    $x->layout;\n}", "a conditional exit"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { return; } else { warn 'w'; }\n    $x->layout;\n}", "an else arm"),
+    ] {
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+}
+
+fn fa_type_at(src: &str, var: &str, at: Point) -> Option<InferredType> {
+    build_fa(src).inferred_type_via_bag(var, at)
+}
+
+#[test]
 fn narrow_observed_through_method_dispatch() {
     // The invocant of `$x->paint` inside the block resolves to Foo, so a
     // method call dispatches on the narrowed class (the query seam).

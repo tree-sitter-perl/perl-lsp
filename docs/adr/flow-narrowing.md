@@ -307,7 +307,19 @@ exception — perlsyn runs the block once before the first test. Nothing
 narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
-diagnostics see each statement-level guard once, as before.
+diagnostics see each statement-level guard once, as before. The block
+spelling is the same fall-through: an `if`/`unless` with no other arm
+whose block's last statement is an exit (`unless ($x->isa('Foo')) {
+return }`, `if (!defined $x) { warn …; die }`) leaves the rest of the
+enclosing block to run where the block was not entered, through the same
+`narrow_block_remainder`; its guard is recorded once, as the arm's. An
+exit is a word read by its spelling (`is_exit_expression`'s table:
+`return`, `die`, `exit`, `croak`, `confess`, `last`, `next`, `redo`,
+`goto`), so a file's own sub named `croak` counts as one, and so does a
+`goto` whose label lies in the rest of the block. A
+chain with another arm decides no fall-through yet, even when every arm
+exits, and nothing narrows past the enclosing block: both are the CFG's
+block-exit join (`docs/prompt-cfg-tier.md` §3.5, `TODO(cfg-exit-join)`).
 
 A pack's document states its guards in three parts, and the extractor
 (`query_extract/extract/narrowing.rs`) joins them by containment, the

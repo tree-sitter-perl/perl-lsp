@@ -435,11 +435,12 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
 }
 
 /// True if an expression is a guaranteed control-flow exit
-/// (`return`/`die`/`croak`/`last`/`next`/`redo`/`goto`): it never yields a
-/// value, so `STMT if/unless G` narrows the rest of the block and
-/// `X || EXIT` is worth only `X`.
+/// (`return`/`die`/`exit`/`croak`/`last`/`next`/`redo`/`goto`): it never
+/// yields a value, so `STMT if/unless G` narrows the rest of the block and
+/// `X || EXIT` is worth only `X`. The words are read by spelling, so a sub
+/// of the file's own named `croak` counts too.
 pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
-    const EXITS: [&str; 7] = ["die", "croak", "confess", "last", "next", "redo", "goto"];
+    const EXITS: [&str; 8] = ["die", "exit", "croak", "confess", "last", "next", "redo", "goto"];
     match node.kind() {
         "return_expression" | "last_expression" | "next_expression" | "redo_expression" => true,
         "function" | "bareword" => node
@@ -456,6 +457,18 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
             .unwrap_or(false),
         _ => false,
     }
+}
+
+/// True if `block` never falls through: its last statement is an exit.
+/// Whatever runs before it ends there too, or leaves sooner.
+fn block_ends_in_exit(block: Node, source: &[u8]) -> bool {
+    use crate::cst::NodeExt;
+    block
+        .elements()
+        .last()
+        .filter(|stmt| stmt.kind() == "expression_statement")
+        .and_then(|stmt| crate::cst::nth_element(stmt, 0))
+        .is_some_and(|e| is_exit_expression(e, source))
 }
 
 impl<'a> Builder<'a> {
@@ -516,7 +529,9 @@ impl<'a> Builder<'a> {
     /// negations survive — `defined`/`blessed` complement to `Undef`, while
     /// `isa`/`ref-eq` have no positive complement (stay wide). The `else`
     /// arm is pure cumulative negation; an `elsif` arm combines its own
-    /// guard with the priors' negation.
+    /// guard with the priors' negation. A lone arm whose block ends in an
+    /// exit leaves the rest of the enclosing block to run where it is not
+    /// entered.
     pub(super) fn narrow_block_guard(&mut self, cond_stmt: Node<'a>) {
         let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = crate::cst::conditional_arms(cond_stmt)
             .into_iter()
@@ -550,6 +565,12 @@ impl<'a> Builder<'a> {
                     covered.push(key);
                     self.emit_narrowing_fact(&subject, op, region);
                 }
+            }
+        }
+        // The arm's own guard is recorded above, once.
+        if let [(Some(cond), blk, enter)] = arms[..] {
+            if block_ends_in_exit(blk, self.source) {
+                self.narrow_block_remainder(cond_stmt, cond, !enter);
             }
         }
     }
@@ -610,8 +631,11 @@ impl<'a> Builder<'a> {
             return;
         }
         self.narrow_arm(condition, modified, runs_when_true);
-        if !is_loop && is_exit_expression(modified, self.source) {
-            self.narrow_block_remainder(postfix, condition, !runs_when_true);
+        if !is_loop
+            && is_exit_expression(modified, self.source)
+            && self.narrow_block_remainder(postfix, condition, !runs_when_true)
+        {
+            self.record_guard_sites(condition);
         }
     }
 
@@ -677,31 +701,33 @@ impl<'a> Builder<'a> {
         if !is_exit_expression(right, self.source) {
             return;
         }
-        self.narrow_block_remainder(expr, left, holds_when_true);
+        if self.narrow_block_remainder(expr, left, holds_when_true) {
+            self.record_guard_sites(left);
+        }
     }
 
     /// Narrow `[statement end .. enclosing-block end]` for a statement-level
-    /// guard.
+    /// guard: the statement `node` is in leaves the block unless
+    /// `condition` is `holds_when_true`. False when that statement is no
+    /// block's; the caller records the guard's sites, once per condition.
+    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
     fn narrow_block_remainder(
         &mut self,
-        stmt_expr: Node<'a>,
+        node: Node<'a>,
         condition: Node<'a>,
         holds_when_true: bool,
-    ) {
-        let mut stmt = stmt_expr;
-        while stmt.kind() != "expression_statement" {
-            let Some(p) = self.syntax.parent(stmt) else { return };
+    ) -> bool {
+        let mut stmt = node;
+        while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
+            let Some(p) = self.syntax.parent(stmt) else { return false };
             stmt = p;
         }
-        let Some(block) = self.syntax.parent(stmt) else { return };
-        if block.kind() != "block" {
-            return;
-        }
+        let Some(block) = self.syntax.parent(stmt).filter(|b| b.kind() == "block") else { return false };
         let region = Span { start: stmt.end_position(), end: block.end_position() };
-        self.record_guard_sites(condition);
         for (subject, op) in facts_for_region(self, condition, holds_when_true) {
             self.emit_narrowing_fact(&subject, op, region);
         }
+        true
     }
 
     /// A deref observes its operand as the reference its sigil names:
