@@ -3410,10 +3410,78 @@ function g(Cache $c) {
     let undef = Some(InferredType::Undef);
     assert_eq!(ty("$first"), undef, "a property not set");
     assert_eq!(ty("$second"), undef);
-    assert_eq!(ty("$third"), None, "a passing test strips nothing yet");
+    assert_eq!(ty("$third"), Some(InferredType::Unknown), "what came in without its null: an untyped property");
     assert_eq!(ty("$fourth"), undef);
     assert_eq!(ty("$fifth"), undef);
     assert_eq!(ty("$last"), None, "nothing after the `if`");
+}
+
+/// A passing `isset`, `!== null` or `!is_null`, and a failed `=== null`,
+/// leave the subject what it held coming in without its null: a nullable
+/// local, parameter or property is its class there, a nullable union its
+/// other arms. Outside the test, and on a subject that was never nullable,
+/// nothing changes.
+#[cfg(feature = "php")]
+#[test]
+fn a_passing_null_test_strips_the_null() {
+    let src = "<?php
+class Foo { public function run() {} }
+class A { public function run() {} }
+class B { public function run() {} }
+function maybe(): ?Foo { return null; }
+class Holder {
+    public ?Foo $p;
+    public function m(?Foo $w, Foo $plain, A|B|null $u) {
+        $v = maybe();
+        if (isset($w)) { $w->run(); }
+        $w->run();
+        if ($v !== null) { $v->run(); }
+        if ($this->p === null) { $x = 1; } else { $this->p->run(); }
+        if (!is_null($this->p)) { $this->p->run(); }
+        $this->p->run();
+        if (isset($plain)) { $plain->run(); }
+        if ($u !== null) { $u->run(); }
+        $u->run();
+    }
+}
+function g(Holder $h) {
+    if (isset($h->p)) { $h->p->run(); }
+    $h->p->run();
+}
+";
+    let fa = php(src);
+    let mut rows: Vec<(usize, Option<InferredType>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None)))
+        .collect();
+    rows.sort_by_key(|(row, _)| *row);
+    let foo = || Some(InferredType::ClassName("Foo".into()));
+    let nullable = |t: Option<InferredType>| t.map(|t| InferredType::Optional(Box::new(t)));
+    let ab = || crate::model::file_analysis::join_all(
+        &[InferredType::ClassName("A".into()), InferredType::ClassName("B".into())],
+        &crate::model::file_analysis::LatticeRules::default(),
+    );
+    assert_eq!(
+        rows,
+        [
+            (9, foo()),
+            (10, nullable(foo())),
+            (11, foo()),
+            (12, foo()),
+            (13, foo()),
+            (14, nullable(foo())),
+            (15, foo()),
+            (16, ab()),
+            (17, nullable(ab())),
+            (21, foo()),
+            (22, nullable(foo())),
+        ]
+    );
+    // The variable itself, as hover reads it.
+    assert_eq!(fa.inferred_type_via_bag("w", at(src, "$w->run(); }", 0)), foo());
+    assert_eq!(fa.inferred_type_via_bag("w", at(src, "$w->run();\n", 0)), nullable(foo()));
 }
 
 /// `self`, `static` and `parent` on the right of `instanceof` name a class

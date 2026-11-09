@@ -1209,11 +1209,6 @@ fn remap_spans(
         *w = rspan(*w);
         *lands = r(*lands);
     }
-    for n in place_narrowings.iter_mut() {
-        let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;
-        *subject = rspan(*subject);
-        *region = rspan(*region);
-    }
     for m in member_reads.iter_mut() {
         let crate::build::query_extract::MemberRead { span, receiver, member: _, token, written: _ } = m;
         *span = rspan(*span);
@@ -1266,6 +1261,12 @@ fn remap_spans(
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);
+    }
+    for n in place_narrowings.iter_mut() {
+        let crate::build::query_extract::PlaceNarrowing { subject, refined, region } = n;
+        *subject = rspan(*subject);
+        refined.for_each_attachment_mut(&mut remap_att);
+        *region = rspan(*region);
     }
     // Value-flow edges (the provenance tier above the bag) + label/goto refs +
     // moved-from sites + domain-typing sites all carry transformed spans too.

@@ -349,8 +349,14 @@ connectives on the way decide its value in each of the condition's
 regions, or that the region says nothing about it. The refinement
 attaches in the atom's scope over the region, cut at the subject's next
 rebind (a variable) or disturbance (a place). A failed `is` proves
-nothing; a passing `set` would strip the null from the incoming type,
-which needs a fold the pack tier lacks (TODO(narrow-set-strip)).
+nothing. A value proved set is what it held coming in without its null,
+which only the query knows, so the region carries an edge rather than a
+type: `Projected { base: Expr(the subject's read in the test), step:
+Defined }`. The query materializes the base and keeps each arm it may be
+once set (`?Foo` → `Foo`, `A|B|null` → `A|B`; a value never nullable is
+itself). The test and the regions it decides are disjoint, so the base
+never reads its own narrowing. Where the subject token is a name inside
+its read (php's `w` in `$w`), the base is the read the token names.
 
 PHP's document declares its atoms (`instanceof`; a single-argument
 `isset`, `!== null`; `=== null`, `is_null`), its connectives and its
@@ -423,7 +429,9 @@ often comes from a sub return that only converges during the fold. So
 `query_point` — *before* the region, so the read sees the un-narrowed
 type and the pass's own output can't feed back), and
 `emit_defined_narrowing_witnesses` re-derives `Optional<T> → T` each fold
-iteration (clear-and-emit on tag `defined_narrowing`).
+iteration (clear-and-emit on tag `defined_narrowing`). The pack tier's
+`Defined` projection states the same strip as an edge the query
+resolves, with no pass to re-run (`TODO(perl-defined-strip-payload)`).
 
 ## Reaching writes
 

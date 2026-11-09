@@ -362,11 +362,11 @@ pub struct MoveCall {
 }
 
 /// A guard narrowing a member read (`isinstance(self.x, T)`): the subject,
-/// its refined type, and the arm the guard enters.
+/// what it holds over the arm, and the arm the guard enters.
 #[derive(Debug, Clone)]
 pub struct PlaceNarrowing {
     pub subject: crate::model::file_analysis::Span,
-    pub refined: InferredType,
+    pub refined: crate::model::witnesses::WitnessPayload,
     pub region: crate::model::file_analysis::Span,
 }
 
@@ -1523,7 +1523,7 @@ impl SkeletonAnalysis {
             narrowed.iter().map(|(p, _)| p.clone()).collect();
         if !narrowed.is_empty() {
             use crate::model::file_analysis::Binding;
-            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessSource};
             let wanted = narrowed.iter().map(|(p, _)| p.root.clone()).collect();
             let disturbances = places.disturbances(&wanted, &place_writes);
             for (place, n) in narrowed {
@@ -1539,7 +1539,7 @@ impl SkeletonAnalysis {
                 bag.push(Witness {
                     attachment: WA::Place(Box::new(place)),
                     source: WitnessSource::Builder("skeleton-narrow".into()),
-                    payload: WP::InferredType(n.refined),
+                    payload: n.refined,
                     span: held,
                 });
             }

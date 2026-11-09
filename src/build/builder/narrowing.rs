@@ -798,6 +798,10 @@ impl<'a> Builder<'a> {
     /// oscillation) and, if it is `Optional<T>`, narrow the region to `T`.
     /// Clear-and-emit on tag `defined_narrowing`; converges as the
     /// subject's (possibly fold-derived) `Optional` settles.
+    // TODO(perl-defined-strip-payload): the guard's region could carry the
+    // pack tier's `Projected { base: Expr(subject at the guard), step:
+    // Defined }` once at walk time, and this pass and its materialized
+    // `InferredType` go (docs/adr/flow-narrowing.md).
     pub(super) fn emit_defined_narrowing_witnesses(&mut self) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("defined_narrowing");

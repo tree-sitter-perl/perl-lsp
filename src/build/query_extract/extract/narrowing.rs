@@ -87,16 +87,24 @@ enum Atom {
     Unset,
 }
 
+/// What the subject is over a region an atom decides.
+enum Proof {
+    /// This type, whatever came in.
+    Is(InferredType),
+    /// The value it held at the test, without its null. Only the query
+    /// knows that value, so the region carries a projection of it.
+    Defined,
+}
+
 impl Atom {
     /// What the subject is where the atom evaluates to `holds`. "Not a
     /// Foo" names no type, so a failed `is` proves nothing.
-    fn proves(&self, holds: bool) -> Option<InferredType> {
+    fn proves(&self, holds: bool) -> Option<Proof> {
         match (self, holds) {
-            (Atom::Is(t), true) => Some(t.clone()),
-            (Atom::Set, false) | (Atom::Unset, true) => Some(InferredType::Undef),
-            // TODO(narrow-set-strip): a value that is set is its incoming
-            // type without the null, which only a fold over that type knows.
-            (Atom::Is(_), false) | (Atom::Set, true) | (Atom::Unset, false) => None,
+            (Atom::Is(t), true) => Some(Proof::Is(t.clone())),
+            (Atom::Set, false) | (Atom::Unset, true) => Some(Proof::Is(InferredType::Undef)),
+            (Atom::Set, true) | (Atom::Unset, false) => Some(Proof::Defined),
+            (Atom::Is(_), false) => None,
         }
     }
 }
@@ -179,6 +187,15 @@ fn regions_of(ad: &Adorned<'_, '_>, atom: &Event) -> Vec<(Span, bool)> {
     out
 }
 
+/// The value a subject token names: the variable read it is the name token
+/// of (php's `$w` around `w`), else the token's own node.
+fn subject_value(ad: &Adorned<'_, '_>, v: &Event) -> Span {
+    ad.on(v)
+        .filter(|t| t.cap == Capture::Expr(ExprCap::ReadVarName))
+        .find_map(|t| ad.in_match(t.match_id, Capture::Expr(ExprCap::ReadVar)))
+        .map_or(v.span(), Event::span)
+}
+
 pub(super) fn finish(st: &mut ExtractState) {
     let n = &mut st.narrowing;
     let out = &mut st.out;
@@ -223,10 +240,23 @@ pub(super) fn finish(st: &mut ExtractState) {
         let node = ad.in_match(mid, Capture::Narrow(NarrowCap::Var));
         let member = node.is_some_and(|v| ad.on_ixs(v).any(|i| st.minted[i].projects.is_some()));
         for (region, holds) in regions {
-            let Some(refined) = atom.proves(holds) else { continue };
-            let refined = match relative {
-                Some(_) => refined,
-                None => written_type_at(out, &st.pack.names, refined, region.start),
+            use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+            let refined = match atom.proves(holds) {
+                None => continue,
+                Some(Proof::Is(t)) => WitnessPayload::InferredType(match relative {
+                    Some(_) => t,
+                    None => written_type_at(out, &st.pack.names, t, region.start),
+                }),
+                // The subject as the test reads it: the condition and the
+                // regions it decides are disjoint, so the projection never
+                // reads its own narrowing.
+                Some(Proof::Defined) => match node {
+                    Some(v) => WitnessPayload::Projected {
+                        base: WitnessAttachment::Expr(subject_value(ad, v)),
+                        step: ProjectionStep::Defined,
+                    },
+                    None => continue,
+                },
             };
             if let Some(v) = node {
                 out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
@@ -246,7 +276,7 @@ pub(super) fn finish(st: &mut ExtractState) {
         out.variable_regions.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
-            payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
+            payload: refined,
             span: region,
         });
     }
