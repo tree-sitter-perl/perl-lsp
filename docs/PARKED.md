@@ -211,7 +211,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   `arrow_deref_sites`) are minted only by `src/builder/narrowing.rs`, a
   child of the Perl-only tree-sitter consumer. cpp goes through
   `query_extract` and never runs `build()`. The cpp hover/goto **type**
-  tier already narrows (`@narrow.*` atoms refine inside `dynamic_cast` /
+  tier already narrows (`narrow_guard` refines inside `dynamic_cast` /
   `std::optional` guards — `cpp_dynamic_cast_guard_narrows`); what's missing
   is the **diagnostics** layer. Needs a cpp nullability pass that lowers
   `nullptr` comparisons + `std::optional` engagement state into the

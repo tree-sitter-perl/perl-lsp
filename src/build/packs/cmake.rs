@@ -27,6 +27,7 @@ pub fn cmake_pack() -> LangPack {
                 vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
             }
         },
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["{", "("],

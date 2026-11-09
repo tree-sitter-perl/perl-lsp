@@ -986,12 +986,12 @@
 
 ; Guard narrowing. An atom states what a test proves of its subject, a
 ; local or a member (`o.b`): `dynamic_cast<Derived*>(b)` that b is a
-; Derived, pointer-ness dropped for navigation like a local's. A value that
-; tests true is set, so an engaged `std::optional<T>` (a nullable T) holds
-; a T, and one that tests false is any falsy value (`0`, a null pointer, an
-; empty optional), which proves nothing. The truth is the subject's own
-; (`opt`, `!opt`, `opt && …`) or `opt.has_value()`; `!= std::nullopt` is
-; left out.
+; Derived, pointer-ness dropped for navigation like a local's. A
+; `std::optional<T>` tested as engaged holds a T: no type token rides that
+; test, so the pack's narrow_guard reads the subject's DECLARED type and
+; peels T, and a non-optional subject (`if (ptr)`) declares no inner type
+; and narrows nothing. Engagement is the subject's own truth (`opt`,
+; `!opt`, `opt && …`) or `opt.has_value()`; `!= std::nullopt` is left out.
 ((call_expression
    function: (template_function
      name: (identifier) @_cast
@@ -1002,14 +1002,14 @@
 ((call_expression
    function: (field_expression
      argument: (identifier) @narrow.var
-     field: (field_identifier) @_m)) @narrow.truthy
+     field: (field_identifier) @_m)) @narrow.is
  (#eq? @_m "has_value"))
-(condition_clause value: (identifier) @narrow.var @narrow.truthy)
-(conditional_expression condition: (identifier) @narrow.var @narrow.truthy)
-(binary_expression left: (identifier) @narrow.var @narrow.truthy operator: ["&&" "||"])
-(binary_expression operator: ["&&" "||"] right: (identifier) @narrow.var @narrow.truthy)
-(unary_expression operator: "!" argument: (identifier) @narrow.var @narrow.truthy)
-(parenthesized_expression (identifier) @narrow.var @narrow.truthy)
+(condition_clause value: (identifier) @narrow.var @narrow.is)
+(conditional_expression condition: (identifier) @narrow.var @narrow.is)
+(binary_expression left: (identifier) @narrow.var @narrow.is operator: ["&&" "||"])
+(binary_expression operator: ["&&" "||"] right: (identifier) @narrow.var @narrow.is)
+(unary_expression operator: "!" argument: (identifier) @narrow.var @narrow.is)
+(parenthesized_expression (identifier) @narrow.var @narrow.is)
 ; A condition built of atoms decides them through its connectives.
 (unary_expression operator: "!") @narrow.not
 (binary_expression operator: "&&") @narrow.and

@@ -24,6 +24,7 @@ pub fn perl_pack() -> LangPack {
         annot_type: |_| None,
         doc_text: |_| None,
         module_paths: |m| vec![crate::model::conventions::perl_module_rel_path(m)],
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         // Nothing reads them: Perl's trigger characters come from

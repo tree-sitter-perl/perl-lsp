@@ -127,10 +127,16 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         Capture::Flow(FlowCap::Target) => {
             let name = (pack.shape_name)(&e.text);
             let (at, resets) = written_at(ad, e);
-            let relative = ad
-                .in_match(e.match_id, Capture::TypeAnnot)
-                .and_then(|annot| super::defs::names_relative(ad, annot))
-                .map(|rel| (rel, enclosing));
+            // Record the declared-type text keyed by (var, DECLARING scope)
+            // for the token-less optional-engagement narrowing. cur_scope is
+            // only known here (scopes mint during this walk).
+            let mut relative = None;
+            if let Some(annot) = ad.in_match(e.match_id, Capture::TypeAnnot) {
+                for &scope in &target_scopes {
+                    st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
+                }
+                relative = super::defs::names_relative(ad, annot).map(|rel| (rel, enclosing));
+            }
             let space = ad.on(e).find_map(|t| match t.cap {
                 Capture::Space { id, .. } => Some(id),
                 _ => None,

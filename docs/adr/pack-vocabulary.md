@@ -72,8 +72,8 @@ the fields the pack lane carries per file.
 ## Consequences
 
 - A fn is code the reflection cannot see into. A callee name inside one
-  escapes both tripwires; moving it into the document is still rule
-  #15's work, done per language as each lane moves. R's
+  (`narrow_guard`) escapes both tripwires; moving it into the document is
+  still rule #15's work, done per language as each lane moves. R's
   constructors and imports, CMake's command families, cpp's rebinding
   resets (`@flow.rebind` on the receiver of `x.clear()`), the member
   operators (`@member.op.arrow` / `@member.op.dot`) and the receiver
