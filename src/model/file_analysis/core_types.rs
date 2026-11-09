@@ -697,16 +697,33 @@ bitflags::bitflags! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessScope {
     Anywhere,
-    /// The declaring class and its descendants.
+    /// The declaring class and its family, as far as the language's
+    /// `FamilyReach` goes.
     Family,
     /// The declaring class alone.
     Class,
 }
 
+/// Which classes `AccessScope::Family` admits besides the declaring class:
+/// a language's rule for what "protected" reaches
+/// (`LanguageConventions::family_reach`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FamilyReach {
+    /// The classes that descend from it: C++'s derived class reaches its
+    /// bases' protected members, a base never a derived class's.
+    #[default]
+    Descendants,
+    /// Its whole lineage, the classes it descends from too: PHP admits code
+    /// of a class either one descends from (`is_protected_compatible_scope`,
+    /// `zend_check_protected`), so a parent's method sets a `protected(set)`
+    /// member its child declares.
+    Lineage,
+}
+
 impl SymbolFlags {
     /// Where the member these flags describe may be named from: its
-    /// declaring class alone when private, the class and its descendants
-    /// when protected, else anywhere.
+    /// declaring class alone when private, its class family when
+    /// protected, else anywhere.
     pub fn access_scope(self) -> AccessScope {
         if self.contains(SymbolFlags::PRIVATE) {
             AccessScope::Class

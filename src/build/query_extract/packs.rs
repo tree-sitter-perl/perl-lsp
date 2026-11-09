@@ -37,6 +37,9 @@ pub struct LangPack {
     /// registered by id with the lattice. Its names are the document's
     /// `@space.<name>` vocabulary.
     pub member_spaces: crate::model::file_analysis::MemberSpaces,
+    /// Which classes a protected member reaches beyond its own, registered
+    /// by id with the lattice: access checks read it, no file.
+    pub family_reach: crate::model::file_analysis::FamilyReach,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -116,7 +119,14 @@ pub struct LangPack {
 impl LangPack {
     /// What every file of this language shares, registered by its id.
     pub fn conventions(&self) -> crate::model::conventions::LanguageConventions {
-        crate::model::conventions::LanguageConventions::of_pack(self.lattice.clone(), self.type_display, self.construction, self.member_spaces.clone(), self.functions)
+        crate::model::conventions::LanguageConventions::of_pack(
+            self.lattice.clone(),
+            self.type_display,
+            self.construction,
+            self.member_spaces.clone(),
+            self.functions,
+            self.family_reach,
+        )
     }
 
     /// Every `&'static str` this pack declares, tagged with the field it
@@ -141,6 +151,7 @@ impl LangPack {
             // The document's own namespace words, checked against its
             // `@space.<name>` captures (`bundled_documents_speak_the_vocabulary`).
             member_spaces: _,
+            family_reach: _,
             shape_name: _,
             default_name: _,
             annot_type: _,

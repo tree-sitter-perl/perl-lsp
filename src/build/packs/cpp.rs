@@ -23,6 +23,9 @@ pub fn cpp_pack() -> LangPack {
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // One member namespace (see `names`).
         member_spaces: MemberSpaces::SHARED,
+        // A derived class reaches its bases' protected members, a base
+        // never a derived class's.
+        family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         type_display: |_| None,

@@ -271,7 +271,8 @@ fn member_completion_filters_by_access_specifier() {
 }
 
 /// A `protected:` member is offered inside its class and the classes
-/// derived from it; a `private:` one inside its own class only.
+/// derived from it; a `private:` one inside its own class only. A base is
+/// not offered the protected members a derived class declares.
 #[cfg(feature = "cpp")]
 #[test]
 fn member_completion_offers_protected_to_derived_classes() {
@@ -283,6 +284,7 @@ fn member_completion_offers_protected_to_derived_classes() {
          };\n\
          class Kid : public Base {\n\
          public:\n  void Run();\n\
+         protected:\n  int guarded;\n\
          };\n",
     );
     let labels = |class: &str, from: Option<&str>| {
@@ -291,7 +293,12 @@ fn member_completion_offers_protected_to_derived_classes() {
         out.sort();
         out
     };
-    assert_eq!(labels("Kid", Some("Kid")), ["Normalize", "Run", "kin", "open"], "a derived class");
+    assert_eq!(labels("Kid", Some("Kid")), ["Normalize", "Run", "guarded", "kin", "open"], "a derived class");
+    assert_eq!(
+        labels("Kid", Some("Base")),
+        ["Normalize", "Run", "Secret", "kin", "mine", "open"],
+        "a base, on a derived receiver"
+    );
     assert_eq!(labels("Base", Some("Base")), ["Normalize", "Secret", "kin", "mine", "open"], "its own class");
     assert_eq!(labels("Kid", None), ["Run", "open"], "outside the hierarchy");
 }

@@ -597,6 +597,8 @@ impl FileAnalysis {
     // TODO(get-visibility-diagnostic): private/protected access from outside its scope, under its own code (docs/prompt-php-member-access-residuals.md).
     pub fn misplaced_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<MisplacedWrite> {
         let mut out = Vec::new();
+        // One naming site per writing class: its lineage is walked once.
+        let mut sites: HashMap<Option<&str>, NamingSite> = HashMap::new();
         // TODO(unseen-member-writes): element, by-reference and destructuring writes mint no write ref (docs/prompt-php-member-access-residuals.md).
         for r in self.refs().iter() {
             if !r.access.is_write() || MemberKind::of_ref(&r.kind).map(|k| k.mode) != Some(MemberMode::Value) {
@@ -647,11 +649,12 @@ impl FileAnalysis {
                     return false;
                 }
                 let declaring = res.class();
-                let in_family = writer.is_some_and(|w| self.class_isa(w, declaring, module_index));
+                let site = sites.entry(writer).or_insert_with(|| NamingSite::in_class(self, writer, module_index));
+                let in_family = site.admits(AccessScope::Family, declaring);
                 let verdict = match scope {
                     // A trait's member is its composer's own.
                     AccessScope::Class
-                        if writer != Some(declaring)
+                        if !site.admits(scope, declaring)
                             && !(in_family && self.hit_class_declared(declaring, SymbolFlags::TRAIT, &res, module_index)) =>
                     {
                         MisplacedWriteKind::OutsideClass

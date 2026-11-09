@@ -1314,38 +1314,75 @@ pub fn own_method_names<'a>(
     })
 }
 
-/// The code naming a member: the class it is written in (`None` for
-/// free-standing code) and every class that class descends from, walked
-/// once so each member's access scope is a set lookup.
-pub(crate) struct NamingSite {
+/// The code naming or writing a member: the class it is written in
+/// (`None` for free-standing code) and every class that class descends
+/// from, walked once so each member's access scope is a set lookup. The
+/// one answer to whether a site reaches a member its scope guards.
+pub(crate) struct NamingSite<'a> {
     class: Option<String>,
     lineage: HashSet<String>,
+    /// Where the language's protected reach is the whole lineage
+    /// (`FamilyReach::Lineage`), the walk that asks whether a declaring
+    /// class descends from the site's, and its answers by declaring class.
+    below: Option<(&'a FileAnalysis, Option<&'a dyn CrossFileLookup>)>,
+    descends: std::cell::RefCell<HashMap<String, bool>>,
 }
 
-impl NamingSite {
+impl<'a> NamingSite<'a> {
     /// Code outside every class: it names public members only.
     pub(crate) fn outside() -> Self {
-        NamingSite { class: None, lineage: HashSet::new() }
+        NamingSite { class: None, lineage: HashSet::new(), below: None, descends: Default::default() }
     }
 
     /// Code written in `class` (`None`: outside every class), its lineage
-    /// the MRO walk every other ancestry question takes.
-    pub(crate) fn in_class(fa: &FileAnalysis, class: Option<&str>, module_index: Option<&dyn CrossFileLookup>) -> Self {
+    /// the MRO walk every other ancestry question takes, and its reach the
+    /// family reach of `fa`'s language.
+    pub(crate) fn in_class(
+        fa: &'a FileAnalysis,
+        class: Option<&str>,
+        module_index: Option<&'a dyn CrossFileLookup>,
+    ) -> Self {
         let Some(class) = class else { return Self::outside() };
         let mut lineage = HashSet::new();
         fa.for_each_ancestor_class(class, module_index, |c| {
             lineage.insert(c.to_string());
             std::ops::ControlFlow::Continue(())
         });
-        NamingSite { class: Some(class.to_string()), lineage }
+        let below = match crate::model::conventions::conventions_of(&fa.language).family_reach {
+            FamilyReach::Descendants => None,
+            FamilyReach::Lineage => Some((fa, module_index)),
+        };
+        NamingSite { class: Some(class.to_string()), lineage, below, descends: Default::default() }
     }
 
     /// May this site name a member of `declaring` with these flags?
     pub(crate) fn may_name(&self, flags: SymbolFlags, declaring: &str) -> bool {
-        match flags.access_scope() {
+        self.admits(flags.access_scope(), declaring)
+    }
+
+    /// Does `scope`, guarding a member of `declaring`, admit this site?
+    /// A member's access scope says who names it, its set scope who
+    /// writes it.
+    pub(crate) fn admits(&self, scope: AccessScope, declaring: &str) -> bool {
+        match scope {
             AccessScope::Anywhere => true,
             AccessScope::Class => self.class.as_deref() == Some(declaring),
-            AccessScope::Family => self.lineage.contains(declaring),
+            AccessScope::Family => self.in_family(declaring),
         }
+    }
+
+    fn in_family(&self, declaring: &str) -> bool {
+        if self.lineage.contains(declaring) {
+            return true;
+        }
+        let (Some(class), Some((fa, module_index))) = (self.class.as_deref(), self.below) else {
+            return false;
+        };
+        if let Some(&hit) = self.descends.borrow().get(declaring) {
+            return hit;
+        }
+        let hit = fa.class_isa(declaring, class, module_index);
+        self.descends.borrow_mut().insert(declaring.to_string(), hit);
+        hit
     }
 }

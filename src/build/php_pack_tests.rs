@@ -3046,6 +3046,47 @@ function f(User $u) { $u->id = 2; }
     assert_eq!(found, [6]);
 }
 
+/// PHP's protected reaches up the lineage as well as down: a parent's
+/// method sets a `protected(set)` member its child declares, and a write-once
+/// one in good form only from a constructor. A sibling class shares neither
+/// lineage, and `private(set)` stays its declaring class's alone.
+#[cfg(feature = "php")]
+#[test]
+fn a_parent_may_set_its_childs_protected_set_member() {
+    use crate::model::file_analysis::MisplacedWriteKind::{OutsideClass, OutsideConstructor, OutsideFamily};
+    let fa = php("<?php
+namespace App;
+class Base {
+    public function __construct(Kid $k) { $k->once = 1; }
+    public function reset(Kid $k) { $k->kin = 1; $k->own = 2; $k->once = 3; }
+}
+class Kid extends Base {
+    public protected(set) int $kin;
+    public private(set) int $own;
+    public readonly int $once;
+}
+class Sibling extends Base {
+    public function poke(Kid $k) { $k->kin = 4; }
+}
+function outside(Kid $k) { $k->kin = 5; }
+");
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    let at = |row: usize, member: &str, kind| (row, member.to_string(), kind);
+    assert_eq!(
+        found,
+        [
+            at(4, "own", OutsideClass),
+            at(4, "once", OutsideConstructor),
+            at(12, "kin", OutsideFamily),
+            at(14, "kin", OutsideFamily),
+        ]
+    );
+}
+
 /// Each method-call receiver `m` is read on, by its row, as the class it
 /// dispatches on.
 #[cfg(feature = "php")]
@@ -3921,6 +3962,35 @@ fn a_protected_member_is_offered_in_its_class_and_descendants() {
     );
     assert_eq!(at("STRANGER", "$b->|"), ["__construct", "greet", "here", "open"], "outside the family");
     assert_eq!(at("STRANGER", "Base::|"), ["OPEN", "__construct", "class", "greet", "here"], "outside the family");
+}
+
+/// A parent names its child's protected members on a receiver typed as
+/// the child, never its private ones; a class outside the lineage names
+/// neither.
+#[cfg(feature = "php")]
+#[test]
+fn a_parent_is_offered_its_childs_protected_members() {
+    let src = "<?php
+namespace App;
+class Base {
+    public function look(Kid $k) { HERE }
+}
+class Kid extends Base {
+    public $open;
+    protected $kin;
+    private $mine;
+    protected function normalize() {}
+}
+class Stranger {
+    public function look(Kid $k) { THERE }
+}
+";
+    let at = |hole: &str| {
+        let other = if hole == "HERE" { "THERE" } else { "HERE" };
+        labels(&src.replace(hole, "$k->|").replace(other, ""))
+    };
+    assert_eq!(at("HERE"), ["kin", "look", "normalize", "open"], "the parent");
+    assert_eq!(at("THERE"), ["look", "open"], "outside the lineage");
 }
 
 /// A member and a constant or property of one name are two members, each

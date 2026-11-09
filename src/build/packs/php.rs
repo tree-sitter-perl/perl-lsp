@@ -32,6 +32,9 @@ pub fn php_pack() -> LangPack {
         // namespaces: `X()`, `$obj->X`, `Foo::$X` and `Foo::X` never answer
         // one another (`PhpSpace`).
         member_spaces: PhpSpace::SPACES,
+        // Protected reaches the declaring class's ancestors as well as its
+        // descendants.
+        family_reach: crate::model::file_analysis::FamilyReach::Lineage,
         lattice: PHP_LATTICE,
         type_display: display_type,
         shape_name: |raw| raw.to_string(),

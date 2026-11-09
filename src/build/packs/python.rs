@@ -37,6 +37,7 @@ pub fn python_pack() -> LangPack {
         construction: ConstructionKey::Class,
         // One member namespace (see `names`).
         member_spaces: MemberSpaces::SHARED,
+        family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
         type_display: |_| None,

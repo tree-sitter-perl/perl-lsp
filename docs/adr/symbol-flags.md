@@ -43,14 +43,17 @@ its own; a mark spelled like an attribute mints that attribute's flag
 
 `PRIVATE` and `PROTECTED` say where a member may be named from, and
 `SymbolFlags::access_scope` reads them as an `AccessScope`: `Class` (its
-declaring class alone), `Family` (that class and its descendants) or
+declaring class alone), `Family` (that class and its descendants, and its
+ancestors too where the language's `FamilyReach` is `Lineage`: php's) or
 `Anywhere`. `set_scope` answers the same enum for where a slot may be
 written from (php's `private(set)` / `protected(set)`). php states the
 flags in its document (`@mark.private`, `@mark.protected`); cpp's
 access-label scan stamps them, since a label governs the siblings after
 it. A gate asks a `NamingSite` — the class the code is written in and
 its lineage, walked once by the MRO walk — whether it may name a member
-of a given class.
+of a given class, and the write rule asks it under the member's set
+scope, so naming and writing share one family test. The reach is a
+convention (`LanguageConventions::family_reach`), read by language id.
 
 Perl's lexical subs and methods (`my sub`, `my method`) are not on this
 axis. They are names bound in a block from the declaration down, and

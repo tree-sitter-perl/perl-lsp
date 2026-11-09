@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, ConstructionKey, LatticeRules, MemberSpaces, NameSpellings, Subsumption};
+use crate::model::file_analysis::{ClassSpelling, ConstructionKey, FamilyReach, LatticeRules, MemberSpaces, NameSpellings, Subsumption};
 
 /// Perl's namespace separator. Source-side Perl code (the builder, the CST
 /// view, the cursor detector) spells it through this; a consumer that serves
@@ -64,6 +64,8 @@ pub struct LanguageConventions {
     /// Where an unqualified, unimported function or constant spelling
     /// finds its name.
     pub functions: FunctionLookup,
+    /// Which classes a protected member reaches beyond its own.
+    pub family_reach: FamilyReach,
 }
 
 /// Where a bare function (or constant) spelling no import row binds finds
@@ -96,8 +98,17 @@ impl LanguageConventions {
         construction: ConstructionKey,
         member_spaces: crate::model::file_analysis::MemberSpaces,
         functions: FunctionLookup,
+        family_reach: FamilyReach,
     ) -> Self {
-        LanguageConventions { lattice, special_variable: no_special_variable, type_display, construction, member_spaces, functions }
+        LanguageConventions {
+            lattice,
+            special_variable: no_special_variable,
+            type_display,
+            construction,
+            member_spaces,
+            functions,
+            family_reach,
+        }
     }
 
     /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
@@ -134,6 +145,8 @@ pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     // A call reaches a sub, never a `field` of the same name.
     member_spaces: MemberSpaces::PER_FAMILY,
     functions: FunctionLookup::Global,
+    // No Perl member is protected.
+    family_reach: FamilyReach::Descendants,
 };
 
 /// Each pack language's conventions, by `FileAnalysis::language`. The model
@@ -174,6 +187,7 @@ static UNREGISTERED: LanguageConventions =
         construction: ConstructionKey::Constructor,
         member_spaces: MemberSpaces::PER_FAMILY,
         functions: FunctionLookup::Global,
+        family_reach: FamilyReach::Descendants,
     };
 
 fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {

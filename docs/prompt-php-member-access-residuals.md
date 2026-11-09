@@ -70,7 +70,7 @@ What it reuses from `misplaced_member_writes`, unchanged: the writer's class
 (`package_at`, with the trait skip), the receiver arms
 (`receiver_classes(.., ReceiverPolicy::Stated)`) and the every-arm rule, the
 member lookup (`resolve_field_in_ancestors`, `resolve_method_in_ancestors`
-for calls) and its widened-guess skip, and the family test (`class_isa`).
+for calls) and its widened-guess skip, and the scope test (`NamingSite`).
 The axis is the read visibility the member's flags state,
 `SymbolFlags::access_scope()` over `PRIVATE` / `PROTECTED`, which returns
 the same `AccessScope` (`Class` / `Family` / `Anywhere`) `set_scope`
@@ -79,11 +79,11 @@ returns; completion already asks it through `NamingSite::may_name`
 `__call` answers any name), and method calls and class constants
 (`Foo::LIMIT`) alongside value access.
 
-PHP's protected check (`zend_check_protected`) passes in either direction
-along the parent chain: a parent's code may reach a protected member its
-child declares. `class_isa(writer, declaring)` and `NamingSite`'s lineage
-test one direction only; the family test both diagnostics share should test
-both.
+PHP's protected check (`zend_check_protected`, `is_protected_compatible_scope`)
+tests the member's ROOT declaration (`prototype->ce`,
+`zend_get_function_root_class`), so a class reaches a protected member its
+sibling redeclares from their shared parent. `NamingSite` tests the
+declaration the lookup resolves to, and turns the sibling away.
 
 ## `Closure::bind` / `bindTo` / `Closure::call` scope (`TODO(closure-bind-scope)`)
 
