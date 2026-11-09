@@ -64,12 +64,6 @@ pub struct LangPack {
     /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
     #[allow(dead_code)]
     pub module_paths: fn(module: &str) -> Vec<String>,
-    /// What a subject declared `declared` holds where an `@narrow.is` test
-    /// that names no type proves it engaged (`std::optional<T>` → `T`), or
-    /// `None` when the declared type holds nothing narrower. Which tests
-    /// prove what is the document's (`docs/adr/flow-narrowing.md`); this
-    /// reads a type spelling.
-    pub narrow_guard: fn(declared: &str) -> Option<InferredType>,
     /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
     /// `main`: reached through the ABI, never a source call site) — a
     /// zero-fan-in callable with one of these names is alive by contract.
@@ -157,7 +151,6 @@ impl LangPack {
             annot_type: _,
             doc_text: _,
             module_paths: _,
-            narrow_guard: _,
             entrypoint_symbols,
             brace_scoped_members: _,
             trigger_chars,

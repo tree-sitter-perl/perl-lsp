@@ -49,7 +49,6 @@ pub fn python_pack() -> LangPack {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
         },
-        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["."],

@@ -3948,3 +3948,28 @@ void f(robj *o, iter_t *op) {
 ";
     assert_eq!(member_write_owners("/x/retype.c", src, 7), vec!["declared lp".to_string()]);
 }
+
+#[test]
+fn cpp_a_true_test_strips_the_null_and_a_false_one_proves_nothing() {
+    // `std::optional<T>` is a nullable T: unguarded it is `T` or nothing,
+    // a true test is its T, and a false one is any falsy value, so it
+    // proves nothing of an optional, an int or a pointer.
+    let src = "\
+void f(std::optional<Widget> o, Widget* p, int n) {
+    o->run();
+    if (o) { o->run(); } else { o->other(); }
+    if (!n) { n; }
+    if (p) { p->run(); } else { p; }
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let widget = || InferredType::ClassName("Widget".into());
+    assert_eq!(at("o", 1, 4), Some(InferredType::Optional(Box::new(widget()))));
+    assert_eq!(at("o", 2, 13), Some(widget()));
+    assert_eq!(at("o", 2, 32), Some(InferredType::Optional(Box::new(widget()))));
+    assert_eq!(at("n", 3, 14), Some(InferredType::Numeric));
+    assert_eq!(at("p", 4, 13), Some(widget()));
+    assert_eq!(at("p", 4, 32), Some(widget()));
+}

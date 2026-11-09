@@ -327,7 +327,9 @@ polarity rule above ported over captures. An **atom** is a match naming
 its subject (`@narrow.var`) and what it proves on the atom's node:
 `@narrow.is` (the class `@narrow.type` names where it holds, nothing where
 it fails), `@narrow.set` (a value where it holds, the null value where it
-fails) or `@narrow.unset` (the swap). A **connective** is a node marked
+fails), `@narrow.unset` (the swap) or `@narrow.truthy` (a value where it
+holds; where it fails the subject is any falsy value, which proves
+nothing). A **connective** is a node marked
 `@narrow.not`, `@narrow.and`, `@narrow.or` or `@narrow.group` (a
 parenthesis). A **position** match marks a condition `@narrow.cond` and
 what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
@@ -380,11 +382,13 @@ is a lazy init, as `??=` is.
 Python's document declares `isinstance` and C++'s `dynamic_cast` as
 `@narrow.is` atoms naming their `@narrow.type`, read through the
 language's type spelling first (`isinstance(x, str)` is a string, not a
-class named `str`). C++'s `std::optional` engagement (the subject's own
-truth, or `has_value()`) names no type: its class is what the pack's
-`narrow_guard` peels off the subject's declared type. So `if not
-isinstance(x, T): return` and `if (!opt) return;` narrow the rest of
-their block.
+class named `str`). C++ reads `std::optional<T>` as a nullable `T`, and its
+engagement (the subject's own truth, or `has_value()`) is a `truthy`
+atom: a true test strips the null, and a false one says nothing of an
+optional, an int or a pointer. So `if not isinstance(x, T): return`
+and `if (!opt) return;` narrow the rest of their block. A C++ `.` access
+reaches an optional's own members, not its value's, which the nullable
+reading cannot tell apart from `->` (`TODO(cpp-optional-wrapper-members)`).
 
 ## A tag is a value: `ref` names its subject
 
