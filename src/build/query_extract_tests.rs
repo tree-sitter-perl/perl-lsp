@@ -3973,3 +3973,69 @@ void f(std::optional<Widget> o, Widget* p, int n) {
     assert_eq!(at("p", 4, 13), Some(widget()));
     assert_eq!(at("p", 4, 32), Some(widget()));
 }
+
+#[test]
+fn python_a_none_test_decides_whether_the_subject_holds_a_value() {
+    // `is not None` holding, and `is None` failing, leave the subject what
+    // it held coming in without its None; `is None` holding is None.
+    let src = "\
+class Foo:
+    def run(self): pass
+class A: pass
+class B: pass
+class Holder:
+    p: Optional[Foo]
+    def m(self):
+        if self.p is not None:
+            self.p.run()
+        self.p.run()
+def f(x: Optional[Foo], y: Foo | None, u: A | B | None, z: Foo):
+    if x is not None:
+        x.run()
+    x.run()
+    if y is None:
+        return
+    y.run()
+    if None is not u:
+        u.run()
+    if z is not None:
+        z.run()
+    if x is None:
+        x.run()
+    else:
+        x.run()
+";
+    let (fa, _) = python_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let mut rows: Vec<(usize, Option<InferredType>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .filter(|r| r.span.start.row != 22)
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None)))
+        .collect();
+    rows.sort_by_key(|(row, _)| *row);
+    let foo = || Some(InferredType::ClassName("Foo".into()));
+    let nullable = |t: Option<InferredType>| t.map(|t| InferredType::Optional(Box::new(t)));
+    let ab = || {
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName("A".into()), InferredType::ClassName("B".into())],
+            &crate::model::file_analysis::LatticeRules::default(),
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            (8, foo()),
+            (9, nullable(foo())),
+            (12, foo()),
+            (13, nullable(foo())),
+            (16, foo()),
+            (18, ab()),
+            (20, foo()),
+            (24, foo()),
+        ]
+    );
+    // A receiver holding None types no call, so ask the variable.
+    assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 22, column: 8 }), Some(InferredType::Undef));
+}

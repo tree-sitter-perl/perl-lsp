@@ -247,12 +247,17 @@
 
 ; Guard narrowing. An atom states what a test proves of its subject, a
 ; name or a member (`self.x`): `isinstance(x, Foo)` that it is the class
-; named (a tuple of classes names no single one). The narrowing attaches in
+; named (a tuple of classes names no single one), `x is not None` that it
+; holds a value, `x is None` that it holds none. The narrowing attaches in
 ; the guard's scope (an `if` body is no scope in Python).
 ((call
    function: (identifier) @_fn
    arguments: (argument_list . [(identifier) (attribute)] @narrow.var . (identifier) @narrow.type .)) @narrow.is
  (#eq? @_fn "isinstance"))
+(comparison_operator . [(identifier) (attribute)] @narrow.var operators: "is not" . (none) .) @narrow.set
+(comparison_operator . (none) operators: "is not" . [(identifier) (attribute)] @narrow.var .) @narrow.set
+(comparison_operator . [(identifier) (attribute)] @narrow.var operators: "is" . (none) .) @narrow.unset
+(comparison_operator . (none) operators: "is" . [(identifier) (attribute)] @narrow.var .) @narrow.unset
 ; A condition built of atoms decides them through its connectives.
 (not_operator) @narrow.not
 (boolean_operator operator: "and") @narrow.and
