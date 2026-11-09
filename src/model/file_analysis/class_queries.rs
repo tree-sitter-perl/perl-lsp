@@ -571,13 +571,16 @@ impl FileAnalysis {
     /// reported only when every class its receiver may be resolves the
     /// member to a declaration that finds it misplaced: an untyped
     /// receiver, or one arm that may be written there, is no finding.
+    // TODO(get-visibility-diagnostic): private/protected access from outside its scope, under its own code (docs/prompt-php-member-access-residuals.md).
     pub fn misplaced_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<MisplacedWrite> {
         let mut out = Vec::new();
+        // TODO(unseen-member-writes): element, by-reference and destructuring writes mint no write ref (docs/prompt-php-member-access-residuals.md).
         for r in self.refs().iter() {
             if !r.access.is_write() || MemberKind::of_ref(&r.kind) != Some(MemberKind::Value) {
                 continue;
             }
             let Some(site) = r.member_site() else { continue };
+            // TODO(closure-bind-scope): a closure bound to another class runs with that class's access (docs/prompt-php-member-access-residuals.md).
             let writer = self.package_at(site.name_span.start);
             // A trait's code runs as whichever class composes it, a class
             // the site cannot name.
