@@ -507,6 +507,20 @@
     (function_declarator
       declarator: (field_identifier) @def.method.name
       parameters: (parameter_list) @scope.sub))) @def.method
+; A `static` member function is its class's and runs on no object: its
+; body's `this` refers to nothing.
+(function_definition
+  (storage_class_specifier "static")
+  declarator: [
+    (function_declarator declarator: (field_identifier) @mark.static)
+    (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @mark.static))
+    (reference_declarator (function_declarator declarator: (field_identifier) @mark.static))])
+(field_declaration
+  (storage_class_specifier "static")
+  declarator: [
+    (function_declarator declarator: (field_identifier) @mark.static)
+    (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @mark.static))
+    (reference_declarator (function_declarator declarator: (field_identifier) @mark.static))])
 ; operator overloads: the declarator name is an `operator_name` token
 ; (`operator+`, `operator<<`), not an identifier/field_identifier, so the
 ; name patterns above never see them. In-class decls are Methods; free
@@ -749,8 +763,8 @@
 
 ; `this` is the object the enclosing method runs on, an instance of the
 ; method's class (out-of-line bodies included), never a name to spell a
-; class.
-(this) @receiver.enclosing
+; class; its token refers to that object, as php's `$this` does.
+(this) @receiver.enclosing @ref.receiver
 
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.

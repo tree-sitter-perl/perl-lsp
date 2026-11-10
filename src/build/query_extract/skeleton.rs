@@ -1624,9 +1624,15 @@ impl SkeletonAnalysis {
                     }
                     // The object a method runs on, named where its body
                     // spells it: a read of that method's receiver, which
-                    // declares nothing and is no variable of the body's.
+                    // declares nothing and is no variable of the body's. A
+                    // class-level method runs on no object, so its body's
+                    // token refers to nothing.
                     RefCap::Receiver => {
-                        binding = Some(RefBinding::Receiver(owning_method.get(r.scope.0 as usize).copied().flatten()?));
+                        let method = owning_method.get(r.scope.0 as usize).copied().flatten()?;
+                        if symbols[method.0 as usize].flags.contains(crate::model::file_analysis::SymbolFlags::STATIC) {
+                            return None;
+                        }
+                        binding = Some(RefBinding::Receiver(method));
                         RefKind::Variable
                     }
                     // A `goto` label resolves through `label_refs`; the
@@ -1816,7 +1822,9 @@ impl SkeletonAnalysis {
             let mut bare_reads: Vec<(usize, String, Option<(SymbolId, ScopeId)>)> = Vec::new();
             let mut sibling_calls: Vec<(usize, String)> = Vec::new();
             for (i, r) in refs.iter().enumerate() {
-                if matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none() {
+                // A read already bound to anything (a local, a spelled
+                // receiver) names no member.
+                if matches!(r.kind, RefKind::Variable) && r.binding.is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     let local = fields.get(&(class, r.target_name.as_str())).map(|&(fscope, fsym)| (fsym, fscope));
                     bare_reads.push((i, class.to_string(), local));

@@ -1015,7 +1015,7 @@ fn a_cpp_local_renames_whole() {
 }
 
 /// Where `needle` starts in `src`, `offset` bytes in.
-#[cfg(feature = "php")]
+#[cfg(any(feature = "php", feature = "cpp"))]
 fn at(src: &str, needle: &str, offset: usize) -> tree_sitter::Point {
     let i = src.find(needle).unwrap_or_else(|| panic!("`{needle}` in the source")) + offset;
     let row = src[..i].matches('\n').count();
@@ -2674,6 +2674,43 @@ fn this_hovers_as_its_enclosing_class() {
         assert_eq!(php_landing(&idx, path, point).0, [("App/Box.php".to_string(), 2, None)], "{needle}");
         assert_eq!(cs.renameable(), Ok(false), "{needle}");
     }
+}
+
+/// C++'s `this` is the same reference: hover names the enclosing class and
+/// goto-def lands on it, in an out-of-line body (whose class is its
+/// qualifier's) and in a lambda that captures it, and no rename rewrites
+/// it. A `static` member function runs on no object, so its `this` refers
+/// to nothing.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_this_hovers_as_its_enclosing_class() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "class W {\n  int n;\n  int get() { return this->n; }\n  void later() { auto f = [this] { return this->n; }; }\n  void set(int v);\n  static int make() { return this->n; }\n};\nvoid W::set(int v) { this->n = v; }\n";
+    let path = std::path::PathBuf::from("/fake/cpp/w.cpp");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let driver = crate::build::language_driver::LanguageRegistry::compiled();
+    idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze_with_path(src, Some(&path)));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    let ask = |point| {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        resolve(&docs, &fa, key, point, Some(&idx), OverrideScope::default()).with_source(src)
+    };
+    for needle in ["this->n; }\n  void later", "this->n; }; }", "this->n = v"] {
+        let point = at(src, needle, 0);
+        let cs = ask(point);
+        let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "cpp").unwrap_or_default();
+        assert!(hover.contains("class W"), "{needle}: {hover}");
+        let defs: Vec<usize> = cs.definitions().iter().map(|d| d.span.start.row).collect();
+        assert_eq!(defs, [0], "{needle}");
+        assert_eq!(cs.renameable(), Ok(false), "{needle}");
+    }
+    let make = fa.symbols().iter().find(|s| s.name == "make").expect("the static member function");
+    assert!(make.flags.contains(crate::model::file_analysis::SymbolFlags::STATIC));
+    let point = at(src, "this->n; }\n};", 0);
+    assert!(fa.ref_at(point).is_none(), "{:?}", fa.ref_at(point));
+    assert!(ask(point).definitions().is_empty());
 }
 
 /// (namespace, start row, end row) of every lane section, in write order.
