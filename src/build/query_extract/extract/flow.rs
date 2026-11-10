@@ -127,6 +127,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // function's `Symbol` onto it when undeclared.
             out.return_sites.push((cur_scope, e.span()));
         }
+        Capture::Expr(ExprCap::ReturnClass) => {
+            if !e.text.is_empty() {
+                out.class_returns.push((cur_scope, e.span(), e.text.clone()));
+            }
+        }
         Capture::Flow(FlowCap::Target) => {
             let name = (pack.shape_name)(&e.text);
             let (at, resets) = written_at(ad, e);

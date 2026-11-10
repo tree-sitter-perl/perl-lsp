@@ -182,9 +182,16 @@ extra, whatever the pattern.
   `@parent.super` edge names (php's `parent`), resolved with the receiver
   mark of the same name. A callable that declares no return returns what
   its body returns (`@expr.return.value`), each site an arm of the nearest
-  callable around it, so a closure's `return` is the closure's.
-  TODO(generator-returns): a php or python function that yields returns a
-  generator whatever its `return` says; its arms do not know it yields.
+  callable around it, so a closure's `return` is the closure's. A site
+  marked `@expr.return.class` (a `yield`) makes that same nearest callable
+  return the class its pattern's `#set! return.class` names (php's
+  `Generator`, python's `typing.Generator`), whatever its `return` says:
+  it lands as the callable's value before the arms are read, so the arms
+  type nothing, and a declared return that types the callable still
+  answers first. A lambda is a callable of its own, so its `yield` never
+  makes the def around it a generator.
+  TODO(generator-elements): the generator is the bare class; what it
+  yields (`foreach` over it) is not yet its element type.
 - A receiver is typed by the value at its exact span. Every call states
   one at its whole span (Perl's builder and the packs' `@expr.call` alike),
   so under `f()->a->b` the receiver of `b` is `f()->a`, never `f`, the

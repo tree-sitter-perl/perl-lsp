@@ -430,7 +430,7 @@ fn record_matches<'t>(
     syntax: &crate::cst::SyntaxForest<'t>,
     root: tree_sitter::Node<'t>,
     source: &[u8],
-) -> (links::Links<'t>, Vec<(tree_sitter::Node<'t>, Capture, usize)>) {
+) -> (links::Links<'t>, Vec<(tree_sitter::Node<'t>, Capture, usize, usize)>) {
     let mut links = links::Links::default();
     let mut captured = Vec::new();
     let mut cursor = QueryCursor::new();
@@ -460,7 +460,7 @@ fn record_matches<'t>(
                 // which are never code: no capture lands on one but the
                 // `@doc` that names a comment for what it says.
                 Some(cap) if c.node.is_extra() && cap != Capture::Doc => {}
-                Some(cap) => captured.push((c.node, cap, match_counter)),
+                Some(cap) => captured.push((c.node, cap, match_counter, m.pattern_index)),
             }
         }
     }
@@ -533,10 +533,10 @@ pub fn extract_in(
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.
     let mut flat: Vec<Flattened<'_>> = Vec::new();
-    let match_count = captured.last().map_or(0, |&(_, _, mid)| mid);
+    let match_count = captured.last().map_or(0, |&(_, _, mid, _)| mid);
     let spelled: std::collections::HashSet<usize> =
-        captured.iter().filter(|&&(_, cap, _)| cap == Capture::RefSpelled).map(|&(_, _, mid)| mid).collect();
-    for (node, cap, match_id) in captured {
+        captured.iter().filter(|&&(_, cap, _, _)| cap == Capture::RefSpelled).map(|&(_, _, mid, _)| mid).collect();
+    for (node, cap, match_id, pattern) in captured {
         match cap {
             Capture::Ref(_) if spelled.contains(&match_id) => {
                 flat.push(refs::flatten_spelled(node, cap, &links, pack, source, match_id))
@@ -547,6 +547,18 @@ pub fn extract_in(
                 flat.push(members::flatten_recv(node, cap, source, match_id))
             }
             Capture::Qualifier => flat.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
+            // The class is the pattern's word, not the node's.
+            Capture::Expr(ExprCap::ReturnClass) => {
+                let class = compiled
+                    .query
+                    .property_settings(pattern)
+                    .iter()
+                    .find(|s| *s.key == *SettingKey::ReturnClass.spelling())
+                    .and_then(|s| s.value.as_deref())
+                    .unwrap_or_default()
+                    .to_string();
+                flat.push(Event::at(node, cap, class, match_id))
+            }
             _ => flat.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
     }

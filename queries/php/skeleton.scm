@@ -69,6 +69,9 @@
 (function_definition name: (name) @def.sub.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.sub
 (method_declaration name: (name) @def.method.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.method
 (return_statement (_) @expr.return.value)
+; A callable that yields returns a generator, whatever its `return` says.
+((yield_expression) @expr.return.class
+ (#set! return.class "Generator"))
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own. A function, a method or a closure sees no
 ; variable of the code around it but the ones its `use` clause names; an

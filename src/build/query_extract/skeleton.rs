@@ -268,6 +268,10 @@ pub struct SkeletonAnalysis {
     /// (join to the owning callable, chain it when the callable declares no
     /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
+    /// Sites that make the nearest callable return a class whatever its
+    /// `return_sites` say (`@expr.return.class`, a `yield`): (enclosing
+    /// scope, the site's span, the class's identity).
+    pub class_returns: Vec<(crate::model::file_analysis::ScopeId, Span, String)>,
     /// Receiver parameters (`@receiver`, python's `self`): (enclosing scope,
     /// the parameter's name token). `into_file_analysis` types each as its
     /// method's class, once the scopes know their callables. An undeclared
@@ -1937,6 +1941,25 @@ impl SkeletonAnalysis {
             // it: this loop writes the very `Symbol` witnesses a live check
             // would read, so the first arm would block every later one.
             let mut undeclared: std::collections::HashMap<SymbolId, bool> = Default::default();
+            // A callable that yields returns its language's generator, so
+            // its `return` arms type nothing; a declared return still
+            // answers first. Pushed before the arms, which then read it as
+            // a declaration.
+            for (scope, span, class) in &self.class_returns {
+                let Some(sid) = owning_callable(&self.scopes, *scope) else { continue };
+                let open = *undeclared
+                    .entry(sid)
+                    .or_insert_with(|| bag.for_attachment(&WA::Symbol(sid)).is_empty());
+                if open {
+                    bag.push(Witness {
+                        attachment: WA::Symbol(sid),
+                        source: WitnessSource::Builder("class_return".into()),
+                        payload: WP::InferredType(InferredType::ClassName(class.clone())),
+                        span: *span,
+                    });
+                    undeclared.insert(sid, false);
+                }
+            }
             for (ret_scope, ret_span) in &self.return_sites {
                 let Some(sid) = owning_callable(&self.scopes, *ret_scope) else { continue };
                 let first = !undeclared.contains_key(&sid);

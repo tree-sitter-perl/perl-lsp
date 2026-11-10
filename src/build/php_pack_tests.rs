@@ -4209,6 +4209,39 @@ function clock() { return new Clock(); }
     assert_eq!(fa.sub_return_type_at_arity("clock", Some(0)), clock, "a function");
 }
 
+/// A callable that yields returns a `Generator`, whatever its `return`
+/// says; a closure's or an arrow function's `yield` is its own, and a
+/// declared return still answers first.
+#[cfg(feature = "php")]
+#[test]
+fn a_callable_that_yields_returns_a_generator() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+namespace App;
+class Clock {}
+class Box {
+    public function gen() { yield 1; return new Clock(); }
+    public function delegates() { yield from [1, 2]; }
+    public function outer() {
+        $f = function () { yield 1; };
+        $g = fn() => yield 2;
+        return new Clock();
+    }
+    public function declared(): \\Iterator { yield 1; }
+    public function spelled(): \\Generator { return make(); }
+}
+function produce() { yield 1; }
+");
+    let generator = Some(T::ClassName("Generator".into()));
+    let ret = |m: &str| fa.find_method_return_type("App\\Box", m, None, None);
+    assert_eq!(ret("gen"), generator, "a `return` beside a `yield` types nothing");
+    assert_eq!(ret("delegates"), generator, "`yield from`");
+    assert_eq!(ret("outer"), Some(T::ClassName("App\\Clock".into())), "the closures yield, not the method");
+    assert_eq!(ret("declared"), Some(T::ClassName("Iterator".into())), "a declared return answers first");
+    assert_eq!(ret("spelled"), generator, "the class a written `\\Generator` names");
+    assert_eq!(fa.sub_return_type_at_arity("produce", Some(0)), generator, "a function");
+}
+
 /// The completion items at `|` in `src`, asked as the editor asks: the file
 /// indexed, the cursor's buffer the one written.
 #[cfg(feature = "php")]

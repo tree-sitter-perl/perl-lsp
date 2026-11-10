@@ -47,6 +47,8 @@
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).
 (function_definition) @scope.sub
+; A lambda is a callable too: what it yields is its own.
+(lambda) @scope.sub
 
 ; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is two
 ; things from one token: a data member of the class (`Counter.count`) and a
@@ -299,3 +301,6 @@
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.
 (return_statement (_) @expr.return.value)
+; A def that yields returns a generator, whatever its `return` says.
+((yield) @expr.return.class
+ (#set! return.class "typing.Generator"))

@@ -265,6 +265,11 @@ pub enum ExprCap {
     /// (php's `x` in `$x`): the reference is the name, the value the node.
     ReadVarName,
     ReturnValue,
+    /// A site that makes the nearest callable around it return the class
+    /// its pattern's `#set! return.class` names, whatever its `return`
+    /// sites say (php's and python's `yield`). A declared return still
+    /// answers first.
+    ReturnClass,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
     /// A member value read (`recv.field`): its `@member.recv` and
@@ -369,6 +374,10 @@ spelled! {
         /// A word written after the member operator the pattern captures
         /// that names no member (php's `Foo::class`).
         MemberWord = "member.word",
+        /// The class an `@expr.return.class` site makes its callable
+        /// return, by identity: the language's own class, never a
+        /// spelling the file's imports resolve.
+        ReturnClass = "return.class",
     }
 }
 
@@ -722,6 +731,7 @@ impl Capture {
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
             ["expr", "read", "var", "name"] => C::Expr(ExprCap::ReadVarName),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
+            ["expr", "return", "class"] => C::Expr(ExprCap::ReturnClass),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
             ["expr", "construct"] => C::Expr(ExprCap::Construct),
@@ -799,6 +809,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
             C::Expr(ExprCap::ReadVarName) => f.write_str("expr.read.var.name"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
+            C::Expr(ExprCap::ReturnClass) => f.write_str("expr.return.class"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
             C::Expr(ExprCap::Construct) => f.write_str("expr.construct"),

@@ -1426,6 +1426,51 @@ def f():
     assert_eq!(fa.sub_return_type_at_arity("nothing", Some(0)), None, "`-> None` names no class");
 }
 
+/// A def that yields returns a generator, the class `Generator` names
+/// imported from `typing`, whatever its `return` says; a nested def's or
+/// a lambda's `yield` is its own, and a declared return answers first.
+#[cfg(feature = "python")]
+#[test]
+fn a_def_that_yields_returns_a_generator() {
+    let fa = py_in(
+        "\
+from typing import Generator
+
+class Widget:
+    pass
+
+def gen():
+    yield 1
+    return Widget()
+
+def delegates():
+    yield from [1, 2]
+
+def outer():
+    def inner():
+        yield 1
+    f = lambda: (yield)
+    return Widget()
+
+def declared() -> Widget:
+    yield 1
+
+def spelled() -> Generator:
+    return make()
+",
+        None,
+    );
+    let ret = |f: &str| fa.sub_return_type_at_arity(f, Some(0));
+    let generator = ret("spelled");
+    assert_eq!(generator, Some(InferredType::ClassName("typing.Generator".into())));
+    assert_eq!(ret("gen"), generator, "a `return` beside a `yield` types nothing");
+    assert_eq!(ret("delegates"), generator, "`yield from`");
+    assert_eq!(ret("inner"), generator, "a nested def");
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    assert_eq!(ret("outer"), widget, "the nested def and the lambda yield, not the def");
+    assert_eq!(ret("declared"), widget, "a declared return answers first");
+}
+
 /// Calling a class another file declares constructs it: the call is an
 /// instance of the class its spelling names through the file's imports,
 /// whether the call is assigned, chained, or returned by a def.

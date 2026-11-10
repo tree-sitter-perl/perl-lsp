@@ -1095,6 +1095,7 @@ fn remap_spans(
         field_types: _,
         decl_facts,
         return_sites,
+        class_returns,
         receivers,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
@@ -1200,6 +1201,9 @@ fn remap_spans(
         site.span = rspan(site.span);
     }
     for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
+        *span = rspan(*span);
+    }
+    for (_, span, _) in class_returns.iter_mut() {
         *span = rspan(*span);
     }
     // Member writes settle through `expr_type_at_span` on the receiver and an

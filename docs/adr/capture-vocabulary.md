@@ -50,9 +50,11 @@ A name starting with `_` follows tree-sitter's predicate-only convention
 
 A `#set!` directive carries a word no node of the match spells, so its key
 is vocabulary too (`SettingKey`): an unknown key, or one with no value,
-fails the compile. `member.word` is the one key: a word the pattern's
-member operator may be followed by that names no member (php's
-`Foo::class`), which completion offers beside the members.
+fails the compile. `member.word` is a word the pattern's member operator
+may be followed by that names no member (php's `Foo::class`), which
+completion offers beside the members. `return.class` is the class an
+`@expr.return.class` site makes its callable return, by identity (php's
+`Generator` at a `yield`).
 
 ## Decision: structural predicates are a closed set too
 
