@@ -181,7 +181,9 @@ pub(crate) fn qualifier_at_point(source: &str, point: tree_sitter::Point) -> Opt
     while start > 0 && is_id(b[start - 1]) {
         start -= 1;
     }
-    if start < 2 || !source.is_char_boundary(start) || &source[start - 2..start] != "::" {
+    // Bytes, not a str slice: `start - 2` can land inside a multi-byte
+    // character (`'¯\_(ツ)_/¯'` with the cursor after `)`).
+    if start < 2 || b[start - 2..start] != *b"::" {
         return None;
     }
     let e = start - 2;
