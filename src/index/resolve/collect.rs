@@ -1113,7 +1113,12 @@ pub(super) fn collect_from_analysis(
                 };
                 match r.resolved_package() {
                     Some(pinned) => pkg_matches(&Some(pinned.to_string())),
-                    None => {
+                    // A use-map language's bare name resolves by the one
+                    // ladder goto-def walks: the namespace it lands in, not
+                    // the one it is written in.
+                    None => match analysis.names().use_map_sep().and_then(|_| analysis.free_name_declared(r, module_index)) {
+                        Some(landed) => landed.namespace == scope.as_deref().unwrap_or_default(),
+                        None => {
                         // Unqualified + unresolved: derive the caller's own
                         // enclosing namespace positionally (pack) — a plain
                         // `vformat_to(...)` inside `namespace fmt` looks up
@@ -1127,7 +1132,8 @@ pub(super) fn collect_from_analysis(
                             },
                         );
                         pkg_matches(&derived)
-                    }
+                        }
+                    },
                 }
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },

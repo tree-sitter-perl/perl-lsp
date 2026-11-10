@@ -4744,6 +4744,22 @@ fn a_class_constant_and_a_builtin_are_no_free_constant() {
     assert!(messages.is_empty(), "{messages:?}");
 }
 
+/// `\f()` names the global function, whatever the namespace in force
+/// declares: the leading `\` skips the namespace rung.
+#[cfg(feature = "php")]
+#[test]
+fn a_global_qualified_call_reaches_the_global_function() {
+    use tree_sitter::Point;
+    let global = ("/fake/php/0/global.php", "<?php\nfunction f() {}\n");
+    let own = ("/fake/php/App/own.php", "<?php\nnamespace App;\nfunction f() {}\n");
+    let b = ("/fake/php/App/b.php", "<?php\nnamespace App;\n\\f();\nf();\n");
+    let idx = php_indexed(&[global, own, b]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(2, 1)).0, [("0/global.php".to_string(), 1, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(3, 0)).0, [("App/own.php".to_string(), 2, None)]);
+    let ws = Workspace::new(&[global, own, b]);
+    assert_eq!(ws.renames("global.php", "f()", 0), [site("b.php", 2, 1), site("global.php", 1, 9)]);
+}
+
 /// The narrowing builtins answer in their global-qualified spelling too —
 /// `\is_null`, `\die`, `\exit` — and a spelling qualified by any other
 /// namespace is somebody else's function.
