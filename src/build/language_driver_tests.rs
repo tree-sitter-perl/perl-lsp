@@ -143,9 +143,9 @@ fn cpp_enumerator_carries_parent_enum_as_container_and_type() {
     assert_eq!(red.package.as_deref(), Some("Color"),
         "enum member's container is its enum");
     assert_eq!(
-        fa.inferred_type_via_bag("RED", red.span.start),
+        fa.declared_value_type(red.id, red.span.start, None),
         Some(InferredType::ClassName("Color".to_string())),
-        "enum member's type is its enum, so hover renders `RED: Color`"
+        "enum member's type is its own binding's, so hover renders `RED: Color`"
     );
     // A bare `enum` (no @scope) keeps members in the enclosing scope, so a
     // later bare read of RED still resolves to this def.

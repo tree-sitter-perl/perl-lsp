@@ -2713,6 +2713,28 @@ fn cpp_this_hovers_as_its_enclosing_class() {
     assert!(ask(point).definitions().is_empty());
 }
 
+/// A declaration's hover shows the value its own binding holds: an
+/// enumerator its enum, a data member its declared type.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_declaration_hovers_show_their_own_binding_type() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "enum Color { RED, GREEN };\ntypedef enum { ON, OFF } Mode;\nstruct Box {\n  Color tint;\n};\n";
+    let path = std::path::PathBuf::from("/fake/cpp/decls.cpp");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let driver = crate::build::language_driver::LanguageRegistry::compiled();
+    idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze_with_path(src, Some(&path)));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    for (needle, want, kind) in [("RED", "RED: Color", "*enumerator*"), ("OFF", "OFF: Mode", "*enumerator*"), ("tint", "tint: Color", "*field*")] {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &fa, key, at(src, needle, 0), Some(&idx), OverrideScope::default()).with_source(src);
+        let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "cpp").unwrap_or_default();
+        assert!(hover.contains(want) && hover.contains(kind), "{needle}: {hover}");
+    }
+}
+
 /// (namespace, start row, end row) of every lane section, in write order.
 fn lane(fa: &FileAnalysis) -> Vec<(&str, usize, usize)> {
     fa.namespace_ranges.iter().map(|r| (r.namespace.as_str(), r.span.start.row, r.span.end.row)).collect()

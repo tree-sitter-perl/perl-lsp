@@ -176,8 +176,8 @@ pub struct SkeletonAnalysis {
     /// slot's value edge: a type that mentions its class's template
     /// parameters substitutes the receiver's arguments.
     pub field_types: Vec<(String, crate::model::file_analysis::ScopeId, InferredType)>,
-    /// A data member's or free constant's declaration facts (its
-    /// annotation, its initializer), each with the scope, token and name
+    /// A data member's, enumerator's or free constant's declaration facts
+    /// (its annotation, its initializer, its enum), each with the scope, token and name
     /// that declare it, until `into_file_analysis` lowers it to the place of
     /// the symbol that token declares — so two declarations of one member
     /// (`#if` arms, one struct name defined in two function bodies) keep
@@ -811,15 +811,16 @@ impl SkeletonAnalysis {
                 // The enum is the tightest container, tighter than any
                 // enclosing namespace the sticky context may have tagged.
                 symbols[idx].package = Some(enum_name.clone());
-                bag.push(Witness {
-                    attachment: WA::Variable {
-                        name: symbols[idx].name.clone(),
-                        scope: symbols[idx].scope,
-                    },
+                // Its type is its declaration's fact, lowered with the
+                // others onto the enumerator's own place: never the
+                // binding a name spelled like it reaches.
+                let s = &symbols[idx];
+                self.decl_facts.push((s.scope, s.selection_span.start, s.name.clone(), Witness {
+                    attachment: WA::Variable { name: s.name.clone(), scope: s.scope },
                     source: WitnessSource::Builder("enumerator".into()),
                     payload: WP::InferredType(InferredType::ClassName(enum_name)),
                     span: esp,
-                });
+                }));
             }
         }
 
@@ -1061,11 +1062,14 @@ impl SkeletonAnalysis {
             type DeclSite<'a> = (crate::model::file_analysis::ScopeId, Point, &'a str);
             let declaring: std::collections::HashMap<DeclSite, &Symbol> = symbols
                 .iter()
-                .filter(|s| matches!(s.kind, SymKind::Field) || crate::model::file_analysis::NameTable::Constant.holds(s))
+                .filter(|s| {
+                    matches!(s.kind, SymKind::Field | SymKind::Enumerator)
+                        || crate::model::file_analysis::NameTable::Constant.holds(s)
+                })
                 .map(|s| ((s.scope, s.selection_span.start, s.name.as_str()), s))
                 .collect();
-            // A member's or constant's declaration facts are its declaring
-            // symbol's place's.
+            // A member's, enumerator's or constant's declaration facts are
+            // its declaring symbol's place's.
             for (scope, token, name, mut w) in std::mem::take(&mut self.decl_facts) {
                 if let Some(sym) = declaring.get(&(scope, token, name.as_str())) {
                     w.attachment = place_of(sym);
