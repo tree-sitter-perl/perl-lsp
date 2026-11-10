@@ -79,7 +79,8 @@ pub fn query_sub_return_type(
     // Cross-file: the exporters, then a pack's include closure — the same
     // ladder an unresolved `Callee::Function` walks.
     let ctx = context?;
-    reg.free_function_cross_file(ctx, &[sub_name], None, arity_hint, receiver, &[], &mut QueryState::new())
+    let ask = super::registry::FreeAsk::Returns { constructs: None };
+    reg.free_name_cross_file(ctx, &[sub_name], &ask, arity_hint, receiver, &[], &mut QueryState::new())
 }
 
 /// What `place` holds at `point`. The place names its storage, so there

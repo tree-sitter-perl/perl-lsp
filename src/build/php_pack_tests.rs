@@ -4843,3 +4843,35 @@ fn a_constant_and_a_variable_of_one_name_hold_their_own_values() {
     let fa = php(src);
     assert_eq!(fa.inferred_type_via_bag("m", at(src, "echo $m", 0)), string);
 }
+
+/// A read of a constant another file declares holds that declaration's
+/// value: `\Lib\LIMIT`, a `use const` row's leaf and a bare read in the
+/// constant's namespace each, and a bare read its namespace declares
+/// nothing for holds the global `define`'s.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_read_holds_the_value_another_file_declares() {
+    let lib = ("/fake/php/Lib/limits.php", "<?php\nnamespace Lib;\nconst LIMIT = 3;\n");
+    let global = ("/fake/php/0/global.php", "<?php\ndefine('MAX', 'x');\n");
+    let qualified = ("/fake/php/App/q.php", "<?php\nnamespace App;\n$a = \\Lib\\LIMIT;\n$m = MAX;\necho $a;\n");
+    let imported = ("/fake/php/App/u.php", "<?php\nnamespace App;\nuse const Lib\\LIMIT;\n$a = LIMIT;\necho $a;\n");
+    let bare = ("/fake/php/Lib/b.php", "<?php\nnamespace Lib;\n$a = LIMIT;\necho $a;\n");
+    let idx = php_indexed(&[lib, global, qualified, imported, bare]);
+    let ty = |(path, src): (&str, &str), var: &str| {
+        use crate::build::language_driver::LanguageRegistry;
+        use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
+        let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
+        let base: &dyn CrossFileLookup = &idx;
+        let scoped = ScopedLookup::for_origin(base, &fa, None, LanguageRegistry::pack_visibility(&fa.language));
+        fa.inferred_type_via_bag_ctx(var, at(src, "echo", 0), Some(&scoped))
+    };
+    let numeric = Some(InferredType::Numeric);
+    assert_eq!(ty(qualified, "a"), numeric, "a qualified read");
+    assert_eq!(ty(imported, "a"), numeric, "a read through `use const`");
+    assert_eq!(ty(bare, "a"), numeric, "a bare read in the constant's namespace");
+    assert_eq!(ty(qualified, "m"), Some(InferredType::String), "the global fallback");
+    let hover = php_hover(&idx, qualified.0, qualified.1, "$a;", 1);
+    assert!(hover.contains("int"), "hover reads the same value: {hover}");
+    // the value is the declaring file's: this file alone states none
+    assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
+}

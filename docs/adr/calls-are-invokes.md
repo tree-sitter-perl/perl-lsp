@@ -29,7 +29,7 @@ so the callee is chosen at query time, never fixed when the file was built.
 The producer resolves the local half because it holds the symbol table, and
 a cross-file chase into a file whose symbols are evicted still finds the
 edge in that file's bag (rule #11). The cross-file half is one ladder,
-`ReducerRegistry::free_function_cross_file`: a module exporting the name,
+`ReducerRegistry::free_name_cross_file`: a module exporting the name,
 then a pack's linkage-visible definitions gated by include-closure
 reachability. `query_sub_return_type` walks the same ladder for a bare
 name, so a call and a name probe cannot disagree. The ladder shares the
@@ -82,7 +82,10 @@ extra, whatever the pattern.
   first rung the file declares and `local` is that declaration; across
   files each rung is looked up by its identity, and a call whose identity
   nothing declares widens to its leaf out loud. A free constant
-  (`@ref.constant`) walks the same ladder in its own table.
+  (`@ref.constant`) walks the same ladder in its own table; a read of one
+  the file does not declare is a `FreeValue` the registry looks up across
+  files on that ladder, asking the declaration what it holds
+  (`FreeAsk::Holds`) where a call asks what it returns.
 - A body elides its receiver where the document marks its scope
   `@scope.sub.implicit_receiver` and the body belongs to a method. There a
   bare call carries `member_of`, and a bare read the file can't resolve to

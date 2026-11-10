@@ -119,11 +119,12 @@ the class's fan-out cut.
 
 An index-less chase (a bake, a hand-built FA) has no fan-out to key.
 
-A free function's cross-file half (`free_function_cross_file`: its
+A free name's cross-file half (`free_name_cross_file`: its
 exporters, then a pack's linkage-visible definitions, and for a
 constructing call the class's definitions) is the same shape — a
 fan-out over files, each chased on its own bag — so it is the same node,
-keyed by name and constructed class, and spends the consult budget per
+keyed by names and what it asks (`FreeAsk`: a call's return and the
+class it constructs, or a constant's value), and spends the consult budget per
 file it decodes as the ladder's candidates do. Two fan-outs, one node:
 whatever bounds one bounds the other.
 

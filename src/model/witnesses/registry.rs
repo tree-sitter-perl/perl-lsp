@@ -33,12 +33,57 @@ type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option
 /// when it entered), so a cut can say which frame it closed at.
 type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
 /// What a cross-file fan-out asks the files of: a class-keyed attachment's
-/// candidate files (`class_candidates_node`), or a free function's exporters
-/// and linkage-visible definitions (`free_function_cross_file`).
+/// candidate files (`class_candidates_node`), or a free name's exporters
+/// and linkage-visible definitions (`free_name_cross_file`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FanOut {
     Class(WitnessAttachment),
-    Free { names: Vec<String>, class: Option<String> },
+    Free { names: Vec<String>, ask: FreeAsk },
+}
+
+/// What a free name's cross-file lookup asks of the declaration it
+/// reaches: the `Returns` / `Holds` split a `Member` attachment makes, for
+/// a name no owner qualifies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) enum FreeAsk {
+    /// What calling it yields: a callable filed under the name, or a class
+    /// declared under `constructs` (`Callee::Function::constructs`), whose
+    /// value is an instance of itself.
+    Returns { constructs: Option<String> },
+    /// What the declaration of the name in this table holds: its declared
+    /// place's value (`FileAnalysis::declared_place`).
+    Holds(crate::model::file_analysis::NameTable),
+}
+
+impl FreeAsk {
+    /// Does `sym`, of `fa`, declare `name` for this ask? The first of a
+    /// ladder's names only: a constructed class answers no fallback.
+    fn declares(
+        &self,
+        fa: &crate::model::file_analysis::FileAnalysis,
+        sym: &crate::model::file_analysis::Symbol,
+        name: &str,
+        first: bool,
+    ) -> bool {
+        use crate::model::file_analysis::SymKind;
+        // filed under the name a reference spells it by (`linkage_identity`)
+        match self {
+            FreeAsk::Returns { constructs } => {
+                (matches!(sym.kind, SymKind::Sub | SymKind::Method) && fa.linkage_identity(sym) == name)
+                    || (first && sym.kind == SymKind::Class && constructs.as_deref() == Some(sym.name.as_str()))
+            }
+            FreeAsk::Holds(table) => table.holds(sym) && fa.linkage_identity(sym) == name,
+        }
+    }
+
+    /// The class a call constructs, whose own files are candidates too when
+    /// it is filed apart from the name.
+    fn constructs(&self) -> Option<&str> {
+        match self {
+            FreeAsk::Returns { constructs } => constructs.as_deref(),
+            FreeAsk::Holds(_) => None,
+        }
+    }
 }
 /// A fan-out's identity: `VisitedKey` without the bag and the point (a
 /// fan-out is point-free).
@@ -2834,6 +2879,17 @@ impl ReducerRegistry {
                         });
                     }
                 }
+                WitnessPayload::FreeValue { table, name, fallback } => {
+                    let ask = FreeAsk::Holds(*table);
+                    if let Some(t) = self.free_name(q, state, name, fallback.as_deref(), &ask, None, None, &[]) {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(t),
+                            span: w.span,
+                        });
+                    }
+                }
                 _ => out.push(w.clone()),
             }
         }
@@ -2991,16 +3047,9 @@ impl ReducerRegistry {
                     .collect()
             }
             Callee::Function { name, local: None, constructs, fallback, .. } => {
-                let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
-                    // The definition is in another file, and no conclusion
-                    // key names a free function, so a bake can't link it.
-                    super::note_bake_exit("free_function", false);
-                    state.note_exit(None);
-                    return None;
-                };
                 let arity = exact.then_some(arg_types.len() as u32);
-                let names: Vec<&str> = std::iter::once(name.as_str()).chain(fallback.as_deref()).collect();
-                return self.free_function_cross_file(ctx, &names, constructs.as_deref(), arity, recv, &arg_types, state);
+                let ask = FreeAsk::Returns { constructs: constructs.clone() };
+                return self.free_name(q, state, name, fallback.as_deref(), &ask, arity, recv, &arg_types);
             }
             Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
@@ -3041,23 +3090,47 @@ impl ReducerRegistry {
         })
     }
 
-    /// The free function `names` names as the files `ctx` can see it: a
-    /// module exporting it, then a pack's linkage-visible definitions — the
-    /// first of `names` anything declares, in order (a bare call's
-    /// language-ordered identities, `Callee::Function::fallback`). One
-    /// ladder for both entries — `query_sub_return_type`'s cross-file half
-    /// and an unresolved `Callee::Function` — and the chase shares `state`,
-    /// so a call that crosses back into a file already on the path stops at
-    /// the cycle guard instead of recursing through a fresh query. `class`
-    /// is the identity the call constructs if it names a class
-    /// (`Callee::Function::constructs`): a class declared under it is a
-    /// callee too, whose value is an instance of itself.
+    /// A free name this file does not declare — `name`, then `fallback`
+    /// (`Callee::Function::fallback`) — under the index `q` holds. A bake
+    /// has none, and no conclusion key names a free name, so it records an
+    /// exit nothing can link.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn free_function_cross_file(
+    fn free_name(
+        &self,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        name: &str,
+        fallback: Option<&str>,
+        ask: &FreeAsk,
+        arity_hint: Option<u32>,
+        receiver: Option<InferredType>,
+        args: &[InferredType],
+    ) -> Option<InferredType> {
+        let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
+            super::note_bake_exit("free_name", false);
+            state.note_exit(None);
+            return None;
+        };
+        let names: Vec<&str> = std::iter::once(name).chain(fallback).collect();
+        self.free_name_cross_file(ctx, &names, ask, arity_hint, receiver, args, state)
+    }
+
+    /// The free name `names` names as the files `ctx` can see it: a module
+    /// exporting it, then a pack's linkage-visible definitions — the first
+    /// of `names` anything declares, in order (a bare spelling's
+    /// language-ordered identities, `Callee::Function::fallback`), asked
+    /// what `ask` asks of it. One ladder for every entry —
+    /// `query_sub_return_type`'s cross-file half, an unresolved
+    /// `Callee::Function`, and a `FreeValue` read — and the chase shares
+    /// `state`, so a chase that crosses back into a file already on the
+    /// path stops at the cycle guard instead of recursing through a fresh
+    /// query.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn free_name_cross_file(
         &self,
         ctx: &BagContext,
         names: &[&str],
-        class: Option<&str>,
+        ask: &FreeAsk,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
         args: &[InferredType],
@@ -3068,15 +3141,13 @@ impl ReducerRegistry {
             return None;
         }
         let key = (
-            FanOut::Free { names: names.iter().map(|n| n.to_string()).collect(), class: class.map(str::to_string) },
+            FanOut::Free { names: names.iter().map(|n| n.to_string()).collect(), ask: ask.clone() },
             receiver_key(&receiver),
             arity_hint,
         );
         let v = state.fan_out_node(key, |state| {
             names.iter().enumerate().find_map(|(i, name)| {
-                // a class the call constructs answers on the first name only
-                let class = class.filter(|_| i == 0);
-                self.free_function_fan_out(idx, name, class, arity_hint, receiver.clone(), args, state)
+                self.free_name_fan_out(idx, name, ask, i == 0, arity_hint, receiver.clone(), args, state)
             })
             .flatten()
             .map(ReducedValue::Type)
@@ -3087,34 +3158,34 @@ impl ReducerRegistry {
         }
     }
 
-    /// The walk behind `free_function_cross_file`'s fan-out node, for one of
-    /// its names: `None` when nothing it can see declares `name` (the next
-    /// name is asked), `Some(answer)` when something does — an untyped or
-    /// ambiguous declaration still stops the ladder. Each file it decodes
-    /// spends the session's consult budget, as the class ladder's
-    /// candidates do.
+    /// The walk behind `free_name_cross_file`'s fan-out node, for one of
+    /// its names (`first`: the ladder's first): `None` when nothing it can
+    /// see declares `name` (the next name is asked), `Some(answer)` when
+    /// something does — an untyped or ambiguous declaration still stops the
+    /// ladder. Each file it decodes spends the session's consult budget, as
+    /// the class ladder's candidates do.
     #[allow(clippy::too_many_arguments)]
-    fn free_function_fan_out(
+    fn free_name_fan_out(
         &self,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
         name: &str,
-        class: Option<&str>,
+        free: &FreeAsk,
+        first: bool,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
         args: &[InferredType],
         state: &mut QueryState,
     ) -> Option<Option<InferredType>> {
-        use crate::model::file_analysis::{FileAnalysis, SymKind};
+        use crate::model::file_analysis::FileAnalysis;
         use std::sync::Arc;
-        // filed under the name a call spells it by (`linkage_identity`)
-        let is_callable = |fa: &FileAnalysis, s: &crate::model::file_analysis::Symbol| {
-            (matches!(s.kind, SymKind::Sub | SymKind::Method) && fa.linkage_identity(s) == name)
-                || (class == Some(s.name.as_str()) && s.kind == SymKind::Class)
-        };
+        let declares = |fa: &FileAnalysis, s: &crate::model::file_analysis::Symbol| free.declares(fa, s, name, first);
+        let class = free.constructs().filter(|_| first);
         let mut declared = false;
-        // The callable's answer in its own file, under the caller's arity,
-        // receiver and arguments. The copy is pinned: the memo keys on its
-        // bag's address for the rest of this query.
+        // The declaration's answer in its own file, under the caller's
+        // arity, receiver and arguments: what calling it returns, or what
+        // its place holds by the end of the scope it is declared in. The
+        // copy is pinned: the memo keys on its bag's address for the rest of
+        // this query.
         let ask = |full: &Arc<FileAnalysis>, sym: SymbolId, state: &mut QueryState| {
             state.pins.push(Arc::clone(full));
             let cached_ctx = BagContext {
@@ -3128,11 +3199,19 @@ impl ReducerRegistry {
 
                 member_spaces: crate::model::conventions::member_spaces_for(&full.language),
             };
-            let att = WitnessAttachment::Symbol(sym);
+            let (att, point, framework) = match free {
+                FreeAsk::Returns { .. } => (WitnessAttachment::Symbol(sym), None, FrameworkFact::Plain),
+                FreeAsk::Holds(_) => {
+                    let place = full.declared_place(sym);
+                    let at = binding_scope_end(&cached_ctx, &place.root);
+                    let framework = binding_framework(&cached_ctx, &place.root);
+                    (WitnessAttachment::Place(Box::new(place)), at, framework)
+                }
+            };
             let q = ReducerQuery {
                 attachment: &att,
-                point: None,
-                framework: FrameworkFact::Plain,
+                point,
+                framework,
                 arity_hint,
                 receiver: receiver.clone(),
                 args: args.to_vec(),
@@ -3157,7 +3236,7 @@ impl ReducerRegistry {
                     return Some(None);
                 }
                 let full = idx.bag_present(&cached);
-                let Some(sym) = full.symbols().iter().find(|s| is_callable(&full, s)).map(|s| s.id) else {
+                let Some(sym) = full.symbols().iter().find(|s| declares(&full, s)).map(|s| s.id) else {
                     continue;
                 };
                 declared = true;
@@ -3180,7 +3259,7 @@ impl ReducerRegistry {
             if Arc::ptr_eq(&enriched, &full) {
                 continue;
             }
-            let Some(sym) = enriched.symbols().iter().find(|s| is_callable(&enriched, s)).map(|s| s.id) else {
+            let Some(sym) = enriched.symbols().iter().find(|s| declares(&enriched, s)).map(|s| s.id) else {
                 continue;
             };
             if let Some(t) = ask(&enriched, sym, state) {
@@ -3230,7 +3309,7 @@ impl ReducerRegistry {
             let Some(sym) = full
                 .symbols()
                 .iter()
-                .find(|s| is_callable(&full, s) && full.is_linkage_visible(s))
+                .find(|s| declares(&full, s) && full.is_linkage_visible(s))
                 .map(|s| s.id)
             else {
                 continue;

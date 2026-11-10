@@ -168,7 +168,11 @@ A name nothing declares (a runtime's `PHP_EOL`) answers nothing and is
 not renameable. A constant's value is its own binding's — its declaring
 symbol's place, held file-wide, never a `Variable` of its name, so `$X`
 and `X` in one scope keep their own — and a read the file's own
-declaration answers is an edge to that place.
+declaration answers is an edge to that place. A read of one another file
+declares carries its ladder (`WitnessPayload::FreeValue`), and the
+registry walks it across files the way it walks an unresolved call's
+(`free_name_cross_file`), asking the declaration it reaches what its place
+holds where a call asks what its callable returns (`FreeAsk`).
 
 **A class is a home, not a namespace.** Whose member a declaration is
 and how a name written somewhere resolves are two facts, and the scope

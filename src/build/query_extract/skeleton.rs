@@ -1566,7 +1566,8 @@ impl SkeletonAnalysis {
         }
         // A constant read's value is the constant's own binding, the one its
         // declaration's facts land on; a read of a constant another file
-        // declares states none here.
+        // declares carries the names it may be, for the registry to ask
+        // across files (`WitnessPayload::FreeValue`).
         let mut constant_reads: Vec<crate::model::witnesses::Witness> = Vec::new();
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
@@ -1592,14 +1593,27 @@ impl SkeletonAnalysis {
                             _ => (RefKind::FunctionCall, crate::model::file_analysis::NameTable::Function),
                         };
                         let named = free_name(table, &r.name, span);
-                        if let (RefKind::Constant, Some((_, sid))) = (&kind, named.as_ref().and_then(|(n, _)| n.local)) {
-                            let value = r.spelled.unwrap_or(span);
-                            let place = crate::model::file_analysis::Place::variable(crate::model::file_analysis::Binding::Lexical(sid));
+                        if let (RefKind::Constant, Some((named, _))) = (&kind, named.as_ref()) {
                             use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+                            let value = r.spelled.unwrap_or(span);
+                            let payload = match named.local {
+                                Some((_, sid)) => {
+                                    let place = crate::model::file_analysis::Place::variable(crate::model::file_analysis::Binding::Lexical(sid));
+                                    WP::Edge(WA::Place(Box::new(place)))
+                                }
+                                None => {
+                                    let sep = names.use_map_sep().unwrap_or_default();
+                                    WP::FreeValue {
+                                        table,
+                                        name: named.callee().identity(sep),
+                                        fallback: named.fallback().map(|q| q.identity(sep)),
+                                    }
+                                }
+                            };
                             constant_reads.push(crate::model::witnesses::Witness {
                                 attachment: WA::Expr(value),
                                 source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
-                                payload: WP::Edge(WA::Place(Box::new(place))),
+                                payload,
                                 span: value,
                             });
                         }
