@@ -4618,3 +4618,35 @@ fn a_construction_hovers_its_class_and_constructor() {
     assert!(ctor.contains("public function __construct(int $level)"), "{ctor}");
     assert!(ctor.contains("*class Lib\\Handler*") && ctor.contains("Wrap a level.") && ctor.contains("Handler.php"), "{ctor}");
 }
+
+/// The narrowing builtins answer in their global-qualified spelling too —
+/// `\is_null`, `\die`, `\exit` — and a spelling qualified by any other
+/// namespace is somebody else's function.
+#[cfg(feature = "php")]
+#[test]
+fn a_global_qualified_builtin_narrows() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src = "<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f(?Foo $y) {\n    if (!\\is_null($y)) { $y->run(); }\n    if (!App\\is_null($y)) { $y->run(); }\n    if (!namespace\\is_null($y)) { $y->run(); }\n}\n";
+    let fa = php(src);
+    let mut rows: Vec<(usize, Option<InferredType>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None)))
+        .collect();
+    rows.sort_by_key(|(row, _)| *row);
+    let nullable = foo.clone().map(|t| InferredType::Optional(Box::new(t)));
+    assert_eq!(rows, [(4, foo.clone()), (5, nullable.clone()), (6, nullable)]);
+
+    for (body, exits) in [
+        ("\\die(\"x\");", true),
+        ("\\exit(1);", true),
+        ("Lib\\die(\"x\");", false),
+        ("namespace\\exit(1);", false),
+    ] {
+        let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
+        let fa = php(&src);
+        let want = if exits { foo.clone() } else { None };
+        assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), want, "{body}");
+    }
+}

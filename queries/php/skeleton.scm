@@ -400,7 +400,9 @@
 ; property `$this->x`: `instanceof` that it is the class named, `isset`
 ; and `!== null` that it holds a value, `=== null` and `is_null` that it
 ; holds none. A multi-argument `isset` is a conjunction, so only a single
-; argument is an atom. Loose `==` / `!=` prove nothing: `0 == null` holds.
+; argument is an atom. A function named from the global namespace
+; (`\is_null`) is the same function; one named from any other namespace is
+; not. Loose `==` / `!=` prove nothing: `0 == null` holds.
 ; `instanceof static` proves the class the guard is written in: the class
 ; the call is made on is that class or one beneath it.
 ((binary_expression
@@ -409,7 +411,7 @@
    right: [(name) (qualified_name)] @narrow.type) @narrow.is
  (#not-eq? @narrow.var "this"))
 ((function_call_expression
-   function: (name) @_fn
+   function: [(name) @_fn (qualified_name . (name) @_fn)]
    arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.set
  (#eq? @_fn "isset")
  (#not-eq? @narrow.var "this"))
@@ -434,7 +436,7 @@
    right: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) @narrow.unset
  (#not-eq? @narrow.var "this"))
 ((function_call_expression
-   function: (name) @_fn
+   function: [(name) @_fn (qualified_name . (name) @_fn)]
    arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.unset
  (#eq? @_fn "is_null")
  (#not-eq? @narrow.var "this"))
@@ -451,7 +453,8 @@
 ; leaves the rest of the block to run where its condition fails: what runs
 ; before that statement ends there too, or leaves sooner. `die` and a
 ; called `exit` are calls by the grammar's reading (`die;` a bare name),
-; and the language reserves both words, so their spelling names them.
+; and the language reserves both words, so their spelling names them,
+; from the global namespace too (`\exit(1)`).
 ; A comment after the leaving statement is a named child too, and hides
 ; it from the closing anchor.
 (if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
@@ -483,9 +486,11 @@
 ((if_statement
    condition: (_) @narrow.cond
    body: [
-     (expression_statement [(function_call_expression function: (name) @_exit) (name) @_exit])
+     (expression_statement
+       [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit])
      (compound_statement
-       (expression_statement [(function_call_expression function: (name) @_exit) (name) @_exit]) .)]
+       (expression_statement
+         [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) .)]
    !alternative) @narrow.exit
  (#any-of? @_exit "die" "exit"))
 
