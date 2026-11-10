@@ -37,25 +37,42 @@
 
 ; ---- written types ----
 ; `self` names the class it is written in, and `parent` the class it
-; extends, nullable or not, wherever a type is written: a return, a
-; parameter, a property, the class an `instanceof` tests for. `static` is
-; late-bound: the class the call is made on, the class it is written in
-; where no call says.
+; extends, nullable or not (`?T`, `T|null`, `null|T` alike), wherever a
+; type is written: a return, a parameter, a property, the class an
+; `instanceof` tests for. `static` is late-bound: the class the call is
+; made on, the class it is written in where no call says.
+; TODO(static-union-arms): a union with another class (`static|Foo`) is
+; no mark; its arms are read as text, where no relative class resolves.
 (([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.enclosing)
  (#eq? @_class "self"))
 (([
+  (union_type . (named_type (name) @_class) . (primitive_type) @_null .)
+  (union_type . (primitive_type) @_null . (named_type (name) @_class) .)
+ ] @type.enclosing)
+ (#eq? @_class "self") (#eq? @_null "null"))
+(([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.called)
  (#eq? @_class "static"))
 (([
+  (union_type . (named_type (name) @_class) . (primitive_type) @_null .)
+  (union_type . (primitive_type) @_null . (named_type (name) @_class) .)
+ ] @type.called)
+ (#eq? @_class "static") (#eq? @_null "null"))
+(([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.super)
  (#eq? @_class "parent"))
+(([
+  (union_type . (named_type (name) @_class) . (primitive_type) @_null .)
+  (union_type . (primitive_type) @_null . (named_type (name) @_class) .)
+ ] @type.super)
+ (#eq? @_class "parent") (#eq? @_null "null"))
 ((binary_expression operator: "instanceof" right: (name) @type.enclosing)
  (#eq? @type.enclosing "self"))
 ((binary_expression operator: "instanceof" right: (name) @type.called)

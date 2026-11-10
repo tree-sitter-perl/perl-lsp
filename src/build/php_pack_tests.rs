@@ -1449,8 +1449,10 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(ret("full"), clock, "a fully qualified class");
     assert_eq!(ret("count"), Some(T::Numeric));
     assert_eq!(ret("either"), or(T::ClassName("Lib\\Clock".into()), T::Numeric), "a union is the join of its arms");
-    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
-    assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
+    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n    public function either(): self|int {}\n}\n");
+    let a = Some(T::ClassName("A".into()));
+    assert_eq!(union.find_method_return_type("A", "orNull", None, None), a, "`self|null` reads as `?self`");
+    assert_eq!(union.find_method_return_type("A", "either", None, None), None, "a union of `self` with another type");
     assert_eq!(ret("nothing"), None);
     assert_eq!(ret("bare"), None);
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
@@ -4090,6 +4092,8 @@ class Query {
     public function maybe(): ?static {}
     public function again(): self {}
     public function query() {}
+    public function orNull(): static|null {}
+    public function nullOr(): null|static {}
 }
 class Users extends Query {
     public function active() {}
@@ -4098,11 +4102,14 @@ function run(Users $u) {
     $u->where()->active();
     $u->maybe()->active();
     $u->again()->query();
+    $u->orNull()->active();
+    $u->nullOr()->active();
 }
 ";
 
 /// A declared `static` return is the class the call is made on, nullable
-/// or not, and `self` the class the method is written in.
+/// (`?static`, `static|null`, `null|static`) or not, and `self` the class
+/// the method is written in.
 #[cfg(feature = "php")]
 #[test]
 fn a_static_return_is_the_class_the_call_is_made_on() {
@@ -4117,8 +4124,13 @@ fn a_static_return_is_the_class_the_call_is_made_on() {
             ("active", "Users"),
             ("again", "Users"),
             ("query", "Query"),
+            ("orNull", "Users"),
+            ("active", "Users"),
+            ("nullOr", "Users"),
+            ("active", "Users"),
         ])
     );
+    assert_eq!(fa.find_method_return_type("Query", "orNull", None, None), Some(T::ClassName("Query".into())));
     assert_eq!(fa.find_method_return_type("Users", "where", None, None), Some(T::ClassName("Users".into())));
     assert_eq!(fa.find_method_return_type("Query", "where", None, None), Some(T::ClassName("Query".into())));
     assert_eq!(fa.find_method_return_type("Users", "again", None, None), Some(T::ClassName("Query".into())));
