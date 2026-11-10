@@ -128,6 +128,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let (pkg, owner_stated) = match (&through, stated) {
         (Some(_), _) => (None, false),
         (None, Some(owner)) => (Some(owner), true),
+        (None, None) if mine(Capture::DefGlobal).is_some() => (None, false),
         (None, None) => (st.package.clone(), false),
     };
     let shaped = (pack.shape_name)(&name);

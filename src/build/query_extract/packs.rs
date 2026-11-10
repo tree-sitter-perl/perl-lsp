@@ -18,10 +18,10 @@ pub struct LangPack {
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
     pub names: NameSpellings,
-    /// Where a bare function call finds its function, registered by id
-    /// with the lattice: the extractor names each free call by it and
+    /// Where a bare function or constant finds its name, registered by id
+    /// with the lattice: the extractor names each free name by it and
     /// resolution looks across files by it, so no file carries it.
-    pub functions: FunctionLookup,
+    pub free_names: FreeNameLookup,
     /// Which cross-family types the language's joins fold into one another
     /// (`docs/adr/union-types.md`). Registered by language id
     /// (`conventions::register_conventions`).
@@ -124,7 +124,7 @@ impl LangPack {
             self.type_display,
             self.construction,
             self.member_spaces.clone(),
-            self.functions,
+            self.free_names,
             self.family_reach,
         )
     }
@@ -144,7 +144,7 @@ impl LangPack {
             id: _,
             query_source: _,
             names: _,
-            functions: _,
+            free_names: _,
             lattice: _,
             type_display: _,
             construction: _,
@@ -228,4 +228,4 @@ pub(super) fn param_return_expr(
     }
 }
 
-pub use crate::model::conventions::FunctionLookup;
+pub use crate::model::conventions::FreeNameLookup;

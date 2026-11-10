@@ -24,9 +24,9 @@ pub fn php_pack() -> LangPack {
             class_call: ClassCall::FunctionCall,
             ..NameSpellings::NONE
         },
-        // A bare call names the function its namespace declares, else the
-        // global one.
-        functions: FunctionLookup::NamespaceThenGlobal,
+        // A bare call or constant names the one its namespace declares,
+        // else the global one.
+        free_names: FreeNameLookup::NamespaceThenGlobal,
         construction: ConstructionKey::Class,
         // Methods, properties, static properties and constants are four
         // namespaces: `X()`, `$obj->X`, `Foo::$X` and `Foo::X` never answer

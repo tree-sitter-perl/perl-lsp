@@ -256,6 +256,7 @@ fn family(cap: Capture) -> Family {
         C::Def { .. }
         | C::DefPair
         | C::DefHoist
+        | C::DefGlobal
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget

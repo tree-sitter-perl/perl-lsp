@@ -73,14 +73,16 @@ extra, whatever the pattern.
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
   qualified pack call (`@ref.call` named by its `@ref.spelled`) mints
   no call value yet outside a use-map.
-- Under a use-map a free function is its namespace's
-  (`function_identity`): a qualified spelling (`@ref.call` under
-  `@ref.spelled`, php's `\Lib\f()`) resolves like a class spelling, and a
-  bare name is the namespace in force's own function when the file
-  declares one there, else the global one. The call's ref is pinned to
-  that namespace and `local` is that declaration; across files the name
-  is looked up by its leaf, so two namespaces' same-leaf functions can
-  answer for each other. php's `use function` rows are not read yet.
+- Under a use-map a free function is its namespace's identity
+  (`docs/prompt-class-identity.md`, "A free name is its identity too"): a
+  qualified spelling (`@ref.call` under `@ref.spelled`, php's `\Lib\f()`)
+  resolves like a class spelling, a `use function` row binds its leaf,
+  and a bare name walks `UseMap::free_name_ladder` — the namespace in
+  force's function, then the global one. The call's ref is pinned to the
+  first rung the file declares and `local` is that declaration; across
+  files each rung is looked up by its identity, and a call whose identity
+  nothing declares widens to its leaf out loud. A free constant
+  (`@ref.constant`) walks the same ladder in its own table.
 - A body elides its receiver where the document marks its scope
   `@scope.sub.implicit_receiver` and the body belongs to a method. There a
   bare call carries `member_of`, and a bare read the file can't resolve to

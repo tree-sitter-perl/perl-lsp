@@ -109,6 +109,13 @@ promoted constructor parameter, a property and a local). It is opt-in on
 the pattern because two defs in one match are a pair only when the
 document says so; the extractor links them as `Symbol::declared_with`.
 
+`@ref.constant` sits on a free constant's spelled name (php's `LIMIT`,
+`\Lib\LIMIT`), the twin of `@ref.call` in the constant table; which bare
+names are values and not calls, labels or class names is the document's,
+by the node they sit in. `@mark.constant` marks a def as one, and
+`@def.global` beside a def says its name is the global namespace's
+wherever it is written (php's `define('X', 1)`).
+
 `@receiver.<kind>` sits on a receiver token whose value is a class, so a
 call on it dispatches there: the token's `Expr` witness is the one store
 of that class, and the call's lookup reads it like any receiver's value.

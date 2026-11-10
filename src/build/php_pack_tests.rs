@@ -4619,6 +4619,131 @@ fn a_construction_hovers_its_class_and_constructor() {
     assert!(ctor.contains("*class Lib\\Handler*") && ctor.contains("Wrap a level.") && ctor.contains("Handler.php"), "{ctor}");
 }
 
+/// A free constant is a def in both of its spellings: a namespace-level
+/// `const` files under the namespace in force, `define` under the global
+/// namespace wherever it is written. Each is a constant, never a variable,
+/// and is filed for linkage under its namespaced identity.
+#[cfg(feature = "php")]
+#[test]
+fn a_free_constant_is_a_def_in_both_spellings() {
+    use crate::model::file_analysis::SymbolFlags;
+    let fa = php("<?php\nnamespace App;\nconst LIMIT = 3;\ndefine('MAX', 'x');\nclass C { const INNER = 1; }\n");
+    let constants: Vec<_> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.flags.contains(SymbolFlags::CONSTANT))
+        .map(|s| (s.name.clone(), s.package.clone(), fa.linkage_identity(s).into_owned()))
+        .collect();
+    assert_eq!(
+        constants,
+        [
+            ("LIMIT".to_string(), Some("App".to_string()), "App\\LIMIT".to_string()),
+            ("MAX".to_string(), None, "MAX".to_string()),
+        ]
+    );
+    assert!(fa.symbols().iter().filter(|s| s.flags.contains(SymbolFlags::CONSTANT)).all(|s| s.variable_decl().is_none()));
+}
+
+/// Within a file a constant's uses — bare and `\`-qualified — land on it, hover with its value's type, and
+/// rename together; `$LIMIT` is another name, and a function of the same
+/// name is another table.
+#[cfg(feature = "php")]
+#[test]
+fn a_free_constant_resolves_within_its_file() {
+    let src: &'static str = "<?php\nnamespace App;\nconst LIMIT = 3;\nfunction LIMIT() {}\n$LIMIT = 'x';\necho LIMIT;\necho \\App\\LIMIT;\nLIMIT();\necho $LIMIT;\n";
+    let ws = Workspace::new(&[("/fake/php/App/c.php", src)]);
+    for (needle, offset) in [("LIMIT;", 0), ("\\App\\LIMIT", 5)] {
+        assert_eq!(ws.defs("c.php", needle, offset), [site("c.php", 2, 6)], "{needle}");
+    }
+    assert_eq!(ws.defs("c.php", "LIMIT();\necho", 0), [site("c.php", 3, 9)], "the call is the function's");
+    assert_eq!(
+        ws.renames("c.php", "LIMIT = 3", 0),
+        [site("c.php", 2, 6), site("c.php", 5, 5), site("c.php", 6, 10)]
+    );
+    let idx = php_indexed(&[("/fake/php/App/c.php", src)]);
+    let hover = php_hover(&idx, "/fake/php/App/c.php", src, "LIMIT;", 0);
+    assert!(hover.contains("constant") && hover.contains("int"), "{hover}");
+}
+
+const PHP_LIB_CONSTS: (&str, &str) = ("/fake/php/Lib/consts.php", "<?php\nnamespace Lib;\nconst LIMIT = 3;\nconst ONLY = 1;\n");
+const PHP_OTHER_CONSTS: (&str, &str) = ("/fake/php/Other/consts.php", "<?php\nnamespace Other;\nconst LIMIT = 'x';\n");
+
+/// A constant is its namespace-qualified identity across files, as a
+/// function is: a `use const` row binds its leaf, a qualified spelling
+/// names one constant, a same-leaf constant of another namespace never
+/// answers for it, and one nothing indexed declares widens out loud.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_is_its_identity_across_files() {
+    use tree_sitter::Point;
+    let a = (
+        "/fake/php/App/a.php",
+        "<?php\nnamespace App;\nuse const Other\\LIMIT;\nfunction caller() {\n    return LIMIT . \\Lib\\LIMIT . ONLY;\n}\n",
+    );
+    let idx = php_indexed(&[PHP_LIB_CONSTS, PHP_OTHER_CONSTS, a]);
+    let lands = |at: Point| php_landing(&idx, a.0, at).0;
+    let other = [("Other/consts.php".to_string(), 2, None)];
+    assert_eq!(lands(Point::new(4, 11)), other, "a bare use through its `use const` row");
+    assert_eq!(lands(Point::new(2, 16)), other, "the row's own leaf");
+    assert_eq!(lands(Point::new(4, 24)), [("Lib/consts.php".to_string(), 2, None)], "a qualified use");
+    assert_eq!(
+        lands(Point::new(4, 32)),
+        [("Lib/consts.php".to_string(), 3, Some("widened: `Lib\\ONLY` stands in for `App\\ONLY`".to_string()))]
+    );
+    let msg = "nothing indexed declares `App\\ONLY`; resolved by its leaf to `Lib\\ONLY`".to_string();
+    assert_eq!(php_widening(&idx, a.0), [(4, 32, msg)]);
+
+    let ws = Workspace::new(&[PHP_LIB_CONSTS, PHP_OTHER_CONSTS, a]);
+    assert_eq!(
+        ws.renames("Other/consts.php", "LIMIT", 0),
+        [site("a.php", 2, 16), site("a.php", 4, 11), site("consts.php", 2, 6)]
+    );
+    assert_eq!(ws.renames("Lib/consts.php", "LIMIT", 0), [site("a.php", 4, 24), site("consts.php", 2, 6)]);
+}
+
+/// A bare constant looks up the namespace in force's constant first and
+/// the global one — `const` or `define` — only when the namespace
+/// declares none, across files.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_constant_tries_its_namespace_then_the_global_constant() {
+    use tree_sitter::Point;
+    let global = ("/fake/php/0/global.php", "<?php\nconst TWICE = 1;\ndefine('GONE', 2);\n");
+    let own = ("/fake/php/App/own.php", "<?php\nnamespace App;\nconst TWICE = 3;\n");
+    let b = ("/fake/php/App/b.php", "<?php\nnamespace App;\necho TWICE;\necho GONE;\necho \\TWICE;\n");
+    let g = ("/fake/php/0/g.php", "<?php\necho App\\TWICE;\n");
+    let idx = php_indexed(&[global, own, b, g]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(2, 5)).0, [("App/own.php".to_string(), 2, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(3, 5)).0, [("0/global.php".to_string(), 2, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(4, 6)).0, [("0/global.php".to_string(), 1, None)]);
+    assert!(php_widening(&idx, b.0).is_empty());
+    assert_eq!(php_landing(&idx, g.0, Point::new(1, 9)).0, [("App/own.php".to_string(), 2, None)], "namespace-qualified");
+    let ws = Workspace::new(&[global, own, b, g]);
+    assert_eq!(ws.renames("own.php", "TWICE", 0), [site("b.php", 2, 5), site("g.php", 1, 9), site("own.php", 2, 6)]);
+    assert_eq!(ws.renames("global.php", "TWICE", 0), [site("b.php", 4, 6), site("global.php", 1, 6)]);
+}
+
+/// `Foo::X` is the class's member, never a free constant of the same
+/// leaf; a builtin constant or literal names nothing indexed, so it has no
+/// definition, no rename and no diagnostic.
+#[cfg(feature = "php")]
+#[test]
+fn a_class_constant_and_a_builtin_are_no_free_constant() {
+    let src: &'static str = "<?php\nnamespace App;\nclass Foo { const X = 1; }\nconst X = 2;\necho Foo::X;\necho X . PHP_EOL;\n$t = true;\n$n = null;\n";
+    let ws = Workspace::new(&[("/fake/php/App/x.php", src)]);
+    assert_eq!(ws.defs("x.php", "X;\necho X", 0), [site("x.php", 2, 18)]);
+    assert_eq!(ws.defs("x.php", "X . PHP", 0), [site("x.php", 3, 6)]);
+    assert!(ws.defs("x.php", "PHP_EOL", 0).is_empty());
+    assert_eq!(ws.ask("x.php", "PHP_EOL", 0, |cs| cs.renameable()), Ok(false));
+    let idx = php_indexed(&[("/fake/php/App/x.php", src)]);
+    let fa = idx.workspace_file_for_test(std::path::Path::new("/fake/php/App/x.php")).unwrap();
+    let messages: Vec<String> = crate::lsp::symbols::collect_diagnostics(&fa, &idx, Default::default())
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
 /// The narrowing builtins answer in their global-qualified spelling too —
 /// `\is_null`, `\die`, `\exit` — and a spelling qualified by any other
 /// namespace is somebody else's function.

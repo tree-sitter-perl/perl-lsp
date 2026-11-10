@@ -19,7 +19,7 @@ pub fn cpp_pack() -> LangPack {
             // constructor yet, so a constructor's references do not list it.
             ..NameSpellings::with_separator(CPP_SEP)
         },
-        functions: FunctionLookup::Global,
+        free_names: FreeNameLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // One member namespace (see `names`).
         member_spaces: MemberSpaces::SHARED,

@@ -96,6 +96,9 @@ spelled! {
         SetPublic = "set_public",
         SetProtected = "set_protected",
         SetPrivate = "set_private",
+        /// A free constant (php's namespace `const X`, `define('X', …)`):
+        /// it binds in its language's constant table, never as a variable.
+        Constant = "constant",
     }
 }
 
@@ -121,6 +124,11 @@ spelled! {
         /// A token naming the object the enclosing method runs on (php's
         /// `$this`): a read of that receiver, bound to the method.
         Receiver = "receiver",
+        /// A name read as a free constant (php's `LIMIT`, `\Lib\LIMIT`,
+        /// a `use const` row's leaf): a reference to the constant the
+        /// language's constant table names there, as a call's is to the
+        /// function its function table names.
+        Constant = "constant",
     }
 }
 
@@ -574,6 +582,9 @@ pub enum Capture {
     /// in (php's `use (&$x)` creates `$x` in the function around the
     /// closure).
     DefHoist,
+    /// The match's def is named from the global namespace, whatever
+    /// namespace it is written in (php's `define('X', 1)` declares `\X`).
+    DefGlobal,
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
@@ -684,6 +695,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", "pair"] => C::DefPair,
             ["def", "hoist"] => C::DefHoist,
+            ["def", "global"] => C::DefGlobal,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
@@ -768,6 +780,7 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Anchor } => write!(f, "def.{kind}.anchor"),
             C::DefPair => f.write_str("def.pair"),
             C::DefHoist => f.write_str("def.hoist"),
+            C::DefGlobal => f.write_str("def.global"),
             C::ClosureCapture => f.write_str("closure.capture"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
@@ -956,6 +969,7 @@ impl MarkCap {
             MarkCap::SetPublic => F::SET_PUBLIC,
             MarkCap::SetProtected => F::SET_PROTECTED,
             MarkCap::SetPrivate => F::SET_PRIVATE,
+            MarkCap::Constant => F::CONSTANT,
         }
     }
 }

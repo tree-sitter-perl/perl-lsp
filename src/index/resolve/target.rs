@@ -228,6 +228,7 @@ impl TargetRef {
                 | TargetKind::Handler { .. }
                 | TargetKind::PackageVar { .. }
                 | TargetKind::FileScopeValue
+                | TargetKind::Constant { .. }
         )
     }
 
@@ -284,6 +285,7 @@ impl TargetRef {
             RenameKind::Method { name, class, member } => {
                 TargetRef::method(name, class, member, origin, module_index, scope)
             }
+            RenameKind::Constant { name, package } => TargetRef::new(name, TargetKind::Constant { package }, origin),
             RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
             RenameKind::Handler { owner, name } => {
                 TargetRef::new(name.clone(), TargetKind::Handler { owner, name }, origin)
@@ -408,6 +410,12 @@ pub enum TargetKind {
     /// type-position uses. Never minted from a Perl cursor (Perl variables
     /// carry sigils; Perl callables aren't `Variable` symbols).
     FileScopeValue,
+    /// A free constant filed under its namespace (`None`: the global one;
+    /// php's `const X`, `define('X', …)`). Matches the constant declared
+    /// there and every constant reference resolving to it
+    /// (`FileAnalysis::free_name_declared`) — never a same-leaf constant
+    /// of another namespace, nor a function or variable of its name.
+    Constant { package: Option<String> },
 }
 
 /// A located reference in some file.

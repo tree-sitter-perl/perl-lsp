@@ -114,6 +114,13 @@ impl FileAnalysis {
                     // Nothing local; leave cross-file resolution to
                     // the LSP adapter (symbols::find_definition).
                 }
+                // The first name of its table it may denote that this file
+                // declares: the one its extraction pinned.
+                RefKind::Constant => {
+                    if let Some(sym) = self.free_name_symbol(r) {
+                        return Some(sym.selection_span);
+                    }
+                }
                 RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                     // Member dispatch is the frozen edge, full stop.
                     // `Local` lands on the local symbol; `CrossFile`
@@ -1162,6 +1169,14 @@ impl FileAnalysis {
                 // The language owns a spelled receiver's name (`$this`).
                 RefKind::Variable if r.receiver_method().is_some() => return None,
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
+                // The constant it resolves to; a name nothing declares (the
+                // runtime's own `PHP_EOL`) the language owns.
+                RefKind::Constant => {
+                    return self.free_name_declared(r, module_index).map(|q| RenameKind::Constant {
+                        name: q.leaf,
+                        package: (!q.namespace.is_empty()).then_some(q.namespace),
+                    })
+                }
                 RefKind::FunctionCall | RefKind::ImportedName => {
                     // A CORE-bound ref is a builtin call keyword (`shift`,
                     // `keys`, ...). It has an identity — the in-file
@@ -1245,6 +1260,9 @@ impl FileAnalysis {
             }
         }
         if let Some(sym) = self.symbol_at(point) {
+            if NameTable::Constant.holds(sym) {
+                return Some(RenameKind::Constant { name: sym.name.clone(), package: sym.package.clone() });
+            }
             return match sym.kind {
                 SymKind::Variable | SymKind::Field => Some(RenameKind::Variable),
                 SymKind::Sub => Some(RenameKind::Function {

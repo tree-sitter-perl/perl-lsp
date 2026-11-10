@@ -1101,7 +1101,7 @@ fn remap_spans(
         macro_body_member_reads: _,
         language: _,
         names: _,
-        functions: _,
+        free_names: _,
         slot_writes,
         member_writes,
         member_reads,

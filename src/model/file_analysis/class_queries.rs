@@ -1205,43 +1205,77 @@ impl FileAnalysis {
         }
     }
 
-    /// The identities the function a call or imported-name token `r` names
-    /// may have, in the order its language looks them up — the function
-    /// half of `spelled_identity`, through the same use-map. A token inside
-    /// one of the file's own function rows names the row's function; a
-    /// qualified spelling names one function, its qualifier resolved like a
-    /// class spelling's; a bare one a `use function` row binds names that
-    /// row's; any other bare one is the language's `FunctionLookup` (PHP's
-    /// namespace first, then the global function). A language without a
-    /// use-map names the leaf.
-    pub fn function_identities(&self, r: &Ref) -> Vec<String> {
-        let leaf = r.unqualified_target_name(self.names());
-        let Some(sep) = self.pack.names.use_map_sep() else {
-            return vec![leaf.to_string()];
-        };
-        if let Some(row) = self.pack.use_row_covering(&r.span).filter(|row| row.table == NameTable::Function) {
-            return vec![row.name.identity(sep)];
+    /// The names a free-name reference `r` — a call, an imported function,
+    /// a constant read — may denote, in the order its language looks them
+    /// up in `r`'s table (`Ref::free_name_table`): the free-name half of
+    /// `spelled_identity`, through the same use-map. A token inside one of
+    /// the file's own rows of that table names the row's name; a qualified
+    /// spelling names one, its qualifier resolved like a class spelling's;
+    /// a bare one a row of the table binds names that row's; any other bare
+    /// one is the language's `FreeNameLookup` (PHP's namespace first, then
+    /// the global name). A language without a use-map names the leaf.
+    pub fn free_names(&self, r: &Ref) -> Vec<QualifiedName> {
+        let table = r.free_name_table().unwrap_or(NameTable::Function);
+        let bare = || vec![QualifiedName::new("", r.unqualified_target_name(self.names()))];
+        if self.pack.names.use_map_sep().is_none() {
+            return bare();
+        }
+        if let Some(row) = self.pack.use_row_covering(&r.span).filter(|row| row.table == table) {
+            return vec![row.name.clone()];
         }
         match self.use_map_in(r.span.start, r.scope) {
-            Some(map) => map
-                .free_name_ladder(NameTable::Function, &r.target_name, crate::model::conventions::conventions_of(&self.language).functions)
-                .iter()
-                .map(|q| q.identity(sep))
-                .collect(),
-            None => vec![leaf.to_string()],
+            Some(map) => map.free_name_ladder(table, &r.target_name, crate::model::conventions::conventions_of(&self.language).free_names),
+            None => bare(),
         }
     }
 
-    /// This file's own declaration a call names under `identity` — the
-    /// function half of `find_type_decl`: a function, or a value a call can
-    /// name (a variable, an enumerator), filed under `identity`
+    /// `free_names`, each as the identity it is filed under
     /// (`linkage_identity`).
-    pub fn declared_callee(&self, identity: &str) -> Option<&Symbol> {
+    pub fn free_name_identities(&self, r: &Ref) -> Vec<String> {
+        let sep = self.pack.names.use_map_sep().unwrap_or_default();
+        self.free_names(r).iter().map(|q| q.identity(sep)).collect()
+    }
+
+    /// This file's own declaration of `table` filed under `identity` — the
+    /// free-name half of `find_type_decl` (`NameTable::holds`,
+    /// `linkage_identity`).
+    pub fn declared_free_name(&self, table: NameTable, identity: &str) -> Option<&Symbol> {
         let leaf = name_match_key(identity, self.names());
         self.symbols()
             .iter()
             .filter(|s| s.name == leaf)
-            .find(|s| matches!(s.kind, SymKind::Sub | SymKind::Variable | SymKind::Enumerator) && self.linkage_identity(s) == identity)
+            .find(|s| table.holds(s) && self.linkage_identity(s) == identity)
+    }
+
+    /// This file's own declaration the free-name reference `r` names: the
+    /// first of its `free_names` declared here, the one its extraction
+    /// pinned.
+    pub fn free_name_symbol(&self, r: &Ref) -> Option<&Symbol> {
+        let table = r.free_name_table()?;
+        let sep = self.pack.names.use_map_sep().unwrap_or_default();
+        self.free_names(r).iter().find_map(|q| self.declared_free_name(table, &q.identity(sep)))
+    }
+
+    /// The name the free-name reference `r` resolves to: the first of its
+    /// `free_names` this file declares — the one its extraction pinned —
+    /// else the first anything `index` holds declares. `None` when nothing
+    /// declares any (a runtime's own constant, an unindexed function); it
+    /// never widens.
+    pub fn free_name_declared(&self, r: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<QualifiedName> {
+        let table = r.free_name_table()?;
+        if let Some(sym) = self.free_name_symbol(r) {
+            return Some(QualifiedName::new(sym.package.as_deref().unwrap_or_default(), &sym.name));
+        }
+        let sep = self.pack.names.use_map_sep().unwrap_or_default();
+        let names = self.free_names(r);
+        let index = index?;
+        names.into_iter().find(|q| {
+            let identity = q.identity(sep);
+            index
+                .visible_def_candidates(&identity)
+                .iter()
+                .any(|c| index.symbols_present(c).declared_free_name(table, &identity).is_some())
+        })
     }
 
     /// The class a call-shaped token names, for a use-map language where
@@ -1279,9 +1313,9 @@ impl FileAnalysis {
             .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
     }
 
-    /// The class and function references in this file whose identity
-    /// nothing indexed declares, answered instead by a same-leaf class or
-    /// function of another namespace — the widened answers the
+    /// The class, function and constant references in this file whose
+    /// identity nothing indexed declares, answered instead by a same-leaf
+    /// one of another namespace — the widened answers the
     /// `resolved-by-widening` lane says out loud. `index` is this file's own
     /// scoped view; a scope that never widens (every language but a use-map
     /// one) yields nothing. A name this file declares itself is never
@@ -1290,27 +1324,27 @@ impl FileAnalysis {
         if self.names().use_map_sep().is_none() {
             return Vec::new();
         }
-        let mut verdicts: std::collections::HashMap<Vec<String>, Option<(String, String)>> = std::collections::HashMap::new();
+        let mut verdicts: std::collections::HashMap<(NameTable, Vec<String>), Option<(String, String)>> =
+            std::collections::HashMap::new();
         let mut out = Vec::new();
         for r in self.refs().iter() {
-            let named = match r.kind {
-                RefKind::PackageRef => vec![self.spelled_identity(r)],
-                RefKind::FunctionCall | RefKind::ImportedName => self.function_identities(r),
-                _ => continue,
+            let key = match (r.kind == RefKind::PackageRef, r.free_name_table()) {
+                (true, _) => (NameTable::Class, vec![self.spelled_identity(r)]),
+                (false, Some(table)) => (table, self.free_name_identities(r)),
+                (false, None) => continue,
             };
-            let class = matches!(r.kind, RefKind::PackageRef);
-            let verdict = verdicts.entry(named).or_insert_with_key(|named| {
+            let verdict = verdicts.entry(key).or_insert_with_key(|(table, named)| {
                 let first = named.first()?.clone();
-                if class {
+                if *table == NameTable::Class {
                     if self.find_type_decl(&first).is_some() {
                         return None;
                     }
                     return widened_class_stand_ins(index, &first, self.names()).into_iter().next().map(|w| (first, w.class));
                 }
-                if named.iter().any(|id| self.declared_callee(id).is_some()) {
+                if named.iter().any(|id| self.declared_free_name(*table, id).is_some()) {
                     return None;
                 }
-                let (decls, widened) = callee_declarations(index, named, self.names());
+                let (decls, widened) = callee_declarations(index, *table, named, self.names());
                 widened.then(|| decls.into_iter().next().map(|d| (first, d.identity))).flatten()
             });
             if let Some((named, resolved)) = verdict {

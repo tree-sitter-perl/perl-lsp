@@ -617,6 +617,9 @@ pub(super) fn symbol_defines_target(
             sym.kind,
             SymKind::Package | SymKind::Class | SymKind::Module
         ),
+        TargetKind::Constant { package } => {
+            crate::model::file_analysis::NameTable::Constant.holds(sym) && sym.package == *package
+        }
         TargetKind::HashKeyOfSub { package, name } => matches!(
             &sym.detail,
             SymbolDetail::HashKeyDef {
@@ -1036,7 +1039,7 @@ pub(super) fn collect_from_analysis(
             // A construction is keyed by its class; whether it runs this
             // constructor is the dispatch check below.
             !target.constructed_classes.is_empty()
-        } else if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) || r.member_site().is_some() {
+        } else if r.free_name_table().is_some() || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1177,6 +1180,11 @@ pub(super) fn collect_from_analysis(
                     matched
                 }
             }
+            // A constant read references the constant it resolves to, by
+            // the one ladder goto-def walks.
+            (TargetKind::Constant { package }, RefKind::Constant) => analysis
+                .free_name_declared(r, module_index)
+                .is_some_and(|q| q.namespace == package.as_deref().unwrap_or_default()),
             (TargetKind::Package, RefKind::PackageRef) => true,
             (TargetKind::Package, RefKind::FunctionCall | RefKind::ImportedName) => call_names_class,
             // A class member read by BARE name (`x = OP_SCOPE`,

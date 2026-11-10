@@ -114,6 +114,25 @@
 (declaration_list
   (const_declaration
     (const_element (name) @def.field.name @space.constant @flow.target . (_) @flow.source) @def.field))
+
+; ---- free constants ----
+; A constant declared outside a class is a free name of its namespace, in
+; the language's constant table: `const LIMIT` under `namespace App` is
+; `App\LIMIT`, apart from any function or variable of that name. Its value
+; is the one it is declared with.
+((const_declaration
+   (const_element (name) @def.var.name @mark.constant @flow.target . (_) @flow.source) @def.var) @_free
+ (#not-has-parent? @_free declaration_list))
+; `define('LIMIT', 3)` declares the global `\LIMIT`, whatever namespace it
+; is called in, and holds the value it is passed. Only a plain name is read
+; as one; a namespaced string (`define('App\LIMIT', …)`) is not.
+((function_call_expression
+   function: [(name) @_fn (qualified_name . (name) @_fn)]
+   arguments: (arguments
+     . (argument (string (string_content) @def.var.name @mark.constant @flow.target))
+     . (argument (_) @flow.source))) @def.var @def.global
+ (#eq? @_fn "define")
+ (#match? @def.var.name "^[A-Za-z_][A-Za-z0-9_]*$"))
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
@@ -509,6 +528,52 @@
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 (arguments (argument (variadic_unpacking)) @arity.spread)
 
+; ---- constants ----
+; A name, bare or qualified, where a value is read is a constant: it
+; references the constant its spelling names, looked up like a function's
+; (the namespace in force, then the global one). A name anywhere else is a
+; function, a class, a member, a label, a named argument or a declaration,
+; each its own pattern's; `instanceof` names a class. `true`, `false` and
+; `null` are literals of their own, and `die` and `exit` the language's.
+(([(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled] @_value)
+ (#has-parent? @_value
+   echo_statement expression_statement return_statement print_intrinsic
+   throw_expression yield_expression exit_statement
+   assignment_expression augmented_assignment_expression reference_assignment_expression
+   parenthesized_expression conditional_expression unary_op_expression cast_expression
+   clone_expression error_suppression_expression subscript_expression sequence_expression
+   array_element_initializer variadic_unpacking dynamic_variable_name arrow_function
+   case_statement match_condition_list match_conditional_expression match_default_expression
+   for_statement foreach_statement
+   include_expression include_once_expression require_expression require_once_expression
+   simple_parameter property_element property_promotion_parameter static_variable_declaration)
+ (#not-any-of? @_value "die" "exit"))
+(argument
+  !name
+  [(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled])
+(argument
+  name: (_)
+  [(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled])
+(const_element
+  (name)
+  .
+  [(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled])
+(enum_case
+  value: [(name) @ref.constant
+          (qualified_name (name) @ref.constant) @ref.spelled])
+(binary_expression
+  left: [(name) @ref.constant
+         (qualified_name (name) @ref.constant) @ref.spelled])
+((binary_expression
+   operator: _ @_op
+   right: [(name) @ref.constant
+           (qualified_name (name) @ref.constant) @ref.spelled])
+ (#not-eq? @_op "instanceof"))
+
 ; ---- members ----
 ; `$x->m()` calls the method `m` of the receiver's class and `$x->p` reads
 ; its property `p`, named without the `$` it is declared with; the nullsafe
@@ -735,7 +800,8 @@
 ; class's leaf references the class the row names, so a rename of the class
 ; rewrites the `use` line too; the ref is the leaf alone, since the row it
 ; sits in already names the class in full (`spelled_identity`). An imported
-; function's leaf references the function the row names the same way.
+; function's or constant's leaf references the function or constant the row
+; names the same way.
 (namespace_use_declaration
   (namespace_use_clause
     !type
@@ -751,7 +817,8 @@
 (namespace_use_declaration
   (namespace_use_clause
     type: "const" @import.constant
-    . [(name) (qualified_name)] @import.name
+    . [(name) @import.name @ref.constant
+       (qualified_name (name) @ref.constant) @import.name]
     alias: (name)? @import.alias))
 ; `use A\B\{C, D as E}`: each clause hangs off the shared prefix.
 (namespace_use_declaration
@@ -774,7 +841,7 @@
   (namespace_name) @import.prefix
   body: (namespace_use_group
     (namespace_use_clause
-      . (name) @import.name
+      . (name) @import.name @ref.constant
       alias: (name)? @import.alias)))
 (namespace_use_declaration
   !type
@@ -790,5 +857,5 @@
   body: (namespace_use_group
     (namespace_use_clause
       type: "const" @import.constant
-      . (name) @import.name
+      . (name) @import.name @ref.constant
       alias: (name)? @import.alias)))

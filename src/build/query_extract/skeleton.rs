@@ -212,8 +212,8 @@ pub struct SkeletonAnalysis {
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
-    /// Where the language's bare function call finds its function.
-    pub functions: super::FunctionLookup,
+    /// Where the language's bare function or constant finds its name.
+    pub free_names: super::FreeNameLookup,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -502,7 +502,7 @@ impl SkeletonAnalysis {
         if pack.id != crate::model::conventions::PERL_LANGUAGE {
             crate::model::conventions::register_conventions(pack.id, || pack.conventions());
         }
-        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), functions: pack.functions, ..Default::default() }
+        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), free_names: pack.free_names, ..Default::default() }
     }
 
     /// Re-anchor members that lost their enclosing container to a tree-sitter
@@ -624,7 +624,7 @@ impl SkeletonAnalysis {
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolId,
         };
         let names = self.names.clone();
-        let functions = self.functions;
+        let free_name_lookup = self.free_names;
         let slot_writes = std::mem::take(&mut self.slot_writes);
         let member_writes = std::mem::take(&mut self.member_writes);
         let class_scopes = std::mem::take(&mut self.class_scopes);
@@ -933,21 +933,32 @@ impl SkeletonAnalysis {
             }
             out
         };
-        // What a use-map call names a function by (`function_identity`); the
-        // earliest declaration of a name wins, as in `callee_sid`.
-        let mut free_functions: FreeFunctions = Default::default();
-        for s in symbols.iter().filter(|s| matches!(s.kind, SymKind::Sub)) {
-            free_functions.entry((s.package.as_deref().unwrap_or(""), s.name.as_str())).or_insert(s.id);
+        // What a use-map call names a function by, and a constant read a
+        // constant (`FreeCall`); the earliest declaration of a name wins, as
+        // in `callee_sid`.
+        let mut free_names: FreeNames = Default::default();
+        {
+            use crate::model::file_analysis::NameTable;
+            for s in &symbols {
+                let table = match s.kind {
+                    SymKind::Sub => NameTable::Function,
+                    _ if NameTable::Constant.holds(s) => NameTable::Constant,
+                    _ => continue,
+                };
+                free_names.entry((table, s.package.as_deref().unwrap_or(""), s.name.as_str())).or_insert(s.id);
+            }
         }
-        // A free call under a use-map, from its callee as written and the
-        // token it is written at: the functions it may name and the identity
-        // a class of that spelling has there. Its `Invoke` and its reference
-        // (an imported name's too) each ask it of their own capture.
-        let free_call = |written: &str, at: Span| {
+        // A free name under a use-map, from its table, its spelling as
+        // written and the token it is written at: the names it may denote and
+        // the identity a class of that spelling has there. A call's `Invoke`
+        // and its reference (an imported name's too) each ask it of their
+        // own capture.
+        let free_name = |table, written: &str, at: Span| {
             let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, at.start, &symbols)?;
-            let named = FreeCall::named(&map, functions, &self.use_rows, written, at, &free_functions);
+            let named = FreeCall::named(&map, table, free_name_lookup, &self.use_rows, written, at, &free_names);
             Some((named, map.resolve(written).identity(map.sep)))
         };
+        let free_call = |written: &str, at: Span| free_name(crate::model::file_analysis::NameTable::Function, written, at);
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -1561,18 +1572,20 @@ impl SkeletonAnalysis {
                     // the qualifier the `Function` binding, and the ref sits
                     // on the bare name token (the rename/highlight unit; also
                     // what claims the `@expr.read.var` at the same start).
-                    RefCap::Call | RefCap::Import => {
-                        binding = match free_call(&r.name, span) {
+                    RefCap::Call | RefCap::Import | RefCap::Constant => {
+                        let (kind, table) = match r.kind {
+                            RefCap::Import => (RefKind::ImportedName, crate::model::file_analysis::NameTable::Function),
+                            RefCap::Constant => (RefKind::Constant, crate::model::file_analysis::NameTable::Constant),
+                            _ => (RefKind::FunctionCall, crate::model::file_analysis::NameTable::Function),
+                        };
+                        binding = match free_name(table, &r.name, span) {
                             Some((named, _)) => named
                                 .pinned()
                                 .filter(|f| !f.namespace.is_empty())
                                 .map(|f| RefBinding::Function { package: f.namespace.clone() }),
                             None => r.qualifier.clone().map(|package| RefBinding::Function { package }),
                         };
-                        match r.kind {
-                            RefCap::Import => RefKind::ImportedName,
-                            _ => RefKind::FunctionCall,
-                        }
+                        kind
                     }
                     // `recv.field` / `recv->field`: a value read. The
                     // invocant types query-time via
@@ -2001,11 +2014,12 @@ impl SkeletonAnalysis {
     }
 }
 
-/// The free functions a call written at a use-map site may name: the
-/// language's lookup order over them (`UseMap::free_name_ladder`; a token
-/// inside a `use function` row names that row's), and the first of them
-/// this file declares, which stands for the rest — PHP runs the
-/// namespace's function where it is declared and only then the global one.
+/// The free names a call or a constant read written at a use-map site may
+/// name in its table: the language's lookup order over them
+/// (`UseMap::free_name_ladder`; a token inside a row of the table names
+/// that row's), and the first of them this file declares, which stands for
+/// the rest — PHP runs the namespace's function where it is declared and
+/// only then the global one, and reads its constants the same way.
 struct FreeCall {
     ladder: Vec<crate::model::file_analysis::QualifiedName>,
     local: Option<(usize, crate::model::file_analysis::SymbolId)>,
@@ -2014,26 +2028,26 @@ struct FreeCall {
 impl FreeCall {
     fn named(
         map: &crate::model::file_analysis::UseMap,
-        functions: super::FunctionLookup,
+        table: crate::model::file_analysis::NameTable,
+        lookup: super::FreeNameLookup,
         rows: &[crate::model::file_analysis::UseRow],
         written: &str,
         at: Span,
-        free_functions: &FreeFunctions,
+        declared: &FreeNames,
     ) -> Self {
-        use crate::model::file_analysis::NameTable;
-        let ladder = match crate::model::file_analysis::row_covering(rows, &at).filter(|row| row.table == NameTable::Function) {
+        let ladder = match crate::model::file_analysis::row_covering(rows, &at).filter(|row| row.table == table) {
             Some(row) => vec![row.name.clone()],
-            None => map.free_name_ladder(NameTable::Function, written, functions),
+            None => map.free_name_ladder(table, written, lookup),
         };
         let local = ladder
             .iter()
             .enumerate()
-            .find_map(|(i, f)| free_functions.get(&(f.namespace.as_str(), f.leaf.as_str())).map(|&sid| (i, sid)));
+            .find_map(|(i, f)| declared.get(&(table, f.namespace.as_str(), f.leaf.as_str())).map(|&sid| (i, sid)));
         FreeCall { ladder, local }
     }
 
-    /// The function the call names when it names one for certain: the one
-    /// this file declares, or the only one the spelling can name.
+    /// The name the site names when it names one for certain: the one this
+    /// file declares, or the only one the spelling can name.
     fn pinned(&self) -> Option<&crate::model::file_analysis::QualifiedName> {
         match self.local {
             Some((i, _)) => self.ladder.get(i),
@@ -2054,8 +2068,10 @@ impl FreeCall {
     }
 }
 
-/// A file's free functions by (namespace, leaf); the global namespace is `""`.
-type FreeFunctions<'a> = std::collections::HashMap<(&'a str, &'a str), crate::model::file_analysis::SymbolId>;
+/// A file's free names by (table, namespace, leaf); the global namespace
+/// is `""`.
+type FreeNames<'a> =
+    std::collections::HashMap<(crate::model::file_analysis::NameTable, &'a str, &'a str), crate::model::file_analysis::SymbolId>;
 
 /// The callable whose body a scope sits in: the nearest callable around it
 /// (`callable_reach`), so a return in a closure is the closure's, and one

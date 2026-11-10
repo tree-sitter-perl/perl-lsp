@@ -33,7 +33,7 @@ pub fn python_pack() -> LangPack {
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },
-        functions: FunctionLookup::Global,
+        free_names: FreeNameLookup::Global,
         construction: ConstructionKey::Class,
         // One member namespace (see `names`).
         member_spaces: MemberSpaces::SHARED,

@@ -689,6 +689,12 @@ bitflags::bitflags! {
         /// Named only from its declaring class's code and its descendants'
         /// (`SymbolFlags::access_scope`).
         const PROTECTED = 1 << 25;
+        /// A free constant (php's namespace `const X`, `define('X', …)`):
+        /// it binds in its language's constant table (`NameTable::Constant`),
+        /// so a constant reference reaches it and a variable read never
+        /// does. Minted from a capture (`@mark.constant`), never spelled as
+        /// an attribute.
+        const CONSTANT = 1 << 26;
     }
 }
 
@@ -1244,6 +1250,8 @@ impl Symbol {
     pub fn variable_decl(&self) -> Option<VariableDecl<'_, SymbolId>> {
         let declared = match (self.kind, &self.detail) {
             (_, SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. }) => false,
+            // a free constant is named through its table, never read as a variable
+            _ if self.flags.contains(SymbolFlags::CONSTANT) => false,
             (SymKind::Variable, _) | (SymKind::Field, SymbolDetail::Field { .. }) => true,
             _ => false,
         };
@@ -1256,6 +1264,16 @@ impl Symbol {
             },
             scope_wide: self.flags.contains(SymbolFlags::SCOPE_WIDE),
         })
+    }
+
+    /// Where the value this declaration holds for a use at `asked` is read:
+    /// a free constant holds what it is declared with wherever it is used,
+    /// so at its declaration; anything else at the use.
+    pub fn value_point(&self, asked: Point) -> Point {
+        match self.flags.contains(SymbolFlags::CONSTANT) {
+            true => self.selection_span.start,
+            false => asked,
+        }
     }
 
     /// The declaration's documentation, from whichever of its two homes
@@ -1979,6 +1997,17 @@ impl Ref {
     }
 
     /// The package pin of a `FunctionCall` ref.
+    /// The name table a free name's reference is looked up in: a call's,
+    /// and an imported function's, the function table; a constant read's
+    /// the constant table. `None` for a ref that names no free name.
+    pub fn free_name_table(&self) -> Option<super::NameTable> {
+        match self.kind {
+            RefKind::FunctionCall | RefKind::ImportedName => Some(super::NameTable::Function),
+            RefKind::Constant => Some(super::NameTable::Constant),
+            _ => None,
+        }
+    }
+
     pub fn resolved_package(&self) -> Option<&str> {
         match self.binding.as_ref()? {
             RefBinding::Function { package } => Some(package),
@@ -2110,9 +2139,10 @@ impl Ref {
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
             RefKind::ImportedName => 8,
+            RefKind::Constant => 9,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
-            RefKind::FunctionCall | RefKind::ImportedName => {
+            RefKind::FunctionCall | RefKind::ImportedName | RefKind::Constant => {
                 (1, self.resolved_package().map(str::to_string))
             }
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
@@ -2502,6 +2532,9 @@ pub enum RenameKind {
     /// package context; otherwise package-scoped so cross-file
     /// walks don't rename same-named subs in unrelated packages.
     Function { name: String, package: Option<String> },
+    /// A free constant filed under its namespace (`None`: the global
+    /// one), as a function is under its package.
+    Constant { name: String, package: Option<String> },
     Package(String),
     /// A member with its owning class. Cross-file walks use `class`
     /// to avoid unioning unrelated classes that share a member name
@@ -2623,6 +2656,14 @@ pub enum RefKind {
     /// class's constructor. Kept at the END for bincode variant-index
     /// stability.
     ImportedName,
+    /// A name read as a free constant (php's `LIMIT`, `\Lib\LIMIT`, a
+    /// `use const` row's leaf): a reference to the constant its language's
+    /// constant table names there (`FileAnalysis::free_name_identities`),
+    /// pinned through `Ref::binding` as a call is to its function. It
+    /// calls nothing and is no variable: no call lane reads it, and no
+    /// variable declaration answers it. Kept at the END for bincode
+    /// variant-index stability.
+    Constant,
 }
 
 /// The receiver half of a member access, whatever the member's kind — the

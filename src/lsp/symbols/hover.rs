@@ -243,6 +243,9 @@ fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
     if sym.flags.contains(crate::model::file_analysis::SymbolFlags::MACRO) {
         return "macro";
     }
+    if sym.flags.contains(crate::model::file_analysis::SymbolFlags::CONSTANT) {
+        return "constant";
+    }
     match sym.kind {
         FaSymKind::Sub => "function",
         FaSymKind::Method => "method",
@@ -276,7 +279,7 @@ fn render_symbol_hover(
     };
     if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field | FaSymKind::Enumerator) {
         if let Some(ty) = analysis
-            .inferred_type_via_bag_ctx(&sym.name, type_point, module_index)
+            .inferred_type_via_bag_ctx(&sym.name, sym.value_point(type_point), module_index)
             .filter(InferredType::is_known)
         {
             // Config-variant macro type → display the concrete leaf recovered

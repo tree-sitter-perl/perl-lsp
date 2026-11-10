@@ -53,6 +53,12 @@ impl FileAnalysis {
         if sym.flags.contains(SymbolFlags::ANONYMOUS) {
             return false;
         }
+        // A free constant binds in its namespace's table wherever its
+        // declaration is written: a braced namespace's body, the function
+        // that calls `define`.
+        if super::NameTable::Constant.holds(sym) {
+            return true;
+        }
         match sym.kind {
             SymKind::Class | SymKind::Sub => true,
             // An anonymous-enum constant leaks to file scope the same way an
@@ -69,15 +75,18 @@ impl FileAnalysis {
     }
 
     /// The key another file names linkage-visible `sym` by: a free function
-    /// of a language that files its functions under their namespace
-    /// (`FunctionLookup::NamespaceThenGlobal`) is its namespace and name
-    /// joined (`Lib\helper`), as a class's name already is its identity;
-    /// every other symbol is its name.
+    /// or constant of a language that files its free names under their
+    /// namespace (`FreeNameLookup::NamespaceThenGlobal`) is its namespace
+    /// and name joined (`Lib\helper`, `Lib\LIMIT`), as a class's name
+    /// already is its identity; every other symbol is its name.
     pub fn linkage_identity<'s>(&self, sym: &'s Symbol) -> std::borrow::Cow<'s, str> {
-        use crate::model::conventions::FunctionLookup;
-        match (sym.kind, &sym.package, self.pack.names.use_map_sep()) {
-            (SymKind::Sub, Some(ns), Some(sep))
-                if crate::model::conventions::conventions_of(&self.language).functions == FunctionLookup::NamespaceThenGlobal =>
+        use crate::model::conventions::FreeNameLookup;
+        let free = sym.kind == SymKind::Sub || super::NameTable::Constant.holds(sym);
+        match (&sym.package, self.pack.names.use_map_sep()) {
+            (Some(ns), Some(sep))
+                if free
+                    && crate::model::conventions::conventions_of(&self.language).free_names
+                        == FreeNameLookup::NamespaceThenGlobal =>
             {
                 std::borrow::Cow::Owned(crate::model::conventions::join_qualified(ns, &sym.name, sep))
             }
