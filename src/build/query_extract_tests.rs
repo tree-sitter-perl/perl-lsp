@@ -3272,7 +3272,7 @@ fn members_declared_at_one_token_keep_their_own_facts() {
     for s in skel.symbols.iter_mut().filter(|s| s.name == "a" || s.name == "c") {
         s.name_start = call;
     }
-    for fact in skel.member_decl_facts.iter_mut() {
+    for fact in skel.decl_facts.iter_mut() {
         fact.1 = call;
     }
     let fa = skel.into_file_analysis();

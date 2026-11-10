@@ -165,7 +165,10 @@ extractor pins a reference to the first rung its own file declares
 references and rename read one answer: `\f()` in `namespace App` is the
 global `f` and a bare `f()` there is `App\f` once anything declares it.
 A name nothing declares (a runtime's `PHP_EOL`) answers nothing and is
-not renameable.
+not renameable. A constant's value is its own binding's — its declaring
+symbol's place, held file-wide, never a `Variable` of its name, so `$X`
+and `X` in one scope keep their own — and a read the file's own
+declaration answers is an edge to that place.
 
 **A class is a home, not a namespace.** Whose member a declaration is
 and how a name written somewhere resolves are two facts, and the scope

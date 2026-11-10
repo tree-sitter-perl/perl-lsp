@@ -97,6 +97,9 @@ pub struct SkelRef {
     /// `a::b::f(...)`), as the `spelled` walk read them off its levels;
     /// `None` for a reference written unqualified.
     pub qualifier: Option<String>,
+    /// The whole written spelling's span where `@ref.spelled` names one
+    /// (`\Lib\X` around `X`): the node a read of the name is the value of.
+    pub spelled: Option<Span>,
 }
 
 /// One `@expr.call` site.
@@ -173,12 +176,13 @@ pub struct SkeletonAnalysis {
     /// slot's value edge: a type that mentions its class's template
     /// parameters substitutes the receiver's arguments.
     pub field_types: Vec<(String, crate::model::file_analysis::ScopeId, InferredType)>,
-    /// A data member's declaration facts (its annotation, its initializer),
-    /// each with the scope, token and name that declare it, attached to the member
-    /// until `into_file_analysis` lowers it to the place of the symbol that
-    /// token declares — so two declarations of one member (`#if` arms, one
-    /// struct name defined in two function bodies) keep their own facts.
-    pub member_decl_facts: Vec<(crate::model::file_analysis::ScopeId, Point, String, crate::model::witnesses::Witness)>,
+    /// A data member's or free constant's declaration facts (its
+    /// annotation, its initializer), each with the scope, token and name
+    /// that declare it, until `into_file_analysis` lowers it to the place of
+    /// the symbol that token declares — so two declarations of one member
+    /// (`#if` arms, one struct name defined in two function bodies) keep
+    /// their own facts, and a constant's never meet a variable of its name.
+    pub decl_facts: Vec<(crate::model::file_analysis::ScopeId, Point, String, crate::model::witnesses::Witness)>,
     /// Variable reads (`@expr.read.var`). Each resolves to the nearest
     /// visible Variable declaration by lexical scope walk → local goto-def +
     /// hover. Resolution runs in `into_file_analysis`.
@@ -1057,11 +1061,12 @@ impl SkeletonAnalysis {
             type DeclSite<'a> = (crate::model::file_analysis::ScopeId, Point, &'a str);
             let declaring: std::collections::HashMap<DeclSite, &Symbol> = symbols
                 .iter()
-                .filter(|s| matches!(s.kind, SymKind::Field))
+                .filter(|s| matches!(s.kind, SymKind::Field) || crate::model::file_analysis::NameTable::Constant.holds(s))
                 .map(|s| ((s.scope, s.selection_span.start, s.name.as_str()), s))
                 .collect();
-            // A member declaration's own facts are its declaring symbol's place's.
-            for (scope, token, name, mut w) in std::mem::take(&mut self.member_decl_facts) {
+            // A member's or constant's declaration facts are its declaring
+            // symbol's place's.
+            for (scope, token, name, mut w) in std::mem::take(&mut self.decl_facts) {
                 if let Some(sym) = declaring.get(&(scope, token, name.as_str())) {
                     w.attachment = place_of(sym);
                 }
@@ -1555,6 +1560,10 @@ impl SkeletonAnalysis {
                 });
             }
         }
+        // A constant read's value is the constant's own binding, the one its
+        // declaration's facts land on; a read of a constant another file
+        // declares states none here.
+        let mut constant_reads: Vec<crate::model::witnesses::Witness> = Vec::new();
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
             .iter()
@@ -1578,7 +1587,19 @@ impl SkeletonAnalysis {
                             RefCap::Constant => (RefKind::Constant, crate::model::file_analysis::NameTable::Constant),
                             _ => (RefKind::FunctionCall, crate::model::file_analysis::NameTable::Function),
                         };
-                        binding = match free_name(table, &r.name, span) {
+                        let named = free_name(table, &r.name, span);
+                        if let (RefKind::Constant, Some((_, sid))) = (&kind, named.as_ref().and_then(|(n, _)| n.local)) {
+                            let value = r.spelled.unwrap_or(span);
+                            let place = crate::model::file_analysis::Place::variable(crate::model::file_analysis::Binding::Lexical(sid));
+                            use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+                            constant_reads.push(crate::model::witnesses::Witness {
+                                attachment: WA::Expr(value),
+                                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                                payload: WP::Edge(WA::Place(Box::new(place))),
+                                span: value,
+                            });
+                        }
+                        binding = match named {
                             Some((named, _)) => named
                                 .pinned()
                                 .filter(|f| !f.namespace.is_empty())
@@ -1677,6 +1698,9 @@ impl SkeletonAnalysis {
                 })
             })
             .collect();
+        for w in constant_reads {
+            bag.push(w);
+        }
         // The `(identifier) @expr.read.var` catch-all also fires on a call's
         // function-name (`foo` in `foo()`) and on a def's OWN name (`compute`
         // in `int compute(...)`), neither of which is a bare value read — the

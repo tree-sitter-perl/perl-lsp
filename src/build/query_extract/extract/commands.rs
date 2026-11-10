@@ -36,6 +36,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             constructs: false,
             spaces: None,
             qualifier: None,
+            spelled: None,
         });
     }
 }

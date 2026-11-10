@@ -4791,3 +4791,33 @@ fn a_global_qualified_builtin_narrows() {
         assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), want, "{body}");
     }
 }
+
+/// A constant and a variable spelled alike in one scope are two bindings:
+/// each holds its own value, at its declaration's hover and at every read
+/// — a read written above the constant's declaration included.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_and_a_variable_of_one_name_hold_their_own_values() {
+    let src: &'static str = "<?php\nnamespace App;\nfunction early() { return LIMIT; }\nconst LIMIT = 3;\n$LIMIT = 'x';\n$a = LIMIT;\n$b = $LIMIT;\n$c = \\App\\LIMIT;\n$d = $LIMIT;\necho $d;\n";
+    let fa = php(src);
+    let int = fa.inferred_type_via_bag("a", at(src, "$b", 0));
+    let string = fa.inferred_type_via_bag("b", at(src, "$c", 0));
+    assert!(int.as_ref().is_some_and(InferredType::is_known) && string.as_ref().is_some_and(InferredType::is_known));
+    assert_ne!(int, string);
+    assert_eq!(fa.inferred_type_via_bag("c", at(src, "$d", 0)), int, "a qualified read");
+    assert_eq!(fa.inferred_type_via_bag("d", at(src, "echo $d", 0)), string, "the variable after the constant's reads");
+    assert_eq!(fa.sub_return_type_at_arity("early", None), int, "a read above the declaration");
+
+    let idx = php_indexed(&[("/fake/php/App/v.php", src)]);
+    let constant = php_hover(&idx, "/fake/php/App/v.php", src, "LIMIT = 3", 0);
+    let variable = php_hover(&idx, "/fake/php/App/v.php", src, "$LIMIT = 'x'", 1);
+    assert!(constant.contains("int") && !constant.contains("string"), "{constant}");
+    assert!(variable.contains("string") && !variable.contains("int"), "{variable}");
+    let read = php_hover(&idx, "/fake/php/App/v.php", src, "$LIMIT;\n$c", 1);
+    assert!(read.contains("string") && !read.contains("int"), "{read}");
+
+    // `define` binds its value the same way, from inside a function too.
+    let src = "<?php\nnamespace App;\nfunction boot() { define('MAX', 'x'); }\n$MAX = 1;\n$m = MAX;\necho $m;\n";
+    let fa = php(src);
+    assert_eq!(fa.inferred_type_via_bag("m", at(src, "echo $m", 0)), string);
+}

@@ -279,7 +279,7 @@ fn render_symbol_hover(
     };
     if matches!(sym.kind, FaSymKind::Variable | FaSymKind::Field | FaSymKind::Enumerator) {
         if let Some(ty) = analysis
-            .inferred_type_via_bag_ctx(&sym.name, sym.value_point(type_point), module_index)
+            .declared_value_type(sym.id, type_point, module_index)
             .filter(InferredType::is_known)
         {
             // Config-variant macro type → display the concrete leaf recovered

@@ -1266,16 +1266,6 @@ impl Symbol {
         })
     }
 
-    /// Where the value this declaration holds for a use at `asked` is read:
-    /// a free constant holds what it is declared with wherever it is used,
-    /// so at its declaration; anything else at the use.
-    pub fn value_point(&self, asked: Point) -> Point {
-        match self.flags.contains(SymbolFlags::CONSTANT) {
-            true => self.selection_span.start,
-            false => asked,
-        }
-    }
-
     /// The declaration's documentation, from whichever of its two homes
     /// the producer wrote (`docs/PARKED.md`, "Two homes for a
     /// declaration's documentation text").

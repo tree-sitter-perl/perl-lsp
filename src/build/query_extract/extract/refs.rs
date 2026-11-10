@@ -58,11 +58,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Some(Payload::Qualifier(q)) => Some(q.clone()),
         _ => None,
     };
+    let spelled = ad.in_match(e.match_id, Capture::RefSpelled);
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         // `@ref.spelled`: the name as the match spells it, where that is
         // not the reference token's own text.
-        name: (pack.shape_name)(ad.in_match(e.match_id, Capture::RefSpelled).map_or(&e.text, |s| &s.text)),
+        name: (pack.shape_name)(spelled.map_or(&e.text, |s| &s.text)),
         start: e.start,
         end: e.end,
         scope: st.cur_scope,
@@ -72,6 +73,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         constructs: false,
         spaces: space_ask(ad.on(e)),
         qualifier,
+        spelled: spelled.map(Event::span),
     });
 }
 

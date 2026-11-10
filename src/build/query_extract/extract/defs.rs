@@ -280,10 +280,16 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
     if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
     }
-    // Every other Variable def declares where it is written, from its token on.
+    // Every other Variable def declares where it is written, from its token
+    // on. A free constant is no variable: `$X` is another name than `X`.
     let mut decls: HashMap<String, Vec<(ScopeId, VariableDecl<'static, ()>)>> = HashMap::new();
     let decl = |at, scope_wide| VariableDecl { id: (), view: InView::from(at), gate: None, scope_wide };
-    for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == SymKind::Variable) {
+    let variable = |s: &&SkelSymbol| {
+        s.kind != DefCap::Assigned
+            && s.kind.sym_kind() == SymKind::Variable
+            && !s.flags.contains(crate::model::file_analysis::SymbolFlags::CONSTANT)
+    };
+    for s in out.symbols.iter().filter(variable) {
         decls.entry(s.name.clone()).or_default().push((s.scope, decl(s.name_start, false)));
     }
     let mut order: Vec<usize> = (0..out.symbols.len()).filter(|&i| out.symbols[i].kind == DefCap::Assigned).collect();
