@@ -752,7 +752,7 @@ pub fn member_completion_for_type(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
-    let on_receiver = analysis.runs_on_receiver_at(point);
+    let on_receiver = analysis.runs_on_at(point).is_some();
     let classes = analysis.dispatch_classes_of(receiver, Some(module_index));
     let candidates = analysis.shared_members(&classes, |class| {
         analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref(), on_receiver, offers)

@@ -42,8 +42,15 @@ impl FileAnalysis {
     /// incoming projection groups reference sites by. `None` for top-level
     /// code (import-time calls, scripts): there is no callable to report.
     pub fn enclosing_callable_at(&self, point: Point) -> Option<&Symbol> {
-        if let Some(callable) = self.callables_around(point).next() {
-            return Some(callable);
+        // The scope chain carries the owner: the first scope up the chain
+        // that is a callable's body names it.
+        let mut cur = self.scope_at(point);
+        while let Some(id) = cur {
+            let sc = self.scope(id);
+            if let Some(owner) = sc.owner {
+                return Some(self.symbol(owner));
+            }
+            cur = sc.parent;
         }
         // A body the document mints as a plain block (R) or on another node
         // than its callable carries no owner: the span walk answers there.
@@ -55,29 +62,10 @@ impl FileAnalysis {
             .min_by_key(|s| span_size(&s.span))
     }
 
-    /// The callables whose bodies hold `point`, innermost first: the scope
-    /// chain carries each body's owner.
-    fn callables_around(&self, point: Point) -> impl Iterator<Item = &Symbol> + '_ {
-        let mut cur = self.scope_at(point);
-        std::iter::from_fn(move || {
-            while let Some(id) = cur {
-                let sc = self.scope(id);
-                cur = sc.parent;
-                if let Some(owner) = sc.owner {
-                    return Some(self.symbol(owner));
-                }
-            }
-            None
-        })
-    }
-
-    /// Whether code at `point` runs on an object: the nearest method whose
-    /// body holds it, through any closure, is not static. The receiver a
-    /// spelled `$this` there reads is that method's, by the same walk.
-    pub fn runs_on_receiver_at(&self, point: Point) -> bool {
-        self.callables_around(point)
-            .find(|s| s.kind == SymKind::Method)
-            .is_some_and(|m| !m.flags.contains(SymbolFlags::STATIC))
+    /// The method whose object the code at `point` runs on: the innermost
+    /// scope's `Scope::runs_on`, as the extractor minted it.
+    pub fn runs_on_at(&self, point: Point) -> Option<SymbolId> {
+        self.scope_at(point).and_then(|sc| self.scope(sc).runs_on)
     }
 
     /// The build-time-resolved owner of the hash key under the cursor —
