@@ -2679,38 +2679,99 @@ fn this_hovers_as_its_enclosing_class() {
 /// C++'s `this` is the same reference: hover names the enclosing class and
 /// goto-def lands on it, in an out-of-line body (whose class is its
 /// qualifier's) and in a lambda that captures it, and no rename rewrites
-/// it. A `static` member function runs on no object, so its `this` refers
-/// to nothing.
+/// it.
 #[cfg(feature = "cpp")]
 #[test]
 fn cpp_this_hovers_as_its_enclosing_class() {
     use crate::index::open_docs::{FileKey, OpenDocs};
     use crate::index::resolve::{resolve, OverrideScope};
-    let src = "class W {\n  int n;\n  int get() { return this->n; }\n  void later() { auto f = [this] { return this->n; }; }\n  void set(int v);\n  static int make() { return this->n; }\n};\nvoid W::set(int v) { this->n = v; }\n";
+    let src = "class W {\n  int n;\n  int get() { return this->n; }\n  void later() { auto f = [this] { return this->n; }; }\n  void set(int v);\n};\nvoid W::set(int v) { this->n = v; }\n";
     let path = std::path::PathBuf::from("/fake/cpp/w.cpp");
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let driver = crate::build::language_driver::LanguageRegistry::compiled();
     idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze_with_path(src, Some(&path)));
     let fa = idx.workspace_file_for_test(&path).unwrap();
     let docs = OpenDocs::new();
-    let ask = |point| {
-        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
-        resolve(&docs, &fa, key, point, Some(&idx), OverrideScope::default()).with_source(src)
-    };
     for needle in ["this->n; }\n  void later", "this->n; }; }", "this->n = v"] {
         let point = at(src, needle, 0);
-        let cs = ask(point);
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &fa, key, point, Some(&idx), OverrideScope::default()).with_source(src);
         let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "cpp").unwrap_or_default();
         assert!(hover.contains("class W"), "{needle}: {hover}");
         let defs: Vec<usize> = cs.definitions().iter().map(|d| d.span.start.row).collect();
         assert_eq!(defs, [0], "{needle}");
         assert_eq!(cs.renameable(), Ok(false), "{needle}");
     }
-    let make = fa.symbols().iter().find(|s| s.name == "make").expect("the static member function");
-    assert!(make.flags.contains(crate::model::file_analysis::SymbolFlags::STATIC));
-    let point = at(src, "this->n; }\n};", 0);
-    assert!(fa.ref_at(point).is_none(), "{:?}", fa.ref_at(point));
-    assert!(ask(point).definitions().is_empty());
+}
+
+/// A `static` member function runs on no object. Every site that refers
+/// to one comes up empty in its body: `this` has no ref, no value and no
+/// member place, and a bare instance member is no `this->n`. What names the
+/// class still answers there: a bare static member, a bare static sibling.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_a_static_member_function_runs_on_no_object() {
+    use crate::model::file_analysis::{Binding, InferredType, Span};
+    let src = "class W {\n  int n;\n  static int c;\n  int get() { return this->n; }\n  static int helper() { return 1; }\n  static int make() { int a = std::move(this->n); int b = std::move(n); return a + b + c + helper(); }\n};\n";
+    let path = std::path::PathBuf::from("/fake/cpp/w.cpp");
+    let fa = crate::build::language_driver::LanguageRegistry::compiled().for_path(&path).unwrap().analyze_with_path(src, Some(&path));
+    let sym = |name: &str| fa.symbols().iter().find(|s| s.name == name).unwrap_or_else(|| panic!("{name}"));
+    let this_at = |needle| {
+        let start = at(src, needle, 0);
+        Span { start, end: tree_sitter::Point { row: start.row, column: start.column + 4 } }
+    };
+    // the object a method runs on, for contrast
+    let get = this_at("this->n; }\n  static int helper");
+    assert!(fa.ref_at(get.start).is_some());
+    assert_eq!(fa.expr_type_at_span(get, None), Some(InferredType::ClassName("W".into())));
+    let make = this_at("this->n); int b");
+    assert!(fa.ref_at(make.start).is_none(), "{:?}", fa.ref_at(make.start));
+    assert_eq!(fa.expr_type_at_span(make, None), None, "`this` has no value");
+    let on_make: Vec<_> =
+        fa.pack.moved_from.iter().filter(|m| m.place.root == Binding::Receiver(sym("make").id)).map(|m| &m.place).collect();
+    assert!(on_make.is_empty(), "no member place of `this`, spelled or elided: {on_make:?}");
+    let bound = |needle| fa.ref_at(at(src, needle, 0)).and_then(|r| r.resolved_symbol());
+    assert_eq!(bound("n); return"), None, "a bare instance member names nothing");
+    assert_eq!(bound("c + helper"), Some(sym("c").id), "a bare static member is the class's");
+    assert!(sym("c").flags.contains(crate::model::file_analysis::SymbolFlags::STATIC));
+    let helper = fa.ref_at(at(src, "helper(); }", 0)).expect("the sibling call");
+    assert!(
+        matches!(&helper.binding, Some(crate::model::file_analysis::RefBinding::Function { package }) if package == "W"),
+        "a bare static sibling is the class's: {:?}",
+        helper.binding
+    );
+}
+
+/// php's `$this` in a `static function` follows the same rule: no ref, no
+/// value, no member place; `self::` still names the class.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_static_method_runs_on_no_object() {
+    use crate::model::file_analysis::{Binding, InferredType, PathStep, Place};
+    let src = "<?php
+class W {
+    private ?array $items;
+    private static ?W $inst = null;
+    public function get() { $mine = $this; return $mine; }
+    public static function make() {
+        $x = $this;
+        if (!isset($this->items)) { $first = 1; }
+        if (self::$inst === null) { $second = 1; }
+        return $x;
+    }
+}
+";
+    let fa = php(src);
+    let make = fa.symbols().iter().find(|s| s.name == "make" && s.kind == SymKind::Method).unwrap().id;
+    assert!(fa.ref_at(at(src, "$this;\n        if", 1)).is_none());
+    let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
+    assert!(var("mine", "return $mine").is_some(), "the object a method runs on, for contrast");
+    assert_eq!(var("x", "return $x"), None, "`$this` has no value");
+    let member = |name: &str| Place { root: Binding::Receiver(make), path: vec![PathStep::Member(name.into())] };
+    assert_eq!(fa.place_type_at(&member("items"), at(src, "$first", 0), None), None, "`$this->items` has no place");
+    let self_at = at(src, "self::$inst", 0);
+    let self_span = crate::model::file_analysis::Span { start: self_at, end: tree_sitter::Point { row: self_at.row, column: self_at.column + 4 } };
+    assert_eq!(fa.expr_type_at_span(self_span, None), Some(InferredType::ClassName("W".into())), "`self` names the class");
 }
 
 /// A declaration's hover shows the value its own binding holds: an

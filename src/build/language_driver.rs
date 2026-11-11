@@ -905,6 +905,7 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            runs_on: None,
             closed: false,
             captures: Vec::new(),
             direct: false,

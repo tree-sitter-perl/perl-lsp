@@ -133,6 +133,22 @@ the call runs on the calling method's own receiver, the token naming only
 the class its lookup starts at (php's `self::m()` and `parent::m()`, which
 forward the called class).
 
+`@ref.receiver` beside a `@receiver.<kind>` says the token refers to the
+object the method runs on (php's `$this`, cpp's `this`), not only to a
+class: it mints a read bound to that method (`RefBinding::Receiver`), and
+the token's value and member place are that object's. Which object a body
+runs on is one per-scope fact (`Scope::runs_on`, minted once by the
+extractor): the nearest enclosing method's, a closure inside one included,
+and none inside a class-level (`@mark.static`) method. Every site that
+refers to the object reads it — the token's ref, value and place, and a
+bare instance member in a body that elides its receiver — so in a static
+method they all come up empty. The sites that name the class (`self::`,
+`static::`, `parent::`, a bare static member or static sibling call) read
+the method's class and still answer there. An out-of-line cpp definition
+(`int W::make() { … }`) carries no `static`, which is on the in-class
+declaration only, so its body still runs on an object
+(`TODO(cpp-out-of-line-static)`).
+
 `@rettype` is a callable's declared return, captured in the def's match.
 `@type.enclosing` sits on any written type (a return, a parameter's or
 property's `@type.annot`) the document says names the class it is written

@@ -519,6 +519,7 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        runs_on: None,
         closed: false,
         captures: Vec::new(),
         direct: false,
