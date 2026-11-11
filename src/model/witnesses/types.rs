@@ -241,6 +241,18 @@ impl WitnessPayload {
 }
 
 impl WitnessPayload {
+    /// A use of the value (a deref, a numeric context) that says nothing a
+    /// later use of the same kind doesn't: the fold reads uses only as "one
+    /// was made" and where the latest one stands, so `SpanOrder` keeps just
+    /// the latest of each kind in a read's window. A deferred bless binds a
+    /// value, so it is not one.
+    pub fn repeated_use(&self) -> Option<&TypeObservation> {
+        match self {
+            WitnessPayload::Observation(o) if !self.binds_value() => Some(o),
+            _ => None,
+        }
+    }
+
     /// Does a temporal read decide this witness by position alone? The live
     /// window (`LiveWindow`) admits it at or after the latest write before
     /// the read and retires it otherwise; no reducer reads it past that, and

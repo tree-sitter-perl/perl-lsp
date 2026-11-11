@@ -306,6 +306,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // typing of the assignment) instead of losing its marks to it.
         let mut branded: Option<InferredType> = None;
         let mut rep_obs: Option<Rep> = None;
+        let mut rep_obs_at: Option<Point> = None;
         let mut bless_rep: Option<Rep> = None;
         let mut num = false;
         let mut str_ = false;
@@ -399,10 +400,20 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     }
                 }
                 WitnessPayload::Observation(obs) => {
+                    // Rep evidence that disagrees goes to the use latest in
+                    // source: the window keeps only the latest use of each
+                    // kind (`WitnessPayload::repeated_use`), so the answer
+                    // can't hang on an earlier one.
+                    let mut rep = |r: Rep| {
+                        if rep_obs_at.is_none_or(|at| w.span.start >= at) {
+                            rep_obs = Some(r);
+                            rep_obs_at = Some(w.span.start);
+                        }
+                    };
                     match obs {
-                        TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
-                        TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
-                        TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
+                        TypeObservation::HashRefAccess => rep(Rep::Hash),
+                        TypeObservation::ArrayRefAccess => rep(Rep::Array),
+                        TypeObservation::CodeRefInvocation => rep(Rep::Code),
                         TypeObservation::BlessTarget(r) => bless_rep = Some(*r),
                         TypeObservation::NumericUse => num = true,
                         TypeObservation::StringUse => str_ = true,
@@ -497,16 +508,6 @@ fn span_area(span: &Span) -> u64 {
         span.end.column.saturating_sub(span.start.column) as u64
     } else {
         rows * 10_000 + (span.end.column as u64)
-    }
-}
-
-fn merge_rep(existing: Option<Rep>, new: Rep) -> Option<Rep> {
-    match existing {
-        None => Some(new),
-        Some(r) if r == new => Some(r),
-        // Conflict shouldn't really fire; prefer the newer observation
-        // and leave it for a later diagnostic.
-        Some(_) => Some(new),
     }
 }
 
