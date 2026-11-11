@@ -14,7 +14,10 @@ macro_rules! spelled {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum $name { $($(#[$vm])* $var),* }
         impl $name {
+            /// Every word, for a test that checks the whole vocabulary; an
+            /// enum no such test reads leaves it unused.
             #[cfg(test)]
+            #[allow(dead_code)]
             pub const ALL: &'static [Self] = &[$($name::$var),*];
             pub fn spelling(self) -> &'static str {
                 match self { $($name::$var => $s),* }
@@ -375,6 +378,41 @@ spelled! {
         /// it is declared (php's `Foo::$x`).
         Spelled = "spelled",
     }
+}
+
+impl SpaceMark {
+    /// What the mark is said of, so what the document puts it on: a member
+    /// name's mark on the node that names the member, an operator's on the
+    /// token the document spells.
+    fn sits_on(self) -> crate::build::query_predicates::StepShape {
+        use crate::build::query_predicates::StepShape;
+        match self {
+            SpaceMark::Illegal => StepShape::Node,
+            SpaceMark::Forward | SpaceMark::Spelled => StepShape::Spelled,
+        }
+    }
+}
+
+/// Every `@space.<name>.<mark>` a document states sits on what its mark is
+/// said of, as the document writes the step it captures (`SpaceMark::sits_on`),
+/// so a mark in the wrong place fails the compile instead of being read
+/// nowhere.
+pub(super) fn check_space_marks(source: &str) -> Result<(), String> {
+    for site in crate::build::query_predicates::capture_sites(source).unwrap_or_default() {
+        let Some(mark) = site.name.strip_prefix("space.").and_then(|rest| SpaceMark::parse(rest.rsplit_once('.')?.1)) else {
+            continue;
+        };
+        if let Some(&on) = site.on.iter().find(|&&on| on != mark.sits_on()) {
+            let line = source[..site.at].matches('\n').count() + 1;
+            return Err(format!(
+                "line {line}: @{} is on {}, but a .{mark} mark goes on {}",
+                site.name,
+                on.described(),
+                mark.sits_on().described()
+            ));
+        }
+    }
+    Ok(())
 }
 
 spelled! {

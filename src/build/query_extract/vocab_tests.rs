@@ -139,3 +139,32 @@ fn a_capture_stacks_on_the_first_step_of_its_group() {
     assert!(check_source("((x) @a (#eq? @a @b @c @d))").is_ok(), "predicate arguments");
     assert!(check_source("(x) @a ;\"@b @c @d\n(y \"\\\"@e @f @g @h\")").is_ok(), "comments and escapes");
 }
+
+/// A namespace mark sits on what it is said of, as the document writes the
+/// step: an operator's (`.forward`, `.spelled`) on the token it spells, a
+/// member name's (`.illegal`) on the node that names the member. A mark
+/// anywhere else fails the load instead of being read nowhere.
+#[test]
+fn a_space_mark_sits_on_what_it_is_said_of() {
+    let load = |query_source: &'static str| {
+        let pack = LangPack { query_source, ..php_pack() };
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+        let tree = parser.parse("<?php", None).unwrap();
+        extract(&tree, b"<?php", &pack).map(|_| ())
+    };
+    let err = load("(member_access_expression\n  name: (name) @space.method.forward)").unwrap_err();
+    assert!(err.contains("line 2: @space.method.forward is on a node, but a .forward mark goes on a token the document spells"), "{err}");
+    let err = load("[\"->\" \"?->\"] @space.property.illegal").unwrap_err();
+    assert!(err.contains(".illegal mark goes on a node"), "{err}");
+    assert!(load("(scoped_property_access_expression name: (_) @space.static_property.spelled)").is_err(), "a wildcard is a node");
+    assert_eq!(load("(\"::\" @space.static_property.spelled (#set! member.word \"class\"))"), Ok(()));
+    assert_eq!(load("(member_access_expression name: (name) @space.property @space.static_property.illegal)"), Ok(()));
+    for &mark in SpaceMark::ALL {
+        let misplaced = match mark.sits_on() {
+            crate::build::query_predicates::StepShape::Node => format!("\"->\" @space.property.{mark}"),
+            crate::build::query_predicates::StepShape::Spelled => format!("(name) @space.property.{mark}"),
+        };
+        assert!(load(Box::leak(misplaced.into_boxed_str())).is_err(), ".{mark} misplaced");
+    }
+}

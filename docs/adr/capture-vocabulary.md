@@ -235,10 +235,20 @@ instance member of the namespace only on the object the site already runs
 on: from an instance method of the receiver's class or a class it extends
 (php's `parent::m()`), elsewhere only a static member. `.spelled` says a
 member of the namespace is written after the operator as it is declared
-(php's `Foo::$x`), so completion lists it by its declared spelling.
+(php's `Foo::$x`), so completion lists every member of the namespace,
+methods included, by its declared spelling (`Symbol::offered_as`).
 `@member.spelled` is the member's token as written where that is more than
 its name (php's `$x`): what a completion at the site replaces, so a typed
-`$` is replaced, never doubled.
+`$` is replaced, never doubled, and the site reaches only the `.spelled`
+namespaces.
+
+A mark is checked where it sits when the query compiles
+(`vocab::check_space_marks`, over `query_predicates::capture_sites`), the
+way a `#set!` key is (`SettingKey`): `.illegal` is said of a name, so it
+sits on a node; `.forward` and `.spelled` are said of an operator, so they
+sit on a token the document spells (`SpaceMark::sits_on`). Where a capture
+sits is read off the pattern as written, never off a list of node kinds;
+a misplaced mark is a document error, not a silent no-op.
 
 ## Decision: a def with no name is named from its anchor
 

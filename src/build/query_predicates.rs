@@ -81,16 +81,46 @@ fn is_name_char(c: char) -> bool {
     c.is_alphanumeric() || "_-.?!".contains(c)
 }
 
-/// The byte offset of the first capture in `source` that its step cannot
-/// hold. Tree-sitter files a pattern's captures on the pattern's first
-/// step (a node's own; a group's first child's; each alternation branch's
-/// first), so a group's capture stacks on the node inside it. The lexing is
-/// the query parser's: a string is `"…"` with `\` escaping the next
-/// character, `;` comments to the line's end between tokens, a capture name
-/// runs over alphanumerics and `_-.?!`, and a parenthesis opening on `#` or
-/// `.` is a predicate, whose `@` arguments name captures but add none.
-fn overloaded_capture(source: &str) -> Option<usize> {
-    let mut captures: Vec<usize> = Vec::new();
+/// What a pattern step is, as the document writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepShape {
+    /// A token the document spells (`"::"`): an anonymous node.
+    Spelled,
+    /// A node the document names by kind (`(name)`) or leaves open (`_`).
+    Node,
+}
+
+impl StepShape {
+    pub fn described(self) -> &'static str {
+        match self {
+            StepShape::Spelled => "a token the document spells",
+            StepShape::Node => "a node",
+        }
+    }
+}
+
+/// One capture as the document writes it: its byte offset, its name, and
+/// the steps it lands on (several where it follows an alternation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureSite<'s> {
+    pub at: usize,
+    pub name: &'s str,
+    pub on: Vec<StepShape>,
+    steps: Vec<usize>,
+}
+
+/// Every capture in `source`, in order, with the steps it lands on.
+/// Tree-sitter files a pattern's captures on the pattern's first step (a
+/// node's own; a group's first child's; each alternation branch's first),
+/// so a group's capture stacks on the node inside it. The lexing is the
+/// query parser's: a string is `"…"` with `\` escaping the next character,
+/// `;` comments to the line's end between tokens, a capture name runs over
+/// alphanumerics and `_-.?!`, and a parenthesis opening on `#` or `.` is a
+/// predicate, whose `@` arguments name captures but add none. `None` when
+/// the source does not balance (the compile reports that itself).
+pub fn capture_sites(source: &str) -> Option<Vec<CaptureSite<'_>>> {
+    let mut steps: Vec<StepShape> = Vec::new();
+    let mut sites: Vec<CaptureSite<'_>> = Vec::new();
     let mut open: Vec<Open> = vec![Open::Root];
     // The first steps of the pattern a capture written now would follow.
     let mut last: Option<Vec<usize>> = None;
@@ -122,17 +152,21 @@ fn overloaded_capture(source: &str) -> Option<usize> {
             ';' => while chars.next_if(|&(_, c)| c != '\n').is_some() {},
             '"' => {
                 skip_string(&mut chars);
-                captures.push(0);
-                complete(vec![captures.len() - 1], &mut open, &mut last);
+                steps.push(StepShape::Spelled);
+                complete(vec![steps.len() - 1], &mut open, &mut last);
             }
             '@' => {
-                while chars.next_if(|&(_, c)| is_name_char(c)).is_some() {}
-                for &step in last.iter().flatten() {
-                    captures[step] += 1;
-                    if captures[step] > MAX_STEP_CAPTURES {
-                        return Some(i);
-                    }
+                let mut end = i + 1;
+                while let Some((j, c)) = chars.next_if(|&(_, c)| is_name_char(c)) {
+                    end = j + c.len_utf8();
                 }
+                let on: Vec<usize> = last.iter().flatten().copied().collect();
+                sites.push(CaptureSite {
+                    at: i,
+                    name: &source[i + 1..end],
+                    on: on.iter().map(|&s| steps[s]).collect(),
+                    steps: on,
+                });
             }
             '+' | '*' | '?' if last.is_some() => {}
             '(' => {
@@ -161,8 +195,8 @@ fn overloaded_capture(source: &str) -> Option<usize> {
                     }
                     Some('(' | '[' | '"') => open.push(Open::Group { first: None }),
                     _ => {
-                        captures.push(0);
-                        open.push(Open::Node { step: captures.len() - 1, named: false });
+                        steps.push(StepShape::Node);
+                        open.push(Open::Node { step: steps.len() - 1, named: false });
                     }
                 }
             }
@@ -191,11 +225,27 @@ fn overloaded_capture(source: &str) -> Option<usize> {
                     // A wildcard child is a step; a field name, negated
                     // field or anchor only prefixes or places one.
                     _ if word == "_" => {
-                        captures.push(0);
-                        complete(vec![captures.len() - 1], &mut open, &mut last);
+                        steps.push(StepShape::Node);
+                        complete(vec![steps.len() - 1], &mut open, &mut last);
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+    Some(sites)
+}
+
+/// The byte offset of the first capture in `source` that its step cannot
+/// hold.
+fn overloaded_capture(source: &str) -> Option<usize> {
+    let mut held: std::collections::HashMap<usize, usize> = Default::default();
+    for site in capture_sites(source)? {
+        for &step in &site.steps {
+            let n = held.entry(step).or_default();
+            *n += 1;
+            if *n > MAX_STEP_CAPTURES {
+                return Some(site.at);
             }
         }
     }
