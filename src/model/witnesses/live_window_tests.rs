@@ -38,13 +38,19 @@ fn random_bag(seed: u64) -> WitnessBag {
         let start = at(row, g.next(3));
         let region_end = at(row + 1 + g.next(3), 0);
         let point = |w: WitnessPayload| (w, start, start);
-        let (payload, s, e) = match g.next(9) {
+        let (payload, s, e) = match g.next(11) {
             0 | 1 => point(WitnessPayload::Reset),
             2 => point(WitnessPayload::InferredType(class(g.next(4)))),
             3 => (WitnessPayload::InferredType(class(g.next(4))), start, region_end),
             4 => point(WitnessPayload::Observation(TypeObservation::HashRefAccess)),
             5 => (WitnessPayload::Observation(TypeObservation::NumericUse), start, region_end),
             6 => point(WitnessPayload::ReturnExpr(ReturnExpr::Concrete(class(9)))),
+            // Uses repeat, and two reps can disagree.
+            9 => point(WitnessPayload::Observation(TypeObservation::ArrayRefAccess)),
+            10 => {
+                let obs = if g.next(2) == 0 { TypeObservation::HashRefAccess } else { TypeObservation::NumericUse };
+                (WitnessPayload::Observation(obs), start, at(row + g.next(6), 2))
+            }
             7 => {
                 let rhs = Span { start: at(row, 5), end: at(row, 9) };
                 let target = WitnessAttachment::Expr(rhs);
@@ -154,4 +160,34 @@ fn a_chain_build_reads_each_write_a_bounded_number_of_times() {
     };
     let (short, long) = (cost(60), cost(120));
     assert!(long < short * 3, "60 links read {short} witnesses, 120 read {long}: superlinear");
+}
+
+fn perl_uses(uses: usize) -> String {
+    let mut src = String::from("package G; sub new { bless {}, shift } sub foo {}\nsub init { my $self = shift;\n");
+    for i in 0..uses {
+        src.push_str(&format!("$self->{{k{i}}} = 1;\n"));
+    }
+    src.push_str("$self->foo;\n}\n1;\n");
+    src
+}
+
+/// Deterministic cost pin: every `$self->{k}` reads `$self` at its own
+/// point and leaves one more use of it behind. Keeping only the latest use
+/// of each kind keeps the witnesses a build reads linear in the uses.
+#[test]
+fn a_build_reads_each_use_a_bounded_number_of_times() {
+    if live_window_equiv_enabled() || fold_memo_equiv_enabled() {
+        return;
+    }
+    let cost = |uses| {
+        let src = perl_uses(uses);
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(&src, None).unwrap();
+        let before = materialize_reads();
+        crate::build::builder::build(&tree, src.as_bytes());
+        materialize_reads() - before
+    };
+    let (short, long) = (cost(100), cost(200));
+    assert!(long < short * 3, "100 uses read {short} witnesses, 200 read {long}: superlinear");
 }
