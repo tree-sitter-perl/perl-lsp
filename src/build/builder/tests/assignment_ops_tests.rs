@@ -30,6 +30,10 @@ fn an_assignment_is_worth_the_value_it_stores() {
         "my $s; return $s //= Bar->new;",
         "my $s = 1; return $s &&= Bar->new;",
         "my $h = shift; return $h->{k} = Bar->new;",
+        // The memoized accessor reads the member it writes: a cycle, not an
+        // untyped member.
+        "my $self = shift; return $self->{k} ||= Bar->new;",
+        "my $self = shift; my $o = $self->{k} //= Bar->new; return $o;",
         "return cache->{k} ||= Bar->new;",
         "return cache->{k} //= Bar->new;",
         "cache->{k} ||= Bar->new",
@@ -289,4 +293,16 @@ fn a_call_returning_undef_is_an_undef_arm() {
     // Webmin Convert/TNEF.pm `_build_data`: the untyped `$fd` arm may return
     // a value, so the undef call arm doesn't answer for the sub.
     assert_eq!(probe("my ($s, $fd) = @_; return err() unless $fd; return $fd;"), None);
+}
+
+/// A write through a computed key (`$self->{types}{$n} = …`) says the slot
+/// holds a hash, so a read of the slot is that hash, not an untyped member.
+#[test]
+fn a_nested_computed_key_write_types_the_slot_as_a_hash() {
+    let src = "package Lib;\nsub new { bless {}, shift }\nsub add { my ($self, $n, $t) = @_; $self->{types}{$n} = $t; }\nsub probe { my $self = shift; return $self->{types} ||= {}; }\n1;\n";
+    let t = build_fa(src).sub_return_type_at_arity("probe", None);
+    assert!(
+        matches!(t, Some(InferredType::HashWithKeys { open: true, .. })),
+        "{t:?}"
+    );
 }

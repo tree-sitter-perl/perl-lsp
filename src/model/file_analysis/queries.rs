@@ -9,6 +9,11 @@ impl FileAnalysis {
         &self.pack.names
     }
 
+    /// The namespaces this file's language holds members in.
+    pub fn member_spaces(&self) -> &'static MemberSpaces {
+        crate::model::conventions::member_spaces_for(&self.language)
+    }
+
     /// Where `var` is bound inside `scope` — the earliest declaring
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
@@ -74,6 +79,26 @@ impl FileAnalysis {
         self.lookup_chain(from).bindings(&self.symbols).collect()
     }
 
+    /// Whether completion offers `sym` at `point`. A local its first write
+    /// declares (`SymbolFlags::SCOPE_WIDE`) binds from the top of its body,
+    /// but is offered only below that write in the body that writes it:
+    /// Perl's `my` rule. A body nested in it runs later, so there it is
+    /// offered wherever the write sits. Binding, goto-def and types keep
+    /// the scope-wide view.
+    ///
+    /// TODO(cfg-loop-locals): in a loop, a local read at the top and first
+    /// written further down is in force on the second pass but is not
+    /// offered above its write. Source order stands in for control flow
+    /// until the CFG work ("Model closures and scopes - with CFG next
+    /// version") gives reaching writes.
+    pub fn in_completion_view(&self, sym: &Symbol, point: Point) -> bool {
+        if !sym.flags.contains(SymbolFlags::SCOPE_WIDE) {
+            return true;
+        }
+        let body = self.scope_at(point).and_then(|s| callable_reach(&self.scopes, s).last());
+        body != Some(sym.scope) || sym.selection_span.start < point
+    }
+
     /// Get the scope struct by ID.
     pub fn scope(&self, id: ScopeId) -> &Scope {
         &self.scopes[id.0 as usize]
@@ -108,11 +133,15 @@ impl FileAnalysis {
         self.resolve_variable(name, point).is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER))
     }
 
+    /// The declaration a use of the variable `name` at `point` names: the
+    /// binders' rule asked by name (`variable_binding`), so it agrees with
+    /// the binding on a ref of that spelling there. A global nothing
+    /// declares is no declaration.
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
-        let scope = self.scope_at(point)?;
-        self.lookup_chain(scope)
-            .bindings(&self.symbols)
-            .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
+        match self.variable_use_at(name, point)? {
+            VariableUse::Declared(id) => Some(self.symbol(id)),
+            VariableUse::Global { .. } | VariableUse::GatedOur => None,
+        }
     }
 
     /// The pointer/reference declarator stack of the in-scope variable
@@ -339,6 +368,8 @@ impl FileAnalysis {
             package_parents: &self.packages,
             app_surface_consumers: &self.plugin.app_surface_consumers,
             lattice: crate::model::conventions::lattice_for(&self.language),
+
+            member_spaces: crate::model::conventions::member_spaces_for(&self.language),
         }
     }
 
@@ -417,7 +448,7 @@ impl FileAnalysis {
 
     /// Resolve the inferred return type of a method call by its ref index
     /// (into `refs`). Reads the `Expression(refidx)` witnesses seeded by
-    /// the builder; `module_index` lets cross-file `PackageSymbol` edges
+    /// the builder; `module_index` lets cross-file `Member` edges
     /// (e.g. `$r->get(...)` where `get` lives in `Mojolicious::Routes`)
     /// chase through the registry's recursive walker.
     ///
@@ -508,7 +539,7 @@ impl FileAnalysis {
         };
         // Fallback for a chain receiver whose class the BUILDER couldn't
         // pin (so `emit_method_call_return_edges` never emitted the
-        // `Expression → Edge(PackageSymbol{package, method})` for this
+        // `Expression → Edge(Member{package, method})` for this
         // call): resolve the method's return via the receiver's class at
         // QUERY time. This is what lets a receiver-relative projection
         // — `$rs->search({...})->first` (RowOf on the fluent-search
@@ -525,7 +556,7 @@ impl FileAnalysis {
             .name()
             .to_string();
             let arity = self.refs[ref_idx].arg_count.map(|c| c as u32);
-            let moc = WitnessAttachment::PackageSymbol { package: class, name: method };
+            let moc = WitnessAttachment::returns_of(class, method);
             let mq = ReducerQuery {
                 attachment: &moc,
                 point: None,
@@ -649,8 +680,7 @@ impl FileAnalysis {
         // exact-span match is what distinguishes "the value of
         // `$f->get_bar()->get_name()`" (the outer call's return) from
         // "the inner receiver `$f->get_bar()`" (which has its own,
-        // narrower span), which is why this asks `call_spanning` and not
-        // `call_at_start` (the innermost receiver).
+        // narrower span).
         if let Some((recv_idx, kind)) =
             self.refs.call_spanning(span).map(|i| (i, &self.refs[i].kind))
         {
@@ -683,7 +713,7 @@ impl FileAnalysis {
         // member ref whose invocant opens this span and whose token ends
         // inside it (the chain's last hop), type the receiver recursively
         // (strictly narrower span, bounded), and resolve the member's
-        // value on it — methods through `PackageSymbol` with the receiver
+        // value on it — methods through `Member` with the receiver
         // threaded (`ParamOf` substitutes), fields through the declared
         // type with params substituted.
         if let Some((inv, r)) = self
@@ -710,7 +740,7 @@ impl FileAnalysis {
                 // the method, a call never the field.
                 let t = match &r.kind {
                     RefKind::FieldAccess { .. } => {
-                        self.field_value_type(&recv_ty, member, module_index)
+                        self.field_value_type(&recv_ty, member, module_index, MemberKind::of_ref(&r.kind)?)
                     }
                     _ => self.member_value_type(&recv_ty, member, module_index, None),
                 };
@@ -858,12 +888,18 @@ impl FileAnalysis {
         !package_variable && !self.reassigned_vars.contains(&id)
     }
 
+    /// What a use of the variable `name` written at `at` names, by the
+    /// binders' rule (`variable_use`) over the declarations the analysis
+    /// holds.
+    fn variable_use_at(&self, name: &str, at: Point) -> Option<VariableUse> {
+        Some(self.variable_use_in(name, at, self.scope_at(at)?))
+    }
+
     /// The variable a use of `name` written at `at` binds to — the
-    /// builder's binding rule (`variable_use`) asked by name, so it agrees
-    /// with the binding on every ref of that spelling there.
+    /// binders' rule (`variable_use`) asked by name, so it agrees with the
+    /// binding on every ref of that spelling there.
     pub fn variable_binding(&self, name: &str, at: Point) -> Option<SymbolId> {
-        let scope = self.scope_at(at)?;
-        match self.variable_use_in(name, at, scope) {
+        match self.variable_use_at(name, at)? {
             VariableUse::Declared(id) => Some(id),
             VariableUse::GatedOur => None,
             VariableUse::Global { package, name } => {
@@ -973,8 +1009,7 @@ impl FileAnalysis {
 
     /// The place the variable or member `sym` declares.
     pub fn declared_place(&self, sym: SymbolId) -> Place {
-        let s = &self.symbols[sym.0 as usize];
-        Place::variable(self.variable_binding_of(&s.name, s.span.start, s.scope).0)
+        Place::variable(Binding::Lexical(self.binding_symbol(sym)))
     }
 
     /// The one symbol a binding is named by. A token that declares two
@@ -1023,22 +1058,17 @@ impl FileAnalysis {
     }
 
     fn variable_use_in(&self, name: &str, at: Point, scope: ScopeId) -> VariableUse {
-        variable_use(name, at, self.lookup_chain(scope), self.package_at(at), self.names(), |scope| {
-            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter_map(move |s| {
-                // An implicit global is minted from uses, not declared: the
-                // `Global` arm reaches it by its package.
-                let declared = match &s.detail {
-                    SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. } => false,
-                    _ => matches!(s.kind, SymKind::Variable | SymKind::Field),
-                };
-                let gate = match &s.detail {
-                    SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => s.package.as_deref(),
-                    _ => None,
-                };
+        let chain = variable_lookup_chain(&self.scopes, scope, name);
+        variable_use(name, at, chain, self.package_at(at), self.names(), |scope| {
+            self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter(|s| s.name == name).filter_map(move |s| {
                 // A member is in force throughout its class, wherever it is
-                // declared.
-                let view = if s.kind == SymKind::Field { InView::from(self.scopes[scope.0 as usize].span.start) } else { s.in_view() };
-                (declared && s.name == name).then_some((s.id, view, gate))
+                // declared — a pack's too, which the ref binders reach
+                // through its receiver instead.
+                if s.kind == SymKind::Field {
+                    let view = InView::from(self.scopes[scope.0 as usize].span.start);
+                    return Some(VariableDecl { id: s.id, view, gate: None, scope_wide: false });
+                }
+                s.variable_decl()
             })
         })
     }
@@ -1070,7 +1100,7 @@ impl FileAnalysis {
             if !(var_text.starts_with('$') || var_text.starts_with('%')) {
                 continue;
             }
-            if matches!(r.access, AccessKind::Write) {
+            if r.access.is_write() {
                 continue;
             }
             let Some(t) =

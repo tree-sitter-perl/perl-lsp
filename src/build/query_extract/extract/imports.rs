@@ -19,7 +19,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // A prefix, a level and an alias are read through their import
         // name, and a call's argument once every row is in.
         Capture::Import(
-            ImportCap::Statement | ImportCap::Prefix | ImportCap::Relative | ImportCap::Alias | ImportCap::Arg,
+            ImportCap::Statement
+            | ImportCap::Prefix
+            | ImportCap::Relative
+            | ImportCap::Alias
+            | ImportCap::Arg
+            | ImportCap::Function
+            | ImportCap::Constant,
         ) => {}
         _ => {}
     }
@@ -28,8 +34,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 /// An imported name's row, spanning the name token. Under a use-map it is
 /// a `UseRow` of the parts as written — the group clause's prefix and the
 /// name's own qualifier are its namespace, the name's last segment its
-/// leaf, the alias what it is bound under — so nothing downstream splits a
-/// joined name back apart. Elsewhere the name as written is the row.
+/// leaf, the alias what it is bound under, the table the match names —
+/// so nothing downstream splits a joined name back apart. Elsewhere the
+/// name as written is the row. Only a class row names a module the file
+/// uses: a function or a constant is no class to load.
 fn name_row(st: &mut ExtractState, e: &Event) {
     let names = &st.pack.names;
     let Some(sep) = names.use_map_sep() else {
@@ -50,14 +58,23 @@ fn name_row(st: &mut ExtractState, e: &Event) {
     if names.imports.reach == ImportReach::FromImport {
         reach.start = e.span().start;
     }
+    use crate::model::file_analysis::NameTable;
+    let in_match = |cap: ImportCap| st.adorned.in_match(e.match_id, Capture::Import(cap));
+    let table = match (in_match(ImportCap::Function), in_match(ImportCap::Constant)) {
+        (Some(_), _) => NameTable::Function,
+        (None, Some(_)) => NameTable::Constant,
+        (None, None) => NameTable::Class,
+    };
     let row = crate::model::file_analysis::UseRow {
         span: e.span(),
         name: crate::model::file_analysis::QualifiedName { namespace, leaf: leaf.to_string() },
-        alias: st.adorned.in_match(e.match_id, Capture::Import(ImportCap::Alias)).map(|a| a.text.clone()),
+        alias: in_match(ImportCap::Alias).map(|a| a.text.clone()),
         reach,
+        table,
     };
-    let identity = row.name.identity(sep);
-    push_import(st, &identity);
+    if table == NameTable::Class {
+        push_import(st, &row.name.identity(sep));
+    }
     st.out.use_rows.push(row);
 }
 

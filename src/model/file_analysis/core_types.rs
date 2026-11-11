@@ -116,6 +116,15 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// A body that sees no variable of the code around it but the ones it
+    /// captures (`@scope.sub.closed`: php's functions, methods and
+    /// closures). Read through `variable_lookup_chain`.
+    #[serde(default)]
+    pub closed: bool,
+    /// The names a closed body takes from the code around it
+    /// (`@closure.capture`, php's `use ($x)`).
+    #[serde(default)]
+    pub captures: Vec<String>,
     /// The names declared in this scope are in force only for code
     /// written directly in it (`@scope.direct`): a use inside a callable,
     /// or inside another such scope, nested here looks past the scope, as
@@ -192,6 +201,13 @@ pub enum ScopeKind {
     Block,
     /// `for my $x (...) { }` — loop variable scoped to block.
     ForLoop { var: String },
+}
+
+impl ScopeKind {
+    /// A callable's body: the boundary `callable_reach` ends at.
+    pub fn is_callable(&self) -> bool {
+        matches!(self, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+    }
 }
 
 // ---- Package context ----
@@ -392,9 +408,6 @@ pub struct NameSpellings {
     /// The package an empty qualifier names (Perl's `$::x` is `$main::x`);
     /// `None` keeps the empty qualifier as written.
     pub root_package: Option<std::borrow::Cow<'static, str>>,
-    /// How the language's classes hold their members: the rule a member
-    /// ask is answered by (`docs/adr/member-kinds.md`).
-    pub member_namespace: MemberNamespace,
     /// How a use-map language's import rows bind — read by the extractor
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
@@ -436,6 +449,22 @@ pub enum EnclosingClass {
     /// The namespace in force: Perl's `package Foo;` makes the code after
     /// it Foo's, so the namespace lane answers.
     NamespaceInForce,
+}
+
+/// What a construction's reference to its constructor is keyed by, so a
+/// constructor's references know where to look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ConstructionKey {
+    /// The constructor's own name: the site calls it by name (Perl's
+    /// `Foo->new`), like any other call.
+    #[default]
+    Constructor,
+    /// The class the site spells (php's `new Foo`, python's `Foo()`): the
+    /// site never names its constructor, so a constructor's references are
+    /// retrieved under the classes that construct through it — a
+    /// `RefKind::MethodCall::constructs` ref, or a call whose name is a
+    /// class where calling a class constructs it.
+    Class,
 }
 
 /// What a call whose callee names a class means in a language.
@@ -505,7 +534,6 @@ impl NameSpellings {
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
         root_package: None,
-        member_namespace: MemberNamespace::PerFamily,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
@@ -521,7 +549,6 @@ impl NameSpellings {
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
             root_package: None,
-            member_namespace: MemberNamespace::PerFamily,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
@@ -557,6 +584,13 @@ impl NameSpellings {
         self.sigils.contains(&c)
     }
 
+    /// A typed name without its leading sigils: the bare identity token a
+    /// rename writes (`$total` → `total`). A language with no sigils keeps
+    /// every character — a `$` in its identifiers is identifier text.
+    pub fn strip_sigils<'n>(&self, name: &'n str) -> &'n str {
+        name.trim_start_matches(&self.sigils[..])
+    }
+
     /// The package a written qualifier names: an empty one (a leading
     /// separator) is the root package, when the language declares one.
     pub fn qualifier_package<'a>(&'a self, qualifier: &'a str) -> &'a str {
@@ -589,8 +623,9 @@ bitflags::bitflags! {
         const ABSTRACT = 1 << 2;
         /// A default-named container (`(union)`): structure, not an addressable name.
         const ANONYMOUS = 1 << 3;
-        /// Not public: completes only from inside its own class's body.
-        const NON_PUBLIC = 1 << 4;
+        /// Named only from its declaring class's own code
+        /// (`SymbolFlags::access_scope`).
+        const PRIVATE = 1 << 4;
         /// A union container: its body nests its members in the outline.
         const UNION = 1 << 5;
         /// An `extern` declaration: a definition elsewhere is the landing.
@@ -623,7 +658,7 @@ bitflags::bitflags! {
         /// instance's class.
         const TRAIT = 1 << 16;
         /// The method a construction invokes (Perl's `new`, php
-        /// `__construct`). A construction can reach it without naming it, so
+        /// `__construct`, python `__init__`). A construction can reach it without naming it, so
         /// no reference to it is not evidence that it is dead.
         const CONSTRUCTOR = 1 << 17;
         /// A callable declared for a composer to provide (a Perl role's
@@ -634,6 +669,85 @@ bitflags::bitflags! {
         /// `__call` / `__get`): it has no closed member surface to check a
         /// name against.
         const DYNAMIC_MEMBERS = 1 << 19;
+        /// A variable declared for its whole scope, wherever it is written
+        /// (a function-scoped variable its first write declares, php's
+        /// `$x = …`): a use above the write reaches it. Minted from a
+        /// capture (`@def.assigned`), never spelled as an attribute.
+        const SCOPE_WIDE = 1 << 20;
+        /// A storage slot written at most once (php `readonly`). Unless a
+        /// set scope says otherwise, its class family sets it
+        /// (`SymbolFlags::set_scope`).
+        const READONLY = 1 << 21;
+        /// A storage slot any code may write (php `public(set)`).
+        const SET_PUBLIC = 1 << 22;
+        /// A storage slot only its declaring class and that class's
+        /// descendants may write (php `protected(set)`).
+        const SET_PROTECTED = 1 << 23;
+        /// A storage slot only its declaring class may write (php
+        /// `private(set)`).
+        const SET_PRIVATE = 1 << 24;
+        /// Named only from its declaring class's code and its descendants'
+        /// (`SymbolFlags::access_scope`).
+        const PROTECTED = 1 << 25;
+    }
+}
+
+/// Where a member may be reached from: named at all
+/// (`SymbolFlags::access_scope`), or written (`SymbolFlags::set_scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessScope {
+    Anywhere,
+    /// The declaring class and its family, as far as the language's
+    /// `FamilyReach` goes.
+    Family,
+    /// The declaring class alone.
+    Class,
+}
+
+/// Which classes `AccessScope::Family` admits besides the declaring class:
+/// a language's rule for what "protected" reaches
+/// (`LanguageConventions::family_reach`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FamilyReach {
+    /// The classes that descend from it: C++'s derived class reaches its
+    /// bases' protected members, a base never a derived class's.
+    #[default]
+    Descendants,
+    /// Its whole lineage, the classes it descends from too: PHP admits code
+    /// of a class either one descends from (`is_protected_compatible_scope`,
+    /// `zend_check_protected`), so a parent's method sets a `protected(set)`
+    /// member its child declares.
+    Lineage,
+}
+
+impl SymbolFlags {
+    /// Where the member these flags describe may be named from: its
+    /// declaring class alone when private, its class family when
+    /// protected, else anywhere.
+    pub fn access_scope(self) -> AccessScope {
+        if self.contains(SymbolFlags::PRIVATE) {
+            AccessScope::Class
+        } else if self.contains(SymbolFlags::PROTECTED) {
+            AccessScope::Family
+        } else {
+            AccessScope::Anywhere
+        }
+    }
+
+    /// Where the slot these flags describe may be written from: its stated
+    /// set scope, else its class family for a write-once slot, else
+    /// anywhere. `access_scope` is not consulted: a private member with
+    /// no set scope answers `Anywhere`.
+    pub fn set_scope(self) -> AccessScope {
+        if self.contains(SymbolFlags::SET_PUBLIC) {
+            AccessScope::Anywhere
+        } else if self.contains(SymbolFlags::SET_PRIVATE) {
+            AccessScope::Class
+        } else if self.intersects(SymbolFlags::SET_PROTECTED | SymbolFlags::READONLY) {
+            AccessScope::Family
+        } else {
+            AccessScope::Anywhere
+        }
     }
 }
 
@@ -674,7 +788,8 @@ impl TryFrom<&str> for SymbolFlags {
             "interface" => SymbolFlags::INTERFACE,
             "abstract" => SymbolFlags::ABSTRACT,
             "anonymous" => SymbolFlags::ANONYMOUS,
-            "non_public" => SymbolFlags::NON_PUBLIC,
+            "private" => SymbolFlags::PRIVATE,
+            "protected" => SymbolFlags::PROTECTED,
             "union" => SymbolFlags::UNION,
             "extern" => SymbolFlags::EXTERN,
             "inline" => SymbolFlags::INLINE,
@@ -686,6 +801,10 @@ impl TryFrom<&str> for SymbolFlags {
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
             "trait" => SymbolFlags::TRAIT,
+            "readonly" => SymbolFlags::READONLY,
+            "set_public" => SymbolFlags::SET_PUBLIC,
+            "set_protected" => SymbolFlags::SET_PROTECTED,
+            "set_private" => SymbolFlags::SET_PRIVATE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
@@ -724,12 +843,12 @@ pub struct Presentation {
     /// the default `SymKind` → LSP mapping.
     #[serde(default)]
     pub display: Option<HandlerDisplay>,
-    /// Outline-only display-name override. When set, the outline uses
-    /// this verbatim instead of `name` (and drops any kind prefix).
-    /// A chained Mojo helper leaf has `name: "create"` (so method
-    /// resolution works on `$c->users->create`) but labels itself
-    /// `"users.create"`; a mojo-lite route prepends the HTTP verb.
-    /// Doesn't affect resolution, rename, or workspace-symbol.
+    /// The name the symbol is listed by, when it is not `name`: read
+    /// through `Symbol::listed_name` by every listing view. A chained
+    /// Mojo helper leaf has `name: "create"` (so method resolution works
+    /// on `$c->users->create`) but lists as `"users.create"`; a mojo-lite
+    /// route prepends the HTTP verb; a php property lists as written
+    /// (`$x`). Doesn't affect resolution, rename, or workspace-symbol.
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -765,6 +884,11 @@ pub struct Symbol {
     /// onto them at conversion, the Perl builder sets them directly.
     #[serde(default)]
     pub flags: SymbolFlags,
+    /// The member namespace the query document tagged this declaration
+    /// with (`@space.<name>`); `None` lives where its kind does
+    /// (`MemberSpaces::of_decl`).
+    #[serde(default)]
+    pub member_space: Option<NamespaceId>,
     /// The OTHER symbol the same declaration token minted: a `has` accessor
     /// and its constructor key, a promoted constructor parameter and its
     /// field. Minted where the pair is synthesized, so no consumer
@@ -929,6 +1053,35 @@ pub struct MemberOpPeel {
     pub depth: usize,
 }
 
+/// A write made where its member may not be set, or, for a write-once
+/// member, where it is not set in good form
+/// (`FileAnalysis::misplaced_member_writes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MisplacedWrite {
+    /// The written member token.
+    pub span: Span,
+    /// The member as the site names it.
+    pub member: String,
+    /// The class declaring the member, one per receiver arm, deduplicated.
+    pub classes: Vec<String>,
+    pub kind: MisplacedWriteKind,
+}
+
+/// Ordered strictest first: a site whose receiver arms disagree reports
+/// the most lenient verdict any arm gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MisplacedWriteKind {
+    /// Code outside the declaring class of a member only that class may
+    /// set (`AccessScope::Class`): the write fails at runtime.
+    OutsideClass,
+    /// Code outside the declaring class and its descendants
+    /// (`AccessScope::Family`): the write fails at runtime.
+    OutsideFamily,
+    /// Code of the class family that no constructor encloses, writing a
+    /// write-once member it may set.
+    OutsideConstructor,
+}
+
 /// The peeled receiver spelling for a DEEP stack — one whose pointer depth
 /// exceeds what a single `.`/`->` can reach (`expected_member_op` is `None`).
 /// Returns `(wrap, depth)`: a plain pointer chain of depth N peels to
@@ -994,9 +1147,16 @@ pub struct FlowEdge {
     /// Target binding name (sigiled, as the bag keys variables).
     pub target_name: String,
     pub target_scope: ScopeId,
-    /// The target's site, for the lowered witness's span (temporal ordering).
+    /// Where the write lands, for the lowered witness's span (temporal
+    /// ordering).
     #[serde(with = "PointDef")]
     pub target_at: Point,
+    /// The token the write names its target by, where its producer states
+    /// it (the pack extractor; the Perl builder states none,
+    /// `TODO(perl-write-token)`): what the token denotes is the value the
+    /// write leaves at `target_at` (`FileAnalysis::write_lands_at`).
+    #[serde(default)]
+    pub target_token: Option<Span>,
     /// The source expression's span — resolved to a type at query time via
     /// `expr_type_at_span`, and the value-provenance anchor.
     pub source: Span,
@@ -1076,6 +1236,43 @@ pub fn cut_region(region: Span, cuts: impl IntoIterator<Item = Option<Point>>) -
 }
 
 impl Symbol {
+    /// What the symbol declares for a variable use of its name to bind
+    /// (`variable_use`): a variable, or a field declared as one (Corinna's
+    /// `field $x`, in lexical view of its methods). A global minted from
+    /// its uses declares nothing (a use reaches it as a global), and a
+    /// member reached through a receiver is no variable.
+    pub fn variable_decl(&self) -> Option<VariableDecl<'_, SymbolId>> {
+        let declared = match (self.kind, &self.detail) {
+            (_, SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. }) => false,
+            (SymKind::Variable, _) | (SymKind::Field, SymbolDetail::Field { .. }) => true,
+            _ => false,
+        };
+        declared.then(|| VariableDecl {
+            id: self.id,
+            view: InView { from: self.selection_span.start, ..self.in_view() },
+            gate: match &self.detail {
+                SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => self.package.as_deref(),
+                _ => None,
+            },
+            scope_wide: self.flags.contains(SymbolFlags::SCOPE_WIDE),
+        })
+    }
+
+    /// The declaration's documentation, from whichever of its two homes
+    /// the producer wrote (`docs/PARKED.md`, "Two homes for a
+    /// declaration's documentation text").
+    pub fn doc(&self) -> Option<&str> {
+        match &self.detail {
+            SymbolDetail::Sub { doc: Some(d), .. } => Some(d),
+            _ => self.presentation.doc.as_deref(),
+        }
+    }
+
+    /// The name listing views (outline, hover) show the symbol by.
+    pub fn listed_name(&self) -> &str {
+        self.presentation.label.as_deref().unwrap_or(&self.name)
+    }
+
     /// The first point a use of this name can see the declaration.
     pub fn in_force_from(&self) -> Point {
         self.in_force.unwrap_or(self.span.start)
@@ -1177,69 +1374,254 @@ impl Symbol {
     }
 }
 
-/// Which family a member belongs to: a stored value or a callable. An ask
-/// carries the family of the fact that produced it, a declaration the
-/// family of its symbol kind (`docs/adr/member-kinds.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MemberKind {
-    Value,
-    Callable,
+/// What a member walk looks for on each class of an MRO: a member by its
+/// name, or the class's constructor — the callable its language flags
+/// `CONSTRUCTOR`, whatever it is called (`__construct`, `__init__`). A
+/// construction spells its class, never its constructor, so it asks by
+/// role (`Ref::member_key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKey<'a> {
+    Named(&'a str),
+    Constructor,
 }
 
-impl MemberKind {
-    pub fn of_sym(kind: SymKind) -> MemberKind {
-        match kind {
-            SymKind::Sub | SymKind::Method => MemberKind::Callable,
-            _ => MemberKind::Value,
+impl<'a> MemberKey<'a> {
+    /// Does `sym` answer this key (its name or its role)? The kind and
+    /// class gates stay the walk's.
+    pub fn admits(self, sym: &Symbol) -> bool {
+        match self {
+            MemberKey::Named(n) => sym.name == n,
+            MemberKey::Constructor => sym.is_constructor(),
         }
     }
 
-    /// May a declaration of `kind` answer an ask of this family, in a
-    /// language whose classes hold their members in `namespace`? Nothing
-    /// resolves across families where they are separate; where there is
-    /// one namespace the family never mattered.
-    pub fn admits_decl(self, kind: SymKind, namespace: MemberNamespace) -> bool {
-        match namespace {
-            MemberNamespace::PerFamily => MemberKind::of_sym(kind) == self,
-            MemberNamespace::Shared => true,
-        }
-    }
-
-    /// The family a ref's own kind states: a value read is `Value`, a call
-    /// `Callable`, anything else no member at all.
-    pub fn of_ref(kind: &RefKind) -> Option<MemberKind> {
-        match kind {
-            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
-            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
-            _ => None,
-        }
-    }
-
-    /// May a use of family `other` reference a target of this family? The
-    /// same rule as `admits_decl`, read from the use's side; a use that is
-    /// no member access is not this rule's to refuse.
-    pub fn admits_ref(self, other: Option<MemberKind>, namespace: MemberNamespace) -> bool {
-        match namespace {
-            MemberNamespace::PerFamily => other.is_none_or(|o| o == self),
-            MemberNamespace::Shared => true,
+    /// The name this key asks for, when it asks by name: the lanes keyed
+    /// by name (the row prefilter, typeglob installs, plugin bridges)
+    /// answer only these.
+    pub fn name(self) -> Option<&'a str> {
+        match self {
+            MemberKey::Named(n) => Some(n),
+            MemberKey::Constructor => None,
         }
     }
 }
 
-/// How a language's classes hold their members. A language declares it on
-/// its spellings; the member walk reads the value and never asks which
-/// language it serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum MemberNamespace {
-    /// A namespace per family: a read reaches only a stored value and a
-    /// call only a callable (Perl's sub beside a same-named `field`).
-    #[default]
-    PerFamily,
+impl<'a> From<&'a str> for MemberKey<'a> {
+    fn from(name: &'a str) -> Self {
+        MemberKey::Named(name)
+    }
+}
+
+/// One of a language's member namespaces, by its index in the language's
+/// `MemberSpaces`. Opaque to the model: two ids are compared, never read.
+/// Each language owns the closed enum its ids stand for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct NamespaceId(pub u8);
+
+impl NamespaceId {
+    /// Where a call, and a callable declaration, lives untagged, in every
+    /// language: a language lists its callables' namespace first. A plugin
+    /// manifest stating what a call returns names no namespace, so it
+    /// means this one.
+    pub const CALLABLES: NamespaceId = NamespaceId(0);
+}
+
+/// The namespaces a language's classes hold their members in, by name, and
+/// the one each mode of access reaches when its site states none. A
+/// declaration or a member site the query document tags (`@space.<name>`)
+/// lives in that namespace instead (php's `const X` beside `$X` and `X()`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberSpaces {
+    /// By id: the first is where calls land untagged
+    /// (`NamespaceId::CALLABLES`).
+    pub names: std::borrow::Cow<'static, [std::borrow::Cow<'static, str>]>,
+    /// Where a value read, and a stored declaration, lives untagged.
+    pub values: NamespaceId,
+}
+
+impl Default for MemberSpaces {
+    fn default() -> Self {
+        MemberSpaces::PER_FAMILY
+    }
+}
+
+impl MemberSpaces {
+    /// A namespace per mode: a read reaches only a stored value and a call
+    /// only a callable (Perl's sub beside a same-named `field`).
+    pub const PER_FAMILY: MemberSpaces = MemberSpaces {
+        names: std::borrow::Cow::Borrowed(&[std::borrow::Cow::Borrowed("callable"), std::borrow::Cow::Borrowed("value")]),
+        values: NamespaceId(1),
+    };
     /// One namespace: a name is one member whatever its kind, so every ask
     /// reaches the nearest declaration of it. C++'s `d.hook()` reads member
     /// `hook` and calls whatever it holds, so a derived function pointer
     /// hides a base method of that name.
-    Shared,
+    pub const SHARED: MemberSpaces = MemberSpaces {
+        names: std::borrow::Cow::Borrowed(&[std::borrow::Cow::Borrowed("member")]),
+        values: NamespaceId(0),
+    };
+
+    /// The id a query document's `@space.<name>` names.
+    pub fn id_of(&self, name: &str) -> Option<NamespaceId> {
+        self.names.iter().position(|n| n == name).and_then(|i| u8::try_from(i).ok()).map(NamespaceId)
+    }
+
+    /// The namespaces an ask is answered from.
+    ///
+    /// TODO(mandatory-space-tags): an untagged site or declaration falls
+    /// back to the namespace its mode implies, here and in `of_decl`. The
+    /// tag should be mandatory in every pack document, so a member pattern
+    /// that forgets it fails the vocabulary test instead of defaulting. Not
+    /// done with the namespaces: it touches every member pattern in the
+    /// cpp, python and php documents (cpp alone has 33 method defs), and a
+    /// name node already carrying three captures silently drops a fourth,
+    /// so each pattern has to be restructured, not tagged.
+    pub fn of_ask(&self, ask: MemberKind) -> SpaceSet {
+        match ask.spaces {
+            Some(a) => a.search,
+            None => SpaceSet::of(match ask.mode {
+                MemberMode::Value => self.values,
+                MemberMode::Callable => NamespaceId::CALLABLES,
+            }),
+        }
+    }
+
+    /// The namespace a declaration of `kind` lives in.
+    pub fn of_decl(&self, kind: SymKind, space: Option<NamespaceId>) -> NamespaceId {
+        space.unwrap_or(match MemberKind::of_sym(kind, None).mode {
+            MemberMode::Value => self.values,
+            MemberMode::Callable => NamespaceId::CALLABLES,
+        })
+    }
+}
+
+/// A set of a language's member namespaces (at most 32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct SpaceSet(pub u32);
+
+impl SpaceSet {
+    /// Its namespaces, by id.
+    pub fn iter(self) -> impl Iterator<Item = NamespaceId> {
+        (0..32u8).filter(move |i| self.0 & (1 << i) != 0).map(NamespaceId)
+    }
+
+    pub fn of(id: NamespaceId) -> SpaceSet {
+        SpaceSet(1 << id.0)
+    }
+    pub fn with(self, id: NamespaceId) -> SpaceSet {
+        SpaceSet(self.0 | 1 << id.0)
+    }
+    pub fn contains(self, id: NamespaceId) -> bool {
+        self.0 & (1 << id.0) != 0
+    }
+    pub fn intersects(self, other: SpaceSet) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
+/// The namespaces a member site may land in, as its query document tagged
+/// them (`@space.<name>`), and those of them it may not legally reach
+/// (`@space.<name>.illegal`: php's `$obj->x` finds a static `$x`, wrongly).
+/// Resolution searches every one; a landing in an illegal one resolves and
+/// is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct SpaceAsk {
+    pub search: SpaceSet,
+    pub illegal: SpaceSet,
+}
+
+impl SpaceAsk {
+    /// One namespace, legally reached.
+    pub fn only(id: NamespaceId) -> SpaceAsk {
+        SpaceAsk { search: SpaceSet::of(id), illegal: SpaceSet::default() }
+    }
+
+    /// The namespaces to search, in the order a site's member is resolved
+    /// in: the legal ones, then the illegal ones.
+    pub fn in_order(self) -> impl Iterator<Item = NamespaceId> {
+        let legal = SpaceSet(self.search.0 & !self.illegal.0);
+        legal.iter().chain(self.illegal.iter())
+    }
+}
+
+/// How a member site uses what it names: reads a stored value or invokes a
+/// callable. The model gives each its own meaning (a call has a return and
+/// an out-of-line body; a read has a slot's value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemberMode {
+    Value,
+    Callable,
+}
+
+/// A member ask: what the site does with the member, and the namespaces it
+/// asks in (`None`: the one its mode reaches in its language,
+/// `MemberSpaces::of_ask`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemberKind {
+    pub mode: MemberMode,
+    pub spaces: Option<SpaceAsk>,
+}
+
+impl MemberKind {
+    pub const VALUE: MemberKind = MemberKind { mode: MemberMode::Value, spaces: None };
+    pub const CALLABLE: MemberKind = MemberKind { mode: MemberMode::Callable, spaces: None };
+
+    pub fn of_sym(kind: SymKind, space: Option<NamespaceId>) -> MemberKind {
+        let mode = match kind {
+            SymKind::Sub | SymKind::Method => MemberMode::Callable,
+            _ => MemberMode::Value,
+        };
+        MemberKind { mode, spaces: space.map(|id| SpaceAsk { search: SpaceSet::of(id), illegal: SpaceSet::default() }) }
+    }
+
+    pub fn of_symbol(sym: &Symbol) -> MemberKind {
+        MemberKind::of_sym(sym.kind, sym.member_space)
+    }
+
+    /// May a declaration of `kind`, living in `space`, answer this ask, in
+    /// a language whose classes hold their members in `spaces`? Only one
+    /// in the namespace the ask is answered from.
+    pub fn admits_decl(self, kind: SymKind, space: Option<NamespaceId>, spaces: &MemberSpaces) -> bool {
+        spaces.of_ask(self).contains(spaces.of_decl(kind, space))
+    }
+
+    /// This ask over the namespaces its site may legally reach.
+    pub fn legal(self) -> MemberKind {
+        MemberKind {
+            spaces: self.spaces.map(|a| SpaceAsk { search: SpaceSet(a.search.0 & !a.illegal.0), illegal: SpaceSet::default() }),
+            ..self
+        }
+    }
+
+    /// This ask over only the namespaces its site may not legally reach;
+    /// `None` when it has none.
+    pub fn illegal_only(self) -> Option<MemberKind> {
+        let a = self.spaces.filter(|a| a.illegal.0 != 0)?;
+        Some(MemberKind { spaces: Some(SpaceAsk { search: a.illegal, illegal: a.illegal }), ..self })
+    }
+
+    /// Whether this ask reaches `sym` only through a namespace its site
+    /// may not legally reach.
+    pub fn reaches_illegally(self, sym: &Symbol, spaces: &MemberSpaces) -> bool {
+        self.spaces.is_some_and(|a| a.illegal.contains(spaces.of_decl(sym.kind, sym.member_space)))
+    }
+
+    /// The ask a ref's own kind states: a value read or a call, in the
+    /// namespace its site was tagged with; anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<MemberKind> {
+        match kind {
+            RefKind::FieldAccess { spaces, .. } => Some(MemberKind { mode: MemberMode::Value, spaces: *spaces }),
+            RefKind::MethodCall { .. } => Some(MemberKind::CALLABLE),
+            _ => None,
+        }
+    }
+
+    /// May a use asking `other` reference a target of this ask? The same
+    /// rule as `admits_decl`, read from the use's side; a use that is no
+    /// member access is not this rule's to refuse.
+    pub fn admits_ref(self, other: Option<MemberKind>, spaces: &MemberSpaces) -> bool {
+        other.is_none_or(|o| spaces.of_ask(o).intersects(spaces.of_ask(self)))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1495,7 +1877,7 @@ impl Ref {
                     member_op: member_op.as_ref(),
                 })
             }
-            RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op } => {
+            RefKind::FieldAccess { invocant, invocant_span, member_name_span, member_op, .. } => {
                 Some(MemberSite {
                     invocant,
                     invocant_span: *invocant_span,
@@ -1503,6 +1885,15 @@ impl Ref {
                     member_op: member_op.as_ref(),
                 })
             }
+            _ => None,
+        }
+    }
+
+    /// The place a member value access denotes, where a narrowing gives it
+    /// a value.
+    pub fn access_place(&self) -> Option<&Place> {
+        match &self.kind {
+            RefKind::FieldAccess { place, .. } => place.as_deref(),
             _ => None,
         }
     }
@@ -1560,7 +1951,15 @@ impl Ref {
         match self.binding.as_ref()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) => None,
+            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::Receiver(_) => None,
+        }
+    }
+
+    /// The method whose receiver a spelled-receiver ref (`$this`) reads.
+    pub fn receiver_method(&self) -> Option<SymbolId> {
+        match self.binding.as_ref()? {
+            RefBinding::Receiver(method) => Some(*method),
+            _ => None,
         }
     }
 
@@ -1610,7 +2009,24 @@ impl Ref {
     /// companion of the class token's own ref — the stacked-refs fork in
     /// `docs/open-forks.md` is where a second case would reopen the shape.
     pub fn is_cursor_companion(&self, pack: &PackFacts) -> bool {
-        self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+        self.constructs() || self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+    }
+
+    /// A construction site's call of the constructor (`RefKind::MethodCall`'s
+    /// `constructs`).
+    pub fn constructs(&self) -> bool {
+        matches!(self.kind, RefKind::MethodCall { constructs: true, .. })
+    }
+
+    /// The member a member-site ref asks its class for: the one its token
+    /// names, or — at a construction, whose token spells the class — the
+    /// class's constructor.
+    pub fn member_key(&self, names: &NameSpellings) -> MemberKey<'_> {
+        if self.constructs() {
+            MemberKey::Constructor
+        } else {
+            MemberKey::Named(self.unqualified_target_name(names))
+        }
     }
 
     /// Whether matching this ref against a target consults only the frozen
@@ -1693,9 +2109,10 @@ impl Ref {
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
+            RefKind::ImportedName => 8,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
-            RefKind::FunctionCall => {
+            RefKind::FunctionCall | RefKind::ImportedName => {
                 (1, self.resolved_package().map(str::to_string))
             }
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
@@ -1718,7 +2135,7 @@ impl Ref {
             span: self.span,
             access: match self.access {
                 AccessKind::Read => 0,
-                AccessKind::Write => 1,
+                AccessKind::Write | AccessKind::WriteIfUnset => 1,
                 AccessKind::Declaration => 2,
             },
             flags,
@@ -2068,6 +2485,12 @@ pub enum RefBinding {
     /// against, plus the linked `Handler` symbol (first stacked def —
     /// `refs_to_symbol` walks all stacked defs separately).
     Handler { owner: HandlerOwner, sym: Option<SymbolId> },
+    /// A spelled receiver (`$this`): the object the method `SymbolId` runs
+    /// on, the root `Binding::Receiver` names. It declares no symbol of its
+    /// own, so it projects through `receiver_method`, never
+    /// `resolved_symbol`. Kept at the END for bincode variant-index
+    /// stability.
+    Receiver(SymbolId),
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.
@@ -2116,9 +2539,9 @@ pub enum RefKind {
     /// edge witnesses; the helper reads those at query time.
     MethodCall {
         invocant: crate::model::conventions::Invocant,
-        /// Span of the invocant node. Used by
-        /// `resolve_receiver` to find an inner-receiver
-        /// ref via `RefTable::call_at_start` (chain dispatch).
+        /// Span of the invocant node. `resolve_receiver` reads the
+        /// receiver's value at it, and the call spanning it exactly
+        /// (`RefTable::call_spanning`, chain dispatch).
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).
         method_name_span: Span,
@@ -2134,6 +2557,15 @@ pub enum RefKind {
         /// callable (PHPUnit providers, key/value pairs).
         #[serde(default)]
         named_by_string: bool,
+        /// The site constructs an instance of the invocant's class (php's
+        /// `new Foo(…)`): it calls the constructor, but its token spells
+        /// the class, so `target_name` is the class identity (the class
+        /// reference's key) and the member is asked by role
+        /// (`MemberKey::Constructor`). A reference to the constructor that
+        /// rename never rewrites, and a cursor companion of the class's own
+        /// reference.
+        #[serde(default)]
+        constructs: bool,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the
@@ -2175,7 +2607,22 @@ pub enum RefKind {
         /// The member token alone (`r.span` may cover the whole access).
         member_name_span: Span,
         member_op: Option<(MemberOp, Span)>,
+        /// The place the access denotes (`$this->x` → the method's object →
+        /// `x`), where a narrowing gives that place a value; elsewhere the
+        /// place answers nothing and is not kept.
+        place: Option<Box<Place>>,
+        /// The member namespaces the site was tagged with
+        /// (`@space.<name>`); `None` reads where a value read does.
+        spaces: Option<SpaceAsk>,
     },
+    /// A name an import binds from another module (python's `from m import
+    /// Foo`): a reference to the def the name resolves to, pinned through
+    /// `Ref::binding` as a call to it is, so goto-def, references and
+    /// rename reach the import line. It calls nothing: no call hierarchy,
+    /// fan-out, arity or unresolved-call lane reads it, and it never runs a
+    /// class's constructor. Kept at the END for bincode variant-index
+    /// stability.
+    ImportedName,
 }
 
 /// The receiver half of a member access, whatever the member's kind — the
@@ -2196,5 +2643,16 @@ pub enum AccessKind {
     Read,
     Write,
     Declaration,
+    /// A write that lands only while the place holds nothing (php `??=`):
+    /// it initialises the place, never overwrites it. Kept at the END for
+    /// bincode variant-index stability.
+    WriteIfUnset,
+}
+
+impl AccessKind {
+    /// Whether the access writes the place, whatever the condition.
+    pub fn is_write(self) -> bool {
+        matches!(self, AccessKind::Write | AccessKind::WriteIfUnset)
+    }
 }
 

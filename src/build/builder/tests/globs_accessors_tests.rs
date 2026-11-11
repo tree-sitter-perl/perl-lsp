@@ -699,7 +699,7 @@ sub retry {
             kind: TargetKind::Sub {
                 package: Some("QA::C".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -819,7 +819,7 @@ sub opt_b { 'b' }
             kind: TargetKind::Sub {
                 package: Some("QA::E".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );

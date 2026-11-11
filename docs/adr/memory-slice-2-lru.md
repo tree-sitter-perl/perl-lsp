@@ -65,7 +65,7 @@ point and **bakes its conclusions into ordinary `FileAnalysis` fields**:
 
 After the fold, a **non-open** workspace/dependency file's bag is re-read only
 by *query-time type inference* — `expr_type_at_span` (reads `Expr(span)`
-witnesses), `inferred_type_via_bag`, and the cross-file `PackageSymbol`
+witnesses), `inferred_type_via_bag`, and the cross-file `Member`
 return-type chase (`find_method_return_type`). None of those run while sweeping
 the tree for references/definitions/rename/workspace-symbol; they run only when
 a query needs a *type* out of that specific file. For a file the user never
@@ -190,7 +190,7 @@ kept as an optional **Slice 3** to chase clangd's ~320 MB, not needed to hit
 | `workspace/symbol` | `all_defs` (name→file) | no | complete, resident |
 | `hover` on a def / signature (name, params, doc) | `symbols` | no | complete, resident |
 | `hover`'s return-type line, type-constrained completion | reducers / `expr_type_at_span` / `SubInfo::return_type` | **yes** | rehydrate exact bag from SQLite |
-| cross-file method-return chain | `find_method_return_type` → `PackageSymbol` | **yes** | rehydrate target file's bag |
+| cross-file method-return chain | `find_method_return_type` → `Member` | **yes** | rehydrate target file's bag |
 
 The whole-tree completeness invariant lives entirely in the first five rows, all bag-free
 — so it holds by construction, resident or not. The bag-consuming rows are

@@ -233,7 +233,14 @@ pub fn in_scope_completion(analysis: &FileAnalysis, point: Point) -> Vec<Complet
     use std::collections::HashSet;
     let bound: HashSet<_> = analysis
         .scope_at(point)
-        .map(|s| analysis.bindings_seen_from(s).into_iter().map(|sym| sym.id).collect())
+        .map(|s| {
+            analysis
+                .bindings_seen_from(s)
+                .into_iter()
+                .filter(|sym| analysis.in_completion_view(sym, point))
+                .map(|sym| sym.id)
+                .collect()
+        })
         .unwrap_or_default();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut items = Vec::new();
@@ -364,7 +371,7 @@ fn completion_items_native(
     // The slot verdict (`docs/adr/cursor-slots.md`) — Perl's detector
     // wraps `cursor_context`'s tree-then-text chain unchanged.
     let crate::lsp::cursor_slot::DetectedSlot { slot, arm: slot_arm } = crate::lsp::cursor_slot::detect_slot(
-        analysis, tree, source, point, "perl", Some(module_index));
+        analysis, tree, source, point, "perl", None, Some(module_index));
     // Bare-sigil trigger (`$|`/`@|`/`%|`) decoded once so the match below
     // doesn't need a second borrow of `slot` inside its own arm.
     let sigil_trigger = slot.sigil();
@@ -725,12 +732,16 @@ fn ref_type_snippet_completions(ty: &InferredType) -> Vec<CompletionItem> {
 /// `additionalTextEdit` to every item that swaps the typed `.`/`->` for the
 /// one the receiver's pointer depth requires (Mode A — accepting `width` on
 /// `p.` yields `p->width`). `None` leaves the items untouched (operator
-/// already correct, or DEEP receiver shown-only).
+/// already correct, or DEEP receiver shown-only). `offers` narrows the
+/// members to the namespaces the operator reaches, and `words` are offered
+/// beside them as keywords.
 pub fn member_completion_for_type(
     analysis: &FileAnalysis,
     receiver: &crate::model::file_analysis::InferredType,
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     op_fix: Option<(crate::model::file_analysis::Span, String)>,
+    offers: Option<crate::model::file_analysis::SpaceSet>,
+    words: &[String],
     point: Point,
 ) -> Option<Vec<CompletionItem>> {
     // The access-specifier gate needs to know whether the
@@ -740,22 +751,26 @@ pub fn member_completion_for_type(
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
     let candidates = analysis.shared_members(&analysis.dispatch_classes_of(receiver, Some(module_index)), |class| {
-        analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref())
+        analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref(), offers)
     });
     if candidates.is_empty() {
         return None;
     }
-    Some(
-        candidates
-            .into_iter()
-            .map(|mut c| {
-                if let Some((span, text)) = &op_fix {
-                    c.additional_edits.push((*span, text.clone()));
-                }
-                candidate_to_completion_item(c)
-            })
-            .collect(),
-    )
+    let mut items: Vec<CompletionItem> = candidates
+        .into_iter()
+        .map(|mut c| {
+            if let Some((span, text)) = &op_fix {
+                c.additional_edits.push((*span, text.clone()));
+            }
+            candidate_to_completion_item(c)
+        })
+        .collect();
+    items.extend(words.iter().map(|w| CompletionItem {
+        label: w.clone(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        ..Default::default()
+    }));
+    Some(items)
 }
 
 // ---- Import resolution helpers ----

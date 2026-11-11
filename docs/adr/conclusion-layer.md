@@ -19,9 +19,10 @@ map cannot answer.
 ```rust
 /// Portable, cross-file-enterable key. Strings only — see "Keys" below.
 pub enum ConclusionKey {
-    MethodOnClass { class: String, name: String },
+    /// A member's identity and the question asked of it (what calling it
+    /// returns, or the value it holds).
+    Member { owner: String, space: NamespaceId, name: String, aspect: MemberAspect },
     SubByName(String),
-    Field { owner: String, name: String },
     TypeName(String),
 }
 
@@ -76,8 +77,8 @@ the enumeration misses turns "the bag would answer" into a silent `None`.
 
 ### Keys: `ConclusionKey` vs. internal ids
 
-The four variants are exactly the four cross-file consult shapes the chase
-uses: `MethodOnClass` (the overwhelming majority of consults), `Field`,
+The variants are exactly the cross-file consult shapes the chase
+uses: `Member` (Returns: the overwhelming majority of consults; Holds),
 bridged plugin-namespace lookups, and imported-sub-return lookups. Every
 variant is strings-only: mintable by an asker holding nothing but names,
 stable across any edit of the provider.
@@ -85,12 +86,12 @@ stable across any edit of the provider.
 The internal ids — `SymbolId`, `ScopeId`, `RefIdx`, `Span` — are
 per-`FileAnalysis` and shift on unrelated edits. They never appear in a
 key. Every cross-file entry lands on a strings-only attachment
-(`MethodOnClass`, `Field`, `TypeName`) or resolves a name to a local
+(`Member`, `TypeName`) or resolves a name to a local
 `Symbol(sid)` on the provider's side (`SubByName` is that lookup given a
 key spelling). The one exception is the bridged hop, which enters at
 `Symbol(sym.id)` because per-FA `SymbolId`s can't be portably edge-encoded;
 the bake closes it from the other side — the bridging file knows its own
-bridges, so it writes those entries under `MethodOnClass{bridged_class,
+bridges, so it writes those entries under `Member{bridged_class,
 name}`.
 
 Internal ids MAY appear *inside* a persisted `Conclusion`'s `InferredType`
@@ -109,7 +110,7 @@ epoch-independent projection of that key.
 The `InferredType` enum stored verbatim, constant in all three binders.
 Example: `sub _build_ua { return LWP::UserAgent->new(timeout => 10) }`
 bakes to `Value(ClassName("LWP::UserAgent"))` under both
-`MethodOnClass{"My::Client","_build_ua"}` and `SubByName("_build_ua")`.
+`Member{"My::Client","_build_ua"}` and `SubByName("_build_ua")`.
 Evaluation is a hash lookup; `receiver`, `arity`, `point` are ignored — the
 bake has proven the answer constant in them.
 
@@ -174,15 +175,15 @@ a path that never decodes.
 
 A portable `ConclusionKey` target, an optional arity override, and a
 `ReceiverRule`. It subsumes every cross-file edge hop the live chase makes:
-a fresh-dispatch edge from a non-`MethodOnClass` attachment
-(`receiver: Dispatch(c)`), an inheritance-hop edge between `MethodOnClass`
+a fresh-dispatch edge from a non-`Member` attachment
+(`receiver: Dispatch(c)`), an inheritance-hop edge between `Member`
 entries (`receiver: Thread`), and a method `Invoke` (`arity: Some(n),
 receiver: Dispatch(target.class)`, with an explicit target key for a
 SUPER or qualified lookup).
 
 Example: `sub active { return $self->search({ active => 1 }) }` on a DBIC
-resultset bakes `MethodOnClass{"...Users","active"}` to `Link { target:
-MethodOnClass{"...Users","search"}, arity: Some(1), receiver:
+resultset bakes `Member{"...Users","active"}` to `Link { target:
+Member{"...Users","search"}, arity: Some(1), receiver:
 Dispatch("...Users") }` — the bake collapses every internal-id hop in the
 return chain and stops at the first step that needs the world.
 
@@ -208,13 +209,13 @@ enriched-tier hop exactly as expensive as it is.
 `base: Box<Conclusion>` (recursive), `step: ProjectionStep`
 (`HashKey(String)` | `ArrayIndex(i32)`). Subsumes the live chase's
 `Projected` payload. Example: `sub _dbh { return $self->config->{dbh} }`
-bakes to `Project { base: Link { target: MethodOnClass{"My::Worker","config"},
+bakes to `Project { base: Link { target: Member{"My::Worker","config"},
 arity: Some(0), receiver: Dispatch("My::Worker") }, step: HashKey("dbh") }`.
 
 **Evaluation.** Evaluate `base`, then narrow: a `Value(HashWithKeys{...})`
 base answers `key_value_type("dbh")` directly; a class-typed base mints a
-follow-on `Field{class, "dbh"}` lookup up that class's ancestry —
-exactly the `Field` fallback ladder the live chase uses. `ArrayIndex(i)`
+follow-on `Member{class, "dbh"}` lookup up that class's ancestry —
+exactly the `Member` fallback ladder the live chase uses. `ArrayIndex(i)`
 uses `element_at(i)`.
 
 **Where it breaks.** A base with no structure axis (bare `HashRef`,

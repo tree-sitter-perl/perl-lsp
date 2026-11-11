@@ -23,6 +23,12 @@ fn bundled_documents_speak_the_vocabulary() {
             if name.starts_with('_') {
                 continue;
             }
+            // A namespace is the pack's own word: it names one the pack declares.
+            if let Some(rest) = name.strip_prefix("space.") {
+                let space = rest.strip_suffix(".illegal").unwrap_or(rest);
+                assert!(pack.member_spaces.id_of(space).is_some(), "{lang}: @{name} names a declared namespace");
+                continue;
+            }
             let cap = Capture::parse(name).unwrap_or_else(|e| panic!("{lang}: {e}"));
             assert_eq!(cap.to_string(), *name, "{lang}: @{name} round-trips");
         }
@@ -48,7 +54,7 @@ fn unknown_capture_fails_the_load() {
 /// rest of the pattern extracts as usual.
 #[test]
 fn predicate_only_captures_are_skipped() {
-    let table = capture_table(&["def.sub", "_const", "def.sub.name"]).unwrap();
+    let table = capture_table(&["def.sub", "_const", "def.sub.name"], &crate::model::file_analysis::MemberSpaces::PER_FAMILY).unwrap();
     assert_eq!(
         table,
         vec![
@@ -108,4 +114,28 @@ fn load_err(query_source: &'static str) -> String {
     parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
     let tree = parser.parse("sub f {}", None).unwrap();
     extract(&tree, b"sub f {}", &pack).unwrap_err()
+}
+
+/// A node written with a fourth capture fails the load: tree-sitter would
+/// drop it without a word.
+#[test]
+fn a_fourth_capture_on_one_node_fails_the_load() {
+    let err = load_err("(subroutine_declaration_statement\n  name: (_) @def.sub.name @_a @_b @_c) @def.sub");
+    assert!(err.contains("line 2: a node holds at most three captures"), "{err}");
+    assert!(crate::build::query_predicates::check_source("(x) @a @b @c ; @d @e\n(y \"@q @r\" @s) @t").is_ok());
+}
+
+/// A capture on a group or an alternation lands on the first step inside
+/// it, so it stacks on that node's own captures; a predicate's `@`
+/// arguments add none.
+#[test]
+fn a_capture_stacks_on_the_first_step_of_its_group() {
+    use crate::build::query_predicates::check_source;
+    let line = |src: &str| check_source(src).unwrap_err();
+    assert!(line("((x) @a @b @c (y)) @d").contains("line 1"), "a group's capture");
+    assert!(line("[(x) (y) @a @b @c]\n@d").contains("line 2"), "an alternation's, on each branch");
+    assert!(line("(x) @a@b@c@d").contains("line 1"), "a capture name ends where tree-sitter's does");
+    assert!(check_source("((x) @a @b (y) @c @d @e) @f").is_ok(), "only the first child takes it");
+    assert!(check_source("((x) @a (#eq? @a @b @c @d))").is_ok(), "predicate arguments");
+    assert!(check_source("(x) @a ;\"@b @c @d\n(y \"\\\"@e @f @g @h\")").is_ok(), "comments and escapes");
 }

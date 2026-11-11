@@ -15,6 +15,22 @@ impl FileAnalysis {
             .min_by_key(|r| (span_size(&r.span), r.is_cursor_companion(&self.pack) as u8))
     }
 
+    /// Where the write whose target token holds `point` lands — the point
+    /// from which the token's variable holds the value that write gives.
+    /// `None` off a written token.
+    pub fn write_lands_at(&self, point: Point) -> Option<Point> {
+        self.flow_edges
+            .iter()
+            .find(|fe| fe.target_token.is_some_and(|t| contains_point(&t, point)))
+            .map(|fe| fe.target_at)
+    }
+
+    /// The construction a class token at `point` makes (`new Foo(…)`): the
+    /// cursor companion `ref_at` passes over for the token's own reference.
+    pub fn construction_at(&self, point: Point) -> Option<&Ref> {
+        self.refs.iter().find(|r| r.constructs() && contains_point(&r.span, point))
+    }
+
     /// Find the symbol whose selection_span contains the point.
     pub fn symbol_at(&self, point: Point) -> Option<&Symbol> {
         // A mention is anchored on a use, which declares nothing.
@@ -73,8 +89,13 @@ impl FileAnalysis {
                     if let Some(sym) = r.resolved_symbol().map(|id| self.symbol(id)).filter(|s| !s.is_mention()) {
                         return Some(sym.selection_span);
                     }
+                    // A spelled receiver is an instance of its method's
+                    // class: that class's declaration is what it names.
+                    if let Some(method) = r.receiver_method() {
+                        return self.symbol(method).package.as_deref().and_then(|class| self.find_type_decl(class));
+                    }
                 }
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // Package-scoped: pick the sub whose package
                     // matches the ref's resolved_package. When the
                     // call pinned a specific package (import or
@@ -311,7 +332,7 @@ impl FileAnalysis {
             for r in self.refs() {
                 if r.resolved_symbol().is_some() { continue; }
                 match (&r.kind, &sym.kind) {
-                        (RefKind::FunctionCall, SymKind::Sub) => {
+                        (RefKind::FunctionCall | RefKind::ImportedName, SymKind::Sub) => {
                             // Match the bare callable name so qualified call
                             // sites (`Foo::baz()`, target_name "Foo::baz")
                             // pair with `sub baz`; `resolved_package` (the
@@ -397,11 +418,9 @@ impl FileAnalysis {
         if let Some(group) = self.field_group_at(point) {
             return Some(self.rename_field_group(&group, new_name));
         }
-        // Perl owns a special variable's name (`@_`, `$_`, `%ENV`): it has
-        // occurrences, but no rename.
         if self.ref_at(point).is_some_and(|r| {
             matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-                && crate::model::conventions::is_special_variable(&r.target_name)
+                && crate::model::conventions::conventions_of(&self.language).is_special_variable(&r.target_name)
         }) {
             return None;
         }
@@ -424,8 +443,8 @@ impl FileAnalysis {
             });
 
         let edits: Vec<(Span, String)> = if let Some(old) = variable_name {
-            let bare_name = crate::model::conventions::strip_variable_sigils(new_name);
-            let base_len = crate::model::conventions::strip_variable_sigils(old).len();
+            let bare_name = self.names().strip_sigils(new_name);
+            let base_len = self.names().strip_sigils(old).len();
             refs.into_iter().map(|span| {
                 let name_span = Span {
                     start: Point::new(span.end.row, span.end.column.saturating_sub(base_len)),
@@ -634,7 +653,7 @@ impl FileAnalysis {
                 bare: bare.to_string(),
                 has_param: true,
                 has_reader: accessor.is_some(),
-                reader_kind: MemberKind::Callable,
+                reader_kind: MemberKind::CALLABLE,
             });
         }
         // (2) Class-key pairing (DBIC `add_columns`, Class::Accessor): an
@@ -664,7 +683,7 @@ impl FileAnalysis {
             bare: bare.to_string(),
             has_param: false,
             has_reader: true,
-            reader_kind: MemberKind::Callable,
+            reader_kind: MemberKind::CALLABLE,
         })
     }
 
@@ -681,7 +700,7 @@ impl FileAnalysis {
                 bare: sym.name.clone(),
                 has_param: false,
                 has_reader: true,
-                reader_kind: MemberKind::of_sym(sym.kind),
+                reader_kind: MemberKind::of_symbol(sym),
             });
         }
         let SymbolDetail::Field { .. } = sym.detail else {
@@ -698,7 +717,7 @@ impl FileAnalysis {
             bare: sym.name[1..].to_string(),
             has_param: sym.flags.contains(SymbolFlags::PARAM),
             has_reader: sym.flags.contains(SymbolFlags::READER),
-            reader_kind: MemberKind::Callable,
+            reader_kind: MemberKind::CALLABLE,
         })
     }
 
@@ -1127,7 +1146,12 @@ impl FileAnalysis {
             return None;
         };
         let mut token = *span;
-        let qual = r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
+        // A construction's token is its class's spelling, already the whole
+        // name span; its name is the class identity, never the token's text.
+        let qual = match r.constructs() {
+            true => 0,
+            false => r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len()),
+        };
         token.start.column = token.start.column.saturating_sub(qual);
         contains_point(&token, point).then_some(r)
     }
@@ -1135,8 +1159,10 @@ impl FileAnalysis {
     pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
+                // The language owns a spelled receiver's name (`$this`).
+                RefKind::Variable if r.receiver_method().is_some() => return None,
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     // A CORE-bound ref is a builtin call keyword (`shift`,
                     // `keys`, ...). It has an identity — the in-file
                     // occurrence union serves highlights/references — but no
@@ -1174,11 +1200,14 @@ impl FileAnalysis {
                         {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
-                            return Some(RenameKind::Method {
-                                name: r.unqualified_target_name(self.names()).to_string(),
-                                class,
-                                member: MemberKind::of_ref(&r.kind),
-                            });
+                            // A construction names its class's constructor.
+                            if let Some(name) = self.called_member(r, &class, module_index) {
+                                return Some(RenameKind::Method {
+                                    name: name.into_owned(),
+                                    class,
+                                    member: MemberKind::of_ref(&r.kind),
+                                });
+                            }
                         }
                     }
                     // Invocant unresolvable (or cursor in args) — try symbol-at
@@ -1236,7 +1265,7 @@ impl FileAnalysis {
                     Some(RenameKind::Method {
                         name: sym.name.clone(),
                         class,
-                        member: Some(MemberKind::of_sym(sym.kind)),
+                        member: Some(MemberKind::of_symbol(sym)),
                     })
                 }
                 SymKind::Package | SymKind::Class => Some(RenameKind::Package(sym.name.clone())),
@@ -1331,7 +1360,7 @@ impl FileAnalysis {
         for r in self.refs() {
             if r.target_name != old_name { continue; }
             match &r.kind {
-                RefKind::FunctionCall => {
+                RefKind::FunctionCall | RefKind::ImportedName => {
                     if r.resolved_package() == scope.as_deref() {
                         edits.push((r.span, new_name.to_string()));
                     }

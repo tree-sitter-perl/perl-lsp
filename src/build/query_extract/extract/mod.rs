@@ -158,11 +158,19 @@ impl<'a, 't> Adorned<'a, 't> {
 
     /// The captures in `list`'s subtree that are its own: a list of the
     /// same tag nested in it (a call in an argument, a callback's
-    /// parameters) holds its own items, so its subtree is skipped.
+    /// parameters) holds its own items, so its subtree is skipped. An item
+    /// whose own match states its list belongs to that list wherever it
+    /// sits: a construction tagged a list on its own node (php's `new A(new
+    /// B)`) is an item of the list around it, not of itself.
     fn list_items<'e>(&'e self, list: &'e Event) -> impl Iterator<Item = &'e Event> + 'e {
         let mut nested_end = 0;
         self.within(list).filter_map(move |ix| {
             let t = &self.events()[ix];
+            if t.cap != list.cap {
+                if let Some(own) = self.in_match(t.match_id, list.cap) {
+                    return (own.site == list.site).then_some(t);
+                }
+            }
             if ix < nested_end {
                 return None;
             }
@@ -199,16 +207,27 @@ impl<'a, 't> Adorned<'a, 't> {
 /// match — that names the same node to ask, instead of re-deriving it.
 #[derive(Default)]
 struct Minted {
-    /// A value witness on its span: a flow source narrows onto it.
-    value: bool,
     /// The name token of a def that declares it: a ref inside is the
     /// declaration, not a use.
     declares: bool,
     /// The identity a class def filed itself under.
     class: Option<Box<str>>,
-    /// A member read's (receiver span, member): what a place written here
-    /// projects, so a write lands where the read looks.
-    projects: Option<Box<(Span, String)>>,
+    /// A member read: what a place written here projects, so a write
+    /// lands where the read looks.
+    projects: Option<Box<MemberRead>>,
+    /// On a def node: the `symbols` row it pushed, whose written return
+    /// resolves once every row is in (`defs::resolve_returns`).
+    return_row: Option<usize>,
+}
+
+/// A member read (`@expr.member`): the receiver it reads through, the
+/// member's name, and the token that names it.
+struct MemberRead {
+    receiver: Span,
+    member: String,
+    token: Span,
+    /// The namespaces the member may live in (`@space.*` on its token).
+    spaces: crate::model::file_analysis::SpaceAsk,
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`
@@ -230,20 +249,25 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent | C::ParentSuper => Family::Scopes,
         C::Def { .. }
         | C::DefPair
+        | C::DefHoist
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget
         | C::RetType
+        | C::TypeRelative(_)
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline
+        | C::Doc
+        | C::DocOf
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::Mark(_) => Family::Defs,
+        | C::Mark(_)
+        | C::Space { .. } => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
@@ -254,7 +278,8 @@ fn family(cap: Capture) -> Family {
         | C::Shape(_)
         | C::TypeAnnot
         | C::AnonAggMember
-        | C::Receiver => Family::Flow,
+        | C::Receiver
+        | C::NamedReceiver(_) => Family::Flow,
         C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing
         }
@@ -340,6 +365,38 @@ impl ExtractState<'_, '_> {
         self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
     }
 
+    /// The scope a def of `kind`, declared in match `match_id` at the
+    /// current event, binds in. A data member belongs to its class body even
+    /// where it is written inside a callable (php's constructor-promoted
+    /// property); a hoisted def (`@def.hoist`) to the scope around the one
+    /// it is written in.
+    fn def_scope(&self, kind: DefCap, match_id: usize) -> ScopeId {
+        match kind {
+            DefCap::Field | DefCap::Slot => self.member_scope(),
+            DefCap::Sub
+            | DefCap::Method
+            | DefCap::Anon
+            | DefCap::Class
+            | DefCap::Package
+            | DefCap::Var
+            | DefCap::Local
+            | DefCap::Assigned
+            | DefCap::Constant
+            | DefCap::Enumerator
+            | DefCap::Label
+            | DefCap::Macro
+            | DefCap::Reexport
+            | DefCap::Union
+            | DefCap::UnionField => match self.adorned.in_match(match_id, Capture::DefHoist).is_some() {
+                true => crate::model::file_analysis::scope_chain_of(&self.out.scopes, self.cur_scope)
+                    .get(1)
+                    .copied()
+                    .unwrap_or(self.cur_scope),
+                false => self.bind_scope(),
+            },
+        }
+    }
+
     fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
         match self.pack.names.use_map_sep() {
             Some(sep) => crate::model::conventions::join_qualified(scopes::home_of(self, from, at).unwrap_or(""), leaf, sep),
@@ -396,8 +453,9 @@ fn record_matches<'t>(
                 Some(Capture::Deref(level)) => links.mark_level(c.node, level),
                 Some(Capture::DerefLeaf(def)) => links.mark_leaf(c.node, def),
                 // A wildcard also matches the grammar's extras (a comment),
-                // which are never code: no capture lands on one.
-                Some(_) if c.node.is_extra() => {}
+                // which are never code: no capture lands on one but the
+                // `@doc` that names a comment for what it says.
+                Some(cap) if c.node.is_extra() && cap != Capture::Doc => {}
                 Some(cap) => captured.push((c.node, cap, match_counter)),
             }
         }
@@ -413,7 +471,7 @@ pub struct DeclaratorPeel<'t>(links::Links<'t>);
 
 impl<'t> DeclaratorPeel<'t> {
     pub fn of_tree(tree: &'t Tree, source: &[u8], pack: &LangPack) -> Self {
-        match cached_query(&tree.language(), pack.query_source) {
+        match cached_query(&tree.language(), pack) {
             Ok(compiled) => {
                 let syntax = crate::cst::SyntaxForest::new(tree.root_node());
                 DeclaratorPeel(record_matches(compiled, &syntax, tree.root_node(), source).0)
@@ -444,11 +502,10 @@ pub fn extract_in(
     file_module: Option<&FileModule>,
 ) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let compiled = cached_query(&language, pack.query_source)?;
+    let compiled = cached_query(&language, pack)?;
 
     let root = tree.root_node();
-    let mut out = SkeletonAnalysis::default();
-    out.names = pack.names.clone();
+    let mut out = SkeletonAnalysis::for_pack(pack);
     out.scopes.push(Scope {
         id: ScopeId(0),
         parent: None,
@@ -457,6 +514,8 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        closed: false,
+        captures: Vec::new(),
         direct: false,
         hints: Vec::new(),
     });
@@ -481,7 +540,7 @@ pub fn extract_in(
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut flat),
             Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut flat),
             Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
-                flat.push(members::flatten_recv(node, cap, pack, source, match_id))
+                flat.push(members::flatten_recv(node, cap, source, match_id))
             }
             Capture::Qualifier => flat.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => flat.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
@@ -567,7 +626,11 @@ pub fn extract_in(
     // A parent may be written above the import that names it, so it
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
+    // A return type likewise.
+    defs::resolve_returns(&mut st);
     defs::dedup(&mut st);
+    // Reads the deduped defs; the flow lane reads the writes it finds.
+    defs::unify_assigned(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

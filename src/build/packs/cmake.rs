@@ -5,12 +5,19 @@ use crate::model::file_analysis::NameSpellings;
 
 pub fn cmake_pack() -> LangPack {
     LangPack {
+        id: "cmake",
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         names: NameSpellings::NONE,
+        functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
+        member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
+        family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         lattice: crate::model::file_analysis::LatticeRules::new(&[]),
+        type_display: |_| None,
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _| None,
         annot_type: |_| None,
+        doc_text: |_| None,
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -20,15 +27,13 @@ pub fn cmake_pack() -> LangPack {
                 vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
             }
         },
-        narrow_guard: |_, _| None,
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["{", "("],
         recv_peel: &[],
         simple_var_kinds: &[],
-        member_kinds: &[],
         skip_kinds: &[],
-        call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }

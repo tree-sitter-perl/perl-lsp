@@ -199,7 +199,7 @@ from the arg's bag-resolved `CodeRef` shape — an anonymous-sub body, a
 rebound scalar, or a named `\&Foo::bar` ref). Builder pushes `Symbol(sid) → Edge(Expr(span))`
 instead of the usual `Symbol(sid) → InferredType(rt)`. The bag's edge-
 chase resolver follows it at query time. Class-scoped synth gets the
-edge mirrored to `PackageSymbol{package, name}` by
+edge mirrored to `Member{owner, name}` by
 `write_back_sub_return_types` so cross-file `find_method_return_type`
 queries reach it via the class-keyed attachment.
 
@@ -208,7 +208,7 @@ arm witness; the scope exists for return-arm semantics only — anon
 subs remain values, not symbols.
 
 The mechanism composes cross-file with no special case. The synthesized
-Method's `PackageSymbol` edge resolves through the cached producer's
+Method's `Member` edge resolves through the cached producer's
 bag and edge-chases into the body's `Expr(span)`; the bag's existing
 cross-file primary lookup carries the chain through.
 

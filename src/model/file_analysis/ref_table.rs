@@ -45,10 +45,8 @@ pub struct RefTable {
     by_target: HashMap<SymbolId, Vec<usize>>,
 
     /// Call-shaped refs (MethodCall / FunctionCall) sorted by
-    /// `(start, end, index)`. Answers both chain lookups by binary search:
-    /// the narrowest call at a start point (`Foo->new->m`'s outer `->m`
-    /// `invocant_span` starts at the inner `Foo->new` call's start), and
-    /// the call spanning exactly an expression.
+    /// `(start, end, index)`: the call spanning exactly an expression, by
+    /// binary search.
     #[serde(skip, default)]
     calls_by_span: Vec<usize>,
     /// Member refs spanning only their member token (the pack shape; a
@@ -172,6 +170,28 @@ impl RefTable {
         self.refs.push(r);
     }
 
+    /// Re-key ref `i` to `target_name`, moving it between `by_key` buckets
+    /// so the lookups stay what a rebuild would make them.
+    pub fn rekey(&mut self, i: usize, target_name: String, names: &NameSpellings) {
+        let old = self.refs[i].match_key(names);
+        self.refs[i].target_name = target_name;
+        let new = self.refs[i].match_key(names);
+        if old == new {
+            return;
+        }
+        if let Some(bucket) = self.by_key.get_mut(&old) {
+            bucket.retain(|&j| j != i);
+            if bucket.is_empty() {
+                self.by_key.remove(&old);
+            }
+        }
+        // A delegate key already buckets the ref there.
+        let bucket = self.by_key.entry(new).or_default();
+        if let Err(at) = bucket.binary_search(&i) {
+            bucket.insert(at, i);
+        }
+    }
+
     /// Ref indexes whose `match_key` is `key`, in ref order.
     pub fn by_key(&self, key: &str) -> &[usize] {
         self.by_key.get(key).map_or(&[], |v| v.as_slice())
@@ -180,15 +200,6 @@ impl RefTable {
     /// Ref indexes resolving to `sym_id`.
     pub fn to_symbol(&self, sym_id: SymbolId) -> &[usize] {
         self.by_target.get(&sym_id).map_or(&[], |v| v.as_slice())
-    }
-
-    /// The call-shaped ref anchored at `start` — the chain-receiver hop.
-    /// The narrowest span wins (closest to the actual receiver: in
-    /// `Foo->new->m` the outer `m` and inner `Foo->new` share a start), a
-    /// tie the earlier ref.
-    pub fn call_at_start(&self, start: &Point) -> Option<usize> {
-        let at = self.calls_by_span.partition_point(|&i| self.refs[i].span.start < *start);
-        self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span.start == *start)
     }
 
     /// Calls in the file's deepest fluent chain (`a->b->c` is 2, the
@@ -219,19 +230,6 @@ impl RefTable {
         let key = |i: usize| (self.refs[i].span.start, self.refs[i].span.end);
         let at = self.calls_by_span.partition_point(|&i| key(i) < (span.start, span.end));
         self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span == span)
-    }
-
-    /// Every `(anchor point, ref index)` `call_at_start` can answer — the
-    /// shape pins read it to assert the tiebreak and that only call-shaped
-    /// kinds are indexed.
-    pub fn call_index_entries(&self) -> impl Iterator<Item = (Point, usize)> + '_ {
-        self.calls_by_span
-            .iter()
-            .enumerate()
-            .filter(|&(k, &i)| {
-                k == 0 || self.refs[self.calls_by_span[k - 1]].span.start != self.refs[i].span.start
-            })
-            .map(|(_, &i)| (self.refs[i].span.start, i))
     }
 
     /// Every ref's relational row seed, in ref order. A delegated use adds
@@ -282,7 +280,7 @@ impl RefTable {
     }
 
     /// Rebuild every index from the current refs. Both the name/target
-    /// lookups and the start-anchored call index.
+    /// lookups and the call index.
     pub fn rebuild_indices(&mut self, names: &NameSpellings) {
         self.by_key.clear();
         self.by_target.clear();
@@ -294,7 +292,9 @@ impl RefTable {
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
-            if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
+            // A construction's ref sits on its class token, whose value is
+            // the class: the constructed value is the `new` expression's.
+            if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) && !r.constructs() {
                 self.calls_by_span.push(i);
             }
             if member_hop_key(r).is_some() {

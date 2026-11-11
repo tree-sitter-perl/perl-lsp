@@ -28,13 +28,41 @@ of comparing its name against a per-language list. `CONSTRUCTOR`,
 `__construct`, every method declared without a body, and a class whose
 body declares a catch-all. Perl mints the first two where it mints the
 symbol, from its `new` convention and from a role's `requires`.
+`SCOPE_WIDE` is the kind of def that minted it: a variable `@def.assigned`
+declares is in force across its scope, so the binding rule
+(`variable_use`) reads it off the symbol.
 
-A `@mark` also states a declared attribute whose token is not the
-canonical spelling (`private` and `protected` both mean `non_public`) or
-whose modifiers come in any order, which one def pattern cannot list. A
+A `@mark` also states a declared attribute whose modifiers come in any
+order, which one def pattern cannot list (php's `private` / `protected`
+beside `static`, `readonly`, `abstract`). A
 mark joins its symbol by the name token's span, since it is a pattern of
 its own; a mark spelled like an attribute mints that attribute's flag
 (`vocab_tests`).
+
+## Access scope
+
+`PRIVATE` and `PROTECTED` say where a member may be named from, and
+`SymbolFlags::access_scope` reads them as an `AccessScope`: `Class` (its
+declaring class alone), `Family` (that class and its descendants, and its
+ancestors too where the language's `FamilyReach` is `Lineage`: php's) or
+`Anywhere`. `set_scope` answers the same enum for where a slot may be
+written from (php's `private(set)` / `protected(set)`). php states the
+flags in its document (`@mark.private`, `@mark.protected`); cpp's
+access-label scan stamps them, since a label governs the siblings after
+it. A gate asks a `NamingSite` — the class the code is written in and
+its lineage, walked once by the MRO walk — whether it may name a member
+of a given class, and the write rule asks it under the member's set
+scope, so naming and writing share one family test. The reach is a
+convention (`LanguageConventions::family_reach`), read by language id.
+
+Perl's lexical subs and methods (`my sub`, `my method`) are not on this
+axis. They are names bound in a block from the declaration down, and
+`$obj->name` never reaches a lexical method even inside its block, so a
+`Block` scope on the same enum would admit a member access that does not
+dispatch. A Corinna `field` is a lexical of its class body, never named
+through `->`, and its `FieldGroup::private` is about storage identity
+(a subclass's same-named field is another slot), which rename widening
+reads, not visibility.
 
 ## Why closed
 

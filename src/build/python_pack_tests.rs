@@ -273,6 +273,19 @@ fn calling_a_local_class_constructs_it() {
     assert!(members.iter().any(|m| m == "grow"), "{members:?}");
 }
 
+/// A value inside an assignment's right-hand side is not the variable's:
+/// `w = Widget()[0]` is an element, not a `Widget`. A transparent wrapper
+/// still holds its operand's value.
+#[test]
+fn a_value_inside_the_right_hand_side_is_not_the_variables() {
+    let src = "class Widget:\n    pass\n\nw = Widget()[0]\np = (Widget())\nq = ((p))\n";
+    let fa = py_in(src, None);
+    let widget = Some(InferredType::ClassName("Widget".to_string()));
+    assert_eq!(fa.inferred_type_via_bag("w", Point::new(6, 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("p", Point::new(6, 0)), widget);
+    assert_eq!(fa.inferred_type_via_bag("q", Point::new(6, 0)), widget, "parentheses hold a variable's value too");
+}
+
 /// Calling a class constructs it, so the call is a reference to the class
 /// and its value an instance — the language data PHP declares the other
 /// way (`php_pack_tests::calling_a_class_name_is_a_function_call`).
@@ -499,8 +512,9 @@ class Other(Outer.Inner):
     assert_eq!(fa.inferred_type_via_bag("child", Point::new(5, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
     // Sub's body and build's body see past Outer to the module's class
-    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
-    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    // (each declared type holds from the end of its write)
+    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 28)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 25)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
     // a dotted spelling hangs its leaf off the class its head names
     assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
@@ -811,6 +825,37 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
     assert_eq!(defs, [("models.py".to_string(), 1)], "and from the annotation");
 }
 
+/// A rename from a Python class's own name token, or from a local, writes
+/// each site's whole token: a pack's names carry no sigil for the edit to
+/// step past (`php_pack_tests::a_cpp_local_renames_whole`).
+#[cfg(feature = "python")]
+#[test]
+fn a_python_rename_writes_whole_tokens() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "class Foo:\n    pass\n\ndef helper(n):\n    total = n\n    return total\n";
+    let (t, idx) = indexed("wholetokens", &[("app/__init__.py", ""), ("app/mod.py", src)]);
+    let path = t.0.join("app/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let edits_from = |row: usize, column: usize| {
+        let cs = resolve(&store, &fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone())), Point { row, column }, Some(&idx), OverrideScope::default());
+        let mut e: Vec<(usize, usize, usize)> = cs
+            .rename_edits("Renamed")
+            .unwrap()
+            .into_iter()
+            .map(|(l, text)| {
+                assert_eq!(text, "Renamed");
+                (l.span.start.row, l.span.start.column, l.span.end.column)
+            })
+            .collect();
+        e.sort();
+        e
+    };
+    assert_eq!(edits_from(0, 7), [(0, 6, 9)], "the class's own name token");
+    assert_eq!(edits_from(4, 5), [(4, 4, 9), (5, 11, 16)], "a local, from its binding");
+    assert_eq!(edits_from(5, 12), [(4, 4, 9), (5, 11, 16)], "a local, from a read");
+}
 
 const MEMBERS: &str = "\
 class Counter:
@@ -966,7 +1011,7 @@ x = o.z
 fn instance_completion_offers_every_member() {
     let fa = members_fa();
     let labels: std::collections::HashSet<String> =
-        fa.complete_members_for_class("pkg.mod.Counter", None, None).into_iter().map(|c| c.label).collect();
+        fa.complete_members_for_class("pkg.mod.Counter", None, None, None).into_iter().map(|c| c.label).collect();
     for name in ["a", "b", "count", "total", "n", "bump", "__init__"] {
         assert!(labels.contains(name), "{name} in {labels:?}");
     }
@@ -1421,6 +1466,138 @@ make().spin()
     }
 }
 
+/// An assignment's left side is written: `self.n = 0` and `self.n += 1`
+/// write the member, and a read of it stays a read.
+#[test]
+fn a_member_an_assignment_writes_is_a_write() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let fa = py_in(
+        "class C:
+    def __init__(self):
+        self.n = 0
+    def bump(self):
+        self.n += 1
+        return self.n
+",
+        None,
+    );
+    let n: Vec<(usize, AccessKind)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "n")
+        .map(|r| (r.span.start.row, r.access))
+        .collect();
+    assert_eq!(n, [(2, AccessKind::Write), (4, AccessKind::Write), (5, AccessKind::Read)]);
+}
+
+/// A write lands once the assignment has read what it reads, and replaces
+/// what the variable held: `n = n.nxt` reads the old `n`, and after
+/// `x = {}` the variable is no longer the `Foo` it was.
+#[test]
+fn a_write_replaces_the_value_after_its_right_side_is_read() {
+    let src = "class Foo:
+    nxt: Foo
+def f():
+    x = Foo()
+    x = {}
+    n = Foo()
+    n = n.nxt
+    return x
+";
+    let fa = py_in(src, None);
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_ne!(fa.inferred_type_via_bag("x", Point::new(7, 11)), foo, "the later write replaces it");
+    assert_eq!(fa.inferred_type_via_bag("n", Point::new(7, 4)), foo, "the right side read the old `n`");
+}
+
+/// A variable is the function's it is assigned in: the first write
+/// declares it, and every later write and every read is that one variable.
+/// A nested function that assigns the name makes its own, and reads the
+/// one around it until it does.
+#[test]
+fn a_variable_is_one_across_its_writes_in_its_function() {
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let fa = py_in(
+        "x = 0
+def f():
+    x = 1
+    if x:
+        x = 2
+    def g():
+        return x
+    def h():
+        x = 3
+        return x
+    return x
+",
+        None,
+    );
+    let decls: Vec<(usize, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Variable && s.name == "x")
+        .map(|s| (s.selection_span.start.row, s.selection_span.start.column))
+        .collect();
+    assert_eq!(decls, [(0, 0), (2, 4), (8, 8)], "the module's, f's and h's");
+    let decl_row = |r: &crate::model::file_analysis::Ref| {
+        r.resolved_symbol().map(|sid| fa.symbol(sid).selection_span.start.row)
+    };
+    let mut uses: Vec<(usize, Option<usize>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "x")
+        .map(|r| (r.span.start.row, decl_row(r)))
+        .collect();
+    uses.sort();
+    assert_eq!(
+        uses,
+        [(3, Some(2)), (4, Some(2)), (6, Some(2)), (9, Some(8)), (10, Some(2))],
+        "the write in a branch, g's read and f's return are f's; h's are h's"
+    );
+}
+
+/// `__init__` is the constructor by its flag, so a class that declares
+/// none constructs through the one it inherits; a module-level function
+/// of that name is no constructor.
+#[test]
+fn init_is_the_constructor_a_class_inherits() {
+    let m = module(&["app"], false);
+    let fa = py_in(
+        "class Base:\n    def __init__(self, n):\n        pass\nclass Kid(Base):\n    pass\nclass Deco:\n    @staticmethod\n    def __init__(self):\n        pass\ndef __init__():\n    pass\n",
+        Some(&m),
+    );
+    let flagged: Vec<(usize, bool)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "__init__")
+        .map(|s| (s.selection_span.start.row, s.is_constructor()))
+        .collect();
+    assert_eq!(flagged, [(1, true), (7, true), (9, false)]);
+    assert_eq!(fa.constructor_of("app.Kid", None), Some(("app.Base".to_string(), "__init__".to_string())));
+    assert_eq!(fa.constructor_of("app.Deco", None), Some(("app.Deco".to_string(), "__init__".to_string())));
+}
+
+/// A name `from m import` binds is a reference to the def it names, pinned
+/// as a call to it is, but its kind says it is an import: it calls
+/// nothing, so no call lane reads it and it never constructs the class
+/// it names.
+#[test]
+fn an_imported_name_is_its_own_kind_pinned_like_a_call() {
+    use crate::model::file_analysis::RefKind;
+    let m = module(&["app"], false);
+    let fa = py_in("from lib.model import Model
+m = Model()
+", Some(&m));
+    let sites: Vec<(usize, bool, Option<&str>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "Model" && matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName))
+        .map(|r| (r.span.start.row, matches!(r.kind, RefKind::FunctionCall), r.resolved_package()))
+        .collect();
+    assert_eq!(sites.iter().map(|&(row, call, _)| (row, call)).collect::<Vec<_>>(), [(0, false), (1, true)]);
+    assert_eq!(sites[0].2, sites[1].2, "the import is pinned as the call is");
+}
+
 /// A receiver expression is typed by its value, never read as a class
 /// spelling: `self.either` (written two classes) is either class,
 /// `self.unknown` (never written) types nothing, and a class name read
@@ -1637,6 +1814,49 @@ class A:
     );
 }
 
+/// A return arm that reads a member no write types is `Unknown`, and
+/// `Unknown` poisons the join: `ev` does not claim `Ref` because one arm
+/// returns `self`.
+#[test]
+fn an_untyped_member_read_poisons_a_return_join() {
+    let src = "class Ref:\n    def __init__(self, f):\n        self.v = f()\n\n    def ev(self, x):\n        if x:\n            return self\n        return self.v\n\n\nr = Ref(len).ev(1)\n";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("r", Point { row: 11, column: 0 }), Some(InferredType::Unknown));
+}
+
+/// A local is offered below its first write in the body that writes it; a
+/// function reads a module global it runs after, so it is offered there
+/// wherever the global is written.
+#[test]
+fn a_local_is_offered_below_its_first_write() {
+    let src = "\
+def f():
+
+    early = 1
+
+    late = 2
+
+def g():
+    pass
+
+LIMIT = 3
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let offered = |row: usize, column: usize| -> Vec<String> {
+        let mut out: Vec<String> = crate::lsp::symbols::in_scope_completion(&fa, Point::new(row, column))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| ["early", "late", "LIMIT"].contains(&l.as_str()))
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(offered(1, 4), ["LIMIT"], "above the first writes");
+    assert_eq!(offered(3, 4), ["LIMIT", "early"]);
+    assert_eq!(offered(7, 4), ["LIMIT"], "a function reads the module global it runs after");
+    assert!(offered(9, 0).is_empty(), "module code above the global's write");
+}
+
 /// `x0 = A()` then `x{i+1} = x{i}.add()`: each call's receiver flows
 /// through every call before it.
 fn python_chain(links: usize) -> String {
@@ -1676,4 +1896,29 @@ fn a_build_stamp_reduces_each_link_once() {
     };
     let (short, long) = (cost(60), cost(120));
     assert!(long < short * 3, "60 links reduced {short} attachments, 120 reduced {long}: superlinear");
+}
+
+/// A name's hover at its write is the value that write gives: the write
+/// lands once its right side is read, after the cursor on its left. A
+/// method's hover names its class and what it returns.
+#[cfg(feature = "python")]
+#[test]
+fn a_write_hovers_the_value_it_writes() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "class Foo:\n    def me(self):\n        return self\n\nclass Bar:\n    pass\n\nf = Foo()\nf = Bar()\ng = f\n";
+    let (t, idx) = indexed("write-hover", &[("m.py", src)]);
+    let path = t.0.join("m.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let hover = |at: Point| {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::resolve(path.clone()));
+        let cs = resolve(&store, &fa, key, at, Some(&idx), OverrideScope::default()).with_source(src);
+        crate::lsp::symbols::pack_hover_markdown(&cs, "python").unwrap_or_default()
+    };
+    assert!(hover(Point::new(7, 0)).contains("\nf: m.Foo\n"), "{}", hover(Point::new(7, 0)));
+    assert!(hover(Point::new(8, 0)).contains("\nf: m.Bar\n"), "{}", hover(Point::new(8, 0)));
+    assert!(hover(Point::new(9, 4)).contains("\nf: m.Bar\n"), "{}", hover(Point::new(9, 4)));
+    let me = hover(Point::new(1, 8));
+    assert!(me.ends_with("*method*\n\n*class m.Foo*\n\n*returns: m.Foo*"), "{me}");
 }

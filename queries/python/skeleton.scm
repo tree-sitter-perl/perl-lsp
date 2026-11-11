@@ -35,6 +35,14 @@
   name: (identifier) @def.sub.name
   return_type: (type)? @rettype) @def.sub
 
+; The method calling the class runs; its name belongs to the language.
+((class_definition
+  body: (block
+    [(function_definition name: (identifier) @mark.constructor)
+     (decorated_definition
+       definition: (function_definition name: (identifier) @mark.constructor))]))
+ (#eq? @mark.constructor "__init__"))
+
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).
@@ -70,10 +78,12 @@
     object: (identifier) @def.slot.receiver
     attribute: (identifier) @def.slot.name) @def.slot)
 
-; An assignment writes the place its left side denotes, whatever that is.
+; An assignment writes the place its left side denotes, whatever that is; a
+; compound one writes it too, with a value it does not name.
 (assignment
   left: (_) @flow.place
   right: (_) @flow.source) @flow.assign
+(augmented_assignment left: (_) @flow.place)
 
 ; An augmented assignment and a `del` leave what they name without the
 ; value a guard proved, whatever it is: a name rebinds (to the operator's
@@ -150,20 +160,28 @@
 ; Imported names are references to the remote def — this single
 ; pattern is what makes cross-file RENAME rewrite the import line too.
 (import_from_statement
-  name: (dotted_name (identifier) @ref.call))
+  name: (dotted_name (identifier) @ref.import))
 
-; Assignment IS declaration in Python — the same identifier is both
-; the def and the flow target.
+; A variable belongs to the function it is assigned in: the first write
+; declares it, and every later write and every read in the body is that
+; one variable. A write lands once the assignment has read what it reads.
 (assignment
-  left: (identifier) @def.var.name @def.var @flow.target
-  right: (_) @flow.source) @flow.assign
+  left: (identifier) @def.assigned.name @flow.target
+  right: (_) @flow.source) @def.assigned @flow.assign
 
 ; Annotated assignment: `x: int = ...` — ring 3 is partly IN the tree
 ; here; the annotation emits a direct type witness via the pack's
-; annot_type predicate.
+; annot_type predicate. With a value it is a write, landing once the value
+; is read; a bare `x: int` writes nothing, so its declared type holds from
+; its token and no write replaces it.
 (assignment
   left: (identifier) @flow.target
-  type: (type) @type.annot)
+  type: (type) @type.annot
+  right: (_)) @flow.assign
+(assignment
+  left: (identifier) @flow.target
+  type: (type) @type.annot
+  !right)
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
 ; type yet) so the narrowing cutoff ends a region at the loop.
@@ -218,42 +236,57 @@
  (#not-has-parent? @expr.read.var attribute))
 (attribute object: (identifier) @expr.read.var)
 
+; Parentheses hold the value they wrap.
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
 (string) @expr.lit.string
 (integer) @expr.lit.number
 (float) @expr.lit.number
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
 
-; Guard narrowing: `isinstance(x, Foo)` refines x to Foo over the arm it
-; enters, tagged `@narrow.arm` — an `if`/`elif` body, the value a conditional
-; expression yields when the test holds, the right of `and`. The pack's
-; narrow_guard maps the guard + type token to the refinement; core attaches
-; it in the guard's scope over the arm (an `if` body is no scope in Python).
-; A member subject (`self.x`) narrows the place it denotes.
+; Guard narrowing. An atom states what a test proves of its subject, a
+; name or a member (`self.x`): `isinstance(x, Foo)` that it is the class
+; named (a tuple of classes names no single one). The narrowing attaches in
+; the guard's scope (an `if` body is no scope in Python).
+((call
+   function: (identifier) @_fn
+   arguments: (argument_list . [(identifier) (attribute)] @narrow.var . (identifier) @narrow.type .)) @narrow.is
+ (#eq? @_fn "isinstance"))
+; A condition built of atoms decides them through its connectives.
+(not_operator) @narrow.not
+(boolean_operator operator: "and") @narrow.and
+(boolean_operator operator: "or") @narrow.or
+(parenthesized_expression) @narrow.group
+; Where a condition decides what runs: an `if` or `elif` body runs where it
+; holds, every later clause of the chain where it fails; a conditional
+; expression yields its first value or its last; the right of `and` runs
+; where the left holds, of `or` where it fails. An `if` whose body only
+; leaves the block, with no clause after it, leaves the rest of the block
+; to run where its condition fails.
+(if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
+(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (if_statement
-  condition: (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  consequence: (block) @narrow.arm)
-(elif_clause
-  condition: (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  consequence: (block) @narrow.arm)
+  alternative: (elif_clause condition: (_) @narrow.cond)
+  alternative: (_) @narrow.else)
 (conditional_expression
-  (_) @narrow.arm
+  (_) @narrow.then
   .
   "if"
   .
-  (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type)))
-(boolean_operator
-  left: (call
-    function: (identifier) @narrow.guard
-    arguments: (argument_list [(identifier) (attribute)] @narrow.var (identifier) @narrow.type))
-  operator: "and"
-  right: (_) @narrow.arm)
+  (_) @narrow.cond
+  .
+  "else"
+  .
+  (_) @narrow.else)
+(boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
+(boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  consequence: (block
+    . [(return_statement) (raise_statement) (continue_statement) (break_statement)] .)
+  !alternative) @narrow.exit
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.

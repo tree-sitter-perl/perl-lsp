@@ -57,7 +57,10 @@ with a stated not-cross-file-visible reason):
   silently; the equality-net tests (reformat/body-edit → equal;
   return-type/method/parent/export/import change → unequal; bincode
   roundtrip) are the regression net. File-internal attachment identities
-  inside a type (a `CodeRef` body edge) are sanitized by `despan`.
+  inside a type (a `CodeRef` body edge) are sanitized by `despan`. A
+  class the pack names for it (`ANONYMOUS`, php's `class@anonymous:R:C`)
+  is off the Surface with everything it declares: no other file can spell
+  it, and its name stands for where it is written.
 - **Typed fields, not display strings** (rule #10's lossy-string form).
   `return: Option<InferredType>`, never `"returns Foo"`. Consumers project.
 - **Derived from the post-fold `FileAnalysis`**, emitted by the builder as
@@ -134,7 +137,7 @@ Closed workspace/dependency files answer enriched through
 fingerprint-and-generation-keyed copies, byte-capped and LRU-bounded,
 cycle-guarded, consulted FALLBACK-ON-MISS after the raw bag answers.
 Consumers: `query_sub_return_type`'s imported recursion and the
-`PackageSymbol` cross-file primary (`src/model/witnesses/`), the diagnostics
+`Member` cross-file primary (`src/model/witnesses/`), the diagnostics
 sweep, and `--check`/`--dump-package`. See CLAUDE.md's "Cross-file
 enrichment" section for the full consumer/derivation contract — this ADR
 owns the Surface/freshness design that overlay is keyed on, not its

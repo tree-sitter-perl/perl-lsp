@@ -1212,6 +1212,7 @@ impl<'a> Builder<'a> {
             target_name: name,
             target_scope: scope,
             target_at: at,
+            target_token: None,
             source,
             extraction,
             reassigns,

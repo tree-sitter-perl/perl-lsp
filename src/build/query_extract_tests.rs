@@ -323,7 +323,7 @@ y = x
         .collect();
     assert!(names.contains(&(DefCap::Class, "Greeter".into())), "{names:?}");
     assert!(names.contains(&(DefCap::Sub, "greet".into())), "{names:?}");
-    assert!(names.contains(&(DefCap::Var, "x".into())), "{names:?}");
+    assert!(names.contains(&(DefCap::Assigned, "x".into())), "{names:?}");
     assert_eq!(skel.imports, vec!["os"]);
 
     let fa = skel.into_file_analysis();
@@ -596,7 +596,8 @@ fn operator_evidence_ends_at_a_rebind() {
         .filter(|w| matches!(w.payload, WitnessPayload::Observation(_)))
         .collect();
     assert_eq!(obs.len(), 1);
-    assert_eq!(obs[0].span.end, tree_sitter::Point { row: 2, column: 0 }, "cut at `$x = g()`");
+    // A write lands at its assignment's end, once the right side is read.
+    assert_eq!(obs[0].span.end, tree_sitter::Point { row: 2, column: 8 }, "cut where `$x = g()` lands");
 }
 
 #[test]
@@ -692,11 +693,11 @@ fn r_outline_imports_and_s3_names() {
     // convention layer (print.myclass IS print on myclass) is a later
     // pack predicate, but the outline is already right.
     assert_eq!(subs, vec!["add_one", "print.myclass"]);
-    // params + locals are vars, the function names are NOT doubled
+    // params + locals are variables, the function names are NOT doubled
     let vars: Vec<&str> = skel
         .symbols
         .iter()
-        .filter(|s| s.kind == DefCap::Var)
+        .filter(|s| s.kind.sym_kind() == crate::model::file_analysis::SymKind::Variable)
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(vars, vec!["x", "y", "obj"]);
@@ -1031,12 +1032,15 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
+        spelled: None,
+        doc: None,
         pair: None,
         return_type: None,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
-        qualifier_owned: false,
+        owner_stated: false,
+        member_space: None,
         flags: Default::default(),
     }
 }
@@ -1992,7 +1996,7 @@ void f() {
 #[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
-    // the cpp analog of python isinstance, via the now-wired narrow_guard.
+    // the cpp analog of python isinstance.
     let src = "\
 void f(Base* b) {
     if (dynamic_cast<Derived*>(b)) {
@@ -2147,7 +2151,7 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
 #[test]
 fn a_pack_guard_narrows_every_arm_it_enters() {
     // One region rule for every pack guard: the arm the pattern tags
-    // `@narrow.arm`, whatever construct holds it, and nothing outside it.
+    // `@narrow.then`, whatever construct holds it, and nothing outside it.
     let src = "\
 void f(Base* b, std::optional<Widget> o) {
     if (o) return o->run();
@@ -2187,6 +2191,61 @@ x.tail()
     assert_eq!(at(4, 27), class("Foo"), "the right of `and`");
     assert_eq!(at(8, 4), class("Foo"), "an `elif` body");
     assert_ne!(at(9, 0), class("Foo"), "nothing after");
+}
+
+#[test]
+fn a_negated_pack_guard_narrows_where_it_fails() {
+    // A failed negation is the atom holding: an `else`, the right of `or` /
+    // `||`, and the rest of a block after an `if` that only leaves it. An
+    // `is` test's class is read as the language reads a type spelling.
+    let src = "\
+class Foo:
+    pass
+def f(x, y):
+    if not isinstance(x, Foo):
+        return
+    x.run()
+    if not isinstance(y, Foo):
+        y.other()
+    else:
+        y.run()
+    z = not isinstance(y, Foo) or y.run()
+    w = isinstance(y, Foo) or y.other()
+    if isinstance(y, str):
+        y.upper()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(at("x", 5, 4), class("Foo"), "the rest of the block after the exit");
+    assert_ne!(at("x", 4, 8), class("Foo"), "not the exit itself");
+    assert_ne!(at("y", 7, 8), class("Foo"), "a failed isinstance proves nothing");
+    assert_eq!(at("y", 9, 8), class("Foo"), "the else of a negation");
+    assert_eq!(at("y", 10, 34), class("Foo"), "the right of `or` after a negation");
+    assert_ne!(at("y", 11, 30), class("Foo"), "the right of `or` after the atom itself");
+    assert_eq!(at("y", 13, 8), Some(InferredType::String), "a builtin type is the language's reading of it");
+
+    let src = "\
+void f(Base* b, std::optional<Widget> o) {
+    if (!o) return;
+    o->run();
+    if (!dynamic_cast<Derived*>(b)) {
+        b->base();
+    } else {
+        b->derived();
+    }
+    bool k = !o || o->ok();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    assert_eq!(at("o", 2, 4), class("Widget"), "the rest of the block after `if (!o) return;`");
+    assert_ne!(at("b", 4, 8), class("Derived"));
+    assert_eq!(at("b", 6, 8), class("Derived"), "the else of a negated cast");
+    assert_eq!(at("o", 8, 19), class("Widget"), "the right of `||` after a negation");
 }
 
 #[test]
@@ -2448,7 +2507,7 @@ struct S {
 // ---- Domain typing (int-used-as-enum): a storage slot's DOMAIN recovered
 // from usage. `op_type` is stored `uint16_t` but always compared against
 // `enum opcode` values — the sites fold onto the language-generic
-// `Field{owner, name}` subject via `DomainCoherenceFold`. ----
+// `Member{owner, name, Holds}` subject via `DomainCoherenceFold`. ----
 
 #[test]
 fn cpp_domain_typing_field_folds_to_enum() {
@@ -2545,6 +2604,84 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
     extract(&tree, src.as_bytes(), &cpp_pack())
         .unwrap()
         .into_file_analysis()
+}
+
+/// `x = x.add()` reads the x before the write on its right, so each call's
+/// receiver is the previous link's value, one hop back. Each call chases its
+/// whole prefix, so the chain stays inside the registry's depth cap.
+#[test]
+fn every_call_on_a_reassignment_chain_has_its_receiver() {
+    use crate::model::file_analysis::{ReceiverPolicy, RefKind};
+    let links = 150;
+    let mut src = String::from("struct A { A add(); };\nvoid f() {\n  A x;\n");
+    for _ in 0..links {
+        src.push_str("  x = x.add();\n");
+    }
+    src.push_str("}\n");
+    let fa = cpp_fa(&src);
+    let receivers: Vec<Vec<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "add")
+        .map(|r| fa.receiver_classes(r, None, ReceiverPolicy::Navigate).into_iter().collect())
+        .collect();
+    assert_eq!(receivers.len(), links);
+    let lost: Vec<usize> =
+        receivers.iter().enumerate().filter(|(_, c)| c.as_slice() != ["A"]).map(|(i, _)| i).collect();
+    assert!(lost.is_empty(), "{} of {links} calls lost their receiver; first {:?}", lost.len(), lost.first());
+}
+
+/// The receiver class of the first call to `method`.
+fn cpp_receiver_of(fa: &crate::model::file_analysis::FileAnalysis, method: &str) -> Vec<String> {
+    use crate::model::file_analysis::{ReceiverPolicy, RefKind};
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == method)
+        .unwrap_or_else(|| panic!("no call to {method}"));
+    fa.receiver_classes(r, None, ReceiverPolicy::Navigate).into_iter().collect()
+}
+
+/// A write lands after its value: the right side reads what x held, and the
+/// write replaces it.
+#[test]
+fn a_reassignment_writes_after_its_right_side() {
+    let line = "void f() { auto x = A(); x = x.toB(); x.b(); }";
+    let fa = cpp_fa(&format!("struct B {{ int b(); }};\nstruct A {{ B toB(); }};\n{line}\n"));
+    let rhs = line.find("x.toB()").unwrap();
+    let write = fa.flow_edges.iter().find(|e| e.source.start == tree_sitter::Point::new(2, rhs)).expect("the write's edge");
+    assert_eq!(write.target_at, tree_sitter::Point::new(2, rhs + "x.toB()".len()));
+    assert_eq!(cpp_receiver_of(&fa, "toB"), ["A"]);
+    assert_eq!(cpp_receiver_of(&fa, "b"), ["B"]);
+}
+
+/// A compound write names no value of its own, so x keeps its kind.
+#[test]
+fn a_compound_write_keeps_the_declared_type() {
+    use crate::model::file_analysis::Extraction;
+    let fa = cpp_fa("struct S { S& operator+=(int); int m(); };\nvoid f() { S s; s += 1; s.m(); }\n");
+    assert!(fa.flow_edges.iter().any(|e| e.target_name == "s" && e.extraction == Extraction::Rebind));
+    assert_eq!(cpp_receiver_of(&fa, "m"), ["S"]);
+}
+
+/// A functional cast `Foo(1)` is an instance of the class it calls, as
+/// Python's `Foo()` is (`python_pack_tests::calling_a_class_names_it`).
+#[test]
+fn a_functional_cast_is_an_instance_of_its_class() {
+    use crate::model::file_analysis::{InferredType, Span};
+    let fa = cpp_fa("struct Foo { Foo(int x) {} };\nvoid f() { auto a = Foo(1); }\n");
+    let call = Span { start: tree_sitter::Point::new(1, 20), end: tree_sitter::Point::new(1, 26) };
+    assert_eq!(fa.expr_type_at_span(call, None), Some(InferredType::ClassName("Foo".to_string())));
+}
+
+/// An analysis is of its pack's language however it was assembled — through
+/// the driver, straight from extraction, or as the stand-in for a file that
+/// never parsed — because `resolve()` routes visibility on that stamp.
+#[test]
+fn assembly_stamps_the_packs_language() {
+    assert_eq!(cpp_fa("int f();").language, "cpp");
+    let empty = SkeletonAnalysis::for_pack(&cpp_pack()).into_file_analysis();
+    assert_eq!(empty.language, "cpp");
 }
 
 /// A member token with an argument list beside it is a call; without one
@@ -2708,7 +2845,7 @@ fn python_member_call_is_an_invoke_on_its_receiver() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member }, .. } => Some(member.clone()),
+            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member, .. }, .. } => Some(member.clone()),
             _ => None,
         })
         .collect();
@@ -2969,7 +3106,7 @@ fn cpp_out_of_line_multilevel_qualifier_def_owns_inner_class() {
         .find(|s| s.name == "InitAlt")
         .expect("multi-level-qualified out-of-line def is extracted");
     assert_eq!(m.package.as_deref(), Some("Inst"));
-    assert!(m.qualifier_owned, "package came from the `::` qualifier");
+    assert!(m.owner_stated, "package came from the `::` qualifier");
 }
 
 #[test]
@@ -2994,6 +3131,84 @@ fn cpp_out_of_line_arbitrary_declarator_nesting_and_qualifier_depth() {
         .find(|s| s.name == "make")
         .expect("nested-pointer + 3-level qualifier out-of-line def is extracted");
     assert_eq!(m.package.as_deref(), Some("Inner"));
+}
+
+/// A class spelled other than its identity (`Hook<R (*)(A...)>` files as
+/// `Hook<R(*)(A...)>`) is no container re-anchoring can locate, so its own
+/// scope is what names its members' owner: the declaration facts, the
+/// method and the implicit-`this` read all agree on it.
+#[test]
+fn a_partial_specs_members_are_owned_by_the_class_its_scope_names() {
+    let src = "namespace ns {\ntemplate <typename T> class Hook;\ntemplate <typename R, typename... A>\nclass Hook<R (*)(A...)> {\n public:\n  int read() const { return k; }\n private:\n  int k;\n};\n}\n";
+    let mut skel = cpp_skel(src);
+    skel.reanchor_truncated_containers(src);
+    let fa = skel.into_file_analysis();
+    let owner = |name: &str| fa.symbols().iter().find(|s| s.name == name).and_then(|s| s.package.clone());
+    assert_eq!(owner("k").as_deref(), Some("Hook<R(*)(A...)>"));
+    assert_eq!(owner("read").as_deref(), Some("Hook<R(*)(A...)>"));
+    let read = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 5, column: 28 },
+        end: tree_sitter::Point { row: 5, column: 29 },
+    };
+    assert_eq!(fa.expr_type_at_span(read, None), Some(crate::model::file_analysis::InferredType::Numeric));
+}
+
+/// Two declarations of one member (`#if` arms) are two symbols, and each
+/// keeps the facts its own token declared: neither place takes the other's
+/// type, whichever is declared last.
+#[test]
+fn each_declaration_of_a_member_keeps_its_own_facts() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+    let src = "class H {\n#if A\n  int v_;\n#else\n  bool v_;\n#endif\n};\n";
+    let fa = cpp_skel(src).into_file_analysis();
+    let declared: Vec<Vec<crate::model::file_analysis::InferredType>> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "v_")
+        .map(|s| {
+            fa.witnesses
+                .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
+                .iter()
+                .filter_map(|w| match &w.payload {
+                    WP::InferredType(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    use crate::model::file_analysis::InferredType as T;
+    assert_eq!(declared, vec![vec![T::Numeric], vec![T::Bool]]);
+}
+
+/// A macro's expansion declares several members at its one call-site token
+/// (remapping lands each expanded name on the call), and each still keeps
+/// the facts its own name declared.
+#[test]
+fn members_declared_at_one_token_keep_their_own_facts() {
+    use crate::model::file_analysis::InferredType as T;
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
+    let src = "class H {\n  int a;\n  bool c;\n};\n";
+    let mut skel = cpp_skel(src);
+    let call = tree_sitter::Point { row: 1, column: 2 };
+    for s in skel.symbols.iter_mut().filter(|s| s.name == "a" || s.name == "c") {
+        s.name_start = call;
+    }
+    for fact in skel.member_decl_facts.iter_mut() {
+        fact.1 = call;
+    }
+    let fa = skel.into_file_analysis();
+    let declared = |n: &str| -> Vec<T> {
+        let s = fa.symbols().iter().find(|s| s.name == n).unwrap();
+        fa.witnesses
+            .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WP::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!((declared("a"), declared("c")), (vec![T::Numeric], vec![T::Bool]));
 }
 
 /// A qualified call nests a qualifier per segment and a template call's name
@@ -3035,7 +3250,7 @@ fn cpp_qualified_call_ref_sits_on_its_name_token() {
 fn reanchor_keeps_qualifier_owner_when_class_body_absent() {
     let src = "namespace re2 {\nvoid RE2::Init(const char* p) { }\n}\n";
     let mut init = sksym(src, DefCap::Method, "Init", 0, Some("RE2"));
-    init.qualifier_owned = true;
+    init.owner_stated = true;
     let mut skel = SkeletonAnalysis::default();
     skel.symbols = vec![sksym(src, DefCap::Package, "re2", 0, None), init];
     skel.reanchor_truncated_containers(src);
@@ -3197,7 +3412,7 @@ typedef union {
     assert_eq!(overlay.len(), 1);
     assert!(overlay[0].starts_with("op_pmtargetgv"), "{overlay:?}");
     // completion: real members offered flat on pm; the synthetic container never
-    let cands = fa.complete_members_for_class("pm", None, None);
+    let cands = fa.complete_members_for_class("pm", None, None, None);
     let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
     for want in ["op_first", "op_pmreplroot", "op_pmtargetgv", "u2a", "named_u"] {
         assert!(labels.contains(&want), "{want} missing from {labels:?}");
@@ -3289,8 +3504,8 @@ struct S {
 ",
     );
     let s = InferredType::ClassName("S".into());
-    assert_eq!(fa.field_value_type(&s, "v_", None), Some(InferredType::Numeric));
-    assert_eq!(fa.field_value_type(&s, "size", None), None, "a callable is not a value member");
+    assert_eq!(fa.field_value_type(&s, "v_", None, crate::model::file_analysis::MemberKind::VALUE), Some(InferredType::Numeric));
+    assert_eq!(fa.field_value_type(&s, "size", None, crate::model::file_analysis::MemberKind::VALUE), None, "a callable is not a value member");
     assert_eq!(fa.member_value_type(&s, "size", None, None), Some(InferredType::Numeric));
 }
 
@@ -3418,11 +3633,28 @@ fn cpp_call_arg_count_skips_comments() {
 // The receiver stays an expression: the parens are how it was written.
 #[test]
 fn cpp_receiver_peel_skips_comments() {
-    let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
-    let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
-    let (span, invocant) = call.invocant.as_ref().unwrap();
-    assert_eq!(*invocant, crate::model::conventions::Invocant::expr("w"));
-    assert_eq!(span.start, Point::new(1, 25));
+    let fa = cpp_fa("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
+    let call = fa.refs().iter().find(|r| r.target_name == "spin" && r.member_site().is_some()).expect("spin member ref");
+    assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())));
+}
+
+// A receiver in parentheses (or behind `*` / `&`) is the wrapper node
+// itself, read through the wrapper's edge to what it holds: the document
+// states which nodes hold their content's value, and no Rust table peels
+// them a second time. Every pack places the receiver on the same node.
+#[test]
+fn a_wrapped_receiver_is_read_through_its_wrapper() {
+    let fa = cpp_fa("struct W { void spin(); };\nvoid g() { W w; W* p; (w).spin(); (*p).spin(); (&w)->spin(); }\n");
+    let calls: Vec<_> = fa.refs().iter().filter(|r| r.target_name == "spin" && r.member_site().is_some()).collect();
+    assert_eq!(calls.len(), 3);
+    for (call, col) in calls.iter().zip([22, 34, 47]) {
+        assert_eq!(call.member_site().unwrap().invocant_span.unwrap().start, Point::new(1, col), "the wrapper is the receiver");
+        assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())), "col {col}");
+    }
+    let (fa, _) = python_fa("class W:\n    def spin(self):\n        pass\n\nw = W()\n(w).spin()\n");
+    let call = fa.refs().iter().find(|r| r.target_name == "spin" && r.member_site().is_some()).expect("spin");
+    assert_eq!(call.member_site().unwrap().invocant_span.unwrap().start, Point::new(5, 0), "the wrapper is the receiver");
+    assert_eq!(fa.method_call_invocant_type(call, None), Some(InferredType::ClassName("W".into())));
 }
 
 // `this` is the object of the class whose body it is in, not a class named
@@ -3438,6 +3670,19 @@ fn cpp_this_reads_the_enclosing_class() {
         let r = fa.ref_at(at).expect("member call");
         assert_eq!(fa.method_call_invocant_type(r, None), Some(InferredType::ClassName("Status".into())), "{at:?}");
     }
+}
+
+// One system types `this`: the token is stated once (`@receiver.enclosing`)
+// and its class is the method-class table's, so its value is one witness.
+#[test]
+fn cpp_this_is_typed_once() {
+    use crate::model::witnesses::WitnessAttachment as WA;
+    let src = "class S {\n void f() { this->g(); }\n void g();\n};\n";
+    let fa = cpp_fa(src);
+    let this = crate::model::file_analysis::Span { start: Point::new(1, 12), end: Point::new(1, 16) };
+    let typed: Vec<_> = fa.witnesses.for_attachment(&WA::Expr(this)).into_iter().map(|w| w.source.clone()).collect();
+    assert_eq!(typed.len(), 1, "one witness types `this`: {typed:?}");
+    assert_eq!(fa.expr_type_at_span(this, None), Some(InferredType::ClassName("S".into())));
 }
 
 // A comment inside a Python argument list is not an argument.
@@ -3576,7 +3821,7 @@ fn member_write_owners(path: &str, src: &str, row: usize) -> Vec<String> {
                 Binding::Lexical(id) if place.path.is_empty() => format!("declared {}", fa.symbol(*id).name),
                 other => format!("{other:?} {:?}", place.path),
             },
-            WA::Field { owner, name } => format!("{owner}.{name}"),
+            WA::Member { owner, name, .. } => format!("{owner}.{name}"),
             other => format!("{other:?}"),
         })
         .collect();

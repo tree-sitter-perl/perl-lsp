@@ -49,7 +49,7 @@ pub fn query_sub_return_type(
         }
         // Cross-symbol dispatch within the sym's class (Mojo::Base
         // getter+writer share a name; at arity=1 the writer's answer is
-        // required). `PackageSymbol{package, name}` carries every per-arity
+        // required). `Member{owner, name}` carries every per-arity
         // arm synthesis published.
         if let Some(class) = sym.package.as_ref() {
             // Default receiver for class-keyed lookup: when the caller
@@ -57,10 +57,7 @@ pub fn query_sub_return_type(
             // writer's `Receiver` then evaluates to the fluent return,
             // matching what `$obj->writer()` would produce. A supplied
             // receiver passes through.
-            let att = WitnessAttachment::PackageSymbol {
-                package: class.clone(),
-                name: sub_name.to_string(),
-            };
+            let att = WitnessAttachment::returns_of(class.clone(), sub_name.to_string());
             let effective_receiver = receiver
                 .clone()
                 .or_else(|| Some(InferredType::ClassName(class.clone())));
@@ -82,7 +79,7 @@ pub fn query_sub_return_type(
     // Cross-file: the exporters, then a pack's include closure — the same
     // ladder an unresolved `Callee::Function` walks.
     let ctx = context?;
-    reg.free_function_cross_file(ctx, sub_name, None, arity_hint, receiver, &[], &mut QueryState::new())
+    reg.free_function_cross_file(ctx, &[sub_name], None, arity_hint, receiver, &[], &mut QueryState::new())
 }
 
 /// What `place` holds at `point`. The place names its storage, so there

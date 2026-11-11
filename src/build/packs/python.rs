@@ -2,8 +2,8 @@
 
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
-    join_all, ClassCall, ClassSpelling, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType, MemberNamespace,
-    NameSpellings,
+    join_all, ClassCall, ClassSpelling, ConstructionKey, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType,
+    MemberSpaces, NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
@@ -14,43 +14,48 @@ const PYTHON_LATTICE: crate::model::file_analysis::LatticeRules =
 
 pub fn python_pack() -> LangPack {
     LangPack {
+        id: "python",
         query_source: include_str!("../../../queries/python/skeleton.scm"),
         // `.` qualifies, and a class spelling names what the file's imports
         // and its own module say it does (`User` after `from pkg.models
         // import User`). An import is a statement that runs, so it binds
         // from where it is written; a leading `.` climbs from the file's
-        // package. Calling a class constructs it. One member namespace: the
+        // package. Calling a class constructs it, so the call is keyed by
+        // the class and runs its `__init__`. One member namespace: the
         // nearest declaration of a name wins, whether it is a data member
         // or a member function. An instance holds its own attributes (the
         // slots `self.x = …` writes), read before its class's members.
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(".")),
             class_spelling: ClassSpelling::UseMap,
-            member_namespace: MemberNamespace::Shared,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
             class_call: ClassCall::Constructs,
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },
+        functions: FunctionLookup::Global,
+        construction: ConstructionKey::Class,
+        // One member namespace (see `names`).
+        member_spaces: MemberSpaces::SHARED,
+        family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         // `bool` is a subclass of `int`.
         lattice: PYTHON_LATTICE,
+        type_display: |_| None,
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _| None,
         annot_type: annotation_type,
+        doc_text: |_| None,
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
         },
-        // `isinstance(x, Foo)` narrows x to Foo inside the guard.
-        narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["."],
         recv_peel: &["parenthesized_expression"],
         simple_var_kinds: &["identifier"],
-        member_kinds: &["attribute"],
         skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
-        call_kinds: &["call"],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }

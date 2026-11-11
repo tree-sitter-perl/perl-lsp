@@ -21,11 +21,13 @@
 //! splice lands AT the cursor, strictly AFTER the receiver, so every
 //! receiver byte offset is identical in patched and original source — the
 //! one anchor the other reparse siblings must carry, this one gets free.
-//! Language config is a two-field table (rule #10): the member-access node
-//! kinds and the don't-splice-here set are the only facts that vary.
+//! Which node is a member access, its receiver and its operator, is the
+//! pack document's answer (`CursorDocument`), read over the reparse.
 
+use crate::build::query_extract::{CursorDocument, MemberSite};
 use crate::model::file_analysis::{
-    expected_member_op, CrossFileLookup, FileAnalysis, InferredType, Span,
+    expected_member_op, CrossFileLookup, FileAnalysis, InferredType, MemberKind, MemberMode, MemberOp, SpaceSet,
+    Span,
 };
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
@@ -55,7 +57,7 @@ pub fn point_to_byte(src: &str, point: Point) -> usize {
 /// The receiver of a dangling member access, recovered by sentinel
 /// re-parse. Test-only probe surface: production consumes
 /// `member_completion_ctx_incremental`; these wrappers exercise the shared
-/// sentinel mechanics (`find_sentinel` / `climb_to_member` / `cursor_in_skip`)
+/// sentinel mechanics (the document's member site / `cursor_in_skip`)
 /// with a directly assertable result.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
@@ -123,9 +125,7 @@ pub fn receiver_at(
     }
     let patched = patch(src, cursor);
     let tree = parser.parse(&patched, None)?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
-    receiver_of(member, &patched, cursor)
+    receiver_of(&tree, cfg, &patched, cursor)
 }
 
 /// Find the freshly-spliced sentinel identifier node. It begins exactly
@@ -156,53 +156,24 @@ fn find_sentinel<'a>(root: Node<'a>, patched: &str, cursor: usize) -> Option<Nod
         .map(|_| node)
 }
 
-/// Walk up from the sentinel to the member-access node that owns it.
-fn climb_to_member<'a>(node: Node<'a>, cfg: &crate::build::query_extract::LangPack) -> Option<Node<'a>> {
-    let mut n = node;
-    for _ in 0..6 {
-        let parent = n.parent()?;
-        if cfg.member_kinds.contains(&parent.kind()) {
-            return Some(parent);
-        }
-        n = parent;
-    }
-    None
-}
-
-/// Extract the receiver (first named child) of a member-access node and
-/// map its span back to original coordinates. Since the receiver lies
-/// entirely before `cursor`, patched and original offsets coincide.
+/// The receiver of the member access whose name the sentinel completed,
+/// in original coordinates: it lies entirely before `cursor`, so patched
+/// and original offsets coincide.
 #[cfg(test)]
-fn receiver_of(member: Node, patched: &str, cursor: usize) -> Option<Receiver> {
-    let receiver = member.named_child(0)?;
+fn receiver_of(tree: &Tree, cfg: &crate::build::query_extract::LangPack, patched: &str, cursor: usize) -> Option<Receiver> {
+    let doc = CursorDocument::new(tree, patched.as_bytes(), cfg)?;
+    let site = doc.member_named_at(cursor)?;
+    let receiver = site.recv;
     // Defensive: the receiver must end at or before the splice site.
     if receiver.end_byte() > cursor {
         return None;
     }
-    let arrow = member_uses_arrow(member, patched);
     Some(Receiver {
         text: receiver.utf8_text(patched.as_bytes()).ok()?.to_string(),
         start: receiver.start_byte(),
         end: receiver.end_byte(),
-        arrow,
+        arrow: doc.facts(&site).op == Some(MemberOp::Arrow),
     })
-}
-
-/// The `.`/`->` operator token of a member-access node (the anonymous
-/// child between the two named children). It lies entirely before the
-/// splice site, so its span is identical in patched and original source.
-fn operator_token<'a>(member: Node<'a>, patched: &str) -> Option<Node<'a>> {
-    let mut cur = member.walk();
-    let found = member.children(&mut cur).find(|c| {
-        !c.is_named() && matches!(c.utf8_text(patched.as_bytes()), Ok(".") | Ok("->"))
-    });
-    found
-}
-
-/// Detect `->` vs `.` by scanning the member node's anonymous children.
-#[cfg(test)]
-fn member_uses_arrow(member: Node, patched: &str) -> bool {
-    operator_token(member, patched).map(|t| t.utf8_text(patched.as_bytes()) == Ok("->")).unwrap_or(false)
 }
 
 /// Incremental variant: reuse a cached `old` tree of the unpatched
@@ -234,9 +205,7 @@ pub fn receiver_at_incremental(
         new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
     });
     let tree = parser.parse(&patched, Some(&edited))?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
-    receiver_of(member, &patched, cursor)
+    receiver_of(&tree, cfg, &patched, cursor)
 }
 
 /// The completion context at a dangling member access: the receiver's type
@@ -255,8 +224,21 @@ pub struct MemberCompletionCtx {
     /// `op_fix` corrects it. `Slot::Member.op`'s pack-side answer
     /// (`docs/adr/cursor-slots.md`).
     pub op: crate::model::file_analysis::MemberOp,
+    /// The member namespaces completion offers here (`None`: every one).
+    pub offers: Option<SpaceSet>,
+    /// Words the operator may be followed by that name no member.
+    pub words: Vec<String>,
 }
 
+///
+/// The receiver types on `analysis`, the buffer as written. Where that
+/// leaves it untyped and the written buffer failed to parse the access
+/// (`Foo::` at the end of a block is an ERROR, so no pattern stated what
+/// `Foo` is), it types on `completed`'s analysis of the buffer the sentinel
+/// finished: the same document over the same receiver bytes. A site the
+/// written buffer parsed was matched there already, so the finished buffer
+/// can say nothing more about it and is never analyzed.
+#[allow(clippy::too_many_arguments)]
 pub fn member_completion_ctx_incremental(
     parser: &mut Parser,
     cfg: &crate::build::query_extract::LangPack,
@@ -265,6 +247,7 @@ pub fn member_completion_ctx_incremental(
     cursor: usize,
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
+    completed: &dyn Fn(&str) -> FileAnalysis,
 ) -> Option<MemberCompletionCtx> {
     if cursor_in_skip(old, src, cursor, cfg) {
         return None;
@@ -281,17 +264,61 @@ pub fn member_completion_ctx_incremental(
         new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
     });
     let tree = parser.parse(&patched, Some(&edited))?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
-    let receiver = member.named_child(0)?;
+    let doc = CursorDocument::new(&tree, patched.as_bytes(), cfg)?;
+    let site = doc.member_named_at(cursor)?;
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
     // `formatter<int>`) is made HERE, while the index is in hand.
-    let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
+    let site_end = site.op.map_or(site.recv.end_byte(), |op| op.end_byte());
+    let receiver_type = resolve_node_type(site.recv, &doc, cfg, &patched, analysis, module_index)
+        .or_else(|| {
+            parsed_as_error(old, site.recv.start_byte(), site_end)
+                .then(|| resolve_node_type(site.recv, &doc, cfg, &patched, &completed(&patched), module_index))
+                .flatten()
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
-    let op_fix = operator_fix(member, receiver, &patched, analysis, cfg);
-    let op = typed_member_op(member, &patched);
-    Some(MemberCompletionCtx { receiver_type, op_fix, op })
+    let facts = doc.facts(&site);
+    let op_fix = site.op.and_then(|op| operator_fix(op, site.recv, facts.op?, &patched, analysis, cfg));
+    // A writer who has put something between the operator and the name (php's
+    // `$` in `Foo::$x`) has chosen the access's form, so its own namespaces
+    // are the ones offered; otherwise every namespace the operator reaches.
+    let chosen = site
+        .op
+        .is_some_and(|op| patched[op.end_byte()..site.name.start_byte()].chars().any(|c| !c.is_whitespace()));
+    let (offers, words) = if chosen {
+        let ask = MemberKind { mode: site.mode, spaces: facts.spaces };
+        (Some(analysis.member_spaces().of_ask(ask.legal())), Vec::new())
+    } else {
+        (facts.offers, facts.words)
+    };
+    Some(MemberCompletionCtx { receiver_type, op_fix, op: facts.op.unwrap_or(MemberOp::Dot), offers, words })
+}
+
+/// Whether the bytes `start..end` of `written` sit in, or overlap, a span
+/// the parser could not read (an ERROR node): the parser's own verdict on
+/// the site, whatever kinds surround it. One descent from the root toward
+/// the site, so no step climbs.
+fn parsed_as_error(written: &Tree, start: usize, end: usize) -> bool {
+    let mut node = written.root_node();
+    loop {
+        if node.is_error() {
+            return true;
+        }
+        let mut cur = node.walk();
+        let mut covering = None;
+        for c in node.children(&mut cur).filter(|c| c.start_byte() < end && c.end_byte() > start) {
+            if c.is_error() {
+                return true;
+            }
+            if c.start_byte() <= start && c.end_byte() >= end {
+                covering = Some(c);
+            }
+        }
+        match covering {
+            Some(c) => node = c,
+            None => return false,
+        }
+    }
 }
 
 /// The domain-comparison completion context: the cursor sits after an
@@ -335,14 +362,13 @@ pub fn domain_compare_ctx_incremental(
     let tree = parser.parse(&patched, Some(&edited))?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
     let cmp = climb_to_domain_compare(node, cfg, &patched)?;
-    let slot = domain_slot_operand(cmp, cfg, cursor)?;
+    let doc = CursorDocument::new(&tree, patched.as_bytes(), cfg)?;
+    let slot = domain_slot_operand(cmp, &doc, cursor)?;
     // The field slot is `recv OP field` — recover the receiver's class and
     // the field name, then ask usage what enum this field is used AS.
-    let base = slot.named_child(0)?;
-    let field = slot.named_child(slot.named_child_count() - 1)?;
-    let base_ty = resolve_node_type(base, cfg, &patched, analysis, module_index)?;
+    let base_ty = resolve_node_type(slot.recv, &doc, cfg, &patched, analysis, module_index)?;
     let class = base_ty.class_name()?;
-    let field_name = field.utf8_text(patched.as_bytes()).ok()?;
+    let field_name = slot.name.utf8_text(patched.as_bytes()).ok()?;
     let dom = analysis.field_domain(class, field_name, module_index)?;
     Some(InferredType::ClassName(dom.domain))
 }
@@ -389,26 +415,15 @@ fn comparison_uses_domain_op(
 /// domain-typed field slot, as opposed to the value operand holding the
 /// spliced sentinel. The cursor-containment guard is belt-and-suspenders:
 /// the value operand parses as a bare identifier, never a member access.
-fn domain_slot_operand<'a>(
-    cmp: Node<'a>,
-    cfg: &crate::build::query_extract::LangPack,
+fn domain_slot_operand<'t>(
+    cmp: Node<'t>,
+    doc: &CursorDocument<'t, '_>,
     cursor: usize,
-) -> Option<Node<'a>> {
+) -> Option<MemberSite<'t>> {
     (0..cmp.named_child_count())
         .filter_map(|i| cmp.named_child(i))
-        .find(|n| {
-            cfg.member_kinds.contains(&n.kind())
-                && !(n.start_byte() <= cursor && cursor < n.end_byte())
-        })
-}
-
-/// The operator token actually written at a member access — `.` unless
-/// the anonymous child between the two named children spells `->`.
-fn typed_member_op(member: Node, patched: &str) -> crate::model::file_analysis::MemberOp {
-    match operator_token(member, patched).and_then(|t| t.utf8_text(patched.as_bytes()).ok()) {
-        Some("->") => crate::model::file_analysis::MemberOp::Arrow,
-        _ => crate::model::file_analysis::MemberOp::Dot,
-    }
+        .filter(|n| !(n.start_byte() <= cursor && cursor < n.end_byte()))
+        .find_map(|n| doc.member_at(n).filter(|s| s.mode == MemberMode::Value))
 }
 
 /// The operator correction for a member access whose receiver is a simple
@@ -416,8 +431,9 @@ fn typed_member_op(member: Node, patched: &str) -> crate::model::file_analysis::
 /// the depth picks the expected operator, and we offer the swap only when
 /// it differs from what was typed AND a single token expresses it.
 fn operator_fix(
-    member: Node,
+    op: Node,
     receiver: Node,
+    typed: MemberOp,
     patched: &str,
     analysis: &FileAnalysis,
     cfg: &crate::build::query_extract::LangPack,
@@ -428,62 +444,48 @@ fn operator_fix(
     let name = receiver.utf8_text(patched.as_bytes()).ok()?;
     let stack = analysis.var_deref_stack_at(name, receiver.start_position())?;
     let expected = expected_member_op(stack)?; // None = DEEP → show-only
-    let op = operator_token(member, patched)?;
-    let typed_arrow = op.utf8_text(patched.as_bytes()) == Ok("->");
-    let expected_arrow = expected == crate::model::file_analysis::MemberOp::Arrow;
-    if typed_arrow == expected_arrow {
+    if typed == expected {
         return None; // already correct
     }
     let span = Span { start: op.start_position(), end: op.end_position() };
     Some((span, expected.as_str().to_string()))
 }
 
-/// Type a receiver node. A member-access node (`field_expression` /
-/// `attribute`) is field-on-class — recurse the base, look the field up on
-/// its class; anything else (an identifier, a call) resolves by its exact
-/// span through the bag (`expr_type_at_span`).
-fn resolve_node_type(
-    node: Node,
+/// Type a receiver node. A member access the document states (a read or a
+/// call) is its member on its receiver — recurse the receiver, look the
+/// member up on its class; anything else (an identifier, a plain call)
+/// resolves by its exact span through the bag (`expr_type_at_span`).
+fn resolve_node_type<'t>(
+    node: Node<'t>,
+    doc: &CursorDocument<'t, '_>,
     cfg: &crate::build::query_extract::LangPack,
     src: &str,
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<InferredType> {
-    // a member ACCESS `recv.field` — the member's value on the receiver
-    // (`member_value_type`: dispatch ladder + receiver-threaded method
-    // return, falling back to the field's declared type with template
-    // params substituted).
-    if cfg.member_kinds.contains(&node.kind()) {
-        let base = node.named_child(0)?;
-        let field = node.named_child(node.named_child_count() - 1)?;
-        let base_ty = resolve_node_type(base, cfg, src, analysis, module_index)?;
-        let field_name = field.utf8_text(src.as_bytes()).ok()?;
-        return analysis.member_value_type(&base_ty, field_name, module_index, None);
-    }
-    // a method CALL `recv.method(...)` — the method's return on the
-    // receiver's class, resolved through PackageSymbol (inheritance +
-    // cross-file flow through the same chase, no special-casing). The
-    // receiver's full value threads through so a param-shaped return
-    // (`T get()`) substitutes the instance's args.
-    if cfg.call_kinds.contains(&node.kind()) {
-        let func = node.child_by_field_name("function")?;
-        if cfg.member_kinds.contains(&func.kind()) {
-            let recv = func.named_child(0)?;
-            let method = func.named_child(func.named_child_count() - 1)?;
-            let recv_ty = resolve_node_type(recv, cfg, src, analysis, module_index)?;
-            let method_name = method.utf8_text(src.as_bytes()).ok()?;
-            return analysis.member_value_type(&recv_ty, method_name, module_index, None);
-        }
-        // A plain call (`make_widget()`, a ctor-on-temporary `Box()`) —
-        // `function` isn't member-shaped, so there's no receiver to recurse
-        // onto. Falls through to the exact-span lookup below, which chases
-        // the call's own return through the bag's call-root arm.
+    // `recv.field` / `recv.method(...)` — the member's value on the receiver.
+    // A read asks the namespaces its site searches (`field_value_type`); a
+    // call, or a read no stored member answers (python's `@property`), takes
+    // the kind-less ladder (`member_value_type`: receiver-threaded method
+    // return, then the field's declared type). The receiver's full value
+    // threads through so a param-shaped return (`T get()`) substitutes the
+    // instance's args.
+    if let Some(site) = doc.member_at(node) {
+        let base_ty = resolve_node_type(site.recv, doc, cfg, src, analysis, module_index)?;
+        let name = site.name.utf8_text(src.as_bytes()).ok()?;
+        let read = (site.mode == MemberMode::Value)
+            .then(|| {
+                let want = MemberKind { mode: MemberMode::Value, spaces: doc.facts(&site).spaces };
+                analysis.field_value_type(&base_ty, name, module_index, want)
+            })
+            .flatten();
+        return read.or_else(|| analysis.member_value_type(&base_ty, name, module_index, None));
     }
     // Transparent wrappers — `(expr)`, `*p`, `&obj` — denote the same class
     // as their operand (pointer-/reference-ness dropped). Peel and recurse so
     // `(*p).m` / `(&o)->m` reach the members `p->m` does.
     if cfg.recv_peel.contains(&node.kind()) {
-        return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
+        return resolve_node_type(node.named_child(0)?, doc, cfg, src, analysis, module_index);
     }
     // Implicit-`this` member receiver: a bare identifier (`iter_->`, `mem_->`,
     // `options_.`) with NO local declaration IS `this->name` where the

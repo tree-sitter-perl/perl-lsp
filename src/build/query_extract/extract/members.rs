@@ -34,22 +34,19 @@ pub(super) fn op_of(ad: &Adorned, match_id: usize) -> Option<(MemberOp, Span)> {
 
 /// `@member.recv.name` / `@member.recv`: a member access receiver, which
 /// the document states is a written name or an expression. An expression
-/// peels its transparent wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner,
-/// so the minted MethodCall ref's invocant_span lands on the inner expression
-/// `expr_type_at_span` already types.
+/// in a wrapper (`(p)`, `(*p)`, `(&o)`) stays the wrapper: the document's
+/// `@expr.wrapper` edge types it as what it holds.
 pub(super) fn flatten_recv<'t>(
     node: tree_sitter::Node<'t>,
     cap: MemberCap,
-    pack: &LangPack,
     source: &[u8],
     match_id: usize,
 ) -> Flattened<'t> {
     let named = cap == MemberCap::RecvName;
-    let inner = if named { node } else { peel_receiver(node, pack.recv_peel) };
-    let text = inner.utf8_text(source).unwrap_or("").to_string();
+    let text = node.utf8_text(source).unwrap_or("").to_string();
     // A written name (`w`, `Widget`) may spell a class; an expression never does.
     let invocant = if named { Invocant::assume_canonical(text.clone()) } else { Invocant::expr(text.clone()) };
-    with(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id), Payload::Recv(invocant))
+    with(Event::at(node, Capture::Member(MemberCap::Recv), text, match_id), Payload::Recv(invocant))
 }
 
 /// A signature's arity: the parameters tagged in its list.
@@ -80,23 +77,4 @@ pub(super) fn finish(st: &mut ExtractState) {
         .filter(|e| e.cap == Capture::Arity(ArityCap::Sig))
         .map(|sig| (sig.span(), arity_of(ad, sig)))
         .collect();
-}
-
-/// Drop transparent receiver wrappers (`(*p)` → `p`) through each one's
-/// first named child; the node itself when it is not a wrapper, or when a
-/// wrapper has no named child.
-fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sitter::Node<'a> {
-    let mut inner = node;
-    for _ in 0..32 {
-        if !wrappers.contains(&inner.kind()) {
-            return inner;
-        }
-        let mut c = inner.walk();
-        let first = inner.named_children(&mut c).find(|ch| !ch.is_extra());
-        match first {
-            Some(ch) => inner = ch,
-            None => return node,
-        }
-    }
-    node
 }

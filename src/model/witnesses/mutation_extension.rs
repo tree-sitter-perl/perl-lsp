@@ -22,7 +22,7 @@ use crate::model::file_analysis::{KeyWrite, WriteKey};
 ///
 /// A nested write through an object's slot (`$self->{s}{k} = …`) lands in
 /// the slot's value, which every method shares, so its delta goes on
-/// `Field{class, s}`; every other delta goes on the variable's place, with
+/// `Member{class, s, Holds}`; every other delta goes on the variable's place, with
 /// a zero-width span at the write — invisible to reads before it.
 ///
 /// `bindings[i]` is `key_writes[i]`'s variable binding and its home scope,
@@ -76,7 +76,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
         });
         let (attachment, hops) = match (owner, &w.key) {
             (Some(owner), WriteKey::Hash(slot)) => {
-                (WitnessAttachment::Field { owner, name: slot.clone() }, w.path.clone())
+                (WitnessAttachment::holds_of(owner, ctx.member_spaces.values, slot.clone()), w.path.clone())
             }
             _ => (
                 WitnessAttachment::Place(Box::new(place)),
@@ -307,7 +307,7 @@ fn open_shape(open: &mut bool) -> bool {
 /// TODO(element-typed-array): a tuple is only right while nothing else
 /// writes the array; these writes move to an element-typed array when the
 /// lattice has one.
-fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option<InferredType> {
+pub(super) fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option<InferredType> {
     use crate::model::file_analysis::SharedKeys;
     let Some((first, rest)) = hops.split_first() else { return vtype.cloned() };
     match first {
@@ -319,6 +319,9 @@ fn vivify(hops: &[WriteKey], vtype: Option<&InferredType>, open: bool) -> Option
             Some(InferredType::Sequence(vec![vivify(rest, vtype, open).unwrap_or(InferredType::Unknown)]))
         }
         WriteKey::Index(i) if *i > 0 => Some(InferredType::ArrayRef),
+        // A computed key still names the container it writes into.
+        WriteKey::AnyKey => Some(InferredType::HashWithKeys { keys: SharedKeys::new(Vec::new()), open: true }),
+        WriteKey::AnyIndex => Some(InferredType::ArrayRef),
         WriteKey::Index(_) | WriteKey::Unknown => None,
     }
 }

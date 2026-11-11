@@ -106,12 +106,12 @@ impl FileAnalysis {
 
     /// Find a method's return type within a class/package, walking
     /// inheritance. Thin wrapper that queries the bag's class-keyed
-    /// `PackageSymbol{package, method}` attachment with the caller's
+    /// `Member{package, method}` attachment with the caller's
     /// `arg_count` as arity hint. Inheritance composes through
     /// `package_parents` (carried in `BagContext`); cross-file
     /// classes resolve via `module_index`. No procedural ancestor
     /// walk; no procedural overload picking — the registry's
-    /// `ReturnExprReducer` claims `PackageSymbol + ReturnExpr` and
+    /// `ReturnExprReducer` claims `Member + ReturnExpr` and
     /// the structural-walk code in `query_rec` handles MRO.
     pub(crate) fn find_method_return_type(
         &self,
@@ -138,7 +138,7 @@ impl FileAnalysis {
     }
 
     /// `find_method_return_type` with the receiver's FULL value threaded
-    /// into the `PackageSymbol` query — the receiver-relative shapes
+    /// into the `Member` query — the receiver-relative shapes
     /// (`ReturnExpr::Receiver`, `Operator(RowOf/ParamOf)`) substitute the
     /// rich value (`Parametric(Instance { args })`) rather than a bare
     /// class projection. Callers with a value in hand pass it here (via
@@ -157,10 +157,7 @@ impl FileAnalysis {
             WitnessAttachment,
         };
         let framework = self.package_framework(class_name).unwrap_or(FrameworkFact::Plain);
-        let att = WitnessAttachment::PackageSymbol {
-            package: class_name.to_string(),
-            name: method_name.to_string(),
-        };
+        let att = WitnessAttachment::returns_of(class_name.to_string(), method_name.to_string());
         let ctx = self.bag_context(module_index);
         let q = ReducerQuery {
             attachment: &att,
@@ -310,12 +307,17 @@ impl FileAnalysis {
             }
         }
 
-        // Collect methods from this class and all ancestors. Perl has no
-        // access-specifier concept, so no symbol here ever carries
-        // "non_public" — `requesting_class: None` is a no-op gate.
-        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, None);
+        // Collect methods from this class and all ancestors. No Perl symbol
+        // is private or protected, so the site outside every class names
+        // them all.
+        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, &NamingSite::outside(), None);
 
         candidates
+    }
+
+    /// Whether `sym` is a member of namespace `space` (`None`: of any).
+    pub(super) fn lives_in(&self, sym: &Symbol, space: Option<NamespaceId>) -> bool {
+        space.is_none_or(|s| self.member_spaces().of_decl(sym.kind, sym.member_space) == s)
     }
 
     /// Push a class's DATA fields (class-body `Variable`/`Field` members,
@@ -328,7 +330,8 @@ impl FileAnalysis {
         cls: &str,
         candidates: &mut Vec<CompletionCandidate>,
         seen: &mut HashSet<String>,
-        requesting_class: Option<&str>,
+        site: &NamingSite,
+        space: Option<NamespaceId>,
     ) {
         let class_body = self
             .symbols
@@ -351,7 +354,7 @@ impl FileAnalysis {
         };
         // An instance's slots first, as member access reads them.
         for sym in &self.symbols {
-            if self.slot_class_of(sym) == Some(cls) && seen.insert(sym.name.clone()) {
+            if self.slot_class_of(sym) == Some(cls) && self.lives_in(sym, space) && seen.insert(sym.name.clone()) {
                 candidates.push(CompletionCandidate {
                     label: sym.name.clone(),
                     kind: sym.kind,
@@ -370,9 +373,9 @@ impl FileAnalysis {
                 && self.symbol_in_class(sym.id, cls)
                 // A Field is class content BY KIND — extraction only mints it
                 // for real data members, and constructor promotion (php
-                // `__construct(public string $name)`) legitimately places one
-                // inside a sub body and a param region, so the locals gates
-                // below apply to Variables only.
+                // `__construct(public string $name)`) legitimately declares
+                // one inside a parameter list, so the locals gates below
+                // apply to Variables only.
                 && (matches!(sym.kind, SymKind::Field)
                     || (!self
                         .pack
@@ -392,11 +395,8 @@ impl FileAnalysis {
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
                 && !sym.flags.contains(SymbolFlags::ANONYMOUS)
-                // access-specifier gate: a non-public member
-                // completes only from inside its OWN class's lexical body —
-                // two-state (friend/protected-via-inheritance not modeled).
-                && (requesting_class == Some(cls)
-                    || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && site.may_name(sym.flags, cls)
+                && self.lives_in(sym, space)
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
@@ -419,7 +419,8 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Enumerator)
                 && self.symbol_in_class(sym.id, cls)
-                && (requesting_class == Some(cls) || !sym.flags.contains(SymbolFlags::NON_PUBLIC))
+                && site.may_name(sym.flags, cls)
+                && self.lives_in(sym, space)
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
@@ -444,41 +445,51 @@ impl FileAnalysis {
     /// the real members. Methods (and inherited ones) come from the shared
     /// ancestor walk; fields are this class's `Variable`/`Field` symbols.
     /// `requesting_class` is the class the completion CURSOR is lexically
-    /// inside (`None` from free-standing code) — the access-specifier gate:
-    /// a non-public member offers only when the cursor is
-    /// inside that SAME class's own body. A caller with no cursor context
-    /// passes `None` and safely under-offers to "public only" — it never
-    /// leaks a private member.
+    /// inside (`None` from free-standing code) — the access gate: a private
+    /// member offers only inside its own class, a protected one inside its
+    /// class or a descendant. A caller with no cursor context passes `None`
+    /// and safely under-offers to "public only".
+    ///
+    /// `offers` is the member namespaces the access reaches (`None`: every
+    /// one the language declares). Each is gathered on its own, so a child
+    /// shadows its parent's member of one name within a namespace and
+    /// php's `count()` and `$count` are two members.
     pub fn complete_members_for_class(
         &self,
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         requesting_class: Option<&str>,
+        offers: Option<SpaceSet>,
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, requesting_class);
-        // Data members from this class AND its ancestors. A field lives in
-        // its class body scope (or a nested container body — inline unions);
-        // a Variable inside a Sub-kind scope is a local/param. Anchored on
-        // where each class's methods are declared — that IS the body scope,
-        // whichever node carries it.
-        self.for_each_ancestor_class(class_name, module_index, |cls| {
-            self.collect_class_fields(cls, &mut candidates, &mut seen, requesting_class);
-            // a class defined in ANOTHER file — pull its fields from the
-            // cached module so cross-file member completion is complete
-            // (methods already cross via collect_ancestor_methods).
-            if let Some(mi) = module_index {
-                // Every file declaring `cls` — fields of a reopened class
-                // live across the set (`seen` dedups).
-                for cached in mi.visible_def_candidates(cls) {
-                    mi.whole_present(&cached).collect_class_fields(
-                        cls, &mut candidates, &mut seen, requesting_class,
-                    );
+        let site = NamingSite::in_class(self, requesting_class, module_index);
+        let declared = (0..self.member_spaces().names.len()).filter_map(|i| u8::try_from(i).ok()).map(NamespaceId);
+        for space in declared.filter(|s| offers.is_none_or(|o| o.contains(*s))) {
+            let mut seen: HashSet<String> = HashSet::new();
+            let space = Some(space);
+            self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, &site, space);
+            // Data members from this class AND its ancestors. A field lives in
+            // its class body scope (or a nested container body — inline unions);
+            // a Variable inside a Sub-kind scope is a local/param. Anchored on
+            // where each class's methods are declared — that IS the body scope,
+            // whichever node carries it.
+            self.for_each_ancestor_class(class_name, module_index, |cls| {
+                self.collect_class_fields(cls, &mut candidates, &mut seen, &site, space);
+                // a class defined in ANOTHER file — pull its fields from the
+                // cached module so cross-file member completion is complete
+                // (methods already cross via collect_ancestor_methods).
+                if let Some(mi) = module_index {
+                    // Every file declaring `cls` — fields of a reopened class
+                    // live across the set (`seen` dedups).
+                    for cached in mi.visible_def_candidates(cls) {
+                        mi.whole_present(&cached).collect_class_fields(
+                            cls, &mut candidates, &mut seen, &site, space,
+                        );
+                    }
                 }
-            }
-            std::ops::ControlFlow::Continue(())
-        });
+                std::ops::ControlFlow::Continue(())
+            });
+        }
         candidates
     }
 
@@ -535,28 +546,139 @@ impl FileAnalysis {
         class: &str,
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
     ) -> Option<InferredType> {
-        match self.resolve_field_in_ancestors(class, field, module_index)? {
+        match self.resolve_member_in_ancestors(class, field, module_index, want)? {
             MethodResolution::Local { sym_id, .. } => {
-                self.inferred_type_via_bag(field, self.symbol(sym_id).span.end)
+                let sym = self.symbol(sym_id);
+                // A stored member's value; a callable the ask reached has none.
+                if MemberKind::of_symbol(sym).mode != MemberMode::Value {
+                    return None;
+                }
+                self.subject_type_at(&self.declared_place(sym_id), sym.span.end, module_index)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
                 // Whichever of `class`'s candidate files holds the field.
                 // The field's type lives in the OWNING file's bag; the symbol
                 // scan needs symbols too; take the whole view.
-                idx.visible_def_candidates(&class).iter().find_map(|cached| {
-                    let full = idx.whole_present(cached);
-                    let sym = full.symbols.iter().find(|s| {
-                        matches!(s.kind, SymKind::Variable | SymKind::Field)
-                            && s.name == field
-                            && s.package.as_deref() == Some(class.as_str())
-                            && full.symbol_is_class_content(s)
-                    })?;
-                    full.inferred_type_via_bag(field, sym.span.end)
+                // Legal namespaces first, the illegal ones only as the
+                // fallback, as the resolution walks.
+                let candidates = idx.visible_def_candidates(&class);
+                std::iter::once(want.legal()).chain(want.illegal_only()).find_map(|ask| {
+                    candidates.iter().find_map(|cached| {
+                        let full = idx.whole_present(cached);
+                        let sym = full.symbols.iter().find(|s| {
+                            matches!(s.kind, SymKind::Variable | SymKind::Field)
+                                && ask.admits_decl(s.kind, s.member_space, full.member_spaces())
+                                && s.name == field
+                                && s.package.as_deref() == Some(class.as_str())
+                                && full.symbol_is_class_content(s)
+                        })?;
+                        full.subject_type_at(&full.declared_place(sym.id), sym.span.end, None)
+                    })
                 })
             }
         }
+    }
+
+    /// Member writes made where the member may not be set. The rule, in
+    /// one place: a member's `SymbolFlags::set_scope` says what code may
+    /// write it — a closure written in a method counts as that method's
+    /// class — so a write from code outside it fails at runtime
+    /// (`MisplacedWriteKind::OutsideClass` / `OutsideFamily`). A write-once
+    /// (`READONLY`) member is set by a constructor, so a write its class
+    /// family makes where no constructor encloses it is
+    /// `OutsideConstructor`, unless the write only fills an unset member
+    /// (`AccessKind::WriteIfUnset`): a lazy initialisation. A site is
+    /// reported only when every class its receiver may be resolves the
+    /// member to a declaration that finds it misplaced: an untyped
+    /// receiver, or one arm that may be written there, is no finding.
+    // TODO(get-visibility-diagnostic): private/protected access from outside its scope, under its own code (docs/prompt-php-member-access-residuals.md).
+    pub fn misplaced_member_writes(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<MisplacedWrite> {
+        let mut out = Vec::new();
+        // One naming site per writing class: its lineage is walked once.
+        let mut sites: HashMap<Option<&str>, NamingSite> = HashMap::new();
+        // TODO(unseen-member-writes): element, by-reference and destructuring writes mint no write ref (docs/prompt-php-member-access-residuals.md).
+        for r in self.refs().iter() {
+            if !r.access.is_write() || MemberKind::of_ref(&r.kind).map(|k| k.mode) != Some(MemberMode::Value) {
+                continue;
+            }
+            let Some(site) = r.member_site() else { continue };
+            // TODO(closure-bind-scope): a closure bound to another class runs with that class's access (docs/prompt-php-member-access-residuals.md).
+            let writer = self.package_at(site.name_span.start);
+            // A trait's code runs as whichever class composes it, a class
+            // the site cannot name.
+            if writer.is_some_and(|w| self.declares_class_with(w, SymbolFlags::TRAIT)) {
+                continue;
+            }
+            let arms = self.receiver_classes(r, module_index, ReceiverPolicy::Stated);
+            if arms.is_empty() {
+                continue;
+            }
+            // TODO(readonly-after-cfg): with control flow modelled, an in-class write after the
+            // constructor has run is a second write: a certain error, not just a hint.
+            // A write where the member holds nothing (`??=`, or one a guard
+            // proves unset) initialises it.
+            let lazy = r.access == AccessKind::WriteIfUnset
+                || r.access_place().is_some_and(|place| {
+                    self.place_type_at(place, site.name_span.start, module_index) == Some(InferredType::Undef)
+                });
+            let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
+                self.scope(sc)
+                    .owner
+                    .is_some_and(|sym| self.symbol(sym).flags.contains(SymbolFlags::CONSTRUCTOR))
+            });
+            let member = r.unqualified_target_name(self.names());
+            let mut classes: Vec<String> = Vec::new();
+            let mut kind = MisplacedWriteKind::OutsideClass;
+            let reported = arms.iter().all(|cn| {
+                let Some(res) = self.resolve_field_in_ancestors(cn, member, module_index) else {
+                    return false;
+                };
+                // A member found on a same-leaf stranger is a guess, and a
+                // guess is no finding.
+                let flags = match &res {
+                    MethodResolution::Local { sym_id, .. } => self.symbol(*sym_id).flags,
+                    MethodResolution::CrossFile { widened: true, .. } => return false,
+                    MethodResolution::CrossFile { flags, .. } => *flags,
+                };
+                let scope = flags.set_scope();
+                let write_once = flags.contains(SymbolFlags::READONLY);
+                if scope == AccessScope::Anywhere && (!write_once || in_constructor || lazy) {
+                    return false;
+                }
+                let declaring = res.class();
+                let site = sites.entry(writer).or_insert_with(|| NamingSite::in_class(self, writer, module_index));
+                let in_family = site.admits(AccessScope::Family, declaring);
+                let verdict = match scope {
+                    // A trait's member is its composer's own.
+                    AccessScope::Class
+                        if !site.admits(scope, declaring)
+                            && !(in_family && self.hit_class_declared(declaring, SymbolFlags::TRAIT, &res, module_index)) =>
+                    {
+                        MisplacedWriteKind::OutsideClass
+                    }
+                    AccessScope::Family if !in_family => MisplacedWriteKind::OutsideFamily,
+                    // Only a write-once member has a place it is set in good
+                    // form; a write from outside the family to one any code
+                    // may set is what its set scope declares.
+                    _ if write_once && in_family && !in_constructor && !lazy => {
+                        MisplacedWriteKind::OutsideConstructor
+                    }
+                    _ => return false,
+                };
+                kind = kind.max(verdict);
+                if !classes.iter().any(|c| c == declaring) {
+                    classes.push(declaring.to_string());
+                }
+                true
+            });
+            if reported {
+                out.push(MisplacedWrite { span: site.name_span, member: member.to_string(), classes, kind });
+            }
+        }
+        out
     }
 
     /// The type SPELLING a field's declared type edges to — the `TypeName(n)`
@@ -633,7 +755,7 @@ impl FileAnalysis {
             .find_map(|cached| packaged(&idx.symbols_present(cached)))
     }
 
-    /// The canonical, language-generic `Field{owner, name}` subject for a
+    /// The canonical, language-generic `Member{owner, name, Holds}` subject for a
     /// field access `(class, name)` — the SAME bag primitive a C struct
     /// member folds onto (`witnesses::WitnessAttachment::Field`). This is the
     /// ONE place a field's project-wide identity is minted; every Perl field
@@ -646,7 +768,7 @@ impl FileAnalysis {
     /// (the one hover/goto-def use) climbs to the class whose accessor backs
     /// the slot, so an inherited/role field accessed on any receiver converges
     /// on one subject (a child's `$self->{name}` and the parent's `has 'name'`
-    /// are the same `Field`). A classic hash slot with no accessor doesn't
+    /// are the same `Holds` member). A classic hash slot with no accessor doesn't
     /// resolve through method lookup — it isn't inherited that way — so the
     /// owner falls back to the access class (its own per-class storage).
     pub fn field_subject(
@@ -660,11 +782,11 @@ impl FileAnalysis {
             | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => class.to_string(),
         };
-        crate::model::witnesses::WitnessAttachment::Field { owner, name: name.to_string() }
+        crate::model::witnesses::WitnessAttachment::holds_of(owner, self.member_spaces().values, name.to_string())
     }
 
     /// Route a field ACCESS ref — in any of Perl's varied forms — onto its
-    /// shared `Field{owner, name}` subject. The dispatch is on the access
+    /// shared `Member{owner, name, Holds}` subject. The dispatch is on the access
     /// SHAPE (accessor call / hash-slot deref / Corinna field variable) to
     /// recover the owning class + slot name; identity minting is delegated to
     /// `field_subject`, so the field's FLAVOR never enters here. This is the
@@ -727,7 +849,7 @@ impl FileAnalysis {
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<NominalDomain> {
-        let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
+        let crate::model::witnesses::WitnessAttachment::Member { owner, aspect: crate::model::witnesses::MemberAspect::Holds, .. } =
             self.field_subject(class, field, module_index)
         else {
             return None;
@@ -735,7 +857,7 @@ impl FileAnalysis {
         self.field_domain_for_owner(&owner, field, module_index)
     }
 
-    /// Fold this file's domain sites for `Field{owner, field}` and query
+    /// Fold this file's domain sites for `Member{owner, field, Holds}` and query
     /// `DomainCoherenceFold`. The witnesses are built into a scratch bag at
     /// query time because a site's enum resolves cross-file (the module
     /// index is only in hand here); the fold + majority rule live in the
@@ -760,7 +882,7 @@ impl FileAnalysis {
             domain_coherence, ReducedValue, ReducerQuery, ReducerRegistry, Witness,
             WitnessAttachment, WitnessBag, WitnessPayload, WitnessSource,
         };
-        let att = WitnessAttachment::Field { owner: owner.to_string(), name: field.to_string() };
+        let att = WitnessAttachment::holds_of(owner.to_string(), self.member_spaces().values, field.to_string());
         let mut bag = WitnessBag::new();
         for site in &self.pack.domain_sites {
             if site.slot != field {
@@ -780,7 +902,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         // No context: the vote is these sites and nothing else. With one, a
         // slot whose vote fails falls through to the registry's cross-file
-        // `Field` ladder and answers the slot's declared VALUE as its domain.
+        // `Holds` ladder and answers the slot's declared VALUE as its domain.
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -805,7 +927,7 @@ impl FileAnalysis {
         Some(NominalDomain { domain, confidence })
     }
 
-    /// The canonical `Field` owner of one domain site: the member ref at the
+    /// The canonical `Holds` member owner of one domain site: the member ref at the
     /// site's own span (the member pattern captures the same field token the
     /// domain pattern does), its receiver's class, then the SAME
     /// `field_subject` ancestor walk that minted the queried subject — so an
@@ -824,7 +946,7 @@ impl FileAnalysis {
         // A site votes for one subject; a union receiver names several.
         let classes = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
         let class = classes.single()?;
-        let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
+        let crate::model::witnesses::WitnessAttachment::Member { owner, aspect: crate::model::witnesses::MemberAspect::Holds, .. } =
             self.field_subject(class, &site.slot, module_index)
         else {
             return None;
@@ -1083,6 +1205,45 @@ impl FileAnalysis {
         }
     }
 
+    /// The identities the function a call or imported-name token `r` names
+    /// may have, in the order its language looks them up — the function
+    /// half of `spelled_identity`, through the same use-map. A token inside
+    /// one of the file's own function rows names the row's function; a
+    /// qualified spelling names one function, its qualifier resolved like a
+    /// class spelling's; a bare one a `use function` row binds names that
+    /// row's; any other bare one is the language's `FunctionLookup` (PHP's
+    /// namespace first, then the global function). A language without a
+    /// use-map names the leaf.
+    pub fn function_identities(&self, r: &Ref) -> Vec<String> {
+        let leaf = r.unqualified_target_name(self.names());
+        let Some(sep) = self.pack.names.use_map_sep() else {
+            return vec![leaf.to_string()];
+        };
+        if let Some(row) = self.pack.use_row_covering(&r.span).filter(|row| row.table == NameTable::Function) {
+            return vec![row.name.identity(sep)];
+        }
+        match self.use_map_in(r.span.start, r.scope) {
+            Some(map) => map
+                .free_name_ladder(NameTable::Function, &r.target_name, crate::model::conventions::conventions_of(&self.language).functions)
+                .iter()
+                .map(|q| q.identity(sep))
+                .collect(),
+            None => vec![leaf.to_string()],
+        }
+    }
+
+    /// This file's own declaration a call names under `identity` — the
+    /// function half of `find_type_decl`: a function, or a value a call can
+    /// name (a variable, an enumerator), filed under `identity`
+    /// (`linkage_identity`).
+    pub fn declared_callee(&self, identity: &str) -> Option<&Symbol> {
+        let leaf = name_match_key(identity, self.names());
+        self.symbols()
+            .iter()
+            .filter(|s| s.name == leaf)
+            .find(|s| matches!(s.kind, SymKind::Sub | SymKind::Variable | SymKind::Enumerator) && self.linkage_identity(s) == identity)
+    }
+
     /// The class a call-shaped token names, for a use-map language where
     /// calling a class constructs it (python's `from m import User`,
     /// `User()`; `NameSpellings::class_call`): the token's spelled
@@ -1118,28 +1279,42 @@ impl FileAnalysis {
             .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
     }
 
-    /// The class references in this file whose identity nothing indexed
-    /// declares, answered instead by a same-leaf class of another namespace
-    /// — the widened answers the `resolved-by-widening` lane says out loud.
-    /// `index` is this file's own scoped view; a scope that never widens
-    /// (every language but a use-map one) yields nothing. A class this file
-    /// declares itself is never widened, indexed or not.
-    pub fn widened_class_references(&self, index: &dyn CrossFileLookup) -> Vec<WidenedClassRef> {
+    /// The class and function references in this file whose identity
+    /// nothing indexed declares, answered instead by a same-leaf class or
+    /// function of another namespace — the widened answers the
+    /// `resolved-by-widening` lane says out loud. `index` is this file's own
+    /// scoped view; a scope that never widens (every language but a use-map
+    /// one) yields nothing. A name this file declares itself is never
+    /// widened, indexed or not.
+    pub fn widened_references(&self, index: &dyn CrossFileLookup) -> Vec<WidenedRef> {
         if self.names().use_map_sep().is_none() {
             return Vec::new();
         }
-        let mut verdicts: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let mut verdicts: std::collections::HashMap<Vec<String>, Option<(String, String)>> = std::collections::HashMap::new();
         let mut out = Vec::new();
-        for r in self.refs().iter().filter(|r| matches!(r.kind, RefKind::PackageRef)) {
-            let named = self.spelled_identity(r);
-            let stand_in = verdicts.entry(named.clone()).or_insert_with(|| {
-                if self.find_type_decl(&named).is_some() {
+        for r in self.refs().iter() {
+            let named = match r.kind {
+                RefKind::PackageRef => vec![self.spelled_identity(r)],
+                RefKind::FunctionCall | RefKind::ImportedName => self.function_identities(r),
+                _ => continue,
+            };
+            let class = matches!(r.kind, RefKind::PackageRef);
+            let verdict = verdicts.entry(named).or_insert_with_key(|named| {
+                let first = named.first()?.clone();
+                if class {
+                    if self.find_type_decl(&first).is_some() {
+                        return None;
+                    }
+                    return widened_class_stand_ins(index, &first, self.names()).into_iter().next().map(|w| (first, w.class));
+                }
+                if named.iter().any(|id| self.declared_callee(id).is_some()) {
                     return None;
                 }
-                widened_class_stand_ins(index, &named, self.names()).into_iter().next().map(|w| w.class)
+                let (decls, widened) = callee_declarations(index, named, self.names());
+                widened.then(|| decls.into_iter().next().map(|d| (first, d.identity))).flatten()
             });
-            if let Some(resolved) = stand_in {
-                out.push(WidenedClassRef { span: r.span, named, resolved: resolved.clone() });
+            if let Some((named, resolved)) = verdict {
+                out.push(WidenedRef { span: r.span, named: named.clone(), resolved: resolved.clone() });
             }
         }
         out
@@ -1216,7 +1391,7 @@ impl FileAnalysis {
         };
         let mut visible: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        for row in &self.pack.use_rows {
+        for row in self.pack.use_rows.iter().filter(|r| r.table == NameTable::Class) {
             let QualifiedName { namespace: ns, leaf } = &row.name;
             match &row.alias {
                 // An aliased row pins the alias spelling, never the real
@@ -1268,7 +1443,7 @@ impl FileAnalysis {
                 continue;
             }
             match &r.kind {
-                RefKind::PackageRef | RefKind::FunctionCall => {
+                RefKind::PackageRef | RefKind::FunctionCall | RefKind::ImportedName => {
                     spelled.insert(r.unqualified_target_name(self.names()).to_string());
                 }
                 RefKind::MethodCall { invocant, .. } | RefKind::FieldAccess { invocant, .. } => {

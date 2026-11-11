@@ -126,7 +126,7 @@ pub fn document_highlights(cs: &crate::index::resolve::CandidateSet<'_>) -> Vec<
         .map(|l| DocumentHighlight {
             range: span_to_range(l.span),
             kind: Some(match l.access {
-                AccessKind::Write => DocumentHighlightKind::WRITE,
+                AccessKind::Write | AccessKind::WriteIfUnset => DocumentHighlightKind::WRITE,
                 _ => DocumentHighlightKind::READ,
             }),
         })

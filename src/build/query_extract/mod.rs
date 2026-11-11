@@ -47,7 +47,8 @@ pub(crate) struct CompiledPack {
 /// cache needs. A capture name outside the vocabulary, a predicate outside
 /// the structural set, a link without its `@link.from.<walk>`, or a walk
 /// without its root fails the compile.
-fn cached_query(language: &Language, source: &'static str) -> Result<&'static CompiledPack, String> {
+fn cached_query(language: &Language, pack: &LangPack) -> Result<&'static CompiledPack, String> {
+    let source = pack.query_source;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<usize, &'static CompiledPack>>> = OnceLock::new();
@@ -57,8 +58,10 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
         return Ok(q);
     }
     let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
-    let captures = vocab::capture_table(query.capture_names()).map_err(|e| format!("query: {e}"))?;
+    crate::build::query_predicates::check_source(source).map_err(|e| format!("query: {e}"))?;
+    let captures = vocab::capture_table(query.capture_names(), &pack.member_spaces).map_err(|e| format!("query: {e}"))?;
     crate::build::query_predicates::check(&query, language, &[]).map_err(|e| format!("query: {e}"))?;
+    vocab::check_settings(&query).map_err(|e| format!("query: {e}"))?;
     vocab::check_links(&query, &captures).map_err(|e| match e {
         vocab::LinkError::Pattern(at) => {
             let line = source[..at].lines().count() + 1;
@@ -77,16 +80,18 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
 /// compilation. Empty when the document does not compile, which the first
 /// extraction reports.
 pub fn document_captures(language: &Language, pack: &LangPack) -> Vec<Capture> {
-    cached_query(language, pack.query_source)
+    cached_query(language, pack)
         .map(|c| c.captures.iter().flatten().copied().collect())
         .unwrap_or_default()
 }
 
+mod cursor;
 mod extract;
 mod packs;
 mod places;
 mod skeleton;
 mod vocab;
+pub use cursor::*;
 pub use extract::*;
 pub use packs::*;
 pub use skeleton::*;

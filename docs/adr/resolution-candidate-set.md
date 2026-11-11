@@ -122,7 +122,7 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   handler names, keyval/`:param` keys, the `use Foo qw(|)` import-list
   slot (one named module's export surface). These enumerate the content OF
   an already-identified entity and ride the method/dispatch resolution
-  seams (`PackageSymbol`, `ReceiverGated`) — a different question than
+  seams (`Member`, `ReceiverGated`) — a different question than
   "what names are visible from here." Folding them in would re-derive
   those seams, not unify them.
 - **Presentation**: labels, kinds, details, sort priorities, snippet
@@ -224,10 +224,11 @@ The spike's axes live in CandidateSet construction:
 - **completion** — the pack instance of `complete(prefix)`: the origin's
   include closure is the identifier universe
   (`CrossFileLookup::visible_defs_with_prefix`, no global fallback).
-- **name semantics** — the set's `bare_new_name` hook: Perl sigil rules
-  live in `conventions.rs::strip_variable_sigils`; pack spellings
-  canonicalize at extraction (the LangPack `shape_name` hook, cpp's
-  `canonical_template_spelling`).
+- **name semantics** — the set's `bare_new_name`: every collected site
+  is a name token, so every arm writes the typed name with the origin
+  language's own sigils stripped (`NameSpellings::strip_sigils`); pack
+  spellings canonicalize at extraction (the LangPack `shape_name` hook,
+  cpp's `canonical_template_spelling`).
 - **import facts, not edits** — import-sourced completion candidates
   carry `ImportFact` (`AddToQw`/`NewUse`); the adapter composes fact +
   slot affordance (`complete(prefix, import_slot: bool)`) into the edit.

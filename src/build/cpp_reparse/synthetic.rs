@@ -67,14 +67,12 @@ impl MemberBlockPlan {
     }
 }
 
-/// One class/struct-body member's access region: its own
-/// declaration span, and whether it's reachable from OUTSIDE the class
-/// (`false` = public). Two-state — `private`/`protected` both fold to
-/// non-public; friend declarations and the protected-vs-private distinction
-/// are noted as a follow-up, not modeled here.
+/// One class/struct-body member's access region: its own declaration
+/// span, and the access flag its label gives it (`PRIVATE`, `PROTECTED`,
+/// or empty for public). Friend declarations are not modeled.
 pub struct AccessRegion {
     pub span: crate::model::file_analysis::Span,
-    pub non_public: bool,
+    pub access: crate::model::file_analysis::SymbolFlags,
 }
 
 /// Walk every `field_declaration_list` in `source`, tracking the current
@@ -91,15 +89,19 @@ pub fn access_regions(parser: &mut tree_sitter::Parser, source: &str) -> Vec<Acc
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         if node.kind() == "field_declaration_list" {
-            let mut non_public =
-                node.parent().is_some_and(|p| p.kind() == "class_specifier");
+            use crate::model::file_analysis::SymbolFlags;
+            let mut access = if node.parent().is_some_and(|p| p.kind() == "class_specifier") {
+                SymbolFlags::PRIVATE
+            } else {
+                SymbolFlags::empty()
+            };
             let mut c = node.walk();
             for child in node.named_children(&mut c) {
                 if child.kind() == "access_specifier" {
-                    non_public = match child.utf8_text(src) {
-                        Ok("public") => false,
-                        Ok("private") | Ok("protected") => true,
-                        _ => non_public,
+                    access = match child.utf8_text(src) {
+                        Ok("public") => SymbolFlags::empty(),
+                        Ok(label) => SymbolFlags::try_from(label).unwrap_or(access),
+                        Err(_) => access,
                     };
                     continue;
                 }
@@ -108,7 +110,7 @@ pub fn access_regions(parser: &mut tree_sitter::Parser, source: &str) -> Vec<Acc
                         start: child.start_position(),
                         end: child.end_position(),
                     },
-                    non_public,
+                    access,
                 });
             }
         }

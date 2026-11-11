@@ -41,15 +41,6 @@ pub struct PackFacts {
     #[serde(default)]
     pub doc_mentions: Vec<String>,
 
-    /// The language's display vocabulary for the engine's value lattice:
-    /// `format_inferred_type` tag → this language's spelling (php:
-    /// `"HashRef"` → `"array"`, `"Numeric"` → `"int|float"`). Applied by
-    /// `FileAnalysis::render_type` / `display_type_of` at every human
-    /// surface; a tag not in the map (class names, parametrics) passes
-    /// through. Empty for Perl — the engine's tags ARE its vocabulary.
-    #[serde(default)]
-    pub type_display: Vec<(String, String)>,
-
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
     /// inheritance edge — a spec REPLACES the primary wholesale (its member
@@ -125,7 +116,7 @@ pub struct PackFacts {
     /// with a `value` token (`slot == V`, `slot = V`) at `slot_span`. The
     /// value's enum is resolved cross-file at query time (an enumerator
     /// carries its `enum`), then the sites fold onto the language-generic
-    /// `Field{owner, name}` subject via `DomainCoherenceFold`. Stored raw
+    /// `Member{owner, name, Holds}` subject via `DomainCoherenceFold`. Stored raw
     /// (not pre-resolved) because both the slot owner AND the value's enum
     /// are cross-file for the perl5 `op_type`/`opcode` case — resolution
     /// belongs where the module index is in hand.
@@ -218,7 +209,7 @@ impl PackFacts {
 
     /// The `use` row whose name token covers `span`, if any.
     pub fn use_row_covering(&self, span: &Span) -> Option<&UseRow> {
-        self.use_rows.iter().find(|row| span_within(span, &row.span))
+        super::row_covering(&self.use_rows, span)
     }
 
     /// The line an import quick-fix inserts at: right after the last import
@@ -261,12 +252,11 @@ impl PackFacts {
             + vcap(&self.native_type_spellings)
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
-            + vcap(&self.type_display)
             + self.file_module.as_ref().map_or(0, |m| vcap(&m.segments) + m.segments.iter().map(String::capacity).sum::<usize>());
     }
 }
 
-fn span_within(inner: &Span, outer: &Span) -> bool {
+pub(super) fn span_within(inner: &Span, outer: &Span) -> bool {
     (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
         && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
 }

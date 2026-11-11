@@ -49,6 +49,7 @@ mod class_queries;
 mod cursor_queries;
 mod invocants;
 mod hover;
+pub(crate) use hover::callable_hover_tail;
 mod sym_index;
 mod completion;
 pub use completion::*;
@@ -149,7 +150,7 @@ pub struct FileAnalysis {
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
 
     /// The witness bag. Canonical store for type facts:
-    /// every Variable type, Symbol/PackageSymbol return type, branch
+    /// every Variable type, Symbol/Member return type, branch
     /// arm Edge, hash-key observation. `inferred_type_via_bag` reads
     /// here. The builder pushes directly via `push_type_constraint`
     /// (Variable witnesses with TC shape) and per-attachment emit
@@ -283,8 +284,8 @@ pub struct FileAnalysis {
     /// extraction. The general provenance tier above the type witness bag.
     #[serde(default)]
     pub flow_edges: Vec<FlowEdge>,
-    /// Class-keyed bag attachment names (`PackageSymbol{..}.name`,
-    /// `Field{..}.name`) with NO backing symbol/ref in this file — the
+    /// Class-keyed bag attachment names (`Member{..}.name`,
+    /// `Member{.., Holds}.name`) with NO backing symbol/ref in this file — the
     /// declarative residue (parametric method declarations, plugin `Method`
     /// overrides, bridged entities under a foreign container) the relational
     /// rows cannot see. Derived generically from the final bag in

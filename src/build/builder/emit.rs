@@ -305,7 +305,7 @@ impl<'a> Builder<'a> {
             // syntax (`Foo->new` → `ClassName("Foo")`), bake. Otherwise
             // Edge to the call's `Expression(refidx)` attachment;
             // `emit_method_call_return_edges` re-emits
-            // `Edge(PackageSymbol{package, method})` there once
+            // `Edge(Member{package, method})` there once
             // `invocant_class` is filled, so the chase resolves through.
             "method_call_expression" => {
                 if let Some(class) = self.extract_constructor_class(node) {
@@ -948,7 +948,7 @@ impl<'a> Builder<'a> {
     ) -> crate::model::witnesses::WitnessPayload {
         let args = self.extract_call_args(node);
         crate::model::witnesses::WitnessPayload::Invoke {
-            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None, constructs: None },
+            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None, constructs: None, fallback: None },
             receiver: None,
             args: Some(self.call_operands(&args)),
         }

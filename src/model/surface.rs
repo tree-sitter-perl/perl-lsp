@@ -212,6 +212,21 @@ impl Surface {
             entry.parents = parents;
             entry.is_role = *is_role;
         }
+        // A class the pack named for it (`ANONYMOUS`) has no spelling another
+        // file could write (`is_linkage_visible`), and its minted name
+        // stands for where it is written: neither it, nor what it declares,
+        // nor a value that may be one of it is cross-file visible.
+        let anonymous: std::collections::HashSet<&str> = feed
+            .symbols
+            .iter()
+            .filter(|s| {
+                matches!(s.kind, SymKind::Package | SymKind::Class | SymKind::Module)
+                    && s.flags.contains(crate::model::file_analysis::SymbolFlags::ANONYMOUS)
+            })
+            .map(|s| s.name.as_str())
+            .collect();
+        let names_anonymous =
+            |t: &InferredType| t.receiver_arms().iter().any(|a| a.class_name().is_some_and(|c| anonymous.contains(c)));
         for sym in feed.symbols {
             match sym.kind {
                 SymKind::Package | SymKind::Class | SymKind::Module => {
@@ -262,6 +277,7 @@ impl Surface {
                         ret: feed
                             .analysis
                             .symbol_return_type_via_bag(sym.id, None)
+                            .filter(|t| !names_anonymous(t))
                             .map(|t| despan(&t)),
                         hash_keys,
                     };
@@ -312,6 +328,7 @@ impl Surface {
                 _ => {}
             }
         }
+        by_pkg.retain(|name, _| !anonymous.contains(name.as_str()));
         let mut packages: Vec<PackageSurface> = by_pkg.into_values().collect();
         let sort_values = |vs: &mut Vec<ValueSurface>| {
             vs.sort_by(|a, b| (&a.name, a.kind).cmp(&(&b.name, b.kind)));
@@ -435,14 +452,14 @@ impl Surface {
 /// value is position-independent. The one offender is `CodeRef`'s
 /// `return_edge`: an `Expr(span)` (or any other file-internal attachment)
 /// shifts on unrelated edits AND is meaningless to another file — only the
-/// `PackageSymbol` edge is both stable and cross-file-resolvable. Container
+/// `Member` edge is both stable and cross-file-resolvable. Container
 /// variants recurse.
 fn despan(t: &InferredType) -> InferredType {
     use crate::model::witnesses::WitnessAttachment;
     match t {
         InferredType::CodeRef { return_edge } => InferredType::CodeRef {
             return_edge: match return_edge {
-                Some(WitnessAttachment::PackageSymbol { .. }) => return_edge.clone(),
+                Some(WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }) => return_edge.clone(),
                 _ => None,
             },
         },

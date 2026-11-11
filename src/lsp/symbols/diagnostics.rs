@@ -18,13 +18,14 @@ pub mod codes {
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
     pub const MISSING_DECLARATION: &str = "missing-declaration";
     pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
+    pub const READONLY_WRITE: &str = "readonly-write";
 }
 
-/// `resolved-by-widening`: a class reference whose identity nothing indexed
-/// declares, answered by a same-leaf class of another namespace
-/// (`FileAnalysis::widened_class_references`). Always on, because the
-/// widened answer is a guess every class-shaped verb now acts on; the
-/// lookup is the file's own scope, so only a use-map language reaches it.
+/// `resolved-by-widening`: a class or function reference whose identity
+/// nothing indexed declares, answered by a same-leaf one of another
+/// namespace (`FileAnalysis::widened_references`). Always on, because the
+/// widened answer is a guess every verb now acts on; the lookup is the
+/// file's own scope, so only a use-map language reaches it.
 pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
     use crate::build::language_driver::LanguageRegistry;
     use crate::model::file_analysis::{CrossFileLookup, PackVisibility};
@@ -34,7 +35,7 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
     let base: &dyn CrossFileLookup = module_index;
     let scoped = crate::index::resolve::origin_scope(base, analysis, None);
     analysis
-        .widened_class_references(&scoped)
+        .widened_references(&scoped)
         .into_iter()
         .map(|w| Diagnostic {
             range: span_to_range(w.span),
@@ -46,6 +47,47 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
                 w.named, w.resolved
             ),
             ..Default::default()
+        })
+        .collect()
+}
+
+/// `readonly-write`: a member written where it may not be set
+/// (`FileAnalysis::misplaced_member_writes`). Always on: from outside the
+/// member's set scope it fails at runtime every time (WARNING); a write-once
+/// member set by its class family outside a constructor is bad form (HINT).
+/// One code at two severities, so one switch silences the family. Resolves
+/// through the file's own scope, as navigation does.
+pub fn readonly_write_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::{CrossFileLookup, MisplacedWriteKind};
+    let base: &dyn CrossFileLookup = module_index;
+    let scoped = crate::index::resolve::origin_scope(base, analysis, None);
+    analysis
+        .misplaced_member_writes(Some(&scoped))
+        .into_iter()
+        .map(|w| {
+            let classes = w.classes.join(" or ");
+            let (severity, message) = match w.kind {
+                MisplacedWriteKind::OutsideClass => (
+                    DiagnosticSeverity::WARNING,
+                    format!("`{}` of {classes} cannot be set from outside {classes}", w.member),
+                ),
+                MisplacedWriteKind::OutsideFamily => (
+                    DiagnosticSeverity::WARNING,
+                    format!("`{}` of {classes} cannot be set from outside {classes} or a subclass", w.member),
+                ),
+                MisplacedWriteKind::OutsideConstructor => (
+                    DiagnosticSeverity::HINT,
+                    format!("readonly property `{}` of {classes} is set outside the constructor", w.member),
+                ),
+            };
+            Diagnostic {
+                range: span_to_range(w.span),
+                severity: Some(severity),
+                code: Some(NumberOrString::String(codes::READONLY_WRITE.into())),
+                source: Some("perl-lsp".into()),
+                message,
+                ..Default::default()
+            }
         })
         .collect()
 }
@@ -482,8 +524,10 @@ pub fn collect_diagnostics(
         };
         let method_name = &r.target_name;
 
-        // Skip methods every class of its kind answers without declaring.
-        if implicitly_answered.contains(method_name.as_str()) {
+        // Skip methods every class of its kind answers without declaring. A
+        // construction is one: a class with no declared constructor still
+        // constructs, and its token names the class, not a method.
+        if r.constructs() || implicitly_answered.contains(method_name.as_str()) {
             continue;
         }
 

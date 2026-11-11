@@ -92,7 +92,7 @@ pub(super) fn group_from_projections(
             target: TargetRef::owned_accessor(
                 m.method.clone(),
                 p.class.clone(),
-                MemberKind::Callable,
+                MemberKind::CALLABLE,
                 class_analysis,
                 module_index,
             ),
@@ -203,13 +203,13 @@ pub(super) fn refs_to_in_file(
 }
 
 /// Reject a `newName` that would corrupt rather than rename: empty,
-/// whitespace, or just sigils (`$`/`@`/`%`). The LSP client normally validates
+/// whitespace, or just the language's sigils. The LSP client normally validates
 /// the new name, but the server must not emit a token-*deleting* edit set when
 /// it doesn't — both rename entry points (LSP handler + CLI) gate on this.
 /// Keyword/identifier-shape validation stays the client's job; this is the
 /// safety floor against silent corruption.
-pub fn is_valid_rename_name(new_name: &str) -> bool {
-    !crate::model::conventions::strip_variable_sigils(new_name.trim()).trim().is_empty()
+pub fn is_valid_rename_name(new_name: &str, names: &crate::model::file_analysis::NameSpellings) -> bool {
+    !names.strip_sigils(new_name.trim()).trim().is_empty()
 }
 
 /// Rename edit set for a projection group: every span paired with ITS
@@ -312,6 +312,10 @@ fn site_refusal(name: &str, loc: &RefLocation) -> Option<String> {
             "rename of `{name}` would leave sites spelled through a delegating macro \
              unchanged (the macro body is not rewritten) — refusing rather than \
              emitting a partial edit"
+        )),
+        SiteRewrite::Construction => Some(format!(
+            "rename of `{name}` would leave its constructions unchanged (they spell the \
+             class, not the constructor) — refusing rather than emitting a partial edit"
         )),
         SiteRewrite::Shared { also_on } => {
             let at = match &loc.key {
@@ -486,13 +490,13 @@ fn retrieve_dep_files(
     Some(df)
 }
 
-/// The name keys the relational retrieval probes for `target`: its match
-/// key — the same `name_match_key` spelling rows are written under, so
-/// retrieval is exactly as generous as the matcher's name checks. A use
-/// spelled through a delegating macro carries a row under the delegate's
-/// key too (`RefTable::row_seeds`), so it needs no widening here.
+/// The name keys the relational retrieval probes for `target`, spelled the
+/// way rows are written (`name_match_key`), so retrieval is exactly as
+/// generous as the matcher's name checks. A use spelled through a delegating
+/// macro carries a row under the delegate's key too (`RefTable::row_seeds`),
+/// so it needs no widening here.
 pub(super) fn retrieval_keys(target: &TargetRef) -> Vec<String> {
-    vec![crate::model::file_analysis::name_match_key(&target.name, &target.names)]
+    target.retrieval_keys(&target.names)
 }
 
 /// The analysis view the backward-walk matcher runs on for one closed file:
@@ -517,11 +521,16 @@ pub(super) fn matcher_view(
     let view = idx.refs_present(cached);
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
-        TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
-            r.member_site().is_some()
-                && r.unqualified_target_name(view.names()) == target.name
-                && !r.match_verdict_baked()
-        }),
+        TargetKind::Sub { .. } | TargetKind::Method { .. } => target
+            .retrieval_keys(view.names())
+            .iter()
+            .flat_map(|k| view.ref_indices_keyed(k).iter().map(|&i| &view.refs()[i]))
+            .any(|r| {
+                r.member_site().is_some()
+                    && (r.unqualified_target_name(view.names()) == target.name
+                        || (r.constructs() && !target.constructed_classes.is_empty()))
+                    && !r.match_verdict_baked()
+            }),
         TargetKind::HashKeyOfSub { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => refs_keyed(&view, &target.name).any(|r| {
@@ -585,7 +594,7 @@ fn walk_refs(
     scope: WalkScope<'_>,
 ) -> Vec<RefLocation> {
     // One backward walk issues a top-level type query per candidate call
-    // site, and each re-derives the same cross-file `PackageSymbol`
+    // site, and each re-derives the same cross-file `Member`
     // lattice. The session is the memo that spans them (plus the consult
     // budget that bounds the walk when even the memo isn't enough) —
     // `docs/adr/resolution-session.md`. Entered for BOTH scopes: a

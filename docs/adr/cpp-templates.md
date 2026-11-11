@@ -16,7 +16,7 @@ one structural peel (`ParametricType::instance_from_spelling`, Model layer)
 shared by the cpp `annot_type` path and the `TypeName` alias-chase terminal — so
 a `typedef`/`using` landing on a template spelling chases to the same Instance.
 `class_name()` projects `"Box"` (the dispatch axis), so member gd / completion /
-refs / hover light up through the existing `PackageSymbol` path with no
+refs / hover light up through the existing `Member` path with no
 projection logic. `FileAnalysis::dispatch_class_of` adds the one index-aware
 refinement: it returns the head of the full specialization ladder — exact-spelling
 spec, then partial-pattern spec, then primary (the same ladder
@@ -46,7 +46,7 @@ first type parameter*." Two halves:
   rettype-preferring dedup.
 - **Reducer side.** `ParamOf` evaluates beside `RowOf` in `eval_return_expr` —
   the receiver's i-th instance arg, lazily at query time; the receiver rides the
-  existing `PackageSymbol` chase (inheritance hops included, so
+  existing `Member` chase (inheritance hops included, so
   `basic_memory_buffer<char>` reaching `buffer<T>::data()` substitutes `char`).
   Fields substitute value-side through `substitute_type_params` in
   `FileAnalysis::member_value_type` — the one receiver-typed member entry the

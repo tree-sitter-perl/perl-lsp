@@ -282,7 +282,7 @@ impl<'a> Builder<'a> {
                 // through the same bag-query path locals + imports
                 // already use. Symbol(sid) is pushed unconditionally —
                 // class-scoped and free-fn synth both publish here.
-                // Writeback's `PackageSymbol{package, name}` mirror reads
+                // Writeback's `Member{owner, name}` mirror reads
                 // back through the registry's Edge(Symbol(sid)) chase,
                 // so the per-class slot is populated for class-scoped
                 // synth too. Bridges remain the dispatch mechanism for
@@ -302,13 +302,13 @@ impl<'a> Builder<'a> {
                     // Edge(target)`. `target` is whichever
                     // attachment the source callable carries
                     // (`Expr(span)` for anon-sub bodies, or
-                    // `PackageSymbol{package, name}` for `\&foo` /
+                    // `Member{owner, name}` for `\&foo` /
                     // `\&Foo::bar` references — the bag's existing
                     // edge-chase covers both, including the
                     // cross-file `module_index` recursion for
-                    // PackageSymbol). Writeback projects this
+                    // Member). Writeback projects this
                     // single Symbol-attached emission to
-                    // `PackageSymbol{package, name}` for class-
+                    // `Member{owner, name}` for class-
                     // scoped methods at the post-walk pass.
                     use crate::model::witnesses::{
                         Witness, WitnessAttachment, WitnessPayload, WitnessSource,
@@ -437,6 +437,7 @@ impl<'a> Builder<'a> {
                         method_name_span: span,
                         member_op: None,
                         named_by_string: false,
+                        constructs: false,
                     },
                     span,
                     scope: self.current_scope(),
@@ -487,7 +488,7 @@ impl<'a> Builder<'a> {
                 // is the canonical record — chain typing's bag-routed
                 // queries see plugin-synthesized callables uniformly
                 // with locals + imports. Writeback iterates symbols
-                // and pushes `PackageSymbol{package, name} → Edge(Symbol(sid))`
+                // and pushes `Member{owner, name} → Edge(Symbol(sid))`
                 // for the primary slot when the sym carries a class.
                 let sid = self.add_symbol_ns(name, kind, span, selection_span, detail, ns);
                 *self.presentation_mut(sid) = crate::model::file_analysis::Presentation {
@@ -741,7 +742,7 @@ impl<'a> Builder<'a> {
         // `scalar` arm, which `bag_query_variable`-resolves the
         // variable's TC. Either yields the right `CodeRef` shape;
         // the projection extracts the attachment whatever its target
-        // shape (`Expr(span)` for anon, `PackageSymbol{...}` for refgen).
+        // shape (`Expr(span)` for anon, `Member{...}` for refgen).
         let callable_return_edge = inferred_type
             .as_ref()
             .and_then(InferredType::callable_return_edge)

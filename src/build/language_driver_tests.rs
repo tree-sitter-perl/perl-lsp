@@ -255,7 +255,7 @@ fn member_completion_filters_by_access_specifier() {
          private:\n  void Ref();\n  void Unref();\n  int rep_;\n\
          };\n",
     );
-    let outside_cands = fa.complete_members_for_class("Status", None, None);
+    let outside_cands = fa.complete_members_for_class("Status", None, None, None);
     let outside: Vec<&str> = outside_cands.iter().map(|c| c.label.as_str()).collect();
     assert!(outside.contains(&"ok"), "{outside:?}");
     assert!(outside.contains(&"Update"), "{outside:?}");
@@ -263,11 +263,44 @@ fn member_completion_filters_by_access_specifier() {
     assert!(!outside.contains(&"Unref"), "private method leaked: {outside:?}");
     assert!(!outside.contains(&"rep_"), "private field leaked: {outside:?}");
 
-    let inside = fa.complete_members_for_class("Status", None, Some("Status"));
+    let inside = fa.complete_members_for_class("Status", None, Some("Status"), None);
     let inside_labels: Vec<&str> = inside.iter().map(|c| c.label.as_str()).collect();
     for want in ["ok", "Update", "Ref", "Unref", "rep_"] {
         assert!(inside_labels.contains(&want), "{want} missing from self-access: {inside_labels:?}");
     }
+}
+
+/// A `protected:` member is offered inside its class and the classes
+/// derived from it; a `private:` one inside its own class only. A base is
+/// not offered the protected members a derived class declares.
+#[cfg(feature = "cpp")]
+#[test]
+fn member_completion_offers_protected_to_derived_classes() {
+    let fa = cpp_driver().analyze(
+        "class Base {\n\
+         public:\n  int open;\n\
+         protected:\n  int kin;\n  void Normalize();\n\
+         private:\n  int mine;\n  void Secret();\n\
+         };\n\
+         class Kid : public Base {\n\
+         public:\n  void Run();\n\
+         protected:\n  int guarded;\n\
+         };\n",
+    );
+    let labels = |class: &str, from: Option<&str>| {
+        let mut out: Vec<String> =
+            fa.complete_members_for_class(class, None, from, None).into_iter().map(|c| c.label).collect();
+        out.sort();
+        out
+    };
+    assert_eq!(labels("Kid", Some("Kid")), ["Normalize", "Run", "guarded", "kin", "open"], "a derived class");
+    assert_eq!(
+        labels("Kid", Some("Base")),
+        ["Normalize", "Run", "Secret", "kin", "mine", "open"],
+        "a base, on a derived receiver"
+    );
+    assert_eq!(labels("Base", Some("Base")), ["Normalize", "Secret", "kin", "mine", "open"], "its own class");
+    assert_eq!(labels("Kid", None), ["Run", "open"], "outside the hierarchy");
 }
 
 #[cfg(feature = "cpp")]
@@ -615,6 +648,28 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
     );
 }
 
+// A body that elides its receiver names its own method's class. A local
+// union's destructor mints no callable, so its bare names read no member of
+// the method around it.
+#[cfg(feature = "cpp")]
+#[test]
+fn an_unowned_body_reads_no_member_of_the_method_around_it() {
+    use crate::model::witnesses::{WitnessAttachment as WA, WitnessSource};
+    let src = "struct C { int inner_; void f() { int a = inner_; union U { ~U() { int b = inner_; } }; } };\n";
+    let fa = cpp_driver().analyze(src);
+    let reads: Vec<usize> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "implicit_field_read"))
+        .filter_map(|w| match w.attachment {
+            WA::Expr(sp) => Some(sp.start.column),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, [src.find("inner_; union").unwrap()], "only the method's own read is its member's");
+}
+
 // A callable with no declared return takes every `return` as an arm, and the
 // arms sit under the enrichment seal: enriching the file keeps its type.
 #[cfg(feature = "cpp")]
@@ -822,7 +877,7 @@ fn h13_field_receiver_member_slot_resolves() {
         parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
         let fa = cpp_driver().analyze(src);
-        let detected = detect_slot(&fa, &tree, src, point_after(src, marker), "cpp", None);
+        let detected = detect_slot(&fa, &tree, src, point_after(src, marker), "cpp", None, None);
         match detected.slot {
             Slot::Member { receiver, .. } => receiver
                 .receiver_type
@@ -882,7 +937,7 @@ class Iterator {\n\
     // `requesting`: None = completing from OUTSIDE the class (public only);
     // Some("Iterator") = from a method of the SAME class (privates too).
     let has = |n: &str, requesting: Option<&str>| {
-        fa.complete_members_for_class("Iterator", None, requesting)
+        fa.complete_members_for_class("Iterator", None, requesting, None)
             .iter()
             .any(|c| c.label == n)
     };
@@ -1021,4 +1076,20 @@ fn admits_refuses_files_another_driver_claims() {
         assert!(LanguageRegistry::admits(cpp, std::path::Path::new("Foo.pm")).is_err());
         assert!(LanguageRegistry::admits(cpp, std::path::Path::new("commands.def")).is_ok());
     }
+}
+
+// `this` is an instance of the class whose method it is written in, in-class
+// and out-of-line alike, never a class spelled `this`.
+#[cfg(feature = "cpp")]
+#[test]
+fn this_is_an_instance_of_the_methods_class() {
+    let src = "struct C { int x; int get() { return this->x; } int put(); };\nint C::put() { return this->x; }\n";
+    let fa = cpp_driver().analyze(src);
+    let classes: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "x" && r.member_site().is_some())
+        .map(|r| fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate).single().map(str::to_string))
+        .collect();
+    assert_eq!(classes, [Some("C".to_string()), Some("C".to_string())]);
 }

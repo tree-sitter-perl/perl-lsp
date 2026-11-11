@@ -151,6 +151,7 @@ pub fn pack_diagnostics(
     let mut diags = pack_member_op_diagnostics(analysis);
     diags.extend(pack_member_op_peel_diagnostics(analysis));
     diags.extend(super::diagnostics::widening_diagnostics(analysis, module_index));
+    diags.extend(super::diagnostics::readonly_write_diagnostics(analysis, module_index));
     // use-after-move is OPT-IN (`DiagnosticOptions.use_after_move`): the wired
     // check is the decidable subset only — gates B/C/E on `use_after_move_reads`
     // keep it to straight-line, in-function, local moves, verified to emit ZERO

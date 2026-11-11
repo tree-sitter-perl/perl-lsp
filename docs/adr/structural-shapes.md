@@ -132,7 +132,7 @@ which says nothing about elements.
 The RHS types the last hop; a list-assignment target takes its slot of
 the RHS. Through an object (`$self->{s}{k} = …`) the
 inner shape is the slot's, so the extended shape lands on
-`Field{class, s}`, where it joins the slot's other writes.
+`Member{class, s}`, where it joins the slot's other writes.
 
 An empty literal is a shape too: `{}`, `my %h;` and `my %h = ()` are a
 closed `HashWithKeys` with no keys, so `my $h = {}; $h->{k} = Foo->new`
@@ -150,7 +150,7 @@ key over the value standing at its site. Consecutive deltas with no
 other witness of the place between them are one segment — the standing
 value is read once at the segment's first write and grown in place
 through the rest — and the grown shape stands where the segment's last
-effective write did. A `Field` is not temporal, so each grown shape
+effective write did. A `Member` is not temporal, so each grown shape
 joins the value it grew from, as the slot's other writes do. Snapshotting
 the grown shape per write instead held N²/2 keys for N writes to one
 hash (FHEM's `73_km200.pm`: 1,664 writes, 7.6 GB to dump one file's bag).
@@ -160,7 +160,7 @@ read: Perl evaluates a right-hand side before it stores, and a lazy edge
 let `$s->{r} = $s` read its own write (the cycle guard then cut answers
 elsewhere in the file). The pass reads it with the earlier writes'
 deltas in the bag and its own not yet. A nested write through an
-object's slot is ROUTED to `Field{class, slot}` by the class the root
+object's slot is ROUTED to `Member{class, slot}` by the class the root
 holds; routing re-reads the root only where a value-binding witness of
 it moves, never once per write. Both read types the fold is still
 settling, so the pass is re-emittable in the worklist fold

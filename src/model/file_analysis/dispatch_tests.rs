@@ -27,6 +27,7 @@ fn handler(id: u32, name: &str, owner: HandlerOwner) -> Symbol {
         presentation: Default::default(),
         attributes: Vec::new(),
         flags: Default::default(),
+        member_space: None,
         declared_with: None,
         deref_stack: Vec::new(),
         arity: None,

@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
+use crate::model::file_analysis::{ClassSpelling, ConstructionKey, FamilyReach, LatticeRules, MemberSpaces, NameSpellings, Subsumption};
 
 /// Perl's namespace separator. Source-side Perl code (the builder, the CST
 /// view, the cursor detector) spells it through this; a consumer that serves
@@ -31,8 +31,6 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed(PERL_ROOT_PACKAGE)),
-    // A call reaches a sub, never a `field` of the same name.
-    member_namespace: MemberNamespace::PerFamily,
     imports: NameSpellings::NONE.imports,
     // `Foo()` calls a sub; construction is `Foo->new`.
     class_call: crate::model::file_analysis::ClassCall::FunctionCall,
@@ -46,50 +44,173 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
 /// default for blobs that predate the field.
 pub const PERL_LANGUAGE: &str = "perl";
 
-/// Perl's subsumption rules: an object is a blessed hash, and truth is a
-/// number (`1` / `''`).
-pub static PERL_LATTICE: LatticeRules =
-    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
+/// What every file of one language shares, asked of the language by its id
+/// (`conventions_of`): no file carries it and no consumer branches on which
+/// language it serves (rules #10, #14).
+pub struct LanguageConventions {
+    /// Which cross-family types the language's joins fold into one another
+    /// (`docs/adr/union-types.md`).
+    pub lattice: LatticeRules,
+    /// Whether the runtime owns a variable of this (sigil-led) name.
+    special_variable: fn(&str) -> bool,
+    /// The language's own word for an engine type tag (`Bool` → php
+    /// `bool`); `None` keeps the engine's.
+    type_display: fn(&str) -> Option<&'static str>,
+    /// What a construction's reference to its constructor is keyed by.
+    pub construction: ConstructionKey,
+    /// The namespaces its classes hold their members in
+    /// (`docs/adr/member-kinds.md`).
+    pub member_spaces: crate::model::file_analysis::MemberSpaces,
+    /// Where an unqualified, unimported function or constant spelling
+    /// finds its name.
+    pub functions: FunctionLookup,
+    /// Which classes a protected member reaches beyond its own.
+    pub family_reach: FamilyReach,
+}
 
-/// Each pack language's subsumption rules, by `FileAnalysis::language`. The
-/// model cannot see the packs that declare them, so the build layer registers
-/// each served language's set (`docs/adr/union-types.md`); Perl's are
-/// declared here, beside its other conventions, and never registered. Append-only slots, not a
-/// locked map: every bag query reads this, and a shared lock's reader count is
-/// one contended cache line across a sweep's workers.
-static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+/// Where a bare function (or constant) spelling no import row binds finds
+/// its name, in a use-map language. A qualified spelling resolves like a
+/// class spelling, and one an import row binds names that row's, in every
+/// language (`UseMap::free_name_ladder`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FunctionLookup {
+    /// The global name of that spelling.
+    ///
+    /// TODO(module-functions): Python files its functions by bare name, not
+    /// under their module, so a call names the leaf. Filed under the
+    /// module, a call would resolve through the use-map like a class
+    /// spelling (`from app.a import helper`).
+    #[default]
+    Global,
+    /// The namespace in force first, then the global namespace: PHP's
+    /// fallback for an unqualified function or constant, decided at run
+    /// time by which of the two is declared.
+    NamespaceThenGlobal,
+}
+
+impl LanguageConventions {
+    /// A pack language's: its declared lattice and type words. No pack
+    /// declares variables its runtime owns, so another language's `$_` is
+    /// an ordinary name.
+    pub fn of_pack(
+        lattice: LatticeRules,
+        type_display: fn(&str) -> Option<&'static str>,
+        construction: ConstructionKey,
+        member_spaces: crate::model::file_analysis::MemberSpaces,
+        functions: FunctionLookup,
+        family_reach: FamilyReach,
+    ) -> Self {
+        LanguageConventions {
+            lattice,
+            special_variable: no_special_variable,
+            type_display,
+            construction,
+            member_spaces,
+            functions,
+            family_reach,
+        }
+    }
+
+    /// The runtime owns a special variable's name (`@_`, `$_`, `%ENV`): it
+    /// has occurrences, but no rename.
+    pub fn is_special_variable(&self, name: &str) -> bool {
+        (self.special_variable)(name)
+    }
+
+    /// How a human surface spells the engine type tag `tag` in this
+    /// language; `None` keeps the engine's spelling.
+    pub fn type_label(&self, tag: &str) -> Option<&'static str> {
+        (self.type_display)(tag)
+    }
+}
+
+fn no_special_variable(_: &str) -> bool {
+    false
+}
+
+/// The engine's tags are Perl's own words.
+fn engine_type_words(_: &str) -> Option<&'static str> {
+    None
+}
+
+/// Perl's conventions, declared beside its spellings and never registered.
+/// Its subsumption rules: an object is a blessed hash, and truth is a number
+/// (`1` / `''`).
+pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
+    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
+    special_variable: is_special_variable,
+    type_display: engine_type_words,
+    // `Foo->new` calls its constructor by name.
+    construction: ConstructionKey::Constructor,
+    // A call reaches a sub, never a `field` of the same name.
+    member_spaces: MemberSpaces::PER_FAMILY,
+    functions: FunctionLookup::Global,
+    // No Perl member is protected.
+    family_reach: FamilyReach::Descendants,
+};
+
+/// Each pack language's conventions, by `FileAnalysis::language`. The model
+/// cannot see the packs that declare them, so the build layer registers each
+/// served language's; Perl's are declared here. Append-only slots, not a
+/// locked map: every bag query reads the lattice, and a shared lock's reader
+/// count is one contended cache line across a sweep's workers.
+static LANGUAGE_CONVENTIONS: [std::sync::OnceLock<(&'static str, LanguageConventions)>; 16] =
     [const { std::sync::OnceLock::new() }; 16];
 
-/// Register `language`'s rules once; later calls are no-ops, so `rules` is
-/// built only on the first.
-pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
-    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's rules are declared, not registered");
-    let mut rules = Some(rules);
-    for slot in &LANGUAGE_LATTICES {
+/// Register `language`'s conventions once; later calls are no-ops, so
+/// `conventions` is built only on the first.
+pub fn register_conventions(language: &'static str, conventions: impl FnOnce() -> LanguageConventions) {
+    debug_assert_ne!(language, PERL_LANGUAGE, "Perl's conventions are declared, not registered");
+    let mut conventions = Some(conventions);
+    for slot in &LANGUAGE_CONVENTIONS {
         // A racing registration of another language can take this slot
         // between the check and the init; the loop then moves on.
-        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        let (id, _) = slot.get_or_init(|| (language, (conventions.take().expect("init runs once"))()));
         if *id == language {
             return;
         }
     }
-    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
+    panic!("more than {} languages registered", LANGUAGE_CONVENTIONS.len());
 }
 
-/// The subsumption rules of the language an analysis was built in. A
-/// language nobody registered holds no rules: it never borrows another's.
-pub fn lattice_for(language: &str) -> &'static LatticeRules {
-    static NO_RULES: LatticeRules = LatticeRules::new(&[]);
+/// The conventions of the language an analysis was built in. A language
+/// nobody registered has none: it never borrows another's.
+pub fn conventions_of(language: &str) -> &'static LanguageConventions {
+    registered_conventions(language).unwrap_or(&UNREGISTERED)
+}
+
+static UNREGISTERED: LanguageConventions =
+    LanguageConventions {
+        lattice: LatticeRules::new(&[]),
+        special_variable: no_special_variable,
+        type_display: engine_type_words,
+        construction: ConstructionKey::Constructor,
+        member_spaces: MemberSpaces::PER_FAMILY,
+        functions: FunctionLookup::Global,
+        family_reach: FamilyReach::Descendants,
+    };
+
+fn registered_conventions(language: &str) -> Option<&'static LanguageConventions> {
     if language == PERL_LANGUAGE {
-        return &PERL_LATTICE;
+        return Some(&PERL_CONVENTIONS);
     }
-    let registered = LANGUAGE_LATTICES
+    LANGUAGE_CONVENTIONS
         .iter()
         .map_while(|slot| slot.get())
         .find(|(id, _)| *id == language)
-        .map(|(_, rules)| rules);
+        .map(|(_, conventions)| conventions)
+}
+
+/// The member namespaces of the language an analysis was built in.
+pub fn member_spaces_for(language: &str) -> &'static crate::model::file_analysis::MemberSpaces {
+    &conventions_of(language).member_spaces
+}
+
+/// The subsumption rules of the language an analysis was built in.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    let registered = registered_conventions(language);
     debug_assert!(registered.is_some(), "no lattice registered for language {language:?}");
-    registered.unwrap_or(&NO_RULES)
+    &registered.unwrap_or(&UNREGISTERED).lattice
 }
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -199,17 +320,6 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
         name.strip_prefix('$').unwrap_or(name),
         "self" | "class" | "this" | "proto"
     )
-}
-
-/// Strip Perl variable sigils from a typed name: the bare identity token
-/// a rename writes at every collected span (`$total` → `total`). This is
-/// the PERL instance of the per-language name-semantics hook on the
-/// resolution CandidateSet's identity keying (`CandidateSet::bare_new_name`)
-/// — pack languages canonicalize spellings at extraction instead (the
-/// LangPack `shape_name` hook; cpp's `canonical_template_spelling`), so
-/// their typed names pass through bare.
-pub fn strip_variable_sigils(name: &str) -> &str {
-    name.trim_start_matches(['$', '@', '%'])
 }
 
 /// Perl's `@_`: each call's own arguments, so it names a different array
@@ -659,7 +769,6 @@ mod tests {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
-            member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
             imports: NameSpellings::NONE.imports,
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,

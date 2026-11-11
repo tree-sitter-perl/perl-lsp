@@ -200,6 +200,7 @@ impl FileAnalysis {
                     presentation: gs.presentation.clone(),
                     attributes: Vec::new(),
                     flags: Default::default(),
+                    member_space: None,
                     declared_with: None,
                     deref_stack: Vec::new(),
                     arity: None,
@@ -208,7 +209,7 @@ impl FileAnalysis {
                 if let Some(rt) = &gs.return_type {
                     // Plugin-priority `Symbol(sid) → InferredType`, matching
                     // the builder's Method emit, plus the
-                    // `PackageSymbol{package,name}` mirror the fold writeback
+                    // `Member{package,name}` mirror the fold writeback
                     // would have pushed so cross-file return-type queries
                     // resolve the relationship shape.
                     mint.witnesses.push(Witness {
@@ -220,10 +221,7 @@ impl FileAnalysis {
                     if matches!(gs.kind, SymKind::Method | SymKind::Sub) {
                         if let Some(class) = &pkg {
                             mint.witnesses.push(Witness {
-                                attachment: WitnessAttachment::PackageSymbol {
-                                    package: class.clone(),
-                                    name: gs.name.clone(),
-                                },
+                                attachment: WitnessAttachment::returns_of(class.clone(), gs.name.clone()),
                                 source: WitnessSource::Plugin(em.plugin_id.clone()),
                                 payload: WitnessPayload::Edge(WitnessAttachment::Symbol(id)),
                                 span: gs.span,
@@ -612,18 +610,18 @@ impl FileAnalysis {
         // Enrichment runs it with module_index so cross-file
         // receiver types resolve; the same routine runs from
         // `finalize_post_walk` with module_index=None for the
-        // in-file-resolvable case (chain recursion via
-        // `RefTable::call_at_start` doesn't need module_index).
+        // in-file-resolvable case (chain recursion through
+        // `RefTable::call_spanning` doesn't need module_index).
         self.fix_chain_receiver_hash_key_owners(module_index);
 
         // Cross-file inheritance edges. Local writeback emits
-        // `PackageSymbol(child, m) → Edge(PackageSymbol(parent, m))`
+        // `Member(child, m) → Edge(Member(parent, m))`
         // for every method `m` declared on a *local* parent. When
         // the parent class lives in another file (or its methods
         // do, via further parent chaining), we read the cached
         // analysis here and project the same edge shape into the
         // local bag. The registry's edge-chase then follows
-        // `PackageSymbol(child, m) → PackageSymbol(parent_cross, m)`
+        // `Member(child, m) → Member(parent_cross, m)`
         // and re-enters the cached parent's bag via the existing
         // cross-file primary lookup in `query_rec`.
         if let Some(idx) = module_index {
@@ -664,15 +662,9 @@ impl FileAnalysis {
                             continue;
                         }
                         self.witnesses.push(Witness {
-                            attachment: WitnessAttachment::PackageSymbol {
-                                package: child.clone(),
-                                name: sym.name.clone(),
-                            },
+                            attachment: WitnessAttachment::returns_of(child.clone(), sym.name.clone()),
                             source: WitnessSource::Enrichment("inheritance_cross".to_string()),
-                            payload: WitnessPayload::Edge(WitnessAttachment::PackageSymbol {
-                                package: parent.clone(),
-                                name: sym.name.clone(),
-                            }),
+                            payload: WitnessPayload::Edge(WitnessAttachment::returns_of(parent.clone(), sym.name.clone())),
                             span: zero,
                         });
                     }
@@ -703,6 +695,8 @@ impl FileAnalysis {
                 package_parents: &self.packages,
                 app_surface_consumers: &self.plugin.app_surface_consumers,
                 lattice: crate::model::conventions::lattice_for(&self.language),
+
+                member_spaces: crate::model::conventions::member_spaces_for(&self.language),
             };
             crate::model::witnesses::emit_mutation_extension_witnesses(
                 &mut self.witnesses,

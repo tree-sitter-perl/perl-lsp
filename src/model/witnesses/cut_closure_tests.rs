@@ -79,7 +79,7 @@ fn a_chain_of_self_closing_reads_reduces_each_link_a_bounded_number_of_times() {
 }
 
 fn fan_out(name: &str) -> FanOutKey {
-    (FanOut::Free { name: name.into(), class: None }, None, None)
+    (FanOut::Free { names: vec![name.into()], class: None }, None, None)
 }
 
 /// A frame's taint, with `inner` run as its subtree.

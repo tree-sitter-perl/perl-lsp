@@ -322,7 +322,7 @@ struct Builder<'a> {
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
-    /// reads it to seed `Field{class, key} → Edge(Expr(rhs_span))`
+    /// reads it to seed `Member{class, key, Holds} → Edge(Expr(rhs_span))`
     /// alongside the untyped mutation Fact. Hash-element LHS only; plain
     /// variable assignments never enter it.
     slot_write_rhs_span: std::collections::HashMap<Span, Span>,
@@ -498,7 +498,7 @@ struct Builder<'a> {
     meta_methods: Vec<String>,
 
     /// Plugin `app_surface_consumers()` manifest union, flattened once.
-    /// Threaded into `BagContext` so the build-time `PackageSymbol`
+    /// Threaded into `BagContext` so the build-time `Member`
     /// inheritance walk injects the synthetic app-surface parent the same
     /// way the query-time walks do (`file_analysis::parents_of`).
     app_surface_consumers: Vec<String>,
@@ -660,7 +660,7 @@ struct Builder<'a> {
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading
     /// targets. `emit_method_call_return_edges` consults this set
-    /// and skips publishing its standard `Edge(PackageSymbol)` for
+    /// and skips publishing its standard `Edge(Member)` for
     /// these refs, so the Parametric isn't masked by the receiver
     /// class's plain return-type entry. **Build-only**, like
     /// `method_call_invocant`.
@@ -744,7 +744,7 @@ struct Builder<'a> {
 ///   * `Deferred` — owner=None at emit time. Post-walk fixup in
 ///     `FileAnalysis::fix_chain_receiver_hash_key_owners`
 ///     fills the owner once the enclosing call's receiver type
-///     resolves (in-file via `RefTable::call_at_start` recursion, or
+///     resolves (in-file via `RefTable::call_spanning` recursion, or
 ///     cross-file once `module_index` is available).
 enum Gate {
     Strict(HashKeyOwner),

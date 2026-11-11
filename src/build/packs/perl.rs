@@ -4,20 +4,27 @@ use crate::build::query_extract::*;
 
 pub fn perl_pack() -> LangPack {
     LangPack {
+        id: "perl",
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         names: crate::model::conventions::PERL_SPELLINGS,
-        lattice: crate::model::conventions::PERL_LATTICE.clone(),
+        functions: FunctionLookup::Global,
+        construction: crate::model::file_analysis::ConstructionKey::Constructor,
+        member_spaces: crate::model::conventions::PERL_CONVENTIONS.member_spaces.clone(),
+        family_reach: crate::model::conventions::PERL_CONVENTIONS.family_reach,
+        lattice: crate::model::conventions::PERL_CONVENTIONS.lattice.clone(),
+        type_display: |_| None,
         // The builder stores variable symbols WITH sigil. Nothing to
         // re-attach: def.var captures the whole `(scalar)` node, so the
         // raw text already carries it.
         shape_name: |raw| raw.to_string(),
-        default_name: |kind| match kind {
-            DefCap::Anon => Some("(anon)"),
+        default_name: |kind, _| match kind {
+            DefCap::Anon => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,
+        doc_text: |_| None,
         module_paths: |m| vec![crate::model::conventions::perl_module_rel_path(m)],
-        narrow_guard: |_, _| None,
+        narrow_guard: |_| None,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         // Nothing reads them: Perl's trigger characters come from
@@ -25,9 +32,7 @@ pub fn perl_pack() -> LangPack {
         trigger_chars: &[],
         recv_peel: &[],
         simple_var_kinds: &[],
-        member_kinds: &[],
         skip_kinds: &[],
-        call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
     }

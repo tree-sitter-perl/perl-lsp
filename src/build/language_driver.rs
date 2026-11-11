@@ -239,7 +239,6 @@ impl LanguageDriver for PerlDriver {
 /// whose extraction is query-shaped is a `PackDriver { ... }` literal.
 #[cfg(feature = "pack-langs")]
 pub struct PackDriver {
-    id: &'static str,
     maturity: Maturity,
     exts: &'static [&'static str],
     /// Exact filenames this driver also claims (extensionless conventions
@@ -294,8 +293,8 @@ pub struct PackDriver {
     input_fingerprint: Option<fn() -> u64>,
     /// `public:`/`private:`/`protected:` region scan (C preprocessor-free
     /// languages only; `None` when the language has no access-specifier
-    /// concept). Stamps a `non_public` attribute on member symbols so
-    /// completion can filter by visibility.
+    /// concept). Stamps each member symbol's access flag so completion
+    /// can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
     /// The module a file is, for a language that names modules by path
     /// (python). Asks the walk's marker snapshot, else the disk, so it
@@ -319,7 +318,7 @@ impl LanguageDriver for PackDriver {
         self.maturity
     }
     fn id(&self) -> &'static str {
-        self.id
+        (self.pack)().id
     }
     fn extensions(&self) -> &[&'static str] {
         self.exts
@@ -375,12 +374,7 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
-        crate::model::conventions::register_lattice(self.id, || (self.pack)().lattice);
-        // Every exit stamps the driver id (degraded stand-ins included — a
-        // failed cpp parse is still a cpp file): `resolve()` derives pack
-        // routing from this origin-identity fact at construction.
-        let mut fa = self.analyze_pipeline(source, path);
-        fa.language = self.id.to_string();
+        let fa = self.analyze_pipeline(source, path);
         let module = fa.pack.file_module.as_ref().map(|m| serde_json::to_string(m).expect("module serializes"));
         crate::build::equiv_dump::record(source.as_bytes(), module.as_deref(), &fa);
         fa
@@ -431,9 +425,7 @@ impl PackDriver {
         let ctx = self.gather_pack_context(&mut parser, source, path);
         let Some((tree, src, map, recovered)) = self.transform_and_parse(&mut parser, source, &ctx)
         else {
-            let mut fa = FileAnalysis::new(Default::default());
-            fa.degraded = true;
-            return fa;
+            return self.degraded_stand_in();
         };
         let pack = (self.pack)();
         match crate::build::query_extract::extract_in(&tree, src.as_bytes(), &pack, ctx.module.as_ref()) {
@@ -461,18 +453,25 @@ impl PackDriver {
                 fa
             }
             Err(e) => {
-                // Fail LOUD, and mark the empty stand-in degraded so the
-                // persist tier can't freeze it (a cached empty analysis would
-                // be re-served forever — the source file never changes).
+                // Fail LOUD: a cached empty analysis would be re-served
+                // forever (the source file never changes).
                 log::warn!(
                     "query extract failed for {:?}: {e:?} — serving an empty (non-cacheable) analysis",
                     path
                 );
-                let mut fa = FileAnalysis::new(Default::default());
-                fa.degraded = true;
-                fa
+                self.degraded_stand_in()
             }
         }
+    }
+
+    /// The empty analysis a file that never reached extraction serves —
+    /// still of its language (a failed cpp parse is a cpp file, and
+    /// `resolve()` routes on that), and degraded so the persist tier can't
+    /// freeze it.
+    fn degraded_stand_in(&self) -> FileAnalysis {
+        let mut fa = crate::build::query_extract::SkeletonAnalysis::for_pack(&(self.pack)()).into_file_analysis();
+        fa.degraded = true;
+        fa
     }
 }
 
@@ -637,8 +636,8 @@ impl PackDriver {
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
-        // member symbol non-public when its declaration falls under
-        // `private:`/`protected:`.
+        // member symbol private or protected when its declaration falls
+        // under `private:`/`protected:`.
         if let Some(f) = self.access_regions {
             let regions = crate::util::timings::phase("cpp.access_regions", || f(parser, source));
             stamp_access_regions(fa, &regions);
@@ -673,7 +672,6 @@ impl PackDriver {
 #[cfg(feature = "cpp")]
 fn cpp_driver() -> PackDriver {
     PackDriver {
-        id: "cpp",
         maturity: Maturity::Beta,
         // `.c` too — tree-sitter-cpp parses C (a near-subset), and MISRA /
         // embedded code is C-heavy. One driver serves both.
@@ -701,7 +699,6 @@ fn cpp_driver() -> PackDriver {
 #[cfg(feature = "python")]
 fn python_driver() -> PackDriver {
     PackDriver {
-        id: "python",
         maturity: Maturity::Alpha,
         exts: &["py"],
         filenames: &[],
@@ -725,7 +722,6 @@ fn python_driver() -> PackDriver {
 #[cfg(feature = "php")]
 fn php_driver() -> PackDriver {
     PackDriver {
-        id: "php",
         maturity: Maturity::Alpha,
         // `.phtml` templates parse under the same HTML-interleaved grammar.
         exts: &["php", "phtml"],
@@ -752,7 +748,6 @@ fn php_driver() -> PackDriver {
 #[cfg(feature = "r")]
 fn r_driver() -> PackDriver {
     PackDriver {
-        id: "r",
         maturity: Maturity::Alpha,
         exts: &["R", "r"],
         filenames: &[],
@@ -777,7 +772,6 @@ fn r_driver() -> PackDriver {
 fn cmake_driver() -> PackDriver {
     PackDriver {
         // CMakeLists.txt (no extension match) is a follow-up; `.cmake` now.
-        id: "cmake",
         maturity: Maturity::Alpha,
         exts: &["cmake"],
         filenames: &["CMakeLists.txt"],
@@ -911,6 +905,8 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             hints: Vec::new(),
         });
@@ -929,13 +925,16 @@ fn inject_member_blocks(
                 name_end: m.name_span.end,
                 package: Some(base.macro_name.clone()),
                 scope: scope_id,
+                spelled: None,
+                doc: None,
                 pair: None,
                 return_type: None,
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
-                qualifier_owned: false,
+                owner_stated: false,
                 flags: Default::default(),
+                member_space: None,
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -961,10 +960,10 @@ fn inject_member_blocks(
     }
 }
 
-/// Tag every member symbol whose declaration falls inside a non-public
-/// access region with a `"non_public"` attribute — a
-/// value-borne fact on the symbol, so member completion filters by asking
-/// the symbol, never by re-deriving visibility from a name/kind guess.
+/// Stamp every member symbol with the access flag of the region its
+/// declaration falls inside — a value-borne fact on the symbol, so member
+/// completion filters by asking the symbol, never by re-deriving
+/// visibility from a name/kind guess.
 /// Span containment (not equality) because a region's span is the whole
 /// declaration node (`field_declaration`/`function_definition`) while a
 /// Method/Sub Symbol's own span can be the narrower body-having node.
@@ -979,18 +978,15 @@ fn stamp_access_regions(fa: &mut FileAnalysis, regions: &[crate::build::cpp_repa
         if sym.package.is_none() {
             continue;
         }
-        let non_public = regions
+        let access = regions
             .iter()
             .filter(|r| contains(&r.span, &sym.span))
             .min_by_key(|r| {
                 let s = r.span;
                 (s.end.row - s.start.row, s.end.column.saturating_sub(s.start.column))
             })
-            .is_some_and(|r| r.non_public);
-        if non_public && !sym.flags.contains(crate::model::file_analysis::SymbolFlags::NON_PUBLIC) {
-            sym.attributes.push("non_public".to_string());
-            sym.flags.insert(crate::model::file_analysis::SymbolFlags::NON_PUBLIC);
-        }
+            .map_or(crate::model::file_analysis::SymbolFlags::empty(), |r| r.access);
+        sym.flags.insert(access);
     }
 }
 
@@ -1076,7 +1072,11 @@ fn remap_spans(
         scopes,
         witnesses,
         parents: _,
+        super_parents: _,
         var_reads,
+        var_writes,
+        write_sites,
+        init_sites,
         label_refs,
         flow_edges,
         moved_from,
@@ -1087,17 +1087,21 @@ fn remap_spans(
         // Populated in enrich_skeleton (post-remap) already in original coords.
         macro_call_arg_spans: _,
         call_sites,
+        receiver_sites,
         specializations: _,
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
         // name/scope-keyed — no spans to fix.
         field_types: _,
+        member_decl_facts,
         return_sites,
         receivers,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
+        language: _,
         names: _,
+        functions: _,
         slot_writes,
         member_writes,
         member_reads,
@@ -1118,13 +1122,16 @@ fn remap_spans(
             name_end,
             package: _,
             scope: _,
+            spelled: _,
+            doc: _,
             pair: _,
             return_type: _,
             deref_stack: _,
             attributes: _,
             arity: _,
-            qualifier_owned: _,
+            owner_stated: _,
             flags: _,
+            member_space: _,
         } = s;
         *start = r(*start);
         *end = r(*end);
@@ -1147,6 +1154,8 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            constructs: _,
+            spaces: _,
             qualifier: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
@@ -1160,7 +1169,10 @@ fn remap_spans(
             *sp = rspan(*sp);
         }
     }
-    for (_, _, span) in var_reads.iter_mut() {
+    for (_, _, span) in var_reads.iter_mut().chain(var_writes.iter_mut()) {
+        *span = rspan(*span);
+    }
+    for span in write_sites.iter_mut().chain(init_sites.iter_mut()) {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after
@@ -1168,6 +1180,7 @@ fn remap_spans(
     // (the same call span) they land beside.
     for site in call_sites.iter_mut() {
         site.span = rspan(site.span);
+        site.callee_at = rspan(crate::model::file_analysis::Span { start: site.callee_at, end: site.callee_at }).start;
         if let Some(recv) = site.receiver.as_mut() {
             *recv = rspan(*recv);
         }
@@ -1175,18 +1188,22 @@ fn remap_spans(
             *arg = rspan(*arg);
         }
     }
+    for site in receiver_sites.iter_mut() {
+        site.span = rspan(site.span);
+    }
     for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
         *span = rspan(*span);
     }
     // Member writes settle through `expr_type_at_span` on the receiver and an
     // edge to the value's `Expr`, both of which speak original coords.
     for w in member_writes.iter_mut() {
-        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
     }
-    for w in place_writes.iter_mut() {
+    for (w, lands) in place_writes.iter_mut() {
         *w = rspan(*w);
+        *lands = r(*lands);
     }
     for n in place_narrowings.iter_mut() {
         let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;
@@ -1230,14 +1247,18 @@ fn remap_spans(
         | WitnessAttachment::Expression(_)
         | WitnessAttachment::Symbol(_)
         | WitnessAttachment::HashKey { .. }
-        | WitnessAttachment::PackageSymbol { .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Returns, .. }
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
-        | WitnessAttachment::Field { .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };
-    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()) {
+    for (_, token, _, _) in member_decl_facts.iter_mut() {
+        *token = r(*token);
+    }
+    let decl_facts = member_decl_facts.iter_mut().map(|(_, _, _, w)| w);
+    for w in witnesses.iter_mut().chain(variable_regions.iter_mut()).chain(decl_facts) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);
@@ -1249,11 +1270,15 @@ fn remap_spans(
             target_name: _,
             target_scope: _,
             target_at,
+            target_token,
             source,
             extraction: _,
             reassigns: _,
         } = fe;
         *target_at = r(*target_at);
+        if let Some(t) = target_token {
+            *t = rspan(*t);
+        }
         *source = rspan(*source);
     }
     for (_, _, span) in label_refs.iter_mut() {
@@ -1515,7 +1540,7 @@ impl LanguageRegistry {
             // answers from cached analyses no driver has built this process.
             for d in &drivers {
                 if let Some(pack) = d.lang_pack() {
-                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                    crate::model::conventions::register_conventions(d.id(), || pack.conventions());
                 }
             }
             LanguageRegistry { drivers }

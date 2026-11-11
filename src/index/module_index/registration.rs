@@ -1408,7 +1408,7 @@ impl ModuleIndex {
             crate::util::ghost_stats::SweepScope::note(&cached.path.to_string_lossy());
             // `PERL_LSP_REHYDRATE_TRACE=N`: dump the first N call stacks that
             // reach here. Three candidate callers were eliminated by counter
-            // (diagnostics, the enrichment chase, the PackageSymbol walk) and
+            // (diagnostics, the enrichment chase, the Member walk) and
             // none of them accounted for a 207k-call term, so stop guessing
             // and let the call name itself.
             {

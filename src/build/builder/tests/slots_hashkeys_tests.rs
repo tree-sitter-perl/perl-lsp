@@ -119,17 +119,14 @@ fn error_text_recovery_does_not_duplicate_a_recovered_sub() {
 // ---- Typed-slot witness (Field) ----
 //
 // These exercise the typed half of the hash-key-write seed in isolation:
-// build a fixture, then query the `Field{owner, name}` attachment
+// build a fixture, then query the `Member{owner, name, Holds}` attachment
 // through the registry.
 
 fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> {
     use crate::model::witnesses::{
         BagContext, FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
     };
-    let att = WitnessAttachment::Field {
-        owner: class.to_string(),
-        name: key.to_string(),
-    };
+    let att = WitnessAttachment::holds_of(class.to_string(), crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, key.to_string());
     let ctx = BagContext {
         scopes: &fa.scopes,
         symbols: fa.symbols(),
@@ -138,6 +135,8 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
         lattice: crate::model::conventions::lattice_for(&fa.language),
+
+        member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
     };
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,
@@ -158,7 +157,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
 fn slot_type_single_typed_write() {
     let src = "package Foo;\nsub init {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\n";
     let fa = build_fa(src);
-    let t = slot_type(&fa, "Foo", "h").expect("Field{Foo,h} should fold");
+    let t = slot_type(&fa, "Foo", "h").expect("Member{Foo, h, Holds} should fold");
     assert_eq!(t.class_name(), Some("Helper"), "got {t:?}");
 }
 
@@ -198,7 +197,7 @@ fn slot_type_keyed_by_owner_class() {
     let foo_h = slot_type(&fa, "Foo", "h").expect("Field keyed by owner class Foo");
     assert_eq!(foo_h.class_name(), Some("Helper"), "got {foo_h:?}");
     // The enclosing-package write lands on Bar, not Foo — no cross-contamination.
-    let bar_h = slot_type(&fa, "Bar", "h").expect("Field{Bar,h} from $self write");
+    let bar_h = slot_type(&fa, "Bar", "h").expect("Member{Bar, h, Holds} from $self write");
     assert_eq!(bar_h.class_name(), Some("Sidecar"), "got {bar_h:?}");
 }
 

@@ -222,7 +222,7 @@ sub run {
                 owner: HandlerOwner::Class("Producer".to_string()),
                 name: "ready".to_string(),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1535,7 +1535,7 @@ app->helper(greet => sub {
 /// that returns a concrete class resolves its RETURN type identically
 /// from the app, the controller, AND a user-written app subclass —
 /// proving the single bridge target + synthetic-parent edge composes with
-/// the PackageSymbol type-resolution walk and that subclasses inherit the
+/// the Member type-resolution walk and that subclasses inherit the
 /// surface for free.
 #[test]
 fn plugin_mojo_helpers_return_type_via_app_surface() {

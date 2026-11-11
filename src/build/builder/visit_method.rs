@@ -133,6 +133,7 @@ impl<'a> Builder<'a> {
                 method_name_span: node_to_span(io.method),
                 member_op: None,
                 named_by_string: false,
+                constructs: false,
             },
             node_to_span(node),
             method.clone(),
@@ -252,7 +253,7 @@ impl<'a> Builder<'a> {
                                 method_name_span,
                                 member_op: None,
                                 named_by_string: false,
-
+                                constructs: false,
                             },
                             node_to_span(node),
                             rname,
@@ -276,7 +277,7 @@ impl<'a> Builder<'a> {
                         method_name_span,
                         member_op: None,
                         named_by_string: false,
-
+                        constructs: false,
                     },
                     node_to_span(node),
                     name.clone(),
@@ -327,7 +328,7 @@ impl<'a> Builder<'a> {
                 // `recv->resultset('Foo')` is closed under syntax: push the
                 // `Parametric` type at the call's `Expression(refidx)`, and
                 // mark the ref so `emit_method_call_return_edges` skips its
-                // standard `Edge(PackageSymbol)` — that edge would resolve to
+                // standard `Edge(Member)` — that edge would resolve to
                 // plain `resultset` and mask the row-class arg.
                 if let Some(ty) = self.extract_resultset_parametric(node) {
                     self.parametric_emitted_refs.insert(idx);
@@ -344,7 +345,7 @@ impl<'a> Builder<'a> {
                     });
 
                     // Symbol-declarative ReturnExpr declarations on
-                    // `PackageSymbol{base, method}` are the single
+                    // `Member{base, method}` are the single
                     // source of truth for the per-flavor projection
                     // table (find → RowOf, etc.). The chain typer's
                     // method-call arm threads the call's invocant as
@@ -358,7 +359,7 @@ impl<'a> Builder<'a> {
                     // A fluent verb (`$rs->search`) returns its invocant's type
                     // UNCHANGED. Edge the call's type to the invocant's rather
                     // than minting one — any invocant type flows through, no
-                    // re-mint (edges-not-values). Skip the standard PackageSymbol
+                    // re-mint (edges-not-values). Skip the standard Member
                     // edge: `search` has no return-type def to resolve through.
                     if let RefKind::MethodCall { invocant_span: Some(inv_span), .. } =
                         self.refs[idx].kind
@@ -759,12 +760,12 @@ impl<'a> Builder<'a> {
                 .is_some_and(|m| self.plugins.fluent_verbs().any(|v| v == m))
     }
 
-    /// Push `ReturnExpr` declarations on `PackageSymbol{base, m}`
+    /// Push `ReturnExpr` declarations on `Member{base, m}`
     /// for every projection method the flavor declares. Called
     /// after each `extract_resultset_parametric` hit so the chain
     /// typer's coderef-edge / dynamic-method / inheritance routes
     /// all see the same answer through the bag's standard
-    /// `PackageSymbol` chase. Latest-wins among duplicates: same
+    /// `Member` chase. Latest-wins among duplicates: same
     /// `(base, method)` pair seen twice (two `resultset(...)` calls
     /// in one file) re-publishes the same ReturnExpr — the
     /// reducer's content equality on Operator(RowOf(Receiver))
@@ -786,10 +787,7 @@ impl<'a> Builder<'a> {
         };
         for (method_name, return_expr) in p.return_method_declarations() {
             self.push_witness(crate::model::witnesses::Witness {
-                attachment: crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                    package: base_class.clone(),
-                    name: method_name.to_string(),
-                },
+                attachment: crate::model::witnesses::WitnessAttachment::returns_of(base_class.clone(), method_name.to_string()),
                 source: crate::model::witnesses::WitnessSource::Builder(
                     "parametric_return_expr".into(),
                 ),

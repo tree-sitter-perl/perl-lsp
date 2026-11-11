@@ -11,11 +11,9 @@ core machinery. The resolution seam it feeds: `docs/adr/resolution-candidate-set
 
 ## Residual forward work — each a separate careful change
 
-1. **Full `LangCfg`→`LangPack` fold.** The correctness (Python call kind) is
-   already fixed via `call_kinds`/`simple_var_kinds`. Merging `member_kinds`
-   is blocked on generalizing the cpp-grammar-coupled `member_access_sites`
-   op-DX walk to python's `attribute` node + an explicit `operator_correctable`
-   flag — else a naive merge risks a python op-DX regression. The cpp
+1. **Full `LangCfg`→`LangPack` fold.** Member accesses and calls are the
+   document's (`CursorDocument`), so `member_kinds` / `call_kinds` are gone;
+   `simple_var_kinds` is what remains for the op-DX walk. The cpp
    `recv_wrapper_kinds` (LangPack) / `wrapper_kinds` (LangCfg) overlap dedups
    in the same move.
 2. **Layering-test LSP-layer teeth.** `backend.rs`/`symbols.rs` should name no

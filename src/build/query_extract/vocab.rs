@@ -44,6 +44,11 @@ spelled! {
         Var = "var",
         /// A parameter or block local.
         Local = "local",
+        /// A variable declared by being written (php's `$x = …`, python's
+        /// and R's `x = …`): the first such def of a name in its callable is
+        /// the declaration, unless a declaration the write reaches is
+        /// already in force; every other one is a write of that declaration.
+        Assigned = "assigned",
         /// A struct/class data member.
         Field = "field",
         /// An instance slot: a key of the per-instance store a write through
@@ -67,19 +72,30 @@ spelled! {
 spelled! {
     /// What a `@mark.<flag>` states about the declaration whose NAME token
     /// it captures. The document says it in a pattern of its own, so a
-    /// modifier in any order, a keyword that is not the flag's spelling
-    /// (`private` → non-public) and a fact about a class read off its body
-    /// all reach the symbol as the flag `flag` names.
+    /// modifier in any order, a keyword stated somewhere else (a `readonly
+    /// class` makes each property readonly) and a fact about a class read
+    /// off its body all reach the symbol as the flag `flag` names.
     pub enum MarkCap {
         Static = "static",
         Abstract = "abstract",
-        NonPublic = "non_public",
+        /// Where a member may be named from (php `private` / `protected`).
+        Private = "private",
+        Protected = "protected",
         Constructor = "constructor",
         Contract = "contract",
         DynamicMembers = "dynamic_members",
         /// A preprocessor macro the document mints under another def kind
         /// (an object-like `#define` is a constant, so a `Variable`).
         Macro = "macro",
+        /// A storage slot its class makes write-once (a property of a php
+        /// `readonly class`).
+        Readonly = "readonly",
+        /// Where a storage slot may be written from, stated apart from
+        /// where it may be read (php `public(set)` / `protected(set)` /
+        /// `private(set)`).
+        SetPublic = "set_public",
+        SetProtected = "set_protected",
+        SetPrivate = "set_private",
     }
 }
 
@@ -87,6 +103,9 @@ spelled! {
     /// What a `@ref.<kind>` refers through.
     pub enum RefCap {
         Call = "call",
+        /// A name an import binds (python's `from m import Foo`): a
+        /// reference to the def it names, as a call's is, that calls nothing.
+        Import = "import",
         Method = "method",
         /// A member token READ as a value (`recv.field` / `recv->field`);
         /// joins `@member.recv` by match.
@@ -99,6 +118,9 @@ spelled! {
         Key = "key",
         /// `goto LABEL`.
         Label = "label",
+        /// A token naming the object the enclosing method runs on (php's
+        /// `$this`): a read of that receiver, bound to the method.
+        Receiver = "receiver",
     }
 }
 
@@ -110,6 +132,10 @@ spelled! {
         Sub = "sub",
         /// A sub body whose bare names may elide the member receiver.
         SubImplicitReceiver = "sub.implicit_receiver",
+        /// A sub body that sees no variable of the scopes around it but the
+        /// ones it captures (`@closure.capture`): php's functions, methods
+        /// and closures.
+        SubClosed = "sub.closed",
         /// A scope whose names are in force only for code written
         /// DIRECTLY in it: a callable nested inside looks a name up in the
         /// scopes around the scope, never in it. Python's class body says
@@ -162,6 +188,12 @@ spelled! {
         /// The name an import binds in place of its own leaf
         /// (`use A\B as C`), joined to the import name by match.
         Alias = "alias",
+        /// The import name binds in the language's function table, apart
+        /// from its classes (php's `use function`), joined by match.
+        Function = "function",
+        /// The import name binds in the language's constant table (php's
+        /// `use const`), joined by match.
+        Constant = "constant",
     }
 }
 
@@ -177,8 +209,13 @@ spelled! {
 
 spelled! {
     pub enum FlowCap {
-        /// The assignment node (pattern anchor).
+        /// The assignment node of a write that replaces its target's value:
+        /// every target of the match is written at the node's end, once the
+        /// value has been read, and everything believed about it before
+        /// dies there.
         Assign = "assign",
+        /// A name the value binds. A def's own name token binds where the
+        /// def does (a property's at its class body).
         Target = "target",
         Source = "source",
         /// A rebind with no direct inflowing value: a loop variable, which
@@ -192,6 +229,10 @@ spelled! {
         /// class `obj` is). A name's place is its binding, which `Target`
         /// writes and rebinds.
         Place = "place",
+        /// A place its write fills only while it holds nothing (php `??=`):
+        /// the write initialises it, never overwrites it. The place's own
+        /// `Place` capture makes it a write.
+        Init = "init",
     }
 }
 
@@ -212,12 +253,28 @@ pub enum ExprCap {
     Call,
     Lit(LitKind),
     ReadVar,
+    /// The name token of a variable read whose node also spells a sigil
+    /// (php's `x` in `$x`): the reference is the name, the value the node.
+    ReadVarName,
     ReturnValue,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
     /// A member value read (`recv.field`): its `@member.recv` and
     /// `@ref.member.value` share the match.
     Member,
+    /// A construction (`new Foo(…)`): a call of the constructor of the
+    /// class its `@member.recv` names, on the match's arguments, whose
+    /// value is an instance of that class. The constructor is the member
+    /// flagged `@mark.constructor` in that class's MRO, asked by role where
+    /// the class is known; the site never names it.
+    Construct,
+    /// An expression whose value is the class its match's `@receiver.*`
+    /// token names (php's `Foo::class`).
+    Class,
+    /// A node whose value is its one content's (`(x)`): its
+    /// `@expr.wrapper.inner` shares the match.
+    Wrapper,
+    WrapperInner,
 }
 
 spelled! {
@@ -225,7 +282,42 @@ spelled! {
 }
 
 spelled! {
-    pub enum NarrowCap { Var = "var", Type = "type", Guard = "guard", Arm = "arm" }
+    /// A guard's parts. An atom is a match naming its subject (`var`) and
+    /// what it proves (`is`, `set`, `unset`, on the atom's node);
+    /// connectives and positions are matches of their own, joined to the
+    /// atoms they hold by containment.
+    pub enum NarrowCap {
+        /// The subject the atom is about.
+        Var = "var",
+        /// The type an `is` atom names.
+        Type = "type",
+        /// The subject is the class `@narrow.type` names where the atom
+        /// holds, or with none, what its declared type holds engaged (the
+        /// pack's `narrow_guard`); its failure proves nothing.
+        Is = "is",
+        /// The subject holds a value where the atom holds, the null value
+        /// where it fails.
+        Set = "set",
+        /// `set` with the polarity swapped.
+        Unset = "unset",
+        /// A condition that holds where its operand fails.
+        Not = "not",
+        /// A condition that holds where each operand holds.
+        And = "and",
+        /// A condition that fails where each operand fails.
+        Or = "or",
+        /// A condition that holds where its one operand does (`(…)`).
+        Group = "group",
+        /// The condition a position match's arms are taken on.
+        Cond = "cond",
+        /// What runs where the condition holds.
+        Then = "then",
+        /// What runs where the condition fails.
+        Else = "else",
+        /// A statement that leaves its block unless the condition fails: the
+        /// rest of the block runs where it fails.
+        Exit = "exit",
+    }
 }
 
 spelled! {
@@ -240,6 +332,10 @@ spelled! {
         /// a class, and its operator can be checked by its name.
         RecvName = "recv.name",
         Op = "op",
+        /// A call through this receiver runs on the calling method's own
+        /// receiver: the token says only where the lookup starts (php's
+        /// `self::m()` and `parent::m()`, which forward the called class).
+        Forward = "forward",
     }
 }
 
@@ -255,6 +351,101 @@ impl MemberOpCap {
             MemberOpCap::Arrow => crate::model::file_analysis::MemberOp::Arrow,
             MemberOpCap::Dot => crate::model::file_analysis::MemberOp::Dot,
         }
+    }
+}
+
+spelled! {
+    /// A `#set!` key: a word a pattern carries that no node of the match
+    /// spells.
+    pub enum SettingKey {
+        /// A word written after the member operator the pattern captures
+        /// that names no member (php's `Foo::class`).
+        MemberWord = "member.word",
+    }
+}
+
+/// Every `#set!` a document states uses a key of the vocabulary and gives
+/// it a value, so a misspelt key fails the compile instead of setting
+/// nothing.
+pub(super) fn check_settings(query: &tree_sitter::Query) -> Result<(), String> {
+    for p in 0..query.pattern_count() {
+        for s in query.property_settings(p) {
+            if SettingKey::parse(&s.key).is_none() || s.value.is_none() {
+                let at = query.start_byte_for_pattern(p);
+                return Err(format!("unknown setting #set! {} (pattern at byte {at})", s.key));
+            }
+        }
+    }
+    Ok(())
+}
+
+spelled! {
+    /// A receiver token that names a class rather than holding a value the
+    /// file types: the token's value is that class, and a call on it
+    /// dispatches there.
+    pub enum ReceiverCap {
+        /// A class spelling (`Foo::m()`), resolved through the use-map.
+        Class = "class",
+        /// The class whose method the token is written in (`self::m()`,
+        /// cpp's `this`).
+        Enclosing = "enclosing",
+        /// The class the call that runs the method is made on (php's
+        /// `$this`, `static::m()`, `new static`): late-bound, like Perl's
+        /// `$self`. Where no call supplies one, the class the method is
+        /// written in.
+        Called = "called",
+        /// The class the enclosing class's `@parent.super` edge names (php's
+        /// `parent`).
+        Super = "super",
+        /// The class the same token anchors the declaration of (php's
+        /// `class` in `new class {…}`).
+        Declared = "declared",
+    }
+}
+
+impl ReceiverCap {
+    /// The token's value, given the class it resolves to.
+    pub fn value(self, class: String) -> crate::model::witnesses::WitnessPayload {
+        use crate::model::witnesses::{ReturnExpr, WitnessPayload};
+        match class_by_site(class, self == ReceiverCap::Called) {
+            ReturnExpr::Concrete(t) => WitnessPayload::InferredType(t),
+            late => WitnessPayload::ReturnExpr(late),
+        }
+    }
+}
+
+spelled! {
+    /// A class a written type names by where it is written, not by its
+    /// spelling. Resolved the way the same `@receiver.*` mark is.
+    pub enum RelativeClass {
+        /// The class it is written in (php's `self`).
+        Enclosing = "enclosing",
+        /// The class the call is made on, the class it is written in where
+        /// no call supplies one (php's `static`).
+        Called = "called",
+        /// The class that class's `@parent.super` edge names (php's `parent`).
+        Super = "super",
+    }
+}
+
+impl RelativeClass {
+    /// What a callable declaring this return returns, given the class the
+    /// mark resolves to.
+    pub fn returns(self, class: String) -> crate::model::witnesses::ReturnExpr {
+        class_by_site(class, self == RelativeClass::Called)
+    }
+}
+
+/// A class named by where it is written: that class, or, late-bound, the
+/// receiver of the call that runs the code (`ReceiverOr`, as Perl's
+/// `$self` and a receiver `bless` are), that class where no call supplies
+/// one.
+fn class_by_site(class: String, late_bound: bool) -> crate::model::witnesses::ReturnExpr {
+    use crate::model::witnesses::ReturnExpr;
+    let named = crate::model::file_analysis::InferredType::ClassName(class);
+    match late_bound {
+        true => ReturnExpr::ReceiverOr(named),
+        false => ReturnExpr::Concrete(named),
     }
 }
 
@@ -352,11 +543,18 @@ spelled! {
 }
 
 /// Whether a `@def.<kind>` capture is the def node, its name token, or
+/// the whole written spelling around a name token that is only part of it
+/// (php's `$x` around `x`): the label the declaration is listed by, or
 /// the receiver a member def is written through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
     Node,
     Name,
+    Spelled,
+    /// The token that opens a def written with no name (php's `class` in
+    /// `new class {…}`): the pack's `default_name` names the def from the
+    /// token's position, and the match's context and parents read that name.
+    Anchor,
     /// The receiver a slot def is written through (python's `self` in
     /// `self.x = …`): the slot belongs to the class the receiver is typed
     /// as at the write.
@@ -367,10 +565,15 @@ pub enum DefPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
-    /// The one name token two defs of this match declare together (python's
+    /// The one name token two defs of this match declare together (php's
+    /// promoted constructor parameter: the property and the local; python's
     /// class-body binding: the class's member and the name the body reads).
     /// They are one declaration, linked each way as `Symbol::declared_with`.
     DefPair,
+    /// The match's def declares in the scope around the one it is written
+    /// in (php's `use (&$x)` creates `$x` in the function around the
+    /// closure).
+    DefHoist,
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
@@ -379,9 +582,16 @@ pub enum Capture {
     /// the reference from the node the document tagged down to that leaf.
     RefSpelled,
     Scope(ScopeCap),
+    /// A variable a closure takes from the scope around it (php's
+    /// `use ($x)`): the closure sees that name through its closed boundary.
+    ClosureCapture,
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
+    /// The base class the language's own parent keyword names (php's
+    /// `extends`): a `Parent` edge the class's `@receiver.super` and
+    /// `@type.super` resolve through.
+    ParentSuper,
     Import(ImportCap),
     Alias(AliasPart),
     MacroAlias(AliasPart),
@@ -406,6 +616,8 @@ pub enum Capture {
     /// (python's `self` parameter) or not (C++ `this`): the object, never a
     /// member and never a class spelling.
     Receiver,
+    /// A receiver token that names its class.
+    NamedReceiver(ReceiverCap),
     /// A fact the document states about the declaration at this name token.
     Mark(MarkCap),
     Arity(ArityCap),
@@ -418,7 +630,11 @@ pub enum Capture {
     Qualifier,
     /// An out-of-line function definition.
     OolDef,
+    /// A callable's declared return type, as written.
     RetType,
+    /// A written type (a declared return, a parameter's or property's
+    /// declared type) that names a class by where it is written.
+    TypeRelative(RelativeClass),
     TypeAnnot,
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
@@ -426,6 +642,16 @@ pub enum Capture {
     SpecPrimary,
     /// An inline namespace's name token.
     NsInline,
+    /// A documentation comment (`@doc`), and the name token of the
+    /// declaration it documents (`@doc.of`), in a match of their own: the
+    /// declaration reads its doc off its name token, as a `@mark.<flag>`.
+    Doc,
+    DocOf,
+    /// A member namespace the declaration or member site at this token
+    /// lives in or may land in, by the pack's own namespace names
+    /// (`@space.<name>`, `@space.<name>.illegal`). Resolved against the
+    /// pack's `MemberSpaces` when its document compiles.
+    Space { id: crate::model::file_analysis::NamespaceId, illegal: bool },
     /// A field typed by an anonymous aggregate.
     AnonAggMember,
     /// The node a pattern's links start from, and the walk they belong to.
@@ -457,28 +683,39 @@ impl Capture {
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
             ["def", "pair"] => C::DefPair,
+            ["def", "hoist"] => C::DefHoist,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
+            ["def", k, "anchor"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Anchor },
             ["def", k, "receiver"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Receiver },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
+            ["scope", "sub", "closed"] => C::Scope(ScopeCap::SubClosed),
+            ["closure", "capture"] => C::ClosureCapture,
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
+            ["parent", "super"] => C::ParentSuper,
             ["import"] => C::Import(ImportCap::Statement),
             ["import", k] if !k.is_empty() => C::Import(ImportCap::parse(k)?),
             ["alias", k] => C::Alias(AliasPart::parse(k)?),
             ["macro", "alias", k] => C::MacroAlias(AliasPart::parse(k)?),
             ["tmpl", k] => C::Tmpl(TmplCap::parse(k)?),
-            ["flow", k] => C::Flow(FlowCap::parse(k)?),
+            ["flow", rest @ ..] => C::Flow(FlowCap::parse(&rest.join("."))?),
             ["expr", "call"] => C::Expr(ExprCap::Call),
             ["expr", "lit", k] => C::Expr(ExprCap::Lit(LitKind::parse(k)?)),
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
+            ["expr", "read", "var", "name"] => C::Expr(ExprCap::ReadVarName),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
+            ["expr", "construct"] => C::Expr(ExprCap::Construct),
+            ["expr", "class"] => C::Expr(ExprCap::Class),
+            ["expr", "wrapper"] => C::Expr(ExprCap::Wrapper),
+            ["expr", "wrapper", "inner"] => C::Expr(ExprCap::WrapperInner),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
@@ -488,6 +725,7 @@ impl Capture {
             ["param", "region"] => C::ParamRegion,
             ["receiver"] => C::Receiver,
             ["mark", k] => C::Mark(MarkCap::parse(k)?),
+            ["receiver", k] => C::NamedReceiver(ReceiverCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", rest @ ..] => C::Member(MemberCap::parse(&rest.join("."))?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
@@ -500,9 +738,12 @@ impl Capture {
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
             ["type", "annot"] => C::TypeAnnot,
+            ["type", k] => C::TypeRelative(RelativeClass::parse(k)?),
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
             ["ns", "inline"] => C::NsInline,
+            ["doc"] => C::Doc,
+            ["doc", "of"] => C::DocOf,
             ["anonagg", "member"] => C::AnonAggMember,
             ["link", "from", w] => C::LinkFrom(LinkWalk::parse(w)?),
             ["deref", "leaf", k] => C::DerefLeaf(DefCap::parse(k)?),
@@ -522,14 +763,19 @@ impl fmt::Display for Capture {
         };
         match *self {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
-            C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
+            C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
+            C::Def { kind, part: DefPart::Anchor } => write!(f, "def.{kind}.anchor"),
+            C::DefPair => f.write_str("def.pair"),
+            C::DefHoist => f.write_str("def.hoist"),
+            C::ClosureCapture => f.write_str("closure.capture"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
             C::Context(k) => write!(f, "context.{k}"),
             C::Parent => f.write_str("parent"),
+            C::ParentSuper => f.write_str("parent.super"),
             C::Import(k) => family(f, "import", k.spelling()),
             C::Alias(k) => write!(f, "alias.{k}"),
             C::MacroAlias(k) => write!(f, "macro.alias.{k}"),
@@ -538,9 +784,14 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Call) => f.write_str("expr.call"),
             C::Expr(ExprCap::Lit(k)) => write!(f, "expr.lit.{k}"),
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
+            C::Expr(ExprCap::ReadVarName) => f.write_str("expr.read.var.name"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
+            C::Expr(ExprCap::Construct) => f.write_str("expr.construct"),
+            C::Expr(ExprCap::Class) => f.write_str("expr.class"),
+            C::Expr(ExprCap::Wrapper) => f.write_str("expr.wrapper"),
+            C::Expr(ExprCap::WrapperInner) => f.write_str("expr.wrapper.inner"),
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Arm => f.write_str("arm"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
@@ -552,6 +803,7 @@ impl fmt::Display for Capture {
             C::MemberOp(k) => write!(f, "member.op.{k}"),
             C::Receiver => f.write_str("receiver"),
             C::Mark(k) => write!(f, "mark.{k}"),
+            C::NamedReceiver(k) => write!(f, "receiver.{k}"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),
@@ -560,10 +812,14 @@ impl fmt::Display for Capture {
             C::Qualifier => f.write_str("qualifier"),
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
+            C::TypeRelative(k) => write!(f, "type.{k}"),
             C::TypeAnnot => f.write_str("type.annot"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),
+            C::Doc => f.write_str("doc"),
+            C::DocOf => f.write_str("doc.of"),
+            C::Space { id, illegal } => write!(f, "space#{}{}", id.0, if illegal { ".illegal" } else { "" }),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),
             C::Deref(k) => write!(f, "deref.{k}"),
@@ -576,10 +832,27 @@ impl fmt::Display for Capture {
 /// A compiled query's capture table, indexed by capture id. `None` marks a
 /// predicate-only capture: tree-sitter's `_` prefix (`@_const` under
 /// `#eq?`) names a node a predicate reads, never one the extractor does.
-pub(super) fn capture_table(names: &[&str]) -> Result<Vec<Option<Capture>>, UnknownCapture> {
+pub(super) fn capture_table(
+    names: &[&str],
+    spaces: &crate::model::file_analysis::MemberSpaces,
+) -> Result<Vec<Option<Capture>>, UnknownCapture> {
     names
         .iter()
-        .map(|n| if n.starts_with('_') { Ok(None) } else { Capture::parse(n).map(Some) })
+        .map(|n| {
+            if n.starts_with('_') {
+                return Ok(None);
+            }
+            // A namespace is the pack's own word, so it resolves against
+            // the pack's declared names, never the closed vocabulary.
+            if let Some(rest) = n.strip_prefix("space.") {
+                let (name, illegal) = match rest.strip_suffix(".illegal") {
+                    Some(name) => (name, true),
+                    None => (rest, false),
+                };
+                return spaces.id_of(name).map(|id| Some(Capture::Space { id, illegal })).ok_or_else(|| UnknownCapture(n.to_string()));
+            }
+            Capture::parse(n).map(Some)
+        })
         .collect()
 }
 
@@ -641,8 +914,17 @@ impl DefCap {
             DefCap::Field => SymKind::Field,
             DefCap::Slot => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
-            DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
+            DefCap::Var | DefCap::Local | DefCap::Assigned | DefCap::Label | DefCap::UnionField => {
+                SymKind::Variable
+            }
         }
+    }
+
+    /// A def every assignment of a name mints (`@def.var`,
+    /// `@def.assigned`): a more specific def at the same token (R's
+    /// `f <- function…` is a sub) stands in for it.
+    pub fn is_general(self) -> bool {
+        matches!(self, DefCap::Var | DefCap::Assigned)
     }
 
     /// The structural marker a def of this kind carries onto
@@ -664,11 +946,16 @@ impl MarkCap {
         match self {
             MarkCap::Static => F::STATIC,
             MarkCap::Abstract => F::ABSTRACT,
-            MarkCap::NonPublic => F::NON_PUBLIC,
+            MarkCap::Private => F::PRIVATE,
+            MarkCap::Protected => F::PROTECTED,
             MarkCap::Constructor => F::CONSTRUCTOR,
             MarkCap::Contract => F::CONTRACT,
             MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
             MarkCap::Macro => F::MACRO,
+            MarkCap::Readonly => F::READONLY,
+            MarkCap::SetPublic => F::SET_PUBLIC,
+            MarkCap::SetProtected => F::SET_PROTECTED,
+            MarkCap::SetPrivate => F::SET_PRIVATE,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 `QueryState` dedups within ONE `ReducerRegistry::query`. A backward
 reference walk issues one such query per candidate call site, and each
-re-derives the same `PackageSymbol{package, method}` lattice from scratch.
+re-derives the same `Member{package, method}` lattice from scratch.
 At 138k files that re-derivation is combinatorial — 5–12 files declare a
 common package name, the chase is keyed by that name rather than by an
 import edge, and it recurses through every provider — and the verb does
@@ -27,7 +27,7 @@ the enrichment body rather than at each call site means no caller can
 enrich without the memo and the budget — a CLI `--completion` that did,
 on FHEM, ran for hours with no deadline to stop it. Nested enters ride
 the open one. While it is open the candidate hops of the class-keyed
-ladder — one ladder, `class_fallback`, for `PackageSymbol`, `Field`,
+ladder — one ladder, `class_fallback`, for `Member`,
 `Param` and `TypeName` — answer from a memo of **candidate
 contributions**: "what does the file at `path` contribute to this query".
 It also shares `visible_def_candidates` (a clone + sort of the whole
@@ -108,7 +108,7 @@ Only the fan-out is bag-free. The ancestry hop reduces the attachment
 re-keyed to each parent on the bag that asked, and a candidate's bag can
 state its parent's member where the asker's cannot: `Base.pm` writes
 `my $self = Grand->new; $self->{_area} = {..}`, which is
-`Field{Grand, _area}`, so `Field{Base, _area}` asked from `Kid.pm`
+`Member{Grand, _area}`, so `Member{Base, _area}` asked from `Kid.pm`
 reaches it only through `Base.pm`'s chase walking ancestry on its own
 bag. A skipped fan-out still walks the ancestry. Keying the whole ladder
 without the bag lost exactly those answers (Znuny's chart `_plotarea`).

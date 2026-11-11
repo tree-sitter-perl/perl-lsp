@@ -370,10 +370,10 @@ fn package_var_our_renames_cross_file() {
 fn rename_name_guard_rejects_empty_and_whitespace() {
     use crate::index::resolve::is_valid_rename_name;
     for bad in ["", " ", "   ", "\t", "$", "@", "%", "$ ", "  @  "] {
-        assert!(!is_valid_rename_name(bad), "should reject {bad:?}");
+        assert!(!is_valid_rename_name(bad, &crate::model::conventions::PERL_SPELLINGS), "should reject {bad:?}");
     }
     for ok in ["dim", "foo_bar", "$scalar", "@list", "%map", "RENAMED"] {
-        assert!(is_valid_rename_name(ok), "should accept {ok:?}");
+        assert!(is_valid_rename_name(ok, &crate::model::conventions::PERL_SPELLINGS), "should accept {ok:?}");
     }
 }
 
@@ -419,6 +419,31 @@ fn package_var_array_hash_globals_rename_name_tail_only() {
         let slice = &line[e.span.start.column..e.span.end.column];
         assert_eq!(slice, "items", "rewrite only the name tail, got {slice:?} in {line:?}");
     }
+}
+
+/// Every site a package global's rename collects is its name token, so a
+/// sigil typed on the new name is the language's, not the edit's: `$verbose`
+/// writes `verbose`, never `$$verbose` or `$Cfg::$verbose`.
+#[test]
+fn package_var_rename_writes_the_name_past_a_typed_sigil() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let store = OpenDocs::new();
+    let lib = PathBuf::from("/tmp/pvs_cfg.pm");
+    let app = PathBuf::from("/tmp/pvs_app.pl");
+    let lib_src = "package Cfg;\nour $debug = 0;\nsub on { $debug = 1 }\n1;\n";
+    let app_src = "use Cfg;\nprint $Cfg::debug;\n";
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(lib.clone(), Arc::new(parse(lib_src)));
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
+    let at = tree_sitter::Point { row: 1, column: 6 };
+    let cs = crate::index::resolve::resolve(&store, &lib_fa, FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(lib.clone())), at, Some(&idx), OverrideScope::default());
+    let edits = cs.rename_edits("$verbose").unwrap();
+    assert_eq!(edits.len(), 3, "{edits:?}");
+    assert!(edits.iter().all(|(_, text)| text == "verbose"), "{edits:?}");
 }
 
 /// A `main` package global unifies its spellings *within its file* — decl, bare
@@ -500,7 +525,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     // Hierarchy (default): Base::shared's family includes the Child override,
     // so a rename reaches Child's file.
     let h = TargetRef::method(
-        "shared".to_string(), "Base".to_string(), Some(MemberKind::Callable), &base_fa, Some(&idx), OverrideScope::Hierarchy,
+        "shared".to_string(), "Base".to_string(), Some(MemberKind::CALLABLE), &base_fa, Some(&idx), OverrideScope::Hierarchy,
     );
     assert!(
         h.method_classes.iter().any(|c| c == "Child"),
@@ -517,7 +542,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     // Dispatch: precise — the chain stops at the defining class, so the Child
     // override is NOT pulled into Base::shared's family.
     let d = TargetRef::method(
-        "shared".to_string(), "Base".to_string(), Some(MemberKind::Callable), &base_fa, Some(&idx), OverrideScope::Dispatch,
+        "shared".to_string(), "Base".to_string(), Some(MemberKind::CALLABLE), &base_fa, Some(&idx), OverrideScope::Dispatch,
     );
     assert!(
         !d.method_classes.iter().any(|c| c == "Child"),
@@ -556,7 +581,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "beta".to_string(),
         kind: TargetKind::Sub { package: Some("Exp".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let src_refs = refs_to(&store, Some(&idx), &src, RoleMask::EDITABLE);
     assert!(hit(&src_refs, &exp), "source def missing: {:?}", src_refs);
@@ -567,7 +592,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "rb".to_string(),
         kind: TargetKind::Sub { package: Some("Consumer".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let alias_refs = refs_to(&store, Some(&idx), &alias, RoleMask::EDITABLE);
     assert!(hit(&alias_refs, &cons), "alias `-as` value + call missing: {:?}", alias_refs);
@@ -1232,7 +1257,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
             owner: crate::model::file_analysis::HandlerOwner::Class("App".to_string()),
             name: "connect".to_string(),
         },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");
 
@@ -1467,7 +1492,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "fetch".to_string(),
         kind: TargetKind::Method { class: "My::Role".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let origin = parse("package Probe;\n1;\n");
     let results = implementations_of(&origin, Some(&idx), &target);
@@ -1521,7 +1546,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "save".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
@@ -1631,7 +1656,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "save".to_string(),
         kind: TargetKind::Sub { package: Some("Base".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)

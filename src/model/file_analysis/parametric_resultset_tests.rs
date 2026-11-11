@@ -367,7 +367,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Users".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -493,7 +493,7 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
             kind: TargetKind::Method {
                 class: "Schema::Result::Users".to_string(),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -811,7 +811,7 @@ sub action {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -828,7 +828,7 @@ sub action {
 
 /// **Composition: cross-file `\&Foo::bar` reference as helper
 /// callback.** The helper plugin synthesizes a Method whose return
-/// edges to `PackageSymbol{package: "Producer", name: "build_rs"}`.
+/// edges to `Member{package: "Producer", name: "build_rs"}`.
 /// The bag's existing edge-chase resolves it through `module_index`
 /// — no consumer-side branching on whether the named sub lives
 /// in this file or another. If column-key resolution still works,
@@ -882,7 +882,7 @@ sub action {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -892,7 +892,7 @@ sub action {
         consumer_hit,
         "Mojo helper with `\\&Foo::bar` named-sub reference must compose \
          cross-file: the helper's return edge points at \
-         PackageSymbol{{class: Producer, name: build_rs}}, the bag \
+         Member{{class: Producer, name: build_rs}}, the bag \
          chases that through module_index to find the row class, and \
          column-key resolution finds the call site. hits: {:?}",
         refs.iter().map(|r| (&r.key, r.span.start.row)).collect::<Vec<_>>(),

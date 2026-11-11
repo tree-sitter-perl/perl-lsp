@@ -179,9 +179,9 @@ companion receiver-relative return-type pillar. The summary:
 shapes; `ReturnExprReducer` substitutes `q.receiver` for
 `Receiver` placeholders and dispatches `UnionOnArgs` against
 `q.arity_hint`. DBIC `find` / `single` / etc. declare
-`Operator(RowOf(Receiver))` on `PackageSymbol{base, method}`,
+`Operator(RowOf(Receiver))` on `Member{base, method}`,
 collapsing the per-call-site projection emitter; Mojo `has`
-declares `UnionOnArgs` on `PackageSymbol{package, name}`, retiring
+declares `UnionOnArgs` on `Member{package, name}`, retiring
 `FluentArityDispatch` and `TypeObservation::ArityReturn`.
 
 The deferred `Plugin` escape hatch and nested-hash-key tiers

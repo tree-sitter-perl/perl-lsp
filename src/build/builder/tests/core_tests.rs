@@ -883,7 +883,7 @@ fn test_hash_element_extracted_to_scalar_is_not_container_class() {
 }
 
 /// A4 end-to-end (Step 3 consume join): a typed write into a slot, extracted
-/// to a scalar, types the scalar via `Field` — so a method call on it
+/// to a scalar, types the scalar via its `Holds` member — so a method call on it
 /// resolves. Helper is defined here so resolution can complete (contrast the
 /// honest-miss pin above, where it isn't).
 #[test]

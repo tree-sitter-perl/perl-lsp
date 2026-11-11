@@ -27,7 +27,15 @@ directions cannot disagree.
 `Capture::parse` turns a name into a `Capture`. Nothing else reads a
 capture name: the driver, the pack hooks and the projection all match on
 the enum. A pack hook that depends on a kind takes the typed kind
-(`default_name: fn(DefCap)`).
+(`default_name: fn(DefCap, Point)`).
+
+No literal is read back out of the document. A construction
+(`@expr.construct`) never names its constructor: it keys on the class its
+receiver spells, and the constructor is whichever member of that class's
+MRO carries the `CONSTRUCTOR` flag `@mark.constructor` mints
+(`MemberKey::Constructor`). The `#eq?` that picks the constructor's name
+stays in the document, where the grammar can check it, and nothing on the
+Rust side spells it a second time.
 
 ## Decision: the vocabulary is checked when the query compiles
 
@@ -39,6 +47,12 @@ document fails that pack's tests instead of extracting nothing.
 
 A name starting with `_` follows tree-sitter's predicate-only convention
 (`@_const` under `#eq?`). It maps to `None`, and the driver never sees it.
+
+A `#set!` directive carries a word no node of the match spells, so its key
+is vocabulary too (`SettingKey`): an unknown key, or one with no value,
+fails the compile. `member.word` is the one key: a word the pattern's
+member operator may be followed by that names no member (php's
+`Foo::class`), which completion offers beside the members.
 
 ## Decision: structural predicates are a closed set too
 
@@ -68,6 +82,130 @@ Ancestry is read by one descent from the walked root
 (`child_with_descendant`), because `Node::parent` descends from the root
 too and would repeat the walk per hop. Only patterns that carry a
 structural predicate pay it.
+
+## Decision: a def's name token and its written spelling are two captures
+
+A def has three parts a document may capture: the node (`@def.<kind>`), its
+name token (`@def.<kind>.name`), and, when the name token is only part of
+what is written, the whole written spelling (`@def.<kind>.spelled`, php's
+`$x` around `x`), which is the label a listing shows. It is the def-side
+twin of `@ref.spelled`: the token keys and is rewritten, the spelling is
+read.
+
+A declaration's documentation is a match of its own: `@doc` on the comment
+and `@doc.of` on the name token of the declaration it documents, the way a
+`@mark.<flag>` states a fact about a name token. The document says which
+comments document which declarations (php: a `/**` comment directly before
+one); the pack's `doc_text` reads what the comment says. A comment is a
+grammar extra no other capture lands on.
+
+A variable read splits the same way. `@expr.read.var` is the node whose
+value the read is; `@expr.read.var.name`, when the node also writes a sigil
+(php's `$x`), is the token that is the reference, the name the read
+resolves by, and the span a rename rewrites.
+
+`@def.pair` sits on a name token one match declares as two defs (php's
+promoted constructor parameter, a property and a local). It is opt-in on
+the pattern because two defs in one match are a pair only when the
+document says so; the extractor links them as `Symbol::declared_with`.
+
+`@receiver.<kind>` sits on a receiver token whose value is a class, so a
+call on it dispatches there: the token's `Expr` witness is the one store
+of that class, and the call's lookup reads it like any receiver's value.
+`class` names the class it spells (php's `Foo::m()`, through the use-map);
+`enclosing` names the class of the method the token is written in (php's
+`self::`, cpp's `this`), from the one method-class table; `called` is
+late-bound (php's `$this`, `static::`, `new static`): the class the call
+running the method is made on, that method's class where no call says. Its
+value is `ReturnExpr::ReceiverOr(class)`, the shape Perl's `$self` and a
+receiver `bless` take, so the call's receiver substitutes at every call
+site. Which tokens these are is the document's: the extractor holds no
+receiver spelling. Bare `@receiver` is the declared receiver, a parameter
+(python's `self`). `@member.forward` beside a call's `@member.recv` says
+the call runs on the calling method's own receiver, the token naming only
+the class its lookup starts at (php's `self::m()` and `parent::m()`, which
+forward the called class).
+
+`@rettype` is a callable's declared return, captured in the def's match.
+`@type.enclosing` sits on any written type (a return, a parameter's or
+property's `@type.annot`) the document says names the class it is written
+in rather than a class by its spelling (php's `self`); `@type.called` one
+naming the class the call is made on (php's `static`), so a callable
+declaring it returns `ReceiverOr` of the class it is written in;
+`@type.super` one naming the class that class's `@parent.super` edge names
+(php's `parent`). Each is a pattern of its own, joined to the writing
+site's capture by span. `@parent.super` is a `@parent` edge the document
+marks as the one its parent keyword names (php's `extends`, not an
+`implements` or a trait `use`).
+
+`@expr.wrapper` sits on a node whose value is its one content's
+(`@expr.wrapper.inner`, parentheses in every pack): its `Expr` is an edge
+to the content's, so a source or a receiver written in parentheses reads
+what it wraps. A value merely inside a source (an argument, an operand) is
+never the source's.
+
+## Decision: a function-scoped variable is declared by its first write
+
+A language whose variables belong to their function rather than a block
+(php, python, R) has no declaration syntax: `$x = …` declares `$x` when no
+declaration the write reaches is in force, and is a write of that
+declaration otherwise. The document says so per pattern: `@def.assigned`
+marks such a write. After dedup, `defs::unify_assigned` walks those defs
+in source order; the first one per name that reaches nothing is the
+declaration, re-anchored to the callable around it (`callable_reach`, or
+the file), and is visible from the top of that body, so a read above it in
+a loop reaches it. Every other one becomes a `var_writes` row, minted as a
+`Variable` ref with `AccessKind::Write`. The declaration carries
+`SymbolFlags::SCOPE_WIDE`. One rule, the model's `variable_use`
+(`model/file_analysis/dispatch.rs`, with `latest_in_force` per scope),
+answers the unification, the writes and the reads for every language: each
+binder mints its refs from it and `FileAnalysis::variable_binding` /
+`resolve_variable` answer by name from it, over the declarations
+`Symbol::variable_decl` states. It walks two chains of the model's: a read
+looks along `variable_lookup_chain`, which a closed
+body ends unless it captures the name; a write along `write_lookup_chain`,
+which any callable ends unless it captures the name, because assigning a
+name a python or R closure reads from around it makes a local. The
+model's type queries take the read chain too, so a closed body answers no
+type for a variable around it.
+
+`@scope.sub.closed` is a callable body that sees no variable of the code
+around it (php's functions, methods and closures; an arrow function is a
+plain `@scope.sub` and sees the enclosing function's): `Scope::closed`.
+`@closure.capture` is a name such a body takes from around it (`use
+($x)`), on `Scope::captures`: the chain continues past the closed body for
+that name alone.
+`@def.hoist` files the match's def in the scope around the one it is
+written in, so `use (&$x)` declares `$x` in the enclosing function when it
+does not exist yet.
+
+`@flow.place` is the left side of an assignment. When its own read
+projects a member (`$o->p`, `self.p`), that member takes the value and its
+token is written, not read.
+
+## Decision: a member operator states what it reaches
+
+`@member.op` sits on the operator token of a member access's match.
+`@member.op.<which>` names the model's `MemberOp` on it, and `@space.<name>`
+on it names a namespace a member written after the operator lives in
+(php's `->`: methods and properties; `::`: methods and constants). On a
+member's name token `@space.<name>` is the namespaces the access searches;
+on its operator it is the namespaces the operator reaches, which is what
+completion offers there (`cursor-context-completion.md`). Extraction reads
+neither off the operator. The cursor reads both, with the access's
+receiver and name, off the same document run over its sentinel reparse
+(`CursorDocument`), so no node kind says which node is a member.
+
+## Decision: a def with no name is named from its anchor
+
+`@def.<kind>.anchor` is the token that opens a def written without a name
+(php's `class` in `new class {…}`). The pack's `default_name(kind, at)`
+names it from the anchor's position, so two anonymous classes in a file
+are two classes (`class@anonymous:20:18`), and the def carries the
+`anonymous` attribute. The match's `@context.*` and `@parent` read that
+name, so its members file under it and its parents edge from it.
+`@receiver.declared` on the same token makes the token's value that class.
+A structure-only default (`(anon)`, `(union)`) ignores the position.
 
 ## Decision: a kind's meaning lives on the kind
 
@@ -112,8 +250,9 @@ walk visits sites in preorder, a site's captures by tie rank then match
 order. Beside the tree sits only match → captures, because a match spans
 nodes: every capture a pattern made is one lookup from any other
 (`in_match`). The walk records what it minted on each capture (`Minted`: a
-value witness, a declaring name, a class's identity, a member read's
-projection), so a capture of any match asks the node it names.
+declaring name, a class's identity, a member read's projection, the row a
+def's written return settles), so a capture of any match asks the node it
+names.
 
 A handler therefore keeps no join table. The state a family keeps is only
 what the walk alone knows when it reaches an event: the scope a target
@@ -235,14 +374,14 @@ sealed baseline with `FileAnalysis::adopt_witnesses`). A
 member the file declares on that class or an ancestor takes the write
 into its declaration's `Variable`, as a variable takes one, so a declared
 type outranks what flows in. Any other member — an instance slot, or one
-declared in another file — takes it on `Field{owner, name}`, the
+declared in another file — takes it on `Member{owner, name}`, the
 attachment a C++ or php member declaration's value rides and a member
 read's `ValueHop` chases, where each write is an arm and the arms agree
 as a hash slot's writes do: two classes are no answer. The witness spans
 the class body, as a declaration's does, so a method above `__init__`
 reads what `__init__` writes.
 `TODO(member-write-declared-elsewhere)`: a write to a member declared in
-another file lands on the writer's `Field` and shadows the declared type
+another file lands on the writer's `Member` and shadows the declared type
 until the declaration is decided with the index.
 
 `TODO(slot-owner-deferred)`: an owner only the index can name (a receiver

@@ -140,7 +140,7 @@ impl FileAnalysis {
     /// baseline counts. Called by `builder::build` after the witness
     /// bag has been moved in.
     ///
-    /// `Symbol(sym_id)` and `PackageSymbol{package, name}` return-type
+    /// `Symbol(sym_id)` and `Member{owner, name}` return-type
     /// witnesses for every local Sub/Method are already in the bag —
     /// published by `Builder::write_back_sub_return_types` at the
     /// end of the worklist (single emission point for "this sub's
@@ -155,7 +155,7 @@ impl FileAnalysis {
     ///
     /// What does NOT survive, and is easy to assume otherwise: a sub's RETURN
     /// TYPE. The fold's conclusion is published by
-    /// `write_back_sub_return_types` as a `PackageSymbol{..} -> Edge(Symbol(id))`
+    /// `write_back_sub_return_types` as a `Member{..} -> Edge(Symbol(id))`
     /// witness — in the bag, by the "edges, not values" invariant, since
     /// materialising it into a field would be the parallel store the worklist
     /// rules forbid. There is no `return_types` field to fall back on. So
@@ -319,7 +319,7 @@ impl FileAnalysis {
         let mut out: Vec<String> = Vec::new();
         for att in self.witnesses.attachments() {
             match att {
-                WitnessAttachment::PackageSymbol { package, name } => {
+                WitnessAttachment::Member { owner: package, name, aspect: crate::model::witnesses::MemberAspect::Returns, .. } => {
                     // A class with LOCAL parent edges (declared or dynamic)
                     // fails the pre-filter open at the gate battery for
                     // EVERY name, so its entries here would be dead weight —
@@ -341,7 +341,7 @@ impl FileAnalysis {
                         out.push(name.clone());
                     }
                 }
-                WitnessAttachment::Field { name: key, .. } => {
+                WitnessAttachment::Member { name: key, aspect: crate::model::witnesses::MemberAspect::Holds, .. } => {
                     if !ref_keys.contains(key)
                         && !ref_keys.contains(&super::name_match_key(key, self.names()))
                     {
@@ -474,16 +474,12 @@ impl FileAnalysis {
             // shared resolve leaves it in the session's receiver memo for the
             // readers after this stamp; what goes on the ref is below.
             let (classes, source) = self.resolve_receiver_shared(r, module_index);
-            let member = r.unqualified_target_name(self.names());
             let arms = classes
                 .into_iter()
                 .map(|cn| {
-                    let resolved = match &r.kind {
-                        RefKind::FieldAccess { .. } => {
-                            self.resolve_field_in_ancestors(&cn, member, module_index)
-                        }
-                        _ => self.resolve_method_in_ancestors(&cn, member, module_index),
-                    };
+                    let want = MemberKind::of_ref(&r.kind).unwrap_or(MemberKind::CALLABLE);
+                    let resolved =
+                        self.resolve_member_key_in_ancestors(&cn, r.member_key(self.names()), module_index, want);
                     match resolved {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,
@@ -546,7 +542,7 @@ impl FileAnalysis {
             }
             // Hover asks one question twice. `resolve_method_in_ancestors`
             // climbs to the DEFINING class; `find_method_return_type` then
-            // asks `PackageSymbol{access_class, name}`, whose reducer climbs
+            // asks `Member{access_class, name}`, whose reducer climbs
             // the same ancestry again inside the registry. Two walkers, one
             // question — and the second is handed the access class even
             // though the first already named the owner.
@@ -693,10 +689,7 @@ impl FileAnalysis {
                             // carry its OWN witness for this method, which the
                             // owner anchor then discards?
                             let local_att =
-                                crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                                    package: cn.clone(),
-                                    name: name.to_string(),
-                                };
+                                crate::model::witnesses::WitnessAttachment::returns_of(cn.clone(), name.to_string());
                             crate::util::ghost_stats::count(
                                 if self.witnesses.for_attachment(&local_att).is_empty() {
                                     "owner.lost.no_local_witness_on_access"
@@ -720,10 +713,7 @@ impl FileAnalysis {
                             );
                             // Owner anchor + the ACCESS class's framework: does
                             // restoring that one fact recover the answer?
-                            let att = crate::model::witnesses::WitnessAttachment::PackageSymbol {
-                                package: owner.clone(),
-                                name: name.to_string(),
-                            };
+                            let att = crate::model::witnesses::WitnessAttachment::returns_of(owner.clone(), name.to_string());
                             let ctx = self.bag_context(module_index);
                             let q = crate::model::witnesses::ReducerQuery {
                                 attachment: &att,
@@ -782,7 +772,21 @@ impl FileAnalysis {
             // session memo's.
             let edge_only = module_index.is_some() && target.single().is_none();
             if !keeps_old && !edge_only {
+                // A construction's token names the class it constructs, so
+                // the site is retrieved under the class its receiver's value
+                // settles to (`new $cls` as much as `new Foo`), decided here
+                // where that value is settled. A receiver of several classes
+                // keeps the token's spelling.
+                // TODO(construction-union-retrieval): one key cannot carry a
+                // union, so such a site is retrieved by no constructor.
+                let class = match self.refs[i].constructs() {
+                    true => target.single().map(|t| t.invocant_class().to_string()),
+                    false => None,
+                };
                 self.refs[i].bind_receiver(target);
+                if let Some(class) = class {
+                    self.refs.rekey(i, class, &self.pack.names);
+                }
             }
         }
     }

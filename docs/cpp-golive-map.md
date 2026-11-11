@@ -32,7 +32,7 @@ import (`use`), field slot = one shared subject. Same machinery, C surface.
   as global subs (delegation returns via Edge).
 - **Semantic tier:** enum members carry their enum (`OP_CONST: opcode`);
   cross-file gd for bare value reads (enum variants + globals); DOMAIN typing
-  (`Field{owner,name}` — the project-wide storage-slot fold; `op_type: opcode`
+  (`Member{owner, name, Holds}` — the project-wide storage-slot fold; `op_type: opcode`
   headline + storage drill-down; bidirectional bridge, 944 sites); Perl fields
   bridged onto the same subject (AttrProjection ∪ Field — source-agnostic
   splat); include-closure visibility (rank-not-filter; same-name TU collision

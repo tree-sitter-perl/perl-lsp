@@ -34,7 +34,7 @@ pub fn pack_completion(
     // cursor-tier entry (`docs/adr/cursor-slots.md`); this adapter only
     // projects it onto LSP items.
     let crate::lsp::cursor_slot::DetectedSlot { slot, .. } =
-        crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, Some(xidx));
+        crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, path.map(|p| p.as_path()), Some(xidx));
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(ty) = receiver.receiver_type.as_ref() {
             // Mode A: the member items carry the operator-swap edit
@@ -42,7 +42,7 @@ pub fn pack_completion(
             // a different operator than was typed. The diagnostic
             // path (Mode B) is the universal fallback.
             if let Some(items) = symbols::member_completion_for_type(
-                analysis, ty, xidx, receiver.op_fix.clone(), point,
+                analysis, ty, xidx, receiver.op_fix.clone(), receiver.offers, &receiver.words, point,
             ) {
                 return (items, false);
             }

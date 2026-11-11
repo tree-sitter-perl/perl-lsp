@@ -73,7 +73,7 @@ pub struct TargetRef {
     /// produced it: a `FieldAccess` cursor or a stored-member declaration
     /// is `Value`, a `MethodCall` cursor or a sub declaration `Callable`,
     /// and a target no cursor or declaration told about is `None` (both).
-    /// The declaring language's `MemberNamespace` decides what each family
+    /// The declaring language's `MemberSpaces` decides what each family
     /// matches (`docs/adr/member-kinds.md`).
     pub member_kind: Option<MemberKind>,
     /// Pack-language visibility identity: the canonical paths of the files
@@ -86,6 +86,12 @@ pub struct TargetRef {
     /// stay mirrored on the SAME key: name + visibility. Empty = no gate
     /// (every Perl target: Perl identity is package/sigil, not closure).
     pub def_paths: Vec<String>,
+    /// For a constructor target, the classes whose constructions may run
+    /// it: the class declaring it and its descendants. A construction's
+    /// reference is keyed by the class it spells, never by the constructor
+    /// (`RefKind::MethodCall::constructs`), so these are where its sites
+    /// are retrieved. Empty for every other target.
+    pub constructed_classes: Vec<String>,
 }
 
 impl TargetRef {
@@ -106,6 +112,24 @@ impl TargetRef {
     ) -> Self {
         let method_classes =
             method_classes_for(origin, &class, &name, member_kind, module_index, scope);
+        // Where a construction is keyed by the class it spells, a
+        // constructor's sites sit under its class and every descendant
+        // that may inherit it, never under its own name.
+        let mut constructed_classes = Vec::new();
+        if crate::model::conventions::conventions_of(&origin.language).construction == ConstructionKey::Class {
+            let constructor = origin
+                .constructor_of(&class, module_index)
+                .filter(|(_, ctor)| *ctor == name)
+                .map(|(defining, _)| defining);
+            if let Some(defining) = constructor {
+                constructed_classes = origin.owned_accessor_family(&defining, module_index);
+                for c in &method_classes {
+                    if !constructed_classes.contains(c) {
+                        constructed_classes.push(c.clone());
+                    }
+                }
+            }
+        }
         TargetRef {
             name,
             names: origin.names().clone(),
@@ -115,7 +139,24 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             member_kind,
+            constructed_classes,
         }
+    }
+
+    /// The name keys a reference to this target can sit under
+    /// (`Ref::match_key`), spelled with `names`: the target's own name and a
+    /// constructor's constructed classes.
+    pub fn retrieval_keys(&self, names: &crate::model::file_analysis::NameSpellings) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut add = |spelling: &str| {
+            let k = crate::model::file_analysis::name_match_key(spelling, names);
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        };
+        add(&self.name);
+        self.constructed_classes.iter().for_each(|c| add(c));
+        keys
     }
 
     /// Build a `Method` target for a class-OWNED synthesized accessor (a Moo
@@ -144,6 +185,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             member_kind: Some(member_kind),
+            constructed_classes: Vec::new(),
         }
     }
 
@@ -164,6 +206,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             member_kind: None,
+            constructed_classes: Vec::new(),
         }
     }
 
@@ -212,7 +255,7 @@ impl TargetRef {
                         origin,
                         class,
                         &name,
-                        Some(MemberKind::Callable),
+                        Some(MemberKind::CALLABLE),
                         module_index,
                         scope,
                     ),
@@ -234,7 +277,8 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
-                    member_kind: Some(MemberKind::Callable),
+                    member_kind: Some(MemberKind::CALLABLE),
+                    constructed_classes: Vec::new(),
                 }
             }
             RenameKind::Method { name, class, member } => {
@@ -399,6 +443,10 @@ pub enum SiteRewrite {
     /// body is not a collected span, so renaming the target would leave the
     /// chain pointing at the old name.
     ThroughMacro,
+    /// A construction (`new Foo`, python's `Foo()`) of a constructor
+    /// target: its token spells the class, so renaming the constructor
+    /// would leave it calling the old name.
+    Construction,
     /// A union receiver's member access (`$pet->sound`, `$pet` a Cat or a
     /// Bird): renaming one class's member here breaks the call for the
     /// classes listed, which the rename would not touch.

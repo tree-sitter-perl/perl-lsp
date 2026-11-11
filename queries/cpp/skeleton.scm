@@ -747,6 +747,11 @@
   arguments: (argument_list) @arity.args) @expr.call
  (#not-is-kind? @member.recv identifier))
 
+; `this` is the object the enclosing method runs on, an instance of the
+; method's class (out-of-line bodies included), never a name to spell a
+; class.
+(this) @receiver.enclosing
+
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.
 (field_expression operator: "->" @member.op.arrow)
@@ -756,7 +761,7 @@
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
 ; OP_FREED` / `o->op_targ = pad_alloc(...)`. @domain.slot is the field access,
 ; @domain.value the other operand — an enumerator carries its `enum`, resolved
-; cross-file at query time, then the sites fold onto `Field{owner,name}`
+; cross-file at query time, then the sites fold onto `Member{owner, name, Holds}`
 ; (op_type → opcode). The value is deliberately UNGATED (`(_)`): a site whose
 ; operand is NOT an enumerator (integer literal, arithmetic, a call) is
 ; counter-evidence in the coherence vote's denominator — capturing only
@@ -855,6 +860,12 @@
 (type_identifier) @ref.type
 
 ; ---- literals + variable reads (the edge-chase substrate) ----
+; Parentheses hold the value they wrap, and so, for the class a member
+; access dispatches on, do `*p` and `&o` (pointer-ness is the declarator
+; stack's, not the type's).
+((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper
+ (#not-is-kind? @expr.wrapper.inner comment))
+(pointer_expression argument: (_) @expr.wrapper.inner) @expr.wrapper
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool
@@ -866,9 +877,6 @@
 (binary_expression
   operator: ["==" "!=" "<" ">" "<=" ">=" "&&" "||"]) @expr.lit.bool
 (identifier) @expr.read.var
-; `this` is the receiver of the method around it: an object of that
-; method's class, never a name to spell a class.
-(this) @receiver
 
 ; `return EXPR;` — the returned expression's OWN span already carries
 ; whatever witness the general rules above minted for its shape (a literal,
@@ -899,12 +907,19 @@
     field: (field_identifier) @_m)
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
-; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
-; FlowEdge (like a declaration's init) so the moved-from region AND the
-; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
+; `x = rhs` writes x once the rhs has read it and replaces what x held, so
+; `x = x.next()` reads the old x on its right.
+; TODO(declared-bounds): the write retires `T x`'s declared type, so an
+; untyped rhs reads unknown (/mnt/project-files/design/php-held-prs/declared-contracts.md).
 (assignment_expression
   left: (identifier) @flow.target
-  right: (_) @flow.source)
+  operator: "="
+  right: (_) @flow.source) @flow.assign
+; A compound write keeps the kind of value x holds.
+(assignment_expression
+  left: (identifier) @flow.rebind
+  operator: _ @_op
+  (#not-eq? @_op "="))
 
 ; An assignment writes the place its left side denotes, whatever that is: a
 ; member read's place is the member of the class its receiver is
@@ -969,80 +984,59 @@
 ; analysis this tier lacks, so parameter moves are not flagged (gate E).
 (parameter_list) @param.region
 
-; A guard narrows the arm it enters, tagged `@narrow.arm`: an `if`'s
-; consequence, a ternary's consequence, the right of `&&`. The pack's
-; narrow_guard maps the guard to the refinement; core attaches it in the
-; guard's scope over the arm, and the edge-driven cutoff ends it at any rebind.
-;
-; `dynamic_cast<Derived*>(b)` narrows b to Derived — the cpp analog of python
-; `isinstance`. A member subject (`o.b`) narrows the place it denotes.
+; Guard narrowing. An atom states what a test proves of its subject, a
+; local or a member (`o.b`): `dynamic_cast<Derived*>(b)` that b is a
+; Derived, pointer-ness dropped for navigation like a local's. A
+; `std::optional<T>` tested as engaged holds a T: no type token rides that
+; test, so the pack's narrow_guard reads the subject's DECLARED type and
+; peels T, and a non-optional subject (`if (ptr)`) declares no inner type
+; and narrows nothing. Engagement is the subject's own truth (`opt`,
+; `!opt`, `opt && …`) or `opt.has_value()`; `!= std::nullopt` is left out.
+((call_expression
+   function: (template_function
+     name: (identifier) @_cast
+     arguments: (template_argument_list
+       (type_descriptor type: (type_identifier) @narrow.type)))
+   arguments: (argument_list [(identifier) (field_expression)] @narrow.var)) @narrow.is
+ (#eq? @_cast "dynamic_cast"))
+((call_expression
+   function: (field_expression
+     argument: (identifier) @narrow.var
+     field: (field_identifier) @_m)) @narrow.is
+ (#eq? @_m "has_value"))
+(condition_clause value: (identifier) @narrow.var @narrow.is)
+(conditional_expression condition: (identifier) @narrow.var @narrow.is)
+(binary_expression left: (identifier) @narrow.var @narrow.is operator: ["&&" "||"])
+(binary_expression operator: ["&&" "||"] right: (identifier) @narrow.var @narrow.is)
+(unary_expression operator: "!" argument: (identifier) @narrow.var @narrow.is)
+(parenthesized_expression (identifier) @narrow.var @narrow.is)
+; A condition built of atoms decides them through its connectives.
+(unary_expression operator: "!") @narrow.not
+(binary_expression operator: "&&") @narrow.and
+(binary_expression operator: "||") @narrow.or
+(parenthesized_expression) @narrow.group
+; Where a condition decides what runs: an `if` body runs where it holds,
+; its `else` where it fails; a ternary yields its consequence or its
+; alternative; the right of `&&` runs where the left holds, of `||` where
+; it fails. An `if` whose body only leaves the block, with no `else`,
+; leaves the rest of the block to run where its condition fails. The
+; edge-driven cutoff ends a narrowing at any rebind.
+(if_statement condition: (condition_clause value: (_) @narrow.cond) consequence: (_) @narrow.then)
+(if_statement condition: (condition_clause value: (_) @narrow.cond) alternative: (_) @narrow.else)
+(conditional_expression condition: (_) @narrow.cond consequence: (_) @narrow.then)
+(conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
+(binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
 (if_statement
-  condition: (condition_clause
-    value: (call_expression
-      function: (template_function
-        name: (identifier) @narrow.guard
-        arguments: (template_argument_list
-          (type_descriptor type: (type_identifier) @narrow.type)))
-      arguments: (argument_list [(identifier) (field_expression)] @narrow.var)))
-  consequence: (_) @narrow.arm)
-(conditional_expression
-  condition: (call_expression
-    function: (template_function
-      name: (identifier) @narrow.guard
-      arguments: (template_argument_list
-        (type_descriptor type: (type_identifier) @narrow.type)))
-    arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
-  consequence: (_) @narrow.arm)
-(binary_expression
-  left: (call_expression
-    function: (template_function
-      name: (identifier) @narrow.guard
-      arguments: (template_argument_list
-        (type_descriptor type: (type_identifier) @narrow.type)))
-    arguments: (argument_list [(identifier) (field_expression)] @narrow.var))
-  operator: "&&"
-  right: (_) @narrow.arm)
-
-; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
-; engaged proves it HOLDS a T inside the arm, so `opt->m` / `*opt` resolve on
-; T there. No type token rides these guards (unlike dynamic_cast) — the pack's
-; narrow_guard reads the subject's DECLARED type (std::optional<T>) and peels T,
-; so the refinement keys on the type being optional, not on the guard name (a
-; bare `if (ptr)` over a non-optional declares no inner type → no narrowing).
-; Two clean engagement shapes: bare truthiness `opt` (no @narrow.guard),
-; and `opt.has_value()` (guard token gates the method — an arbitrary
-; `opt.foo()` won't narrow). `!= std::nullopt` needs both operator + operand
-; checks the one-token hook can't express, so it's left out.
-(if_statement
-  condition: (condition_clause value: (identifier) @narrow.var)
-  consequence: (_) @narrow.arm)
-(conditional_expression
-  condition: (identifier) @narrow.var
-  consequence: (_) @narrow.arm)
-(binary_expression
-  left: (identifier) @narrow.var
-  operator: "&&"
-  right: (_) @narrow.arm)
-(if_statement
-  condition: (condition_clause
-    value: (call_expression
-      function: (field_expression
-        argument: (identifier) @narrow.var
-        field: (field_identifier) @narrow.guard)))
-  consequence: (_) @narrow.arm)
-(conditional_expression
-  condition: (call_expression
-    function: (field_expression
-      argument: (identifier) @narrow.var
-      field: (field_identifier) @narrow.guard))
-  consequence: (_) @narrow.arm)
-(binary_expression
-  left: (call_expression
-    function: (field_expression
-      argument: (identifier) @narrow.var
-      field: (field_identifier) @narrow.guard))
-  operator: "&&"
-  right: (_) @narrow.arm)
+  condition: (condition_clause value: (_) @narrow.cond)
+  consequence: [
+    (return_statement)
+    (throw_statement)
+    (continue_statement)
+    (break_statement)
+    (compound_statement
+      . [(return_statement) (throw_statement) (continue_statement) (break_statement)] .)]
+  !alternative) @narrow.exit
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

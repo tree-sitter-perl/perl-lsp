@@ -36,6 +36,11 @@ pub struct ReceiverCtx {
     pub receiver_type: Option<InferredType>,
     pub receiver_text: Option<String>,
     pub op_fix: Option<(Span, String)>,
+    /// The member namespaces the operator offers (`None`: every one), and
+    /// the words it may be followed by that name no member (php's
+    /// `Foo::class`). Pack languages only.
+    pub offers: Option<crate::model::file_analysis::SpaceSet>,
+    pub words: Vec<String>,
 }
 
 /// The owner of a `Slot::Key` — `$h->{|`'s hash, resolved by type when
@@ -208,6 +213,7 @@ pub fn detect_slot(
     source: &str,
     point: Point,
     language: &str,
+    path: Option<&std::path::Path>,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> DetectedSlot {
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
@@ -226,8 +232,9 @@ pub fn detect_slot(
         return bare_identifier();
     };
     let mut parser = driver.make_parser();
+    let completed = |patched: &str| driver.analyze_with_path(patched, path);
     if let Some(ctx) = crate::build::cursor_sentinel::member_completion_ctx_incremental(
-        &mut parser, &lang_pack, source, tree, cursor, analysis, module_index,
+        &mut parser, &lang_pack, source, tree, cursor, analysis, module_index, &completed,
     ) {
         return DetectedSlot {
             slot: Slot::Member {
@@ -235,6 +242,8 @@ pub fn detect_slot(
                     receiver_type: ctx.receiver_type,
                     receiver_text: None,
                     op_fix: ctx.op_fix,
+                    offers: ctx.offers,
+                    words: ctx.words,
                 },
                 op: ctx.op,
             },
@@ -297,6 +306,8 @@ fn slot_from_cursor_context(ctx: CursorContext) -> DetectedSlot {
                     receiver_type: invocant_type,
                     receiver_text: Some(invocant_text),
                     op_fix: None,
+                    offers: None,
+                    words: Vec::new(),
                 },
                 op: MemberOp::Arrow, // Perl method dispatch is always `->`
             },

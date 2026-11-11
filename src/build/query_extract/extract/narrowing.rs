@@ -1,5 +1,6 @@
 //! `@narrow.*`, `@move.*` and the region captures: guard narrowing over
-//! the arm its guard enters, and `std::move` sites for the use-after-move check.
+//! the arms a condition decides, and `std::move` sites for the use-after-move
+//! check.
 
 use super::*;
 use std::collections::HashMap;
@@ -61,49 +62,159 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     }
 }
 
+/// What an atom proves of its subject.
+enum Atom {
+    /// The subject is this type where the atom holds.
+    Is(InferredType),
+    Set,
+    Unset,
+}
+
+impl Atom {
+    /// What the subject is where the atom evaluates to `holds`. "Not a
+    /// Foo" names no type, so a failed `is` proves nothing.
+    fn proves(&self, holds: bool) -> Option<InferredType> {
+        match (self, holds) {
+            (Atom::Is(t), true) => Some(t.clone()),
+            (Atom::Set, false) | (Atom::Unset, true) => Some(InferredType::Undef),
+            // TODO(narrow-set-strip): a value that is set is its incoming
+            // type without the null, which only a fold over that type knows.
+            (Atom::Is(_), false) | (Atom::Set, true) | (Atom::Unset, false) => None,
+        }
+    }
+}
+
+/// A logical step between an atom and a condition above it.
+#[derive(Clone, Copy)]
+enum Connective {
+    Not,
+    And,
+    Or,
+    Group,
+}
+
+fn connective(e: &Event) -> Option<Connective> {
+    match e.cap {
+        Capture::Narrow(NarrowCap::Not) => Some(Connective::Not),
+        Capture::Narrow(NarrowCap::And) => Some(Connective::And),
+        Capture::Narrow(NarrowCap::Or) => Some(Connective::Or),
+        Capture::Narrow(NarrowCap::Group) => Some(Connective::Group),
+        _ => None,
+    }
+}
+
+/// The value an operand under `path` (nearest the operand first) has
+/// where the condition at its top is `holds`, if the condition fixes it:
+/// `A && B` holding fixes both sides, `A || B` failing fixes both, and the
+/// other two outcomes fix neither side alone.
+fn through(path: &[Connective], mut holds: bool) -> Option<bool> {
+    for c in path.iter().rev() {
+        match c {
+            Connective::Not => holds = !holds,
+            Connective::And if !holds => return None,
+            Connective::Or if holds => return None,
+            Connective::And | Connective::Or | Connective::Group => {}
+        }
+    }
+    Some(holds)
+}
+
+/// The regions match `mid`'s positions cover, each with whether its
+/// condition holds there. An exit's region is the rest of the block it
+/// sits in.
+fn positions(ad: &Adorned<'_, '_>, mid: usize) -> Vec<(Span, bool)> {
+    ad.of_match(mid)
+        .filter_map(|e| match e.cap {
+            Capture::Narrow(NarrowCap::Then) => Some((e.span(), true)),
+            Capture::Narrow(NarrowCap::Else) => Some((e.span(), false)),
+            Capture::Narrow(NarrowCap::Exit) => {
+                let block = ad.tree.node(e.site).enclosing_sites().next()?;
+                Some((Span { start: e.end, end: block.ts().end_position() }, false))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every region the atom on `atom`'s node is known in, with its value
+/// there: the positions of each condition above it that the climb
+/// reaches through connectives alone. An atom under any other node (an
+/// argument of a call) is no part of the condition around that node.
+fn regions_of(ad: &Adorned<'_, '_>, atom: &Event) -> Vec<(Span, bool)> {
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    let node = ad.tree.node(atom.site);
+    for site in std::iter::once(node).chain(node.enclosing_sites()) {
+        let tags = || ad.tags.on(site.id()).map(|ix| &ad.events()[ix]);
+        if site != node {
+            let Some(c) = tags().find_map(connective) else { break };
+            path.push(c);
+        }
+        for cond in tags().filter(|t| t.cap == Capture::Narrow(NarrowCap::Cond)) {
+            out.extend(
+                positions(ad, cond.match_id)
+                    .into_iter()
+                    .filter_map(|(region, holds)| Some((region, through(&path, holds)?))),
+            );
+        }
+    }
+    out
+}
+
 pub(super) fn finish(st: &mut ExtractState) {
     let n = &mut st.narrowing;
     let out = &mut st.out;
-    // A guard narrows the arm it enters. Its type text is the guard's own
-    // `@narrow.type` when it names one (`dynamic_cast<Derived*>`), else the
-    // subject's declared type (the optional-engagement form peels `T` from
-    // it); the guard token is absent for the bare `if (opt)` form.
-    // TODO(pack-exit-guard): no pack guard narrows a false test, so the
-    // early-exit fall-through (`if not isinstance(x, T): return`) waits on a
-    // pack-side negation.
+    // An `is` atom's `@narrow.type` names a class, which the language's
+    // reading of a type spelling may know better (python's `str` is a
+    // string); with none, the subject is what its declared type holds once
+    // the test proves it engaged (the pack's `narrow_guard`: an optional's
+    // inner type). An atom is known where the conditions above it put it.
     let ad = st.adorned;
     let mut subjects = std::mem::take(&mut n.narrow_subjects);
     subjects.sort_by_key(|s| s.0);
     let mut pending = Vec::new();
     for (mid, subject, scope, annot) in subjects {
-        let Some(arm) = ad.in_match(mid, Capture::Narrow(NarrowCap::Arm)) else { continue };
-        let Some(ty) = ad.in_match(mid, Capture::Narrow(NarrowCap::Type)).map(|t| &t.text).or(annot.as_ref()) else {
+        let Some((kind, node)) = [NarrowCap::Is, NarrowCap::Set, NarrowCap::Unset]
+            .into_iter()
+            .find_map(|k| ad.in_match(mid, Capture::Narrow(k)).map(|e| (k, e)))
+        else {
             continue;
         };
-        let guard = ad.in_match(mid, Capture::Narrow(NarrowCap::Guard)).map(|g| g.text.as_str());
-        let Some(refined) = (st.pack.narrow_guard)(guard, ty) else { continue };
+        let atom = match kind {
+            NarrowCap::Is => match ad.in_match(mid, Capture::Narrow(NarrowCap::Type)) {
+                Some(t) => Some((st.pack.annot_type)(&t.text).unwrap_or_else(|| InferredType::ClassName(t.text.clone()))),
+                None => annot.as_deref().and_then(st.pack.narrow_guard),
+            }
+            .map(Atom::Is),
+            NarrowCap::Unset => Some(Atom::Unset),
+            _ => Some(Atom::Set),
+        };
+        let Some(atom) = atom else { continue };
+        let regions = regions_of(ad, node);
         // A member subject (`isinstance(self.x, T)`) narrows its place, which
         // only the assembled analysis can root (`PackPlaces`). So may a bare
         // name: only assembly knows whether it is a local or a member of an
         // elided receiver, and it keeps the place only for the member.
         let node = ad.in_match(mid, Capture::Narrow(NarrowCap::Var));
         let member = node.is_some_and(|v| ad.on_ixs(v).any(|i| st.minted[i].projects.is_some()));
-        if let Some(v) = node {
-            let refined = written_type_at(out, &st.pack.names, refined.clone(), arm.span().start);
-            out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
-                subject: v.span(),
-                refined,
-                region: arm.span(),
-            });
-        }
-        if !member {
-            pending.push((subject, refined, arm.span(), scope));
+        for (region, holds) in regions {
+            let Some(refined) = atom.proves(holds) else { continue };
+            let refined = written_type_at(out, &st.pack.names, refined, region.start);
+            if let Some(v) = node {
+                out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+                    subject: v.span(),
+                    refined: refined.clone(),
+                    region,
+                });
+            }
+            if !member {
+                pending.push((subject.clone(), refined, region, scope));
+            }
         }
     }
     // Each region ends at the first rebind of its subject's binding, which
     // only the assembled analysis knows (`bind_variable_regions`).
     for (name, refined, region, scope) in pending {
-        let refined = written_type_at(out, &st.pack.names, refined, region.start);
         out.variable_regions.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),

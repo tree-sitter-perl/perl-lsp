@@ -42,40 +42,6 @@ pub enum WitnessAttachment {
     /// `Expr` for compound expressions). The per-sub fold reads
     /// `Edge(Expr(span))` arms via `Symbol(sub_id)`.
     Expr(Span),
-    /// An entry in a package's symbol table: "what does `name` resolve to
-    /// in package `package`?" — the cross-package disambiguation a
-    /// name-keyed attachment can't carry. Keyed by a plain package string,
-    /// which is why it is not `MethodOnClass`: the key is a namespace, and
-    /// plenty of packages that own one are not classes.
-    ///
-    /// Inheritance composes through `Edge(PackageSymbol(parent, name))`
-    /// witnesses the builder emits per `package_parents[C]`, so the
-    /// registry's cycle-guarded edge chase walks the MRO with no procedural
-    /// ancestor walker. With a `BagContext.module_index`, the materialize
-    /// step recurses into the cached module's bag for `package`.
-    ///
-    /// **Plugin-facing.** Rhai manifests build this variant by NAME through
-    /// serde, so the variant and field spellings are an API, not an internal
-    /// detail. `MethodOnClass` / `class` stay accepted so a third-party
-    /// `.rhai` written against the old names keeps working.
-    ///
-    /// **`package` is a Rhai reserved keyword — quote it, or write `pkg`:**
-    ///
-    /// ```text
-    /// #{ PackageSymbol: #{ "package": cls, name: m } }   // ok
-    /// #{ PackageSymbol: #{ pkg: cls,      name: m } }    // ok
-    /// #{ PackageSymbol: #{ package: cls,  name: m } }    // WHOLE SCRIPT DIES
-    /// ```
-    ///
-    /// Unquoted, the script fails to COMPILE, so the plugin loads not at all
-    /// — every emission it owns disappears, not just this edge. That is why
-    /// `pkg` is aliased: it is the spelling that cannot be got wrong.
-    #[serde(alias = "MethodOnClass")]
-    PackageSymbol {
-        #[serde(alias = "class", alias = "pkg")]
-        package: String,
-        name: String,
-    },
     /// Per-arm return collector for a sub. Each `return EXPR` arm pushes
     /// one `Edge(Expr(body_span))` here; the parent `Symbol(sub_id)`
     /// carries one `Edge(SymbolReturnArm(_))` so consumers querying the
@@ -106,34 +72,8 @@ pub enum WitnessAttachment {
     /// which keeps a plain struct tag or unknown class resolving to itself.
     /// Cross-file: the alias name is a Class symbol in its defining file,
     /// so `get_cached(name)` recurses into the header's bag (same shape as
-    /// the `PackageSymbol` bridge).
+    /// the `Member` bridge).
     TypeName(String),
-    /// A storage slot — a named field DECLARATION, or an instance slot a
-    /// write creates (Perl's `$obj->{k}`, python's `self.k`) — keyed
-    /// **language-generically** by `{owner, name}` (a C struct member, a
-    /// Corinna `field`, a Moo `has`; NOT `{struct, name}`). Distinct from
-    /// the bag's local subjects (`Variable{name,scope}`, `Expr{span}`):
-    /// every access to the slot, in any scope, folds onto the SAME `Field`
-    /// subject — the IDENTITY is project-wide (the `field_subject` ancestor
-    /// walk converges subtypes on the declaring owner), while the domain
-    /// fold GATHERS per querying file (`FileAnalysis::field_domain_for_owner`
-    /// reads that file's own `domain_sites`; owner-gated per site).
-    /// `DomainCompare` witnesses on this attachment carry the enum a use
-    /// compares/assigns the slot against (or `None` counter-evidence);
-    /// `DomainCoherenceFold` folds them into the slot's DOMAIN type
-    /// (`op_type: uint16_t` storage → `opcode` domain). The domain is a
-    /// defeasible refinement for human surfaces; it never changes the
-    /// storage type that flows. The slot's VALUE rides the same
-    /// attachment: an `Edge(Variable{decl})` the pack extractor pushes per
-    /// field declaration, and an `Edge(Expr(rhs))` per write to a slot no
-    /// declaration in the writing file owns (`$obj->{k} = rhs`,
-    /// `obj.k = rhs`), each an arm `FieldValueReducer` agrees.
-    /// `ProjectionStep::ValueHop` and a class-typed `HashKey` drill chase
-    /// it, and the registry's `Field` fallback walks the owner's candidate
-    /// files and parents the way `PackageSymbol`'s does — a slot a parent
-    /// declares or writes answers a child's read. Kept at the END for bincode
-    /// variant-index stability (bump `EXTRACT_VERSION`).
-    Field { owner: String, name: String },
     /// Parameter `index` of the callable `name` in `package`, AS A BINDING
     /// TARGET: the attachment a call site's argument aliases when the
     /// parameter is declared by reference (php `&$out`, C++ `T&`). The
@@ -149,7 +89,7 @@ pub enum WitnessAttachment {
     /// ("a value flowed here"), because the binding is a fact even when
     /// the callee never types what it leaves behind. Cross-file the
     /// registry walks the callee's candidate files and parents the way
-    /// `Field` does. Kept at the END for bincode variant-index stability
+    /// a `Holds` member does. Kept at the END for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Param { package: String, name: String, index: u32 },
     /// A part of a variable's value (`$self->{a}`, `$h{k}[0]`), named by
@@ -159,6 +99,88 @@ pub enum WitnessAttachment {
     /// is wider than every other attachment, and every witness (and every
     /// payload that names an attachment) is as wide as the widest.
     Place(Box<crate::model::file_analysis::Place>),
+    /// A member of an owner: a class's member, or an entry in a package's
+    /// or namespace's symbol table (plenty of packages that own one are not
+    /// classes). Its identity is `(owner, space, name)`: the owner, the
+    /// language's member namespace it lives in (`MemberSpaces`), and its
+    /// name. The namespace is part of the identity because a member is
+    /// addressed across files by it, where no `SymbolId` reaches: php's
+    /// `const X`, `$X` and `X()` on one class are three members.
+    ///
+    /// `aspect` is the question asked of it. `Returns` is what calling it
+    /// yields: the writeback's `Member{C, m} → Edge(Symbol(sid))`, the
+    /// arity-keyed arms, plugin bridges. `Holds` is the value stored in it:
+    /// a declaration's `Edge` to its declared value, and each write to a
+    /// slot no declaration in the writing file owns, arms
+    /// `FieldValueReducer` agrees. A read asks `Holds` (`ValueHop`), a call
+    /// `Returns`, so python's `obj.m` reads a bound method, never its
+    /// return.
+    ///
+    /// Inheritance composes through `Edge(Member{parent, ..})` witnesses
+    /// the builder emits per parent, and the registry's class ladder walks
+    /// the owner's candidate files and parents for either aspect.
+    ///
+    /// A `Holds` member is also where a slot's DOMAIN is voted:
+    /// `DomainCompare` witnesses carry the enum a use compares or assigns
+    /// it against, and `DomainCoherenceFold` folds them (`op_type:
+    /// uint16_t` storage → `opcode` domain), a refinement for human
+    /// surfaces that never changes the storage type that flows. The
+    /// identity is project-wide; the domain fold gathers per querying file
+    /// (`FileAnalysis::field_domain_for_owner`).
+    ///
+    /// **Plugin-facing.** Rhai manifests build this variant by NAME through
+    /// serde: `#{ Member: #{ owner: cls, name: m } }`. A manifest names no
+    /// namespace or aspect: it states what a call returns, in the namespace
+    /// calls land in untagged (`NamespaceId::CALLABLES`). The old spellings
+    /// (`PackageSymbol` / `MethodOnClass`, owner as `package` / `class` /
+    /// `pkg`) stay aliased, so a manifest written against them still reads.
+    ///
+    /// **`package` is a Rhai reserved keyword**: an old manifest that writes
+    /// it unquoted (`#{ PackageSymbol: #{ package: cls, name: m } }`) fails
+    /// to COMPILE, so the plugin loads not at all — every emission it owns
+    /// disappears, not just this edge. `owner` cannot be got wrong.
+    #[serde(alias = "PackageSymbol", alias = "MethodOnClass")]
+    Member {
+        #[serde(alias = "package", alias = "class", alias = "pkg")]
+        owner: String,
+        #[serde(default)]
+        space: crate::model::file_analysis::NamespaceId,
+        name: String,
+        #[serde(default)]
+        aspect: MemberAspect,
+    },
+}
+
+/// The question a `Member` attachment asks of its member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub enum MemberAspect {
+    /// What calling it yields.
+    #[default]
+    Returns,
+    /// The value stored in it.
+    Holds,
+}
+
+impl WitnessAttachment {
+    /// What calling `name` on `owner` yields, in the namespace calls land
+    /// in untagged.
+    pub fn returns_of(owner: impl Into<String>, name: impl Into<String>) -> WitnessAttachment {
+        WitnessAttachment::Member {
+            owner: owner.into(),
+            space: crate::model::file_analysis::NamespaceId::CALLABLES,
+            name: name.into(),
+            aspect: MemberAspect::Returns,
+        }
+    }
+
+    /// The value stored in member `name` of `owner`, living in `space`.
+    pub fn holds_of(
+        owner: impl Into<String>,
+        space: crate::model::file_analysis::NamespaceId,
+        name: impl Into<String>,
+    ) -> WitnessAttachment {
+        WitnessAttachment::Member { owner: owner.into(), space, name: name.into(), aspect: MemberAspect::Holds }
+    }
 }
 
 impl WitnessAttachment {
@@ -292,7 +314,7 @@ impl WitnessPayload {
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
                     Callee::Value(t) => f(t),
-                    Callee::Method { .. } | Callee::Function { .. } => {}
+                    Callee::Method { .. } | Callee::Function { .. } | Callee::Construct { .. } => {}
                 }
                 if let Some(t) = receiver {
                     f(t);
@@ -397,7 +419,7 @@ pub enum WitnessPayload {
     /// once on the symbol) and arity dispatch (Mojo `has`'s getter/writer
     /// collapse to a single `UnionOnArgs`).
     ///
-    /// Attached to `Symbol(_)` (per-sub) and `PackageSymbol{...}`
+    /// Attached to `Symbol(_)` (per-sub) and `Member{...}`
     /// (class-keyed). Latest wins, so a plugin override re-publishes over
     /// a build-time inference.
     ReturnExpr(ReturnExpr),
@@ -421,7 +443,7 @@ pub enum WitnessPayload {
         base: WitnessAttachment,
         step: ProjectionStep,
     },
-    /// **Domain evidence** for a `Field` slot: a single use-site where the
+    /// **Domain evidence** for a `Holds` member: a single use-site where the
     /// slot interacts with a value operand (a comparison `slot == E`, an
     /// assignment `slot = E`, a `switch(slot){case E}`, a typed-arg
     /// position). `Some(enum)` when the operand resolves to an enumerator
@@ -519,9 +541,17 @@ pub enum Callee {
     /// function. `constructs`: in a language where calling a class
     /// constructs it, the class identity the name spells at the call, so a
     /// class declared under it in another file answers with an instance of
-    /// itself. Kept at the END for bincode variant-index stability (bump
+    /// itself. `fallback`: the name looked up when nothing indexed declares
+    /// `name` — the next a bare spelling may name in its language (PHP's
+    /// unqualified call: the namespace's function, then the global one).
+    /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
-    Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String> },
+    Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String>, fallback: Option<String> },
+    /// A construction (`new Foo(…)`): an instance of the class `lookup`
+    /// names. It runs that class's constructor, the member flagged
+    /// `CONSTRUCTOR` in its MRO, whose name the site never spells. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Construct { lookup: Lookup },
 }
 
 /// Where a named method's lookup starts.
@@ -555,12 +585,12 @@ pub enum ProjectionStep {
     /// answers `None`. Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     Element,
-    /// A member VALUE read (`$this->prop`, `obj->field`): chases
-    /// `Field{owner: the base's class, name: member}` — the storage slot's
-    /// own attachment — never `PackageSymbol`, so a same-named callable's
-    /// return can never answer a value read. Kept at the END for bincode
-    /// variant-index stability (bump `EXTRACT_VERSION`).
-    ValueHop { member: String },
+    /// A member VALUE read (`$this->prop`, `obj->field`): what the member
+    /// `Holds` on the base's class, in the namespaces the site may land in
+    /// (`SpaceAsk::in_order`) — never what a call `Returns`, so a
+    /// same-named callable's return can never answer a value read. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    ValueHop { member: String, spaces: crate::model::file_analysis::SpaceAsk },
     /// The KEY axis of an iterated collection — the pair-form foreach's
     /// first binding (`foreach ($m as $k => $v)`). A `Sequence`'s keys ARE
     /// its positions (`Numeric`); a two-argument parametric instance

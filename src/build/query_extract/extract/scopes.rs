@@ -29,6 +29,14 @@ pub(super) struct State {
     open_sections: OpenSections,
 }
 
+impl State {
+    /// The class `scope` is the own scope of, by the identity its def
+    /// minted: the owner of every member declared directly in it.
+    pub(super) fn class_of(&self, scope: ScopeId) -> Option<&str> {
+        self.class_scopes.get(&scope).map(String::as_str)
+    }
+}
+
 /// Record a namespace section under a use-map: a braced one is its body,
 /// a statement-form one runs to the end of the enclosing scope until the
 /// next one at its depth cuts it short.
@@ -99,13 +107,17 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 id,
                 parent: Some(parent),
                 kind: match scope_cap {
-                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver => ScopeKind::Sub { name: String::new() },
+                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver | ScopeCap::SubClosed => {
+                        ScopeKind::Sub { name: String::new() }
+                    }
                     ScopeCap::Block | ScopeCap::Direct | ScopeCap::Header => ScopeKind::Block,
                 },
                 span: e.span(),
                 package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                closed: scope_cap == ScopeCap::SubClosed,
+                captures: Vec::new(),
                 direct: scope_cap == ScopeCap::Direct,
                 hints: Vec::new(),
             });
@@ -130,8 +142,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Capture::Context(kind) => {
             // Shape the context like a def name (cpp canonicalizes a
             // spec's template spelling) so members' `package` matches
-            // the container Symbol's identity exactly.
-            let text = (pack.shape_name)(&e.text);
+            // the container Symbol's identity exactly. A def named from its
+            // anchor is the context its anchor opens.
+            let anchored = super::defs::anchored_name(st, e.match_id);
+            let text = (pack.shape_name)(anchored.as_deref().unwrap_or(&e.text));
             // A class body's members file under the class's identity, as
             // the class's def minted it.
             let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some()).then(|| {
@@ -151,7 +165,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
-                let value = identity.unwrap_or_else(|| e.text.clone());
+                let value = identity
+                    .unwrap_or_else(|| anchored.unwrap_or_else(|| e.text.clone()));
                 if kind == ContextKind::Namespace {
                     let end = st.out.scopes[st.cur_scope.0 as usize].span.end;
                     open_section(st, &value, Span { start: e.span().start, end }, SectionKind::Statement);
@@ -170,7 +185,14 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 st.context_stack.push((st.scope_stack.len(), kind, value));
             }
         }
-        Capture::Parent => {
+        Capture::ClosureCapture => {
+            let name = (pack.shape_name)(&e.text);
+            let captures = &mut st.out.scopes[st.cur_scope.0 as usize].captures;
+            if !captures.contains(&name) {
+                captures.push(name);
+            }
+        }
+        Capture::Parent | Capture::ParentSuper => {
             // `@parent` (a base class) pairs with the `@def.class.name`
             // in the same match — record the inheritance edge from the
             // class as its def minted it. The base is shaped like a def
@@ -179,6 +201,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             if let Some(child) = super::defs::class_of_match(st, e.match_id).map(str::to_string) {
                 if pack.names.use_map_sep().is_some() {
                     st.scopes.written_parents.push((st.out.parents.len(), e.span().start, st.cur_scope));
+                }
+                if e.cap == Capture::ParentSuper {
+                    st.out.super_parents.push(st.out.parents.len());
                 }
                 st.out.parents.push((child, (pack.shape_name)(&e.text)));
             }

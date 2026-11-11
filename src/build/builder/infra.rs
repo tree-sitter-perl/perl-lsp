@@ -23,6 +23,8 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             hints: Vec::new(),
             package: pkg,
@@ -181,7 +183,7 @@ impl<'a> Builder<'a> {
     /// in the glob string that differs from `current_package` (the file
     /// declares e.g. `package DateTime::PP`). The synthesized tail
     /// (`_ymd2rd`) must be keyed under the *named* package so
-    /// `PackageSymbol{DateTime, _ymd2rd}` resolves — not the file's
+    /// `Member{DateTime, _ymd2rd}` resolves — not the file's
     /// own package. Every other caller keeps `current_package` via
     /// `add_symbol_ns`.
     pub(super) fn add_symbol_in_package(
@@ -244,6 +246,7 @@ impl<'a> Builder<'a> {
             presentation: Default::default(),
             attributes: Vec::new(),
             flags,
+            member_space: None,
             declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
@@ -378,7 +381,7 @@ impl<'a> Builder<'a> {
     ///     The symbol carries the body's return arms (`record_sub_tail`),
     ///     so an anon sub's return is read exactly as a named sub's.
     ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
-    ///     `\&$const_folded`) → `PackageSymbol { package, name }`.
+    ///     `\&$const_folded`) → `Member { package, name }`.
     ///     Bag's MRO + `module_index` machinery resolves it,
     ///     including cross-file. Bare names default `class` to
     ///     the current package; qualified names split at the
@@ -406,7 +409,7 @@ impl<'a> Builder<'a> {
                     (Some(c), n) => (c.to_string(), n.to_string()),
                     (None, _) => (self.current_package.clone()?, raw),
                 };
-                Some(crate::model::witnesses::WitnessAttachment::PackageSymbol { package: class, name })
+                Some(crate::model::witnesses::WitnessAttachment::returns_of(class, name))
             }
             _ => None,
         }

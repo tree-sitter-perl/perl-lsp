@@ -17,6 +17,8 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             package: None,
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             hints: Vec::new(),
         }],
@@ -134,6 +136,8 @@ fn test_resolve_sub_return_type() {
             package: None,
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             hints: Vec::new(),
         }],
@@ -164,6 +168,7 @@ fn test_resolve_sub_return_type() {
             attributes: Vec::new(),
             deref_stack: Vec::new(),
             flags: Default::default(),
+        member_space: None,
             declared_with: None,
             arity: None,
             in_force: None,
@@ -202,7 +207,7 @@ impl TypeOrder for Perl {
     }
 
     fn holds(&self, rule: Subsumption) -> bool {
-        crate::model::conventions::PERL_LATTICE.holds(rule)
+        crate::model::conventions::PERL_CONVENTIONS.lattice.holds(rule)
     }
 }
 
@@ -1655,12 +1660,12 @@ sub name {
         "#,
     );
 
-    // At a point inside the method body where `$self` has been
+    // At a point inside the method body after `$self` has been
     // assigned via `shift`, the flat `inferred_type` returns
     // HashRef (because the access flipped it). The witness-based
     // path — which is what `invocant_classes_in_scope` now calls —
     // should return the class.
-    let point = Point { row: 5, column: 15 };
+    let point = Point { row: 6, column: 15 };
 
     // Walk up the scope chain to find the sub's scope.
     let scope = fa.scope_at(point).expect("scope");
@@ -2011,7 +2016,7 @@ $dog->speak();
 
     // Inherited (defined in Animal, not in Dog) — chain runs
     // child → defining ancestor and stops.
-    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::Callable, None);
+    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::CALLABLE, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string(), "Animal".to_string()],
@@ -2021,7 +2026,7 @@ $dog->speak();
     // Override (Dog defines `speak` itself) — chain stops at
     // child. Walking past the override into Animal would lump
     // two semantically distinct methods together in one rename.
-    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::Callable, None);
+    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::CALLABLE, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string()],
@@ -2031,7 +2036,7 @@ $dog->speak();
 
     // Unknown method: degrade to the original class so the
     // backend's per-class rename still runs (no edits, no harm).
-    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::Callable, None);
+    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::CALLABLE, None);
     assert_eq!(chain, vec!["Dog".to_string()]);
 }
 
@@ -2501,11 +2506,11 @@ fn loader_config_types_register_conf_cross_file() {
 }
 
 
-// ---- Field{owner, name}: one subject, source-agnostic across flavors ----
+// ---- Member{owner, name, Holds}: one subject, source-agnostic across flavors ----
 //
 // Every Perl field flavor (Moo `has`, classic `$self->{k}` hash slot, Corinna
 // `field`) and every access form (accessor call, hash-slot deref, field var)
-// projects onto the SAME language-generic `Field{owner, name}` bag primitive a
+// projects onto the SAME language-generic `Member{owner, name, Holds}` bag primitive a
 // C struct member uses — resolved via `field_subject_of_ref`, which dispatches
 // on the access SHAPE, never the field flavor (rule #10). These lock the
 // convergence the refs-splat relies on.
@@ -2521,7 +2526,7 @@ fn field_subject_named(fa: &FileAnalysis, name: &str, kind_is_hash: Option<bool>
             None => true,
         })
         .filter_map(|r| fa.field_subject_of_ref(r, None))
-        .filter(|att| matches!(att, WitnessAttachment::Field { name: n, .. } if n == name))
+        .filter(|att| matches!(att, WitnessAttachment::Member { name: n, aspect: crate::model::witnesses::MemberAspect::Holds, .. } if n == name))
         .collect()
 }
 
@@ -2538,7 +2543,7 @@ sub check   { my $self = shift; return $self->status eq 'ready'; }
 1;
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Widget".into(), name: "status".into() };
+    let want = WitnessAttachment::holds_of("Widget", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "status");
 
     let acc = field_subject_named(&fa, "status", Some(false));
     let hash = field_subject_named(&fa, "status", Some(true));
@@ -2561,7 +2566,7 @@ sub value { my $self = shift; return $self->{count}; }
 1;
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Counter".into(), name: "count".into() };
+    let want = WitnessAttachment::holds_of("Counter", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "count");
     let subs = field_subject_named(&fa, "count", Some(true));
     assert!(subs.len() >= 2, "expected >=2 count hash accesses, got {}", subs.len());
     for s in &subs {
@@ -2581,7 +2586,7 @@ class Point {
 }
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Point".into(), name: "x".into() };
+    let want = WitnessAttachment::holds_of("Point", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "x");
     let subs = field_subject_named(&fa, "x", None);
     assert!(!subs.is_empty(), "expected Corinna field-var uses to route to a subject");
     for s in &subs {
@@ -2606,7 +2611,7 @@ sub tag  { my $self = shift; return $self->{name}; }
 1;
 ";
     let fa = build_fa_from_source(src);
-    let want = WitnessAttachment::Field { owner: "Animal".into(), name: "name".into() };
+    let want = WitnessAttachment::holds_of("Animal", crate::model::file_analysis::MemberSpaces::PER_FAMILY.values, "name");
     let subs = field_subject_named(&fa, "name", None);
     assert!(subs.len() >= 3, "expected parent+child accesses, got {}", subs.len());
     for s in &subs {
@@ -3239,24 +3244,24 @@ fn a_member_ask_crosses_families_only_in_a_shared_namespace() {
     let stored = [SymKind::Field, SymKind::Variable, SymKind::Enumerator];
     let callable = [SymKind::Sub, SymKind::Method];
     for k in stored {
-        assert!(MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(!MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::Shared));
+        assert!(MemberKind::VALUE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(!MemberKind::CALLABLE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(MemberKind::CALLABLE.admits_decl(k, None, &MemberSpaces::SHARED));
     }
     for k in callable {
-        assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(!MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
-        assert!(MemberKind::Value.admits_decl(k, MemberNamespace::Shared));
+        assert!(MemberKind::CALLABLE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(!MemberKind::VALUE.admits_decl(k, None, &MemberSpaces::PER_FAMILY));
+        assert!(MemberKind::VALUE.admits_decl(k, None, &MemberSpaces::SHARED));
     }
-    for (want, other) in [(MemberKind::Value, MemberKind::Callable), (MemberKind::Callable, MemberKind::Value)] {
-        assert!(want.admits_ref(Some(want), MemberNamespace::PerFamily));
-        assert!(!want.admits_ref(Some(other), MemberNamespace::PerFamily));
-        assert!(want.admits_ref(Some(other), MemberNamespace::Shared));
-        assert!(want.admits_ref(None, MemberNamespace::PerFamily), "a non-member use is not refused");
+    for (want, other) in [(MemberKind::VALUE, MemberKind::CALLABLE), (MemberKind::CALLABLE, MemberKind::VALUE)] {
+        assert!(want.admits_ref(Some(want), &MemberSpaces::PER_FAMILY));
+        assert!(!want.admits_ref(Some(other), &MemberSpaces::PER_FAMILY));
+        assert!(want.admits_ref(Some(other), &MemberSpaces::SHARED));
+        assert!(want.admits_ref(None, &MemberSpaces::PER_FAMILY), "a non-member use is not refused");
     }
     assert_eq!(
-        crate::model::conventions::PERL_SPELLINGS.member_namespace,
-        MemberNamespace::PerFamily,
+        crate::model::conventions::PERL_CONVENTIONS.member_spaces,
+        MemberSpaces::PER_FAMILY,
         "a Perl call reaches a sub, never a `field` of the same name"
     );
 }

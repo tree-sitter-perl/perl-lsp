@@ -69,6 +69,23 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         invocant,
         member_op,
         arg_count,
+        constructs: false,
+        spaces: space_ask(ad.on(e)),
         qualifier,
     });
+}
+
+/// The namespaces the `@space.*` captures on a member token state.
+pub(super) fn space_ask<'a>(on: impl Iterator<Item = &'a Event>) -> Option<crate::model::file_analysis::SpaceAsk> {
+    use crate::model::file_analysis::SpaceAsk;
+    on.fold(None, |acc: Option<SpaceAsk>, t| match t.cap {
+        Capture::Space { id, illegal } => {
+            let a = acc.unwrap_or_default();
+            Some(SpaceAsk {
+                search: a.search.with(id),
+                illegal: if illegal { a.illegal.with(id) } else { a.illegal },
+            })
+        }
+        _ => acc,
+    })
 }

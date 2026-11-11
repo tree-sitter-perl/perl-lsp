@@ -46,8 +46,13 @@ impl FileAnalysis {
     /// that annotation must NOT hide it, so key off scope, not package.
     /// Shared by cross-file registration (`ModuleIndex::register_symbols`)
     /// and include-closure completion gathering, so "resolvable" and
-    /// "offered" never drift apart.
+    /// "offered" never drift apart. A def the pack named for it
+    /// (`ANONYMOUS`: an anonymous class, union or sub) has no spelling
+    /// another file could write, so it is never part of the surface.
     pub fn is_linkage_visible(&self, sym: &Symbol) -> bool {
+        if sym.flags.contains(SymbolFlags::ANONYMOUS) {
+            return false;
+        }
         match sym.kind {
             SymKind::Class | SymKind::Sub => true,
             // An anonymous-enum constant leaks to file scope the same way an
@@ -60,6 +65,23 @@ impl FileAnalysis {
                 .find(|s| s.id == sym.scope)
                 .is_some_and(|s| matches!(s.kind, ScopeKind::File)),
             _ => false,
+        }
+    }
+
+    /// The key another file names linkage-visible `sym` by: a free function
+    /// of a language that files its functions under their namespace
+    /// (`FunctionLookup::NamespaceThenGlobal`) is its namespace and name
+    /// joined (`Lib\helper`), as a class's name already is its identity;
+    /// every other symbol is its name.
+    pub fn linkage_identity<'s>(&self, sym: &'s Symbol) -> std::borrow::Cow<'s, str> {
+        use crate::model::conventions::FunctionLookup;
+        match (sym.kind, &sym.package, self.pack.names.use_map_sep()) {
+            (SymKind::Sub, Some(ns), Some(sep))
+                if crate::model::conventions::conventions_of(&self.language).functions == FunctionLookup::NamespaceThenGlobal =>
+            {
+                std::borrow::Cow::Owned(crate::model::conventions::join_qualified(ns, &sym.name, sep))
+            }
+            _ => std::borrow::Cow::Borrowed(&sym.name),
         }
     }
 

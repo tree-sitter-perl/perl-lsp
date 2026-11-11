@@ -388,7 +388,7 @@ fn whole_copy_registration_sites_are_allowlisted() {
 
 /// `FileAnalysis::inferred_type` is raw-seed-state introspection for tests
 /// only. Its last production caller (the MCB early-out) is gone — the
-/// MCB→bag bridge publishes `Edge(PackageSymbol)` witnesses and lets the
+/// MCB→bag bridge publishes `Edge(Member)` witnesses and lets the
 /// registry's fold precedence arbitrate, so a new production
 /// `.inferred_type(` call re-opens a parallel type query beside
 /// `inferred_type_via_bag`.
@@ -416,7 +416,7 @@ fn inferred_type_has_no_production_caller() {
 }
 
 /// Human type labels read in the file's language: `FileAnalysis::render_type`
-/// / `display_type_of` carry the pack's vocabulary (`type_display`), so an
+/// / `display_type_of` carry the language's words (`type_label`), so an
 /// adapter or index site rendering with the vocabulary-free engine spelling
 /// shows a PHP user Perl's words on that one surface. The engine spelling
 /// stays legal in the model (keys, `--dump-package` provenance) and in the
@@ -1411,7 +1411,7 @@ fn language_spellings_have_one_home() {
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 1, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
         ("index/module_cache/sql.rs", 1, "the LIKE statement's `ESCAPE` clause — SQL syntax, not a language spelling"),
-        ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
+        ("model/conventions.rs", 7, "Perl's home: `PERL_SPELLINGS`, `Sigil::char` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
         ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
@@ -1433,13 +1433,14 @@ fn language_spellings_have_one_home() {
     let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp, Layer::Build]);
     let seen = count_lines(&files, &|l| twinned.iter().any(|a| l.contains(a.as_str())));
     let allow: &[(&str, usize, &str)] = &[
-        ("build/cpp_reparse/defs.rs", 4, "the C++ keyword table: grammar vocabulary in the pack's own tier"),
-        ("build/language_driver.rs", 2, "the driver mints two pack attributes (`include_guard`, `non_public`): the minting side"),
+        ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table: grammar vocabulary in the pack's own tier"),
+        ("build/packs/php.rs", 1, "`static` as a type keyword inside a declared union (`static|null`): the pack parsing its own type spelling, not the attribute"),
+        ("build/language_driver.rs", 1, "the driver mints the pack attribute `include_guard`: the minting side"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
-        ("build/query_extract/vocab.rs", 14, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
+        ("build/query_extract/vocab.rs", 19, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
         ("model/conventions.rs", 2, "Perl's own attribute spellings (`field_attribute_flag`), mapped onto the canonical names: Perl's home"),
-        ("model/file_analysis/core_types.rs", 17, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
+        ("model/file_analysis/core_types.rs", 22, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
         ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub: display text (the fact itself is read as a flag)"),
@@ -1571,7 +1572,7 @@ fn one_table_maps_spellings_to_flags() {
         l.trim_start().starts_with('"') && l.contains("=> SymbolFlags::")
     });
     let allow: &[(&str, usize, &str)] =
-        &[("model/file_analysis/core_types.rs", 16, "the canonical table itself")];
+        &[("model/file_analysis/core_types.rs", 21, "the canonical table itself")];
     let drift = allowlist_drift("spelling → flag tables", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
@@ -1769,21 +1770,18 @@ fn pack_fields_name_no_grammar_shapes() {
     const TRIGGERS: &str =
         "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
          tokens by coincidence. A protocol vocabulary, not the language's syntax";
-    const CURSOR: &str = "moves when the cursor reads the document: which nodes are \
-         members, calls, bare variables, strings and comparisons is answered by the patterns \
-         that capture them";
+    const CURSOR: &str = "moves when the cursor reads the document, as it already does for \
+         member accesses: which nodes are bare variables, wrappers, strings and comparisons is \
+         answered by the patterns that capture them";
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
-        ("cpp", "call_kinds", 1, CURSOR),
         ("cpp", "domain_compare_kinds", 1, CURSOR),
         ("cpp", "domain_compare_ops", 2, CURSOR),
-        ("cpp", "member_kinds", 1, CURSOR),
         ("cpp", "recv_peel", 2, CURSOR),
         ("cpp", "simple_var_kinds", 1, CURSOR),
         ("cpp", "skip_kinds", 4, CURSOR),
         ("cpp", "trigger_chars", 3, TRIGGERS),
-        ("python", "call_kinds", 1, CURSOR),
-        ("python", "member_kinds", 1, CURSOR),
+        ("php", "trigger_chars", 3, TRIGGERS),
         ("python", "recv_peel", 1, CURSOR),
         ("python", "simple_var_kinds", 1, CURSOR),
         ("python", "skip_kinds", 4, CURSOR),
@@ -1832,9 +1830,8 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/synthetic.rs", 2, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
-        ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
+        ("build/cursor_sentinel.rs", 3, "the domain-comparison operands and the receiver peel over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
-        ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
         ("cst.rs", 24, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
         ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
@@ -1868,7 +1865,7 @@ fn tree_steps_go_through_the_syntax_tree() {
         ("build/cpp_reparse/gather.rs", 2, "std::path::Path, not a tree"),
         ("build/cpp_reparse/synthetic.rs", 1, "the C++ reparse's own trees, outside any build forest"),
         ("build/cpp_reparse/validate.rs", 3, "the C++ reparse's own trees, outside any build forest"),
-        ("build/cursor_sentinel.rs", 3, "cursor time: one climb per request over the sentinel reparse"),
+        ("build/cursor_sentinel.rs", 2, "cursor time: one climb per request over the sentinel reparse"),
         ("build/packs/python.rs", 3, "std::path::Path, not a tree"),
         ("build/walk_markers.rs", 3, "std::path::Path, not a tree"),
         ("lsp/backend/server.rs", 1, "std::path::Path, not a tree"),
@@ -1925,9 +1922,9 @@ fn raw_scope_climbs_are_containment_only() {
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
         ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
-        ("build/query_extract/skeleton.rs", 1, "owning_callable: the callable a return site is an arm of, and a receiver belongs to"),
+        ("build/query_extract/extract/mod.rs", 1, "def_scope: a hoisted def is filed in the scope around the one it is written in"),
         ("model/file_analysis/core_types.rs", 1, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank"),
-        ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
+        ("model/file_analysis/class_queries.rs", 3, "a member's declaring scope inside its class body; package_at's innermost scope that names a package; whether a member write sits inside a constructor body, its closures included"),
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
         ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
@@ -2049,7 +2046,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 22;
+    const RATCHET: usize = 21;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

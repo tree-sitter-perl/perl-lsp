@@ -454,7 +454,7 @@ fn sub_exporter_member_goto_def_and_references() {
             kind: TargetKind::Sub {
                 package: Some("My::Exp".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -884,7 +884,7 @@ has 'db' => (is => 'ro', isa => 'DBI::db', handles => [qw(prepare execute)]);
 #[test]
 fn test_moo_has_handles_instanceof_edges_return_type() {
     // When isa is InstanceOf['X'], handles delegation edges each local
-    // method's return through PackageSymbol{X, remote} so type inference
+    // method's return through Member{X, remote} so type inference
     // chains through.
     let fa = build_fa(
         "
@@ -1104,7 +1104,7 @@ sub go {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
             },
             RoleMask::EDITABLE,
         );
@@ -1222,7 +1222,7 @@ sub go {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
             },
             RoleMask::EDITABLE,
         );

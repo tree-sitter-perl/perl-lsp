@@ -298,7 +298,7 @@ impl<'a> CandidateSet<'a> {
             RefKind::MethodCall { .. } => {
                 Some(analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate).single()?.to_string())
             }
-            RefKind::FunctionCall => r.resolved_package().map(str::to_string).or_else(|| {
+            RefKind::FunctionCall | RefKind::ImportedName => r.resolved_package().map(str::to_string).or_else(|| {
                 analysis.find_definition(self.point, Some(idx)).and_then(|sp| {
                     analysis
                         .symbols()
@@ -922,13 +922,15 @@ impl<'a> CandidateSet<'a> {
             // through the index, walking the family the use's syntax names.
             if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
-                let namespace = analysis.names().member_namespace;
-                // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
-                let method = r.unqualified_target_name(analysis.names());
+                let namespace = analysis.member_spaces();
                 // A union receiver dispatches on every arm: each arm's
                 // definition is offered.
                 let mut found: Vec<RefLocation> = Vec::new();
                 for cn in analysis.receiver_classes(r, Some(idx), ReceiverPolicy::Navigate) {
+                    // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named
+                    // class; a construction calls its class's constructor.
+                    let Some(called) = analysis.called_member(r, &cn, Some(idx)) else { continue };
+                    let method: &str = &called;
                     let on_class = |cn: String| -> Vec<RefLocation> {
                         // The invocant resolved (e.g. a plugin-bridged route token
                         // → controller class) but the controller lives in THIS
@@ -966,25 +968,30 @@ impl<'a> CandidateSet<'a> {
                                 // view carries it — no per-query enrichment.
                                 let whole = idx.whole_present(&cached);
                                 // A stored member of the class: a data field or
-                                // an enum constant, not a sub.
+                                // an enum constant, not a sub. Legal namespaces
+                                // first, the illegal ones only as the fallback,
+                                // as the resolution itself walks.
                                 let stored_member = || {
-                                    whole.symbols().iter().find(|s| {
-                                        MemberKind::of_sym(s.kind) == MemberKind::Value
-                                            && s.name == method
-                                            && s.package.as_deref() == Some(class.as_str())
-                                            && whole.symbol_is_class_content(s)
+                                    std::iter::once(want.legal()).chain(want.illegal_only()).find_map(|ask| {
+                                        whole.symbols().iter().find(|s| {
+                                            ask.admits_decl(s.kind, s.member_space, namespace)
+                                                && MemberKind::of_symbol(s).mode == MemberMode::Value
+                                                && s.name == method
+                                                && s.package.as_deref() == Some(class.as_str())
+                                                && whole.symbol_is_class_content(s)
+                                        })
                                     })
                                 };
                                 let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
                                     Url::from_file_path(&cached.path).is_ok().then(|| RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration))
                                 };
                                 // A value read lands on the stored member first.
-                                if want == MemberKind::Value {
+                                if want.mode == MemberMode::Value {
                                     if let Some(loc) = stored_member().and_then(stored_loc) {
                                         return vec![loc];
                                     }
                                 }
-                                let callable = want.admits_decl(SymKind::Sub, namespace)
+                                let callable = want.admits_decl(SymKind::Sub, None, namespace)
                                     .then(|| whole.sub_info_view(method))
                                     .flatten();
                                 if let Some(sub_info) = callable {
@@ -1014,7 +1021,7 @@ impl<'a> CandidateSet<'a> {
                                 }
                                 // A call reaches a stored member where the
                                 // language keeps one member namespace.
-                                if want.admits_decl(SymKind::Field, namespace) {
+                                if want.admits_decl(SymKind::Field, None, namespace) {
                                     if let Some(loc) = stored_member().and_then(stored_loc) {
                                         return vec![loc];
                                     }
@@ -1048,8 +1055,35 @@ impl<'a> CandidateSet<'a> {
         // (`absl::StatusCode::kNotFound`) is already handled at the top by the
         // owner-anchored step (`qualifier_at_point` + `member_def_location`),
         // which fires unconditionally for pack routing before this tail.
+        //
+        // A call names a function by identity (`function_identities`): it
+        // lands on the first its language looks up that something declares,
+        // and on a same-leaf stand-in only when nothing does, labeled with
+        // the function it actually is.
         if let Some(r) = analysis.ref_at(point) {
-            if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::Variable) {
+            if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
+                let identities = analysis.function_identities(r);
+                let (decls, widened) = crate::model::file_analysis::callee_declarations(idx, &identities, analysis.names());
+                let mut decls = decls.into_iter().filter(|d| Url::from_file_path(&d.module.path).is_ok()).peekable();
+                if !widened {
+                    if let Some(d) = decls.next() {
+                        // A call resolving to a header PROTOTYPE offers the
+                        // bodied definition first (decl→def ranking).
+                        let loc = RefLocation::at(FileKey::Path(d.module.path.clone()), d.span, AccessKind::Declaration);
+                        return self.preferred_definitions(loc, &idx.whole_present(&d.module));
+                    }
+                } else if decls.peek().is_some() {
+                    let named = identities.first().map(String::as_str).unwrap_or_default();
+                    return decls
+                        .map(|d| {
+                            RefLocation::at(FileKey::Path(d.module.path.clone()), d.span, AccessKind::Declaration)
+                                .with_rewrite(SiteRewrite::Skip)
+                                .with_label(Some(format!("widened: `{}` stands in for `{}`", d.identity, named)))
+                        })
+                        .collect();
+                }
+            }
+            if matches!(r.kind, RefKind::Variable) {
                 let name = r.unqualified_target_name(analysis.names());
                 for cached in idx.visible_def_candidates(name) {
                     let whole = idx.whole_present(&cached);
@@ -1135,8 +1169,11 @@ impl<'a> CandidateSet<'a> {
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named
-        // type/namespace def.
-        if self.pack {
+        // type/namespace def. A captured token that every lane above left
+        // unresolved has no definition: by word, it would land on whatever
+        // shares its spelling, out of scope or not (a method's bare `$x` on
+        // a PHP property).
+        if self.pack && analysis.ref_at(point).is_none() {
             if let Some(source) = self.source {
                 if let Some(word) = word_at_point(source, point) {
                     if let Some(loc) = self.type_def_location(word, idx) {
