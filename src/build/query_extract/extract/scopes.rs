@@ -124,6 +124,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                runs_on: None,
                 closed: scope_cap == ScopeCap::SubClosed,
                 captures: Vec::new(),
                 direct: scope_cap == ScopeCap::Direct,

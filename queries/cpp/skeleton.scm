@@ -507,8 +507,10 @@
     (function_declarator
       declarator: (field_identifier) @def.method.name
       parameters: (parameter_list) @scope.sub))) @def.method
-; A `static` member function is its class's and runs on no object: its
-; body's `this` refers to nothing.
+; A `static` member is its class's, not an object's: a static member
+; function runs on no object (its body's `this` refers to nothing, and a
+; bare instance member names nothing), and a static data member is read by
+; bare name there all the same.
 (function_definition
   (storage_class_specifier "static")
   declarator: [
@@ -518,6 +520,9 @@
 (field_declaration
   (storage_class_specifier "static")
   declarator: [
+    (field_identifier) @mark.static
+    (pointer_declarator declarator: (field_identifier) @mark.static)
+    (reference_declarator (field_identifier) @mark.static)
     (function_declarator declarator: (field_identifier) @mark.static)
     (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @mark.static))
     (reference_declarator (function_declarator declarator: (field_identifier) @mark.static))])

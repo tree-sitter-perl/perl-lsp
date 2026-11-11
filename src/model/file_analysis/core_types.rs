@@ -116,6 +116,13 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// The method whose object this body runs on: the nearest enclosing
+    /// method's, a closure inside one included; `None` in a class-level
+    /// (`STATIC`) method and in code no method encloses. What every site
+    /// that refers to the object reads (`docs/adr/capture-vocabulary.md`).
+    /// Minted by the pack extractor; Perl's receiver is a parameter.
+    #[serde(default)]
+    pub runs_on: Option<SymbolId>,
     /// A body that sees no variable of the code around it but the ones it
     /// captures (`@scope.sub.closed`: php's functions, methods and
     /// closures). Read through `variable_lookup_chain`.

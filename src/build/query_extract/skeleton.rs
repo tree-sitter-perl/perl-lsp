@@ -135,6 +135,9 @@ pub struct ReceiverSite {
     pub names: super::vocab::ReceiverCap,
     /// The token as written: the spelling a `Class` receiver resolves.
     pub text: String,
+    /// The token refers to the object its method runs on (`$this`, `this`),
+    /// not only to a class: its match captures it `@ref.receiver` too.
+    pub object: bool,
 }
 
 #[derive(Debug, Default)]
@@ -906,22 +909,8 @@ impl SkeletonAnalysis {
             }
             out
         };
-        // The same walk, answering whose receiver the body elides: the
-        // method itself, the root of every bare member name in it.
-        let elided_receiver: Vec<Option<SymbolId>> = {
-            let mut out: Vec<Option<SymbolId>> = Vec::with_capacity(self.scopes.len());
-            for sc in &self.scopes {
-                let method = if sc.implicit_receiver {
-                    sc.owner.filter(|sid| symbols.get(sid.0 as usize).is_some_and(|s| matches!(s.kind, SymKind::Method)))
-                } else {
-                    sc.parent.and_then(|p| out.get(p.0 as usize).copied().flatten())
-                };
-                out.push(method);
-            }
-            out
-        };
-        // The method whose object a spelled receiver (`$this`, `this`) is:
-        // the nearest enclosing method body's, a closure inside one included.
+        // The method whose call runs each body: the nearest enclosing
+        // method body's, a closure inside one included.
         let owning_method: Vec<Option<SymbolId>> = {
             let mut out: Vec<Option<SymbolId>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
@@ -929,6 +918,39 @@ impl SkeletonAnalysis {
                     .owner
                     .filter(|sid| symbols.get(sid.0 as usize).is_some_and(|s| matches!(s.kind, SymKind::Method)))
                     .or_else(|| sc.parent.and_then(|p| out.get(p.0 as usize).copied().flatten()));
+                out.push(method);
+            }
+            out
+        };
+        // The method whose OBJECT each body runs on (`Scope::runs_on`): what
+        // every site that refers to the object reads (a spelled receiver's
+        // ref, value and place; a bare instance member). A class-level
+        // method runs on none, and nor does a closure inside one; the sites
+        // that name its class (`self::`, `static::`, a static member) read
+        // `method_class`.
+        //
+        // TODO(cpp-out-of-line-static): `static` is on the in-class
+        // declaration only, and nothing pairs a declaration with its
+        // out-of-line definition (possibly in another file), so the body of
+        // `int W::make() { … }` still runs on an object here.
+        let object_of: Vec<Option<SymbolId>> = owning_method
+            .iter()
+            .map(|m| m.filter(|sid| !symbols[sid.0 as usize].flags.contains(SymbolFlags::STATIC)))
+            .collect();
+        for (sc, &m) in self.scopes.iter_mut().zip(&object_of) {
+            sc.runs_on = m;
+        }
+        // The object a body elides, the root of every bare member name in
+        // it: its own method's (a lambda is transparent), where that method
+        // runs on one.
+        let elided_receiver: Vec<Option<SymbolId>> = {
+            let mut out: Vec<Option<SymbolId>> = Vec::with_capacity(self.scopes.len());
+            for (i, sc) in self.scopes.iter().enumerate() {
+                let method = if sc.implicit_receiver {
+                    sc.owner.filter(|&sid| object_of[i] == Some(sid))
+                } else {
+                    sc.parent.and_then(|p| out.get(p.0 as usize).copied().flatten())
+                };
                 out.push(method);
             }
             out
@@ -1169,6 +1191,11 @@ impl SkeletonAnalysis {
             // code); a call on it dispatches on that value like on any
             // receiver's.
             for r in &self.receiver_sites {
+                // A token that refers to the object has a value only where
+                // the body runs on one.
+                if r.object && object_of.get(r.scope.0 as usize).copied().flatten().is_none() {
+                    continue;
+                }
                 let class = match r.names {
                     super::vocab::ReceiverCap::Enclosing | super::vocab::ReceiverCap::Called => {
                         method_class.get(r.scope.0 as usize).cloned().flatten()
@@ -1444,7 +1471,11 @@ impl SkeletonAnalysis {
             .iter()
             .filter(|r| matches!(r.names, super::vocab::ReceiverCap::Enclosing | super::vocab::ReceiverCap::Called))
         {
-            if let Some(m) = owning_method.get(r.scope.0 as usize).copied().flatten() {
+            // The object's place for a token that refers to it; a token that
+            // names the class roots its members at the call that runs the
+            // method, which a class-level method has too.
+            let method = if r.object { &object_of } else { &owning_method };
+            if let Some(m) = method.get(r.scope.0 as usize).copied().flatten() {
                 var_at.entry(r.span).or_insert_with(|| (Place::variable(Binding::Receiver(m)), r.span));
             }
         }
@@ -1625,14 +1656,9 @@ impl SkeletonAnalysis {
                     // The object a method runs on, named where its body
                     // spells it: a read of that method's receiver, which
                     // declares nothing and is no variable of the body's. A
-                    // class-level method runs on no object, so its body's
-                    // token refers to nothing.
+                    // body that runs on no object has none to refer to.
                     RefCap::Receiver => {
-                        let method = owning_method.get(r.scope.0 as usize).copied().flatten()?;
-                        if symbols[method.0 as usize].flags.contains(crate::model::file_analysis::SymbolFlags::STATIC) {
-                            return None;
-                        }
-                        binding = Some(RefBinding::Receiver(method));
+                        binding = Some(RefBinding::Receiver(object_of.get(r.scope.0 as usize).copied().flatten()?));
                         RefKind::Variable
                     }
                     // A `goto` label resolves through `label_refs`; the
@@ -1827,6 +1853,12 @@ impl SkeletonAnalysis {
                 if matches!(r.kind, RefKind::Variable) && r.binding.is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     let local = fields.get(&(class, r.target_name.as_str())).map(|&(fscope, fsym)| (fsym, fscope));
+                    // An instance member is the elided object's; a body
+                    // that runs on none reads only its class's own.
+                    let instance = local.is_some_and(|(fsym, _)| !symbols[fsym.0 as usize].flags.contains(SymbolFlags::STATIC));
+                    if instance && elided_receiver.get(r.scope.0 as usize).copied().flatten().is_none() {
+                        continue;
+                    }
                     bare_reads.push((i, class.to_string(), local));
                 } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };

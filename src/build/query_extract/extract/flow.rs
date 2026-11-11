@@ -362,6 +362,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 scope: cur_scope,
                 names,
                 text: e.text.clone(),
+                object: ad.in_match(e.match_id, Capture::Ref(RefCap::Receiver)).is_some(),
             });
         }
         // The assignment node anchors its pattern; its target and source
