@@ -91,8 +91,10 @@ extra, whatever the pattern.
   bare call carries `member_of`, and a bare read the file can't resolve to
   a local projects the class's slot (`ValueHop` on `TypeName(class)`),
   pushed after the read's own `Variable` edge so a name no member answers
-  keeps that edge's value. Navigation still binds only members this file
-  declares (`TODO(implicit-receiver-nav)`).
+  keeps that edge's value. A body that runs on no object (a `static`
+  member function's) reads no bare INSTANCE member this file declares; its
+  static members and sibling calls still answer. Navigation still binds
+  only members this file declares (`TODO(implicit-receiver-nav)`).
 - A pack member call (`@ref.member.call` beside `@expr.call`) mints
   `Method` with `Lookup::Receiver` on the receiver's own `Expr`, so a chain
   (`w.get().spin()`) hops through each receiver's value. The dispatch
