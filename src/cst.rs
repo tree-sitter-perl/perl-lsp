@@ -27,7 +27,7 @@ use crate::model::file_analysis::{Binding, PathStep, Place, Slot, Slots, Span};
 use tree_sitter::Point;
 
 mod syntax;
-pub(crate) use syntax::{kind_ids, Injection, NodeFacts, NodeId, Structure, SyntaxForest};
+pub(crate) use syntax::{kind_ids, Injection, NodeFacts, NodeId, Structure, SyntaxForest, SyntaxNode};
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
 

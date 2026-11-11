@@ -266,16 +266,16 @@
 ; Where a condition decides what runs: an `if` or `elif` body runs where it
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
-; where the left holds, of `or` where it fails. An `if` whose body ends in
-; a statement that leaves the block, with no clause after it, leaves the
-; rest of the block to run where its condition fails: what runs before
-; that statement ends there too, or leaves sooner.
+; where the left holds, of `or` where it fails. An `else` arm is its body;
+; the `else` of a loop or a `try` is no arm of a condition.
 (if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
-(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
 (elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (if_statement
   alternative: (elif_clause condition: (_) @narrow.cond)
-  alternative: (_) @narrow.else)
+  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
 (conditional_expression
   (_) @narrow.then
   .
@@ -288,13 +288,13 @@
   (_) @narrow.else)
 (boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
 (boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
-; TODO(noreturn-callee): `sys.exit()` and any call that never returns
-; leave too, which only a fact on the callee can say.
-(if_statement
-  condition: (_) @narrow.cond
-  consequence: (block
-    [(return_statement) (raise_statement) (continue_statement) (break_statement)] .)
-  !alternative) @narrow.exit
+
+; A statement that leaves its block: nothing after it there runs, and
+; whether a chain of arms falls through follows from its arms' statements
+; (`query_extract/extract/narrowing.rs`).
+; TODO(noreturn-callee): `sys.exit()` leaves too. A callee that never
+; returns is an effect on the callee; mark it once effects and the CFG exist.
+[(return_statement) (raise_statement) (continue_statement) (break_statement)] @flow.leaves
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.
