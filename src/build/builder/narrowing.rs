@@ -439,6 +439,9 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
 /// yields a value, so `STMT if/unless G` narrows the rest of the block and
 /// `X || EXIT` is worth only `X`. The words are read by spelling, so a sub
 /// of the file's own named `croak` counts too.
+// TODO(noreturn-callee): a callee that never returns (`croak`, `confess`)
+// is an effect on the callee; replace the spelling lookup once effects and
+// the CFG exist.
 pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
     const EXITS: [&str; 8] = ["die", "exit", "croak", "confess", "last", "next", "redo", "goto"];
     match node.kind() {
@@ -459,16 +462,24 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
     }
 }
 
-/// True if `block` never falls through: its last statement is an exit.
-/// Whatever runs before it ends there too, or leaves sooner.
-fn block_ends_in_exit(block: Node, source: &[u8]) -> bool {
+/// True if `block` never falls through: one of its statements leaves,
+/// wherever it sits, so what follows it there is dead.
+fn block_leaves(block: Node, source: &[u8]) -> bool {
     use crate::cst::NodeExt;
-    block
-        .elements()
-        .last()
-        .filter(|stmt| stmt.kind() == "expression_statement")
-        .and_then(|stmt| crate::cst::nth_element(stmt, 0))
-        .is_some_and(|e| is_exit_expression(e, source))
+    block.elements().any(|stmt| statement_leaves(stmt, source))
+}
+
+/// True if a statement leaves its block: an exit, or a conditional with an
+/// `else` whose every arm leaves.
+fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
+    match stmt.kind() {
+        "expression_statement" => crate::cst::nth_element(stmt, 0).is_some_and(|e| is_exit_expression(e, source)),
+        "conditional_statement" => {
+            let arms = crate::cst::conditional_arms(stmt);
+            arms.last().is_some_and(|arm| arm.cond.is_none()) && arms.iter().all(|arm| block_leaves(arm.block, source))
+        }
+        _ => false,
+    }
 }
 
 impl<'a> Builder<'a> {
@@ -529,9 +540,10 @@ impl<'a> Builder<'a> {
     /// negations survive — `defined`/`blessed` complement to `Undef`, while
     /// `isa`/`ref-eq` have no positive complement (stay wide). The `else`
     /// arm is pure cumulative negation; an `elsif` arm combines its own
-    /// guard with the priors' negation. A lone arm whose block ends in an
-    /// exit leaves the rest of the enclosing block to run where it is not
-    /// entered.
+    /// guard with the priors' negation. A chain with no `else` has an
+    /// implicit one. Where exactly one arm falls through (`block_leaves`),
+    /// the rest of the enclosing block runs where that arm does; where none
+    /// does it never runs, and two or more join (`TODO(cfg-exit-join)`).
     pub(super) fn narrow_block_guard(&mut self, cond_stmt: Node<'a>) {
         let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = crate::cst::conditional_arms(cond_stmt)
             .into_iter()
@@ -540,37 +552,57 @@ impl<'a> Builder<'a> {
 
         for k in 0..arms.len() {
             let (own_cond, blk, enter) = arms[k];
-            let region = node_to_span(blk);
-            // The arm's own guard is the more direct statement about a
-            // subject; a prior arm's negation must not override it.
-            let mut covered: Vec<Place> = Vec::new();
+            // Record the arm's own guard once (not the priors re-walked
+            // for cumulative negation) — D3/D4 want each condition once.
             if let Some(c) = own_cond {
-                // Record the arm's own guard once (not the priors re-walked
-                // for cumulative negation) — D3/D4 want each condition once.
                 self.record_guard_sites(c);
-                for (subject, op) in facts_for_region(self, c, enter) {
-                    covered.push(subject.subject().clone());
-                    self.emit_narrowing_fact(&subject, op, region);
-                }
             }
-            for &(prior_cond, _, prior_enter) in &arms[..k] {
-                let Some(prior_cond) = prior_cond else { continue };
-                // A prior arm not taken means its condition held at the
-                // opposite of its enter polarity.
-                for (subject, op) in facts_for_region(self, prior_cond, !prior_enter) {
-                    let key = subject.subject().clone();
-                    if covered.contains(&key) {
-                        continue;
-                    }
-                    covered.push(key);
-                    self.emit_narrowing_fact(&subject, op, region);
-                }
+            self.narrow_chain_arm(own_cond.map(|c| (c, enter)), &arms[..k], node_to_span(blk));
+        }
+        let mut falling: Vec<Option<usize>> =
+            (0..arms.len()).filter(|&k| !block_leaves(arms[k].1, self.source)).map(Some).collect();
+        if arms.last().is_some_and(|arm| arm.0.is_some()) {
+            falling.push(None);
+        }
+        if let [arm] = falling[..] {
+            let (own, priors) = match arm {
+                Some(k) => (arms[k].0.map(|c| (c, arms[k].2)), &arms[..k]),
+                None => (None, &arms[..]),
+            };
+            if let Some(region) = self.block_remainder(cond_stmt) {
+                self.narrow_chain_arm(own, priors, region);
             }
         }
-        // The arm's own guard is recorded above, once.
-        if let [(Some(cond), blk, enter)] = arms[..] {
-            if block_ends_in_exit(blk, self.source) {
-                self.narrow_block_remainder(cond_stmt, cond, !enter);
+    }
+
+    /// Narrow `region`, which runs where the arm's own condition is as
+    /// given and every prior arm was not taken.
+    fn narrow_chain_arm(
+        &mut self,
+        own: Option<(Node<'a>, bool)>,
+        priors: &[(Option<Node<'a>>, Node<'a>, bool)],
+        region: Span,
+    ) {
+        // The arm's own guard is the more direct statement about a
+        // subject; a prior arm's negation must not override it.
+        let mut covered: Vec<Place> = Vec::new();
+        if let Some((c, enter)) = own {
+            for (subject, op) in facts_for_region(self, c, enter) {
+                covered.push(subject.subject().clone());
+                self.emit_narrowing_fact(&subject, op, region);
+            }
+        }
+        for &(prior_cond, _, prior_enter) in priors {
+            let Some(prior_cond) = prior_cond else { continue };
+            // A prior arm not taken means its condition held at the
+            // opposite of its enter polarity.
+            for (subject, op) in facts_for_region(self, prior_cond, !prior_enter) {
+                let key = subject.subject().clone();
+                if covered.contains(&key) {
+                    continue;
+                }
+                covered.push(key);
+                self.emit_narrowing_fact(&subject, op, region);
             }
         }
     }
@@ -710,24 +742,29 @@ impl<'a> Builder<'a> {
     /// guard: the statement `node` is in leaves the block unless
     /// `condition` is `holds_when_true`. False when that statement is no
     /// block's; the caller records the guard's sites, once per condition.
-    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
     fn narrow_block_remainder(
         &mut self,
         node: Node<'a>,
         condition: Node<'a>,
         holds_when_true: bool,
     ) -> bool {
-        let mut stmt = node;
-        while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
-            let Some(p) = self.syntax.parent(stmt) else { return false };
-            stmt = p;
-        }
-        let Some(block) = self.syntax.parent(stmt).filter(|b| b.kind() == "block") else { return false };
-        let region = Span { start: stmt.end_position(), end: block.end_position() };
+        let Some(region) = self.block_remainder(node) else { return false };
         for (subject, op) in facts_for_region(self, condition, holds_when_true) {
             self.emit_narrowing_fact(&subject, op, region);
         }
         true
+    }
+
+    /// `[statement end .. enclosing-block end]` for the statement `node` is
+    /// in, when that statement is a block's.
+    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
+    fn block_remainder(&self, node: Node<'a>) -> Option<Span> {
+        let mut stmt = node;
+        while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
+            stmt = self.syntax.parent(stmt)?;
+        }
+        let block = self.syntax.parent(stmt).filter(|b| b.kind() == "block")?;
+        Some(Span { start: stmt.end_position(), end: block.end_position() })
     }
 
     /// A deref observes its operand as the reference its sigil names:

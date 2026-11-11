@@ -2249,10 +2249,10 @@ void f(Base* b, std::optional<Widget> o) {
 }
 
 #[test]
-fn a_pack_exit_is_the_last_statement_of_the_body() {
-    // An `if` body that ENDS in a statement leaving the block never falls
-    // through, whatever runs before that statement: a comment, a call, a
-    // nested block. One whose last statement stays narrows nothing after.
+fn a_pack_exit_anywhere_in_the_body_leaves_it() {
+    // An `if` body with a statement leaving the block never falls through,
+    // whatever runs before that statement (a comment, a call, a nested
+    // block) or after it. One with no such statement narrows nothing after.
     use crate::model::file_analysis::InferredType;
     let class = |c: &str| Some(InferredType::ClassName(c.into()));
     let src = "\
@@ -2287,7 +2287,7 @@ def k(x):
     assert_eq!(at(rows[0]), class("Foo"), "a comment, then return");
     assert_eq!(at(rows[1]), class("Foo"), "a nested block, then raise");
     assert_ne!(at(rows[2]), class("Foo"), "no exit");
-    assert_ne!(at(rows[3]), class("Foo"), "an exit that is not the last statement");
+    assert_eq!(at(rows[3]), class("Foo"), "an exit that is not the last statement");
 
     let src = "\
 void f(std::optional<Widget> o) {
@@ -2324,7 +2324,96 @@ void k(std::optional<Widget> o) {
     assert_eq!(at(rows[0]), class("Widget"), "a comment, then return");
     assert_eq!(at(rows[1]), class("Widget"), "a call, then throw");
     assert_ne!(at(rows[2]), class("Widget"), "no exit");
-    assert_ne!(at(rows[3]), class("Widget"), "an exit that is not the last statement");
+    assert_eq!(at(rows[3]), class("Widget"), "an exit that is not the last statement");
+}
+
+#[test]
+fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
+    // After a chain whose one arm falls through, the rest of the block runs
+    // where that arm does; a missing `else` falls through where every
+    // condition failed. Every arm leaving, or two falling through, narrows
+    // nothing after. A loop's `else` is no arm of a condition.
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let python = |chain: &str| {
+        let src = format!("class Foo:\n    pass\ndef f(x, z):\n{chain}\n    x.run()\n");
+        let mut parser = python_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+        let row = src.lines().position(|l| l.contains("x.run()")).unwrap();
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        ("    if not isinstance(x, Foo):\n        return\n        log()", "an exit not in last position"),
+        ("    if isinstance(x, Foo):\n        log()\n    else:\n        return", "an else-arm exit"),
+        (
+            "    if not isinstance(x, Foo):\n        return\n    elif z:\n        raise ValueError()\n    else:\n        log()",
+            "only the else falls",
+        ),
+        (
+            "    if z:\n        return\n    elif isinstance(x, Foo):\n        log()\n    else:\n        raise ValueError()",
+            "only the elif falls",
+        ),
+        (
+            "    if isinstance(x, Foo):\n        log()\n    elif z:\n        return\n    else:\n        raise ValueError()",
+            "only the then falls",
+        ),
+        (
+            "    if not isinstance(x, Foo):\n        if z:\n            return\n        else:\n            raise ValueError()",
+            "a nested chain whose every arm leaves",
+        ),
+        ("    if not isinstance(x, Foo):\n        return  # why\n        # and why", "a comment after the exit"),
+    ];
+    for (chain, why) in narrows {
+        assert_eq!(python(chain), class("Foo"), "python: {why}");
+    }
+    let nothing = [
+        ("    if isinstance(x, Foo):\n        return\n    else:\n        raise ValueError()", "every arm leaves"),
+        (
+            "    if isinstance(x, Foo):\n        log()\n    elif z:\n        log()\n    else:\n        return",
+            "two arms fall through",
+        ),
+        (
+            "    if not isinstance(x, Foo):\n        for y in z:\n            break\n        else:\n            return",
+            "a loop's else",
+        ),
+        (
+            "    if not isinstance(x, Foo):\n        try:\n            log()\n        except ValueError:\n            return",
+            "an except clause",
+        ),
+    ];
+    for (chain, why) in nothing {
+        assert_ne!(python(chain), class("Foo"), "python: {why}");
+    }
+
+    let cpp = |chain: &str| {
+        let src = format!("void f(std::optional<Widget> o, bool z) {{\n{chain}\n    o->run();\n}}\n");
+        let fa = cpp_skel(&src).into_file_analysis();
+        let row = src.lines().position(|l| l.contains("o->run()")).unwrap();
+        fa.inferred_type_via_bag("o", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        ("    if (!o) { return; log(); }", "an exit not in last position"),
+        ("    if (o) { log(); } else { return; }", "an else-arm exit"),
+        ("    if (o) { log(); } else /* why */ throw 1;", "a braceless else-arm exit"),
+        ("    if (!o) { return; } else if (z) { throw 1; } else { log(); }", "only the else falls"),
+        ("    if (z) { return; } else if (o) { log(); } else { throw 1; }", "only the else-if falls"),
+        ("    if (o) { log(); } else if (z) { return; } else { throw 1; }", "only the then falls"),
+        ("    if (!o) { if (z) { return; } else { throw 1; } }", "a nested chain whose every arm leaves"),
+        ("    if (!o) {\n        return; // why\n    }", "a comment after the exit"),
+    ];
+    for (chain, why) in narrows {
+        assert_eq!(cpp(chain), class("Widget"), "cpp: {why}");
+    }
+    let nothing = [
+        ("    if (o) { return; } else { throw 1; }", "every arm leaves"),
+        ("    if (o) { log(); } else if (z) { log(); } else { return; }", "two arms fall through"),
+        ("    if (!o) for (;;) break;", "a loop's body is no statement of the arm"),
+        ("    if (!o) { switch (z) { default: return; } }", "a switch"),
+    ];
+    for (chain, why) in nothing {
+        assert_ne!(cpp(chain), class("Widget"), "cpp: {why}");
+    }
 }
 
 #[test]
