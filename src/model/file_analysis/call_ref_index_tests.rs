@@ -152,6 +152,7 @@ fn equal_span_first_write_wins() {
             package: None,
             owner: None,
             implicit_receiver: false,
+            runs_on: None,
             closed: false,
             captures: Vec::new(),
             direct: false,
