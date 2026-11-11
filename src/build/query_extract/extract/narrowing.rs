@@ -170,6 +170,9 @@ struct Decides {
 /// is dead. Where exactly one arm falls through, the rest of the block
 /// after the chain runs where that arm does; where none does it never
 /// runs, and two or more are a join this tier does not take.
+// TODO(cfg-exit-join): this is reachability worked out inside one block, a
+// stand-in for the CFG; it retires with `@narrow.loop` once the CFG's edges
+// (a `break` to the loop's exit, an exit to the block's) answer it.
 fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
     use crate::cst::NodeId;
     let tree = ad.tree;
