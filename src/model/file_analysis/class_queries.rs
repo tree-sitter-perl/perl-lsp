@@ -325,6 +325,9 @@ impl FileAnalysis {
     /// `candidates`, deduped by `seen`. Called per-class in the ancestor
     /// walk: on `self` for local classes, on a cached module's analysis
     /// for cross-file ones.
+    ///
+    /// A `spelled` namespace's members are labelled as declared (php's
+    /// `$x`), as its operator has them written.
     fn collect_class_fields(
         &self,
         cls: &str,
@@ -332,7 +335,9 @@ impl FileAnalysis {
         seen: &mut HashSet<String>,
         site: &NamingSite,
         space: Option<NamespaceId>,
+        spelled: bool,
     ) {
+        let label = |sym: &Symbol| if spelled { sym.listed_name() } else { &sym.name }.to_string();
         let class_body = self
             .symbols
             .iter()
@@ -356,7 +361,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if self.slot_class_of(sym) == Some(cls) && self.lives_in(sym, space) && seen.insert(sym.name.clone()) {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: label(sym),
                     kind: sym.kind,
                     is_static: false,
                     detail: None,
@@ -400,7 +405,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -424,7 +429,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -450,23 +455,33 @@ impl FileAnalysis {
     /// class or a descendant. A caller with no cursor context passes `None`
     /// and safely under-offers to "public only".
     ///
-    /// `offers` is the member namespaces the access reaches (`None`: every
-    /// one the language declares). Each is gathered on its own, so a child
+    /// `offers` is what the access reaches (`None`: every namespace the
+    /// language declares). Each namespace is gathered on its own, so a child
     /// shadows its parent's member of one name within a namespace and
-    /// php's `count()` and `$count` are two members.
+    /// php's `count()` and `$count` are two members. In a `forward`
+    /// namespace an instance member is offered only where the call would
+    /// run on the object the cursor's code runs on (`on_receiver`, and
+    /// `class_name` is its class or an ancestor): elsewhere PHP's
+    /// `Foo::m()` on an instance method is an Error. A shadowing instance
+    /// member hides its parent's static one there too, as the call would
+    /// reach it.
     pub fn complete_members_for_class(
         &self,
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         requesting_class: Option<&str>,
-        offers: Option<SpaceSet>,
+        on_receiver: bool,
+        offers: Option<MemberReach>,
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
         let site = NamingSite::in_class(self, requesting_class, module_index);
+        let reaches_instance = on_receiver && site.in_lineage(class_name);
         let declared = (0..self.member_spaces().names.len()).filter_map(|i| u8::try_from(i).ok()).map(NamespaceId);
-        for space in declared.filter(|s| offers.is_none_or(|o| o.contains(*s))) {
+        for id in declared.filter(|s| offers.is_none_or(|o| o.spaces.contains(*s))) {
             let mut seen: HashSet<String> = HashSet::new();
-            let space = Some(space);
+            let space = Some(id);
+            let spelled = offers.is_some_and(|o| o.spelled.contains(id));
+            let from = candidates.len();
             self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, &site, space);
             // Data members from this class AND its ancestors. A field lives in
             // its class body scope (or a nested container body — inline unions);
@@ -474,7 +489,7 @@ impl FileAnalysis {
             // where each class's methods are declared — that IS the body scope,
             // whichever node carries it.
             self.for_each_ancestor_class(class_name, module_index, |cls| {
-                self.collect_class_fields(cls, &mut candidates, &mut seen, &site, space);
+                self.collect_class_fields(cls, &mut candidates, &mut seen, &site, space, spelled);
                 // a class defined in ANOTHER file — pull its fields from the
                 // cached module so cross-file member completion is complete
                 // (methods already cross via collect_ancestor_methods).
@@ -483,12 +498,17 @@ impl FileAnalysis {
                     // live across the set (`seen` dedups).
                     for cached in mi.visible_def_candidates(cls) {
                         mi.whole_present(&cached).collect_class_fields(
-                            cls, &mut candidates, &mut seen, &site, space,
+                            cls, &mut candidates, &mut seen, &site, space, spelled,
                         );
                     }
                 }
                 std::ops::ControlFlow::Continue(())
             });
+            if offers.is_some_and(|o| o.forward.contains(id)) && !reaches_instance {
+                let mut gathered = candidates.split_off(from);
+                gathered.retain(|c| c.is_static);
+                candidates.append(&mut gathered);
+            }
         }
         candidates
     }

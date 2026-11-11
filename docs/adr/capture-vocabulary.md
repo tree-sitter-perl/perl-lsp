@@ -197,13 +197,25 @@ token is written, not read.
 `@member.op` sits on the operator token of a member access's match.
 `@member.op.<which>` names the model's `MemberOp` on it, and `@space.<name>`
 on it names a namespace a member written after the operator lives in
-(php's `->`: methods and properties; `::`: methods and constants). On a
-member's name token `@space.<name>` is the namespaces the access searches;
-on its operator it is the namespaces the operator reaches, which is what
-completion offers there (`cursor-context-completion.md`). Extraction reads
-neither off the operator. The cursor reads both, with the access's
-receiver and name, off the same document run over its sentinel reparse
-(`CursorDocument`), so no node kind says which node is a member.
+(php's `->`: methods and properties; `::`: methods, constants and static
+properties). On a member's name token `@space.<name>` is the namespaces the
+access searches; on its operator it is the namespaces the operator reaches,
+which is what completion offers there (`cursor-context-completion.md`).
+Extraction reads neither off the operator. The cursor reads both, with the
+access's receiver and name, off the same document run over its sentinel
+reparse (`CursorDocument`), so no node kind says which node is a member.
+
+A namespace capture may carry a mark, `@space.<name>.<mark>` (`SpaceMark`).
+On a name token, `.illegal` is a namespace the site reaches only wrongly
+(`member-kinds.md`). On an operator, `.forward` says the operator reaches an
+instance member of the namespace only on the object the site already runs
+on: from an instance method of the receiver's class or a class it extends
+(php's `parent::m()`), elsewhere only a static member. `.spelled` says a
+member of the namespace is written after the operator as it is declared
+(php's `Foo::$x`), so completion lists it by its declared spelling.
+`@member.spelled` is the member's token as written where that is more than
+its name (php's `$x`): what a completion at the site replaces, so a typed
+`$` is replaced, never doubled.
 
 ## Decision: a def with no name is named from its anchor
 

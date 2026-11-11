@@ -349,6 +349,26 @@ spelled! {
         /// receiver: the token says only where the lookup starts (php's
         /// `self::m()` and `parent::m()`, which forward the called class).
         Forward = "forward",
+        /// The member as written, sigil and all (php's `$x` in `Foo::$x`):
+        /// what a completion there replaces.
+        Spelled = "spelled",
+    }
+}
+
+spelled! {
+    /// What a `@space.<name>.<mark>` says of the namespace beside naming it.
+    pub enum SpaceMark {
+        /// On a member's name token: the site reaches the namespace only
+        /// wrongly (php's `$obj->x` finding a static `$x`).
+        Illegal = "illegal",
+        /// On an operator: an instance member of the namespace is reached
+        /// through it only on the object the site already runs on, from an
+        /// instance method of the receiver's class or one it extends (php's
+        /// `parent::m()`); elsewhere only a static one.
+        Forward = "forward",
+        /// On an operator: a member of the namespace is written after it as
+        /// it is declared (php's `Foo::$x`).
+        Spelled = "spelled",
     }
 }
 
@@ -669,9 +689,9 @@ pub enum Capture {
     DocOf,
     /// A member namespace the declaration or member site at this token
     /// lives in or may land in, by the pack's own namespace names
-    /// (`@space.<name>`, `@space.<name>.illegal`). Resolved against the
+    /// (`@space.<name>`, `@space.<name>.<mark>`). Resolved against the
     /// pack's `MemberSpaces` when its document compiles.
-    Space { id: crate::model::file_analysis::NamespaceId, illegal: bool },
+    Space { id: crate::model::file_analysis::NamespaceId, mark: Option<SpaceMark> },
     /// A field typed by an anonymous aggregate.
     AnonAggMember,
     /// The node a pattern's links start from, and the walk they belong to.
@@ -843,7 +863,7 @@ impl fmt::Display for Capture {
             C::NsInline => f.write_str("ns.inline"),
             C::Doc => f.write_str("doc"),
             C::DocOf => f.write_str("doc.of"),
-            C::Space { id, illegal } => write!(f, "space#{}{}", id.0, if illegal { ".illegal" } else { "" }),
+            C::Space { id, mark } => write!(f, "space#{}{}", id.0, mark.map(|m| format!(".{m}")).unwrap_or_default()),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),
             C::Deref(k) => write!(f, "deref.{k}"),
@@ -869,11 +889,11 @@ pub(super) fn capture_table(
             // A namespace is the pack's own word, so it resolves against
             // the pack's declared names, never the closed vocabulary.
             if let Some(rest) = n.strip_prefix("space.") {
-                let (name, illegal) = match rest.strip_suffix(".illegal") {
-                    Some(name) => (name, true),
-                    None => (rest, false),
+                let (name, mark) = match rest.rsplit_once('.').and_then(|(name, m)| Some((name, SpaceMark::parse(m)?))) {
+                    Some((name, mark)) => (name, Some(mark)),
+                    None => (rest, None),
                 };
-                return spaces.id_of(name).map(|id| Some(Capture::Space { id, illegal })).ok_or_else(|| UnknownCapture(n.to_string()));
+                return spaces.id_of(name).map(|id| Some(Capture::Space { id, mark })).ok_or_else(|| UnknownCapture(n.to_string()));
             }
             Capture::parse(n).map(Some)
         })

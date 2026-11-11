@@ -5,7 +5,7 @@
 //! sentinel asks here instead of keeping a table of node kinds.
 
 use super::*;
-use crate::model::file_analysis::{MemberMode, MemberOp, SpaceAsk, SpaceSet};
+use crate::model::file_analysis::{MemberMode, MemberOp, MemberReach, SpaceAsk, SpaceSet, Span};
 use std::cell::OnceCell;
 use tree_sitter::Node;
 
@@ -28,14 +28,17 @@ pub struct MemberSite<'t> {
 pub struct MemberFacts {
     /// Which operator the token is (`@member.op.<which>`).
     pub op: Option<MemberOp>,
-    /// The namespaces a member written after the operator lives in
-    /// (`@space.<name>` on the token); `None` when it states none.
-    pub offers: Option<SpaceSet>,
+    /// What the operator reaches (`@space.<name>[.<mark>]` on the token);
+    /// `None` when it states none.
+    pub offers: Option<MemberReach>,
     /// Words written after the operator that name no member
     /// (`#set! member.word`).
     pub words: Vec<String>,
     /// The namespaces the access's own name token searches.
     pub spaces: Option<SpaceAsk>,
+    /// The member as written, where that is more than its name
+    /// (`@member.spelled`: php's `$x`).
+    pub spelled: Option<Span>,
 }
 
 /// A pack's document over one parsed buffer.
@@ -125,7 +128,15 @@ impl<'t, 's> CursorDocument<'t, 's> {
                 if Some(*node) == site.op {
                     match cap {
                         Capture::MemberOp(which) => facts.op = Some(which.op()),
-                        Capture::Space { id, .. } => facts.offers = Some(facts.offers.unwrap_or_default().with(*id)),
+                        Capture::Space { id, mark } => {
+                            let r = facts.offers.unwrap_or_default();
+                            let marked = |set: SpaceSet, m| if *mark == Some(m) { set.with(*id) } else { set };
+                            facts.offers = Some(MemberReach {
+                                spaces: r.spaces.with(*id),
+                                forward: marked(r.forward, SpaceMark::Forward),
+                                spelled: marked(r.spelled, SpaceMark::Spelled),
+                            });
+                        }
                         _ => {}
                     }
                     for s in query.property_settings(pattern) {
@@ -137,13 +148,19 @@ impl<'t, 's> CursorDocument<'t, 's> {
                     }
                 }
                 if *node == site.name {
-                    if let Capture::Space { id, illegal } = cap {
+                    if let Capture::Space { id, mark } = cap {
                         let a = facts.spaces.unwrap_or_default();
                         facts.spaces = Some(SpaceAsk {
                             search: a.search.with(*id),
-                            illegal: if *illegal { a.illegal.with(*id) } else { a.illegal },
+                            illegal: if *mark == Some(SpaceMark::Illegal) { a.illegal.with(*id) } else { a.illegal },
                         });
                     }
+                }
+                if *cap == Capture::Member(MemberCap::Spelled)
+                    && node.start_byte() <= site.name.start_byte()
+                    && site.name.end_byte() <= node.end_byte()
+                {
+                    facts.spelled = Some(Span { start: node.start_position(), end: node.end_position() });
                 }
             }
         });

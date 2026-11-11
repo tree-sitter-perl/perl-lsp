@@ -1355,6 +1355,11 @@ impl<'a> NamingSite<'a> {
         NamingSite { class: Some(class.to_string()), lineage, below, descends: Default::default() }
     }
 
+    /// Is `class` the site's class or one it descends from?
+    pub(crate) fn in_lineage(&self, class: &str) -> bool {
+        self.lineage.contains(class)
+    }
+
     /// May this site name a member of `declaring` with these flags?
     pub(crate) fn may_name(&self, flags: SymbolFlags, declaring: &str) -> bool {
         self.admits(flags.access_scope(), declaring)

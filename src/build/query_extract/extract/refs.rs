@@ -81,11 +81,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 pub(super) fn space_ask<'a>(on: impl Iterator<Item = &'a Event>) -> Option<crate::model::file_analysis::SpaceAsk> {
     use crate::model::file_analysis::SpaceAsk;
     on.fold(None, |acc: Option<SpaceAsk>, t| match t.cap {
-        Capture::Space { id, illegal } => {
+        Capture::Space { id, mark } => {
             let a = acc.unwrap_or_default();
             Some(SpaceAsk {
                 search: a.search.with(id),
-                illegal: if illegal { a.illegal.with(id) } else { a.illegal },
+                illegal: if mark == Some(SpaceMark::Illegal) { a.illegal.with(id) } else { a.illegal },
             })
         }
         _ => acc,

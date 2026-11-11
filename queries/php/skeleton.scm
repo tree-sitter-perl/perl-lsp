@@ -718,13 +718,21 @@
 (scoped_call_expression scope: (qualified_name (name) @ref.type) @ref.spelled)
 
 ; What an operator reaches: after `->` or `?->` one of the object's methods
-; or properties, after `::` one of the class's methods or constants, or
-; `class`, the class itself (`Foo::class`). A static property is written
-; `::$x`, its own form. Completion offers what the operator reaches.
+; or properties, after `::` one of the class's methods, constants or static
+; properties, or `class`, the class itself (`Foo::class`). A method `::`
+; reaches runs on no object, so an instance one is reached only where the
+; call forwards the object the calling method runs on: from an instance
+; method of the class named or one it extends (`parent::__construct()`);
+; elsewhere it is PHP's Error. A static property is written after `::` as
+; declared, `$` and all. Completion offers what the operator reaches.
 "->" @member.op.arrow @space.method @space.property
 "?->" @member.op.arrow @space.method @space.property
-("::" @space.method @space.constant
+("::" @space.method.forward @space.constant
  (#set! member.word "class"))
+"::" @space.static_property.spelled
+; The `$` of a static property is part of the member written: completing
+; `Foo::$` replaces it.
+(scoped_property_access_expression name: (variable_name) @member.spelled)
 
 ; ---- construction ----
 ; `new Foo(…)` calls the constructor of the class `Foo` names on its

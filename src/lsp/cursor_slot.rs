@@ -36,11 +36,14 @@ pub struct ReceiverCtx {
     pub receiver_type: Option<InferredType>,
     pub receiver_text: Option<String>,
     pub op_fix: Option<(Span, String)>,
-    /// The member namespaces the operator offers (`None`: every one), and
-    /// the words it may be followed by that name no member (php's
-    /// `Foo::class`). Pack languages only.
-    pub offers: Option<crate::model::file_analysis::SpaceSet>,
+    /// What the operator reaches (`None`: every namespace), and the words
+    /// it may be followed by that name no member (php's `Foo::class`).
+    /// Pack languages only.
+    pub offers: Option<crate::model::file_analysis::MemberReach>,
     pub words: Vec<String>,
+    /// What an accepted item replaces, where the detector knows better than
+    /// the client's word (a typed sigil). Pack languages only.
+    pub replace: Option<Span>,
 }
 
 /// The owner of a `Slot::Key` — `$h->{|`'s hash, resolved by type when
@@ -244,6 +247,7 @@ pub fn detect_slot(
                     op_fix: ctx.op_fix,
                     offers: ctx.offers,
                     words: ctx.words,
+                    replace: Some(ctx.replace),
                 },
                 op: ctx.op,
             },
@@ -308,6 +312,7 @@ fn slot_from_cursor_context(ctx: CursorContext) -> DetectedSlot {
                     op_fix: None,
                     offers: None,
                     words: Vec::new(),
+                    replace: None,
                 },
                 op: MemberOp::Arrow, // Perl method dispatch is always `->`
             },

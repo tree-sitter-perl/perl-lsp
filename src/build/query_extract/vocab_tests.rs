@@ -25,7 +25,7 @@ fn bundled_documents_speak_the_vocabulary() {
             }
             // A namespace is the pack's own word: it names one the pack declares.
             if let Some(rest) = name.strip_prefix("space.") {
-                let space = rest.strip_suffix(".illegal").unwrap_or(rest);
+                let space = rest.rsplit_once('.').filter(|(_, m)| SpaceMark::parse(m).is_some()).map_or(rest, |(s, _)| s);
                 assert!(pack.member_spaces.id_of(space).is_some(), "{lang}: @{name} names a declared namespace");
                 continue;
             }

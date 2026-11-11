@@ -90,9 +90,10 @@ pub(super) fn string_content_span_at(tree: &Tree, point: Point) -> Option<Span> 
 }
 
 /// Rewrite each item's replace range to `span`, materialized as a
-/// `TextEdit` on `text_edit`. Used for mid-string completions where
-/// the client's default word-extraction would otherwise misfilter the
-/// item (see `string_content_span_at`).
+/// `TextEdit` on `text_edit`. Used where the client's default
+/// word-extraction would otherwise misfilter the item or keep what it
+/// replaces: mid-string completions (see `string_content_span_at`) and a
+/// member written with its sigil (php's `Foo::$x`).
 ///
 /// `newText` is the bare `label` — NOT `insert_text`. `insert_text`
 /// from other code paths can carry wrapping quotes (`'connect'` for

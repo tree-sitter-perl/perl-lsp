@@ -1011,7 +1011,7 @@ x = o.z
 fn instance_completion_offers_every_member() {
     let fa = members_fa();
     let labels: std::collections::HashSet<String> =
-        fa.complete_members_for_class("pkg.mod.Counter", None, None, None).into_iter().map(|c| c.label).collect();
+        fa.complete_members_for_class("pkg.mod.Counter", None, None, false, None).into_iter().map(|c| c.label).collect();
     for name in ["a", "b", "count", "total", "n", "bump", "__init__"] {
         assert!(labels.contains(name), "{name} in {labels:?}");
     }

@@ -4258,6 +4258,11 @@ function produce() { yield 1; }
 /// indexed, the cursor's buffer the one written.
 #[cfg(feature = "php")]
 fn completions(src: &str) -> Vec<(String, Option<tower_lsp::lsp_types::CompletionItemKind>)> {
+    completion_items(src).into_iter().map(|i| (i.label, i.kind)).collect()
+}
+
+#[cfg(feature = "php")]
+fn completion_items(src: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     let at = src.find('|').expect("a cursor");
     let src = format!("{}{}", &src[..at], &src[at + 1..]);
     let row = src[..at].matches('\n').count();
@@ -4271,7 +4276,7 @@ fn completions(src: &str) -> Vec<(String, Option<tower_lsp::lsp_types::Completio
     let store = crate::index::open_docs::OpenDocs::new();
     let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
     let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "php", Some(&canon), &idx);
-    items.into_iter().map(|i| (i.label, i.kind)).collect()
+    items
 }
 
 #[cfg(feature = "php")]
@@ -4300,8 +4305,8 @@ class Kid extends Base {
 ";
 
 /// After `->` or `?->` a member is one of the object's methods or
-/// properties; after `::` one of the class's methods or constants, or
-/// `class`; after `::$` one of its static properties.
+/// properties; after `::` one of the class's methods, constants or static
+/// properties (written `$x`), or `class`.
 #[cfg(feature = "php")]
 #[test]
 fn member_completion_offers_what_the_operator_reaches() {
@@ -4311,14 +4316,76 @@ fn member_completion_offers_what_the_operator_reaches() {
     assert_eq!(at("$b?->|"), instance, "the nullsafe operator");
     assert_eq!(at("$this->|"), ["greet", "make", "next", "run", "shared"], "the class the method is written in");
     assert_eq!(at("$this->next->|"), ["greet", "make", "next", "run", "shared"], "a chain");
-    let statics = ["LIMIT", "class", "greet", "make"];
+    let statics = ["$count", "LIMIT", "class", "greet", "make"];
     assert_eq!(at("Base::|"), statics, "a class name");
     assert_eq!(at("parent::|"), statics, "the parent");
-    assert_eq!(at("self::|"), ["LIMIT", "class", "greet", "make", "run"], "the enclosing class");
-    assert_eq!(at("static::|"), ["LIMIT", "class", "greet", "make", "run"], "the called class");
+    assert_eq!(at("self::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "the enclosing class");
+    assert_eq!(at("static::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "the called class");
     assert_eq!(at("Base::make()->|"), instance, "a call on the class");
-    assert_eq!(at("self::$|"), ["count"], "a static property is written `::$x`");
     assert_eq!(at("$b->gr|eet();"), instance, "completing in place of a member");
+}
+
+/// A static property completes as written, `$` and all, whether or not the
+/// `$` is typed: the item replaces a typed `$`, never doubling it.
+#[cfg(feature = "php")]
+#[test]
+fn a_static_property_replaces_a_typed_dollar() {
+    use tower_lsp::lsp_types::{CompletionTextEdit, Position};
+    let edit = |hole: &str| {
+        let item = completion_items(&SHAPES.replace("CURSOR", hole)).into_iter().find(|i| i.label == "$count");
+        match item.and_then(|i| i.text_edit) {
+            Some(CompletionTextEdit::Edit(e)) => Some((e.new_text, e.range.start, e.range.end)),
+            _ => None,
+        }
+    };
+    let at = |col| Position { line: 12, character: col };
+    assert_eq!(edit("self::|"), Some(("$count".into(), at(14), at(14))), "nothing typed");
+    assert_eq!(edit("self::$|"), Some(("$count".into(), at(14), at(15))), "the `$` typed");
+    assert_eq!(edit("self::$co|"), Some(("$count".into(), at(14), at(17))), "a prefix typed");
+}
+
+/// `::` reaches an instance method only where the call forwards the object
+/// the calling code runs on: from an instance method (or a closure in one)
+/// of the class named or one it extends. Elsewhere only static methods are
+/// offered; constants, static properties and `class` everywhere.
+#[cfg(feature = "php")]
+#[test]
+fn an_instance_method_is_offered_after_double_colon_only_where_the_call_forwards() {
+    let src = "<?php
+namespace App;
+class Base {
+    const LIMIT = 3;
+    public static $count = 0;
+    public function greet() {}
+    public static function make() {}
+    public function look() { BASE }
+}
+class Kid extends Base {
+    public function run() { KID }
+    public static function build() { STATIC }
+}
+class Stranger {
+    public function run() { STRANGER }
+}
+function free() { FREE }
+";
+    let at = |hole: &str, cursor: &str| {
+        let mut s = src.to_string();
+        for h in ["BASE", "KID", "STATIC", "STRANGER", "FREE"] {
+            s = s.replace(h, if h == hole { cursor } else { "" });
+        }
+        labels(&s)
+    };
+    let forwarded = ["$count", "LIMIT", "class", "greet", "look", "make"];
+    let statics = ["$count", "LIMIT", "class", "make"];
+    assert_eq!(at("KID", "parent::|"), forwarded, "the parent, from an instance method");
+    assert_eq!(at("KID", "Base::|"), forwarded, "an ancestor by name");
+    assert_eq!(at("KID", "$f = function () { parent::| };"), forwarded, "a closure runs on the method's object");
+    assert_eq!(at("STATIC", "parent::|"), statics, "a static method runs on no object");
+    assert_eq!(at("STRANGER", "Base::|"), statics, "a class outside the lineage");
+    assert_eq!(at("BASE", "Kid::|"), ["$count", "LIMIT", "build", "class", "make"], "a descendant");
+    assert_eq!(at("FREE", "Base::|"), statics, "free code");
+    assert_eq!(at("FREE", "Stranger::|"), ["class"], "a class with nothing reachable still offers `class`");
 }
 
 #[cfg(feature = "php")]
@@ -4378,7 +4445,7 @@ fn a_protected_member_is_offered_in_its_class_and_descendants() {
         "the parent's protected methods and constants"
     );
     assert_eq!(at("STRANGER", "$b->|"), ["__construct", "greet", "here", "open"], "outside the family");
-    assert_eq!(at("STRANGER", "Base::|"), ["OPEN", "__construct", "class", "greet", "here"], "outside the family");
+    assert_eq!(at("STRANGER", "Base::|"), ["OPEN", "class"], "outside the family, instance methods unreached");
 }
 
 /// A parent names its child's protected members on a receiver typed as

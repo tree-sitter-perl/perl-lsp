@@ -1527,6 +1527,18 @@ impl SpaceSet {
     }
 }
 
+/// What a member operator reaches, as its query document tags its token
+/// (`@space.<name>[.<mark>]`): the namespaces a member written after it
+/// lives in, those whose instance members it reaches only on the object
+/// the site runs on (`.forward`), and those whose members are written after
+/// it as declared (`.spelled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemberReach {
+    pub spaces: SpaceSet,
+    pub forward: SpaceSet,
+    pub spelled: SpaceSet,
+}
+
 /// The namespaces a member site may land in, as its query document tagged
 /// them (`@space.<name>`), and those of them it may not legally reach
 /// (`@space.<name>.illegal`: php's `$obj->x` finds a static `$x`, wrongly).
