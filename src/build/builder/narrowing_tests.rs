@@ -95,10 +95,42 @@ fn narrow_block_form_without_exit_narrows_nothing_after() {
     for (src, why) in [
         ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { warn 'no'; }\n    $x->layout;\n}", "no exit"),
         ("package P;\nsub f {\n    my ($x, $y) = @_;\n    unless ($x->isa('Widget')) { return if $y; }\n    $x->layout;\n}", "a conditional exit"),
-        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { return; } else { warn 'w'; }\n    $x->layout;\n}", "an else arm"),
     ] {
         let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
         assert_eq!(fa_type_at(src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+}
+
+#[test]
+fn narrow_after_a_chain_follows_the_one_arm_that_falls_through() {
+    // A block leaves where any of its statements does, and a chain leaves
+    // where every arm does, an `else` among them. After a chain whose one
+    // arm falls through, the rest of the block runs where that arm does.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    let narrows = [
+        ("unless ($x->isa('Widget')) { return; warn 'x'; }", "an exit not in last position"),
+        ("if ($x->isa('Widget')) { warn 'w'; } else { return; }", "an else-arm exit"),
+        ("unless ($x->isa('Widget')) { return; } else { warn 'w'; }", "unless, then else"),
+        ("if (!$x->isa('Widget')) { return; } elsif ($y) { die 'y'; } else { warn 'w'; }", "only the else falls"),
+        ("if ($y) { return; } elsif ($x->isa('Widget')) { warn 'w'; } else { die 'n'; }", "only the elsif falls"),
+        ("if ($x->isa('Widget')) { warn 'w'; } elsif ($y) { return; } else { die 'n'; }", "only the then falls"),
+        ("unless ($x->isa('Widget')) { if ($y) { return; } else { die 'y'; } }", "a nested chain whose every arm leaves"),
+        ("unless ($x->isa('Widget')) {\n        return; # why\n    }", "a comment after the exit"),
+    ];
+    for (chain, why) in narrows {
+        let src = format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let nothing = [
+        ("if ($x->isa('Widget')) { return; } else { die 'n'; }", "every arm leaves"),
+        ("if ($x->isa('Widget')) { warn 'w'; } elsif ($y) { warn 'y'; } else { return; }", "two arms fall through"),
+        ("unless ($x->isa('Widget')) { if ($y) { return; } }", "a nested chain with no else"),
+    ];
+    for (chain, why) in nothing {
+        let src = format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), None, "{why}");
     }
 }
 

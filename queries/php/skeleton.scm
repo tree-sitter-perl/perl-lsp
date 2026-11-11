@@ -467,50 +467,38 @@
 ; Where a condition decides what runs: an `if` or `elseif` body and a
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
-; runs where the left holds, of `||` where it fails. An `if` whose body
-; ends in a statement that leaves the block, with no clause after it,
-; leaves the rest of the block to run where its condition fails: what runs
-; before that statement ends there too, or leaves sooner. `die` and a
-; called `exit` are calls by the grammar's reading (`die;` a bare name),
-; and the language reserves both words, so their spelling names them,
-; from the global namespace too (`\exit(1)`).
-; A comment after the leaving statement is a named child too, and hides
-; it from the closing anchor.
+; runs where the left holds, of `||` where it fails. An `else` arm is its
+; body. A loop tests its condition again after each run of its body, so
+; what follows it is no arm of that test.
 (if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
-(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
 (else_if_clause condition: (_) @narrow.cond body: (_) @narrow.then)
 (if_statement
   alternative: (else_if_clause condition: (_) @narrow.cond)
-  alternative: (_) @narrow.else)
-(while_statement condition: (_) @narrow.cond body: (_) @narrow.then)
+  alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+(while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
 (conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: ["&&" "and"] right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: ["||" "or"] right: (_) @narrow.else)
-(if_statement
-  condition: (_) @narrow.cond
-  body: [
-    (return_statement)
-    (continue_statement)
-    (break_statement)
-    (exit_statement)
-    (expression_statement (throw_expression))
-    (compound_statement
-      [(return_statement)
-       (continue_statement)
-       (break_statement)
-       (exit_statement)
-       (expression_statement (throw_expression))] .)]
-  !alternative) @narrow.exit
-((if_statement
-   condition: (_) @narrow.cond
-   body: [
-     (expression_statement
-       [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit])
-     (compound_statement
-       (expression_statement
-         [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) .)]
-   !alternative) @narrow.exit
+
+; A statement that leaves its block: nothing after it there runs, and
+; whether a chain of arms falls through follows from its arms' statements
+; (`query_extract/extract/narrowing.rs`). `die` and a called `exit` are
+; calls by the grammar's reading (`die;` a bare name), and the language
+; reserves both words, so their spelling names them, from the global
+; namespace too (`\exit(1)`).
+; TODO(noreturn-callee): a callee that never returns is an effect on the
+; callee; replace the spelling lookup once effects and the CFG exist.
+[(return_statement)
+ (continue_statement)
+ (break_statement)
+ (exit_statement)
+ (expression_statement (throw_expression))] @flow.leaves
+((expression_statement
+   [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
  (#any-of? @_exit "die" "exit"))
 
 ; ---- calls ----

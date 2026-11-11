@@ -241,6 +241,10 @@ spelled! {
         /// the write initialises it, never overwrites it. The place's own
         /// `Place` capture makes it a write.
         Init = "init",
+        /// A statement that leaves its block unconditionally (a return, a
+        /// throw, a `break`): nothing after it in the block runs. Which
+        /// arms of a condition fall through follows by containment.
+        Leaves = "leaves",
     }
 }
 
@@ -322,9 +326,10 @@ spelled! {
         Then = "then",
         /// What runs where the condition fails.
         Else = "else",
-        /// A statement that leaves its block unless the condition fails: the
-        /// rest of the block runs where it fails.
-        Exit = "exit",
+        /// A position match's construct that tests its condition again
+        /// after each run of its arm (a loop): a `break` in the arm lands
+        /// after it too, so its arms decide nothing about what follows.
+        Loop = "loop",
     }
 }
 
