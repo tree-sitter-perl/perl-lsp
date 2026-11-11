@@ -192,6 +192,13 @@ does not exist yet.
 projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
 
+`@flow.leaves` is a statement that leaves its block unconditionally (a
+return, a throw, a `break`): nothing after it in the block runs. It is the
+document's one statement about control leaving; which arms of a
+condition fall through, and what the rest of a block after them is known
+under, the narrowing family derives by containment over the `@narrow.*`
+positions (`flow-narrowing.md`).
+
 ## Decision: a member operator states what it reaches
 
 `@member.op` sits on the operator token of a member access's match.

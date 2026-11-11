@@ -307,19 +307,31 @@ exception — perlsyn runs the block once before the first test. Nothing
 narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
-diagnostics see each statement-level guard once, as before. The block
-spelling is the same fall-through: an `if`/`unless` with no other arm
-whose block's last statement is an exit (`unless ($x->isa('Foo')) {
-return }`, `if (!defined $x) { warn …; die }`) leaves the rest of the
-enclosing block to run where the block was not entered, through the same
-`narrow_block_remainder`; its guard is recorded once, as the arm's. An
-exit is a word read by its spelling (`is_exit_expression`'s table:
-`return`, `die`, `exit`, `croak`, `confess`, `last`, `next`, `redo`,
-`goto`), so a file's own sub named `croak` counts as one, and so does a
-`goto` whose label lies in the rest of the block. A
-chain with another arm decides no fall-through yet, even when every arm
-exits, and nothing narrows past the enclosing block: both are the CFG's
-block-exit join (`docs/prompt-cfg-tier.md` §3.5, `TODO(cfg-exit-join)`).
+diagnostics see each statement-level guard once.
+
+"Falls through" is a fact about statements. A block leaves when any of
+its statements leaves, wherever that statement sits, and what follows it
+there is dead: a statement leaves when it is an exit, or when it is an
+`if`/`unless` chain with an `else` whose every arm leaves
+(`block_leaves`). A chain with no `else` has an implicit one, which falls
+through. After a chain whose arms all leave but one, the rest of the
+enclosing block runs where that arm does, through the same
+`narrow_block_remainder`, narrowed as that arm's block is: the first
+arm where its block is entered, an `elsif` where its own guard holds and
+every earlier arm was not entered, the `else` where no earlier arm was
+(`unless ($x->isa('Foo')) { return }`, `if ($x->isa('Foo')) { … } else
+{ die }`, `if (!defined $x) { die; warn … }`). Each arm's guard is recorded once,
+as the arm's. Where no arm falls through, the rest of the block never
+runs and nothing narrows it; where two or more do, the rest runs where
+any of them does, and nothing narrows past the enclosing block either:
+both are the CFG's block-exit join (`docs/prompt-cfg-tier.md` §3.5,
+`TODO(cfg-exit-join)`). An exit is a word read by its spelling
+(`is_exit_expression`'s table: `return`, `die`, `exit`, `croak`,
+`confess`, `last`, `next`, `redo`, `goto`), so a file's own sub named
+`croak` counts as one, and so does a `goto` whose label lies in the rest
+of the block; a callee that never returns is an effect on the callee,
+which replaces the table once effects and the CFG exist
+(`TODO(noreturn-callee)`).
 
 A pack's document states its guards in three parts, and the extractor
 (`query_extract/extract/narrowing.rs`) joins them by containment, the
@@ -331,18 +343,29 @@ fails) or `@narrow.unset` (the swap). A **connective** is a node marked
 `@narrow.not`, `@narrow.and`, `@narrow.or` or `@narrow.group` (a
 parenthesis). A **position** match marks a condition `@narrow.cond` and
 what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
-it fails, and `@narrow.exit` is a statement that leaves its block unless
-the condition fails, so the rest of that block runs where it fails. Each
-document marks an `if` with no later clause whose body is, or ENDS in, a
-statement that leaves (the closing anchor alone: what runs before it ends
-there too or leaves sooner, so a leading comment or a logging call does
-not hide the exit). A comment AFTER the exit inside the body is a named
-child the anchor counts, and tree-sitter does not honour an anchor after
-a quantified `(comment)*`, so that spelling narrows nothing. PHP names
-`die` (a call, or a bare `die;`) and a called `exit` by spelling, which
-the language reserves; a call that never returns by its callee's nature
-(`sys.exit()`, `std::abort()`, `[[noreturn]]`) needs a fact on the
-callee (`TODO(noreturn-callee)`). An
+it fails. An `else` arm is the statement it holds, so a later clause of
+the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
+condition before it. `@narrow.loop` marks a position's construct that
+tests its condition again after each run of its arm (PHP's `while`): a
+`break` in the arm lands after the loop too, so its arms decide nothing
+about what follows. Apart from guards, each document marks every
+statement that leaves its block unconditionally `@flow.leaves` (return,
+throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
+`exit`, which the language reserves, so their spelling names them), and
+the extractor derives the rest by containment, the Perl rule above: a
+condition's statement is the node holding it and its then arm; a chain
+is that statement with every condition whose statement is an else arm of
+the chain; its arms are the narrowest regions its conditions decide, each
+known by every condition deciding a region around it. An arm leaves when
+it, or one of the statements it runs in sequence (its named children
+outside every field: a loop's body is a part of the loop, not a
+statement of the arm), is marked `@flow.leaves` or is a chain that
+leaves. Where exactly one arm falls through, the rest of the block holding
+the chain runs where that arm does, a region of every condition that
+decides it. A comment is no statement, so where it sits does not matter. A
+call that never returns by its callee's nature (`sys.exit()`,
+`std::abort()`, `[[noreturn]]`) is an effect on the callee, to mark once
+effects and the CFG exist (`TODO(noreturn-callee)`). An
 atom climbs to each condition above it through connectives alone (an
 atom inside a call argument is no part of the condition), and the
 connectives on the way decide its value in each of the condition's
