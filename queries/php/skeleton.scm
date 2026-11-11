@@ -498,6 +498,9 @@
 (if_statement
   alternative: (else_if_clause condition: (_) @narrow.cond)
   alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+; TODO(cfg-exit-join): `@narrow.loop` and the fall-through it guards stand
+; in for reachability; the CFG retires both, since a `break` is an edge to
+; the loop's exit there.
 (while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
 (conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)

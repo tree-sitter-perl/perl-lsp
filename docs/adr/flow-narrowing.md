@@ -348,7 +348,9 @@ the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
 condition before it. `@narrow.loop` marks a position's construct that
 tests its condition again after each run of its arm (PHP's `while`): a
 `break` in the arm lands after the loop too, so its arms decide nothing
-about what follows. Apart from guards, each document marks every
+about what follows. The fall-through derivation and `@narrow.loop` are a
+single-block stand-in for CFG reachability and retire with it
+(`TODO(cfg-exit-join)`). Apart from guards, each document marks every
 statement that leaves its block unconditionally `@flow.leaves` (return,
 throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
 `exit`, which the language reserves, so their spelling names them), and
