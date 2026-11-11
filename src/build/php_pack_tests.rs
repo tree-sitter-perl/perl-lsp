@@ -3226,11 +3226,12 @@ function f($x, $y) {
     assert_eq!(fa.inferred_type_via_bag("y", at(src, "return", 0)), None, "not the exit's own arm");
 }
 
-/// An `if` with no later clause whose body ENDS in a statement that leaves
-/// the block leaves the rest of the block to run where its condition
-/// fails: `die` in either spelling, `exit`, and an exit after work or a
-/// comment. A body that may fall through, or a chain with another clause,
-/// says nothing past the `if`.
+/// An `if` with no later clause whose body leaves the block leaves the
+/// rest of the block to run where its condition fails: `die` in either
+/// spelling, `exit`, and an exit after work or a comment, or before more
+/// work, and so does an `else` that falls through. A body that may fall
+/// through, or a chain whose other clause falls through too, says nothing
+/// past the `if`.
 #[cfg(feature = "php")]
 #[test]
 fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
@@ -3243,6 +3244,8 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
         ("{\n        // why\n        return;\n    }", "a comment before the exit"),
         ("{ log_it(); return; }", "work, then the exit"),
         ("{ if ($z) { log_it(); } throw new \\Exception(); }", "a nested block, then the exit"),
+        ("{ return; log_it(); }", "an exit that is not the last statement"),
+        ("{ return; } else { log_it(); }", "an else clause that falls through"),
     ];
     for (body, why) in exits {
         let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
@@ -3251,9 +3254,7 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
     }
     let falls_through = [
         ("{ log_it(); }", "no exit"),
-        ("{ return; log_it(); }", "an exit that is not the last statement"),
         ("{ if ($z) { return; } }", "an exit only in a nested block"),
-        ("{ return; } else { log_it(); }", "an else clause"),
         ("{ return; } elseif ($z) { log_it(); }", "an elseif clause"),
         ("{ diet(); }", "a call that is not die"),
     ];
@@ -3261,6 +3262,47 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
         let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
         let fa = php(&src);
         assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
+/// After a chain whose one arm falls through, the rest of the block runs
+/// where that arm does: the then-arm where its condition holds, a later
+/// clause where its own holds and every earlier one failed, and a missing
+/// `else` where every condition failed. Every arm leaving, or two falling
+/// through, narrows nothing after; a loop's body is left by `break` to what
+/// follows the loop.
+#[cfg(feature = "php")]
+#[test]
+fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src_of = |chain: &str| {
+        format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    {chain}\n    $y->run();\n}}\n")
+    };
+    let narrows = [
+        ("if (!$y instanceof Foo) { return; log_it(); }", "an exit not in last position"),
+        ("if ($y instanceof Foo) { log_it(); } else { return; }", "an else-arm exit"),
+        ("if ($y instanceof Foo) { log_it(); } else return;", "a braceless else-arm exit"),
+        ("if (!$y instanceof Foo) { return; } elseif ($z) { die(); } else { log_it(); }", "only the else falls"),
+        ("if ($z) { return; } elseif ($y instanceof Foo) { log_it(); } else { exit; }", "only the elseif falls"),
+        ("if ($y instanceof Foo) { log_it(); } elseif ($z) { return; } else { throw new \\Exception(); }", "only the then falls"),
+        ("if (!$y instanceof Foo) { return; } elseif ($z) { return; }", "a missing else, every condition failed"),
+        ("if (!$y instanceof Foo) { if ($z) { return; } else { die; } }", "a nested chain whose every arm leaves"),
+        ("if (!$y instanceof Foo) {\n        return; // why\n    }", "a comment after the exit"),
+        ("if (!$y instanceof Foo):\n        return;\n    endif;", "a colon block"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let nothing = [
+        ("if ($y instanceof Foo) { return; } else { die; }", "every arm leaves"),
+        ("if ($y instanceof Foo) { log_it(); } elseif ($z) { log_it(); } else { return; }", "two arms fall through"),
+        ("while (!$y instanceof Foo) { break; }", "a loop left by break"),
+        ("if (!$y instanceof Foo) while ($z) return;", "a loop's body is no statement of the arm"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
     }
 }
 
