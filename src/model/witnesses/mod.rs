@@ -115,8 +115,14 @@ const SPAN_ORDER_MIN: usize = 16;
 /// `WitnessBag::live_at`. Bag indices throughout.
 #[derive(Debug, Default, Clone)]
 struct SpanOrder {
-    /// Windowed witnesses by `(span.start, bag index)`.
+    /// Windowed witnesses by `(span.start, bag index)`, but for the
+    /// repeated uses below.
     windowed: Vec<usize>,
+    /// Uses of the value (`WitnessPayload::repeated_use`), one `Uses` per
+    /// distinct use. The fold reads a use only as "one holds here" and where
+    /// the latest such stands, so a read takes one member per kind: a
+    /// variable used N times costs a read the number of kinds, not N.
+    repeats: Vec<Uses>,
     /// The write markers, by the same order.
     resets: Vec<usize>,
     /// Witnesses whose payload is not windowed: always read.
@@ -142,7 +148,12 @@ impl SpanOrder {
         if matches!(w.payload, WitnessPayload::Reset) {
             self.resets.push(idx);
         }
-        if w.payload.is_windowed() {
+        if let Some(obs) = w.payload.repeated_use() {
+            match self.repeats.iter_mut().find(|u| u.obs == *obs) {
+                Some(u) => u.members.push(idx),
+                None => self.repeats.push(Uses { obs: obs.clone(), members: vec![idx], up: Vec::new() }),
+            }
+        } else if w.payload.is_windowed() {
             self.windowed.push(idx);
         } else {
             self.kept.push(idx);
@@ -154,7 +165,8 @@ impl SpanOrder {
     fn file(&mut self, ws: &[Witness], idx: usize) {
         self.note(&ws[idx], idx);
         let at = ws[idx].span.start;
-        for v in [&mut self.windowed, &mut self.resets] {
+        let repeats = self.repeats.iter_mut().map(|u| &mut u.members);
+        for v in [&mut self.windowed, &mut self.resets].into_iter().chain(repeats) {
             if v.last() != Some(&idx) {
                 continue;
             }
@@ -163,6 +175,11 @@ impl SpanOrder {
                 v.swap(i - 1, i);
                 i -= 1;
             }
+        }
+        if let Some(obs) = ws[idx].payload.repeated_use() {
+            let u = self.repeats.iter_mut().find(|u| u.obs == *obs).expect("`note` filed it");
+            let k = u.members.iter().rposition(|&i| i == idx).expect("`note` filed it");
+            u.relink_from(ws, k);
         }
     }
 
@@ -174,6 +191,10 @@ impl SpanOrder {
         }
         order.windowed.sort_by_key(|&i| (ws[i].span.start, i));
         order.resets.sort_by_key(|&i| (ws[i].span.start, i));
+        for u in &mut order.repeats {
+            u.members.sort_by_key(|&i| (ws[i].span.start, i));
+            u.relink_from(ws, 0);
+        }
         order
     }
 
@@ -195,6 +216,10 @@ impl SpanOrder {
         };
         let hi = self.windowed.partition_point(|&i| start(i) <= point);
         let mut picked: Vec<usize> = self.windowed[lo..hi].to_vec();
+        let floor = first.and(latest);
+        for u in &self.repeats {
+            picked.extend(u.latest_reaching(ws, point).filter(|&i| floor.is_none_or(|l| start(i) >= l)));
+        }
         picked.extend(first);
         picked.extend(self.kept.iter().copied());
         picked.retain(|&i| reaches(&ws[i], point));
@@ -203,7 +228,65 @@ impl SpanOrder {
     }
 
     fn heap_bytes(&self) -> usize {
-        (self.windowed.capacity() + self.resets.capacity() + self.kept.capacity()) * std::mem::size_of::<usize>()
+        let repeats: usize = self.repeats.iter().map(|u| u.members.capacity() + u.up.capacity()).sum();
+        (self.windowed.capacity() + self.resets.capacity() + self.kept.capacity() + repeats) * std::mem::size_of::<usize>()
+            + self.repeats.capacity() * std::mem::size_of::<Uses>()
+    }
+}
+
+/// One kind of use of a value, in `SpanOrder`'s order.
+#[derive(Debug, Clone)]
+struct Uses {
+    obs: TypeObservation,
+    /// Bag indices by `(span.start, bag index)`.
+    members: Vec<usize>,
+    /// For each member, the nearest earlier one that reaches further, or
+    /// `usize::MAX`: the only members a backward scan for "the latest that
+    /// still holds" needs to visit. Uses are regions to the end of their
+    /// block, so the chain is as long as the blocks are deep.
+    up: Vec<usize>,
+}
+
+impl Uses {
+    /// How far a use holds: a point fact holds from its site on.
+    fn reach(w: &Witness) -> Point {
+        if w.span.start == w.span.end {
+            Point { row: usize::MAX, column: usize::MAX }
+        } else {
+            w.span.end
+        }
+    }
+
+    /// Recompute `up` from member `from` on; the ones before keep theirs.
+    fn relink_from(&mut self, ws: &[Witness], from: usize) {
+        self.up.truncate(from);
+        for k in from..self.members.len() {
+            let reach = Self::reach(&ws[self.members[k]]);
+            let mut j = k.checked_sub(1).unwrap_or(usize::MAX);
+            while j != usize::MAX && Self::reach(&ws[self.members[j]]) <= reach {
+                j = self.up[j];
+            }
+            self.up.push(j);
+        }
+    }
+
+    /// The latest member at or before `point` that still holds there
+    /// (`reaches`). Scanning back from the last one at or before `point`,
+    /// each member it passes ends before `point`, and so does every member
+    /// between it and its `up`.
+    fn latest_reaching(&self, ws: &[Witness], point: Point) -> Option<usize> {
+        let upto = self.members.partition_point(|&i| ws[i].span.start <= point);
+        let mut k = upto.checked_sub(1)?;
+        loop {
+            let i = self.members[k];
+            if reaches(&ws[i], point) {
+                return Some(i);
+            }
+            k = self.up[k];
+            if k == usize::MAX {
+                return None;
+            }
+        }
     }
 }
 
