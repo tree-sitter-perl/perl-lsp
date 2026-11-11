@@ -164,6 +164,14 @@ impl<'t, 's> CursorDocument<'t, 's> {
                 }
             }
         });
+        // A member written as declared (`Foo::$x`) is one of the namespaces
+        // whose members the operator has written so, and no bare word.
+        if facts.spelled.is_some() {
+            if let Some(r) = &mut facts.offers {
+                r.spaces = r.spaces.within(r.spelled);
+            }
+            facts.words.clear();
+        }
         facts
     }
 }

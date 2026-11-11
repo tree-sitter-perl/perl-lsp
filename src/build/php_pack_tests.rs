@@ -4366,11 +4366,16 @@ fn completions(src: &str) -> Vec<(String, Option<tower_lsp::lsp_types::Completio
 
 #[cfg(feature = "php")]
 fn completion_items(src: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    completion_items_in("complete.php", "php", src)
+}
+
+#[cfg(any(feature = "php", feature = "cpp"))]
+fn completion_items_in(path: &str, lang: &str, src: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     let at = src.find('|').expect("a cursor");
     let src = format!("{}{}", &src[..at], &src[at + 1..]);
     let row = src[..at].matches('\n').count();
     let point = tree_sitter::Point { row, column: at - src[..at].rfind('\n').map_or(0, |n| n + 1) };
-    let path = std::path::PathBuf::from("complete.php");
+    let path = std::path::PathBuf::from(path);
     let driver = crate::build::language_driver::LanguageRegistry::compiled();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze(&src));
@@ -4378,8 +4383,23 @@ fn completion_items(src: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
-    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "php", Some(&canon), &idx);
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, lang, Some(&canon), &idx);
     items
+}
+
+/// Every pack's member item replaces the member as written up to the
+/// cursor, not only php's: a C++ `w.wi|` item's edit covers `wi`.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_cpp_member_item_replaces_the_written_prefix() {
+    use tower_lsp::lsp_types::{CompletionTextEdit, Position, Range};
+    let items = completion_items_in("complete.cpp", "cpp", "struct W { int width; int height; };\nint f(W w) { return w.wi|; }\n");
+    let item = items.iter().find(|i| i.label == "width").expect("the member");
+    let range = |c0, c1| Range { start: Position { line: 1, character: c0 }, end: Position { line: 1, character: c1 } };
+    match &item.text_edit {
+        Some(CompletionTextEdit::Edit(e)) => assert_eq!((e.new_text.as_str(), e.range), ("width", range(22, 24))),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[cfg(feature = "php")]
@@ -4426,6 +4446,50 @@ fn member_completion_offers_what_the_operator_reaches() {
     assert_eq!(at("static::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "the called class");
     assert_eq!(at("Base::make()->|"), instance, "a call on the class");
     assert_eq!(at("$b->gr|eet();"), instance, "completing in place of a member");
+}
+
+/// A typed `$` writes the member as declared, so the access reaches only
+/// the namespaces whose members `::` writes so: static properties, never a
+/// method, a constant or `class`.
+#[cfg(feature = "php")]
+#[test]
+fn a_typed_dollar_offers_only_static_properties() {
+    let at = |hole: &str| labels(&SHAPES.replace("CURSOR", hole));
+    assert_eq!(at("self::$|"), ["$count"]);
+    assert_eq!(at("Base::$co|"), ["$count"]);
+    assert_eq!(at("self::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "nothing typed");
+}
+
+/// A `spelled` namespace lists every member it offers as declared, methods
+/// as well as fields, here and across files: the listing is the
+/// namespace's, not the member kind's.
+#[cfg(feature = "php")]
+#[test]
+fn a_spelled_namespace_lists_its_methods_as_declared() {
+    use crate::model::file_analysis::{MemberReach, SpaceSet};
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("x.php")).unwrap();
+    let declared = |src: &str, path: &str| {
+        let mut fa = driver.analyze_with_path(src, Some(std::path::Path::new(path)));
+        for sym in fa.symbols_mut() {
+            if matches!(sym.kind, SymKind::Method) {
+                sym.presentation.label = Some(format!("{}()", sym.name));
+            }
+        }
+        fa
+    };
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test("/w/Base.php".into(), declared("<?php\nclass Base { public static function make() {} }\n", "/w/Base.php"));
+    let fa = declared("<?php\nclass Kid extends Base { public static function build() {} }\n", "/w/Kid.php");
+    let method = fa.member_spaces().id_of("method").unwrap();
+    let reach = |spelled| MemberReach { spaces: SpaceSet::of(method), forward: SpaceSet::default(), spelled };
+    let labels = |spelled| {
+        let mut out: Vec<String> =
+            fa.complete_members_for_class("Kid", Some(&idx), None, false, Some(reach(spelled))).into_iter().map(|c| c.label).collect();
+        out.sort();
+        out
+    };
+    assert_eq!(labels(SpaceSet::of(method)), ["build()", "make()"], "local and cross-file");
+    assert_eq!(labels(SpaceSet::default()), ["build", "make"], "a namespace not spelled lists names");
 }
 
 /// A static property completes as written, `$` and all, whether or not the

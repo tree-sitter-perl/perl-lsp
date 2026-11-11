@@ -310,7 +310,7 @@ impl FileAnalysis {
         // Collect methods from this class and all ancestors. No Perl symbol
         // is private or protected, so the site outside every class names
         // them all.
-        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, &NamingSite::outside(), None);
+        self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen_names, &NamingSite::outside(), None, false);
 
         candidates
     }
@@ -325,9 +325,8 @@ impl FileAnalysis {
     /// `candidates`, deduped by `seen`. Called per-class in the ancestor
     /// walk: on `self` for local classes, on a cached module's analysis
     /// for cross-file ones.
-    ///
-    /// A `spelled` namespace's members are labelled as declared (php's
-    /// `$x`), as its operator has them written.
+    /// A `spelled` namespace's members are labelled as declared
+    /// (`Symbol::offered_as`).
     fn collect_class_fields(
         &self,
         cls: &str,
@@ -337,7 +336,6 @@ impl FileAnalysis {
         space: Option<NamespaceId>,
         spelled: bool,
     ) {
-        let label = |sym: &Symbol| if spelled { sym.listed_name() } else { &sym.name }.to_string();
         let class_body = self
             .symbols
             .iter()
@@ -361,7 +359,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             if self.slot_class_of(sym) == Some(cls) && self.lives_in(sym, space) && seen.insert(sym.name.clone()) {
                 candidates.push(CompletionCandidate {
-                    label: label(sym),
+                    label: sym.offered_as(spelled),
                     kind: sym.kind,
                     is_static: false,
                     detail: None,
@@ -405,7 +403,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: label(sym),
+                    label: sym.offered_as(spelled),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -429,7 +427,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: label(sym),
+                    label: sym.offered_as(spelled),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -482,7 +480,7 @@ impl FileAnalysis {
             let space = Some(id);
             let spelled = offers.is_some_and(|o| o.spelled.contains(id));
             let from = candidates.len();
-            self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, &site, space);
+            self.collect_ancestor_methods(class_name, module_index, &mut candidates, &mut seen, &site, space, spelled);
             // Data members from this class AND its ancestors. A field lives in
             // its class body scope (or a nested container body — inline unions);
             // a Variable inside a Sub-kind scope is a local/param. Anchored on

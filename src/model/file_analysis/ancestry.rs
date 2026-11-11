@@ -1107,7 +1107,9 @@ impl FileAnalysis {
     /// Collect methods from a class and its ancestors, deduping by name
     /// (child shadows parent). The MRO is `for_each_ancestor_class`, so a
     /// class reached by several paths (a diamond, components over one base)
-    /// is collected once.
+    /// is collected once. A `spelled` namespace's members are labelled as
+    /// declared (`Symbol::offered_as`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn collect_ancestor_methods(
         &self,
         class_name: &str,
@@ -1116,15 +1118,17 @@ impl FileAnalysis {
         seen_names: &mut HashSet<String>,
         site: &NamingSite,
         space: Option<NamespaceId>,
+        spelled: bool,
     ) {
         self.for_each_ancestor_class(class_name, module_index, |c| {
-            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, site, space);
+            self.collect_class_methods(class_name, c, module_index, candidates, seen_names, site, space, spelled);
             std::ops::ControlFlow::Continue(())
         });
     }
 
     /// One class's own methods for `collect_ancestor_methods`: local,
     /// bridged plugin entities, and every cross-file file declaring it.
+    #[allow(clippy::too_many_arguments)]
     fn collect_class_methods(
         &self,
         original_class: &str,
@@ -1134,6 +1138,7 @@ impl FileAnalysis {
         seen_names: &mut HashSet<String>,
         site: &NamingSite,
         space: Option<NamespaceId>,
+        spelled: bool,
     ) {
         // Access gate: the member's access scope admits the naming site.
         // Callability gate on the same closure so every enumeration loop in
@@ -1162,7 +1167,7 @@ impl FileAnalysis {
                     let defining = if class_name != original_class { Some(class_name) } else { None };
                     let display_override = sym.presentation.display;
                     candidates.push(CompletionCandidate {
-                        label: sym.name.clone(),
+                        label: sym.offered_as(spelled),
                         kind: sym.kind,
                         is_static: sym.flags.contains(SymbolFlags::STATIC),
                         detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
@@ -1191,7 +1196,7 @@ impl FileAnalysis {
             let defining = if class_name != original_class { Some(class_name) } else { None };
             let display_override = sym.presentation.display;
             candidates.push(CompletionCandidate {
-                label: sym.name.clone(),
+                label: sym.offered_as(spelled),
                 kind: sym.kind,
                 is_static: sym.flags.contains(SymbolFlags::STATIC),
                 detail: Some(self.method_detail(original_class, &sym.name, defining, module_index)),
@@ -1216,8 +1221,9 @@ impl FileAnalysis {
             //       class itself).
             // Collect into a temporary list to avoid borrow-checker
             // issues with the closure capturing &mut seen_names/candidates.
-            // (name, kind, detail, display, is_static)
-            type Bridged = (String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>, bool);
+            // (name, label, kind, detail, display, is_static): the label is
+            // read off the bridged symbol here, where it is in hand.
+            type Bridged = (String, String, SymKind, Option<SymbolDetail>, Option<HandlerDisplay>, bool);
             let mut bridged: Vec<Bridged> = Vec::new();
             idx.for_each_entity_bridged_to(class_name, &mut |_mod, _cached, sym| {
                 use std::ops::ControlFlow;
@@ -1229,6 +1235,7 @@ impl FileAnalysis {
                 }
                 bridged.push((
                     sym.name.clone(),
+                    sym.offered_as(spelled),
                     sym.kind,
                     Some(sym.detail.clone()),
                     sym.presentation.display,
@@ -1236,7 +1243,7 @@ impl FileAnalysis {
                 ));
                 ControlFlow::Continue(())
             });
-            for (name, kind, detail, display_override, is_static) in bridged {
+            for (name, label, kind, detail, display_override, is_static) in bridged {
                 if seen_names.contains(&name) { continue; }
                 seen_names.insert(name.clone());
                 let is_method = kind == SymKind::Method
@@ -1245,7 +1252,7 @@ impl FileAnalysis {
                 let defining = if class_name != original_class { Some(class_name) } else { None };
                 let method_detail_str = self.method_detail(original_class, &name, defining, module_index);
                 candidates.push(CompletionCandidate {
-                    label: name,
+                    label,
                     kind,
                     is_static,
                     detail: Some(method_detail_str),
@@ -1274,7 +1281,7 @@ impl FileAnalysis {
                     let detail = self.method_detail(original_class, &sym.name, defining, module_index);
                     let display_override = sym.presentation.display;
                     candidates.push(CompletionCandidate {
-                        label: sym.name.clone(),
+                        label: sym.offered_as(spelled),
                         kind,
                         is_static: sym.flags.contains(SymbolFlags::STATIC),
                         detail: Some(detail),

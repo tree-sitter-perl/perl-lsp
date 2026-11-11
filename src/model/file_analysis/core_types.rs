@@ -1288,6 +1288,13 @@ impl Symbol {
         self.presentation.label.as_deref().unwrap_or(&self.name)
     }
 
+    /// The label a member completion offers: as declared (`listed_name`)
+    /// where the operator reaching its namespace has members written so
+    /// (`@space.<name>.spelled`), else its name.
+    pub fn offered_as(&self, spelled: bool) -> String {
+        if spelled { self.listed_name() } else { &self.name }.to_string()
+    }
+
     /// The first point a use of this name can see the declaration.
     pub fn in_force_from(&self) -> Point {
         self.in_force.unwrap_or(self.span.start)
@@ -1531,6 +1538,10 @@ impl SpaceSet {
     }
     pub fn intersects(self, other: SpaceSet) -> bool {
         self.0 & other.0 != 0
+    }
+    /// Its namespaces that are also `other`'s.
+    pub fn within(self, other: SpaceSet) -> SpaceSet {
+        SpaceSet(self.0 & other.0)
     }
 }
 

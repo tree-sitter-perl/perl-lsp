@@ -97,18 +97,24 @@ namespace and php's `count()` and `$count` are two members.
 Two marks on the operator's namespaces (`capture-vocabulary.md`) shape what
 is offered. php's `::` reaches methods `.forward`: an instance method is
 offered only where the call would run on the object the cursor's code runs
-on, an instance method (or a closure in one, `runs_on_receiver_at`) of the
-receiver's class or one it extends (`NamingSite::in_lineage`); elsewhere
-only static methods, since `Foo::m()` on an instance method is an Error.
-A class left with nothing reachable still answers the operator's words
-(`Foo::class`). C++ states no `::` member access, so its `Foo::` is a qualified path and
+on, an instance method (or a closure in one) of the receiver's class or one
+it extends (`NamingSite::in_lineage`); elsewhere only static methods, since
+`Foo::m()` on an instance method is an Error. Whether the cursor's code runs
+on an object is the extractor's per-scope fact (`Scope::runs_on`, read
+through `FileAnalysis::runs_on_at`), the same one the `@ref.receiver` token
+reads, so a static method's body offers only static methods. A class left
+with nothing reachable still answers the operator's words (`Foo::class`).
+C++ states no `::` member access, so its `Foo::` is a qualified path and
 `&Foo::m` is unaffected. php's `::` reaches static properties `.spelled`:
-each is listed and inserted as declared (`$count`, the symbol's
-`listed_name`, minted by `@def.field.spelled`). Every member item replaces
-the member as written up to the cursor, from the `@member.spelled` token
-where the document states one (`Foo::$` parses the `$` into the member), so
-`Foo::` and `Foo::$` both complete to `Foo::$count`. What a typed `$`
-narrows to is the client's filter over that range.
+every member of a `.spelled` namespace, inherited and bridged ones
+included, is listed and inserted as declared (`$count`, the symbol's
+`listed_name`, minted by `@def.field.spelled`; `Symbol::offered_as`). Every
+member item replaces the member as written up to the cursor, from the
+`@member.spelled` token where the document states one (`Foo::$` parses the
+`$` into the member), so `Foo::` and `Foo::$` both complete to
+`Foo::$count`. A site whose member is written spelled reaches only the
+operator's `.spelled` namespaces, and no words: `Foo::$` offers static
+properties, never `class` or a method.
 
 ### A receiver the written buffer leaves untyped
 
