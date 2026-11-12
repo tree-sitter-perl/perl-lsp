@@ -238,3 +238,11 @@ $p = realpath($p); }` takes `string`. `TODO(pack-params)`: no pack mints
   an undeclared local does. A fitting write narrows by the rule above; the
   missing piece is the block-exit join (`TODO(cfg-exit-join)`), not the
   bound.
+- **PHP's implicit nullable.** `string $m = null` declares `?string`, but
+  the bound is the spelled `string`, so inside `if (null === $m)` the
+  proof decidedly misfits and reads as both (`?string`), not `null`.
+  `TODO(php-implicit-nullable)` in `queries/php/skeleton.scm`.
+- **A class under `callable`.** The lattice places no class under
+  `CodeRef`, so in `function f(callable $c) { if ($c instanceof Closure) … }`
+  the guard decidedly misfits and reads as `Closure | callable`; `Closure`'s
+  members still dispatch. `TODO(callable-classes)` at `fit`.

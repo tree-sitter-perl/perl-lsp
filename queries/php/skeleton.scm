@@ -105,6 +105,8 @@
 ; Its declared type bounds it on entry: PHP checks it when the call binds
 ; the argument, and a later write may retype the local. A variadic's
 ; declared type is its elements', so the local stays untyped.
+; TODO(php-implicit-nullable): `string $m = null` declares `?string`; the
+; bound is `string`, so a `null === $m` guard reads as both.
 (simple_parameter
   type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
   name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local

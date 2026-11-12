@@ -1444,6 +1444,8 @@ pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) ->
     if join(value, bound, order) == join(bound, bound, order) {
         return Fit::Yes;
     }
+    // TODO(callable-classes): no class sits under `CodeRef`, so `Closure`
+    // (or any class with `__invoke`) decidedly misfits a `callable` bound.
     let open = value.receiver_arms().iter().any(|a| a.class_name().is_some_and(|c| !order.ancestry_closed(c)));
     let classes = bound.receiver_arms().iter().any(|a| a.class_name().is_some());
     if open && classes { Fit::Undecided } else { Fit::No }
