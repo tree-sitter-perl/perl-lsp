@@ -524,6 +524,12 @@
    [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
  (#any-of? @_exit "die" "exit"))
 
+; ---- how a call ends ----
+; A `never` return says a call never comes back; how it leaves is the
+; body's business.
+(function_definition name: (name) @ends.never return_type: (bottom_type))
+(method_declaration name: (name) @ends.never return_type: (bottom_type))
+
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the
 ; argument list rides the callee's match. `...$xs` passes any number of

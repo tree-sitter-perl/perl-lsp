@@ -30,6 +30,13 @@
     [(identifier) @parent @ref.type
      (attribute attribute: (identifier) @ref.type) @parent @ref.spelled]))
 
+; `-> NoReturn` / `-> Never` (bare or through `typing.`) says a call
+; never comes back; how it leaves is the body's business.
+(function_definition
+  name: (identifier) @ends.never
+  return_type: (type [(identifier) @_never (attribute attribute: (identifier) @_never)])
+  (#any-of? @_never "NoReturn" "Never"))
+
 ; A def's `-> T` is its declared return; without one, what it returns is.
 (function_definition
   name: (identifier) @def.sub.name

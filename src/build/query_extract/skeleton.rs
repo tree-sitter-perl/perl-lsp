@@ -57,6 +57,9 @@ pub struct SkelSymbol {
     pub flags: SymbolFlags,
     /// The member namespace a `@space.<name>` on the name token states.
     pub member_space: Option<crate::model::file_analysis::NamespaceId>,
+    /// The declaration says a call never comes back (`@ends.never` on the
+    /// name token).
+    pub never_returns: bool,
 }
 
 impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
@@ -1023,6 +1026,22 @@ impl SkeletonAnalysis {
             for (i, sym) in symbols.iter().enumerate() {
                 if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
                     continue;
+                }
+                // A declaration that says a call never comes back says
+                // nothing of how it leaves, so both ways are open.
+                if self.symbols[i].never_returns {
+                    use crate::model::witnesses::{Effect, Ends};
+                    let never = WP::Effect(Effect::Ends(Ends::UNWINDS | Ends::EXITS));
+                    let stated = |att: WA| Witness {
+                        attachment: att,
+                        source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
+                        payload: never.clone(),
+                        span: sym.selection_span,
+                    };
+                    bag.push(stated(WA::SymbolEffects(sym.id)));
+                    if let (SymKind::Method, Some(class)) = (sym.kind, &sym.package) {
+                        bag.push(mk(WA::effects_of(class.clone(), sym.name.clone()), WP::Edge(WA::SymbolEffects(sym.id)), sym.span));
+                    }
                 }
                 if let Some(ret) = &self.symbols[i].return_type {
                     // A return that MENTIONS the owning class's template

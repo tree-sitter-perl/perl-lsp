@@ -417,6 +417,23 @@
 ; since C++ name lookup finds the member before any free function.
 (function_definition) @scope.sub.implicit_receiver
 
+; ---- how a call ends ----
+; `[[noreturn]]` / `__attribute__((noreturn))` says a call never comes back,
+; on a definition or a prototype; how it leaves is the body's business.
+([(function_definition
+    [(attribute_declaration (attribute name: (identifier) @_attr))
+     (attribute_specifier (argument_list (identifier) @_attr))]
+    declarator: (function_declarator declarator: [(identifier) @ends.never (field_identifier) @ends.never (qualified_identifier name: (identifier) @ends.never)]))
+  (declaration
+    [(attribute_declaration (attribute name: (identifier) @_attr))
+     (attribute_specifier (argument_list (identifier) @_attr))]
+    declarator: (function_declarator declarator: [(identifier) @ends.never (qualified_identifier name: (identifier) @ends.never)]))
+  (field_declaration
+    [(attribute_declaration (attribute name: (identifier) @_attr))
+     (attribute_specifier (argument_list (identifier) @_attr))]
+    declarator: (function_declarator declarator: (field_identifier) @ends.never))]
+ (#any-of? @_attr "noreturn" "__noreturn__"))
+
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
 ; prototype has no body, so its parameter_list is the whole signature

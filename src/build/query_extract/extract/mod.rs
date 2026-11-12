@@ -261,6 +261,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
+        | C::EndsNever
         | C::TypeRelative(_)
         | C::SymAttr
         | C::SpecPrimary

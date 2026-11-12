@@ -483,3 +483,26 @@ fn plugin_stated_ends_reach_the_callable_and_its_heirs() {
         .expect("Own::fail");
     assert_eq!(fa.symbol_ends(own.id), Ends::all());
 }
+
+/// A local jump ends no way the effect lane counts: `return`, `next`,
+/// `last`, `redo` and `goto` state the empty set on themselves, and the
+/// value a `return` carries is untouched.
+#[test]
+fn local_jumps_state_that_evaluation_ends_there() {
+    use crate::model::witnesses::{Effect, Ends, WitnessAttachment, WitnessPayload};
+    let source = "sub f { for (1) { next; last; redo } goto &g; return 1 }\n";
+    let fa = build_with(source, Arc::new(PluginRegistry::new()));
+    let mut leaves: Vec<String> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(w.payload, WitnessPayload::Effect(Effect::Ends(e)) if e == Ends::empty()))
+        .filter_map(|w| match w.attachment {
+            WitnessAttachment::Expr(sp) => Some(source[sp.start.column..sp.end.column].to_string()),
+            _ => None,
+        })
+        .collect();
+    leaves.sort();
+    assert_eq!(leaves, vec!["goto &g", "last", "next", "redo", "return 1"]);
+    assert_eq!(fa.sub_return_type_at_arity("f", None), Some(InferredType::Numeric));
+}
