@@ -1256,6 +1256,16 @@ fn type_check_function_composes_with_exits() {
 }
 
 #[test]
+fn bool_check_leaves_undef_possible() {
+    // Type::Tiny's Bool passes undef, so a passed check proves no definedness.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_Bool);\nsub f {\n    my ($x) = @_;\n    if (is_Bool($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    let t = fa.inferred_type_via_bag("$x", Point::new(5, 16));
+    assert!(t.as_ref().is_some_and(|t| t.may_be_undef()), "{t:?}");
+}
+
+#[test]
 fn assert_function_narrows_the_rest_of_the_block() {
     let fa = build_fa(
         "package P;\nuse Types::Standard qw(assert_Int assert_ArrayRef);\nsub f {\n    my ($x, $y) = @_;\n    assert_Int($x);\n    assert_ArrayRef $y;\n    my $v = $x;\n}",

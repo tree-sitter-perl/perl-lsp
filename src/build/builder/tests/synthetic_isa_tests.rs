@@ -1405,7 +1405,11 @@ fn moose_isa_string_shares_the_bareword_vocabulary() {
     );
     assert_eq!(fa.sub_return_type_at_arity("s", Some(0)), Some(InferredType::String));
     assert_eq!(fa.sub_return_type_at_arity("i", Some(0)), Some(InferredType::Numeric));
-    assert_eq!(fa.sub_return_type_at_arity("b", Some(0)), Some(InferredType::Bool));
+    // Bool admits undef in both vocabularies.
+    assert_eq!(
+        fa.sub_return_type_at_arity("b", Some(0)),
+        Some(InferredType::Optional(Box::new(InferredType::Bool)))
+    );
     // A parameterized container folds to its base rep — the element type has
     // no slot to ride until sequence-types lands.
     assert_eq!(fa.sub_return_type_at_arity("ar", Some(0)), Some(InferredType::ArrayRef));
