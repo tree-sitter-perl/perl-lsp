@@ -1967,3 +1967,32 @@ fn a_write_hovers_the_value_it_writes() {
     let me = hover(Point::new(1, 8));
     assert!(me.ends_with("*method*\n\n*class m.Foo*\n\n*returns: m.Foo*"), "{me}");
 }
+
+/// An annotation bounds every value its variable holds: an untyped write
+/// reads as the annotation, a write that does not fit it reads as the
+/// annotation, and a write that fits narrows within it.
+#[test]
+fn an_annotation_bounds_every_later_write() {
+    let src = "\
+class Base: pass
+class Sub(Base): pass
+def f(): pass
+y: Base = Base()
+y = Sub()
+y
+y = f()
+y
+z: int = 1
+z = 'x'
+z
+def p(a: int):
+    a = f()
+    return a
+";
+    let fa = py_in(src, None);
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(fa.inferred_type_via_bag("y", Point::new(5, 0)), class("Sub"), "a fitting write narrows");
+    assert_eq!(fa.inferred_type_via_bag("y", Point::new(7, 0)), class("Base"), "an untyped write reads the bound");
+    assert_eq!(fa.inferred_type_via_bag("z", Point::new(10, 0)), Some(InferredType::Numeric), "a write past the bound");
+    assert_eq!(fa.inferred_type_via_bag("a", Point::new(13, 11)), Some(InferredType::Numeric), "a parameter's too");
+}

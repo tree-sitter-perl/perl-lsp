@@ -73,9 +73,10 @@ assignment node's end, with its marker there, so `$node = $node->parent`
 reads the old `$node` on the right. An annotated write (`x: int = 5`) is
 anchored too, so its declared type lands at the write it is declared with.
 A target with no anchor binds at its token and mints no marker: a
-declaration (`T x = …`), whose RHS cannot name it. A later write's marker
-retires a declared type like any other value; what a declaration should
-still hold past it is the bounds design's, not a per-language rule.
+declaration (`T x = …`), whose RHS cannot name it. A declared type is no
+value the marker retires: it is a bound the registry caps the variable's
+value by, and its own extent says whether a write ends it
+(`docs/adr/declared-bounds.md`).
 `FrameworkAwareTypeFold` reads it three ways:
 
 - **It is a cutoff.** At the query point, every witness strictly before
@@ -91,8 +92,7 @@ still hold past it is the bounds design's, not a per-language rule.
   when nothing typed stands at or after its site; a typed RHS at the site
   and any later write displace it, and rep or scalar-context evidence
   landing after it revives the variable through those axes
-  (`$r = f(); $r->{k}` reads the hash). An annotation-priority `Unknown`
-  (`@var A|B`) is a claim about the value and keeps its place.
+  (`$r = f(); $r->{k}` reads the hash).
 - **A first binding resets nothing.** A marker with no value-binding
   witness before it (`WitnessPayload::binds_value`) is not a value: the
   write is the declaration — `my $x = f()`, or a pack's first `$x = f()`

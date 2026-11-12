@@ -139,7 +139,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk).
             let mut relative = None;
-            if let Some(annot) = ad.in_match(e.match_id, Capture::TypeAnnot) {
+            if let Some((annot, _)) = ad.annot_in_match(e.match_id) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
                 }
@@ -174,8 +174,14 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 let name = (pack.shape_name)(&e.text);
                 let w = Witness {
                     attachment: WitnessAttachment::Variable { name: name.clone(), scope: cur_scope },
-                    source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
-                    payload: WitnessPayload::Edge(WitnessAttachment::TypeName(owner.clone())),
+                    source: WitnessSource::Builder("declared_type".into()),
+                    payload: WitnessPayload::Bound {
+                        ty: crate::model::witnesses::BoundType::Edge(WitnessAttachment::TypeName(owner.clone())),
+                        // The member holds the container itself, so nothing
+                        // converts and nothing narrows past it either way.
+                        evidence: crate::model::witnesses::Evidence::Declared(st.pack.annot_enforcement),
+                        extent: crate::model::witnesses::Extent::Lifetime,
+                    },
                     span: Span { start: e.start, end: e.start },
                 };
                 out.decl_facts.push((cur_scope, e.start, name, w));
@@ -430,7 +436,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     // it). The type-witness temporal filter is position-based — it admits a
     // witness only at/after its span — so a zero-width witness pinned to the
     // field's decl point would be REJECTED for every read textually above it.
-    // Give the field's declared-type witness its class-body scope's span so
+    // Give the field's declared bound its class-body scope's span so
     // "this type holds class-wide" is what the filter sees. Locals keep their
     // decl-point span (flow narrowing is sequential and correct for them).
     // Scopes are pushed in id order (`id = ScopeId(scopes.len())`), so a
@@ -481,7 +487,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             .get(&(name.clone(), *scope))
             .copied()
             .unwrap_or(Span { start: *at, end: *at });
-        if let Some(annot) = ad.in_match(mid, Capture::TypeAnnot).map(|a| &a.text) {
+        if let Some((annot, extent)) = ad.annot_in_match(mid).map(|(a, x)| (&a.text, x)) {
             // A class-shaped declared type edges into the alias graph (it may
             // be a typedef — `U16 x;` where `typedef unsigned short U16`);
             // primitives stay leaves; `None` (auto/void) defers to the flow
@@ -496,16 +502,36 @@ pub(super) fn finish(st: &mut ExtractState) {
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }
-            let payload = match annot_type {
-                Some(InferredType::ClassName(cn)) => Some(WitnessPayload::Edge(WitnessAttachment::TypeName(cn))),
-                Some(t) => Some(WitnessPayload::InferredType(t)),
-                None => None,
+            let ty = match annot_type {
+                Some(InferredType::ClassName(cn)) => {
+                    Some(crate::model::witnesses::BoundType::Edge(WitnessAttachment::TypeName(cn)))
+                }
+                Some(t) if t.is_known() => Some(crate::model::witnesses::BoundType::Type(t)),
+                Some(_) | None => None,
             };
-            if let Some(payload) = payload {
+            if let Some(ty) = ty {
+                // A binding through a pointer or reference holds the
+                // referent, whose type no write converts.
+                let through_reference = ad.of_match(mid).any(|t| {
+                    matches!(t.payload.as_deref(), Some(super::Payload::Deref(stack)) if !stack.is_empty())
+                });
+                let enforcement = match through_reference {
+                    true => st.pack.annot_enforcement.through_reference(),
+                    false => st.pack.annot_enforcement,
+                };
+                // A member declaration declares the slot: no write retires it.
+                let extent = match field_scope_span.contains_key(&(name.clone(), *scope)) {
+                    true => crate::model::witnesses::Extent::Lifetime,
+                    false => extent,
+                };
                 let w = Witness {
                     attachment: var.clone(),
-                    source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
-                    payload,
+                    source: WitnessSource::Builder("declared_type".into()),
+                    payload: WitnessPayload::Bound {
+                        ty,
+                        evidence: crate::model::witnesses::Evidence::Declared(enforcement),
+                        extent,
+                    },
                     span: annot_span,
                 };
                 match decl {

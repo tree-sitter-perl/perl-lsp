@@ -65,6 +65,11 @@ pub struct WitnessBag {
     /// order would be memory every small variable pays.
     #[serde(skip)]
     spans: HashMap<WitnessAttachment, SpanOrder>,
+    /// The `Bound` witnesses of each attachment that has any, so the
+    /// registry's cap step (`cap_by_bound`) costs one probe of an empty map
+    /// on a bag with no declarations.
+    #[serde(skip)]
+    bounds: HashMap<WitnessAttachment, Vec<usize>>,
     /// Names this bag's content: every mutation draws a fresh value from
     /// [`next_generation`], so a memo that outlives one query can tell
     /// whether the bag it answered from is still the bag being asked.
@@ -307,6 +312,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
             index: HashMap::new(),
             var_scopes: HashMap::new(),
             spans: HashMap::new(),
+            bounds: HashMap::new(),
             generation: 0,
             content: None,
         };
@@ -337,6 +343,10 @@ impl WitnessBag {
         idx_bytes += self.spans.capacity() * span_entry;
         for o in self.spans.values() {
             idx_bytes += o.heap_bytes();
+        }
+        idx_bytes += self.bounds.capacity() * idx_entry;
+        for v in self.bounds.values() {
+            idx_bytes += v.capacity() * std::mem::size_of::<usize>();
         }
         (vec_bytes, idx_bytes)
     }
@@ -394,6 +404,9 @@ impl WitnessBag {
         let ordered = (w.attachment.is_temporal() && slot.len() >= SPAN_ORDER_MIN).then(|| w.attachment.clone());
         if let Some(c) = &mut self.content {
             *c = c.wrapping_add(witness_hash(&w));
+        }
+        if matches!(w.payload, WitnessPayload::Bound { .. }) {
+            self.bounds.entry(w.attachment.clone()).or_default().push(idx);
         }
         self.witnesses.push(w);
         if let Some(att) = ordered {
@@ -458,6 +471,7 @@ impl WitnessBag {
         self.index.clear();
         self.var_scopes.clear();
         self.spans.clear();
+        self.bounds.clear();
         for (i, w) in self.witnesses.iter().enumerate() {
             let slot = self.index.entry(w.attachment.clone()).or_default();
             if slot.is_empty() {
@@ -466,6 +480,9 @@ impl WitnessBag {
                 }
             }
             slot.push(i);
+            if matches!(w.payload, WitnessPayload::Bound { .. }) {
+                self.bounds.entry(w.attachment.clone()).or_default().push(i);
+            }
         }
         for (att, members) in &self.index {
             if att.is_temporal() && members.len() >= SPAN_ORDER_MIN {
@@ -513,13 +530,19 @@ impl WitnessBag {
         self.rebuild_index();
     }
 
-    /// Does an explicitly DECLARED fact (`WitnessSource::Annotation`) sit on
-    /// `att`? The inlay-hint suppression for languages with explicit types
-    /// asks this: `int c` needs no `: int` hint, `auto x` does.
-    pub fn has_annotation(&self, att: &WitnessAttachment) -> bool {
-        self.index.get(att).is_some_and(|idxs| {
-            idxs.iter().any(|&i| matches!(&self.witnesses[i].source, WitnessSource::Annotation(_)))
+    /// Does a declaration bound `att`? The inlay-hint suppression for
+    /// languages with explicit types asks this: `int c` needs no `: int`
+    /// hint, `auto x` does.
+    pub fn has_declared_bound(&self, att: &WitnessAttachment) -> bool {
+        self.bounds_of(att).any(|w| {
+            matches!(&w.payload, WitnessPayload::Bound { evidence: crate::model::witnesses::Evidence::Declared(_), .. })
         })
+    }
+
+    /// The `Bound` witnesses on `att`, in push order.
+    pub fn bounds_of<'b>(&'b self, att: &WitnessAttachment) -> impl Iterator<Item = &'b Witness> + 'b {
+        let ixs = if self.bounds.is_empty() { None } else { self.bounds.get(att) };
+        ixs.into_iter().flatten().map(|&i| &self.witnesses[i])
     }
 
     /// Drop every `Builder(tag)`-sourced witness and rebuild the index;

@@ -102,10 +102,11 @@
 ; A parameter is a local of its callable, named like every variable by
 ; the token after its `$`: a read of `$x` references `x` and leaves the
 ; `$` alone. The `$x` it is written as is the spelling it is listed by.
-; Its declared type is its value from the binding site on. A variadic's
+; Its declared type bounds it on entry: PHP checks it when the call binds
+; the argument, and a later write may retype the local. A variadic's
 ; declared type is its elements', so the local stays untyped.
 (simple_parameter
-  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
+  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
   name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local
 (variadic_parameter
   name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
@@ -158,11 +159,12 @@
 ; body, not to the constructor whose parameter list declares it.
 ; The same token is the constructor's local too, so the match declares
 ; the two as one (`@def.pair`): a rename of either rewrites both, and the
-; declared type is the value of each. (A node holds at most three
+; declared type bounds each: the local on entry, as any parameter, and the
+; property for its life, as any member. (A node holds at most three
 ; captures; tree-sitter drops the rest silently.)
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
-  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
+  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
   name: [
     (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled @def.local.spelled
     (by_ref
@@ -405,10 +407,11 @@
     (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
   ] .)
 ])
-; A caught exception is an instance of the class the clause names; a
-; clause naming several (`A | B`) names no single type.
+; A caught exception is an instance of the class the clause names, on
+; entry to the clause: a write in it may retype the variable. A clause
+; naming several (`A | B`) names no single type.
 (catch_clause
-  type: (type_list . (named_type) @type.annot .)
+  type: (type_list . (named_type) @type.annot.entry .)
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled)
 (global_declaration (variable_name (name) @def.assigned.name) @def.assigned @def.assigned.spelled)
 (static_variable_declaration

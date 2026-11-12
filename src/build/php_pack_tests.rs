@@ -5154,3 +5154,33 @@ fn a_constant_read_holds_the_value_another_file_declares() {
     // the value is the declaring file's: this file alone states none
     assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
 }
+
+/// A parameter's declared type is checked when the call binds it, so it
+/// bounds the local on entry only: a later write retypes it, and a guard
+/// narrows within it. A property's declared type bounds the member for its
+/// life.
+#[cfg(feature = "php")]
+#[test]
+fn a_parameter_is_bounded_on_entry_and_a_property_for_life() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Logger { function log() {} }
+class FileLogger extends Logger { function rotate() {} }
+class Svc {
+    private ?Logger $l = null;
+    function __construct() { $this->l = new FileLogger(); }
+    function f() { $x = $this->l; return $x; }
+}
+function g(int $n) { $n = \"s\"; return $n; }
+function h(Logger $q) { $q = mk(); return $q; }
+function k(Logger $q) { return $q; }
+function m(Logger $q) { if ($q instanceof FileLogger) { return $q; } return $q; }
+");
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let logger = || T::ClassName("Logger".into());
+    assert_eq!(at("x", 6, 42), Some(T::Optional(Box::new(logger()))), "a member reads as its declaration");
+    assert_eq!(at("n", 8, 39), Some(T::String), "a write retires an entry bound");
+    assert_ne!(at("q", 9, 43), Some(logger()), "even an untyped one");
+    assert_eq!(at("q", 10, 32), Some(logger()), "unwritten, the parameter holds its declared type");
+    assert_eq!(at("q", 11, 64), Some(T::ClassName("FileLogger".into())), "a guard narrows within the bound");
+}

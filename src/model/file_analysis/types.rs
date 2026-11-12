@@ -1412,6 +1412,15 @@ pub fn join(a: &InferredType, b: &InferredType, order: &dyn TypeOrder) -> Inferr
     join_traced(a, b, order, &mut |_| {})
 }
 
+/// Does `value` sit within `bound`? Read off the same lattice [`join`]
+/// folds by, so a bound and a fold never disagree about what is above
+/// what: `value` fits when joining it in leaves the bound where it was.
+/// `Unknown` fits nothing, since nothing can say what it is; a class whose
+/// ancestry `order` cannot see does not fit a bound naming another class.
+pub fn fits(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) -> bool {
+    value.is_known() && join(value, bound, order) == join(bound, bound, order)
+}
+
 /// How a join lost precision: the closed set of widening steps, reported to
 /// the `trace` of [`join_traced`] / [`join_all_traced`]. Never stored —
 /// widening is a pure function of the arms and the class order, so

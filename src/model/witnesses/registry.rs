@@ -1308,6 +1308,7 @@ impl ReducerRegistry {
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+        let v = self.cap_by_bound(bag, q, state, &materialized, v);
         let ladder = ClassLadder::of(q.attachment);
         if v != ReducedValue::None && ladder.as_ref().is_none_or(|l| l.settles(&v)) {
             return v;
@@ -1378,6 +1379,89 @@ impl ReducerRegistry {
         }
 
         ReducedValue::None
+    }
+
+    /// The one rule a bound states, the same for every attachment
+    /// (`docs/adr/declared-bounds.md`). The reducers never see a bound, so
+    /// `v` is the value with the bound set aside; what reads past the bound
+    /// is a fact made inside its extent:
+    ///
+    /// - a refinement — a region narrower than the bound that holds the
+    ///   point, a guard's proof of the value there — stands as it is;
+    /// - a value made after a local's declaration (its initializer, a
+    ///   write, a use) stands when it fits the bound and the bound keeps the
+    ///   written type;
+    /// - anything else, no value or an `Unknown` one included, reads as the
+    ///   bound. A member's writes and initializer are as wide as its
+    ///   declaration, so they read as it.
+    #[inline(never)]
+    fn cap_by_bound(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        materialized: &[Witness],
+        v: ReducedValue,
+    ) -> ReducedValue {
+        let Some((stated, ty, evidence)) = bound_in_force(bag, q) else {
+            return v;
+        };
+        let bound = match ty {
+            BoundType::Type(t) => t.clone(),
+            BoundType::Edge(att) => {
+                let sub_q = ReducerQuery {
+                    attachment: att,
+                    point: None,
+                    framework: q.framework,
+                    arity_hint: None,
+                    receiver: None,
+                    args: Vec::new(),
+                    context: q.context,
+                };
+                // Opaque: the answer combines the bound with this frame's
+                // own value, so no exit key names it.
+                match &*state.in_opaque_frame(|state| self.query_rec(bag, &sub_q, state)) {
+                    ReducedValue::Type(t) => t.clone(),
+                    ReducedValue::FactMap(_) | ReducedValue::None => return v,
+                }
+            }
+        };
+        if !bound.is_known() {
+            return v;
+        }
+        let t = match v {
+            ReducedValue::Type(t) if t.is_known() => t,
+            ReducedValue::Type(_) | ReducedValue::None => return ReducedValue::Type(bound),
+            ReducedValue::FactMap(_) => return v,
+        };
+        let at = q.point.filter(|_| q.attachment.is_temporal()).map(|p| p.at);
+        let zero = |s: &crate::model::file_analysis::Span| s.start == s.end;
+        // A region narrower than the bound's own extent, holding the point:
+        // after a local's declaration, or strictly inside a member's.
+        let refined = materialized.iter().any(|w| {
+            !zero(&w.span)
+                && at.is_some_and(|p| w.span.start <= p && p <= w.span.end)
+                && match zero(&stated) {
+                    true => w.span.start >= stated.start,
+                    false => w.span != stated && stated.start <= w.span.start && w.span.end <= stated.end,
+                }
+                && matches!(&w.payload, WitnessPayload::InferredType(r) if *r == t)
+        });
+        if refined {
+            return ReducedValue::Type(t);
+        }
+        // A value made after a local's declaration: a write, a use.
+        let made_after = zero(&stated)
+            && materialized.iter().any(|w| {
+                zero(&w.span)
+                    && w.span.start >= stated.start
+                    && at.is_none_or(|p| w.span.start <= p)
+                    && !matches!(w.payload, WitnessPayload::Bound { .. } | WitnessPayload::Reset)
+            });
+        if made_after && evidence.keeps_written_type() && crate::model::file_analysis::fits(&t, &bound, class_order(q)) {
+            return ReducedValue::Type(t);
+        }
+        ReducedValue::Type(bound)
     }
 
     /// The ladder for a class-keyed attachment the local bag couldn't
@@ -3464,6 +3548,36 @@ pub(crate) fn variable_binding_scope(
                 .iter_attachment(&WitnessAttachment::Variable { name: var.to_string(), scope: sid })
                 .any(|w| point.reaches(w.span.start))
     })
+}
+
+/// The bound in force at `q`'s point: the latest one stated at or before
+/// it. A `Lifetime` bound holds past every write; an `Entry` bound is a
+/// value like any other, retired by the next write (`LiveWindow`).
+fn bound_in_force<'b>(
+    bag: &'b WitnessBag,
+    q: &ReducerQuery,
+) -> Option<(crate::model::file_analysis::Span, &'b BoundType, Evidence)> {
+    let mut bounds = bag.bounds_of(q.attachment).peekable();
+    bounds.peek()?;
+    let point = q.point.filter(|_| q.attachment.is_temporal());
+    let mut window: Option<super::reducers::LiveWindow> = None;
+    let mut best: Option<(&Witness, &BoundType, Evidence)> = None;
+    for w in bounds {
+        let WitnessPayload::Bound { ty, evidence, extent } = &w.payload else {
+            continue;
+        };
+        let stated = match (point, extent.survives_write()) {
+            (None, true) => true,
+            (Some(p), true) => p.reaches(w.span.start) && super::reaches(w, p.at),
+            (_, false) => window
+                .get_or_insert_with(|| super::reducers::LiveWindow::at(&bag.for_attachment(q.attachment), q))
+                .admits(w),
+        };
+        if stated && best.is_none_or(|(b, ..)| w.span.start >= b.span.start) {
+            best = Some((w, ty, *evidence));
+        }
+    }
+    best.map(|(w, ty, evidence)| (w.span, ty, evidence))
 }
 
 /// Pick the "where am I asking from?" `Point` for a scope-chained

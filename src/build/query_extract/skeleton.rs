@@ -2316,6 +2316,11 @@ fn settle_member_writes(
             }
             // Only a declared member has a place; a key a write itself
             // minted (python's `self.x = …` HashKeyDef) is the write.
+            // TODO(member-bound-across-files): a member declared in another
+            // file lands its writes on the class's `Member` here, which its
+            // declaration's bound (on the declared place, in that file) never
+            // caps, so `l->head = NULL` joins `Numeric` into a `cb *head`
+            // (docs/adr/declared-bounds.md).
             .filter(|m| m.kind == crate::model::file_analysis::SymKind::Field);
             let (attachment, scope) = match declared {
                 Some(m) => (WA::Place(Box::new(fa.declared_place(m.id))), Some(m.scope)),

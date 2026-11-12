@@ -226,6 +226,8 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
    - `DomainCoherenceFold` — the `Member{..}` Holds aspect (int-used-as-enum domain vote); order here isn't load-bearing.
    - `SubReturnReducer` — `Symbol(_) + InferredType` latest-wins, runs last; backstop when no higher-priority reducer answered.
 
+**A declared type is a bound, not a witness.** `x: int`, `Foo $p`, `T x;` mint `WitnessPayload::Bound { ty, evidence, extent }`; no reducer folds it as a value, and one registry step after the reducers (`ReducerRegistry::cap_by_bound`) caps their answer by the bound in force — absent/`Unknown` reads the bound, a guard's refinement stands, a write that `fits` stands unless the binding converts. Never give a declaration a source priority to make it win (`docs/adr/declared-bounds.md`).
+
 **Single shared query path.** `query_variable_type(bag, scopes, framework, var, scope, point)` and `query_sub_return_type(bag, symbols, name, arity_hint, ...)` in `model/witnesses/query.rs` are the only scope-walk + framework + reducer dispatch sites. `FileAnalysis::inferred_type_via_bag` / `sub_return_type_at_arity` (query-time) and `Builder::bag_query_attachment` / `bag_query_expr_span` (build-time) are thin wrappers over the registry. Identical rules in both by construction.
 
 **`TypeConstraint` is an input-parameter shape.** The struct exists so callers can package `(variable, scope, span, inferred_type)` for `push_type_constraint(tc)`, which translates it into Variable witnesses on the bag. There is no `Vec<TypeConstraint>` field — the bag is the only storage. Enrichment truncates the bag back to `base_witness_count` before re-deriving.

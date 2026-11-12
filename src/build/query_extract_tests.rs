@@ -3041,12 +3041,9 @@ fn cpp_member_asks_answer_the_nearest_declaration_of_either_family() {
 }
 
 /// An EXPLICIT declared type governs member dispatch for EVERY C++
-/// initializer shape — `T x = {…}`, `T x{…}`, `T x;` — the braced-init
-/// twin of the annotation-priority fix. The initializer's literals mint a
-/// `Numeric` flow witness (priority 10); the declared container mints an
-/// `Annotation(Declared)` witness (priority 20). Before the plain-`InferredType`
-/// axis learned to break ties on source priority, the later flow witness
-/// clobbered the annot (latest-wins) and the variable hovered `Numeric`.
+/// initializer shape — `T x = {…}`, `T x{…}`, `T x;`. The initializer's
+/// literals mint a `Numeric` flow witness, which does not fit the declared
+/// container's bound, so the read is the bound.
 #[test]
 fn cpp_braced_init_declared_type_governs_over_flow() {
     use crate::model::file_analysis::InferredType;
@@ -3338,7 +3335,7 @@ fn each_declaration_of_a_member_keeps_its_own_facts() {
                 .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
                 .iter()
                 .filter_map(|w| match &w.payload {
-                    WP::InferredType(t) => Some(t.clone()),
+                    WP::Bound { ty: crate::model::witnesses::BoundType::Type(t), .. } => Some(t.clone()),
                     _ => None,
                 })
                 .collect()
@@ -3371,7 +3368,7 @@ fn members_declared_at_one_token_keep_their_own_facts() {
             .for_attachment(&WA::Place(Box::new(fa.declared_place(s.id))))
             .iter()
             .filter_map(|w| match &w.payload {
-                WP::InferredType(t) => Some(t.clone()),
+                WP::Bound { ty: crate::model::witnesses::BoundType::Type(t), .. } => Some(t.clone()),
                 _ => None,
             })
             .collect()
@@ -4102,4 +4099,32 @@ def f(x: Optional[Foo], y: Foo | None, u: A | B | None, z: Foo):
     );
     // A receiver holding None types no call, so ask the variable.
     assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 22, column: 8 }), Some(InferredType::Undef));
+}
+
+/// A C++ declaration bounds its later writes: an untyped write reads the
+/// declared type, a value binding converts what it is given to its own
+/// type, and a pointer binding narrows to the object it points at.
+#[test]
+fn a_cpp_declaration_bounds_its_later_writes() {
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "struct Base { void run(); };\n\
+         struct Derived : Base { void more(); };\n\
+         Derived make();\n\
+         Derived* point();\n\
+         void f() {\n\
+         Base x;\n\
+         x = g();\n\
+         x.run();\n\
+         Base v = make();\n\
+         v.run();\n\
+         Base* p = point();\n\
+         p->run();\n\
+         }\n",
+    );
+    let at = |v: &str, row| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column: 0 });
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(at("x", 7), class("Base"), "an untyped write reads the declared type");
+    assert_eq!(at("v", 9), class("Base"), "a value binding converts");
+    assert_eq!(at("p", 11), class("Derived"), "a pointer binding narrows");
 }

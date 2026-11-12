@@ -545,7 +545,7 @@ impl PackDriver {
         // AFTER remap (the injected spans are already original) and BEFORE
         // `into_file_analysis` (it builds indices over everything).
         if let Some(plan) = &ctx.plan {
-            inject_member_blocks(skel, plan, (self.pack)().annot_type);
+            inject_member_blocks(skel, plan, (self.pack)().annot_type, (self.pack)().annot_enforcement);
         }
         // Expanded / blanked macro USES vanish from the parsed text, so no
         // query capture can ref them — re-mint each as a variable read at its
@@ -871,10 +871,11 @@ fn inject_member_blocks(
     skel: &mut crate::build::query_extract::SkeletonAnalysis,
     plan: &crate::build::cpp_reparse::MemberBlockPlan,
     annot_type: fn(&str) -> Option<crate::model::file_analysis::InferredType>,
+    annot_enforcement: crate::model::witnesses::Enforcement,
 ) {
     use crate::model::file_analysis::{InferredType, Scope, ScopeId, ScopeKind};
     use crate::build::query_extract::SkelSymbol;
-    use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+    use crate::model::witnesses::{BoundType, Evidence, Extent, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
     if plan.is_empty() {
         return;
@@ -913,7 +914,7 @@ fn inject_member_blocks(
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {
-            // Field kind + deref_stack + the explicit-annotation witness below:
+            // Field kind + deref_stack + the declared bound below:
             // the SAME payload a plainly-declared struct field carries, so no
             // renderer (hover stars, inlay suppression, `*field*` labeling) can
             // tell a macro-pasted member from a directly-declared one (rule #10).
@@ -937,23 +938,24 @@ fn inject_member_blocks(
                 flags: Default::default(),
                 member_space: None,
             });
-            // The role member emits the SAME `TypeName` edge an expanded field
-            // does — the edge is canonical (the hover leaf + the type chase
-            // resolve `op_type` → `unsigned short`). Tagged `Annotation(Declared)` (the
-            // explicit-annotation source a plain field's declared type carries)
-            // so priority and inlay suppression match field-for-field.
-            let payload = match annot_type(&m.type_text) {
-                Some(InferredType::ClassName(cn)) => {
-                    Some(WitnessPayload::Edge(WitnessAttachment::TypeName(cn)))
-                }
-                Some(t) => Some(WitnessPayload::InferredType(t)),
-                None => None,
+            // The role member states the SAME declared bound an expanded field
+            // does — the `TypeName` edge is canonical (the hover leaf + the
+            // type chase resolve `op_type` → `unsigned short`) — so the cap
+            // and inlay suppression match field-for-field.
+            let ty = match annot_type(&m.type_text) {
+                Some(InferredType::ClassName(cn)) => Some(BoundType::Edge(WitnessAttachment::TypeName(cn))),
+                Some(t) if t.is_known() => Some(BoundType::Type(t)),
+                Some(_) | None => None,
             };
-            if let Some(payload) = payload {
+            let enforcement = match m.deref_stack.is_empty() {
+                true => annot_enforcement,
+                false => annot_enforcement.through_reference(),
+            };
+            if let Some(ty) = ty {
                 skel.witnesses.push(Witness {
                     attachment: WitnessAttachment::Variable { name: m.name.clone(), scope: scope_id },
-                    source: WitnessSource::Annotation(crate::model::witnesses::AnnotationKind::Declared),
-                    payload,
+                    source: WitnessSource::Builder("declared_type".into()),
+                    payload: WitnessPayload::Bound { ty, evidence: Evidence::Declared(enforcement), extent: Extent::Lifetime },
                     span: m.name_span,
                 });
             }

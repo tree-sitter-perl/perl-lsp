@@ -718,7 +718,10 @@ pub enum Capture {
     /// A written type (a declared return, a parameter's or property's
     /// declared type) that names a class by where it is written.
     TypeRelative(RelativeClass),
-    TypeAnnot,
+    /// A declared type, bounding its target's value for as long as the
+    /// extent says: `@type.annot` for the binding's life, `@type.annot.entry`
+    /// on entry only (a parameter a write may retype).
+    TypeAnnot(crate::model::witnesses::Extent),
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
     /// The primary a class specialization specializes.
@@ -822,7 +825,8 @@ impl Capture {
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
-            ["type", "annot"] => C::TypeAnnot,
+            ["type", "annot"] => C::TypeAnnot(crate::model::witnesses::Extent::Lifetime),
+            ["type", "annot", "entry"] => C::TypeAnnot(crate::model::witnesses::Extent::Entry),
             ["type", k] => C::TypeRelative(RelativeClass::parse(k)?),
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
@@ -900,7 +904,8 @@ impl fmt::Display for Capture {
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
             C::TypeRelative(k) => write!(f, "type.{k}"),
-            C::TypeAnnot => f.write_str("type.annot"),
+            C::TypeAnnot(crate::model::witnesses::Extent::Lifetime) => f.write_str("type.annot"),
+            C::TypeAnnot(crate::model::witnesses::Extent::Entry) => f.write_str("type.annot.entry"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),

@@ -243,7 +243,7 @@ impl LiveWindow {
         self.point.is_none_or(|p| p.reaches(w.span.start))
     }
 
-    fn admits(&self, w: &Witness) -> bool {
+    pub(crate) fn admits(&self, w: &Witness) -> bool {
         self.in_window(w) && self.reset_at.is_none_or(|r| w.span.start >= r)
     }
 
@@ -279,7 +279,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_) | WitnessAttachment::Expression(_)
         ) && matches!(
             w.payload,
-            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) | WitnessPayload::Reset
+            WitnessPayload::InferredType(_)
+                | WitnessPayload::Observation(_)
+                | WitnessPayload::Reset
+                | WitnessPayload::Bound { .. }
         )
     }
 
@@ -307,8 +310,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 .filter(|w| matches!(w.payload, WitnessPayload::InferredType(_)))
                 .map(|w| w.span.start)
                 .max();
-            // Source priority first (an annotation outranks a flow guess
-            // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
@@ -318,12 +319,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         && latest_point_fact.is_none_or(|p| p <= w.span.start)
                     {
                         let area = span_area(&w.span);
-                        let prio = w.source.priority();
-                        let better = narrow.is_none_or(|(nw, a)| {
-                            let np = nw.source.priority();
-                            prio > np || (prio == np && area < a)
-                        });
-                        if better {
+                        if narrow.is_none_or(|(_, a)| area < a) {
                             narrow = Some((*w, area));
                         }
                     }
@@ -353,7 +349,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut str_ = false;
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
-        let mut plain_type_priority: u8 = 0;
         let mut plain_type_at: Option<Point> = None;
         // Where a rep / scalar-context observation last landed: evidence
         // after a reset revives the variable through those axes.
@@ -404,26 +399,18 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     b @ InferredType::Branded { base, .. } if base.class_name().is_some() => {
                         branded = Some(b.clone())
                     }
-                    // Source priority breaks ties first (an EXPLICIT
-                    // annotation — `Annotation`, priority 20 — governs over
-                    // an inferred flow type, priority 10, whatever the order
-                    // they land in): the C++ `T x = {…}` braced-init case,
-                    // where the initializer's `Numeric` flow witness would
-                    // otherwise clobber the declared container type. This is
-                    // the same annotation-dominates rule the `ClassName`
-                    // class axis above already applies, extended to
-                    // every `InferredType` flavor (`Parametric`, `HashRef`,
-                    // …). Within equal priority: latest wins UNLESS the
-                    // standing answer subsumes the newcomer — structure
-                    // dominates rep (`HashWithKeys` is not downgraded by a
-                    // deref's re-derived `HashRef`), mirroring class-over-rep.
+                    // Latest wins UNLESS the standing answer subsumes the
+                    // newcomer — structure dominates rep (`HashWithKeys` is
+                    // not downgraded by a deref's re-derived `HashRef`),
+                    // mirroring class-over-rep. A declared type is no
+                    // witness here: it bounds what this fold answers
+                    // (`ReducerRegistry::cap_by_bound`).
                     other => {
                         let subsumed = plain_type
                             .as_ref()
                             .is_some_and(|have| have.subsumes_narrowing(other));
-                        if prio > plain_type_priority || (prio == plain_type_priority && !subsumed) {
+                        if !subsumed {
                             plain_type = Some(other.clone());
-                            plain_type_priority = prio;
                             plain_type_at = Some(w.span.start);
                         }
                     }
@@ -436,7 +423,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     let stands = plain_type_at.is_some_and(|at| at >= w.span.start);
                     if !stands && bound_before(w.span.start) {
                         plain_type = Some(InferredType::Unknown);
-                        plain_type_priority = prio;
                         plain_type_at = Some(w.span.start);
                     }
                 }
@@ -467,10 +453,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         }
         // An `Unknown` on the plain axis (a reset the RHS never typed, a
         // join approximation) yields to rep and scalar-context evidence that
-        // lands strictly after it: `$r = f(); $r->{k}` reads the hash. An
-        // annotation-priority `Unknown` is a claim and keeps its place.
+        // lands strictly after it: `$r = f(); $r->{k}` reads the hash.
         if matches!(plain_type, Some(InferredType::Unknown))
-            && plain_type_priority <= WitnessSource::Builder(String::new()).priority()
             && last_observation_at > plain_type_at
         {
             plain_type = None;

@@ -1025,14 +1025,14 @@ impl FileAnalysis {
             .unwrap_or_default()
     }
 
-    /// The `TypeName(n)` the declared type of the variable or member `sym`
+    /// The `TypeName(n)` the declared bound of the variable or member `sym`
     /// edges to (the alias edge the skeleton emits for a class-shaped
     /// declared type).
     pub(crate) fn type_name_edge_of(&self, sym: SymbolId) -> Option<String> {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        use crate::model::witnesses::{BoundType, WitnessAttachment, WitnessPayload};
         let place = self.declared_place(sym);
-        self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))).find_map(|w| match &w.payload {
-            WitnessPayload::Edge(WitnessAttachment::TypeName(target)) => Some(target.clone()),
+        self.witnesses.bounds_of(&WitnessAttachment::Place(Box::new(place))).find_map(|w| match &w.payload {
+            WitnessPayload::Bound { ty: BoundType::Edge(WitnessAttachment::TypeName(target)), .. } => Some(target.clone()),
             _ => None,
         })
     }

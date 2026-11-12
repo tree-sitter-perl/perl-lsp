@@ -131,6 +131,14 @@ impl<'a, 't> Adorned<'a, 't> {
         self.in_match_ix(mid, cap).map(|ix| &self.events()[ix])
     }
 
+    /// Match `mid`'s declared type and the extent its capture states.
+    fn annot_in_match(&self, mid: usize) -> Option<(&Event, crate::model::witnesses::Extent)> {
+        self.of_match_ixs(mid).find_map(|ix| match self.events()[ix].cap {
+            Capture::TypeAnnot(extent) => Some((&self.events()[ix], extent)),
+            _ => None,
+        })
+    }
+
     fn in_match_ix(&self, mid: usize, cap: Capture) -> Option<usize> {
         self.of_match_ixs(mid).find(|&ix| self.events()[ix].cap == cap)
     }
@@ -281,7 +289,7 @@ fn family(cap: Capture) -> Family {
         | C::Arm
         | C::Domain(_)
         | C::Shape(_)
-        | C::TypeAnnot
+        | C::TypeAnnot(_)
         | C::AnonAggMember
         | C::Receiver
         | C::NamedReceiver(_) => Family::Flow,
