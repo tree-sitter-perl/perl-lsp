@@ -290,6 +290,20 @@ pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
         .map(|s| s.id)
 }
 
+/// The callable whose body is `from` or encloses it: the first scope up the
+/// chain that names its owner.
+pub fn owning_callable(scopes: &[Scope], from: Option<ScopeId>) -> Option<SymbolId> {
+    let mut cur = from;
+    while let Some(id) = cur {
+        let sc = scopes.get(id.0 as usize)?;
+        if let Some(owner) = sc.owner {
+            return Some(owner);
+        }
+        cur = sc.parent;
+    }
+    None
+}
+
 /// How many scopes enclose `id` (the file scope is 0). "Nearer" between two
 /// scopes on one chain is the deeper one; a span's size never says so.
 pub fn scope_depth(scopes: &[Scope], id: ScopeId) -> usize {

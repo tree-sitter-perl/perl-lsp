@@ -1882,3 +1882,28 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
+
+// ── compile-time tokens (docs/prompt-magic-tokens.md) ──
+
+#[test]
+fn current_sub_token_is_a_coderef_to_its_own_sub() {
+    // `__SUB__->(…)` recurses: the call's return is the sub's own.
+    let src = "package P;\nuse feature 'current_sub';\nsub count {\n    my ($n) = @_;\n    return 'done' unless $n;\n    my $r = __SUB__->($n - 1);\n    return $r;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(6, 11)), Some(InferredType::String));
+}
+
+#[test]
+fn current_sub_token_in_an_anonymous_sub_names_that_sub() {
+    let src = "package P;\nuse feature 'current_sub';\nmy $f = sub {\n    my ($n) = @_;\n    return 42 unless $n;\n    my $r = __SUB__->($n - 1);\n    return $r;\n};\n";
+    let fa = build_fa(src);
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(6, 11)), Some(InferredType::Numeric));
+}
+
+#[test]
+fn file_and_line_tokens_type_as_string_and_number() {
+    let src = "package P;\nsub f {\n    my $file = __FILE__;\n    my $line = __LINE__;\n    return;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(fa.inferred_type_via_bag("$file", Point::new(4, 4)), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$line", Point::new(4, 4)), Some(InferredType::Numeric));
+}

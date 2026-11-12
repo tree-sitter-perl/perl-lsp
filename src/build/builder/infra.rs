@@ -150,6 +150,11 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The callable whose body holds `at`, a named sub or an anonymous one.
+    pub(super) fn enclosing_callable(&self, at: Point) -> Option<SymbolId> {
+        crate::model::file_analysis::owning_callable(&self.scopes, Some(self.scope_at_point(at)))
+    }
+
     /// Push the body scope of callable `owner`, recording the pairing both
     /// ways (`Scope::owner`, `owner_scope`).
     pub(super) fn push_callable_scope(&mut self, kind: ScopeKind, span: Span, owner: SymbolId) -> ScopeId {
@@ -372,7 +377,7 @@ impl<'a> Builder<'a> {
     /// / `refgen_expression` — the bag is canonical and there's no
     /// second consumer that bypasses it.
     ///
-    /// Two recognized shapes:
+    /// Three recognized shapes:
     ///   - `anonymous_subroutine_expression` → `Symbol(sub_id)`,
     ///     looked up in `anon_sub_symbol_by_span`. The bag's
     ///     symbol-keyed reducers (`ReturnExprReducer`,
@@ -381,6 +386,7 @@ impl<'a> Builder<'a> {
     ///     special-case for "this is anonymous."
     ///     The symbol carries the body's return arms (`record_sub_tail`),
     ///     so an anon sub's return is read exactly as a named sub's.
+    ///   - `__SUB__` → `Symbol` of the callable it runs in.
     ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
     ///     `\&$const_folded`) → `Member { package, name }`.
     ///     Bag's MRO + `module_index` machinery resolves it,
@@ -411,6 +417,17 @@ impl<'a> Builder<'a> {
                     (None, _) => (self.current_package.clone()?, raw),
                 };
                 Some(crate::model::witnesses::WitnessAttachment::returns_of(class, name))
+            }
+            // `__SUB__` is the callable it runs in — that symbol itself, so a
+            // same-named sub elsewhere can never answer for it.
+            "func0op_call_expression"
+                if node
+                    .child(0)
+                    .and_then(|t| t.utf8_text(self.source).ok())
+                    .and_then(crate::model::conventions::CompileTimeToken::parse)
+                    == Some(crate::model::conventions::CompileTimeToken::Sub) =>
+            {
+                self.enclosing_callable(node.start_position()).map(crate::model::witnesses::WitnessAttachment::Symbol)
             }
             _ => None,
         }

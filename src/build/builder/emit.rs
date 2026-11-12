@@ -1170,11 +1170,20 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => Some(InferredType::Numeric),
             "func1op_call_expression" | "func0op_call_expression" => {
                 let name = node.child(0)?.utf8_text(self.source).ok()?;
-                if crate::model::conventions::is_current_package_token(name) {
+                use crate::model::conventions::CompileTimeToken;
+                match CompileTimeToken::parse(name) {
                     // `package_at_pos`, not the scope walk: top-level code
                     // under `package Foo;` sits in the file scope, whose
                     // package is `main`.
-                    return self.package_at_pos(node.start_position()).map(|p| InferredType::ClassName(p.to_string()));
+                    Some(CompileTimeToken::Package) => {
+                        return self.package_at_pos(node.start_position()).map(|p| InferredType::ClassName(p.to_string()));
+                    }
+                    Some(CompileTimeToken::Sub) => {
+                        return Some(InferredType::CodeRef { return_edge: Some(self.coderef_return_edge_for(node)?) });
+                    }
+                    Some(CompileTimeToken::File) => return Some(InferredType::String),
+                    Some(CompileTimeToken::Line) => return Some(InferredType::Numeric),
+                    None => {}
                 }
                 crate::model::builtins::builtin_return_type(name)
             }
