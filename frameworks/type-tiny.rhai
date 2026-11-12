@@ -55,7 +55,8 @@ fn base_constant_type(name) {
     if name == "CodeRef" { return type_coderef(); }
     if name == "RegexpRef" { return type_regexp(); }
     if name == "Undef" { return type_undef(); }
-    if name == "Bool" { return type_bool(); }
+    // Type::Tiny's Bool admits undef alongside 1, 0 and "".
+    if name == "Bool" { return type_optional(type_bool()); }
     ()
 }
 
