@@ -297,3 +297,19 @@ fn an_advisory_bound_answers_only_for_an_unknown_value() {
     checked.push(witness(var(), WitnessPayload::InferredType(InferredType::String), at(2, 0), at(2, 0)));
     assert_eq!(read(&checked, at(2, 5)), ReducedValue::Type(InferredType::Numeric));
 }
+
+/// A value fits by its arms: one decidedly outside the bound puts it
+/// outside, and only arms the order cannot place leave it undecided.
+#[test]
+fn a_value_fits_by_its_arms() {
+    use crate::model::file_analysis::{fit, join, Fit, Unordered};
+    let class = |c: &str| InferredType::ClassName(c.into());
+    let either = |a: &InferredType, b: &InferredType| join(a, b, &Unordered);
+    let nullable = |t: &InferredType| either(t, &InferredType::Undef);
+    let foo = class("Foo");
+    assert_eq!(fit(&either(&foo, &InferredType::Numeric), &foo, &Unordered), Fit::No, "a C `NULL` arm");
+    assert_eq!(fit(&either(&foo, &class("Bar")), &foo, &Unordered), Fit::Undecided);
+    assert_eq!(fit(&nullable(&class("Bar")), &foo, &Unordered), Fit::No, "undef under a non-null bound");
+    assert_eq!(fit(&nullable(&class("Bar")), &nullable(&foo), &Unordered), Fit::Undecided);
+    assert_eq!(fit(&nullable(&foo), &nullable(&foo), &Unordered), Fit::Yes);
+}

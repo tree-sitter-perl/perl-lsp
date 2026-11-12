@@ -2272,8 +2272,9 @@ fn declare_slots(
 /// receiver's value is, asked of the assembled analysis's own registry, as
 /// `declare_slots` asks for a slot's owner. A member this file declares on
 /// that class or an ancestor takes the write the way a variable takes one:
-/// into its declaration's place, whose declared bound caps what flows in. Any other member — an instance slot, or one declared in
-/// another file — takes it on `Member{owner, name, Holds}`, the attachment a member
+/// into its declaration's place, whose declared bound caps what flows in.
+/// Any other member — an instance slot, or one declared in another file —
+/// takes it on `Member{owner, name, Holds}`, the attachment a member
 /// read's `ValueHop` chases, where every write is one arm of the slot's
 /// value. A write through a receiver of no known class states nothing.
 ///

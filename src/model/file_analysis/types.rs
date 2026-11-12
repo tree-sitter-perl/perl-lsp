@@ -1435,20 +1435,33 @@ pub enum Fit {
 /// How `value` fits `bound`, read off the same lattice [`join`] folds by, so
 /// a bound and a fold never disagree about what is above what. A class
 /// whose whole ancestry the order sees (`TypeOrder::ancestry_closed`) is
-/// decided; one with an ancestor the order cannot see is not. Both sides
-/// are read by their arms, so `?Iface` and `A|B` bound like `Iface`.
+/// decided; one with an ancestor the order cannot see is not. A value is
+/// its arms (`receiver_arms`, so `?Iface` and `A|B` bound like `Iface`):
+/// one arm decidedly outside puts it outside, and it is undecided only
+/// when every arm outside is a class the order cannot place.
 pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) -> Fit {
     if !value.is_known() {
         return Fit::Undecided;
     }
-    if join(value, bound, order) == join(bound, bound, order) {
+    let top = join(bound, bound, order);
+    let within = |v: &InferredType| join(v, bound, order) == top;
+    if within(value) {
         return Fit::Yes;
+    }
+    if value.defined_part() != Some(value) && !within(&InferredType::Undef) {
+        return Fit::No;
     }
     // TODO(callable-classes): no class sits under `CodeRef`, so `Closure`
     // (or any class with `__invoke`) decidedly misfits a `callable` bound.
-    let open = value.receiver_arms().iter().any(|a| a.class_name().is_some_and(|c| !order.ancestry_closed(c)));
     let classes = bound.receiver_arms().iter().any(|a| a.class_name().is_some());
-    if open && classes { Fit::Undecided } else { Fit::No }
+    let mut fit = Fit::Yes;
+    for arm in value.receiver_arms().iter().filter(|a| !within(a)) {
+        match arm.class_name() {
+            Some(c) if classes && !order.ancestry_closed(c) => fit = Fit::Undecided,
+            _ => return Fit::No,
+        }
+    }
+    fit
 }
 
 /// How a join lost precision: the closed set of widening steps, reported to
