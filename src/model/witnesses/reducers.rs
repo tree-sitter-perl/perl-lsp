@@ -114,6 +114,16 @@ impl crate::model::file_analysis::TypeOrder for BagContext<'_> {
     fn holds(&self, rule: crate::model::file_analysis::Subsumption) -> bool {
         self.lattice.holds(rule)
     }
+
+    /// A class this file declares, or one the index has a candidate for.
+    fn ancestry_closed(&self, class: &str) -> bool {
+        use crate::model::file_analysis::SymKind;
+        let declared = |c: &str| {
+            self.symbols.iter().any(|s| matches!(s.kind, SymKind::Class | SymKind::Package) && s.name == c)
+                || self.module_index.is_some_and(|idx| idx.get_cached(c).is_some() || !idx.def_candidates(c).is_empty())
+        };
+        crate::model::file_analysis::ancestry_closed(class, self.package_parents, self.module_index, &declared)
+    }
 }
 
 /// The class order a query's joins read: its context's, else none.

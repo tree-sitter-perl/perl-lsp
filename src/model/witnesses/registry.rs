@@ -451,7 +451,7 @@ fn fold_memo_probe(
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
     let index = q.context.and_then(|ctx| ctx.module_index);
-    if !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
+    if bounds_unfilled() || !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
         return Err(None);
     }
     let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
@@ -1382,18 +1382,17 @@ impl ReducerRegistry {
     }
 
     /// The one rule a bound states, the same for every attachment
-    /// (`docs/adr/declared-bounds.md`). The reducers never see a bound, so
-    /// `v` is the value with the bound set aside; what reads past the bound
-    /// is a fact made inside its extent:
+    /// (`docs/adr/declared-bounds.md`). The reducers fold the value as if no
+    /// bound were there; what it reads as under the bound in force is a
+    /// question the bound's own facts answer:
     ///
-    /// - a refinement — a region narrower than the bound that holds the
-    ///   point, a guard's proof of the value there — stands as it is;
-    /// - a value made after a local's declaration (its initializer, a
-    ///   write, a use) stands when it fits the bound and the bound keeps the
-    ///   written type;
-    /// - anything else, no value or an `Unknown` one included, reads as the
-    ///   bound. A member's writes and initializer are as wide as its
-    ///   declaration, so they read as it.
+    /// - a guard's proof holding the point (`WitnessPayload::Proof`) reads
+    ///   by `Evidence::read_proven`;
+    /// - a slot reads as its declaration, whatever its writes put there;
+    /// - a local reads the value its facts from the declaration on fold to,
+    ///   by `Evidence::read_written`;
+    /// - no value, or an `Unknown` one, reads as the bound, unless the
+    ///   bound is set aside while a pass settles (`with_bounds_unfilled`).
     #[inline(never)]
     fn cap_by_bound(
         &self,
@@ -1403,11 +1402,72 @@ impl ReducerRegistry {
         materialized: &[Witness],
         v: ReducedValue,
     ) -> ReducedValue {
-        let Some((stated, ty, evidence)) = bound_in_force(bag, q) else {
+        let Some((stated, ty, evidence, extent)) = bound_in_force(bag, q) else {
             return v;
         };
-        let bound = match ty {
-            BoundType::Type(t) => t.clone(),
+        if matches!(v, ReducedValue::FactMap(_)) {
+            return v;
+        }
+        // A point query's facts are the ones reaching it already.
+        let proven = q.point.is_some()
+            && q.attachment.is_temporal()
+            && materialized.iter().any(|w| matches!(w.payload, WitnessPayload::Proof));
+        let mut bound: Option<Option<InferredType>> = None;
+        let mut resolve = |state: &mut QueryState| -> Option<InferredType> {
+            bound.get_or_insert_with(|| self.bound_type(bag, q, state, ty).filter(InferredType::is_known)).clone()
+        };
+        let value = match (proven, extent) {
+            (true, _) => v,
+            // The declaration is the slot's answer, not a stand-in for a
+            // value still to come, so it reads the same while a pass settles.
+            (false, Extent::Slot) => return resolve(state).map_or(v, ReducedValue::Type),
+            (false, Extent::Lifetime | Extent::Entry) => {
+                // Only what the declaration holds counts: a fact made before
+                // it is another binding's.
+                match materialized.iter().all(|w| w.span.start >= stated) {
+                    true => v,
+                    false => {
+                        let after: Vec<Witness> =
+                            materialized.iter().filter(|w| w.span.start >= stated).cloned().collect();
+                        self.reduce_materialized(&after, q)
+                    }
+                }
+            }
+        };
+        let t = match value {
+            ReducedValue::Type(t) if t.is_known() => t,
+            ReducedValue::Type(_) | ReducedValue::None if bounds_unfilled() => return value,
+            ReducedValue::Type(_) | ReducedValue::None => {
+                return resolve(state).map_or(value, ReducedValue::Type);
+            }
+            ReducedValue::FactMap(_) => return value,
+        };
+        let order = class_order(q);
+        let mut fit = |state: &mut QueryState| match resolve(state) {
+            Some(b) => crate::model::file_analysis::fit(&t, &b, order),
+            None => crate::model::file_analysis::Fit::Undecided,
+        };
+        let read = match proven {
+            true => evidence.read_proven(|| fit(state)),
+            false => evidence.read_written(|| fit(state)),
+        };
+        let Some(b) = (match read {
+            BoundRead::Value => None,
+            BoundRead::Bound | BoundRead::Both => resolve(state),
+        }) else {
+            return ReducedValue::Type(t);
+        };
+        match read {
+            BoundRead::Value => ReducedValue::Type(t),
+            BoundRead::Bound => ReducedValue::Type(b),
+            BoundRead::Both => ReducedValue::Type(crate::model::file_analysis::join(&t, &b, order)),
+        }
+    }
+
+    /// The type a bound states, its alias edge chased.
+    fn bound_type(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, ty: &BoundType) -> Option<InferredType> {
+        match ty {
+            BoundType::Type(t) => Some(t.clone()),
             BoundType::Edge(att) => {
                 let sub_q = ReducerQuery {
                     attachment: att,
@@ -1421,47 +1481,11 @@ impl ReducerRegistry {
                 // Opaque: the answer combines the bound with this frame's
                 // own value, so no exit key names it.
                 match &*state.in_opaque_frame(|state| self.query_rec(bag, &sub_q, state)) {
-                    ReducedValue::Type(t) => t.clone(),
-                    ReducedValue::FactMap(_) | ReducedValue::None => return v,
+                    ReducedValue::Type(t) => Some(t.clone()),
+                    ReducedValue::FactMap(_) | ReducedValue::None => None,
                 }
             }
-        };
-        if !bound.is_known() {
-            return v;
         }
-        let t = match v {
-            ReducedValue::Type(t) if t.is_known() => t,
-            ReducedValue::Type(_) | ReducedValue::None => return ReducedValue::Type(bound),
-            ReducedValue::FactMap(_) => return v,
-        };
-        let at = q.point.filter(|_| q.attachment.is_temporal()).map(|p| p.at);
-        let zero = |s: &crate::model::file_analysis::Span| s.start == s.end;
-        // A region narrower than the bound's own extent, holding the point:
-        // after a local's declaration, or strictly inside a member's.
-        let refined = materialized.iter().any(|w| {
-            !zero(&w.span)
-                && at.is_some_and(|p| w.span.start <= p && p <= w.span.end)
-                && match zero(&stated) {
-                    true => w.span.start >= stated.start,
-                    false => w.span != stated && stated.start <= w.span.start && w.span.end <= stated.end,
-                }
-                && matches!(&w.payload, WitnessPayload::InferredType(r) if *r == t)
-        });
-        if refined {
-            return ReducedValue::Type(t);
-        }
-        // A value made after a local's declaration: a write, a use.
-        let made_after = zero(&stated)
-            && materialized.iter().any(|w| {
-                zero(&w.span)
-                    && w.span.start >= stated.start
-                    && at.is_none_or(|p| w.span.start <= p)
-                    && !matches!(w.payload, WitnessPayload::Bound { .. } | WitnessPayload::Reset)
-            });
-        if made_after && evidence.keeps_written_type() && crate::model::file_analysis::fits(&t, &bound, class_order(q)) {
-            return ReducedValue::Type(t);
-        }
-        ReducedValue::Type(bound)
     }
 
     /// The ladder for a class-keyed attachment the local bag couldn't
@@ -3550,34 +3574,59 @@ pub(crate) fn variable_binding_scope(
     })
 }
 
-/// The bound in force at `q`'s point: the latest one stated at or before
-/// it. A `Lifetime` bound holds past every write; an `Entry` bound is a
-/// value like any other, retired by the next write (`LiveWindow`).
+/// The bound in force at `q`'s point, the latest stated before it, with
+/// where it was stated. A slot's bound holds wherever the slot is asked; a
+/// local's from its declaration on, and an `Entry` one only until the next
+/// write (`WitnessBag::latest_reset`).
 fn bound_in_force<'b>(
     bag: &'b WitnessBag,
     q: &ReducerQuery,
-) -> Option<(crate::model::file_analysis::Span, &'b BoundType, Evidence)> {
+) -> Option<(Point, &'b BoundType, Evidence, Extent)> {
     let mut bounds = bag.bounds_of(q.attachment).peekable();
     bounds.peek()?;
     let point = q.point.filter(|_| q.attachment.is_temporal());
-    let mut window: Option<super::reducers::LiveWindow> = None;
-    let mut best: Option<(&Witness, &BoundType, Evidence)> = None;
+    let mut retired: Option<Option<Point>> = None;
+    let mut best: Option<(&Witness, &BoundType, Evidence, Extent)> = None;
     for w in bounds {
         let WitnessPayload::Bound { ty, evidence, extent } = &w.payload else {
             continue;
         };
-        let stated = match (point, extent.survives_write()) {
-            (None, true) => true,
-            (Some(p), true) => p.reaches(w.span.start) && super::reaches(w, p.at),
-            (_, false) => window
-                .get_or_insert_with(|| super::reducers::LiveWindow::at(&bag.for_attachment(q.attachment), q))
-                .admits(w),
+        let stated = match extent {
+            Extent::Slot => true,
+            Extent::Lifetime => point.is_none_or(|p| p.reaches(w.span.start) && super::reaches(w, p.at)),
+            Extent::Entry => {
+                point.is_none_or(|p| p.reaches(w.span.start))
+                    && retired
+                        .get_or_insert_with(|| bag.latest_reset(q.attachment, point))
+                        .is_none_or(|r| w.span.start >= r)
+            }
         };
         if stated && best.is_none_or(|(b, ..)| w.span.start >= b.span.start) {
-            best = Some((w, ty, *evidence));
+            best = Some((w, ty, *evidence, *extent));
         }
     }
-    best.map(|(w, ty, evidence)| (w.span, ty, evidence))
+    best.map(|(w, ty, evidence, extent)| (w.span.start, ty, evidence, extent))
+}
+
+thread_local! {
+    static BOUNDS_UNFILLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with no bound standing in for an absent or `Unknown` value. A
+/// pass that keeps every round's facts reads this way while its rounds
+/// settle: a bound filled in for a value a later round finds would be a
+/// fact the settled answer never states (`docs/adr/declared-bounds.md`
+/// §Monotonicity). The fold memo is closed meanwhile, so no answer made
+/// either way is reused the other.
+pub(crate) fn with_bounds_unfilled<R>(f: impl FnOnce() -> R) -> R {
+    let prev = BOUNDS_UNFILLED.with(|c| c.replace(true));
+    let out = f();
+    BOUNDS_UNFILLED.with(|c| c.set(prev));
+    out
+}
+
+fn bounds_unfilled() -> bool {
+    BOUNDS_UNFILLED.with(|c| c.get())
 }
 
 /// Pick the "where am I asking from?" `Point` for a scope-chained

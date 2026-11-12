@@ -873,7 +873,7 @@ fn inject_member_blocks(
     annot_type: fn(&str) -> Option<crate::model::file_analysis::InferredType>,
     annot_enforcement: crate::model::witnesses::Enforcement,
 ) {
-    use crate::model::file_analysis::{InferredType, Scope, ScopeId, ScopeKind};
+    use crate::model::file_analysis::{Scope, ScopeId, ScopeKind};
     use crate::build::query_extract::SkelSymbol;
     use crate::model::witnesses::{BoundType, Evidence, Extent, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
@@ -939,23 +939,15 @@ fn inject_member_blocks(
                 member_space: None,
             });
             // The role member states the SAME declared bound an expanded field
-            // does — the `TypeName` edge is canonical (the hover leaf + the
-            // type chase resolve `op_type` → `unsigned short`) — so the cap
-            // and inlay suppression match field-for-field.
-            let ty = match annot_type(&m.type_text) {
-                Some(InferredType::ClassName(cn)) => Some(BoundType::Edge(WitnessAttachment::TypeName(cn))),
-                Some(t) if t.is_known() => Some(BoundType::Type(t)),
-                Some(_) | None => None,
-            };
-            let enforcement = match m.deref_stack.is_empty() {
-                true => annot_enforcement,
-                false => annot_enforcement.through_reference(),
-            };
-            if let Some(ty) = ty {
+            // does: the `TypeName` edge is canonical (the hover leaf and the
+            // type chase resolve `op_type` → `unsigned short`), and a slot's
+            // bound holds class-wide wherever it is stated.
+            if let Some(ty) = BoundType::declared(annot_type(&m.type_text)) {
+                let enforcement = annot_enforcement.of_binding(!m.deref_stack.is_empty());
                 skel.witnesses.push(Witness {
                     attachment: WitnessAttachment::Variable { name: m.name.clone(), scope: scope_id },
                     source: WitnessSource::Builder("declared_type".into()),
-                    payload: WitnessPayload::Bound { ty, evidence: Evidence::Declared(enforcement), extent: Extent::Lifetime },
+                    payload: WitnessPayload::Bound { ty, evidence: Evidence::Declared(enforcement), extent: Extent::Slot },
                     span: m.name_span,
                 });
             }

@@ -1594,12 +1594,15 @@ impl SkeletonAnalysis {
                 let Some(held) = crate::model::file_analysis::cut_region(n.region, cuts) else {
                     continue;
                 };
-                bag.push(Witness {
-                    attachment: WA::Place(Box::new(place)),
-                    source: WitnessSource::Builder("skeleton-narrow".into()),
-                    payload: n.refined,
-                    span: held,
-                });
+                let attachment = WA::Place(Box::new(place));
+                for payload in [n.refined, crate::model::witnesses::WitnessPayload::Proof] {
+                    bag.push(Witness {
+                        attachment: attachment.clone(),
+                        source: WitnessSource::Builder("skeleton-narrow".into()),
+                        payload,
+                        span: held,
+                    });
+                }
             }
         }
         // A constant read's value is the constant's own binding, the one its
@@ -2104,10 +2107,12 @@ impl SkeletonAnalysis {
         // zero — otherwise enrichment wipes every pack-language symbol.
         fa.finalize_post_walk();
         // Last, over the assembled analysis: an owner is a type, and the
-        // registry answers types from the whole bag.
-        declare_slots(&mut fa, slot_writes, &class_scopes);
+        // registry answers types from the whole bag. The member writes settle
+        // first, so a slot's owner is read off settled receivers (a slot is
+        // the write itself, never a member the settling resolves to).
         let writes_members = !member_writes.is_empty();
         settle_member_writes(&mut fa, member_writes, &class_scopes);
+        declare_slots(&mut fa, slot_writes, &class_scopes);
         // A settled write types the receivers that read the member, and the
         // seal's stamp froze them before it landed.
         if writes_members {
@@ -2267,8 +2272,7 @@ fn declare_slots(
 /// receiver's value is, asked of the assembled analysis's own registry, as
 /// `declare_slots` asks for a slot's owner. A member this file declares on
 /// that class or an ancestor takes the write the way a variable takes one:
-/// into its declaration's `Variable`, whose fold ranks a declared type over
-/// what flows in. Any other member — an instance slot, or one declared in
+/// into its declaration's place, whose declared bound caps what flows in. Any other member — an instance slot, or one declared in
 /// another file — takes it on `Member{owner, name, Holds}`, the attachment a member
 /// read's `ValueHop` chases, where every write is one arm of the slot's
 /// value. A write through a receiver of no known class states nothing.
@@ -2286,7 +2290,6 @@ fn settle_member_writes(
     writes: Vec<MemberWrite>,
     class_scopes: &[(String, crate::model::file_analysis::ScopeId)],
 ) {
-    use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     // A receiver can be a member another write fills (`self.a.b = v` reads
     // `a`, which `self.a = A()` writes), so the writes settle to a fixed
     // point: each round re-derives every write against the bag the rounds
@@ -2301,12 +2304,38 @@ fn settle_member_writes(
         return;
     }
     let _t = crate::util::ghost_stats::ScopedNs::start("member_write::settle");
-    let mut stated: std::collections::HashSet<(WA, Span)> = Default::default();
+    let mut stated = Default::default();
+    // A declared bound stands in for a value no round has found yet only
+    // once the rounds stop finding values: filled in earlier, it would be
+    // kept beside the value a later round finds (docs/adr/declared-bounds.md
+    // §Monotonicity). A file that declares no type has no bound to defer.
+    let mut rounds = 0;
+    if fa.witnesses.has_bounds() {
+        rounds += crate::model::witnesses::with_bounds_unfilled(|| settle_rounds(fa, &writes, class_scopes, &mut stated));
+    }
+    rounds += settle_rounds(fa, &writes, class_scopes, &mut stated);
+    // Once per file, so attributing to the file is cheap: which file pays
+    // the rounds is the question the counters answer.
+    for (tag, n) in [("member_write::writes", writes.len() as u64), ("member_write::rounds", rounds)] {
+        crate::util::ghost_stats::count_by(tag, n);
+        crate::util::ghost_stats::count_for_file(tag, n);
+    }
+}
+
+/// `settle_member_writes`' rounds, to a fixed point over `stated`; the
+/// number of rounds run.
+fn settle_rounds(
+    fa: &mut crate::model::file_analysis::FileAnalysis,
+    writes: &[MemberWrite],
+    class_scopes: &[(String, crate::model::file_analysis::ScopeId)],
+    stated: &mut std::collections::HashSet<(crate::model::witnesses::WitnessAttachment, Span)>,
+) -> u64 {
+    use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     let mut rounds = 0u64;
     for _ in 0..=writes.len() {
         rounds += 1;
         let mut values = Vec::new();
-        for w in &writes {
+        for w in writes {
             let Some(class) =
                 fa.expr_type_at_span(w.receiver, None).and_then(|t| t.class_name().map(str::to_string))
             else {
@@ -2350,12 +2379,7 @@ fn settle_member_writes(
         }
         fa.adopt_witnesses(values);
     }
-    // Once per file, so attributing to the file is cheap: which file pays
-    // the rounds is the question the counters answer.
-    for (tag, n) in [("member_write::writes", writes.len() as u64), ("member_write::rounds", rounds)] {
-        crate::util::ghost_stats::count_by(tag, n);
-        crate::util::ghost_stats::count_for_file(tag, n);
-    }
+    rounds
 }
 
 const MEMBER_WRITE: &str = "member_write";

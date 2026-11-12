@@ -111,6 +111,12 @@ impl crate::cst::PlaceBinder for SurveyBinder<'_, '_, '_> {
 }
 
 /// What a guard does to the subject's type where it holds.
+///
+/// TODO(perl-guard-proofs): the regions these mint carry no
+/// `WitnessPayload::Proof`, which only a bound reads and Perl declares none.
+/// The first Perl bound (docs/adr/declared-bounds.md) needs them minted
+/// beside each region, as the pack narrowing does, or a guard under it
+/// reads by the write rule.
 #[derive(Clone)]
 pub(super) enum NarrowOp {
     /// `isa` / `ref…eq` prove a concrete type.

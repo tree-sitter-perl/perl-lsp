@@ -1968,9 +1968,9 @@ fn a_write_hovers_the_value_it_writes() {
     assert!(me.ends_with("*method*\n\n*class m.Foo*\n\n*returns: m.Foo*"), "{me}");
 }
 
-/// An annotation bounds every value its variable holds: an untyped write
-/// reads as the annotation, a write that does not fit it reads as the
-/// annotation, and a write that fits narrows within it.
+/// An annotation is advisory: nothing at run time holds a value to it, so a
+/// known written value reads as itself, fitting or not, and the annotation
+/// answers only where no value is known.
 #[test]
 fn an_annotation_bounds_every_later_write() {
     let src = "\
@@ -1993,6 +1993,59 @@ def p(a: int):
     let class = |c: &str| Some(InferredType::ClassName(c.into()));
     assert_eq!(fa.inferred_type_via_bag("y", Point::new(5, 0)), class("Sub"), "a fitting write narrows");
     assert_eq!(fa.inferred_type_via_bag("y", Point::new(7, 0)), class("Base"), "an untyped write reads the bound");
-    assert_eq!(fa.inferred_type_via_bag("z", Point::new(10, 0)), Some(InferredType::Numeric), "a write past the bound");
+    assert_eq!(fa.inferred_type_via_bag("z", Point::new(10, 0)), Some(InferredType::String), "a write past the bound stands");
     assert_eq!(fa.inferred_type_via_bag("a", Point::new(13, 11)), Some(InferredType::Numeric), "a parameter's too");
+}
+
+/// A parameter rebound to a value of another type reads that value: the
+/// annotation says what the caller passes, not what the body keeps.
+#[test]
+fn a_rebound_annotated_parameter_reads_its_new_value() {
+    let src = "\
+class Path:
+    def exists(self): pass
+def f(path: str):
+    path = Path(path)
+    path.exists()
+";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("path", Point::new(4, 4)), Some(InferredType::ClassName("Path".into())));
+}
+
+/// A member write through an annotated local is filed under the class the
+/// local settles to, never under the annotation a round read before the
+/// local's value was found.
+#[test]
+fn a_member_write_lands_on_the_settled_receiver_only() {
+    let src = "\
+class Base: pass
+class Sub(Base): pass
+class H:
+    def __init__(self):
+        self.s = Sub()
+    def f(self):
+        p: Base = self.s
+        p.k = 1
+";
+    let fa = py_in(src, None);
+    let on = |class: &str| {
+        let member = fa.witnesses.all().iter().any(|w| {
+            matches!(&w.attachment, crate::model::witnesses::WitnessAttachment::Member { owner, name, .. } if owner == class && name == "k")
+        });
+        let slot = fa.symbols().iter().any(|s| s.name == "k" && s.package.as_deref() == Some(class));
+        member || slot
+    };
+    assert_eq!(fa.inferred_type_via_bag("p", Point::new(7, 8)), Some(InferredType::ClassName("Sub".into())));
+    assert!(on("Sub"), "the write lands on the settled receiver's class");
+    assert!(!on("Base"), "and on no class an unsettled round read");
+}
+
+/// A write in a nested block reads by the same rule as the same write
+/// written flat: the shape of the code never decides how a bound reads.
+#[test]
+fn a_nested_write_reads_as_its_flat_twin() {
+    let flat = py_in("x: int = 0\nx = 's'\nx\n", None);
+    let nested = py_in("x: int = 0\nif c:\n    x = 's'\n    x\n", None);
+    assert_eq!(flat.inferred_type_via_bag("x", Point::new(2, 0)), Some(InferredType::String));
+    assert_eq!(nested.inferred_type_via_bag("x", Point::new(3, 4)), Some(InferredType::String));
 }

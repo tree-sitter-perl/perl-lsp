@@ -191,3 +191,85 @@ fn a_build_reads_each_use_a_bounded_number_of_times() {
     let (short, long) = (cost(100), cost(200));
     assert!(long < short * 3, "100 uses read {short} witnesses, 200 read {long}: superlinear");
 }
+
+/// Where an `Entry` bound asks whether a write retired it, the index answers
+/// what a scan of every write marker answers, skipped statements included.
+#[test]
+fn the_latest_write_is_the_same_through_the_index() {
+    let att = var();
+    let mut indexed = 0;
+    for seed in 0..400 {
+        let bag = random_bag(seed);
+        indexed += usize::from(bag.live_at(&att, at(20, 0)).is_some());
+        for row in 0..18usize {
+            for skips in [None, Some(Span { start: at(row.saturating_sub(2), 0), end: at(row, 9) })] {
+                let point = ReadPoint { at: at(row, 1), skips };
+                let scan = bag
+                    .iter_attachment(&att)
+                    .filter(|w| matches!(w.payload, WitnessPayload::Reset) && point.reaches(w.span.start))
+                    .map(|w| w.span.start)
+                    .max();
+                assert_eq!(bag.latest_reset(&att, Some(point)), scan, "seed {seed} at {row}");
+            }
+        }
+        let anywhere = bag.iter_attachment(&att).filter(|w| matches!(w.payload, WitnessPayload::Reset)).map(|w| w.span.start).max();
+        assert_eq!(bag.latest_reset(&att, None), anywhere, "seed {seed}, no point");
+    }
+    assert!(indexed > 100, "only {indexed} bags were indexed");
+}
+
+fn bound(ty: InferredType, enforcement: Enforcement, extent: Extent, start: Point) -> Witness {
+    witness(var(), WitnessPayload::Bound { ty: BoundType::Type(ty), evidence: Evidence::Declared(enforcement), extent }, start, start)
+}
+
+fn read(bag: &WitnessBag, p: Point) -> ReducedValue {
+    let att = var();
+    ReducerRegistry::with_defaults().query(
+        bag,
+        &ReducerQuery {
+            attachment: &att,
+            point: Some(ReadPoint::position(p)),
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: None,
+        },
+    )
+}
+
+/// A region is a write unless its producer says it is a guard's proof: the
+/// span's shape decides nothing.
+#[test]
+fn a_region_reads_by_the_write_rule_unless_it_is_a_proof() {
+    let base = InferredType::ClassName("Base".into());
+    let other = InferredType::ClassName("Other".into());
+    let region = |bag: &mut WitnessBag, payload| bag.push(witness(var(), payload, at(2, 0), at(4, 0)));
+    let mut written = WitnessBag::new();
+    written.push(bound(base.clone(), Enforcement::Converted, Extent::Lifetime, at(1, 0)));
+    region(&mut written, WitnessPayload::InferredType(other.clone()));
+    assert_eq!(read(&written, at(3, 0)), ReducedValue::Type(base.clone()), "a converted write reads the bound");
+    let mut proven = written.clone();
+    region(&mut proven, WitnessPayload::Proof);
+    // No order in hand: nothing is decided, and an undecided proof stands.
+    assert_eq!(read(&proven, at(3, 0)), ReducedValue::Type(other.clone()));
+    assert_eq!(read(&proven, at(5, 0)), ReducedValue::Type(base), "past the region the proof is gone");
+}
+
+/// An advisory bound holds no value to it: a known value stands, and the
+/// bound answers only where none is known. A checked one keeps a value it
+/// decidedly rejects out.
+#[test]
+fn an_advisory_bound_answers_only_for_an_unknown_value() {
+    let mut bag = WitnessBag::new();
+    bag.push(bound(InferredType::Numeric, Enforcement::Advisory, Extent::Lifetime, at(1, 0)));
+    bag.push(witness(var(), WitnessPayload::InferredType(InferredType::String), at(2, 0), at(2, 0)));
+    bag.push(witness(var(), WitnessPayload::Reset, at(3, 0), at(3, 0)));
+    bag.push(witness(var(), WitnessPayload::InferredType(InferredType::Unknown), at(3, 0), at(3, 0)));
+    assert_eq!(read(&bag, at(2, 5)), ReducedValue::Type(InferredType::String));
+    assert_eq!(read(&bag, at(3, 5)), ReducedValue::Type(InferredType::Numeric));
+    let mut checked = WitnessBag::new();
+    checked.push(bound(InferredType::Numeric, Enforcement::Checked, Extent::Lifetime, at(1, 0)));
+    checked.push(witness(var(), WitnessPayload::InferredType(InferredType::String), at(2, 0), at(2, 0)));
+    assert_eq!(read(&checked, at(2, 5)), ReducedValue::Type(InferredType::Numeric));
+}

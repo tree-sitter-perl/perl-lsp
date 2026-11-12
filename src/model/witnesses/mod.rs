@@ -506,6 +506,27 @@ impl WitnessBag {
         self.spans.get(att)?.live_at(&self.witnesses, point)
     }
 
+    /// Where the latest write marker on `att` that a read at `point` reaches
+    /// stands; with no point, the latest anywhere. A binary search over the
+    /// attachment's `SpanOrder` when it has one, else a scan of its few
+    /// witnesses.
+    pub(crate) fn latest_reset(&self, att: &WitnessAttachment, point: Option<ReadPoint>) -> Option<Point> {
+        let Some(order) = self.spans.get(att) else {
+            return self
+                .iter_attachment(att)
+                .filter(|w| matches!(w.payload, WitnessPayload::Reset))
+                .map(|w| w.span.start)
+                .filter(|&s| point.is_none_or(|p| p.reaches(s)))
+                .max();
+        };
+        let start = |i: usize| self.witnesses[i].span.start;
+        let upto = match point {
+            Some(p) => order.resets.partition_point(|&i| start(i) <= p.at),
+            None => order.resets.len(),
+        };
+        order.resets[..upto].iter().rev().map(|&i| start(i)).find(|&s| point.is_none_or(|p| !p.skips_site(s)))
+    }
+
     /// Rewrite every witness in place, keeping push order.
     pub fn rewrite(&mut self, mut f: impl FnMut(&mut Witness)) {
         self.witnesses.iter_mut().for_each(&mut f);
@@ -537,6 +558,11 @@ impl WitnessBag {
         self.bounds_of(att).any(|w| {
             matches!(&w.payload, WitnessPayload::Bound { evidence: crate::model::witnesses::Evidence::Declared(_), .. })
         })
+    }
+
+    /// Does any declaration bound anything in this bag?
+    pub fn has_bounds(&self) -> bool {
+        !self.bounds.is_empty()
     }
 
     /// The `Bound` witnesses on `att`, in push order.

@@ -904,7 +904,9 @@ impl fmt::Display for Capture {
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
             C::TypeRelative(k) => write!(f, "type.{k}"),
-            C::TypeAnnot(crate::model::witnesses::Extent::Lifetime) => f.write_str("type.annot"),
+            C::TypeAnnot(crate::model::witnesses::Extent::Lifetime | crate::model::witnesses::Extent::Slot) => {
+                f.write_str("type.annot")
+            }
             C::TypeAnnot(crate::model::witnesses::Extent::Entry) => f.write_str("type.annot.entry"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),

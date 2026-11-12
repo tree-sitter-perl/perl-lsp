@@ -273,7 +273,8 @@ impl WitnessPayload {
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
             | WitnessPayload::EvaluatedBefore(_)
-            | WitnessPayload::Bound { .. } => false,
+            | WitnessPayload::Bound { .. }
+            | WitnessPayload::Proof => false,
         }
     }
 }
@@ -313,7 +314,8 @@ impl WitnessPayload {
             | WitnessPayload::Reset
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
-            | WitnessPayload::EvaluatedBefore(_) => {}
+            | WitnessPayload::EvaluatedBefore(_)
+            | WitnessPayload::Proof => {}
         }
     }
 }
@@ -340,7 +342,8 @@ impl WitnessPayload {
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::Extend(_)
             | WitnessPayload::FreeValue { .. }
-            | WitnessPayload::Bound { .. } => {}
+            | WitnessPayload::Bound { .. }
+            | WitnessPayload::Proof => {}
         }
     }
 }
@@ -523,15 +526,21 @@ pub enum WitnessPayload {
     /// variant-index stability.
     EvaluatedBefore(crate::model::file_analysis::Span),
     /// A BOUND on the attachment's value: what a declaration (`x: int`,
-    /// `Foo $p`, `T x;`) says every value it holds is. No reducer folds it
-    /// as a value (the type fold reads it only as "something was bound
-    /// before"); the registry caps whatever the reducers fold to by the one
-    /// bound in force (`ReducerRegistry::cap_by_bound`,
-    /// `docs/adr/declared-bounds.md`).
+    /// `Foo $p`, `T x;`) says every value it holds is. The type fold reads
+    /// it only as "something was bound before"; what the attachment reads
+    /// as is the registry's one rule over the bound in force
+    /// (`ReducerRegistry::cap_by_bound`, `docs/adr/declared-bounds.md`).
     /// Its evidence and extent are facts about the declaration, minted with
     /// it, so a consumer asks the bound and never the language or the
     /// source. Kept at the END for bincode variant-index stability.
     Bound { ty: BoundType, evidence: Evidence, extent: Extent },
+    /// The region witness beside it, at the same attachment and span, is a
+    /// guard's PROOF of the value there (`isinstance`, `instanceof`, an
+    /// engaged optional): a run-time test, not a write, so a bound reads
+    /// it by the guard rule (`ReducerRegistry::cap_by_bound`). A sibling of
+    /// the region's own payload, cut with it; no reducer claims it. Kept at
+    /// the END for bincode variant-index stability.
+    Proof,
 }
 
 /// The type a bound states: a type, or an edge into the alias graph
@@ -540,6 +549,19 @@ pub enum WitnessPayload {
 pub enum BoundType {
     Type(InferredType),
     Edge(WitnessAttachment),
+}
+
+impl BoundType {
+    /// The bound a declared type states: a class edges into the alias graph
+    /// (it may be a typedef), any other known type is a leaf, and a type
+    /// nothing can name (`auto`, `void`) states no bound.
+    pub fn declared(t: Option<InferredType>) -> Option<BoundType> {
+        match t {
+            Some(InferredType::ClassName(cn)) => Some(BoundType::Edge(WitnessAttachment::TypeName(cn))),
+            Some(t) if t.is_known() => Some(BoundType::Type(t)),
+            Some(_) | None => None,
+        }
+    }
 }
 
 /// Why a bound holds. Closed: every rule over evidence is an exhaustive
@@ -564,43 +586,83 @@ pub enum Enforcement {
 }
 
 impl Enforcement {
-    /// The enforcement of a binding that holds its value through a pointer
-    /// or reference: nothing is converted, the referent keeps its type.
-    pub fn through_reference(self) -> Enforcement {
-        match self {
-            Enforcement::Converted => Enforcement::Checked,
-            other => other,
+    /// The enforcement of a binding as it holds its value: through a
+    /// pointer or reference nothing is converted, the referent keeps its
+    /// type.
+    pub fn of_binding(self, through_reference: bool) -> Enforcement {
+        match (self, through_reference) {
+            (Enforcement::Converted, true) => Enforcement::Checked,
+            (other, _) => other,
         }
     }
 }
 
-/// How long a bound holds.
+/// How long a bound holds, and over what.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Extent {
-    /// For the binding's whole life: a write does not retire it.
+    /// A local, for its whole life: a write does not retire it, and a value
+    /// written after the declaration reads by the enforcement's rule.
     Lifetime,
-    /// On entry only (PHP checks a parameter's type when the call binds it):
-    /// a write retires it like any other value.
+    /// A local on entry only (PHP checks a parameter's type when the call
+    /// binds it): a write retires it like any other value.
     Entry,
+    /// A member's slot, class-wide: its writes are arms of one value no
+    /// single write decides, so the slot reads as its declaration wherever
+    /// it is asked.
+    Slot,
+}
+
+/// What a bound makes of a value read under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundRead {
+    /// The value stands.
+    Value,
+    /// The declared type.
+    Bound,
+    /// Both, for dispatch: the value is the bound's and the guard's at
+    /// once, a meet the lattice has no element for, so the read is their
+    /// join.
+    Both,
 }
 
 impl Evidence {
-    /// Does a value that fits the bound keep its own type? A converting
-    /// binding reads as the declared type whatever was written.
-    pub fn keeps_written_type(&self) -> bool {
+    /// How a known value written under the bound reads, given how it fits
+    /// (asked only when the rule reads it). Nothing enforces an advisory
+    /// declaration, so the value stands. A checked one rejects a value that
+    /// does not fit, so a value there that the order cannot place did fit,
+    /// and one that decidedly does not is the bound. A converting binding
+    /// holds the declared type whatever it was given.
+    pub fn read_written(&self, fit: impl FnOnce() -> crate::model::file_analysis::Fit) -> BoundRead {
+        use crate::model::file_analysis::Fit;
         match self {
-            Evidence::Declared(Enforcement::Advisory | Enforcement::Checked) => true,
-            Evidence::Declared(Enforcement::Converted) => false,
+            Evidence::Declared(Enforcement::Advisory) => BoundRead::Value,
+            Evidence::Declared(Enforcement::Converted) => BoundRead::Bound,
+            Evidence::Declared(Enforcement::Checked) => match fit() {
+                Fit::Yes | Fit::Undecided => BoundRead::Value,
+                Fit::No => BoundRead::Bound,
+            },
         }
     }
-}
 
-impl Extent {
-    /// Does the bound outlive a write to its binding?
-    pub fn survives_write(&self) -> bool {
+    /// How a guard's proof reads under the bound. A guard tests the value at
+    /// run time, so its proof holds whatever the declaration enforces: it
+    /// stands when it fits or the order cannot place it, as a write does,
+    /// and under an advisory bound always. One that decidedly does not fit
+    /// a checked bound proves a value that is both, which reads as their
+    /// join; a converting binding holds its declared type, so there it is
+    /// the bound.
+    pub fn read_proven(&self, fit: impl FnOnce() -> crate::model::file_analysis::Fit) -> BoundRead {
+        use crate::model::file_analysis::Fit;
         match self {
-            Extent::Lifetime => true,
-            Extent::Entry => false,
+            Evidence::Declared(Enforcement::Advisory) => BoundRead::Value,
+            Evidence::Declared(Enforcement::Checked) => match fit() {
+                Fit::Yes | Fit::Undecided => BoundRead::Value,
+                Fit::No => BoundRead::Both,
+            },
+            Evidence::Declared(Enforcement::Converted) => match fit() {
+                Fit::Yes | Fit::Undecided => BoundRead::Value,
+                Fit::No => BoundRead::Bound,
+            },
         }
     }
 }

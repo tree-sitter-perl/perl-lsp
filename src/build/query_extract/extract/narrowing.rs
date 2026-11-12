@@ -448,14 +448,18 @@ pub(super) fn finish(st: &mut ExtractState) {
         }
     }
     // Each region ends at the first rebind of its subject's binding, which
-    // only the assembled analysis knows (`bind_variable_regions`).
+    // only the assembled analysis knows (`bind_variable_regions`). Every one
+    // is a guard's proof, and says so beside it, cut with it.
     for (name, refined, region, scope) in pending {
-        out.variable_regions.push(crate::model::witnesses::Witness {
-            attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
-            source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
-            payload: refined,
-            span: region,
-        });
+        let attachment = crate::model::witnesses::WitnessAttachment::Variable { name, scope };
+        for payload in [refined, crate::model::witnesses::WitnessPayload::Proof] {
+            out.variable_regions.push(crate::model::witnesses::Witness {
+                attachment: attachment.clone(),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
+                payload,
+                span: region,
+            });
+        }
     }
     for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
         out.variable_regions.push(crate::model::witnesses::Witness {

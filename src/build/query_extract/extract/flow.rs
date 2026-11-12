@@ -180,7 +180,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                         // The member holds the container itself, so nothing
                         // converts and nothing narrows past it either way.
                         evidence: crate::model::witnesses::Evidence::Declared(st.pack.annot_enforcement),
-                        extent: crate::model::witnesses::Extent::Lifetime,
+                        extent: crate::model::witnesses::Extent::Slot,
                     },
                     span: Span { start: e.start, end: e.start },
                 };
@@ -436,9 +436,11 @@ pub(super) fn finish(st: &mut ExtractState) {
     // it). The type-witness temporal filter is position-based — it admits a
     // witness only at/after its span — so a zero-width witness pinned to the
     // field's decl point would be REJECTED for every read textually above it.
-    // Give the field's declared bound its class-body scope's span so
-    // "this type holds class-wide" is what the filter sees. Locals keep their
-    // decl-point span (flow narrowing is sequential and correct for them).
+    // The field's declared bound is a slot's (`Extent::Slot`), in force
+    // wherever it is asked; it is spanned to its class body so the type
+    // fold's position filter, which reads it as "bound before", admits it
+    // class-wide too. Locals keep their decl-point span (flow narrowing is
+    // sequential and correct for them).
     // Scopes are pushed in id order (`id = ScopeId(scopes.len())`), so a
     // ScopeId indexes its own scope directly.
     let field_scope_span: HashMap<(String, ScopeId), Span> = out
@@ -488,13 +490,10 @@ pub(super) fn finish(st: &mut ExtractState) {
             .copied()
             .unwrap_or(Span { start: *at, end: *at });
         if let Some((annot, extent)) = ad.annot_in_match(mid).map(|(a, x)| (&a.text, x)) {
-            // A class-shaped declared type edges into the alias graph (it may
-            // be a typedef — `U16 x;` where `typedef unsigned short U16`);
-            // primitives stay leaves; `None` (auto/void) defers to the flow
-            // edge as before. `TypeName` chases the typedef or falls back to
-            // the same `ClassName`, so a plain struct/class is unchanged.
             // A type naming a class by where it is written is that class,
             // already an identity; any other spelling resolves at its site.
+            // `auto`/`void` name nothing and state no bound
+            // (`BoundType::declared`).
             let annot_type = match relative {
                 Some((rel, class)) => class.as_ref().and_then(|c| out.relative_class(*rel, c)).map(InferredType::ClassName),
                 None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
@@ -502,26 +501,16 @@ pub(super) fn finish(st: &mut ExtractState) {
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }
-            let ty = match annot_type {
-                Some(InferredType::ClassName(cn)) => {
-                    Some(crate::model::witnesses::BoundType::Edge(WitnessAttachment::TypeName(cn)))
-                }
-                Some(t) if t.is_known() => Some(crate::model::witnesses::BoundType::Type(t)),
-                Some(_) | None => None,
-            };
-            if let Some(ty) = ty {
+            if let Some(ty) = crate::model::witnesses::BoundType::declared(annot_type) {
                 // A binding through a pointer or reference holds the
                 // referent, whose type no write converts.
                 let through_reference = ad.of_match(mid).any(|t| {
                     matches!(t.payload.as_deref(), Some(super::Payload::Deref(stack)) if !stack.is_empty())
                 });
-                let enforcement = match through_reference {
-                    true => st.pack.annot_enforcement.through_reference(),
-                    false => st.pack.annot_enforcement,
-                };
-                // A member declaration declares the slot: no write retires it.
+                let enforcement = st.pack.annot_enforcement.of_binding(through_reference);
+                // A member declaration declares the slot.
                 let extent = match field_scope_span.contains_key(&(name.clone(), *scope)) {
-                    true => crate::model::witnesses::Extent::Lifetime,
+                    true => crate::model::witnesses::Extent::Slot,
                     false => extent,
                 };
                 let w = Witness {

@@ -4128,3 +4128,18 @@ fn a_cpp_declaration_bounds_its_later_writes() {
     assert_eq!(at("v", 9), class("Base"), "a value binding converts");
     assert_eq!(at("p", 11), class("Derived"), "a pointer binding narrows");
 }
+
+/// A write in a nested block reads by the same rule as the same write
+/// written flat: a value binding converts it in both.
+#[test]
+fn a_cpp_nested_write_reads_as_its_flat_twin() {
+    use crate::model::file_analysis::InferredType;
+    let decls = "struct Base { void run(); };\n\
+                 struct Derived : Base { void more(); };\n\
+                 Derived make_derived();\n";
+    let flat = cpp_fa(&format!("{decls}void f() {{\nBase v;\nv = make_derived();\nv.more();\n}}\n"));
+    let nested = cpp_fa(&format!("{decls}void f(int c) {{\nBase v;\nif (c) {{\nv = make_derived();\nv.more();\n}}\n}}\n"));
+    let class = Some(InferredType::ClassName("Base".into()));
+    assert_eq!(flat.inferred_type_via_bag("v", tree_sitter::Point { row: 6, column: 0 }), class);
+    assert_eq!(nested.inferred_type_via_bag("v", tree_sitter::Point { row: 7, column: 0 }), class);
+}

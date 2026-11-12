@@ -1028,6 +1028,27 @@ impl FileAnalysis {
         self.subject_type_at(&self.declared_place(sym), ReadPoint::position(point), module_index)
     }
 
+    /// The type parameter `param` is DECLARED to take: its declaration's
+    /// bound, read where the call binds it (`ParamInfo::binding_site`), so
+    /// no write in the body moves it. `None` when no declaration bounds it.
+    ///
+    /// TODO(pack-params): pack languages mint no `ParamInfo` yet, so their
+    /// signatures reach no consumer of this; a pack that mints them states
+    /// the binding site at the parameter's name token.
+    pub fn param_declared_type(
+        &self,
+        param: &ParamInfo,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        let at = param.binding_site?;
+        let sym = self.symbols_named(&param.name).iter().copied().find(|&sid| {
+            let s = &self.symbols[sid.0 as usize];
+            s.kind == SymKind::Variable && s.selection_span.start == at
+        })?;
+        let att = crate::model::witnesses::WitnessAttachment::Place(Box::new(self.declared_place(sym)));
+        crate::model::witnesses::query_declared_bound(&self.witnesses, &self.bag_context(module_index), &att)
+    }
+
     /// The place the variable or member `sym` declares.
     pub fn declared_place(&self, sym: SymbolId) -> Place {
         Place::variable(Binding::Lexical(self.binding_symbol(sym)))

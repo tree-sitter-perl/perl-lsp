@@ -5184,3 +5184,41 @@ function m(Logger $q) { if ($q instanceof FileLogger) { return $q; } return $q; 
     assert_eq!(at("q", 10, 32), Some(logger()), "unwritten, the parameter holds its declared type");
     assert_eq!(at("q", 11, 64), Some(T::ClassName("FileLogger".into())), "a guard narrows within the bound");
 }
+
+/// What a parameter takes is its declaration, asked where the call binds it:
+/// a rebinding in the body moves what the body holds, not what callers pass.
+/// The pack mints no `ParamInfo` yet (`TODO(pack-params)`), so the test
+/// states the one a signature would carry: the parameter's token.
+#[cfg(feature = "php")]
+#[test]
+fn a_parameter_takes_its_declared_type_whatever_the_body_rebinds() {
+    use crate::model::file_analysis::{InferredType as T, ParamInfo, SymKind};
+    let src = "<?php
+function load(string $p) { $p = realpath($p); return file($p); }
+";
+    let fa = php(src);
+    let token = at(src, "$p)", 1);
+    let decl = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.selection_span.start == token);
+    assert!(decl.is_some(), "the parameter's declaration sits at its token");
+    let param = ParamInfo { name: "p".into(), default: None, is_slurpy: false, is_invocant: false, binding_site: Some(token) };
+    assert_eq!(fa.param_declared_type(&param, None), Some(T::String));
+    assert_ne!(fa.inferred_type_via_bag("p", at(src, "return", 0)), Some(T::String), "the body holds the rebinding");
+}
+
+/// A guard on a class the declared type decidedly does not cover proves a
+/// value that is both, so both classes' members dispatch inside it.
+#[cfg(feature = "php")]
+#[test]
+fn a_guard_outside_the_declared_type_reads_as_both() {
+    let src = "<?php
+interface Sized { function count(); }
+interface Logger { function info($m); }
+function f(Sized $c) {
+    if ($c instanceof Logger) { $c->count(); $c->info(''); }
+}
+";
+    let fa = php(src);
+    let t = fa.inferred_type_via_bag("c", at(src, "$c->count", 0)).expect("a type inside the guard");
+    let classes: Vec<&str> = t.receiver_arms().iter().filter_map(|a| a.class_name()).collect();
+    assert!(classes.contains(&"Sized") && classes.contains(&"Logger"), "{t:?}");
+}
