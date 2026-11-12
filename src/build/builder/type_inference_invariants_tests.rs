@@ -506,3 +506,42 @@ fn local_jumps_state_that_evaluation_ends_there() {
     assert_eq!(leaves, vec!["goto &g", "last", "next", "redo", "return 1"]);
     assert_eq!(fa.sub_return_type_at_arity("f", None), Some(InferredType::Numeric));
 }
+
+/// How a call ends is read through the call: a builtin states it on
+/// itself, a call the file can pin to its definition reads that
+/// definition's answer, and a call it cannot pin is the top.
+#[test]
+fn a_call_ends_the_way_the_definitions_it_runs_end() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let source = "package Foo;\nsub fail { return 1 }\nsub plain { 1 }\npackage main;\ndie 'x';\nexit 1;\nFoo::fail();\nFoo->fail;\nFoo->plain;\nmy $o = bless {}, 'Foo';\n$o->fail;\nunknown();\npackage Foo;\nmy $r = fail();\n";
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let ctx = fa.bag_context(None);
+    let line = |row: usize| -> String { source.lines().nth(row).unwrap().trim_end_matches(';').to_string() };
+    let ends_on = |row: usize| -> Ends {
+        let text = line(row);
+        let point = |column| tree_sitter::Point { row, column };
+        let span = crate::model::file_analysis::Span { start: point(0), end: point(text.len()) };
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx))
+    };
+    assert_eq!(ends_on(4), Ends::UNWINDS, "die");
+    assert_eq!(ends_on(5), Ends::EXITS, "exit");
+    // `Foo->m` dispatches on its receiver like `$o->m`: the call does not
+    // say the receiver is the class itself, so both are open until the
+    // descendant join lands.
+    assert_eq!(ends_on(7), Ends::all(), "a receiver may be any subclass");
+    assert_eq!(ends_on(10), Ends::all(), "a receiver may be any subclass");
+    assert_eq!(ends_on(11), Ends::all(), "nothing defines it");
+    let pinned = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 13, column: 8 },
+        end: tree_sitter::Point { row: 13, column: 14 },
+    };
+    assert_eq!(
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(pinned), Some(&ctx)),
+        Ends::UNWINDS,
+        "a call the file pins to its definition"
+    );
+    let fail = fa.symbols().iter().find(|s| s.name == "fail").expect("fail");
+    let plain = fa.symbols().iter().find(|s| s.name == "plain").expect("plain");
+    assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
+    assert_eq!(fa.symbol_ends(plain.id), Ends::all(), "a definition that states nothing");
+}

@@ -103,6 +103,24 @@ pub fn query_ends(bag: &WitnessBag, attachment: &WitnessAttachment, context: Opt
     }
 }
 
+/// How evaluating the expression at `attachment` (`Expr(span)` /
+/// `Expression(ref)`) ends: what it states of itself, and for a call, how
+/// the definitions it runs end. No evidence is the top.
+pub fn query_expr_ends(bag: &WitnessBag, attachment: &WitnessAttachment, context: Option<&BagContext>) -> Ends {
+    let q = ReducerQuery {
+        attachment,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context,
+    };
+    ReducerRegistry::with_defaults()
+        .expr_ends(bag, &q, &mut QueryState::new(), attachment)
+        .unwrap_or(Ends::all())
+}
+
 /// What `place` holds at `point`. The place names its storage, so there
 /// is no chain to walk; `scope` (where the question is asked) supplies only
 /// the framework the fold reads under.
