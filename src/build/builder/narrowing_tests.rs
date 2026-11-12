@@ -1332,6 +1332,15 @@ fn check_on_something_that_is_no_constraint_proves_nothing() {
 }
 
 #[test]
+fn check_on_a_value_that_may_be_no_constraint_proves_nothing() {
+    // One arm proving nothing voids the proof: `$t` may be the Validator.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(Int);\nsub f {\n    my ($c, $x) = @_;\n    my $t = $c ? Int : Validator->new;\n    if ($t->check($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 16)), None);
+}
+
+#[test]
 fn assert_valid_narrows_the_rest_of_the_block() {
     let fa = build_fa(
         "package P;\nuse Types::Standard qw(Str);\nsub f {\n    my ($x) = @_;\n    Str->assert_valid($x);\n    my $v = $x;\n}",

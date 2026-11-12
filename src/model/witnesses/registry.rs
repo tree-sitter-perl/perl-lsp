@@ -2806,6 +2806,11 @@ impl ReducerRegistry {
                         // the read keeps whatever else it knows.
                         let projected = match step {
                             ProjectionStep::Defined if !base_ty.may_be_undef() => None,
+                            // What a constraint admits is a proof, and a
+                            // value that may be no constraint proves nothing.
+                            ProjectionStep::ConstrainedInner => {
+                                base_ty.join_over_every_arm(class_order(q), |t| project(t, state))
+                            }
                             _ => base_ty.join_over_arms(class_order(q), |t| project(t, state)),
                         };
                         if let Some(t) = projected {

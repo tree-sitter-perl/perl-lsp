@@ -920,6 +920,18 @@ impl InferredType {
         join_all(&answers, order)
     }
 
+    /// [`Self::join_over_arms`] where an arm `f` answers nothing for voids
+    /// the whole answer: the join of proofs, where a value that proves
+    /// nothing leaves nothing proven.
+    pub fn join_over_every_arm(
+        &self,
+        order: &dyn TypeOrder,
+        f: impl FnMut(&InferredType) -> Option<InferredType>,
+    ) -> Option<InferredType> {
+        let answers: Option<Vec<InferredType>> = self.receiver_arms().iter().map(f).collect();
+        join_all(&answers?, order)
+    }
+
     /// The wrapped type of an `Optional<T>`, else `None`. The `defined` /
     /// `blessed` guards strip an optional to its inner via this.
     pub fn optional_inner(&self) -> Option<&InferredType> {
