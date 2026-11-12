@@ -1589,6 +1589,9 @@ fn join_precise(
             Some(T::HashWithKeys { keys: SharedKeys::new(keys), open: *oa || *ob })
         }
         _ if a.is_hash_shaped() && b.is_hash_shaped() => Some(T::HashRef),
+        // TODO(sequence-join-elementwise): two tuples of one arity join slot
+        // by slot; widening them to `ArrayRef` drops what a destructuring
+        // `my ($ok, $host) = f()` reads once one arm is narrower than another.
         _ if a.is_array_shaped() && b.is_array_shaped() => Some(T::ArrayRef),
         (T::Bool, T::Numeric) | (T::Numeric, T::Bool) if order.holds(Subsumption::BoolIntoNumeric) => {
             Some(T::Numeric)
