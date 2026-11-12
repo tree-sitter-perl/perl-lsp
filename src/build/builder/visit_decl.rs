@@ -190,7 +190,14 @@ impl<'a> Builder<'a> {
             // bodies returns `Edge(Expression(refidx))`; finding
             // refidx requires the ref to exist, which requires the
             // walker to have visited the method-call expression.
+            // `next` / `last` / `redo` / `goto`: control leaves to a target
+            // the construct names, so evaluation never ends here.
+            "loopex_expression" | "goto_expression" => {
+                self.push_leave_effect(node);
+                self.queue_children(node);
+            }
             "return_expression" => {
+                self.push_leave_effect(node);
                 let body_span = crate::cst::nth_element(node, 0).map(node_to_span);
                 let scope = self.enclosing_sub_scope();
                 if let Some(scope) = scope {

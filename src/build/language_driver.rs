@@ -936,6 +936,7 @@ fn inject_member_blocks(
                 owner_stated: false,
                 flags: Default::default(),
                 member_space: None,
+                never_returns: false,
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1134,6 +1135,7 @@ fn remap_spans(
             owner_stated: _,
             flags: _,
             member_space: _,
+            never_returns: _,
         } = s;
         *start = r(*start);
         *end = r(*end);

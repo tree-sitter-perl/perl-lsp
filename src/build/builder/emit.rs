@@ -740,6 +740,21 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// A local jump (`return`, `next`, `goto`): evaluation leaves to a
+    /// target the control structure names, so it ends no way the effect
+    /// lane counts. The empty set, on the expression itself
+    /// (`docs/adr/cfg-tier.md` §Effects).
+    pub(super) fn push_leave_effect(&mut self, node: Node<'a>) {
+        use crate::model::witnesses::{Effect, Ends, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let span = node_to_span(node);
+        self.push_witness(Witness {
+            attachment: WitnessAttachment::Expr(span),
+            source: WitnessSource::Builder("leave".into()),
+            payload: WitnessPayload::Effect(Effect::Ends(Ends::empty())),
+            span,
+        });
+    }
+
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
         // A written element and the levels on a write's path are the write,
         // not drills: their keys extend the shape

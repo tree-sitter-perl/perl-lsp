@@ -715,6 +715,10 @@ pub enum Capture {
     OolDef,
     /// A callable's declared return type, as written.
     RetType,
+    /// Stated on a callable's name: its declaration says a call never
+    /// comes back (php `: never`, python `-> NoReturn`, c++
+    /// `[[noreturn]]`), but not how it leaves.
+    EndsNever,
     /// A written type (a declared return, a parameter's or property's
     /// declared type) that names a class by where it is written.
     TypeRelative(RelativeClass),
@@ -822,6 +826,7 @@ impl Capture {
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
+            ["ends", "never"] => C::EndsNever,
             ["type", "annot"] => C::TypeAnnot,
             ["type", k] => C::TypeRelative(RelativeClass::parse(k)?),
             ["sym", "attr"] => C::SymAttr,
@@ -899,6 +904,7 @@ impl fmt::Display for Capture {
             C::Qualifier => f.write_str("qualifier"),
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
+            C::EndsNever => f.write_str("ends.never"),
             C::TypeRelative(k) => write!(f, "type.{k}"),
             C::TypeAnnot => f.write_str("type.annot"),
             C::SymAttr => f.write_str("sym.attr"),

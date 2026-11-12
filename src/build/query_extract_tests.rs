@@ -1042,6 +1042,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         owner_stated: false,
         member_space: None,
         flags: Default::default(),
+        never_returns: false,
     }
 }
 
@@ -4102,4 +4103,71 @@ def f(x: Optional[Foo], y: Foo | None, u: A | B | None, z: Foo):
     );
     // A receiver holding None types no call, so ask the variable.
     assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 22, column: 8 }), Some(InferredType::Undef));
+}
+
+/// A declaration that says a call never comes back states it on the
+/// callable, and on its class for a method; one that says nothing is the top.
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn declared_ends(path: &str, src: &str) -> Vec<(String, crate::model::witnesses::Ends)> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::SymKind;
+    let p = std::path::PathBuf::from(path);
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    let mut out: Vec<(String, crate::model::witnesses::Ends)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+        .map(|s| (s.name.clone(), fa.symbol_ends(s.id)))
+        .collect();
+    let ctx = fa.bag_context(None);
+    for s in fa.symbols().iter().filter(|s| s.kind == SymKind::Method) {
+        let class = s.package.clone().unwrap_or_default();
+        let ends = crate::model::witnesses::query_ends(
+            &fa.witnesses,
+            &crate::model::witnesses::WitnessAttachment::effects_of(class.clone(), s.name.clone()),
+            Some(&ctx),
+        );
+        out.push((format!("{class}::{}", s.name), ends));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn never() -> crate::model::witnesses::Ends {
+    crate::model::witnesses::Ends::UNWINDS | crate::model::witnesses::Ends::EXITS
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_never_return_says_a_call_never_comes_back() {
+    use crate::model::witnesses::Ends;
+    let src = "<?php\nfunction bail(): never { exit(1); }\nfunction ok(): int { return 1; }\nclass C { public function fail(): never { throw new E(); } }\n";
+    assert_eq!(
+        declared_ends("/x/n.php", src),
+        vec![("C::fail".into(), never()), ("bail".into(), never()), ("fail".into(), never()), ("ok".into(), Ends::all())]
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_noreturn_says_a_call_never_comes_back() {
+    use crate::model::witnesses::Ends;
+    let src = "import typing\nfrom typing import NoReturn\ndef bail() -> NoReturn:\n    raise E()\ndef stop() -> typing.Never:\n    raise E()\ndef ok() -> int:\n    return 1\n";
+    assert_eq!(
+        declared_ends("/x/n.py", src),
+        vec![("bail".into(), never()), ("ok".into(), Ends::all()), ("stop".into(), never())]
+    );
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_noreturn_says_a_call_never_comes_back() {
+    use crate::model::witnesses::Ends;
+    let src = "[[noreturn]] void bail();\n__attribute__((noreturn)) void die_now(int c);\n[[noreturn]] void stop() { throw 1; }\nint ok() { return 1; }\n";
+    assert_eq!(
+        declared_ends("/x/n.cpp", src),
+        vec![("bail".into(), never()), ("die_now".into(), never()), ("ok".into(), Ends::all()), ("stop".into(), never())]
+    );
 }

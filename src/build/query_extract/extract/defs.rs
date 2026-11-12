@@ -222,6 +222,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             Capture::Space { id, .. } => Some(id),
             _ => None,
         }),
+        never_returns: on_name.iter().any(|t| t.cap == Capture::EndsNever),
     };
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
