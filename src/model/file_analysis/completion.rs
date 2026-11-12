@@ -1412,6 +1412,7 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
         InferredType::Undef => tag("Undef"),
         InferredType::Bool => tag("Bool"),
         InferredType::Unknown => tag("unknown"),
+        InferredType::Never => tag("never"),
         InferredType::Union(arms) => arms.iter().map(|a| format_type_with(a, vocab)).collect::<Vec<_>>().join("|"),
     }
 }

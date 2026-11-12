@@ -259,6 +259,13 @@ pub enum InferredType {
     /// a union is not definitely any one class. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     Union(UnionArms),
+    /// The type of an expression that does not complete: `die`, `return`,
+    /// a call whose callee never comes back. The identity of [`join`], so an
+    /// arm that leaves drops out of every value fold. A registry projection
+    /// of the effect lane, never stored (`docs/adr/cfg-tier.md` §Effects):
+    /// a callable whose every arm is `Never` yields no value and answers
+    /// nothing. Distinct from `None`, which is no evidence.
+    Never,
 }
 
 /// Which builtin minted a [`InferredType::RefTagOf`] — what its string can
@@ -900,6 +907,11 @@ impl InferredType {
         (!t.is_undef()).then_some(t)
     }
 
+    /// Whether this is the type of an expression that does not complete.
+    pub fn is_never(&self) -> bool {
+        matches!(self, InferredType::Never)
+    }
+
     /// Whether the value is known to be possibly undef: an `Optional` or
     /// `Undef` itself. `Unknown` says nothing either way.
     pub fn may_be_undef(&self) -> bool {
@@ -1143,7 +1155,8 @@ impl InferredType {
             | InferredType::Undef
             | InferredType::Bool
             | InferredType::RefTagOf { .. }
-            | InferredType::Unknown => {}
+            | InferredType::Unknown
+            | InferredType::Never => {}
         }
     }
 
@@ -1437,6 +1450,12 @@ pub fn join_traced(
     if a == b {
         return a.clone();
     }
+    if a.is_never() {
+        return b.clone();
+    }
+    if b.is_never() {
+        return a.clone();
+    }
     let mut arms = Vec::new();
     let mut maybe_undef = false;
     for t in [a, b] {
@@ -1631,6 +1650,10 @@ pub fn join_return_arms(
     order: &dyn TypeOrder,
 ) -> Option<InferredType> {
     let base = join_all(value_types, order)?;
+    // Arms that all leave beside an undef arm: only undef comes back.
+    if base.is_never() && has_undef_arm {
+        return None;
+    }
     Some(if has_undef_arm { join(&base, &InferredType::Undef, order) } else { base })
 }
 

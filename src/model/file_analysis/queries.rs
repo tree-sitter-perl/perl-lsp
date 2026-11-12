@@ -681,6 +681,19 @@ impl FileAnalysis {
         // `$f->get_bar()->get_name()`" (the outer call's return) from
         // "the inner receiver `$f->get_bar()`" (which has its own,
         // narrower span).
+        // A call that cannot come back has no return to look up, whichever
+        // call arm below would read one.
+        if !self.refs.calls_starting_at(span.start).is_empty() {
+            let ctx = self.bag_context(module_index);
+            let ends = crate::model::witnesses::query_expr_ends(
+                &self.witnesses,
+                &crate::model::witnesses::WitnessAttachment::Expr(span),
+                Some(&ctx),
+            );
+            if !ends.completes() {
+                return Some(InferredType::Never);
+            }
+        }
         if let Some((recv_idx, kind)) =
             self.refs.call_spanning(span).map(|i| (i, &self.refs[i].kind))
         {

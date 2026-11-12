@@ -81,10 +81,16 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   their own join; set union is the join of `Ends`, not of the lane.
 
 `InferredType::Never` is the value-level projection of a non-completing
-effect: the registry derives it for a call expression from the callee's
-effect, and nothing stores it. Being the identity of `join`, it drops a
-non-completing arm from every value fold (`//`, ternaries, `or return`,
-return arms) without any fold asking the effect lane.
+effect: the registry answers it for an expression that states it leaves
+and for a call whose callee cannot come back, and nothing stores it
+(`layering_tests::never_is_made_only_by_the_registry`; the bag refuses it
+in debug builds). Only an evaluation answers it: a callable whose every
+arm leaves, or a slot written only by expressions that leave, answers
+nothing. Being the identity of `join`, it drops a non-completing arm from
+every value fold (`//`, ternaries, `or return`, return arms) without any
+fold asking the effect lane. Until effects cross files, the short-circuit
+fold keeps its spelled exit flag for callees another file decides
+(`Carp::croak`).
 
 ## What it retires
 

@@ -382,6 +382,10 @@ impl WitnessBag {
     }
 
     pub fn push(&mut self, w: Witness) -> usize {
+        debug_assert!(
+            !matches!(&w.payload, WitnessPayload::InferredType(t) if t.is_never()),
+            "`Never` is a projection of the effect lane and is never stored: {w:?}"
+        );
         self.generation = next_generation();
         let idx = self.witnesses.len();
         let slot = self.index.entry(w.attachment.clone()).or_default();

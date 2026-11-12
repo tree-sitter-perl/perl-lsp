@@ -578,6 +578,9 @@ impl WitnessReducer for BranchArmFold {
                 _ => {}
             }
         }
+        // TODO(noreturn-callee): the spelled exit flag stands in for callees
+        // whose effect is decided in another file (`Carp::croak`); it goes
+        // with `is_exit_expression` once effects cross files.
         if let Some(exits) = short_circuit {
             // `X || return`: when the fallback runs nothing is assigned, so
             // the value is `X` minus its false part — an `Optional` peels,
@@ -605,6 +608,9 @@ impl WitnessReducer for BranchArmFold {
             let unseen_left = typed.is_empty() && undef_arms == 0;
             let all: Vec<InferredType> = defined.chain(fallback).collect();
             return match crate::model::file_analysis::join_all(&all, class_order(_q)) {
+                // A fallback that leaves (`X // fatal()`) is `Never`, the
+                // join's identity; with no left in sight that says nothing.
+                Some(t) if t.is_never() && unseen_left => ReducedValue::None,
                 Some(t) if unseen_left => ReducedValue::Type(t.joined_with_unseen()),
                 Some(t) => ReducedValue::Type(t),
                 None => ReducedValue::None,
