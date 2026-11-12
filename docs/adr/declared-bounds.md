@@ -82,8 +82,9 @@ it points at, and `Base v = make()` reads `Base`.
 **Fit is three-valued** (`Fit`, `fit(v, B)` in `model/file_analysis/types.rs`
 beside `join`). `Yes` when `join(v, B) == join(B, B)` under the query's
 `class_order` (local and cross-file ancestry): there is no second subtype
-check. Otherwise `Undecided` when both are classes and the value's
-ancestry runs past what the order sees (`TypeOrder::ancestry_closed`: every
+check. Otherwise `Undecided` when both hold a class arm (read through
+`receiver_arms`, so `?Iface` and `A|B` bound like `Iface`) and a class of
+the value has ancestry running past what the order sees (`TypeOrder::ancestry_closed`: every
 class on its isa walk is declared in the file or has an index candidate),
 since an edge the order does not hold could put it under the bound; and
 `No` when the order sees all of it. An undecided value is read as a fit,

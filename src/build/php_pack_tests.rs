@@ -5222,3 +5222,19 @@ function f(Sized $c) {
     let classes: Vec<&str> = t.receiver_arms().iter().filter_map(|a| a.class_name()).collect();
     assert!(classes.contains(&"Sized") && classes.contains(&"Logger"), "{t:?}");
 }
+
+/// A guard naming a class nothing here declares is undecided, whether the
+/// bound is a class, a nullable one or a union: the class may well
+/// implement it, so the guard's class stands.
+#[test]
+fn a_guard_on_an_unseen_class_stands_under_a_nullable_bound() {
+    let src = "<?php
+interface Shape { function area(); }
+function f(?Shape $c) {
+    if ($c instanceof Square) { $c->side(); }
+}
+";
+    let fa = php(src);
+    let t = fa.inferred_type_via_bag("c", at(src, "$c->side", 0)).expect("a type inside the guard");
+    assert_eq!(t, crate::model::file_analysis::InferredType::ClassName("Square".into()));
+}

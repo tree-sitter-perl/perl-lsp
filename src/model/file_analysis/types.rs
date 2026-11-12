@@ -1435,7 +1435,8 @@ pub enum Fit {
 /// How `value` fits `bound`, read off the same lattice [`join`] folds by, so
 /// a bound and a fold never disagree about what is above what. A class
 /// whose whole ancestry the order sees (`TypeOrder::ancestry_closed`) is
-/// decided; one with an ancestor the order cannot see is not.
+/// decided; one with an ancestor the order cannot see is not. Both sides
+/// are read by their arms, so `?Iface` and `A|B` bound like `Iface`.
 pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) -> Fit {
     if !value.is_known() {
         return Fit::Undecided;
@@ -1443,10 +1444,9 @@ pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) ->
     if join(value, bound, order) == join(bound, bound, order) {
         return Fit::Yes;
     }
-    match (value.class_name(), bound.class_name()) {
-        (Some(v), Some(_)) if !order.ancestry_closed(v) => Fit::Undecided,
-        _ => Fit::No,
-    }
+    let open = value.receiver_arms().iter().any(|a| a.class_name().is_some_and(|c| !order.ancestry_closed(c)));
+    let classes = bound.receiver_arms().iter().any(|a| a.class_name().is_some());
+    if open && classes { Fit::Undecided } else { Fit::No }
 }
 
 /// How a join lost precision: the closed set of widening steps, reported to
