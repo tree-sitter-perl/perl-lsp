@@ -820,7 +820,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perl-lsp"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "bincode",
  "bitflags 2.11.1",
@@ -1473,9 +1473,9 @@ dependencies = [
 
 [[package]]
 name = "ts-parser-perl"
-version = "2.0.4"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3650803676fb001e5cbc8d0ce36ec788909b97ab47a4a2c3adcd33fb7fa96b4"
+checksum = "85b29761da72f34a1f33368c77238195f5ce98e1f83794d807b0275cc8d7ce81"
 dependencies = [
  "cc",
  "tree-sitter-language",

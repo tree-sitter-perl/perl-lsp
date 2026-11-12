@@ -4,6 +4,98 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
+## v0.9.2 — 2026-11-12
+
+### Perl
+
+- **Long reassignment chains are linear.** Repeating `$x = $x->m` N
+  times no longer costs quadratic time, and neither do subs with
+  thousands of `$self->{k}` writes. A 1600-link chain checks in 0.67 s
+  instead of 4.75 s, at 59 MB instead of 196 MB, and the diagnostics for
+  po4a's Docbook.pm take half the time. Calls past about 170 links used
+  to lose their receiver; every call now keeps it. (#425, #426, #428,
+  #432)
+- **A chain receiver is the hop it follows.** `$self->req->headers->header`
+  no longer types `->headers` as the first hop's class. This removes 23
+  false method hints in Conch. (#407)
+- **A `defined` / `blessed` guard strips undef at query time.** An imported
+  `Optional<Foo>` now reads as `Foo` past the guard, and in
+  `blessed($x) && $x->isa('Foo')` the `isa` class is no longer dropped.
+  (#441)
+- **A write through a computed key** (`$meta->{$name} = …`) types the
+  member as a hash or array. (#418)
+- **Narrowing holds after a block that always exits.** (#434)
+- **Parser: tree-sitter-perl 2.0.5.** These now parse: a `$`-delimited
+  pattern, a label before `}`, `while ()`, a prototype before attributes,
+  and `@#` inside interpolation. Five FHEM files and Znuny's bundled
+  YAML::Loader used to hold ERROR nodes and now have none, so their real
+  diagnostics show. (tree-sitter-perl #279–#283)
+- **Hover no longer panics next to a multi-byte character.** (#437)
+
+### C/C++, PHP and Python (feature builds only)
+
+**PHP preview** (`--features php`, `perl-lsp --lang php`). PHP goes from
+an outline to navigable, typed code. Composer `vendor/` isn't indexed
+yet, so classes from dependencies stay unresolved.
+
+- **Properties, parameters and locals exist.** Every property is a member
+  of its class, including ones promoted from the constructor. Parameters
+  are typed locals. A variable is declared by its first write and scoped
+  to its function, so it no longer binds to a property of the same
+  name. (#404, #405, #409)
+- **Calls resolve.** `->`, `?->`, `::`, `self::`, `static::`, `parent::`,
+  free functions and property reads all support goto-def, references,
+  rename and hover, across files and up `extends`. (#406, #410)
+- **Chains type hop by hop.** Declared returns type the call, including
+  unions, `self` and `static`. A method with no declared return is what
+  its body returns. `static::`, `new static` and a `: static` return
+  follow the class the call is made on. (#407, #422, #439)
+- **`new Foo` types as `Foo` and reaches its constructor**, so a
+  constructor's references list its constructions. (#410)
+- **Functions and constants by namespaced identity.** `use function` and
+  `use const` are read, a bare call tries the namespace and then the
+  global function, and `$this` hovers as its class. (#421, #438)
+- **Members by namespace.** Constants, static properties, properties and
+  methods are separate members. Literals and defaults type the member
+  they flow into. (#417, #418, #419)
+- **Narrowing.** `instanceof`, `isset`, `=== null` and `is_null` narrow
+  variables, properties and `$this->x`. This works with `!`, `&&`, `||`,
+  else arms and early exits, and a passing null test strips the null.
+  (#412, #413, #433, #434, #435)
+- **Completion after `->`, `?->` and `::`** offers members by visibility.
+  Locals are offered only below their first write. (#423, #431, #440)
+- **Hover** shows `$`-spelled locals, the value at a write, the
+  constructor at `new`, and the owner, return type and docblock. (#430)
+- **New diagnostic `readonly-write`** covers writes to `readonly` and
+  `private(set)` / `protected(set)` members. A guarded lazy init isn't
+  reported. (#411, #414)
+
+**C++ and Python**
+
+- C++ qualified calls are named by their spelling, member writes are
+  writes, and `x = x.next()` reads the old `x`. A 1600-link chain now
+  checks in 1.8 s instead of 260 s. (#401, #402, #428, #429)
+- C++ `this` names its class, and a static body has no object. (#436)
+- Python and C++ guards narrow the same way PHP's do. For example,
+  `if not isinstance(x, T): return` narrows, and `isinstance(y, str)`
+  narrows to a string. (#415)
+- A method a subclass overrides no longer answers with its parent's
+  return type. (#422)
+
+### Releases
+
+- Merging a version bump to main now tags and publishes the release, and
+  CI checks that every version string agrees. (#400)
+- Cache versions come from epoch files under `cache-epochs/`. (#398)
+
+### Upgrading
+
+- The analysis cache format changed. The first start after upgrading
+  re-indexes the project once.
+- Peak memory is 2–6% higher on the Perl corpora. Every reference and
+  call now carries the facts the PHP work needed. Wall time is flat or
+  faster.
+
 ## v0.9.1 — 2026-11-04
 
 ### Perl: inheritance and declarations
