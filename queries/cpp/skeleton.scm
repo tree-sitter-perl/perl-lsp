@@ -1073,11 +1073,10 @@
 ; TODO(noreturn-callee): `std::abort()`, `exit()` and a `[[noreturn]]`
 ; function leave too. A callee that never returns is an effect on the
 ; callee; mark it once effects and the CFG exist.
-[(return_statement)
- (co_return_statement)
- (throw_statement)
- (continue_statement)
- (break_statement)] @flow.leaves
+[(return_statement) (co_return_statement)] @ctl.leave.return
+(throw_statement) @ctl.leave.throw
+(continue_statement) @ctl.leave.continue
+(break_statement) @ctl.leave.break
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

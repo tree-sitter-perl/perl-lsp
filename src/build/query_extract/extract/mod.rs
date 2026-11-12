@@ -275,7 +275,6 @@ fn family(cap: Capture) -> Family {
         | C::Space { .. } => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
-        C::Flow(FlowCap::Leaves) => Family::Narrowing,
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)

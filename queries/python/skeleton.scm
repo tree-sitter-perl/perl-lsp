@@ -303,7 +303,10 @@
 ; (`query_extract/extract/narrowing.rs`).
 ; TODO(noreturn-callee): `sys.exit()` leaves too. A callee that never
 ; returns is an effect on the callee; mark it once effects and the CFG exist.
-[(return_statement) (raise_statement) (continue_statement) (break_statement)] @flow.leaves
+(return_statement) @ctl.leave.return
+(raise_statement) @ctl.leave.throw
+(continue_statement) @ctl.leave.continue
+(break_statement) @ctl.leave.break
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.
