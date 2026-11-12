@@ -615,7 +615,9 @@ pub enum ProjectionStep {
     ParamOf { member: String, index: u32 },
     /// The value once it is set: the base without its null (`?Foo` →
     /// `Foo`, `A|B|null` → `A|B`), what a passing `isset($x)` / `$x !==
-    /// null` / `if (opt)` proves of the value it tests. Kept at the END for
+    /// null` / `if (opt)` / `defined $x` proves of the value it tests. A
+    /// base not known to be possibly unset (a class, `Unknown`) answers
+    /// nothing, so the test never outranks what its read already knows. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     Defined,
 }

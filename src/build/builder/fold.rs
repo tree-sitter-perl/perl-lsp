@@ -937,7 +937,6 @@ impl<'a> Builder<'a> {
         use crate::util::ghost_stats::timed;
         timed("fold::arity", || self.emit_arity_return_witnesses());
         timed("fold::mc_edges", || self.emit_method_call_return_edges());
-        timed("fold::narrowing", || self.emit_defined_narrowing_witnesses());
         timed("fold::tag_narrowing", || self.emit_tag_narrowing_witnesses());
         let (return_types, return_provenance) =
             timed("fold::seed", || self.seed_return_types_from_bag(reg, method_sym_by_name));

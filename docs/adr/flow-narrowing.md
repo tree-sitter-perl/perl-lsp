@@ -267,12 +267,12 @@ already says the write may not have run.
 
 ## Polarity and the negative lattice
 
-`GuardFact { subject, op, asserts_when_true }`; `op` is `NarrowOp::To(T)`
-(`isa`/`ref-eq`) or `StripOptional` (`defined`/`blessed`). The region a
+`GuardFact { subject, op, asserts_when_true, read }`; `op` is
+`NarrowOp::To(T)` (`isa`/`ref-eq`) or `Defined { read }` (`defined`/`blessed`). The region a
 guard dominates either asserts the guard TRUE or FALSE;
 `op_for_region(holds)` returns the fact's op when polarity matches, else
 `op.negated()`. `To(_).negated()` is `None` ("not Foo" has no positive
-lookup target → emit nothing, stay wide); `StripOptional.negated()` is
+lookup target → emit nothing, stay wide); `Defined.negated()` is
 `To(Undef)`. So the `defined`-family negatives (`else` of `if (defined
 $x)`, `return if defined $x`, `unless (defined $x)`) narrow to the bottom
 `Undef`, lighting up the early-exit rows **for free** through the
@@ -449,17 +449,31 @@ outranks. Two tags that disagree join to
 plain `String`. Under unions the same rule holds arm-wise: a guard reads
 a subject only when every arm of `$ref`'s value names the same one.
 
-## `defined`/`blessed` strip via a re-emittable fold pass
+## `defined`/`blessed` strip as an edge to the guard's read
 
-`StripOptional` can't resolve at walk time: the subject's `Optional`
-often comes from a sub return that only converges during the fold. So
-`recognize_*` records the guard (subject, region, and the guard's own
-`query_point` — *before* the region, so the read sees the un-narrowed
-type and the pass's own output can't feed back), and
-`emit_defined_narrowing_witnesses` re-derives `Optional<T> → T` each fold
-iteration (clear-and-emit on tag `defined_narrowing`). The pack tier's
-`Defined` projection states the same strip as an edge the query
-resolves, with no pass to re-run (`TODO(perl-defined-strip-payload)`).
+A `defined`/`blessed` guard's region holds `Projected { base: Expr(read),
+step: Defined }` on the subject's place, minted at walk time like any other
+region fact and cut at the same rebinds and disturbances. `read` is the
+subject as the guard reads it; the walker types that read
+(`emit_expr_witness`), so the strip resolves when asked, through whatever
+the read holds then: a sub return the fold converges, an import only the
+index types. Nothing re-derives it per fold round. The read sits in the
+guard, outside every region the guard decides, so the projection never
+reads its own narrowing. The pack tier states the same strip the same way.
+
+`Defined` answers only over a base known to be possibly undef (`Optional`,
+`Undef`). Over anything else, a class or an `Unknown`, it is no evidence,
+so the region never outranks what the read already knows: a deref's rep
+inside `if (defined $c)` still reads, and an `isa` beside the guard still
+holds. A conjunction that proves a type for a subject drops its `defined`
+of that subject (`conjoin`): the type is already defined, and two regions
+on one span would otherwise tie.
+
+A postfix guard is read where it is written, after the statement it
+decides, so a write in that statement reaches the guard's read
+(`$x = f($x) if defined $x`). The strip then sees the write's value, not
+the value the guard tested; it answers only if that value may be undef
+(`TODO(postfix-guard-read-order)`).
 
 ## Reaching writes
 

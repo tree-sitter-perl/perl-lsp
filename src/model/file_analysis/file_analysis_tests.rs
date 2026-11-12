@@ -773,6 +773,31 @@ sub get_config { return { host => 'h', port => 1, name => 'n' }; }
     );
 }
 
+/// A `defined` guard strips what its read holds when asked, so an optional
+/// only the index can type (an imported sub's undef-or-object return)
+/// strips past the guard too.
+#[test]
+fn defined_strips_an_optional_only_the_index_types() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+    let producer = "package Maker;\nuse Exporter 'import';\nour @EXPORT = ('maybe');\nsub maybe { return rand() ? Foo->new : undef; }\n1;\n";
+    let consumer = "package C;\nuse Maker;\nsub u {\n    my $r = maybe();\n    return unless defined $r;\n    $r->go;\n}\n";
+    let fa = build_fa_from_source(consumer);
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(std::path::PathBuf::from("/tmp/Maker.pm"), Arc::new(build_fa_from_source(producer)));
+    let foo = InferredType::ClassName("Foo".into());
+    assert_eq!(
+        fa.inferred_type_via_bag_ctx("$r", Point::new(4, 0), Some(&idx)),
+        Some(InferredType::Optional(Box::new(foo.clone()))),
+        "ahead of the guard `$r` is the import's Optional<Foo>",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag_ctx("$r", Point::new(5, 4), Some(&idx)),
+        Some(foo),
+        "past `defined $r` the strip reads the same import",
+    );
+}
+
 /// Cross-file hash-key completion reads the producer's real keys through the
 /// index — no consumer-side stub. `$c = get_config(); $c->{<TAB>` offers the
 /// producer's `host`/`port`, resolved by `complete_hash_keys_for_owner`'s

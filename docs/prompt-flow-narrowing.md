@@ -36,12 +36,12 @@ matching spelling). Revisit if a motivating soundness case appears.
   guard-lint noise, and cheap: the subject is already recognised, and
   the region machinery already exists.
 
-  **It is NOT `StripOptional` with a different recognizer**, and the
+  **It is NOT `Defined` with a different recognizer**, and the
   difference is the whole design. `defined`/`blessed` negate to
   `To(Undef)` — if the guard is false, the subject IS undef. Truthiness
   does not: `0` and `''` are false and perfectly defined, so the
   negative arm proves nothing and must emit nothing. A variant that
-  reuses `StripOptional`'s `negated()` would claim `Undef` in the else
+  reuses `Defined`'s `negated()` would claim `Undef` in the else
   branch and manufacture exactly the confident-wrong verdicts the lint
   exists to avoid.
 

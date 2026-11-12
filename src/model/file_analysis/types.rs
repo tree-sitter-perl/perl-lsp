@@ -900,6 +900,12 @@ impl InferredType {
         (!t.is_undef()).then_some(t)
     }
 
+    /// Whether the value is known to be possibly undef: an `Optional` or
+    /// `Undef` itself. `Unknown` says nothing either way.
+    pub fn may_be_undef(&self) -> bool {
+        matches!(self, InferredType::Optional(_) | InferredType::Undef)
+    }
+
     /// `f` over each value a receiver may be (`receiver_arms`), joined
     /// under `order`. An arm `f` answers nothing for adds no evidence —
     /// whether its member is untyped or absent there: the value is what

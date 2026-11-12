@@ -303,6 +303,58 @@ fn optional_blessed_narrows_to_inner() {
 }
 
 #[test]
+fn a_defined_region_is_an_edge_to_its_read() {
+    // The region holds the subject's read in the guard, stripped when
+    // asked: no fold pass materializes the strip.
+    use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+    let fa = build_fa(
+        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless defined $r;\n    $r->go;\n}",
+    );
+    let read = fa
+        .witnesses
+        .all()
+        .iter()
+        .find_map(|w| match (&w.attachment, &w.payload) {
+            (WitnessAttachment::Place(_), WitnessPayload::Projected { base: WitnessAttachment::Expr(read), step: ProjectionStep::Defined }) => Some(*read),
+            _ => None,
+        })
+        .expect("the guard's region is a Defined projection");
+    assert_eq!((read.start.row, read.start.column), (4, 26), "its base is `$r` as `defined` reads it");
+    assert!(
+        fa.witnesses.for_attachment(&WitnessAttachment::Expr(read)).iter().next().is_some(),
+        "the walk types that read",
+    );
+    assert!(
+        !fa.witnesses.all().iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (WitnessAttachment::Place(_), WitnessPayload::InferredType(InferredType::ClassName(_)))
+        )),
+        "no stripped value is materialized on the place",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 4)), Some(InferredType::ClassName("Foo".into())));
+}
+
+#[test]
+fn a_type_a_conjunct_proves_outranks_its_defined() {
+    // `blessed($t) && $t->isa('Foo')` holds `Foo` past the exit: the proven
+    // type is already defined, so the `blessed` adds nothing beside it.
+    let fa = build_fa(
+        "package P; use Scalar::Util qw(blessed);\nsub use_it {\n    my $t = make();\n    unless (blessed($t) && $t->isa('Foo')) {\n        die 'not a Foo';\n    }\n    $t->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_defined_guard_on_an_untyped_value_keeps_what_its_reads_know() {
+    // `defined $c` on a value nothing types narrows nothing: the deref
+    // inside still says `$c` is a hash.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my ($self, $c) = @_;\n    $c ||= $self->ctx;\n    if (defined $c) {\n        my $d = $c->{d};\n        return $c;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$c", Point::new(6, 15)), Some(InferredType::HashRef));
+}
+
+#[test]
 fn optional_dispatches_leniently_without_guard() {
     // An unguarded Optional<Foo> still resolves its method receiver to Foo
     // (lenient navigation — goto/hover/completion shouldn't go dark just

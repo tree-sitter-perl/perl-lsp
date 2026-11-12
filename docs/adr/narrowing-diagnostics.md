@@ -67,8 +67,7 @@ at the use point — the narrowest possible span, so it wins the merged
 `inferred_type_via_bag` query against the wider `ref…eq 'ARRAY'` narrowing
 region. Reading the merged type for D6 is therefore circular: the deref
 masks the very conflict the diagnostic looks for. `guard_narrowed_rep`
-scans **narrowing-sourced witnesses only** (`Builder("narrowing")` /
-`"defined_narrowing"`), so it sees the guard's assertion and not the
+scans **narrowing-sourced witnesses only** (`Builder("narrowing")`), so it sees the guard's assertion and not the
 deref's self-belief. A consequence falls out for free: D6 fires *only* on
 guard-narrowed reps — a plain `my $x = []; $x->{k}` is silent (no guard,
 no witness), which is the intended restriction, not a special case.

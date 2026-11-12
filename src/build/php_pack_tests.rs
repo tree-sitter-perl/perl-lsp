@@ -3574,7 +3574,7 @@ function g(Cache $c) {
     let undef = Some(InferredType::Undef);
     assert_eq!(ty("$first"), undef, "a property not set");
     assert_eq!(ty("$second"), undef);
-    assert_eq!(ty("$third"), Some(InferredType::Unknown), "what came in without its null: an untyped property");
+    assert_eq!(ty("$third"), None, "a passing test proves nothing of an untyped property");
     assert_eq!(ty("$fourth"), undef);
     assert_eq!(ty("$fifth"), undef);
     assert_eq!(ty("$last"), None, "nothing after the `if`");

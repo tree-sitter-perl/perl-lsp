@@ -2800,8 +2800,13 @@ impl ReducerRegistry {
                                 }
                             }
                         };
-                        // The base projects on each value it may be.
-                        let projected = base_ty.join_over_arms(class_order(q), |t| project(t, state));
+                        // The base projects on each value it may be. A value
+                        // that is never unset is no evidence for `Defined`:
+                        // the read keeps whatever else it knows.
+                        let projected = match step {
+                            ProjectionStep::Defined if !base_ty.may_be_undef() => None,
+                            _ => base_ty.join_over_arms(class_order(q), |t| project(t, state)),
+                        };
                         if let Some(t) = projected {
                             out.push(Witness {
                                 attachment: w.attachment.clone(),
