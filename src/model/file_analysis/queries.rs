@@ -2,6 +2,7 @@
 //! expression typing, member-op diagnostics.
 
 use super::*;
+use crate::model::witnesses::ReadPoint;
 
 impl FileAnalysis {
     /// How this analysis's language spells names (`PackFacts::names`).
@@ -338,21 +339,18 @@ impl FileAnalysis {
     }
 
     /// Query the witness bag via the reducer registry for a variable at
-    /// a point. Returns owned `InferredType` because the reducer may
-    /// synthesize a value not stored anywhere.
+    /// a position. Returns owned `InferredType` because the reducer may
+    /// synthesize a value not stored anywhere. A position is no recorded
+    /// read: a consumer typing the read at a ref asks
+    /// `inferred_type_via_bag_ctx` with `Ref::read_point`.
     ///
     /// The bag is the canonical store: `push_type_constraint` (TC
     /// shape), `call_bindings` propagation, framework accessor
     /// synthesis, and cross-file enrichment all push witnesses here.
     pub fn inferred_type_via_bag(&self, var_name: &str, point: Point) -> Option<InferredType> {
-        self.inferred_type_via_bag_ctx(var_name, point, None)
+        self.inferred_type_via_bag_ctx(var_name, ReadPoint::position(point), None)
     }
 
-    /// As `inferred_type_via_bag`, but with a `ModuleIndex` so a variable whose
-    /// value is a cross-file method chain (`my $x = Foo->new->bar`) resolves —
-    /// the chase keeps the index when it crosses the `Variable` edge instead of
-    /// dead-ending. Pass the index from query-time callers (hover/completion);
-    /// the bare wrapper keeps `None` for build-time / single-file callers.
     /// The registry-query context over this analysis. Every bag query
     /// threads the same field set; build it here so adding a field is one
     /// edit, not one per call site.
@@ -373,13 +371,17 @@ impl FileAnalysis {
         }
     }
 
+    /// What the variable `var_name` holds at `point`, with a `ModuleIndex`
+    /// so a variable whose value is a cross-file method chain (`my $x =
+    /// Foo->new->bar`) resolves — the chase keeps the index when it crosses
+    /// the `Variable` edge instead of dead-ending. Pass the index from
+    /// query-time callers (hover/completion).
     pub fn inferred_type_via_bag_ctx(
         &self,
         var_name: &str,
-        point: impl Into<crate::model::witnesses::ReadPoint>,
+        point: ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let point = point.into();
         let scope = self.scope_at(point.at)?;
         let place = Place::variable(self.variable_binding_of(var_name, point.at, scope).0);
         self.subject_type_at(&place, point, module_index)
@@ -390,34 +392,26 @@ impl FileAnalysis {
     pub fn place_type_at(
         &self,
         place: &Place,
-        point: impl Into<crate::model::witnesses::ReadPoint>,
+        point: ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let point = point.into();
         let scope = self.scope_at(point.at)?;
         crate::model::witnesses::query_place_type(&self.witnesses, &self.bag_context(module_index), place, scope, point)
     }
 
-    /// Where the read recorded at `span` asks: its own site, less the
-    /// statement the builder found it evaluated before
-    /// (`WitnessPayload::EvaluatedBefore`).
-    pub fn read_point(&self, span: Span) -> crate::model::witnesses::ReadPoint {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-        let skips = self.witnesses.for_attachment(&WitnessAttachment::Expr(span)).iter().find_map(|w| match w.payload {
-            WitnessPayload::EvaluatedBefore(s) => Some(s),
-            _ => None,
-        });
-        crate::model::witnesses::ReadPoint { at: span.start, skips }
+    /// Where a read of the node at `span` asks: the read point of the ref
+    /// recorded exactly there. `None` for text the build never saw.
+    pub fn read_at(&self, span: Span) -> Option<ReadPoint> {
+        self.ref_at(span.start).filter(|r| r.span == span).map(Ref::read_point)
     }
 
     /// What a narrowing subject holds at `point`.
     pub fn subject_type_at(
         &self,
         subject: &Place,
-        point: impl Into<crate::model::witnesses::ReadPoint>,
+        point: ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let point = point.into();
         if let Some(t) = self.place_type_at(subject, point, module_index) {
             return Some(t);
         }
@@ -1031,7 +1025,7 @@ impl FileAnalysis {
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        self.subject_type_at(&self.declared_place(sym), point, module_index)
+        self.subject_type_at(&self.declared_place(sym), ReadPoint::position(point), module_index)
     }
 
     /// The place the variable or member `sym` declares.
@@ -1131,7 +1125,7 @@ impl FileAnalysis {
                 continue;
             }
             let Some(t) =
-                self.inferred_type_via_bag_ctx(var_text, r.span.start, module_index)
+                self.inferred_type_via_bag_ctx(var_text, r.read_point(), module_index)
             else {
                 continue;
             };

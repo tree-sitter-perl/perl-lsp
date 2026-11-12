@@ -1433,19 +1433,18 @@ pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound:
     let mut up = syn.ancestors(node);
     while let Some(p) = up.next() {
         let is_field = |f: &str| p.child_by_field_name(f).is_some_and(|c| c == child);
-        let arm = match p.kind() {
-            "subroutine_declaration_statement"
-            | "method_declaration_statement"
-            | "anonymous_subroutine_expression"
-            | "source_file" => return None,
+        let kind = p.kind();
+        if is_callable_boundary(kind) || kind == "source_file" {
+            return None;
+        }
+        let arm = match kind {
             "block" if bound == ArmBound::Block => return None,
-            "conditional_statement"
-            | "loop_statement"
-            | "postfix_conditional_expression"
-            | "postfix_loop_expression"
-            | "conditional_expression" => !is_field("condition"),
+            "conditional_statement" | "loop_statement" | "conditional_expression" => !is_field("condition"),
+            "postfix_conditional_expression" | "postfix_loop_expression" | "postfix_for_expression" => {
+                modifier_head(p) != Some(child)
+            }
             "cstyle_for_statement" => !is_field("initialiser") && !is_field("condition"),
-            "for_statement" | "postfix_for_expression" => !is_field("list") && !is_field("variable"),
+            "for_statement" => !is_field("list") && !is_field("variable"),
             "lowprec_logical_expression" => is_field("right"),
             "binary_expression" => {
                 is_field("right")
@@ -1463,36 +1462,45 @@ pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound:
     None
 }
 
-/// The statement `node` is evaluated before although it follows it: `node`
-/// is in a statement modifier's condition (`STMT if G`, `unless`, `while`,
-/// `until`) or loop list (`STMT for LIST`), which runs before `STMT`. `do
-/// BLOCK while G` runs its block first, so its condition is read where it
-/// is written. A sub boundary ends the climb: a body runs when called.
-// TODO(evaluation-order-later-writes): the statement's reads of a write its
-// condition makes need a later fact to reach them, which a skip cannot say.
-pub(crate) fn evaluated_before<'a>(syn: &SyntaxForest<'a>, node: Node<'a>) -> Option<Node<'a>> {
-    let mut child = node;
-    for p in syn.ancestors(node) {
-        match p.kind() {
-            "subroutine_declaration_statement"
-            | "method_declaration_statement"
-            | "anonymous_subroutine_expression"
-            | "source_file" => return None,
-            "postfix_conditional_expression" | "postfix_loop_expression" | "postfix_for_expression" => {
-                let stmt = nth_element(p, 0)?;
-                if stmt != child {
-                    // TODO(do-loop-node): the grammar gives `do BLOCK while G`
-                    // the node `STMT while G` has; a node of its own would make
-                    // this a kind.
-                    let body_first = p.kind() == "postfix_loop_expression" && stmt.kind() == "do_expression";
-                    return (!body_first).then_some(stmt);
-                }
-            }
-            _ => {}
-        }
-        child = p;
+/// The kinds whose body runs when called, not where it is written.
+pub(crate) const CALLABLE_KINDS: &[&str] = &[
+    "subroutine_declaration_statement",
+    "method_declaration_statement",
+    "anonymous_subroutine_expression",
+    "anonymous_method_expression",
+];
+
+/// Does a node of `kind` open a callable body? A climb that asks what runs
+/// around a node stops here.
+pub(crate) fn is_callable_boundary(kind: &str) -> bool {
+    CALLABLE_KINDS.contains(&kind)
+}
+
+/// The statement-modifier kinds: `STMT if G` / `unless`, `STMT while G` /
+/// `until`, `STMT for LIST`.
+pub(crate) const MODIFIER_KINDS: &[&str] =
+    &["postfix_conditional_expression", "postfix_loop_expression", "postfix_for_expression"];
+
+/// A statement modifier's head: its condition, or the list a `for`
+/// modifier runs over. `None` for any other node.
+pub(crate) fn modifier_head<'a>(modifier: Node<'a>) -> Option<Node<'a>> {
+    match modifier.kind() {
+        "postfix_conditional_expression" | "postfix_loop_expression" => modifier.child_by_field_name("condition"),
+        "postfix_for_expression" => modifier.child_by_field_name("list"),
+        _ => None,
     }
-    None
+}
+
+/// A statement modifier whose head runs before the statement written ahead
+/// of it, as `(statement, head)`. `do BLOCK while G` runs its block first,
+/// so it is not one.
+pub(crate) fn modifier_runs_head_first<'a>(modifier: Node<'a>) -> Option<(Node<'a>, Node<'a>)> {
+    let head = modifier_head(modifier)?;
+    let stmt = nth_element(modifier, 0).filter(|s| *s != head)?;
+    // TODO(do-loop-node): the grammar gives `do BLOCK while G` the node
+    // `STMT while G` has; a node of its own would make this a kind.
+    let body_first = modifier.kind() == "postfix_loop_expression" && stmt.kind() == "do_expression";
+    (!body_first).then_some((stmt, head))
 }
 
 /// The scalar wrapped by a container node's deref varname (`@$h{…}` —

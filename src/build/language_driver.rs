@@ -1271,9 +1271,7 @@ fn remap_spans(
     for w in witnesses.iter_mut().chain(variable_regions.iter_mut()).chain(decl_facts) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
-        if let crate::model::witnesses::WitnessPayload::EvaluatedBefore(s) = &mut w.payload {
-            *s = rspan(*s);
-        }
+        w.payload.for_each_span_mut(&mut |s| *s = rspan(*s));
         w.span = rspan(w.span);
     }
     for n in place_narrowings.iter_mut() {

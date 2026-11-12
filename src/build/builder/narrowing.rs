@@ -946,6 +946,9 @@ impl<'a> Builder<'a> {
                 });
                 continue;
             }
+            // TODO(narrowing-cutoff-read-order): a write in a modified
+            // statement runs after the modifier's head, so the cut should not
+            // end the region ahead of the head's reads.
             let rebound = |var: &str| {
                 let var = Place::variable(self.binding_of(var, pn.region.start, pn.scope).0);
                 self.rebinds.earliest_in(&var, pn.region)
@@ -1050,12 +1053,14 @@ impl<'a> Builder<'a> {
                         .filter(|r| r.exact && !r.place.is_variable());
                     if let (Some(read), Ok(text)) = (read, receiver.utf8_text(self.source)) {
                         let dies_on_undef = self.deref_dies_on_undef(node, &form);
+                        let span = node_to_span(node);
                         sites.push(crate::model::file_analysis::ArrowDerefSite {
                             receiver: text.to_string(),
                             place: Box::new(read.place),
-                            span: node_to_span(node),
+                            span,
                             form,
                             dies_on_undef,
+                            evaluated_before: self.evaluated_before(span),
                         });
                     }
                 }

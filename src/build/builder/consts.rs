@@ -125,10 +125,7 @@ impl<'a> Builder<'a> {
         if !self.consts.written.contains(&name_match_key(name, &PERL_SPELLINGS)) {
             return None;
         }
-        let at = ReadPoint {
-            at: read.start_position(),
-            skips: crate::cst::evaluated_before(self.syntax, read).map(node_to_span),
-        };
+        let at = self.read_point_of(read);
         self.consts.visible(&self.const_key(name, at.at), at)
     }
 

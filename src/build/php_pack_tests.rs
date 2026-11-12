@@ -2770,7 +2770,7 @@ class W {
     assert!(var("mine", "return $mine").is_some(), "the object a method runs on, for contrast");
     assert_eq!(var("x", "return $x"), None, "`$this` has no value");
     let member = |name: &str| Place { root: Binding::Receiver(make), path: vec![PathStep::Member(name.into())] };
-    assert_eq!(fa.place_type_at(&member("items"), at(src, "$first", 0), None), None, "`$this->items` has no place");
+    assert_eq!(fa.place_type_at(&member("items"), crate::model::witnesses::ReadPoint::position(at(src, "$first", 0)), None), None, "`$this->items` has no place");
     let self_at = at(src, "self::$inst", 0);
     let self_span = crate::model::file_analysis::Span { start: self_at, end: tree_sitter::Point { row: self_at.row, column: self_at.column + 4 } };
     assert_eq!(fa.expr_type_at_span(self_span, None), Some(InferredType::ClassName("W".into())), "`self` names the class");
@@ -3455,7 +3455,7 @@ class Cache {
         path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
     };
     let undef = Some(InferredType::Undef);
-    assert_eq!(fa.place_type_at(&items, at(src, "$first", 0), None), undef, "a property not set");
+    assert_eq!(fa.place_type_at(&items, crate::model::witnesses::ReadPoint::position(at(src, "$first", 0)), None), undef, "a property not set");
     let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
     assert_eq!(var("a", "$one"), None, "a passing isset strips nothing yet");
     assert_eq!(var("a", "$two"), undef);
@@ -3570,7 +3570,7 @@ function g(Cache $c) {
         root: crate::model::file_analysis::Binding::Lexical(c),
         path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
     };
-    let ty = |needle| fa.place_type_at(&items, at(src, needle, 0), None);
+    let ty = |needle| fa.place_type_at(&items, crate::model::witnesses::ReadPoint::position(at(src, needle, 0)), None);
     let undef = Some(InferredType::Undef);
     assert_eq!(ty("$first"), undef, "a property not set");
     assert_eq!(ty("$second"), undef);
@@ -5142,7 +5142,7 @@ fn a_constant_read_holds_the_value_another_file_declares() {
         let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
         let base: &dyn CrossFileLookup = &idx;
         let scoped = ScopedLookup::for_origin(base, &fa, None, LanguageRegistry::pack_visibility(&fa.language));
-        fa.inferred_type_via_bag_ctx(var, at(src, "echo", 0), Some(&scoped))
+        fa.inferred_type_via_bag_ctx(var, crate::model::witnesses::ReadPoint::position(at(src, "echo", 0)), Some(&scoped))
     };
     let numeric = Some(InferredType::Numeric);
     assert_eq!(ty(qualified, "a"), numeric, "a qualified read");

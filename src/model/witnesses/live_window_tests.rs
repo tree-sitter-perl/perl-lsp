@@ -80,7 +80,7 @@ fn a_read_answers_the_same_through_the_window() {
             for column in [0, 1, 4] {
                 let q = ReducerQuery {
                     attachment: &att,
-                    point: Some(at(row, column).into()),
+                    point: Some(ReadPoint::position(at(row, column))),
                     framework: FrameworkFact::Plain,
                     arity_hint: None,
                     receiver: None,

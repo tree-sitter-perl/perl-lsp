@@ -1440,6 +1440,7 @@ impl SkeletonAnalysis {
                 .map(crate::model::file_analysis::RefBinding::Symbol),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: None,
             });
         }
         for super::VarRead { name, scope: read_scope, span: value_span, token: read_span } in &self.var_reads {
@@ -1476,6 +1477,7 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
+                    evaluated_before: None,
                 }),
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
             }
@@ -1521,6 +1523,7 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
+                    evaluated_before: None,
                 });
             }
         }
@@ -1743,6 +1746,7 @@ impl SkeletonAnalysis {
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
+                    evaluated_before: None,
                 })
             })
             .collect();
@@ -1791,6 +1795,7 @@ impl SkeletonAnalysis {
                 binding: None,
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: None,
             });
         }
         refs.extend(local_refs);
@@ -1867,6 +1872,7 @@ impl SkeletonAnalysis {
                         )),
                         folded_from: None,
                         arg_count: None,
+                        evaluated_before: None,
                     });
                 }
             }

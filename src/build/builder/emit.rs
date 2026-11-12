@@ -861,11 +861,11 @@ impl<'a> Builder<'a> {
             });
             // A read the source places after a statement it runs before
             // must not see that statement's writes (`$x = f($x) if defined $x`).
-            if let Some(stmt) = reads_binding.then(|| crate::cst::evaluated_before(self.syntax, node)).flatten() {
+            if let Some(stmt) = reads_binding.then(|| self.read_order.before(span)).flatten() {
                 self.push_witness(Witness {
                     attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("evaluation_order".into()),
-                    payload: WitnessPayload::EvaluatedBefore(node_to_span(stmt)),
+                    payload: WitnessPayload::EvaluatedBefore(stmt),
                     span,
                 });
             }
@@ -1223,12 +1223,14 @@ impl<'a> Builder<'a> {
         let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
         let dies_on_undef = self.deref_dies_on_undef(node, &form);
         let place = crate::model::file_analysis::Place::variable(self.binding_key_here(&name, receiver.start_position()));
+        let span = node_to_span(node);
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
             receiver: name,
             place: Box::new(place),
-            span: node_to_span(node),
+            span,
             form,
             dies_on_undef,
+            evaluated_before: self.evaluated_before(span),
         });
     }
 

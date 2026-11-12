@@ -573,7 +573,7 @@ impl FileAnalysis {
                 if MemberKind::of_symbol(sym).mode != MemberMode::Value {
                     return None;
                 }
-                self.subject_type_at(&self.declared_place(sym_id), sym.span.end, module_index)
+                self.subject_type_at(&self.declared_place(sym_id), crate::model::witnesses::ReadPoint::position(sym.span.end), module_index)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
@@ -593,7 +593,7 @@ impl FileAnalysis {
                                 && s.package.as_deref() == Some(class.as_str())
                                 && full.symbol_is_class_content(s)
                         })?;
-                        full.subject_type_at(&full.declared_place(sym.id), sym.span.end, None)
+                        full.subject_type_at(&full.declared_place(sym.id), crate::model::witnesses::ReadPoint::position(sym.span.end), None)
                     })
                 })
             }
@@ -640,7 +640,7 @@ impl FileAnalysis {
             // proves unset) initialises it.
             let lazy = r.access == AccessKind::WriteIfUnset
                 || r.access_place().is_some_and(|place| {
-                    self.place_type_at(place, site.name_span.start, module_index) == Some(InferredType::Undef)
+                    self.place_type_at(place, r.read_point_at(site.name_span.start), module_index) == Some(InferredType::Undef)
                 });
             let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
                 self.scope(sc)

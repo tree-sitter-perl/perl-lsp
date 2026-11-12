@@ -370,6 +370,21 @@ fn a_postfix_condition_sees_its_own_earlier_writes() {
 }
 
 #[test]
+fn a_postfix_condition_key_is_owned_by_the_value_it_reads() {
+    // The key read in the condition belongs to the object the statement
+    // has not yet replaced.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $cfg = Foo->new;\n    $cfg = Other->new unless $cfg->{loaded};\n}",
+    );
+    let owner = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.target_name == "loaded")
+        .and_then(|r| r.hash_key_owner().cloned());
+    assert_eq!(owner, Some(HashKeyOwner::Class("Foo".into())));
+}
+
+#[test]
 fn a_do_while_condition_reads_after_its_block() {
     // `do BLOCK while G` runs the block first: G sees the block's write.
     let fa = build_fa(
@@ -625,7 +640,7 @@ fn narrow_place_block_if_isa() {
         "package P;\nsub f {\n    my ($self) = @_;\n    if ($self->{h}->isa('Foo')) {\n        $self->{h}->go;\n    }\n}",
     );
     assert_eq!(
-        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("h")]), Point::new(4, 8), None),
+        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("h")]), crate::model::witnesses::ReadPoint::position(Point::new(4, 8)), None),
         Some(InferredType::ClassName("Foo".into())),
         "place isa guard narrows the slot inside the block",
     );
@@ -772,7 +787,7 @@ fn narrow_place_ref_eq() {
         "package P;\nsub f {\n    my ($self) = @_;\n    return unless ref($self->{cfg}) eq 'HASH';\n    my $v = $self->{cfg};\n}",
     );
     assert_eq!(
-        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("cfg")]), Point::new(4, 12), None),
+        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("cfg")]), crate::model::witnesses::ReadPoint::position(Point::new(4, 12)), None),
         Some(InferredType::HashRef),
         "ref(place) eq 'HASH' narrows the slot",
     );
@@ -867,7 +882,7 @@ fn narrow_place_direct_hash_isa() {
         "package P;\nsub f {\n    my %h = @_;\n    return unless $h{cfg}->isa('Cfg');\n    $h{cfg}->load;\n}",
     );
     assert_eq!(
-        fa.place_type_at(&lexical_place(&fa, "%h", vec![key("cfg")]), Point::new(4, 4), None),
+        fa.place_type_at(&lexical_place(&fa, "%h", vec![key("cfg")]), crate::model::witnesses::ReadPoint::position(Point::new(4, 4)), None),
         Some(InferredType::ClassName("Cfg".into())),
         "direct hash-element isa guard narrows the slot",
     );
