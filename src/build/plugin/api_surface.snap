@@ -303,6 +303,12 @@ pub constraint: String,
 pub asserts: bool,
 }
 
+pub struct TypeCheckMethod {
+pub name: String,
+#[serde(default)]
+pub asserts: bool,
+}
+
 pub struct TypeOverride {
 pub target: OverrideTarget,
 pub return_type: OverrideReturn,

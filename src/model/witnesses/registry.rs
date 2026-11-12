@@ -2703,6 +2703,7 @@ impl ReducerRegistry {
                                 // set, so the arm distribution below IS the
                                 // strip: the null is no arm.
                                 ProjectionStep::Defined => Some(t.clone()),
+                                ProjectionStep::ConstrainedInner => t.constrained_inner().cloned(),
                                 ProjectionStep::Element => match t {
                                     // An element is any of the sequence's values.
                                     crate::model::file_analysis::InferredType::Sequence(elems) => {

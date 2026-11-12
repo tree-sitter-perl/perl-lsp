@@ -620,6 +620,11 @@ pub enum ProjectionStep {
     /// nothing, so the test never outranks what its read already knows. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     Defined,
+    /// What a type-constraint value admits: `TypeConstraintOf(T)` → `T`,
+    /// what a passing `$type->check($x)` proves of `$x`. Any other base
+    /// answers nothing. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    ConstrainedInner,
 }
 
 /// A sub's return type as a **deferred computation**, not a value:
