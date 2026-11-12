@@ -264,7 +264,7 @@ impl<'a> Builder<'a> {
             }
             // A `shift` of `@_` is the head of the argument window at its
             // point; the walk's `consume_arg_head` advances the window past it.
-            _ if self.shifts_arg_window(node) => Some(WitnessPayload::Projected {
+            _ if self.is_shift_call(node) => Some(WitnessPayload::Projected {
                 base: WitnessAttachment::Variable {
                     name: "@_".into(),
                     scope: self.scope_at_point(node.start_position()),
@@ -533,17 +533,7 @@ impl<'a> Builder<'a> {
     /// `||`/`//` fold treats these LHSes as the param-default idiom (the
     /// value is the unknown parameter, not the fallback literal's type).
     pub(super) fn is_param_pull(&self, node: Node<'a>) -> bool {
-        if self.is_shift_call(node) {
-            return true;
-        }
-        if node.kind() == "array_element_expression" {
-            if let Some(array) = node.child_by_field_name("array") {
-                return array.kind() == "container_variable"
-                    && array.named_child(0).and_then(|v| v.utf8_text(self.source).ok())
-                        == Some("_");
-            }
-        }
-        false
+        self.is_shift_call(node) || crate::cst::arg_slot_index(node, self.source).is_some()
     }
 
     /// The receiver operand of a method call: `Expr(invocant)` typed as the
@@ -602,27 +592,6 @@ impl<'a> Builder<'a> {
                 }
             })
             .collect()
-    }
-
-    /// A `shift` whose array is `@_` — bare, or spelled `shift @_`.
-    pub(super) fn shifts_arg_window(&self, node: Node<'a>) -> bool {
-        self.is_shift_call(node)
-            && match self.extract_call_args(node).as_slice() {
-                [] => true,
-                [arg] => arg.utf8_text(self.source).ok() == Some("@_"),
-                _ => false,
-            }
-    }
-
-    /// `$_[0]` — the positional-receiver pseudo-invocant of a method
-    /// body. Shared by `invocant_type_at_node`'s array-element arm and
-    /// `expr_payload`'s `Receiver` emission so both agree on the shape.
-    pub(super) fn is_positional_receiver(&self, node: Node<'a>) -> bool {
-        let Some(array) = node.child_by_field_name("array") else { return false };
-        let Some(index) = node.child_by_field_name("index") else { return false };
-        array.kind() == "container_variable"
-            && array.named_child(0).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
-            && index.utf8_text(self.source).ok() == Some("0")
     }
 
     /// Emit the `Expr(span)` witnesses for `node` and (recursively)
@@ -859,7 +828,7 @@ impl<'a> Builder<'a> {
             // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
             // `ReturnExprReducer` claims it ahead of the window projection
             // above, which answers when no receiver is in hand.
-            if self.is_positional_receiver(node) {
+            if crate::cst::is_positional_receiver(node, self.source) {
                 self.push_witness(Witness {
                     attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("expression".into()),

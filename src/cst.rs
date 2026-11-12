@@ -635,6 +635,47 @@ pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     node.named().find(|c| c.kind() == "varname")
 }
 
+/// Whether `node` names the sub's argument array: `@_` itself, or the
+/// container of a `$_[N]` slot read.
+pub(crate) fn names_arg_array(node: Node, src: &[u8]) -> bool {
+    matches!(node.kind(), "array" | "container_variable")
+        && varname_child(node).and_then(|v| v.utf8_text(src).ok()) == Some("_")
+}
+
+/// `$_[N]`: the index of a read of one argument slot.
+pub(crate) fn arg_slot_index<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+    if node.kind() != "array_element_expression" {
+        return None;
+    }
+    let array = node.child_by_field_name("array")?;
+    (array.kind() == "container_variable" && names_arg_array(array, src))
+        .then(|| node.child_by_field_name("index"))
+        .flatten()
+}
+
+/// `$_[0]`: the positional receiver of a method body.
+pub(crate) fn is_positional_receiver(node: Node, src: &[u8]) -> bool {
+    arg_slot_index(node, src).is_some_and(|i| i.utf8_text(src).ok() == Some("0"))
+}
+
+/// A call of builtin `op` written with no argument (`shift`, `pop`,
+/// `shift()`), which defaults to the argument array.
+pub(crate) fn is_bare_call_of(node: Node, src: &[u8], op: &str) -> bool {
+    match node.kind() {
+        "bareword" => node.utf8_text(src).ok() == Some(op),
+        "func1op_call_expression" => {
+            nth_element(node, 0).is_none() && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some(op)
+        }
+        "ambiguous_function_call_expression" | "function_call_expression" => node.field_text("function", src) == Some(op),
+        _ => false,
+    }
+}
+
+/// A bare `shift`: one pull off the argument array.
+pub(crate) fn is_bare_shift(node: Node, src: &[u8]) -> bool {
+    is_bare_call_of(node, src, "shift")
+}
+
 /// `no Module LIST`: a `use_statement` led by the `no` keyword (the grammar
 /// has no `no_statement` kind).
 pub(crate) fn is_negated_use(node: Node) -> bool {

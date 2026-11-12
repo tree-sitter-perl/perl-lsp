@@ -121,7 +121,7 @@ impl<'a> Builder<'a> {
         }
         match node.kind() {
             "scalar" => crate::cst::is_conventional_invocant_scalar(node, self.source),
-            "array_element_expression" => self.is_positional_receiver(node),
+            "array_element_expression" => crate::cst::is_positional_receiver(node, self.source),
             // `ref <invocant>`
             "func1op_call_expression" => {
                 node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("ref")

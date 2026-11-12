@@ -1816,7 +1816,7 @@ fn positional_reads_skip_grammar_extras() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/emit.rs", 12, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/emit.rs", 10, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
@@ -1824,7 +1824,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_calls.rs", 41, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_decl.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_decl.rs", 16, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
