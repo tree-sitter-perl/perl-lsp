@@ -1249,6 +1249,30 @@ mod tests {
         assert!(emissions.is_empty(), "dynamic name must not emit");
     }
 
+    /// A manifest may state how a call ends without stating what it returns.
+    #[test]
+    fn rhai_override_states_ends_alone() {
+        let src = r#"
+            fn id() { "demo-ends" }
+            fn triggers() { [] }
+            fn overrides() {
+                [
+                    #{
+                        target: #{ Method: #{ class: "Mojo::Exception", name: "throw" } },
+                        ends: ["unwinds"],
+                        reason: "throws its invocant",
+                    }
+                ]
+            }
+        "#;
+        let engine = Arc::new(make_engine());
+        let plugin = RhaiPlugin::from_source(src, engine).expect("compiles");
+        let ovs = plugin.overrides();
+        assert_eq!(ovs.len(), 1);
+        assert_eq!(ovs[0].return_type, None);
+        assert_eq!(ovs[0].ends, Some(vec![crate::build::plugin::OverrideEnds::Unwinds]));
+    }
+
     #[test]
     fn rhai_overrides_function_is_read_at_compile_time() {
         // A plugin that defines a top-level `overrides()` function:
@@ -1283,7 +1307,7 @@ mod tests {
         }
         assert_eq!(
             ovs[0].return_type,
-            crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Foo".into()))
+            Some(crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Foo".into())))
         );
         assert_eq!(ovs[0].reason, "test");
     }
@@ -1366,28 +1390,28 @@ mod tests {
         let has_req = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "req")
-                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Request".into()))
+                && o.return_type == Some(crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Request".into())))
         });
         assert!(has_req, "missing req → Catalyst::Request override");
 
         let has_res = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "res")
-                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Response".into()))
+                && o.return_type == Some(crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Response".into())))
         });
         assert!(has_res, "missing res → Catalyst::Response override");
 
         let has_stash = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "stash")
-                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::HashRef)
+                && o.return_type == Some(crate::build::plugin::OverrideReturn::Type(InferredType::HashRef))
         });
         assert!(has_stash, "missing stash → HashRef override");
 
         let has_log = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "log")
-                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Log".into()))
+                && o.return_type == Some(crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Log".into())))
         });
         assert!(has_log, "missing log → Catalyst::Log override");
     }

@@ -158,6 +158,12 @@ pub enum WitnessAttachment {
     /// read past the join folds the arms (`JoinFold`, `docs/adr/cfg-tier.md`).
     /// Kept at the END for bincode variant-index stability.
     Join { place: Box<crate::model::file_analysis::Place>, of: Span, role: JoinRole },
+    /// How running this callable ends: the collector for its `Effect` arms
+    /// (a declaration, a plugin's statement, the body's inferred arms).
+    /// `Symbol(sid)` asks what calling it yields; this asks whether it comes
+    /// back (`docs/adr/cfg-tier.md` §Effects). Kept at the END for bincode
+    /// variant-index stability.
+    SymbolEffects(SymbolId),
 }
 
 /// Which of a construct's meeting points a `Join` is.
@@ -175,6 +181,60 @@ pub enum MemberAspect {
     Returns,
     /// The value stored in it.
     Holds,
+    /// How calling it ends (`Ends`): the class-keyed twin of
+    /// `SymbolEffects`. Kept at the END for bincode variant-index stability.
+    Effects,
+}
+
+bitflags::bitflags! {
+    /// The ways evaluating something can end. A set, joined by union: a
+    /// callee that may return or may throw has two bits. The empty set is
+    /// the BOTTOM — no way of ending derived, which is what a callee on a
+    /// cycle is assumed to be while its answer is computed — and is never
+    /// "unknown": no evidence is `Ends::all()`, the top, spelled out
+    /// (`docs/adr/cfg-tier.md` §Effects).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+    pub struct Ends: u8 {
+        /// Control continues after it: a call comes back to its call site.
+        const COMPLETES = 1 << 0;
+        /// It leaves by something an enclosing handler can catch (`die`, `throw`, `raise`).
+        const UNWINDS = 1 << 1;
+        /// It leaves and nothing catches it (`exit`, `abort`, `exec`).
+        const EXITS = 1 << 2;
+    }
+}
+
+impl Ends {
+    /// Does control come back? The one question v1 answers precisely: a
+    /// set holding `COMPLETES` reads as the top, because nothing yet
+    /// carries "may throw" out of a nested call.
+    pub fn completes(self) -> bool {
+        self.contains(Ends::COMPLETES)
+    }
+}
+
+/// The wire form is the bare bit set, so a bit added at the tail reads old
+/// blobs unchanged.
+impl Serialize for Ends {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.bits().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Ends {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u8::deserialize(d).map(Ends::from_bits_retain)
+    }
+}
+
+/// What running something does besides yielding a value. Closed and
+/// unconditional; each variant joins its own way (`EffectFold`), so a
+/// later variant (a write through a parameter) brings its own join rather
+/// than borrowing `Ends`' union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Effect {
+    /// How it ends.
+    Ends(Ends),
 }
 
 impl WitnessAttachment {
@@ -186,6 +246,17 @@ impl WitnessAttachment {
             space: crate::model::file_analysis::NamespaceId::CALLABLES,
             name: name.into(),
             aspect: MemberAspect::Returns,
+        }
+    }
+
+    /// How calling `name` on `owner` ends, in the namespace calls land in
+    /// untagged.
+    pub fn effects_of(owner: impl Into<String>, name: impl Into<String>) -> WitnessAttachment {
+        WitnessAttachment::Member {
+            owner: owner.into(),
+            space: crate::model::file_analysis::NamespaceId::CALLABLES,
+            name: name.into(),
+            aspect: MemberAspect::Effects,
         }
     }
 
@@ -211,6 +282,16 @@ impl WitnessAttachment {
     /// collector instead counts the arms it could not type itself.)
     pub fn folds_every_arm(&self) -> bool {
         matches!(self, WitnessAttachment::Join { .. })
+    }
+
+    /// Does this attachment ask how something ends rather than what it
+    /// holds? Its answer is `ReducedValue::Effects`, and an edge to it
+    /// carries an effect, never a type.
+    pub fn asks_effects(&self) -> bool {
+        matches!(
+            self,
+            WitnessAttachment::SymbolEffects(_) | WitnessAttachment::Member { aspect: MemberAspect::Effects, .. }
+        )
     }
 
     /// The binding whose whole value this attachment states facts about.
@@ -321,7 +402,8 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => false,
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::Effect(_) => false,
         }
     }
 }
@@ -357,7 +439,8 @@ impl WitnessPayload {
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => {}
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::Effect(_) => {}
         }
     }
 }
@@ -537,6 +620,11 @@ pub enum WitnessPayload {
     /// `Edge` to that declaration's place instead. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     FreeValue { table: crate::model::file_analysis::NameTable, name: String, fallback: Option<String> },
+    /// An effect of evaluating the thing at my attachment: a leaving
+    /// expression's own (`Expr(span)`), or one arm of how a callable ends
+    /// (`SymbolEffects`, `Member{.., Effects}`). `EffectFold` joins them.
+    /// Kept at the END for bincode variant-index stability.
+    Effect(Effect),
 }
 
 /// What one write adds to the shape it lands in.

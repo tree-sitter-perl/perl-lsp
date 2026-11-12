@@ -615,3 +615,5 @@ mod live_window_tests;
 
 #[cfg(test)]
 mod join_tests;
+#[cfg(test)]
+mod effect_tests;

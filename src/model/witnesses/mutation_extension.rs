@@ -106,7 +106,7 @@ fn rhs_type(bag: &WitnessBag, ctx: &BagContext, s: Span) -> Option<InferredType>
     };
     match reg.query(bag, &q) {
         ReducedValue::Type(t) => Some(t),
-        ReducedValue::FactMap(_) | ReducedValue::None => None,
+        ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
     }
 }
 

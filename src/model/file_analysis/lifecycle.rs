@@ -732,7 +732,7 @@ impl FileAnalysis {
                                     crate::model::witnesses::ReducedValue::Type(_) => {
                                         "owner.lost.recovered_by_framework"
                                     }
-                                    crate::model::witnesses::ReducedValue::FactMap(_)
+                                    crate::model::witnesses::ReducedValue::FactMap(_) | crate::model::witnesses::ReducedValue::Effects(_)
                                     | crate::model::witnesses::ReducedValue::None => {
                                         "owner.lost.still_lost"
                                     }

@@ -45,7 +45,7 @@ pub fn query_sub_return_type(
         };
         match reg.query(bag, &q) {
             ReducedValue::Type(t) => return Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => {}
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => {}
         }
         // Cross-symbol dispatch within the sym's class (Mojo::Base
         // getter+writer share a name; at arity=1 the writer's answer is
@@ -72,7 +72,7 @@ pub fn query_sub_return_type(
             };
             match reg.query(bag, &q) {
                 ReducedValue::Type(t) => return Some(t),
-                ReducedValue::FactMap(_) | ReducedValue::None => {}
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => {}
             }
         }
     }
@@ -81,6 +81,26 @@ pub fn query_sub_return_type(
     let ctx = context?;
     let ask = super::registry::FreeAsk::Returns { constructs: None };
     reg.free_name_cross_file(ctx, &[sub_name], &ask, arity_hint, receiver, &[], &mut QueryState::new())
+}
+
+/// How the thing `attachment` names ends — a callable's `SymbolEffects` or
+/// a class's `Member{.., Effects}`. Never empty-for-unknown: an attachment
+/// nothing answers is no evidence, the top (`Ends::all()`).
+pub fn query_ends(bag: &WitnessBag, attachment: &WitnessAttachment, context: Option<&BagContext>) -> Ends {
+    debug_assert!(attachment.asks_effects(), "an effect query asks an effect attachment");
+    let q = ReducerQuery {
+        attachment,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context,
+    };
+    match ReducerRegistry::with_defaults().query(bag, &q) {
+        ReducedValue::Effects(e) => e,
+        ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => Ends::all(),
+    }
 }
 
 /// What `place` holds at `point`. The place names its storage, so there
@@ -113,7 +133,7 @@ pub fn query_place_type(
     };
     match ReducerRegistry::with_defaults().query(bag, &q) {
         ReducedValue::Type(t) => Some(t),
-        ReducedValue::FactMap(_) | ReducedValue::None => None,
+        ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
     }
 }
 

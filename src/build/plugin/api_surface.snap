@@ -297,8 +297,17 @@ pub tag: crate::model::file_analysis::RefTagFn,
 
 pub struct TypeOverride {
 pub target: OverrideTarget,
-pub return_type: OverrideReturn,
+#[serde(default)]
+pub return_type: Option<OverrideReturn>,
 pub reason: String,
+#[serde(default)]
+pub ends: Option<Vec<OverrideEnds>>,
+}
+
+pub enum OverrideEnds {
+Completes,
+Unwinds,
+Exits,
 }
 
 pub enum OverrideReturn {

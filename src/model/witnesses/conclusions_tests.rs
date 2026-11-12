@@ -57,7 +57,7 @@ fn a_baked_conclusion_agrees_with_the_live_chase() {
                 ReducedValue::Type(t) => Some(t),
                 // Neither is a type answer, so neither is something a
                 // conclusion claims to summarize.
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             };
             match map.evaluate(&key, None, None, &[]) {
                 // A decode defers to the live path, so it cannot disagree
