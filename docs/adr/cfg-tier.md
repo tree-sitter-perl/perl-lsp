@@ -96,7 +96,7 @@ fold keeps its spelled exit flag for callees another file decides
 
 `is_exit_expression`'s name list, PHP's name-matched `die`/`exit` calls,
 `narrow_block_remainder`, `@narrow.exit`'s region rule, #434's single-block
-`fall_through`, PHP's `@narrow.loop`, the per-level reset markers' `Unknown`
+`fall_through`, the `@ctl.loop` on PHP's `while`, the per-level reset markers' `Unknown`
 in `fold.rs`, and every `TODO(cfg-exit-join)`, `TODO(noreturn-callee)` and
 `TODO(cfg-loop-locals)`.
 

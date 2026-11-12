@@ -43,7 +43,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
         // Control-flow construct spans: the use-after-move check reads these
         // to decide whether a move is straight-line in its scope.
-        Capture::GuardRegion => st.out.control_regions.push(e.span()),
+        Capture::Ctl(CtlCap::Branch | CtlCap::Loop) => st.out.control_regions.push(e.span()),
         // Parameter-list spans: the use-after-move check reads these to tell
         // a moved parameter (not flagged) from a moved local.
         Capture::ParamRegion => st.out.param_regions.push(e.span()),
@@ -149,8 +149,8 @@ fn through(path: &[Connective], mut holds: bool) -> Option<bool> {
 fn positions(ad: &Adorned<'_, '_>, mid: usize) -> Vec<(Span, bool)> {
     ad.of_match(mid)
         .filter_map(|e| match e.cap {
-            Capture::Narrow(NarrowCap::Then) => Some((e.span(), true)),
-            Capture::Narrow(NarrowCap::Else) => Some((e.span(), false)),
+            Capture::Ctl(CtlCap::Then) => Some((e.span(), true)),
+            Capture::Ctl(CtlCap::Else) => Some((e.span(), false)),
             _ => None,
         })
         .collect()
@@ -179,14 +179,14 @@ struct Decides {
 /// after the chain runs where that arm does; where none does it never
 /// runs, and two or more are a join this tier does not take.
 // TODO(cfg-exit-join): this is reachability worked out inside one block, a
-// stand-in for the CFG; it retires with `@narrow.loop` once the CFG's edges
+// stand-in for the CFG; it retires with `@ctl.loop` once the CFG's edges
 // (a `break` to the loop's exit, an exit to the block's) answer it.
 fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
     use crate::cst::NodeId;
     let tree = ad.tree;
     let mut conds: Vec<Decides> = Vec::new();
     let mut by_site: HashMap<NodeId, usize> = HashMap::new();
-    for e in ad.events().iter().filter(|e| e.cap == Capture::Narrow(NarrowCap::Cond)) {
+    for e in ad.events().iter().filter(|e| e.cap == Capture::Ctl(CtlCap::Cond)) {
         let ix = *by_site.entry(e.site).or_insert_with(|| {
             conds.push(Decides { cond: e.site, thens: Vec::new(), elses: Vec::new(), repeats: false });
             conds.len() - 1
@@ -194,9 +194,9 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
         let d = &mut conds[ix];
         for a in ad.of_match(e.match_id) {
             let arms = match a.cap {
-                Capture::Narrow(NarrowCap::Then) => &mut d.thens,
-                Capture::Narrow(NarrowCap::Else) => &mut d.elses,
-                Capture::Narrow(NarrowCap::Loop) => {
+                Capture::Ctl(CtlCap::Then) => &mut d.thens,
+                Capture::Ctl(CtlCap::Else) => &mut d.elses,
+                Capture::Ctl(CtlCap::Loop) => {
                     d.repeats = true;
                     continue;
                 }
@@ -343,7 +343,7 @@ fn regions_of(ad: &Adorned<'_, '_>, fall: &FallThrough, atom: &Event) -> Vec<(Sp
             path.push(c);
         }
         let mut decides = false;
-        for cond in tags().filter(|t| t.cap == Capture::Narrow(NarrowCap::Cond)) {
+        for cond in tags().filter(|t| t.cap == Capture::Ctl(CtlCap::Cond)) {
             decides = true;
             out.extend(
                 positions(ad, cond.match_id)

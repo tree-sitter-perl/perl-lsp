@@ -277,26 +277,26 @@
 ; expression yields its first value or its last; the right of `and` runs
 ; where the left holds, of `or` where it fails. An `else` arm is its body;
 ; the `else` of a loop or a `try` is no arm of a condition.
-(if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
+(if_statement condition: (_) @ctl.cond consequence: (_) @ctl.then)
 (if_statement
-  condition: (_) @narrow.cond
-  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
-(elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
+  condition: (_) @ctl.cond
+  alternative: [(elif_clause) @ctl.else (else_clause body: (_) @ctl.else)])
+(elif_clause condition: (_) @ctl.cond consequence: (_) @ctl.then)
 (if_statement
-  alternative: (elif_clause condition: (_) @narrow.cond)
-  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+  alternative: (elif_clause condition: (_) @ctl.cond)
+  alternative: [(elif_clause) @ctl.else (else_clause body: (_) @ctl.else)])
 (conditional_expression
-  (_) @narrow.then
+  (_) @ctl.then
   .
   "if"
   .
-  (_) @narrow.cond
+  (_) @ctl.cond
   .
   "else"
   .
-  (_) @narrow.else)
-(boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
-(boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
+  (_) @ctl.else)
+(boolean_operator left: (_) @ctl.cond operator: "and" right: (_) @ctl.then)
+(boolean_operator left: (_) @ctl.cond operator: "or" right: (_) @ctl.else)
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

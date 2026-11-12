@@ -341,14 +341,14 @@ its subject (`@narrow.var`) and what it proves on the atom's node:
 it fails), `@narrow.set` (a value where it holds, the null value where it
 fails) or `@narrow.unset` (the swap). A **connective** is a node marked
 `@narrow.not`, `@narrow.and`, `@narrow.or` or `@narrow.group` (a
-parenthesis). A **position** match marks a condition `@narrow.cond` and
-what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
+parenthesis). A **position** match marks a condition `@ctl.cond` and
+what it decides: `@ctl.then` runs where it holds, `@ctl.else` where
 it fails. An `else` arm is the statement it holds, so a later clause of
 the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
-condition before it. `@narrow.loop` marks a position's construct that
+condition before it. `@ctl.loop` marks a position's construct that
 tests its condition again after each run of its arm (PHP's `while`): a
 `break` in the arm lands after the loop too, so its arms decide nothing
-about what follows. The fall-through derivation and `@narrow.loop` are a
+about what follows. The fall-through derivation and `@ctl.loop` are a
 single-block stand-in for CFG reachability and retire with it
 (`TODO(cfg-exit-join)`). Apart from guards, each document marks every
 statement that leaves its block unconditionally `@flow.leaves` (return,
