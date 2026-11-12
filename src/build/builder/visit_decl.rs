@@ -1137,9 +1137,9 @@ impl<'a> Builder<'a> {
         self.get_var_text_from_lhs(left)
     }
 
-    /// Check if a node is a `shift` call (bare or with parens).
+    /// A `shift` of the argument array: bare, `shift()`, or `shift @_`.
     pub(super) fn is_shift_call(&self, node: Node<'a>) -> bool {
-        crate::cst::is_bare_shift(node, self.source)
+        crate::cst::shifts_arg_array(node, self.source)
     }
 
     /// Whether `node` reads or hands on the sub's argument array: `@_` or

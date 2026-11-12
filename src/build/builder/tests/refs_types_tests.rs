@@ -1907,3 +1907,13 @@ fn file_and_line_tokens_type_as_string_and_number() {
     assert_eq!(fa.inferred_type_via_bag("$file", Point::new(4, 4)), Some(InferredType::String));
     assert_eq!(fa.inferred_type_via_bag("$line", Point::new(4, 4)), Some(InferredType::Numeric));
 }
+
+#[test]
+fn shift_spelled_with_the_argument_array_is_the_receiver() {
+    // `shift @_` is the bare `shift` written out; both pull the receiver.
+    for pull in ["shift", "shift @_", "shift(@_)"] {
+        let fa = build_fa(&format!("package Calculator;\nsub add {{\n    my $self = {pull};\n    $self;\n}}"));
+        let ty = fa.inferred_type_via_bag("$self", Point::new(3, 5));
+        assert_eq!(ty, Some(InferredType::ClassName("Calculator".into())), "{pull}");
+    }
+}

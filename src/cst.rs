@@ -671,9 +671,16 @@ pub(crate) fn is_bare_call_of(node: Node, src: &[u8], op: &str) -> bool {
     }
 }
 
-/// A bare `shift`: one pull off the argument array.
-pub(crate) fn is_bare_shift(node: Node, src: &[u8]) -> bool {
-    is_bare_call_of(node, src, "shift")
+/// `shift`, or `shift @_` spelled out: one pull off the head of the
+/// argument array.
+pub(crate) fn shifts_arg_array(node: Node, src: &[u8]) -> bool {
+    if is_bare_call_of(node, src, "shift") {
+        return true;
+    }
+    node.kind() == "func1op_call_expression"
+        && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some("shift")
+        && nth_element(node, 1).is_none()
+        && nth_element(node, 0).is_some_and(|a| a.kind() == "array" && names_arg_array(a, src))
 }
 
 /// `no Module LIST`: a `use_statement` led by the `no` keyword (the grammar
