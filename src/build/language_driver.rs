@@ -1250,7 +1250,9 @@ fn remap_spans(
     // span-bearing shape fails to compile here until it is remapped.
     use crate::model::witnesses::WitnessAttachment;
     let mut remap_att = |a: &mut WitnessAttachment| match a {
-        WitnessAttachment::Expr(sp) | WitnessAttachment::BranchArm(sp) => *sp = rspan(*sp),
+        WitnessAttachment::Expr(sp)
+        | WitnessAttachment::BranchArm(sp)
+        | WitnessAttachment::Join { of: sp, .. } => *sp = rspan(*sp),
         WitnessAttachment::Variable { .. }
         | WitnessAttachment::Expression(_)
         | WitnessAttachment::Symbol(_)
