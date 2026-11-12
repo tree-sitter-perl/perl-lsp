@@ -49,7 +49,7 @@ return, throw, break, continue and jump) replaces `@narrow.cond/then/else/exit`,
 own in `queries/perl/ctl.scm` on the combined walk, so Perl's exit keywords
 stop being a Rust table. The narrowing atoms (`@narrow.is/set/unset/...`)
 describe conditions and stay. The constructs are read once, by the join
-builder, through a tree-free `ControlTree` view; nothing about them persists.
+builder, through a tree-free `ControlView`; nothing about them persists.
 A body that runs later is already a callable scope (`ScopeKind::is_callable`).
 
 ## Effects: how a call ends

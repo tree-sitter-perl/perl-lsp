@@ -42,6 +42,8 @@ mod deferral;
 pub use deferral::*;
 mod place;
 pub use place::*;
+mod control;
+pub use control::*;
 mod queries;
 pub use queries::{hint_in, vivify_dies_in};
 mod enrichment;

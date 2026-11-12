@@ -343,6 +343,13 @@ spelled! {
         /// its arm: a `break` in the arm lands after it too, so its arms
         /// decide nothing about what follows.
         Loop = "loop",
+        /// A loop whose body runs once before its first test (`do … while`).
+        LoopOnce = "loop.once",
+        /// What a loop runs each time its test holds.
+        LoopBody = "loop.body",
+        /// What a loop runs after each pass of its body, before the next
+        /// test (a C-style `for`'s iterator, Perl's `continue` block).
+        LoopStep = "loop.step",
         /// A statement that leaves its block unconditionally, by what it
         /// leaves to: nothing after it in the block runs. Which arms of a
         /// condition fall through follows by containment.
@@ -355,6 +362,8 @@ spelled! {
         LeaveBreak = "leave.break",
         /// … to the next test of the loop around it.
         LeaveContinue = "leave.continue",
+        /// … to a target the statement names (`goto`).
+        LeaveJump = "leave.jump",
     }
 }
 
@@ -363,7 +372,12 @@ impl CtlCap {
     pub fn is_leave(self) -> bool {
         matches!(
             self,
-            CtlCap::LeaveReturn | CtlCap::LeaveThrow | CtlCap::LeaveExit | CtlCap::LeaveBreak | CtlCap::LeaveContinue
+            CtlCap::LeaveReturn
+                | CtlCap::LeaveThrow
+                | CtlCap::LeaveExit
+                | CtlCap::LeaveBreak
+                | CtlCap::LeaveContinue
+                | CtlCap::LeaveJump
         )
     }
 }

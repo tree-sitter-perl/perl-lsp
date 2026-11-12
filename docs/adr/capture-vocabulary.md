@@ -208,10 +208,21 @@ does not exist yet.
 projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
 
+`@ctl.branch` and `@ctl.loop` are a construct whose parts do not all run
+whenever it does, and its other `@ctl.*` captures are those parts:
+`@ctl.cond` the condition, `@ctl.then` / `@ctl.else` what runs where it
+holds / fails, `@ctl.loop.body` what a loop repeats, `@ctl.loop.step` what
+runs after each pass (a `continue` block, a C-style `for`'s iterator).
+`@ctl.loop.once` replaces `@ctl.loop` when the body runs before the first
+test (`do … while`). Every arm pattern carries its construct, so a
+construct several patterns describe is one construct. A condition, a loop
+list and an initialiser run whenever the construct does and are no arm.
+
 `@ctl.leave.<kind>` is a statement that leaves its block unconditionally,
 by what it leaves to: `return`, `throw` (to the nearest handler), `exit`
-(out of the process), `break` (past the loop) or `continue` (to the
-loop's next test). Nothing after it in the block runs. It is the
+(out of the process), `break` (past the loop), `continue` (to the
+loop's next test) or `jump` (to a label or another callable: `goto`).
+Nothing after it in the block runs. It is the
 document's one statement about control leaving; which arms of a
 condition fall through, and what the rest of a block after them is known
 under, the narrowing family derives by containment over the `@ctl.*`
