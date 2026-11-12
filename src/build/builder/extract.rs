@@ -567,18 +567,10 @@ impl<'a> Builder<'a> {
                 key_node.utf8_text(self.source).ok().map(|s| (s.to_string(), false))
             }
             "string_literal" | "interpolated_string_literal" => {
-                // Simple string: 'key' or "key"
-                let text = key_node.utf8_text(self.source).ok()?;
-                // Strip quotes
-                if text.len() >= 2 {
-                    let inner = &text[1..text.len()-1];
-                    // Dynamic if interpolated and contains $/@
-                    let is_dynamic = key_node.kind() == "interpolated_string_literal"
-                        && (inner.contains('$') || inner.contains('@'));
-                    Some((inner.to_string(), is_dynamic))
-                } else {
-                    None
-                }
+                let inner = crate::cst::string_content_text(key_node, self.source).unwrap_or_default();
+                let is_dynamic = key_node.kind() == "interpolated_string_literal"
+                    && (inner.contains('$') || inner.contains('@'));
+                Some((inner, is_dynamic))
             }
             _ => {
                 // Dynamic key (variable, expression)
