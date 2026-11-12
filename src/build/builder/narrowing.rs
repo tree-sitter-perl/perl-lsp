@@ -499,8 +499,8 @@ fn block_leaves(block: Node, source: &[u8]) -> bool {
     block.elements().any(|stmt| statement_leaves(stmt, source))
 }
 
-/// True if a statement leaves its block: an exit, or a conditional with an
-/// `else` whose every arm leaves.
+/// True if a statement leaves its block: an exit, a conditional with an
+/// `else` whose every arm leaves, or a bare block that leaves.
 fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
     match stmt.kind() {
         "expression_statement" => crate::cst::nth_element(stmt, 0).is_some_and(|e| is_exit_expression(e, source)),
@@ -508,8 +508,22 @@ fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
             let arms = crate::cst::conditional_arms(stmt);
             arms.last().is_some_and(|arm| arm.cond.is_none()) && arms.iter().all(|arm| block_leaves(arm.block, source))
         }
+        // A bare block is a loop that runs once (perlsyn).
+        "block_statement" => loop_block_leaves(stmt, source),
         _ => false,
     }
+}
+
+/// True if a loop's block never comes back to the loop or lands after it:
+/// it leaves, and no `last`/`next`/`redo` in it can reach the loop
+/// (conservatively, even one an inner loop owns, or a label names).
+// TODO(cfg-exit-join): a loop-control edge to the loop's exit is the CFG's.
+fn loop_block_leaves(block: Node, source: &[u8]) -> bool {
+    use crate::cst::NodeExt;
+    fn has_loop_control(node: Node) -> bool {
+        node.elements().any(|c| c.kind() == "loopex_expression" || has_loop_control(c))
+    }
+    block_leaves(block, source) && !has_loop_control(block)
 }
 
 impl<'a> Builder<'a> {
@@ -703,8 +717,11 @@ impl<'a> Builder<'a> {
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
     /// run of the body, so the body narrows by G (`until` by its negation),
-    /// and the rebind cutoff ends it at a write. Nothing narrows after the
-    /// loop: `last` leaves with G unchanged.
+    /// and the rebind cutoff ends it at a write. A body that always leaves
+    /// never comes back to the test, so the loop is left only where its
+    /// first test fails, and the rest of the block narrows as after an `if`
+    /// with no `else`; any other body is left with G as the last test or a
+    /// `last` left it (`TODO(cfg-exit-join)`).
     pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
         let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
         else {
@@ -720,6 +737,12 @@ impl<'a> Builder<'a> {
         };
         let enter = stmt.child(0).is_none_or(|k| k.kind() != "until");
         self.narrow_arm(condition, body, enter);
+        if loop_block_leaves(body, self.source) {
+            if let Some(region) = self.rest_of_block(stmt) {
+                self.record_guard_sites(condition);
+                self.narrow_chain_arm(Some((condition, !enter)), &[], region);
+            }
+        }
     }
 
     /// `G ? A : B` — A runs where G holds, B where it fails.
@@ -787,13 +810,19 @@ impl<'a> Builder<'a> {
 
     /// `[statement end .. enclosing-block end]` for the statement `node` is
     /// in, when that statement is a block's.
-    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
     fn block_remainder(&self, node: Node<'a>) -> Option<Span> {
         let mut stmt = node;
         while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
             stmt = self.syntax.parent(stmt)?;
         }
-        let block = self.syntax.parent(stmt).filter(|b| b.kind() == "block")?;
+        self.rest_of_block(stmt)
+    }
+
+    /// `[stmt end .. block end]` when `stmt` is a statement of a block, a
+    /// bare block, or the file's top level.
+    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
+    fn rest_of_block(&self, stmt: Node<'a>) -> Option<Span> {
+        let block = self.syntax.parent(stmt).filter(|b| matches!(b.kind(), "block" | "block_statement" | "source_file"))?;
         Some(Span { start: stmt.end_position(), end: block.end_position() })
     }
 

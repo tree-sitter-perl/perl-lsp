@@ -134,6 +134,86 @@ fn narrow_after_a_chain_follows_the_one_arm_that_falls_through() {
     }
 }
 
+#[test]
+fn narrow_looks_through_a_bare_block() {
+    // A bare block runs where it stands, so it leaves where its statements
+    // do, and the rest of it is a block for a statement-level guard. It is
+    // a loop that runs once, so `last` in it lands right after it.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    let src_of = |chain: &str| format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+    let narrows = [
+        ("unless ($x->isa('Widget')) { warn 'x'; { return; } }", "a bare block that returns"),
+        ("if ($x->isa('Widget')) { warn 'w'; } else { { { die 'n'; } } }", "nested bare blocks in an else"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let nothing = [
+        ("unless ($x->isa('Widget')) { { warn 'x'; } }", "a bare block that falls through"),
+        ("unless ($x->isa('Widget')) { { last if $y; return; } }", "a bare block a `last` leaves"),
+        ("{ warn 'x'; { return unless $x->isa('Widget'); } }", "a guard's narrowing ends with its bare block"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+    // The rest of a bare block is narrowed by a guard inside it.
+    let src = "package P;\nsub f {\n    my ($x) = @_;\n    {\n        return unless $x->isa('Widget');\n        $x->layout;\n    }\n}";
+    assert_eq!(fa_type_at(src, "$x", Point::new(5, 8)), widget, "the rest of the bare block");
+}
+
+#[test]
+fn narrow_after_a_loop_whose_body_always_leaves() {
+    // A body that always leaves never comes back to the test, so the loop
+    // is left only where its first test fails. A `last`, `next` or `redo`
+    // in it, or a body that falls through, says nothing after the loop.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    let src_of = |chain: &str| format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+    let narrows = [
+        ("while (!$x->isa('Widget')) { return; }", "while"),
+        ("until ($x->isa('Widget')) { warn 'x'; die 'n'; }", "until"),
+        ("while (!$x->isa('Widget')) { if ($y) { return; } else { die 'y'; } }", "a chain whose every arm leaves"),
+        ("for (; !$x->isa('Widget'); ) { return; }", "a C-style for"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let nothing = [
+        ("while (!$x->isa('Widget')) { warn 'x'; }", "a body that falls through"),
+        ("while (!$x->isa('Widget')) { last if $y; return; }", "a `last` before the exit"),
+        ("while (!$x->isa('Widget')) { next if $y; return; }", "a `next` before the exit"),
+        ("while (!$x->isa('Widget')) { for my $z (@$y) { last; } return; }", "a `last` an inner loop owns"),
+        ("L: while (!$x->isa('Widget')) { return; }", "a labelled loop"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+}
+
+#[test]
+fn narrow_at_file_top_level() {
+    // A script's top level is a block for the rest-of-block rule.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    for (guard, why) in [
+        ("die unless $x->isa('Widget');", "a postfix exit"),
+        ("$x->isa('Widget') or die;", "an `or die`"),
+        ("unless ($x->isa('Widget')) { exit 1; }", "a block form"),
+        ("while (!$x->isa('Widget')) { exit 1; }", "a loop that always leaves"),
+    ] {
+        let src = format!("my $x = shift;\n{guard}\n$x->layout;\n");
+        assert_eq!(fa_type_at(&src, "$x", Point::new(2, 0)), widget, "{why}");
+    }
+    let src = "my $x = shift;\nwarn 'x' unless $x->isa('Widget');\n$x->layout;\n";
+    assert_eq!(fa_type_at(src, "$x", Point::new(2, 0)), None, "no exit");
+}
+
 fn fa_type_at(src: &str, var: &str, at: Point) -> Option<InferredType> {
     build_fa(src).inferred_type_via_bag(var, at)
 }

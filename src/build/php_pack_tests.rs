@@ -3391,6 +3391,76 @@ fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
     }
 }
 
+/// A bare block leaves where its statements do; a loop whose body always
+/// leaves is left only where its first test fails, unless a `break` or
+/// `continue` in the body goes to the loop.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src_of = |chain: &str| {
+        format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    {chain}\n    $y->run();\n}}\n")
+    };
+    let narrows = [
+        ("if (!$y instanceof Foo) { log_it(); { return; } }", "a bare block that returns"),
+        ("if ($y instanceof Foo) { log_it(); } else { { { die(); } } }", "nested bare blocks in an else"),
+        ("while (!$y instanceof Foo) { return; }", "a loop whose body returns"),
+        ("while (!$y instanceof Foo) { log_it(); throw new \\Exception(); }", "a loop whose body throws"),
+        ("while (!$y instanceof Foo) { if ($z) { return; } else { exit; } }", "a loop body chain whose every arm leaves"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let nothing = [
+        ("if (!$y instanceof Foo) { { log_it(); } }", "a bare block that falls through"),
+        ("while (!$y instanceof Foo) { log_it(); }", "a loop body that falls through"),
+        ("while (!$y instanceof Foo) { if ($z) { break; } return; }", "a break before the exit"),
+        ("while (!$y instanceof Foo) { if ($z) { continue; } return; }", "a continue before the exit"),
+        ("while (!$y instanceof Foo) { foreach ($z as $w) { break; } return; }", "a break an inner loop owns"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
+/// A short-circuit written as a statement is a chain of its own: where its
+/// right side leaves (`throw`, `die`, `exit`), the rest of the block runs
+/// where that side never ran. One whose right side may fall through, or
+/// whose left proves nothing on its own, narrows nothing after.
+#[cfg(feature = "php")]
+#[test]
+fn a_statement_short_circuit_that_leaves_narrows_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src_of = |stmt: &str| {
+        format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    {stmt}\n    $y->run();\n}}\n")
+    };
+    let narrows = [
+        ("$y instanceof Foo || throw new \\Exception();", "|| throw"),
+        ("$y instanceof Foo or die('no');", "or die()"),
+        ("$y instanceof Foo or die;", "or bare die"),
+        ("$y instanceof Foo or exit(1);", "or exit()"),
+        ("!$y instanceof Foo && throw new \\Exception();", "&& throw"),
+        ("!$y instanceof Foo and die;", "and die"),
+        ("($y instanceof Foo) || throw new \\Exception();", "a parenthesised condition"),
+        ("if ($z) { return; } else $y instanceof Foo || throw new \\Exception();", "an else arm's short-circuit"),
+    ];
+    for (stmt, why) in narrows {
+        let src = src_of(stmt);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let nothing = [
+        ("$y instanceof Foo || log_it();", "a right side that falls through"),
+        ("$y instanceof Foo && throw new \\Exception();", "a failed instanceof proves nothing"),
+        ("$z || $y instanceof Foo || throw new \\Exception();", "a disjunction proves neither side"),
+    ];
+    for (stmt, why) in nothing {
+        let src = src_of(stmt);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
 /// A property of `$this` is a place of the method's object: a guard on
 /// it narrows the member's receiver for dispatch, in the arm and after an
 /// early exit, until something may change it.

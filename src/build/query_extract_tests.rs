@@ -2417,6 +2417,70 @@ fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
 }
 
 #[test]
+fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
+    // A `while` body that always leaves never comes back to the test, so
+    // the loop is left only where its first test fails: the rest of the
+    // block narrows as after an `if` with no `else`. A `break` or
+    // `continue` in the body, or a body that falls through, says nothing
+    // after the loop. A bare block (C++) leaves where its statements do.
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let python = |chain: &str| {
+        let src = format!("class Foo:\n    pass\ndef f(x, z):\n{chain}\n    x.run()\n");
+        let mut parser = python_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+        let row = src.lines().position(|l| l.contains("x.run()")).unwrap();
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        ("    while not isinstance(x, Foo):\n        return", "a body that returns"),
+        ("    while not isinstance(x, Foo):\n        log()\n        raise ValueError()", "a body that raises"),
+        (
+            "    while not isinstance(x, Foo):\n        if z:\n            return\n        else:\n            raise ValueError()",
+            "a body chain whose every arm leaves",
+        ),
+    ];
+    for (chain, why) in narrows {
+        assert_eq!(python(chain), class("Foo"), "python: {why}");
+    }
+    let nothing = [
+        ("    while not isinstance(x, Foo):\n        log()", "a body that falls through"),
+        ("    while not isinstance(x, Foo):\n        if z:\n            break\n        return", "a break before the exit"),
+        ("    while not isinstance(x, Foo):\n        if z:\n            continue\n        return", "a continue before the exit"),
+    ];
+    for (chain, why) in nothing {
+        assert_ne!(python(chain), class("Foo"), "python: {why}");
+    }
+
+    let cpp = |chain: &str| {
+        let src = format!("void f(std::optional<Widget> o, bool z) {{\n{chain}\n    o->run();\n}}\n");
+        let fa = cpp_skel(&src).into_file_analysis();
+        let row = src.lines().position(|l| l.contains("o->run()")).unwrap();
+        fa.inferred_type_via_bag("o", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        ("    while (!o) { return; }", "a body that returns"),
+        ("    while (!o) throw 1;", "a braceless body"),
+        ("    while (!o) { log(); { return; } }", "a bare block in the body"),
+        ("    if (!o) { log(); { return; } }", "a bare block in an if"),
+        ("    if (o) { log(); } else { { { throw 1; } } }", "nested bare blocks in an else"),
+    ];
+    for (chain, why) in narrows {
+        assert_eq!(cpp(chain), class("Widget"), "cpp: {why}");
+    }
+    let nothing = [
+        ("    while (!o) { log(); }", "a body that falls through"),
+        ("    while (!o) { if (z) break; return; }", "a break before the exit"),
+        ("    while (!o) { if (z) continue; return; }", "a continue before the exit"),
+        ("    if (!o) { { log(); } }", "a bare block that falls through"),
+    ];
+    for (chain, why) in nothing {
+        assert_ne!(cpp(chain), class("Widget"), "cpp: {why}");
+    }
+}
+
+#[test]
 fn cpp_optional_same_name_narrows_to_own_inner_type_per_function() {
     // GOAL-3 regression: `annot_text_by_var` is keyed by (name, SCOPE), so two
     // functions each with a `std::optional<...> opt` of a DIFFERENT inner type

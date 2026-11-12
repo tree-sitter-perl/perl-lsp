@@ -1048,6 +1048,11 @@
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
+; A `while` body runs where its condition holds, and the loop tests it again
+; after each run, so a `break` or `continue` in it goes to the loop.
+; TODO(cfg-exit-join): `@narrow.loop` and `@flow.to_loop` stand in for
+; reachability until the CFG's loop edges answer it.
+(while_statement condition: (condition_clause value: (_) @narrow.cond) body: (_) @narrow.then) @narrow.loop
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -1060,6 +1065,10 @@
  (throw_statement)
  (continue_statement)
  (break_statement)] @flow.leaves
+; A `break` or `continue` leaves to the loop (or `switch`) around it, and a
+; bare block's statements run where it stands.
+[(continue_statement) (break_statement)] @flow.to_loop
+(compound_statement) @flow.block
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

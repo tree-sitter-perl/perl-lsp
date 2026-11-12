@@ -248,6 +248,13 @@ spelled! {
         /// throw, a `break`): nothing after it in the block runs. Which
         /// arms of a condition fall through follows by containment.
         Leaves = "leaves",
+        /// A statement that leaves to the loop around it (`break`,
+        /// `continue`): in a loop's arm it reaches the loop's test or exit,
+        /// not past the loop.
+        ToLoop = "to_loop",
+        /// A statement whose statements run in sequence where it stands (a
+        /// bare block): it leaves where one of them does.
+        Block = "block",
     }
 }
 
@@ -335,9 +342,14 @@ spelled! {
         /// What runs where the condition fails.
         Else = "else",
         /// A position match's construct that tests its condition again
-        /// after each run of its arm (a loop): a `break` in the arm lands
-        /// after it too, so its arms decide nothing about what follows.
+        /// after each run of its arm (a loop): a `@flow.to_loop` in the arm
+        /// goes to the loop, so the arm leaves only where none is in it.
         Loop = "loop",
+        /// The statement a position's chain is, where that is not the node
+        /// holding the condition and its arms (the expression statement
+        /// around `G || throw …`): the rest of its block runs where the arm
+        /// that falls through does.
+        Stmt = "stmt",
     }
 }
 

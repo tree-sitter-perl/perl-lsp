@@ -493,8 +493,11 @@
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
 ; runs where the left holds, of `||` where it fails. An `else` arm is its
-; body. A loop tests its condition again after each run of its body, so
-; what follows it is no arm of that test.
+; body. A loop tests its condition again after each run of its body, so a
+; `break` or `continue` in it goes to the loop, and the loop is left where
+; a test fails. A short-circuit written as a statement (`G || throw …`,
+; `G or die`) is a chain of its own, so the rest of the block runs where
+; its right side does not leave.
 (if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
 (if_statement
   condition: (_) @narrow.cond
@@ -503,14 +506,15 @@
 (if_statement
   alternative: (else_if_clause condition: (_) @narrow.cond)
   alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
-; TODO(cfg-exit-join): `@narrow.loop` and the fall-through it guards stand
-; in for reachability; the CFG retires both, since a `break` is an edge to
-; the loop's exit there.
+; TODO(cfg-exit-join): `@narrow.loop`, `@flow.to_loop` and the
+; fall-through they guard stand in for reachability; the CFG retires them,
+; since a `break` is an edge to the loop's exit there.
 (while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
 (conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: ["&&" "and"] right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: ["||" "or"] right: (_) @narrow.else)
+(expression_statement (binary_expression left: (_) @narrow.cond operator: ["&&" "and" "||" "or"])) @narrow.stmt
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -528,6 +532,16 @@
 ((expression_statement
    [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
  (#any-of? @_exit "die" "exit"))
+; The right side of a short-circuit leaves the same way (`G || throw …`).
+(binary_expression operator: ["&&" "and" "||" "or"] right: (throw_expression) @flow.leaves)
+((binary_expression
+   operator: ["&&" "and" "||" "or"]
+   right: [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit] @flow.leaves)
+ (#any-of? @_exit "die" "exit"))
+; A `break` or `continue` leaves to the loop around it, and a bare block's
+; statements run where it stands.
+[(break_statement) (continue_statement)] @flow.to_loop
+(compound_statement) @flow.block
 
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the

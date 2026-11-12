@@ -303,8 +303,13 @@ by G TRUE and B by G FALSE, `G && R` / `G and R` narrow R by G TRUE, and
 A loop tests its condition before every run of its body, so the body is
 an arm too: `while (G)`, `STMT while G` and a C-style `for (…; G; …)`
 narrow by G TRUE, `until` by G FALSE. `do BLOCK while G` is the one
-exception — perlsyn runs the block once before the first test. Nothing
-narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
+exception — perlsyn runs the block once before the first test. A loop
+whose block always leaves never comes back to its test, so it is left only
+where its first test fails, and the rest of the enclosing block narrows as
+after an `if` with no `else` (`while (!$x->isa('Foo')) { return }`). Any
+other loop narrows nothing after it: a `last` leaves with G unchanged, and
+a body that falls through leaves G as its last test found it, which is the
+CFG's loop join (`TODO(cfg-exit-join)`). When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once.
@@ -312,9 +317,15 @@ diagnostics see each statement-level guard once.
 "Falls through" is a fact about statements. A block leaves when any of
 its statements leaves, wherever that statement sits, and what follows it
 there is dead: a statement leaves when it is an exit, or when it is an
-`if`/`unless` chain with an `else` whose every arm leaves
-(`block_leaves`). A chain with no `else` has an implicit one, which falls
-through. After a chain whose arms all leave but one, the rest of the
+`if`/`unless` chain with an `else` whose every arm leaves, or a bare
+block that leaves (`block_leaves`). A bare block is a loop that runs once
+(perlsyn), so it leaves only where no `last`/`next`/`redo` in it can reach
+it, the same test a loop's block takes (`loop_block_leaves`, conservative:
+loop control anywhere inside counts, even one an inner loop owns). A chain
+with no `else` has an implicit one, which falls through. The block a
+statement-level guard narrows the rest of is the statement's own: a sub's
+or a construct's block, a bare block, or the file's top level, so a
+script's `die unless $cfg;` narrows the rest of the script. After a chain whose arms all leave but one, the rest of the
 enclosing block runs where that arm does, through the same
 `narrow_block_remainder`, narrowed as that arm's block is: the first
 arm where its block is entered, an `elsif` where its own guard holds and
@@ -346,14 +357,26 @@ what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
 it fails. An `else` arm is the statement it holds, so a later clause of
 the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
 condition before it. `@narrow.loop` marks a position's construct that
-tests its condition again after each run of its arm (PHP's `while`): a
-`break` in the arm lands after the loop too, so its arms decide nothing
-about what follows. The fall-through derivation and `@narrow.loop` are a
-single-block stand-in for CFG reachability and retire with it
-(`TODO(cfg-exit-join)`). Apart from guards, each document marks every
+tests its condition again after each run of its arm (the `while` of PHP,
+Python and C++): its implicit `else` is where a test fails, and its arm
+leaves only where it leaves and no `@flow.to_loop` statement in it
+(`break`, `continue`) can go to the loop. That is checked conservatively,
+by containment alone, so one an inner loop or a C++ `switch` owns counts
+too. So a loop whose body always leaves narrows the rest of the block by
+its condition failing, and any other narrows nothing after it. A
+`@flow.block` statement (PHP's and C++'s bare `{ … }`) runs its
+statements in sequence where it stands, so an arm looks through it for
+one that leaves. A short-circuit written as a statement (PHP's `G ||
+throw …`, `G or die`) decides only the arm on its right; a match naming
+the expression statement around it `@narrow.stmt` makes that statement
+the chain's, and a condition with no `then` arm has an implicit one where
+it holds, as one with no `else` has one where it fails. The fall-through
+derivation, `@narrow.loop` and `@flow.to_loop` are a single-block
+stand-in for CFG reachability and retire with it (`TODO(cfg-exit-join)`). Apart from guards, each document marks every
 statement that leaves its block unconditionally `@flow.leaves` (return,
 throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
-`exit`, which the language reserves, so their spelling names them), and
+`exit`, which the language reserves, so their spelling names them, and
+PHP's leaving right side of a short-circuit), and
 the extractor derives the rest by containment, the Perl rule above: a
 condition's statement is the node holding it and its then arm; a chain
 is that statement with every condition whose statement is an else arm of
