@@ -673,9 +673,6 @@ struct Builder<'a> {
     /// from being duplicated by that fold-phase re-run.
     method_call_ref_dedup: std::collections::HashSet<(Point, Point, String)>,
 
-    /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
-    /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).
-    defined_narrowings: Vec<narrowing::DefinedNarrowing>,
     /// Recorded tag guards (`$ref eq 'ARRAY'`), re-derived each fold
     /// iteration (`emit_tag_narrowing_witnesses`).
     tag_narrowings: Vec<narrowing::TagNarrowing>,

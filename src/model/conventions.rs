@@ -63,17 +63,17 @@ pub struct LanguageConventions {
     pub member_spaces: crate::model::file_analysis::MemberSpaces,
     /// Where an unqualified, unimported function or constant spelling
     /// finds its name.
-    pub functions: FunctionLookup,
+    pub free_names: FreeNameLookup,
     /// Which classes a protected member reaches beyond its own.
     pub family_reach: FamilyReach,
 }
 
-/// Where a bare function (or constant) spelling no import row binds finds
-/// its name, in a use-map language. A qualified spelling resolves like a
+/// Where a bare free name — a function or a constant spelling — no import
+/// row binds finds its name, in a use-map language. A qualified spelling resolves like a
 /// class spelling, and one an import row binds names that row's, in every
 /// language (`UseMap::free_name_ladder`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FunctionLookup {
+pub enum FreeNameLookup {
     /// The global name of that spelling.
     ///
     /// TODO(module-functions): Python files its functions by bare name, not
@@ -97,7 +97,7 @@ impl LanguageConventions {
         type_display: fn(&str) -> Option<&'static str>,
         construction: ConstructionKey,
         member_spaces: crate::model::file_analysis::MemberSpaces,
-        functions: FunctionLookup,
+        free_names: FreeNameLookup,
         family_reach: FamilyReach,
     ) -> Self {
         LanguageConventions {
@@ -106,7 +106,7 @@ impl LanguageConventions {
             type_display,
             construction,
             member_spaces,
-            functions,
+            free_names,
             family_reach,
         }
     }
@@ -144,7 +144,7 @@ pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
     construction: ConstructionKey::Constructor,
     // A call reaches a sub, never a `field` of the same name.
     member_spaces: MemberSpaces::PER_FAMILY,
-    functions: FunctionLookup::Global,
+    free_names: FreeNameLookup::Global,
     // No Perl member is protected.
     family_reach: FamilyReach::Descendants,
 };
@@ -186,7 +186,7 @@ static UNREGISTERED: LanguageConventions =
         type_display: engine_type_words,
         construction: ConstructionKey::Constructor,
         member_spaces: MemberSpaces::PER_FAMILY,
-        functions: FunctionLookup::Global,
+        free_names: FreeNameLookup::Global,
         family_reach: FamilyReach::Descendants,
     };
 

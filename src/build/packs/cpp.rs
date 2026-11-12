@@ -19,7 +19,7 @@ pub fn cpp_pack() -> LangPack {
             // constructor yet, so a constructor's references do not list it.
             ..NameSpellings::with_separator(CPP_SEP)
         },
-        functions: FunctionLookup::Global,
+        free_names: FreeNameLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         // One member namespace (see `names`).
         member_spaces: MemberSpaces::SHARED,
@@ -90,7 +90,9 @@ pub fn cpp_pack() -> LangPack {
             let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
             vec![p.to_string()]
         },
-        // An engaged `std::optional<T>` holds a T.
+        // An engaged `std::optional<T>` holds a T. A stand-in: the optional is a
+        // class whose `->`/`*` reach the T and `.` its own members.
+        // TODO(cpp-wrapper-deref): /mnt/project-files/design/php-rollout/cpp-wrapper-deref-brief.md
         narrow_guard: |declared| optional_inner(declared).map(InferredType::ClassName),
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,

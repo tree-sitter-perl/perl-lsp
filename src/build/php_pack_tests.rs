@@ -1015,7 +1015,7 @@ fn a_cpp_local_renames_whole() {
 }
 
 /// Where `needle` starts in `src`, `offset` bytes in.
-#[cfg(feature = "php")]
+#[cfg(any(feature = "php", feature = "cpp"))]
 fn at(src: &str, needle: &str, offset: usize) -> tree_sitter::Point {
     let i = src.find(needle).unwrap_or_else(|| panic!("`{needle}` in the source")) + offset;
     let row = src[..i].matches('\n').count();
@@ -1449,8 +1449,10 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(ret("full"), clock, "a fully qualified class");
     assert_eq!(ret("count"), Some(T::Numeric));
     assert_eq!(ret("either"), or(T::ClassName("Lib\\Clock".into()), T::Numeric), "a union is the join of its arms");
-    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n}\n");
-    assert_eq!(union.find_method_return_type("A", "orNull", None, None), None, "a union with `self` too");
+    let union = php("<?php\nclass A {\n    public function orNull(): self|null {}\n    public function either(): self|int {}\n}\n");
+    let a = Some(T::ClassName("A".into()));
+    assert_eq!(union.find_method_return_type("A", "orNull", None, None), a, "`self|null` reads as `?self`");
+    assert_eq!(union.find_method_return_type("A", "either", None, None), None, "a union of `self` with another type");
     assert_eq!(ret("nothing"), None);
     assert_eq!(ret("bare"), None);
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
@@ -1486,6 +1488,63 @@ class Node {
         .collect();
     let node = || Some("App\\Node".to_string());
     assert_eq!(receivers, [node(), node(), node(), node()]);
+}
+
+/// `self` and `parent` name a class only inside a class body: a method's
+/// return, parameter and caught exception name the class around it (or
+/// the one it extends), through a nested closure too, while a free
+/// function's name none, whatever namespace holds it.
+#[cfg(feature = "php")]
+#[test]
+fn self_and_parent_name_no_class_outside_a_class_body() {
+    use crate::model::file_analysis::{InferredType as T, RefKind};
+    let fa = php("<?php
+namespace App;
+
+class Base { public function hop() {} }
+class Node extends Base {
+    public function me(): self {}
+    public function up(): parent {}
+    public function link(self $other, parent $up) {
+        try {} catch (self $e) { $e->hop(); }
+        $other->hop();
+        $up->hop();
+        $f = function (self $n) { $n->hop(); };
+    }
+}
+function made(): self {}
+function loose(self $x, parent $y) {
+    try {} catch (self $e) { $e->hop(); }
+    $x->hop();
+    $y->hop();
+}
+");
+    let ret = |m: &str| fa.find_method_return_type("App\\Node", m, None, None);
+    assert_eq!(ret("me"), Some(T::ClassName("App\\Node".into())));
+    assert_eq!(ret("up"), Some(T::ClassName("App\\Base".into())));
+    assert_eq!(fa.sub_return_type_at_arity("made", Some(0)), None, "a free function's `self`");
+    let receivers: Vec<(usize, Option<String>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
+        .map(|r| {
+            let class = fa.receiver_classes(r, None, crate::model::file_analysis::ReceiverPolicy::Navigate);
+            (r.span.start.row, class.single().map(str::to_string))
+        })
+        .collect();
+    let class = |c: &str| Some(c.to_string());
+    assert_eq!(
+        receivers,
+        [
+            (8, class("App\\Node")),
+            (9, class("App\\Node")),
+            (10, class("App\\Base")),
+            (11, class("App\\Node")),
+            (16, None),
+            (17, None),
+            (18, None),
+        ]
+    );
 }
 
 /// A call's value is its callee's declared return, so a chain of calls
@@ -2619,6 +2678,126 @@ fn this_hovers_as_its_enclosing_class() {
     }
 }
 
+/// C++'s `this` is the same reference: hover names the enclosing class and
+/// goto-def lands on it, in an out-of-line body (whose class is its
+/// qualifier's) and in a lambda that captures it, and no rename rewrites
+/// it.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_this_hovers_as_its_enclosing_class() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "class W {\n  int n;\n  int get() { return this->n; }\n  void later() { auto f = [this] { return this->n; }; }\n  void set(int v);\n};\nvoid W::set(int v) { this->n = v; }\n";
+    let path = std::path::PathBuf::from("/fake/cpp/w.cpp");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let driver = crate::build::language_driver::LanguageRegistry::compiled();
+    idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze_with_path(src, Some(&path)));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    for needle in ["this->n; }\n  void later", "this->n; }; }", "this->n = v"] {
+        let point = at(src, needle, 0);
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &fa, key, point, Some(&idx), OverrideScope::default()).with_source(src);
+        let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "cpp").unwrap_or_default();
+        assert!(hover.contains("class W"), "{needle}: {hover}");
+        let defs: Vec<usize> = cs.definitions().iter().map(|d| d.span.start.row).collect();
+        assert_eq!(defs, [0], "{needle}");
+        assert_eq!(cs.renameable(), Ok(false), "{needle}");
+    }
+}
+
+/// A `static` member function runs on no object. Every site that refers
+/// to one comes up empty in its body: `this` has no ref, no value and no
+/// member place, and a bare instance member is no `this->n`. What names the
+/// class still answers there: a bare static member, a bare static sibling.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_a_static_member_function_runs_on_no_object() {
+    use crate::model::file_analysis::{Binding, InferredType, Span};
+    let src = "class W {\n  int n;\n  static int c;\n  int get() { return this->n; }\n  static int helper() { return 1; }\n  static int make() { int a = std::move(this->n); int b = std::move(n); return a + b + c + helper(); }\n};\n";
+    let path = std::path::PathBuf::from("/fake/cpp/w.cpp");
+    let fa = crate::build::language_driver::LanguageRegistry::compiled().for_path(&path).unwrap().analyze_with_path(src, Some(&path));
+    let sym = |name: &str| fa.symbols().iter().find(|s| s.name == name).unwrap_or_else(|| panic!("{name}"));
+    let this_at = |needle| {
+        let start = at(src, needle, 0);
+        Span { start, end: tree_sitter::Point { row: start.row, column: start.column + 4 } }
+    };
+    // the object a method runs on, for contrast
+    let get = this_at("this->n; }\n  static int helper");
+    assert!(fa.ref_at(get.start).is_some());
+    assert_eq!(fa.expr_type_at_span(get, None), Some(InferredType::ClassName("W".into())));
+    let make = this_at("this->n); int b");
+    assert!(fa.ref_at(make.start).is_none(), "{:?}", fa.ref_at(make.start));
+    assert_eq!(fa.expr_type_at_span(make, None), None, "`this` has no value");
+    let on_make: Vec<_> =
+        fa.pack.moved_from.iter().filter(|m| m.place.root == Binding::Receiver(sym("make").id)).map(|m| &m.place).collect();
+    assert!(on_make.is_empty(), "no member place of `this`, spelled or elided: {on_make:?}");
+    let bound = |needle| fa.ref_at(at(src, needle, 0)).and_then(|r| r.resolved_symbol());
+    assert_eq!(bound("n); return"), None, "a bare instance member names nothing");
+    assert_eq!(bound("c + helper"), Some(sym("c").id), "a bare static member is the class's");
+    assert!(sym("c").flags.contains(crate::model::file_analysis::SymbolFlags::STATIC));
+    let helper = fa.ref_at(at(src, "helper(); }", 0)).expect("the sibling call");
+    assert!(
+        matches!(&helper.binding, Some(crate::model::file_analysis::RefBinding::Function { package }) if package == "W"),
+        "a bare static sibling is the class's: {:?}",
+        helper.binding
+    );
+}
+
+/// php's `$this` in a `static function` follows the same rule: no ref, no
+/// value, no member place; `self::` still names the class.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_static_method_runs_on_no_object() {
+    use crate::model::file_analysis::{Binding, InferredType, PathStep, Place};
+    let src = "<?php
+class W {
+    private ?array $items;
+    private static ?W $inst = null;
+    public function get() { $mine = $this; return $mine; }
+    public static function make() {
+        $x = $this;
+        if (!isset($this->items)) { $first = 1; }
+        if (self::$inst === null) { $second = 1; }
+        return $x;
+    }
+}
+";
+    let fa = php(src);
+    let make = fa.symbols().iter().find(|s| s.name == "make" && s.kind == SymKind::Method).unwrap().id;
+    assert!(fa.ref_at(at(src, "$this;\n        if", 1)).is_none());
+    let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
+    assert!(var("mine", "return $mine").is_some(), "the object a method runs on, for contrast");
+    assert_eq!(var("x", "return $x"), None, "`$this` has no value");
+    let member = |name: &str| Place { root: Binding::Receiver(make), path: vec![PathStep::Member(name.into())] };
+    assert_eq!(fa.place_type_at(&member("items"), at(src, "$first", 0), None), None, "`$this->items` has no place");
+    let self_at = at(src, "self::$inst", 0);
+    let self_span = crate::model::file_analysis::Span { start: self_at, end: tree_sitter::Point { row: self_at.row, column: self_at.column + 4 } };
+    assert_eq!(fa.expr_type_at_span(self_span, None), Some(InferredType::ClassName("W".into())), "`self` names the class");
+}
+
+/// A declaration's hover shows the value its own binding holds: an
+/// enumerator its enum, a data member its declared type.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_declaration_hovers_show_their_own_binding_type() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "enum Color { RED, GREEN };\ntypedef enum { ON, OFF } Mode;\nstruct Box {\n  Color tint;\n};\n";
+    let path = std::path::PathBuf::from("/fake/cpp/decls.cpp");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let driver = crate::build::language_driver::LanguageRegistry::compiled();
+    idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze_with_path(src, Some(&path)));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let docs = OpenDocs::new();
+    for (needle, want, kind) in [("RED", "RED: Color", "*enumerator*"), ("OFF", "OFF: Mode", "*enumerator*"), ("tint", "tint: Color", "*field*")] {
+        let key = FileKey::Path(crate::util::canonical_path::CanonicalPath::fixture(path.clone()));
+        let cs = resolve(&docs, &fa, key, at(src, needle, 0), Some(&idx), OverrideScope::default()).with_source(src);
+        let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "cpp").unwrap_or_default();
+        assert!(hover.contains(want) && hover.contains(kind), "{needle}: {hover}");
+    }
+}
+
 /// (namespace, start row, end row) of every lane section, in write order.
 fn lane(fa: &FileAnalysis) -> Vec<(&str, usize, usize)> {
     fa.namespace_ranges.iter().map(|r| (r.namespace.as_str(), r.span.start.row, r.span.end.row)).collect()
@@ -3132,6 +3311,86 @@ function f($x, $y) {
     assert_eq!(fa.inferred_type_via_bag("y", at(src, "return", 0)), None, "not the exit's own arm");
 }
 
+/// An `if` with no later clause whose body leaves the block leaves the
+/// rest of the block to run where its condition fails: `die` in either
+/// spelling, `exit`, and an exit after work or a comment, or before more
+/// work, and so does an `else` that falls through. A body that may fall
+/// through, or a chain whose other clause falls through too, says nothing
+/// past the `if`.
+#[cfg(feature = "php")]
+#[test]
+fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let exits = [
+        ("die(\"x\");", "die()"),
+        ("{ die; }", "a bare die"),
+        ("{ exit; }", "exit"),
+        ("exit(1);", "exit()"),
+        ("{\n        // why\n        return;\n    }", "a comment before the exit"),
+        ("{ log_it(); return; }", "work, then the exit"),
+        ("{ if ($z) { log_it(); } throw new \\Exception(); }", "a nested block, then the exit"),
+        ("{ return; log_it(); }", "an exit that is not the last statement"),
+        ("{ return; } else { log_it(); }", "an else clause that falls through"),
+    ];
+    for (body, why) in exits {
+        let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
+        let fa = php(&src);
+        assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let falls_through = [
+        ("{ log_it(); }", "no exit"),
+        ("{ if ($z) { return; } }", "an exit only in a nested block"),
+        ("{ return; } elseif ($z) { log_it(); }", "an elseif clause"),
+        ("{ diet(); }", "a call that is not die"),
+    ];
+    for (body, why) in falls_through {
+        let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
+        let fa = php(&src);
+        assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
+/// After a chain whose one arm falls through, the rest of the block runs
+/// where that arm does: the then-arm where its condition holds, a later
+/// clause where its own holds and every earlier one failed, and a missing
+/// `else` where every condition failed. Every arm leaving, or two falling
+/// through, narrows nothing after; a loop's body is left by `break` to what
+/// follows the loop.
+#[cfg(feature = "php")]
+#[test]
+fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src_of = |chain: &str| {
+        format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    {chain}\n    $y->run();\n}}\n")
+    };
+    let narrows = [
+        ("if (!$y instanceof Foo) { return; log_it(); }", "an exit not in last position"),
+        ("if ($y instanceof Foo) { log_it(); } else { return; }", "an else-arm exit"),
+        ("if ($y instanceof Foo) { log_it(); } else return;", "a braceless else-arm exit"),
+        ("if (!$y instanceof Foo) { return; } elseif ($z) { die(); } else { log_it(); }", "only the else falls"),
+        ("if ($z) { return; } elseif ($y instanceof Foo) { log_it(); } else { exit; }", "only the elseif falls"),
+        ("if ($y instanceof Foo) { log_it(); } elseif ($z) { return; } else { throw new \\Exception(); }", "only the then falls"),
+        ("if (!$y instanceof Foo) { return; } elseif ($z) { return; }", "a missing else, every condition failed"),
+        ("if (!$y instanceof Foo) { if ($z) { return; } else { die; } }", "a nested chain whose every arm leaves"),
+        ("if (!$y instanceof Foo) {\n        return; // why\n    }", "a comment after the exit"),
+        ("if (!$y instanceof Foo):\n        return;\n    endif;", "a colon block"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let nothing = [
+        ("if ($y instanceof Foo) { return; } else { die; }", "every arm leaves"),
+        ("if ($y instanceof Foo) { log_it(); } elseif ($z) { log_it(); } else { return; }", "two arms fall through"),
+        ("while (!$y instanceof Foo) { break; }", "a loop left by break"),
+        ("if (!$y instanceof Foo) while ($z) return;", "a loop's body is no statement of the arm"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
 /// A property of `$this` is a place of the method's object: a guard on
 /// it narrows the member's receiver for dispatch, in the arm and after an
 /// early exit, until something may change it.
@@ -3239,6 +3498,224 @@ function f($a, $b) {
     assert_eq!(var("a", "$arg"), None);
     assert_eq!(var("a", "$a->run"), class("Foo"), "the right of `and`");
     assert_eq!(var("b", "$b->run"), None, "the right of `||` holds the failed test: set");
+}
+
+/// A property of a local is a place of that local, as one of `$this` is
+/// of the method's object: a guard on it narrows the member's receiver
+/// for dispatch, in the arm and after an early exit, until a write of the
+/// property or of the local, or the local handed on whole, may change it.
+#[cfg(feature = "php")]
+#[test]
+fn instanceof_narrows_a_property_of_a_local_for_dispatch() {
+    let src = "<?php
+class Base { public function run() {} }
+class Foo extends Base { public function run() {} }
+class Holder { public Base $b; }
+function f(Holder $h) {
+    if ($h->b instanceof Foo) {
+        $h->b->run();
+    }
+    $h->b->run();
+    if (!($h->b instanceof Foo)) return;
+    $h->b->run();
+    $h = new Holder();
+    $h->b->run();
+}
+function g(Holder $h) {
+    if ($h->b instanceof Foo) {
+        $h->b->run();
+        $h->b = new Base();
+        $h->b->run();
+    }
+    if ($h->b instanceof Foo) {
+        touch($h);
+        $h->b->run();
+    }
+}
+";
+    let fa = php(src);
+    let class = |c: &str| Some(c.to_string());
+    assert_eq!(
+        dispatch_rows(&fa, "run"),
+        [
+            (6, class("Foo")),
+            (8, class("Base")),
+            (10, class("Foo")),
+            (12, class("Base")),
+            (16, class("Foo")),
+            (18, class("Base")),
+            (22, class("Base")),
+        ]
+    );
+}
+
+/// `isset` and the null tests decide whether a local's property holds a
+/// value, as they do a property of `$this`.
+#[cfg(feature = "php")]
+#[test]
+fn a_null_test_on_a_property_of_a_local_is_the_null_value() {
+    let src = "<?php
+class Cache { public ?array $items; }
+function g(Cache $c) {
+    if (!isset($c->items)) { $first = 1; }
+    if ($c->items === null) { $second = 1; }
+    if ($c->items !== null) { $third = 1; } else { $fourth = 1; }
+    if (is_null($c->items)) { $fifth = 1; }
+    $last = 1;
+}
+";
+    let fa = php(src);
+    let c = fa.symbols().iter().find(|s| s.name == "c" && s.kind == SymKind::Variable).unwrap().id;
+    let items = crate::model::file_analysis::Place {
+        root: crate::model::file_analysis::Binding::Lexical(c),
+        path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
+    };
+    let ty = |needle| fa.place_type_at(&items, at(src, needle, 0), None);
+    let undef = Some(InferredType::Undef);
+    assert_eq!(ty("$first"), undef, "a property not set");
+    assert_eq!(ty("$second"), undef);
+    assert_eq!(ty("$third"), None, "a passing test proves nothing of an untyped property");
+    assert_eq!(ty("$fourth"), undef);
+    assert_eq!(ty("$fifth"), undef);
+    assert_eq!(ty("$last"), None, "nothing after the `if`");
+}
+
+/// A passing `isset`, `!== null` or `!is_null`, and a failed `=== null`,
+/// leave the subject what it held coming in without its null: a nullable
+/// local, parameter or property is its class there, a nullable union its
+/// other arms. Outside the test, and on a subject that was never nullable,
+/// nothing changes.
+#[cfg(feature = "php")]
+#[test]
+fn a_passing_null_test_strips_the_null() {
+    let src = "<?php
+class Foo { public function run() {} }
+class A { public function run() {} }
+class B { public function run() {} }
+function maybe(): ?Foo { return null; }
+class Holder {
+    public ?Foo $p;
+    public function m(?Foo $w, Foo $plain, A|B|null $u) {
+        $v = maybe();
+        if (isset($w)) { $w->run(); }
+        $w->run();
+        if ($v !== null) { $v->run(); }
+        if ($this->p === null) { $x = 1; } else { $this->p->run(); }
+        if (!is_null($this->p)) { $this->p->run(); }
+        $this->p->run();
+        if (isset($plain)) { $plain->run(); }
+        if ($u !== null) { $u->run(); }
+        $u->run();
+    }
+}
+function g(Holder $h) {
+    if (isset($h->p)) { $h->p->run(); }
+    $h->p->run();
+}
+";
+    let fa = php(src);
+    let mut rows: Vec<(usize, Option<InferredType>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None)))
+        .collect();
+    rows.sort_by_key(|(row, _)| *row);
+    let foo = || Some(InferredType::ClassName("Foo".into()));
+    let nullable = |t: Option<InferredType>| t.map(|t| InferredType::Optional(Box::new(t)));
+    let ab = || crate::model::file_analysis::join_all(
+        &[InferredType::ClassName("A".into()), InferredType::ClassName("B".into())],
+        &crate::model::file_analysis::LatticeRules::default(),
+    );
+    assert_eq!(
+        rows,
+        [
+            (9, foo()),
+            (10, nullable(foo())),
+            (11, foo()),
+            (12, foo()),
+            (13, foo()),
+            (14, nullable(foo())),
+            (15, foo()),
+            (16, ab()),
+            (17, nullable(ab())),
+            (21, foo()),
+            (22, nullable(foo())),
+        ]
+    );
+    // The variable itself, as hover reads it.
+    assert_eq!(fa.inferred_type_via_bag("w", at(src, "$w->run(); }", 0)), foo());
+    assert_eq!(fa.inferred_type_via_bag("w", at(src, "$w->run();\n", 0)), nullable(foo()));
+}
+
+/// `self`, `static` and `parent` on the right of `instanceof` name a class
+/// by where the guard is written: the class around it, the class around it
+/// again (the class the call is made on is that class or one beneath it),
+/// and the class it extends. Each is an identity, never respelled through
+/// the use-map. Outside a class they name none.
+#[cfg(feature = "php")]
+#[test]
+fn instanceof_self_static_and_parent_narrow_to_the_class_they_name() {
+    let src = "<?php
+namespace App;
+class Base { public function run() {} }
+class Mid extends Base {
+    private Base $b;
+    public function f($x, $y, $z) {
+        if ($x instanceof self) { $x->run(); }
+        if ($y instanceof static) { $y->run(); }
+        if ($z instanceof parent) { $z->run(); }
+        if ($this->b instanceof self) { $this->b->run(); }
+    }
+}
+function loose($w) {
+    if ($w instanceof self) { $w->run(); }
+}
+";
+    let fa = php(src);
+    let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(var("x", "$x->run"), class("App\\Mid"));
+    assert_eq!(var("y", "$y->run"), class("App\\Mid"));
+    assert_eq!(var("z", "$z->run"), class("App\\Base"));
+    assert_eq!(var("w", "$w->run"), None);
+    let dispatch: Vec<_> = dispatch_rows(&fa, "run").into_iter().filter(|(row, _)| *row == 9).collect();
+    assert_eq!(dispatch, [(9, Some("App\\Mid".to_string()))]);
+}
+
+/// A local's reference and its rename sit on its name, after the `$`,
+/// however its properties are read and guarded.
+#[cfg(feature = "php")]
+#[test]
+fn a_local_read_through_its_properties_is_referenced_by_its_name() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+function f(Holder $h) {
+    if ($h->b instanceof Foo) { $h->b->run(); }
+    $h = new Holder();
+    return $h;
+}
+";
+    let fa = php(src);
+    let mut vars: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable))
+        .map(|r| (r.span.start.row, r.span.start.column, r.span.end.column))
+        .collect();
+    vars.sort();
+    assert_eq!(vars, [(1, 19, 20), (2, 9, 10), (2, 33, 34), (3, 5, 6), (4, 12, 13)]);
+    let ws = Workspace::new(&[("locals.php", src)]);
+    assert_eq!(
+        ws.renames("locals.php", "$h)", 1),
+        [
+            site("locals.php", 1, 19),
+            site("locals.php", 2, 9),
+            site("locals.php", 2, 33),
+            site("locals.php", 3, 5),
+            site("locals.php", 4, 12),
+        ]
+    );
 }
 
 /// A write a guard proves lands where the member holds nothing is a lazy
@@ -3718,6 +4195,8 @@ class Query {
     public function maybe(): ?static {}
     public function again(): self {}
     public function query() {}
+    public function orNull(): static|null {}
+    public function nullOr(): null|static {}
 }
 class Users extends Query {
     public function active() {}
@@ -3726,11 +4205,14 @@ function run(Users $u) {
     $u->where()->active();
     $u->maybe()->active();
     $u->again()->query();
+    $u->orNull()->active();
+    $u->nullOr()->active();
 }
 ";
 
 /// A declared `static` return is the class the call is made on, nullable
-/// or not, and `self` the class the method is written in.
+/// (`?static`, `static|null`, `null|static`) or not, and `self` the class
+/// the method is written in.
 #[cfg(feature = "php")]
 #[test]
 fn a_static_return_is_the_class_the_call_is_made_on() {
@@ -3745,8 +4227,13 @@ fn a_static_return_is_the_class_the_call_is_made_on() {
             ("active", "Users"),
             ("again", "Users"),
             ("query", "Query"),
+            ("orNull", "Users"),
+            ("active", "Users"),
+            ("nullOr", "Users"),
+            ("active", "Users"),
         ])
     );
+    assert_eq!(fa.find_method_return_type("Query", "orNull", None, None), Some(T::ClassName("Query".into())));
     assert_eq!(fa.find_method_return_type("Users", "where", None, None), Some(T::ClassName("Users".into())));
     assert_eq!(fa.find_method_return_type("Query", "where", None, None), Some(T::ClassName("Query".into())));
     assert_eq!(fa.find_method_return_type("Users", "again", None, None), Some(T::ClassName("Query".into())));
@@ -3837,15 +4324,58 @@ function clock() { return new Clock(); }
     assert_eq!(fa.sub_return_type_at_arity("clock", Some(0)), clock, "a function");
 }
 
+/// A callable that yields returns a `Generator`, whatever its `return`
+/// says; a closure's or an arrow function's `yield` is its own, and a
+/// declared return still answers first.
+#[cfg(feature = "php")]
+#[test]
+fn a_callable_that_yields_returns_a_generator() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+namespace App;
+class Clock {}
+class Box {
+    public function gen() { yield 1; return new Clock(); }
+    public function delegates() { yield from [1, 2]; }
+    public function outer() {
+        $f = function () { yield 1; };
+        $g = fn() => yield 2;
+        return new Clock();
+    }
+    public function declared(): \\Iterator { yield 1; }
+    public function spelled(): \\Generator { return make(); }
+}
+function produce() { yield 1; }
+");
+    let generator = Some(T::ClassName("Generator".into()));
+    let ret = |m: &str| fa.find_method_return_type("App\\Box", m, None, None);
+    assert_eq!(ret("gen"), generator, "a `return` beside a `yield` types nothing");
+    assert_eq!(ret("delegates"), generator, "`yield from`");
+    assert_eq!(ret("outer"), Some(T::ClassName("App\\Clock".into())), "the closures yield, not the method");
+    assert_eq!(ret("declared"), Some(T::ClassName("Iterator".into())), "a declared return answers first");
+    assert_eq!(ret("spelled"), generator, "the class a written `\\Generator` names");
+    assert_eq!(fa.sub_return_type_at_arity("produce", Some(0)), generator, "a function");
+}
+
 /// The completion items at `|` in `src`, asked as the editor asks: the file
 /// indexed, the cursor's buffer the one written.
 #[cfg(feature = "php")]
 fn completions(src: &str) -> Vec<(String, Option<tower_lsp::lsp_types::CompletionItemKind>)> {
+    completion_items(src).into_iter().map(|i| (i.label, i.kind)).collect()
+}
+
+#[cfg(feature = "php")]
+fn completion_items(src: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    completion_items_in("complete.php", "php", src)
+}
+
+#[cfg(any(feature = "php", feature = "cpp"))]
+fn completion_items_in(path: &str, lang: &str, src: &str) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     let at = src.find('|').expect("a cursor");
     let src = format!("{}{}", &src[..at], &src[at + 1..]);
     let row = src[..at].matches('\n').count();
     let point = tree_sitter::Point { row, column: at - src[..at].rfind('\n').map_or(0, |n| n + 1) };
-    let path = std::path::PathBuf::from("complete.php");
+    let path = std::path::PathBuf::from(path);
     let driver = crate::build::language_driver::LanguageRegistry::compiled();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.insert_workspace_for_test(path.clone(), driver.for_path(&path).unwrap().analyze(&src));
@@ -3853,8 +4383,23 @@ fn completions(src: &str) -> Vec<(String, Option<tower_lsp::lsp_types::Completio
     let tree = driver.for_path(&path).unwrap().make_parser().parse(&src, None).unwrap();
     let store = crate::index::open_docs::OpenDocs::new();
     let canon = crate::util::canonical_path::CanonicalPath::fixture(path);
-    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, "php", Some(&canon), &idx);
-    items.into_iter().map(|i| (i.label, i.kind)).collect()
+    let (items, _) = crate::lsp::backend::pack_completion(&store, &fa, &src, &tree, point, lang, Some(&canon), &idx);
+    items
+}
+
+/// Every pack's member item replaces the member as written up to the
+/// cursor, not only php's: a C++ `w.wi|` item's edit covers `wi`.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_cpp_member_item_replaces_the_written_prefix() {
+    use tower_lsp::lsp_types::{CompletionTextEdit, Position, Range};
+    let items = completion_items_in("complete.cpp", "cpp", "struct W { int width; int height; };\nint f(W w) { return w.wi|; }\n");
+    let item = items.iter().find(|i| i.label == "width").expect("the member");
+    let range = |c0, c1| Range { start: Position { line: 1, character: c0 }, end: Position { line: 1, character: c1 } };
+    match &item.text_edit {
+        Some(CompletionTextEdit::Edit(e)) => assert_eq!((e.new_text.as_str(), e.range), ("width", range(22, 24))),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[cfg(feature = "php")]
@@ -3883,8 +4428,8 @@ class Kid extends Base {
 ";
 
 /// After `->` or `?->` a member is one of the object's methods or
-/// properties; after `::` one of the class's methods or constants, or
-/// `class`; after `::$` one of its static properties.
+/// properties; after `::` one of the class's methods, constants or static
+/// properties (written `$x`), or `class`.
 #[cfg(feature = "php")]
 #[test]
 fn member_completion_offers_what_the_operator_reaches() {
@@ -3894,14 +4439,120 @@ fn member_completion_offers_what_the_operator_reaches() {
     assert_eq!(at("$b?->|"), instance, "the nullsafe operator");
     assert_eq!(at("$this->|"), ["greet", "make", "next", "run", "shared"], "the class the method is written in");
     assert_eq!(at("$this->next->|"), ["greet", "make", "next", "run", "shared"], "a chain");
-    let statics = ["LIMIT", "class", "greet", "make"];
+    let statics = ["$count", "LIMIT", "class", "greet", "make"];
     assert_eq!(at("Base::|"), statics, "a class name");
     assert_eq!(at("parent::|"), statics, "the parent");
-    assert_eq!(at("self::|"), ["LIMIT", "class", "greet", "make", "run"], "the enclosing class");
-    assert_eq!(at("static::|"), ["LIMIT", "class", "greet", "make", "run"], "the called class");
+    assert_eq!(at("self::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "the enclosing class");
+    assert_eq!(at("static::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "the called class");
     assert_eq!(at("Base::make()->|"), instance, "a call on the class");
-    assert_eq!(at("self::$|"), ["count"], "a static property is written `::$x`");
     assert_eq!(at("$b->gr|eet();"), instance, "completing in place of a member");
+}
+
+/// A typed `$` writes the member as declared, so the access reaches only
+/// the namespaces whose members `::` writes so: static properties, never a
+/// method, a constant or `class`.
+#[cfg(feature = "php")]
+#[test]
+fn a_typed_dollar_offers_only_static_properties() {
+    let at = |hole: &str| labels(&SHAPES.replace("CURSOR", hole));
+    assert_eq!(at("self::$|"), ["$count"]);
+    assert_eq!(at("Base::$co|"), ["$count"]);
+    assert_eq!(at("self::|"), ["$count", "LIMIT", "class", "greet", "make", "run"], "nothing typed");
+}
+
+/// A `spelled` namespace lists every member it offers as declared, methods
+/// as well as fields, here and across files: the listing is the
+/// namespace's, not the member kind's.
+#[cfg(feature = "php")]
+#[test]
+fn a_spelled_namespace_lists_its_methods_as_declared() {
+    use crate::model::file_analysis::{MemberReach, SpaceSet};
+    let driver = crate::build::language_driver::LanguageRegistry::compiled().for_path(std::path::Path::new("x.php")).unwrap();
+    let declared = |src: &str, path: &str| {
+        let mut fa = driver.analyze_with_path(src, Some(std::path::Path::new(path)));
+        for sym in fa.symbols_mut() {
+            if matches!(sym.kind, SymKind::Method) {
+                sym.presentation.label = Some(format!("{}()", sym.name));
+            }
+        }
+        fa
+    };
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test("/w/Base.php".into(), declared("<?php\nclass Base { public static function make() {} }\n", "/w/Base.php"));
+    let fa = declared("<?php\nclass Kid extends Base { public static function build() {} }\n", "/w/Kid.php");
+    let method = fa.member_spaces().id_of("method").unwrap();
+    let reach = |spelled| MemberReach { spaces: SpaceSet::of(method), forward: SpaceSet::default(), spelled };
+    let labels = |spelled| {
+        let mut out: Vec<String> =
+            fa.complete_members_for_class("Kid", Some(&idx), None, false, Some(reach(spelled))).into_iter().map(|c| c.label).collect();
+        out.sort();
+        out
+    };
+    assert_eq!(labels(SpaceSet::of(method)), ["build()", "make()"], "local and cross-file");
+    assert_eq!(labels(SpaceSet::default()), ["build", "make"], "a namespace not spelled lists names");
+}
+
+/// A static property completes as written, `$` and all, whether or not the
+/// `$` is typed: the item replaces a typed `$`, never doubling it.
+#[cfg(feature = "php")]
+#[test]
+fn a_static_property_replaces_a_typed_dollar() {
+    use tower_lsp::lsp_types::{CompletionTextEdit, Position};
+    let edit = |hole: &str| {
+        let item = completion_items(&SHAPES.replace("CURSOR", hole)).into_iter().find(|i| i.label == "$count");
+        match item.and_then(|i| i.text_edit) {
+            Some(CompletionTextEdit::Edit(e)) => Some((e.new_text, e.range.start, e.range.end)),
+            _ => None,
+        }
+    };
+    let at = |col| Position { line: 12, character: col };
+    assert_eq!(edit("self::|"), Some(("$count".into(), at(14), at(14))), "nothing typed");
+    assert_eq!(edit("self::$|"), Some(("$count".into(), at(14), at(15))), "the `$` typed");
+    assert_eq!(edit("self::$co|"), Some(("$count".into(), at(14), at(17))), "a prefix typed");
+}
+
+/// `::` reaches an instance method only where the call forwards the object
+/// the calling code runs on: from an instance method (or a closure in one)
+/// of the class named or one it extends. Elsewhere only static methods are
+/// offered; constants, static properties and `class` everywhere.
+#[cfg(feature = "php")]
+#[test]
+fn an_instance_method_is_offered_after_double_colon_only_where_the_call_forwards() {
+    let src = "<?php
+namespace App;
+class Base {
+    const LIMIT = 3;
+    public static $count = 0;
+    public function greet() {}
+    public static function make() {}
+    public function look() { BASE }
+}
+class Kid extends Base {
+    public function run() { KID }
+    public static function build() { STATIC }
+}
+class Stranger {
+    public function run() { STRANGER }
+}
+function free() { FREE }
+";
+    let at = |hole: &str, cursor: &str| {
+        let mut s = src.to_string();
+        for h in ["BASE", "KID", "STATIC", "STRANGER", "FREE"] {
+            s = s.replace(h, if h == hole { cursor } else { "" });
+        }
+        labels(&s)
+    };
+    let forwarded = ["$count", "LIMIT", "class", "greet", "look", "make"];
+    let statics = ["$count", "LIMIT", "class", "make"];
+    assert_eq!(at("KID", "parent::|"), forwarded, "the parent, from an instance method");
+    assert_eq!(at("KID", "Base::|"), forwarded, "an ancestor by name");
+    assert_eq!(at("KID", "$f = function () { parent::| };"), forwarded, "a closure runs on the method's object");
+    assert_eq!(at("STATIC", "parent::|"), statics, "a static method runs on no object");
+    assert_eq!(at("STRANGER", "Base::|"), statics, "a class outside the lineage");
+    assert_eq!(at("BASE", "Kid::|"), ["$count", "LIMIT", "build", "class", "make"], "a descendant");
+    assert_eq!(at("FREE", "Base::|"), statics, "free code");
+    assert_eq!(at("FREE", "Stranger::|"), ["class"], "a class with nothing reachable still offers `class`");
 }
 
 #[cfg(feature = "php")]
@@ -3961,7 +4612,7 @@ fn a_protected_member_is_offered_in_its_class_and_descendants() {
         "the parent's protected methods and constants"
     );
     assert_eq!(at("STRANGER", "$b->|"), ["__construct", "greet", "here", "open"], "outside the family");
-    assert_eq!(at("STRANGER", "Base::|"), ["OPEN", "__construct", "class", "greet", "here"], "outside the family");
+    assert_eq!(at("STRANGER", "Base::|"), ["OPEN", "class"], "outside the family, instance methods unreached");
 }
 
 /// A parent names its child's protected members on a receiver typed as
@@ -4267,4 +4918,239 @@ fn a_construction_hovers_its_class_and_constructor() {
     let (_, ctor) = hover.split_once("\n\n---\n\n").unwrap_or_else(|| panic!("{hover}"));
     assert!(ctor.contains("public function __construct(int $level)"), "{ctor}");
     assert!(ctor.contains("*class Lib\\Handler*") && ctor.contains("Wrap a level.") && ctor.contains("Handler.php"), "{ctor}");
+}
+
+/// A free constant is a def in both of its spellings: a namespace-level
+/// `const` files under the namespace in force, `define` under the global
+/// namespace wherever it is written. Each is a constant, never a variable,
+/// and is filed for linkage under its namespaced identity.
+#[cfg(feature = "php")]
+#[test]
+fn a_free_constant_is_a_def_in_both_spellings() {
+    use crate::model::file_analysis::SymbolFlags;
+    let fa = php("<?php\nnamespace App;\nconst LIMIT = 3;\ndefine('MAX', 'x');\nclass C { const INNER = 1; }\n");
+    let constants: Vec<_> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.flags.contains(SymbolFlags::CONSTANT))
+        .map(|s| (s.name.clone(), s.package.clone(), fa.linkage_identity(s).into_owned()))
+        .collect();
+    assert_eq!(
+        constants,
+        [
+            ("LIMIT".to_string(), Some("App".to_string()), "App\\LIMIT".to_string()),
+            ("MAX".to_string(), None, "MAX".to_string()),
+        ]
+    );
+    assert!(fa.symbols().iter().filter(|s| s.flags.contains(SymbolFlags::CONSTANT)).all(|s| s.variable_decl().is_none()));
+}
+
+/// Within a file a constant's uses — bare and `\`-qualified — land on it, hover with its value's type, and
+/// rename together; `$LIMIT` is another name, and a function of the same
+/// name is another table.
+#[cfg(feature = "php")]
+#[test]
+fn a_free_constant_resolves_within_its_file() {
+    let src: &'static str = "<?php\nnamespace App;\nconst LIMIT = 3;\nfunction LIMIT() {}\n$LIMIT = 'x';\necho LIMIT;\necho \\App\\LIMIT;\nLIMIT();\necho $LIMIT;\n";
+    let ws = Workspace::new(&[("/fake/php/App/c.php", src)]);
+    for (needle, offset) in [("LIMIT;", 0), ("\\App\\LIMIT", 5)] {
+        assert_eq!(ws.defs("c.php", needle, offset), [site("c.php", 2, 6)], "{needle}");
+    }
+    assert_eq!(ws.defs("c.php", "LIMIT();\necho", 0), [site("c.php", 3, 9)], "the call is the function's");
+    assert_eq!(
+        ws.renames("c.php", "LIMIT = 3", 0),
+        [site("c.php", 2, 6), site("c.php", 5, 5), site("c.php", 6, 10)]
+    );
+    let idx = php_indexed(&[("/fake/php/App/c.php", src)]);
+    let hover = php_hover(&idx, "/fake/php/App/c.php", src, "LIMIT;", 0);
+    assert!(hover.contains("constant") && hover.contains("int"), "{hover}");
+}
+
+const PHP_LIB_CONSTS: (&str, &str) = ("/fake/php/Lib/consts.php", "<?php\nnamespace Lib;\nconst LIMIT = 3;\nconst ONLY = 1;\n");
+const PHP_OTHER_CONSTS: (&str, &str) = ("/fake/php/Other/consts.php", "<?php\nnamespace Other;\nconst LIMIT = 'x';\n");
+
+/// A constant is its namespace-qualified identity across files, as a
+/// function is: a `use const` row binds its leaf, a qualified spelling
+/// names one constant, a same-leaf constant of another namespace never
+/// answers for it, and one nothing indexed declares widens out loud.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_is_its_identity_across_files() {
+    use tree_sitter::Point;
+    let a = (
+        "/fake/php/App/a.php",
+        "<?php\nnamespace App;\nuse const Other\\LIMIT;\nfunction caller() {\n    return LIMIT . \\Lib\\LIMIT . ONLY;\n}\n",
+    );
+    let idx = php_indexed(&[PHP_LIB_CONSTS, PHP_OTHER_CONSTS, a]);
+    let lands = |at: Point| php_landing(&idx, a.0, at).0;
+    let other = [("Other/consts.php".to_string(), 2, None)];
+    assert_eq!(lands(Point::new(4, 11)), other, "a bare use through its `use const` row");
+    assert_eq!(lands(Point::new(2, 16)), other, "the row's own leaf");
+    assert_eq!(lands(Point::new(4, 24)), [("Lib/consts.php".to_string(), 2, None)], "a qualified use");
+    assert_eq!(
+        lands(Point::new(4, 32)),
+        [("Lib/consts.php".to_string(), 3, Some("widened: `Lib\\ONLY` stands in for `App\\ONLY`".to_string()))]
+    );
+    let msg = "nothing indexed declares `App\\ONLY`; resolved by its leaf to `Lib\\ONLY`".to_string();
+    assert_eq!(php_widening(&idx, a.0), [(4, 32, msg)]);
+
+    let ws = Workspace::new(&[PHP_LIB_CONSTS, PHP_OTHER_CONSTS, a]);
+    assert_eq!(
+        ws.renames("Other/consts.php", "LIMIT", 0),
+        [site("a.php", 2, 16), site("a.php", 4, 11), site("consts.php", 2, 6)]
+    );
+    assert_eq!(ws.renames("Lib/consts.php", "LIMIT", 0), [site("a.php", 4, 24), site("consts.php", 2, 6)]);
+}
+
+/// A bare constant looks up the namespace in force's constant first and
+/// the global one — `const` or `define` — only when the namespace
+/// declares none, across files.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_constant_tries_its_namespace_then_the_global_constant() {
+    use tree_sitter::Point;
+    let global = ("/fake/php/0/global.php", "<?php\nconst TWICE = 1;\ndefine('GONE', 2);\n");
+    let own = ("/fake/php/App/own.php", "<?php\nnamespace App;\nconst TWICE = 3;\n");
+    let b = ("/fake/php/App/b.php", "<?php\nnamespace App;\necho TWICE;\necho GONE;\necho \\TWICE;\n");
+    let g = ("/fake/php/0/g.php", "<?php\necho App\\TWICE;\n");
+    let idx = php_indexed(&[global, own, b, g]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(2, 5)).0, [("App/own.php".to_string(), 2, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(3, 5)).0, [("0/global.php".to_string(), 2, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(4, 6)).0, [("0/global.php".to_string(), 1, None)]);
+    assert!(php_widening(&idx, b.0).is_empty());
+    assert_eq!(php_landing(&idx, g.0, Point::new(1, 9)).0, [("App/own.php".to_string(), 2, None)], "namespace-qualified");
+    let ws = Workspace::new(&[global, own, b, g]);
+    assert_eq!(ws.renames("own.php", "TWICE", 0), [site("b.php", 2, 5), site("g.php", 1, 9), site("own.php", 2, 6)]);
+    assert_eq!(ws.renames("global.php", "TWICE", 0), [site("b.php", 4, 6), site("global.php", 1, 6)]);
+}
+
+/// `Foo::X` is the class's member, never a free constant of the same
+/// leaf; a builtin constant or literal names nothing indexed, so it has no
+/// definition, no rename and no diagnostic.
+#[cfg(feature = "php")]
+#[test]
+fn a_class_constant_and_a_builtin_are_no_free_constant() {
+    let src: &'static str = "<?php\nnamespace App;\nclass Foo { const X = 1; }\nconst X = 2;\necho Foo::X;\necho X . PHP_EOL;\n$t = true;\n$n = null;\n";
+    let ws = Workspace::new(&[("/fake/php/App/x.php", src)]);
+    assert_eq!(ws.defs("x.php", "X;\necho X", 0), [site("x.php", 2, 18)]);
+    assert_eq!(ws.defs("x.php", "X . PHP", 0), [site("x.php", 3, 6)]);
+    assert!(ws.defs("x.php", "PHP_EOL", 0).is_empty());
+    assert_eq!(ws.ask("x.php", "PHP_EOL", 0, |cs| cs.renameable()), Ok(false));
+    let idx = php_indexed(&[("/fake/php/App/x.php", src)]);
+    let fa = idx.workspace_file_for_test(std::path::Path::new("/fake/php/App/x.php")).unwrap();
+    let messages: Vec<String> = crate::lsp::symbols::collect_diagnostics(&fa, &idx, Default::default())
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
+/// `\f()` names the global function, whatever the namespace in force
+/// declares: the leading `\` skips the namespace rung.
+#[cfg(feature = "php")]
+#[test]
+fn a_global_qualified_call_reaches_the_global_function() {
+    use tree_sitter::Point;
+    let global = ("/fake/php/0/global.php", "<?php\nfunction f() {}\n");
+    let own = ("/fake/php/App/own.php", "<?php\nnamespace App;\nfunction f() {}\n");
+    let b = ("/fake/php/App/b.php", "<?php\nnamespace App;\n\\f();\nf();\n");
+    let idx = php_indexed(&[global, own, b]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(2, 1)).0, [("0/global.php".to_string(), 1, None)]);
+    assert_eq!(php_landing(&idx, b.0, Point::new(3, 0)).0, [("App/own.php".to_string(), 2, None)]);
+    let ws = Workspace::new(&[global, own, b]);
+    assert_eq!(ws.renames("global.php", "f()", 0), [site("b.php", 2, 1), site("global.php", 1, 9)]);
+}
+
+/// The narrowing builtins answer in their global-qualified spelling too —
+/// `\is_null`, `\die`, `\exit` — and a spelling qualified by any other
+/// namespace is somebody else's function.
+#[cfg(feature = "php")]
+#[test]
+fn a_global_qualified_builtin_narrows() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src = "<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f(?Foo $y) {\n    if (!\\is_null($y)) { $y->run(); }\n    if (!App\\is_null($y)) { $y->run(); }\n    if (!namespace\\is_null($y)) { $y->run(); }\n}\n";
+    let fa = php(src);
+    let mut rows: Vec<(usize, Option<InferredType>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None)))
+        .collect();
+    rows.sort_by_key(|(row, _)| *row);
+    let nullable = foo.clone().map(|t| InferredType::Optional(Box::new(t)));
+    assert_eq!(rows, [(4, foo.clone()), (5, nullable.clone()), (6, nullable)]);
+
+    for (body, exits) in [
+        ("\\die(\"x\");", true),
+        ("\\exit(1);", true),
+        ("Lib\\die(\"x\");", false),
+        ("namespace\\exit(1);", false),
+    ] {
+        let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
+        let fa = php(&src);
+        let want = if exits { foo.clone() } else { None };
+        assert_eq!(fa.inferred_type_via_bag("y", at(&src, "$y->run", 0)), want, "{body}");
+    }
+}
+
+/// A constant and a variable spelled alike in one scope are two bindings:
+/// each holds its own value, at its declaration's hover and at every read
+/// — a read written above the constant's declaration included.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_and_a_variable_of_one_name_hold_their_own_values() {
+    let src: &'static str = "<?php\nnamespace App;\nfunction early() { return LIMIT; }\nconst LIMIT = 3;\n$LIMIT = 'x';\n$a = LIMIT;\n$b = $LIMIT;\n$c = \\App\\LIMIT;\n$d = $LIMIT;\necho $d;\n";
+    let fa = php(src);
+    let int = fa.inferred_type_via_bag("a", at(src, "$b", 0));
+    let string = fa.inferred_type_via_bag("b", at(src, "$c", 0));
+    assert!(int.as_ref().is_some_and(InferredType::is_known) && string.as_ref().is_some_and(InferredType::is_known));
+    assert_ne!(int, string);
+    assert_eq!(fa.inferred_type_via_bag("c", at(src, "$d", 0)), int, "a qualified read");
+    assert_eq!(fa.inferred_type_via_bag("d", at(src, "echo $d", 0)), string, "the variable after the constant's reads");
+    assert_eq!(fa.sub_return_type_at_arity("early", None), int, "a read above the declaration");
+
+    let idx = php_indexed(&[("/fake/php/App/v.php", src)]);
+    let constant = php_hover(&idx, "/fake/php/App/v.php", src, "LIMIT = 3", 0);
+    let variable = php_hover(&idx, "/fake/php/App/v.php", src, "$LIMIT = 'x'", 1);
+    assert!(constant.contains("int") && !constant.contains("string"), "{constant}");
+    assert!(variable.contains("string") && !variable.contains("int"), "{variable}");
+    let read = php_hover(&idx, "/fake/php/App/v.php", src, "$LIMIT;\n$c", 1);
+    assert!(read.contains("string") && !read.contains("int"), "{read}");
+
+    // `define` binds its value the same way, from inside a function too.
+    let src = "<?php\nnamespace App;\nfunction boot() { define('MAX', 'x'); }\n$MAX = 1;\n$m = MAX;\necho $m;\n";
+    let fa = php(src);
+    assert_eq!(fa.inferred_type_via_bag("m", at(src, "echo $m", 0)), string);
+}
+
+/// A read of a constant another file declares holds that declaration's
+/// value: `\Lib\LIMIT`, a `use const` row's leaf and a bare read in the
+/// constant's namespace each, and a bare read its namespace declares
+/// nothing for holds the global `define`'s.
+#[cfg(feature = "php")]
+#[test]
+fn a_constant_read_holds_the_value_another_file_declares() {
+    let lib = ("/fake/php/Lib/limits.php", "<?php\nnamespace Lib;\nconst LIMIT = 3;\n");
+    let global = ("/fake/php/0/global.php", "<?php\ndefine('MAX', 'x');\n");
+    let qualified = ("/fake/php/App/q.php", "<?php\nnamespace App;\n$a = \\Lib\\LIMIT;\n$m = MAX;\necho $a;\n");
+    let imported = ("/fake/php/App/u.php", "<?php\nnamespace App;\nuse const Lib\\LIMIT;\n$a = LIMIT;\necho $a;\n");
+    let bare = ("/fake/php/Lib/b.php", "<?php\nnamespace Lib;\n$a = LIMIT;\necho $a;\n");
+    let idx = php_indexed(&[lib, global, qualified, imported, bare]);
+    let ty = |(path, src): (&str, &str), var: &str| {
+        use crate::build::language_driver::LanguageRegistry;
+        use crate::model::file_analysis::{CrossFileLookup, ScopedLookup};
+        let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
+        let base: &dyn CrossFileLookup = &idx;
+        let scoped = ScopedLookup::for_origin(base, &fa, None, LanguageRegistry::pack_visibility(&fa.language));
+        fa.inferred_type_via_bag_ctx(var, at(src, "echo", 0), Some(&scoped))
+    };
+    let numeric = Some(InferredType::Numeric);
+    assert_eq!(ty(qualified, "a"), numeric, "a qualified read");
+    assert_eq!(ty(imported, "a"), numeric, "a read through `use const`");
+    assert_eq!(ty(bare, "a"), numeric, "a bare read in the constant's namespace");
+    assert_eq!(ty(qualified, "m"), Some(InferredType::String), "the global fallback");
+    let hover = php_hover(&idx, qualified.0, qualified.1, "$a;", 1);
+    assert!(hover.contains("int"), "hover reads the same value: {hover}");
+    // the value is the declaring file's: this file alone states none
+    assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
 }

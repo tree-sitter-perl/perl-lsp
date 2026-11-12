@@ -29,7 +29,7 @@ so the callee is chosen at query time, never fixed when the file was built.
 The producer resolves the local half because it holds the symbol table, and
 a cross-file chase into a file whose symbols are evicted still finds the
 edge in that file's bag (rule #11). The cross-file half is one ladder,
-`ReducerRegistry::free_function_cross_file`: a module exporting the name,
+`ReducerRegistry::free_name_cross_file`: a module exporting the name,
 then a pack's linkage-visible definitions gated by include-closure
 reachability. `query_sub_return_type` walks the same ladder for a bare
 name, so a call and a name probe cannot disagree. The ladder shares the
@@ -73,21 +73,28 @@ extra, whatever the pattern.
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
   qualified pack call (`@ref.call` named by its `@ref.spelled`) mints
   no call value yet outside a use-map.
-- Under a use-map a free function is its namespace's
-  (`function_identity`): a qualified spelling (`@ref.call` under
-  `@ref.spelled`, php's `\Lib\f()`) resolves like a class spelling, and a
-  bare name is the namespace in force's own function when the file
-  declares one there, else the global one. The call's ref is pinned to
-  that namespace and `local` is that declaration; across files the name
-  is looked up by its leaf, so two namespaces' same-leaf functions can
-  answer for each other. php's `use function` rows are not read yet.
+- Under a use-map a free function is its namespace's identity
+  (`docs/prompt-class-identity.md`, "A free name is its identity too"): a
+  qualified spelling (`@ref.call` under `@ref.spelled`, php's `\Lib\f()`)
+  resolves like a class spelling, a `use function` row binds its leaf,
+  and a bare name walks `UseMap::free_name_ladder` — the namespace in
+  force's function, then the global one. The call's ref is pinned to the
+  first rung the file declares and `local` is that declaration; across
+  files each rung is looked up by its identity, and a call whose identity
+  nothing declares widens to its leaf out loud. A free constant
+  (`@ref.constant`) walks the same ladder in its own table; a read of one
+  the file does not declare is a `FreeValue` the registry looks up across
+  files on that ladder, asking the declaration what it holds
+  (`FreeAsk::Holds`) where a call asks what it returns.
 - A body elides its receiver where the document marks its scope
   `@scope.sub.implicit_receiver` and the body belongs to a method. There a
   bare call carries `member_of`, and a bare read the file can't resolve to
   a local projects the class's slot (`ValueHop` on `TypeName(class)`),
   pushed after the read's own `Variable` edge so a name no member answers
-  keeps that edge's value. Navigation still binds only members this file
-  declares (`TODO(implicit-receiver-nav)`).
+  keeps that edge's value. A body that runs on no object (a `static`
+  member function's) reads no bare INSTANCE member this file declares; its
+  static members and sibling calls still answer. Navigation still binds
+  only members this file declares (`TODO(implicit-receiver-nav)`).
 - A pack member call (`@ref.member.call` beside `@expr.call`) mints
   `Method` with `Lookup::Receiver` on the receiver's own `Expr`, so a chain
   (`w.get().spin()`) hops through each receiver's value. The dispatch
@@ -177,9 +184,16 @@ extra, whatever the pattern.
   `@parent.super` edge names (php's `parent`), resolved with the receiver
   mark of the same name. A callable that declares no return returns what
   its body returns (`@expr.return.value`), each site an arm of the nearest
-  callable around it, so a closure's `return` is the closure's.
-  TODO(generator-returns): a php or python function that yields returns a
-  generator whatever its `return` says; its arms do not know it yields.
+  callable around it, so a closure's `return` is the closure's. A site
+  marked `@expr.return.class` (a `yield`) makes that same nearest callable
+  return the class its pattern's `#set! return.class` names (php's
+  `Generator`, python's `typing.Generator`), whatever its `return` says:
+  it lands as the callable's value before the arms are read, so the arms
+  type nothing, and a declared return that types the callable still
+  answers first. A lambda is a callable of its own, so its `yield` never
+  makes the def around it a generator.
+  TODO(generator-elements): the generator is the bare class; what it
+  yields (`foreach` over it) is not yet its element type.
 - A receiver is typed by the value at its exact span. Every call states
   one at its whole span (Perl's builder and the packs' `@expr.call` alike),
   so under `f()->a->b` the receiver of `b` is `f()->a`, never `f`, the

@@ -87,14 +87,34 @@ in-scope completion only. The "don't splice into strings/comments" set
 A member written after an operator lives in some of the language's member
 namespaces (`member-kinds.md`), and the document says which: `@space.<name>`
 on the operator token. php's `->` and `?->` reach an object's methods and
-properties, `::` a class's methods and constants, and a `#set! member.word`
-on the same pattern adds a word that names no member (`Foo::class`). A
-token that states none (C++, Python) offers every namespace. Where the
-writer has put something between the operator and the name (php's `$` in
-`Foo::$x`), the access's form is chosen, so the namespaces its own name
-token searches are offered instead. Each namespace is gathered on its own
+properties, `::` a class's methods, constants and static properties, and a
+`#set! member.word` on the same pattern adds a word that names no member
+(`Foo::class`). A token that states none (C++, Python) offers every
+namespace. Each namespace is gathered on its own
 (`complete_members_for_class`), so a child shadows its parent within a
 namespace and php's `count()` and `$count` are two members.
+
+Two marks on the operator's namespaces (`capture-vocabulary.md`) shape what
+is offered. php's `::` reaches methods `.forward`: an instance method is
+offered only where the call would run on the object the cursor's code runs
+on, an instance method (or a closure in one) of the receiver's class or one
+it extends (`NamingSite::in_lineage`); elsewhere only static methods, since
+`Foo::m()` on an instance method is an Error. Whether the cursor's code runs
+on an object is the extractor's per-scope fact (`Scope::runs_on`, read
+through `FileAnalysis::runs_on_at`), the same one the `@ref.receiver` token
+reads, so a static method's body offers only static methods. A class left
+with nothing reachable still answers the operator's words (`Foo::class`).
+C++ states no `::` member access, so its `Foo::` is a qualified path and
+`&Foo::m` is unaffected. php's `::` reaches static properties `.spelled`:
+every member of a `.spelled` namespace, inherited and bridged ones
+included, is listed and inserted as declared (`$count`, the symbol's
+`listed_name`, minted by `@def.field.spelled`; `Symbol::offered_as`). Every
+member item replaces the member as written up to the cursor, from the
+`@member.spelled` token where the document states one (`Foo::$` parses the
+`$` into the member), so `Foo::` and `Foo::$` both complete to
+`Foo::$count`. A site whose member is written spelled reaches only the
+operator's `.spelled` namespaces, and no words: `Foo::$` offers static
+properties, never `class` or a method.
 
 ### A receiver the written buffer leaves untyped
 

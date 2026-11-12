@@ -16,14 +16,16 @@ use super::MemberRead;
 /// extractor minted: the place each name read denotes (its declaration, or
 /// a member of the elided receiver) and each member read's receiver.
 pub(crate) struct PackPlaces<'a> {
-    vars: HashMap<Span, Place>,
+    /// The place each name read denotes and the read's token, by the
+    /// read's value span — the span a member read names its receiver by.
+    vars: HashMap<Span, (Place, Span)>,
     members: HashMap<Span, &'a MemberRead>,
     /// The member read each receiver is read through, by the receiver.
     through: HashMap<Span, &'a MemberRead>,
 }
 
 impl<'a> PackPlaces<'a> {
-    pub(crate) fn new(vars: HashMap<Span, Place>, member_reads: &'a [MemberRead]) -> Self {
+    pub(crate) fn new(vars: HashMap<Span, (Place, Span)>, member_reads: &'a [MemberRead]) -> Self {
         PackPlaces {
             vars,
             members: member_reads.iter().map(|m| (m.span, m)).collect(),
@@ -40,7 +42,7 @@ impl<'a> PackPlaces<'a> {
         // Each hop steps to a receiver inside the access; a macro remap can
         // fold spans onto one another, so the hops are bounded.
         for _ in 0..=self.members.len() {
-            if let Some(base) = self.vars.get(&at) {
+            if let Some((base, _)) = self.vars.get(&at) {
                 steps.reverse();
                 let mut place = base.clone();
                 place.path.extend(steps);
@@ -90,7 +92,7 @@ impl<'a> PackPlaces<'a> {
                 add(lands, Access::Write, place);
             }
         }
-        for (&span, base) in &self.vars {
+        for (&span, (base, _)) in &self.vars {
             if !self.through.contains_key(&span) {
                 add(span.start, Access::Opaque, base.clone());
             }
@@ -114,9 +116,9 @@ impl<'a> PackPlaces<'a> {
         let mut reads: Vec<Span> = self
             .vars
             .iter()
-            .filter(|(_, base)| base.root == place.root)
-            .filter(|(span, base)| self.read_through(**span, base).reads_into(place))
-            .map(|(span, _)| *span)
+            .filter(|(_, (base, _))| base.root == place.root)
+            .filter(|(span, (base, _))| self.read_through(**span, base).reads_into(place))
+            .map(|(_, &(_, token))| token)
             .collect();
         reads.sort_by_key(|s| s.start);
         reads

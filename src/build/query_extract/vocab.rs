@@ -14,7 +14,10 @@ macro_rules! spelled {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum $name { $($(#[$vm])* $var),* }
         impl $name {
+            /// Every word, for a test that checks the whole vocabulary; an
+            /// enum no such test reads leaves it unused.
             #[cfg(test)]
+            #[allow(dead_code)]
             pub const ALL: &'static [Self] = &[$($name::$var),*];
             pub fn spelling(self) -> &'static str {
                 match self { $($name::$var => $s),* }
@@ -96,6 +99,9 @@ spelled! {
         SetPublic = "set_public",
         SetProtected = "set_protected",
         SetPrivate = "set_private",
+        /// A free constant (php's namespace `const X`, `define('X', …)`):
+        /// it binds in its language's constant table, never as a variable.
+        Constant = "constant",
     }
 }
 
@@ -121,6 +127,11 @@ spelled! {
         /// A token naming the object the enclosing method runs on (php's
         /// `$this`): a read of that receiver, bound to the method.
         Receiver = "receiver",
+        /// A name read as a free constant (php's `LIMIT`, `\Lib\LIMIT`,
+        /// a `use const` row's leaf): a reference to the constant the
+        /// language's constant table names there, as a call's is to the
+        /// function its function table names.
+        Constant = "constant",
     }
 }
 
@@ -233,6 +244,10 @@ spelled! {
         /// the write initialises it, never overwrites it. The place's own
         /// `Place` capture makes it a write.
         Init = "init",
+        /// A statement that leaves its block unconditionally (a return, a
+        /// throw, a `break`): nothing after it in the block runs. Which
+        /// arms of a condition fall through follows by containment.
+        Leaves = "leaves",
     }
 }
 
@@ -257,6 +272,11 @@ pub enum ExprCap {
     /// (php's `x` in `$x`): the reference is the name, the value the node.
     ReadVarName,
     ReturnValue,
+    /// A site that makes the nearest callable around it return the class
+    /// its pattern's `#set! return.class` names, whatever its `return`
+    /// sites say (php's and python's `yield`). A declared return still
+    /// answers first.
+    ReturnClass,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
     /// A member value read (`recv.field`): its `@member.recv` and
@@ -314,9 +334,10 @@ spelled! {
         Then = "then",
         /// What runs where the condition fails.
         Else = "else",
-        /// A statement that leaves its block unless the condition fails: the
-        /// rest of the block runs where it fails.
-        Exit = "exit",
+        /// A position match's construct that tests its condition again
+        /// after each run of its arm (a loop): a `break` in the arm lands
+        /// after it too, so its arms decide nothing about what follows.
+        Loop = "loop",
     }
 }
 
@@ -336,7 +357,62 @@ spelled! {
         /// receiver: the token says only where the lookup starts (php's
         /// `self::m()` and `parent::m()`, which forward the called class).
         Forward = "forward",
+        /// The member as written, sigil and all (php's `$x` in `Foo::$x`):
+        /// what a completion there replaces.
+        Spelled = "spelled",
     }
+}
+
+spelled! {
+    /// What a `@space.<name>.<mark>` says of the namespace beside naming it.
+    pub enum SpaceMark {
+        /// On a member's name token: the site reaches the namespace only
+        /// wrongly (php's `$obj->x` finding a static `$x`).
+        Illegal = "illegal",
+        /// On an operator: an instance member of the namespace is reached
+        /// through it only on the object the site already runs on, from an
+        /// instance method of the receiver's class or one it extends (php's
+        /// `parent::m()`); elsewhere only a static one.
+        Forward = "forward",
+        /// On an operator: a member of the namespace is written after it as
+        /// it is declared (php's `Foo::$x`).
+        Spelled = "spelled",
+    }
+}
+
+impl SpaceMark {
+    /// What the mark is said of, so what the document puts it on: a member
+    /// name's mark on the node that names the member, an operator's on the
+    /// token the document spells.
+    fn sits_on(self) -> crate::build::query_predicates::StepShape {
+        use crate::build::query_predicates::StepShape;
+        match self {
+            SpaceMark::Illegal => StepShape::Node,
+            SpaceMark::Forward | SpaceMark::Spelled => StepShape::Spelled,
+        }
+    }
+}
+
+/// Every `@space.<name>.<mark>` a document states sits on what its mark is
+/// said of, as the document writes the step it captures (`SpaceMark::sits_on`),
+/// so a mark in the wrong place fails the compile instead of being read
+/// nowhere.
+pub(super) fn check_space_marks(source: &str) -> Result<(), String> {
+    for site in crate::build::query_predicates::capture_sites(source).unwrap_or_default() {
+        let Some(mark) = site.name.strip_prefix("space.").and_then(|rest| SpaceMark::parse(rest.rsplit_once('.')?.1)) else {
+            continue;
+        };
+        if let Some(&on) = site.on.iter().find(|&&on| on != mark.sits_on()) {
+            let line = source[..site.at].matches('\n').count() + 1;
+            return Err(format!(
+                "line {line}: @{} is on {}, but a .{mark} mark goes on {}",
+                site.name,
+                on.described(),
+                mark.sits_on().described()
+            ));
+        }
+    }
+    Ok(())
 }
 
 spelled! {
@@ -361,6 +437,10 @@ spelled! {
         /// A word written after the member operator the pattern captures
         /// that names no member (php's `Foo::class`).
         MemberWord = "member.word",
+        /// The class an `@expr.return.class` site makes its callable
+        /// return, by identity: the language's own class, never a
+        /// spelling the file's imports resolve.
+        ReturnClass = "return.class",
     }
 }
 
@@ -574,6 +654,9 @@ pub enum Capture {
     /// in (php's `use (&$x)` creates `$x` in the function around the
     /// closure).
     DefHoist,
+    /// The match's def is named from the global namespace, whatever
+    /// namespace it is written in (php's `define('X', 1)` declares `\X`).
+    DefGlobal,
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
@@ -649,9 +732,9 @@ pub enum Capture {
     DocOf,
     /// A member namespace the declaration or member site at this token
     /// lives in or may land in, by the pack's own namespace names
-    /// (`@space.<name>`, `@space.<name>.illegal`). Resolved against the
+    /// (`@space.<name>`, `@space.<name>.<mark>`). Resolved against the
     /// pack's `MemberSpaces` when its document compiles.
-    Space { id: crate::model::file_analysis::NamespaceId, illegal: bool },
+    Space { id: crate::model::file_analysis::NamespaceId, mark: Option<SpaceMark> },
     /// A field typed by an anonymous aggregate.
     AnonAggMember,
     /// The node a pattern's links start from, and the walk they belong to.
@@ -684,6 +767,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", "pair"] => C::DefPair,
             ["def", "hoist"] => C::DefHoist,
+            ["def", "global"] => C::DefGlobal,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
@@ -710,6 +794,7 @@ impl Capture {
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
             ["expr", "read", "var", "name"] => C::Expr(ExprCap::ReadVarName),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
+            ["expr", "return", "class"] => C::Expr(ExprCap::ReturnClass),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
             ["expr", "construct"] => C::Expr(ExprCap::Construct),
@@ -768,6 +853,7 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Anchor } => write!(f, "def.{kind}.anchor"),
             C::DefPair => f.write_str("def.pair"),
             C::DefHoist => f.write_str("def.hoist"),
+            C::DefGlobal => f.write_str("def.global"),
             C::ClosureCapture => f.write_str("closure.capture"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
@@ -786,6 +872,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
             C::Expr(ExprCap::ReadVarName) => f.write_str("expr.read.var.name"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
+            C::Expr(ExprCap::ReturnClass) => f.write_str("expr.return.class"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
             C::Expr(ExprCap::Construct) => f.write_str("expr.construct"),
@@ -819,7 +906,7 @@ impl fmt::Display for Capture {
             C::NsInline => f.write_str("ns.inline"),
             C::Doc => f.write_str("doc"),
             C::DocOf => f.write_str("doc.of"),
-            C::Space { id, illegal } => write!(f, "space#{}{}", id.0, if illegal { ".illegal" } else { "" }),
+            C::Space { id, mark } => write!(f, "space#{}{}", id.0, mark.map(|m| format!(".{m}")).unwrap_or_default()),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),
             C::Deref(k) => write!(f, "deref.{k}"),
@@ -845,11 +932,11 @@ pub(super) fn capture_table(
             // A namespace is the pack's own word, so it resolves against
             // the pack's declared names, never the closed vocabulary.
             if let Some(rest) = n.strip_prefix("space.") {
-                let (name, illegal) = match rest.strip_suffix(".illegal") {
-                    Some(name) => (name, true),
-                    None => (rest, false),
+                let (name, mark) = match rest.rsplit_once('.').and_then(|(name, m)| Some((name, SpaceMark::parse(m)?))) {
+                    Some((name, mark)) => (name, Some(mark)),
+                    None => (rest, None),
                 };
-                return spaces.id_of(name).map(|id| Some(Capture::Space { id, illegal })).ok_or_else(|| UnknownCapture(n.to_string()));
+                return spaces.id_of(name).map(|id| Some(Capture::Space { id, mark })).ok_or_else(|| UnknownCapture(n.to_string()));
             }
             Capture::parse(n).map(Some)
         })
@@ -956,6 +1043,7 @@ impl MarkCap {
             MarkCap::SetPublic => F::SET_PUBLIC,
             MarkCap::SetProtected => F::SET_PROTECTED,
             MarkCap::SetPrivate => F::SET_PRIVATE,
+            MarkCap::Constant => F::CONSTANT,
         }
     }
 }

@@ -115,12 +115,11 @@ impl crate::cst::PlaceBinder for SurveyBinder<'_, '_, '_> {
 pub(super) enum NarrowOp {
     /// `isa` / `ref…eq` prove a concrete type.
     To(InferredType),
-    /// `defined` / `blessed` strip `Optional<T>` to `T`. The strip reads
-    /// the subject's incoming type, so it can only run once that type has
-    /// converged (a re-emittable fold pass); `query_point` is the subject's
-    /// location IN THE GUARD — before the narrowed region, so the read
-    /// sees the un-narrowed `Optional`, not the pass's own output.
-    StripOptional { query_point: Point },
+    /// `defined` / `blessed` prove the value the guard `read` once set: the
+    /// region holds `Projected { base: Expr(read), step: Defined }`, an edge
+    /// the registry resolves when asked. The read sits in the guard, outside
+    /// every region the guard decides, so it never reads its own narrowing.
+    Defined { read: Span },
     /// The tag a [`NarrowSubject::TagOf`] holds equals this literal.
     TagEq(String),
 }
@@ -134,7 +133,21 @@ impl NarrowOp {
     fn negated(&self) -> Option<NarrowOp> {
         match self {
             NarrowOp::To(_) | NarrowOp::TagEq(_) => None,
-            NarrowOp::StripOptional { .. } => Some(NarrowOp::To(InferredType::Undef)),
+            NarrowOp::Defined { .. } => Some(NarrowOp::To(InferredType::Undef)),
+        }
+    }
+
+    /// The region's value as a witness payload, for an op that states one
+    /// at walk time; a tag guard's waits for its tag to fold.
+    fn payload(self) -> Option<crate::model::witnesses::WitnessPayload> {
+        use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+        match self {
+            NarrowOp::To(ty) => Some(WitnessPayload::InferredType(ty)),
+            NarrowOp::Defined { read } => Some(WitnessPayload::Projected {
+                base: WitnessAttachment::Expr(read),
+                step: ProjectionStep::Defined,
+            }),
+            NarrowOp::TagEq(_) => None,
         }
     }
 }
@@ -142,13 +155,15 @@ impl NarrowOp {
 /// A recognized guard fact: the subject, what the guard proves, and
 /// whether the proof holds where the guard *expression* is TRUE (`!`
 /// flips it).
-pub(super) struct GuardFact {
+pub(super) struct GuardFact<'a> {
     subject: NarrowSubject,
     op: NarrowOp,
     asserts_when_true: bool,
+    /// The subject's read in the guard.
+    read: Node<'a>,
 }
 
-impl GuardFact {
+impl GuardFact<'_> {
     /// The op to emit in a region where the guard holds iff the guard
     /// expression is `holds`: the fact's own op when the polarity matches
     /// (positive narrowing), else its negation (which may be
@@ -160,16 +175,6 @@ impl GuardFact {
             self.op.negated()
         }
     }
-}
-
-/// A pending `defined`/`blessed` narrowing — its `Optional<T> → T` strip
-/// is re-derived each fold iteration once the subject type converges.
-#[derive(Clone)]
-pub(super) struct DefinedNarrowing {
-    subject: Place,
-    scope: ScopeId,
-    region: Span,
-    query_point: Point,
 }
 
 /// A pending tag guard (`$ref eq 'ARRAY'`): re-derived each fold iteration,
@@ -281,7 +286,7 @@ fn logical_shape<'a>(cond: Node<'a>, source: &[u8]) -> Option<Logical<'a>> {
 /// and the other two outcomes say nothing about either side alone.
 /// `builder` is threaded so recognizers can consult constant-fold state (a
 /// folded class name in `$x->isa($CLASS)`).
-fn facts_for_region<'a>(builder: &Builder<'a>, cond: Node<'a>, holds: bool) -> Vec<(NarrowSubject, NarrowOp)> {
+fn facts_for_region<'a>(builder: &Builder<'a>, cond: Node<'a>, holds: bool) -> Vec<(NarrowSubject, NarrowOp, Node<'a>)> {
     // Peel transparent `(...)` / single-element list wrappers up front, so
     // `if (($x->isa('Foo')))` and nested grouping fall through to the real
     // condition — one shared primitive instead of a per-shape arm.
@@ -293,21 +298,35 @@ fn facts_for_region<'a>(builder: &Builder<'a>, cond: Node<'a>, holds: bool) -> V
     };
     match logical_shape(cond, builder.source) {
         Some(Logical::Not(x)) => facts_for_region(builder, x, !holds),
-        Some(Logical::And(l, r)) if holds => both(l, r, true),
-        Some(Logical::Or(l, r)) if !holds => both(l, r, false),
+        Some(Logical::And(l, r)) if holds => conjoin(both(l, r, true)),
+        Some(Logical::Or(l, r)) if !holds => conjoin(both(l, r, false)),
         Some(Logical::And(..) | Logical::Or(..)) => Vec::new(),
         None => recognize_atom(builder, cond)
-            .and_then(|f| f.op_for_region(holds).map(|op| (f.subject, op)))
+            .and_then(|f| f.op_for_region(holds).map(|op| (f.subject, op, f.read)))
             .into_iter()
             .collect(),
     }
+}
+
+/// Facts that hold together. A type a conjunct proves is already defined,
+/// so it subsumes a `defined` of the same subject (`blessed($x) &&
+/// $x->isa('Foo')` holds `Foo`): two regions on one span would otherwise
+/// tie, and the reducer keeps whichever came first.
+fn conjoin<'a>(mut facts: Vec<(NarrowSubject, NarrowOp, Node<'a>)>) -> Vec<(NarrowSubject, NarrowOp, Node<'a>)> {
+    let typed: Vec<Place> = facts
+        .iter()
+        .filter(|(_, op, _)| matches!(op, NarrowOp::To(t) if !t.may_be_undef()))
+        .map(|(s, _, _)| s.subject().clone())
+        .collect();
+    facts.retain(|(s, op, _)| !(matches!(op, NarrowOp::Defined { .. }) && typed.contains(s.subject())));
+    facts
 }
 
 /// Every guard literal in `cond` — an atom plus the negations applied
 /// directly to it — with the literal's node. A negation over a connective
 /// does not reach the atoms inside it (`!(A && B)` says nothing about A
 /// alone), so each literal's polarity is its own.
-fn guard_literals<'a>(builder: &Builder<'a>, cond: Node<'a>, out: &mut Vec<(GuardFact, Node<'a>)>) {
+fn guard_literals<'a>(builder: &Builder<'a>, cond: Node<'a>, out: &mut Vec<(GuardFact<'a>, Node<'a>)>) {
     let cond = crate::cst::peel_groups(cond);
     if let Some(fact) = guard_literal(builder, cond) {
         out.push((fact, cond));
@@ -323,7 +342,7 @@ fn guard_literals<'a>(builder: &Builder<'a>, cond: Node<'a>, out: &mut Vec<(Guar
     }
 }
 
-fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact> {
+fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<'a>> {
     let cond = crate::cst::peel_groups(cond);
     match logical_shape(cond, builder.source) {
         Some(Logical::Not(x)) => guard_literal(builder, x).map(|mut f| {
@@ -336,7 +355,7 @@ fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact>
 }
 
 /// The guard fact a single (non-connective) condition states, if any.
-fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact> {
+fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<'a>> {
     let source = builder.source;
     match cond.kind() {
         "method_call_expression" => recognize_isa_guard(builder, cond, source),
@@ -350,43 +369,46 @@ fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact
 }
 
 /// `defined $x` / `defined($x)` → strip `Optional` off the subject.
-fn recognize_defined_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact> {
+fn recognize_defined_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact<'a>> {
     if call.child(0)?.utf8_text(source).ok()? != "defined" {
         return None;
     }
     let arg = func1op_subject_arg(call)?;
     Some(GuardFact {
         subject: builder.narrow_subject_of(arg)?,
-        op: NarrowOp::StripOptional { query_point: arg.start_position() },
+        op: NarrowOp::Defined { read: node_to_span(arg) },
         asserts_when_true: true,
+        read: arg,
     })
 }
 
 /// `blessed $x` / `blessed($x)` → strip `Optional` off the subject (v1
 /// treats `blessed` as `defined`'s strip; the extra "is an object"
 /// precision has no lattice target yet).
-fn recognize_blessed_guard<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<GuardFact> {
+fn recognize_blessed_guard<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<GuardFact<'a>> {
     let (via, arg) = builder.ref_tag_call(call)?;
     if via != crate::model::file_analysis::RefTagFn::Blessed {
         return None;
     }
     Some(GuardFact {
         subject: builder.narrow_subject_of(arg)?,
-        op: NarrowOp::StripOptional { query_point: arg.start_position() },
+        op: NarrowOp::Defined { read: node_to_span(arg) },
         asserts_when_true: true,
+        read: arg,
     })
 }
 
 /// `$x->isa('Foo')` / `$x->DOES('Role')` → narrow `$x` to `ClassName`.
 /// The class argument is a string literal, or a scalar that the builder's
 /// constant fold pins to a single class (`my $C = 'Foo'; $x->isa($C)`).
-fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact> {
+fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact<'a>> {
     let mc = crate::cst::MethodCall::cast(call)?;
     let method = mc.method()?.utf8_text(source).ok()?;
     if method != "isa" && method != "DOES" {
         return None;
     }
-    let subject = builder.narrow_subject_of(mc.invocant()?)?;
+    let read = mc.invocant()?;
+    let subject = builder.narrow_subject_of(read)?;
     let arg = call.child_by_field_name("arguments")?;
     let class = crate::cst::plain_string_literal_text(arg, source)
         .or_else(|| builder.folded_class_name_arg(arg))
@@ -395,6 +417,7 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
         subject,
         op: NarrowOp::To(InferredType::ClassName(class)),
         asserts_when_true: true,
+        read,
     })
 }
 
@@ -403,7 +426,7 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
 /// `__PACKAGE__` proves the enclosing class. A scalar compared to a
 /// literal (`$ref eq 'ARRAY'`) is a guard on whatever tag it holds —
 /// resolved once its value folds (`emit_tag_narrowing_witnesses`).
-fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]) -> Option<GuardFact> {
+fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]) -> Option<GuardFact<'a>> {
     if raw_mid_op(eq, source) != "eq" {
         return None;
     }
@@ -419,6 +442,7 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
             subject: builder.narrow_subject_of(operand)?,
             op: NarrowOp::To(ty),
             asserts_when_true: true,
+            read: operand,
         });
     }
     let tagged = |var: Node<'a>, lit: Node<'a>| {
@@ -428,18 +452,22 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
         }
         let name = crate::cst::canonical_var_name(var, source)?;
         let place = Place::variable(builder.binding_key_here(&name, var.start_position()));
-        Some((place, crate::cst::plain_string_literal_text(lit, source)?))
+        Some((place, crate::cst::plain_string_literal_text(lit, source)?, var))
     };
-    let (var, lit) = tagged(left, right).or_else(|| tagged(right, left))?;
-    Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true })
+    let (var, lit, read) = tagged(left, right).or_else(|| tagged(right, left))?;
+    Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true, read })
 }
 
 /// True if an expression is a guaranteed control-flow exit
-/// (`return`/`die`/`croak`/`last`/`next`/`redo`/`goto`): it never yields a
-/// value, so `STMT if/unless G` narrows the rest of the block and
-/// `X || EXIT` is worth only `X`.
+/// (`return`/`die`/`exit`/`croak`/`last`/`next`/`redo`/`goto`): it never
+/// yields a value, so `STMT if/unless G` narrows the rest of the block and
+/// `X || EXIT` is worth only `X`. The words are read by spelling, so a sub
+/// of the file's own named `croak` counts too.
+// TODO(noreturn-callee): a callee that never returns (`croak`, `confess`)
+// is an effect on the callee; replace the spelling lookup once effects and
+// the CFG exist.
 pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
-    const EXITS: [&str; 7] = ["die", "croak", "confess", "last", "next", "redo", "goto"];
+    const EXITS: [&str; 8] = ["die", "exit", "croak", "confess", "last", "next", "redo", "goto"];
     match node.kind() {
         "return_expression" | "last_expression" | "next_expression" | "redo_expression" => true,
         "function" | "bareword" => node
@@ -454,6 +482,26 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
             .and_then(|n| n.utf8_text(source).ok())
             .map(|s| EXITS.contains(&s.trim()))
             .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// True if `block` never falls through: one of its statements leaves,
+/// wherever it sits, so what follows it there is dead.
+fn block_leaves(block: Node, source: &[u8]) -> bool {
+    use crate::cst::NodeExt;
+    block.elements().any(|stmt| statement_leaves(stmt, source))
+}
+
+/// True if a statement leaves its block: an exit, or a conditional with an
+/// `else` whose every arm leaves.
+fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
+    match stmt.kind() {
+        "expression_statement" => crate::cst::nth_element(stmt, 0).is_some_and(|e| is_exit_expression(e, source)),
+        "conditional_statement" => {
+            let arms = crate::cst::conditional_arms(stmt);
+            arms.last().is_some_and(|arm| arm.cond.is_none()) && arms.iter().all(|arm| block_leaves(arm.block, source))
+        }
         _ => false,
     }
 }
@@ -516,7 +564,10 @@ impl<'a> Builder<'a> {
     /// negations survive — `defined`/`blessed` complement to `Undef`, while
     /// `isa`/`ref-eq` have no positive complement (stay wide). The `else`
     /// arm is pure cumulative negation; an `elsif` arm combines its own
-    /// guard with the priors' negation.
+    /// guard with the priors' negation. A chain with no `else` has an
+    /// implicit one. Where exactly one arm falls through (`block_leaves`),
+    /// the rest of the enclosing block runs where that arm does; where none
+    /// does it never runs, and two or more join (`TODO(cfg-exit-join)`).
     pub(super) fn narrow_block_guard(&mut self, cond_stmt: Node<'a>) {
         let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = crate::cst::conditional_arms(cond_stmt)
             .into_iter()
@@ -525,31 +576,57 @@ impl<'a> Builder<'a> {
 
         for k in 0..arms.len() {
             let (own_cond, blk, enter) = arms[k];
-            let region = node_to_span(blk);
-            // The arm's own guard is the more direct statement about a
-            // subject; a prior arm's negation must not override it.
-            let mut covered: Vec<Place> = Vec::new();
+            // Record the arm's own guard once (not the priors re-walked
+            // for cumulative negation) — D3/D4 want each condition once.
             if let Some(c) = own_cond {
-                // Record the arm's own guard once (not the priors re-walked
-                // for cumulative negation) — D3/D4 want each condition once.
                 self.record_guard_sites(c);
-                for (subject, op) in facts_for_region(self, c, enter) {
-                    covered.push(subject.subject().clone());
-                    self.emit_narrowing_fact(&subject, op, region);
-                }
             }
-            for &(prior_cond, _, prior_enter) in &arms[..k] {
-                let Some(prior_cond) = prior_cond else { continue };
-                // A prior arm not taken means its condition held at the
-                // opposite of its enter polarity.
-                for (subject, op) in facts_for_region(self, prior_cond, !prior_enter) {
-                    let key = subject.subject().clone();
-                    if covered.contains(&key) {
-                        continue;
-                    }
-                    covered.push(key);
-                    self.emit_narrowing_fact(&subject, op, region);
+            self.narrow_chain_arm(own_cond.map(|c| (c, enter)), &arms[..k], node_to_span(blk));
+        }
+        let mut falling: Vec<Option<usize>> =
+            (0..arms.len()).filter(|&k| !block_leaves(arms[k].1, self.source)).map(Some).collect();
+        if arms.last().is_some_and(|arm| arm.0.is_some()) {
+            falling.push(None);
+        }
+        if let [arm] = falling[..] {
+            let (own, priors) = match arm {
+                Some(k) => (arms[k].0.map(|c| (c, arms[k].2)), &arms[..k]),
+                None => (None, &arms[..]),
+            };
+            if let Some(region) = self.block_remainder(cond_stmt) {
+                self.narrow_chain_arm(own, priors, region);
+            }
+        }
+    }
+
+    /// Narrow `region`, which runs where the arm's own condition is as
+    /// given and every prior arm was not taken.
+    fn narrow_chain_arm(
+        &mut self,
+        own: Option<(Node<'a>, bool)>,
+        priors: &[(Option<Node<'a>>, Node<'a>, bool)],
+        region: Span,
+    ) {
+        // The arm's own guard is the more direct statement about a
+        // subject; a prior arm's negation must not override it.
+        let mut covered: Vec<Place> = Vec::new();
+        if let Some((c, enter)) = own {
+            for (subject, op, read) in facts_for_region(self, c, enter) {
+                covered.push(subject.subject().clone());
+                self.emit_narrowing_fact(&subject, op, read, region);
+            }
+        }
+        for &(prior_cond, _, prior_enter) in priors {
+            let Some(prior_cond) = prior_cond else { continue };
+            // A prior arm not taken means its condition held at the
+            // opposite of its enter polarity.
+            for (subject, op, read) in facts_for_region(self, prior_cond, !prior_enter) {
+                let key = subject.subject().clone();
+                if covered.contains(&key) {
+                    continue;
                 }
+                covered.push(key);
+                self.emit_narrowing_fact(&subject, op, read, region);
             }
         }
     }
@@ -569,7 +646,7 @@ impl<'a> Builder<'a> {
         for (fact, literal) in literals {
             let predicate = match &fact.op {
                 NarrowOp::To(ty) => GuardPredicate::IsType(ty.clone()),
-                NarrowOp::StripOptional { .. } => GuardPredicate::Defined,
+                NarrowOp::Defined { .. } => GuardPredicate::Defined,
                 // What it proves is a fold answer; D3/D4 read the prior
                 // type at the guard, which a tag guard has no subject for.
                 NarrowOp::TagEq(_) => continue,
@@ -610,8 +687,11 @@ impl<'a> Builder<'a> {
             return;
         }
         self.narrow_arm(condition, modified, runs_when_true);
-        if !is_loop && is_exit_expression(modified, self.source) {
-            self.narrow_block_remainder(postfix, condition, !runs_when_true);
+        if !is_loop
+            && is_exit_expression(modified, self.source)
+            && self.narrow_block_remainder(postfix, condition, !runs_when_true)
+        {
+            self.record_guard_sites(condition);
         }
     }
 
@@ -661,8 +741,8 @@ impl<'a> Builder<'a> {
     /// Narrow `arm`, which runs only where `condition` is `holds`.
     fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) {
         let region = node_to_span(arm);
-        for (subject, op) in facts_for_region(self, condition, holds) {
-            self.emit_narrowing_fact(&subject, op, region);
+        for (subject, op, read) in facts_for_region(self, condition, holds) {
+            self.emit_narrowing_fact(&subject, op, read, region);
         }
     }
 
@@ -677,31 +757,38 @@ impl<'a> Builder<'a> {
         if !is_exit_expression(right, self.source) {
             return;
         }
-        self.narrow_block_remainder(expr, left, holds_when_true);
+        if self.narrow_block_remainder(expr, left, holds_when_true) {
+            self.record_guard_sites(left);
+        }
     }
 
     /// Narrow `[statement end .. enclosing-block end]` for a statement-level
-    /// guard.
+    /// guard: the statement `node` is in leaves the block unless
+    /// `condition` is `holds_when_true`. False when that statement is no
+    /// block's; the caller records the guard's sites, once per condition.
     fn narrow_block_remainder(
         &mut self,
-        stmt_expr: Node<'a>,
+        node: Node<'a>,
         condition: Node<'a>,
         holds_when_true: bool,
-    ) {
-        let mut stmt = stmt_expr;
-        while stmt.kind() != "expression_statement" {
-            let Some(p) = self.syntax.parent(stmt) else { return };
-            stmt = p;
+    ) -> bool {
+        let Some(region) = self.block_remainder(node) else { return false };
+        for (subject, op, read) in facts_for_region(self, condition, holds_when_true) {
+            self.emit_narrowing_fact(&subject, op, read, region);
         }
-        let Some(block) = self.syntax.parent(stmt) else { return };
-        if block.kind() != "block" {
-            return;
+        true
+    }
+
+    /// `[statement end .. enclosing-block end]` for the statement `node` is
+    /// in, when that statement is a block's.
+    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
+    fn block_remainder(&self, node: Node<'a>) -> Option<Span> {
+        let mut stmt = node;
+        while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
+            stmt = self.syntax.parent(stmt)?;
         }
-        let region = Span { start: stmt.end_position(), end: block.end_position() };
-        self.record_guard_sites(condition);
-        for (subject, op) in facts_for_region(self, condition, holds_when_true) {
-            self.emit_narrowing_fact(&subject, op, region);
-        }
+        let block = self.syntax.parent(stmt).filter(|b| b.kind() == "block")?;
+        Some(Span { start: stmt.end_position(), end: block.end_position() })
     }
 
     /// A deref observes its operand as the reference its sigil names:
@@ -752,8 +839,12 @@ impl<'a> Builder<'a> {
     /// Emit a guard's narrowing into `region`. `op` is the polarity-
     /// resolved operation (`GuardFact::op_for_region`); the subject is
     /// keyed and the region truncated at the first disturbance, exactly
-    /// as for a positive narrowing.
-    fn emit_narrowing_fact(&mut self, subject: &NarrowSubject, op: NarrowOp, region: Span) {
+    /// as for a positive narrowing. A `defined` region's value is the
+    /// subject's `read` in the guard, so that read carries its witness.
+    fn emit_narrowing_fact(&mut self, subject: &NarrowSubject, op: NarrowOp, read: Node<'a>, region: Span) {
+        if matches!(op, NarrowOp::Defined { .. }) {
+            self.emit_expr_witness(read);
+        }
         self.emit_region_fact(subject, RegionFact::Guard(op), region);
     }
 
@@ -764,36 +855,6 @@ impl<'a> Builder<'a> {
             region,
             scope: self.current_scope(),
         });
-    }
-
-    /// Re-emittable: `defined`/`blessed` narrowing. For each recorded
-    /// guard, read the subject's type at the guard point (BEFORE the
-    /// narrowed region, so this pass's own output is excluded — no
-    /// oscillation) and, if it is `Optional<T>`, narrow the region to `T`.
-    /// Clear-and-emit on tag `defined_narrowing`; converges as the
-    /// subject's (possibly fold-derived) `Optional` settles.
-    pub(super) fn emit_defined_narrowing_witnesses(&mut self) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        self.bag.remove_by_source_tag("defined_narrowing");
-        let guards = self.defined_narrowings.clone();
-        let mut emits: Vec<(WitnessAttachment, InferredType, Span)> = Vec::new();
-        for g in &guards {
-            if let Some(inner) = self
-                .bag_query_place(&g.subject, g.scope, g.query_point)
-                .as_ref()
-                .and_then(InferredType::optional_inner)
-            {
-                emits.push((WitnessAttachment::Place(Box::new(g.subject.clone())), inner.clone(), g.region));
-            }
-        }
-        for (attachment, inner, region) in emits {
-            self.push_witness(Witness {
-                attachment,
-                source: WitnessSource::Builder("defined_narrowing".into()),
-                payload: WitnessPayload::InferredType(inner),
-                span: region,
-            });
-        }
     }
 
     /// Re-emittable: tag guards. A guard `$ref eq 'LIT'` narrows the
@@ -848,8 +909,8 @@ impl<'a> Builder<'a> {
     }
 
     /// Post-walk: resolve every recognized narrowing's region cutoff against
-    /// the now-minted FlowEdges, then emit — `To` → a scoped `InferredType`
-    /// witness; `StripOptional` → a `DefinedNarrowing` the fold re-derives.
+    /// the now-minted FlowEdges, then emit each region's value as a scoped
+    /// witness; a tag guard's waits for the fold (`TagNarrowing`).
     /// Deferred from the walk so the scalar-rebind truncation can read edges
     /// (minted post-walk). The place index walks the injected `s///e` trees
     /// too: their code runs, so a write there disturbs a place.
@@ -903,23 +964,16 @@ impl<'a> Builder<'a> {
             };
             let subject = pn.subject.subject().clone();
             match pn.fact {
-                RegionFact::Guard(NarrowOp::To(ty)) => {
-                    facts.push(Witness {
-                        attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),
-                        source: WitnessSource::Builder("narrowing".into()),
-                        payload: WitnessPayload::InferredType(ty),
-                        span: region,
-                    });
+                RegionFact::Guard(op) => {
+                    if let Some(payload) = op.payload() {
+                        facts.push(Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),
+                            source: WitnessSource::Builder("narrowing".into()),
+                            payload,
+                            span: region,
+                        });
+                    }
                 }
-                RegionFact::Guard(NarrowOp::StripOptional { query_point }) => {
-                    self.defined_narrowings.push(DefinedNarrowing {
-                        subject,
-                        scope: pn.scope,
-                        region,
-                        query_point,
-                    });
-                }
-                RegionFact::Guard(NarrowOp::TagEq(_)) => {}
                 RegionFact::Observe(obs) => {
                     facts.push(Witness {
                         attachment: crate::model::witnesses::WitnessAttachment::Place(Box::new(subject.clone())),

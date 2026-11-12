@@ -42,7 +42,7 @@ pub fn pack_completion(
             // a different operator than was typed. The diagnostic
             // path (Mode B) is the universal fallback.
             if let Some(items) = symbols::member_completion_for_type(
-                analysis, ty, xidx, receiver.op_fix.clone(), receiver.offers, &receiver.words, point,
+                analysis, ty, xidx, receiver.op_fix.clone(), receiver.offers, &receiver.words, receiver.replace, point,
             ) {
                 return (items, false);
             }

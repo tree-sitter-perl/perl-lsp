@@ -65,6 +65,14 @@ pub(super) fn home_of<'s>(st: &'s ExtractState, from: ScopeId, at: Point) -> Opt
         .or_else(|| st.namespace_at(at))
 }
 
+/// The class whose body the current event is written in, through every
+/// callable between: the class a relative mark (`self`, `parent`) names
+/// there. Code outside every class body has none, whatever namespace it is
+/// in.
+pub(super) fn enclosing_class<'s>(st: &'s ExtractState) -> Option<&'s str> {
+    st.scope_stack.iter().rev().find_map(|&(_, id)| st.scopes.class_of(id))
+}
+
 /// The scope each class declared in this file opened as its own (its
 /// first, where a class reopens), by the class's identity.
 pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
@@ -116,6 +124,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                runs_on: None,
                 closed: scope_cap == ScopeCap::SubClosed,
                 captures: Vec::new(),
                 direct: scope_cap == ScopeCap::Direct,

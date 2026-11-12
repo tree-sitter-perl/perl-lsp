@@ -47,6 +47,8 @@
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).
 (function_definition) @scope.sub
+; A lambda is a callable too: what it yields is its own.
+(lambda) @scope.sub
 
 ; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is two
 ; things from one token: a data member of the class (`Counter.count`) and a
@@ -247,12 +249,17 @@
 
 ; Guard narrowing. An atom states what a test proves of its subject, a
 ; name or a member (`self.x`): `isinstance(x, Foo)` that it is the class
-; named (a tuple of classes names no single one). The narrowing attaches in
+; named (a tuple of classes names no single one), `x is not None` that it
+; holds a value, `x is None` that it holds none. The narrowing attaches in
 ; the guard's scope (an `if` body is no scope in Python).
 ((call
    function: (identifier) @_fn
    arguments: (argument_list . [(identifier) (attribute)] @narrow.var . (identifier) @narrow.type .)) @narrow.is
  (#eq? @_fn "isinstance"))
+(comparison_operator . [(identifier) (attribute)] @narrow.var operators: "is not" . (none) .) @narrow.set
+(comparison_operator . (none) operators: "is not" . [(identifier) (attribute)] @narrow.var .) @narrow.set
+(comparison_operator . [(identifier) (attribute)] @narrow.var operators: "is" . (none) .) @narrow.unset
+(comparison_operator . (none) operators: "is" . [(identifier) (attribute)] @narrow.var .) @narrow.unset
 ; A condition built of atoms decides them through its connectives.
 (not_operator) @narrow.not
 (boolean_operator operator: "and") @narrow.and
@@ -261,15 +268,16 @@
 ; Where a condition decides what runs: an `if` or `elif` body runs where it
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
-; where the left holds, of `or` where it fails. An `if` whose body only
-; leaves the block, with no clause after it, leaves the rest of the block
-; to run where its condition fails.
+; where the left holds, of `or` where it fails. An `else` arm is its body;
+; the `else` of a loop or a `try` is no arm of a condition.
 (if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
-(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
 (elif_clause condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (if_statement
   alternative: (elif_clause condition: (_) @narrow.cond)
-  alternative: (_) @narrow.else)
+  alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
 (conditional_expression
   (_) @narrow.then
   .
@@ -282,12 +290,17 @@
   (_) @narrow.else)
 (boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
 (boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
-(if_statement
-  condition: (_) @narrow.cond
-  consequence: (block
-    . [(return_statement) (raise_statement) (continue_statement) (break_statement)] .)
-  !alternative) @narrow.exit
+
+; A statement that leaves its block: nothing after it there runs, and
+; whether a chain of arms falls through follows from its arms' statements
+; (`query_extract/extract/narrowing.rs`).
+; TODO(noreturn-callee): `sys.exit()` leaves too. A callee that never
+; returns is an effect on the callee; mark it once effects and the CFG exist.
+[(return_statement) (raise_statement) (continue_statement) (break_statement)] @flow.leaves
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.
 (return_statement (_) @expr.return.value)
+; A def that yields returns a generator, whatever its `return` says.
+((yield) @expr.return.class
+ (#set! return.class "typing.Generator"))

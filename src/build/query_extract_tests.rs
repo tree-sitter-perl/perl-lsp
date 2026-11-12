@@ -2249,6 +2249,174 @@ void f(Base* b, std::optional<Widget> o) {
 }
 
 #[test]
+fn a_pack_exit_anywhere_in_the_body_leaves_it() {
+    // An `if` body with a statement leaving the block never falls through,
+    // whatever runs before that statement (a comment, a call, a nested
+    // block) or after it. One with no such statement narrows nothing after.
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let src = "\
+class Foo:
+    pass
+def f(x):
+    if not isinstance(x, Foo):
+        # why
+        return
+    x.run()
+def g(x, z):
+    if not isinstance(x, Foo):
+        if z:
+            log()
+        raise ValueError()
+    x.run()
+def h(x):
+    if not isinstance(x, Foo):
+        log()
+    x.run()
+def k(x):
+    if not isinstance(x, Foo):
+        return
+        log()
+    x.run()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    let rows: Vec<usize> = src.lines().enumerate().filter(|(_, l)| l.contains("x.run()")).map(|(i, _)| i).collect();
+    let at = |row| fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 });
+    assert_eq!(at(rows[0]), class("Foo"), "a comment, then return");
+    assert_eq!(at(rows[1]), class("Foo"), "a nested block, then raise");
+    assert_ne!(at(rows[2]), class("Foo"), "no exit");
+    assert_eq!(at(rows[3]), class("Foo"), "an exit that is not the last statement");
+
+    let src = "\
+void f(std::optional<Widget> o) {
+    if (!o) {
+        // why
+        return;
+    }
+    o->run();
+}
+void g(std::optional<Widget> o) {
+    if (!o) {
+        log();
+        throw 1;
+    }
+    o->run();
+}
+void h(std::optional<Widget> o) {
+    if (!o) {
+        log();
+    }
+    o->run();
+}
+void k(std::optional<Widget> o) {
+    if (!o) {
+        return;
+        log();
+    }
+    o->run();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let rows: Vec<usize> = src.lines().enumerate().filter(|(_, l)| l.contains("o->run()")).map(|(i, _)| i).collect();
+    let at = |row| fa.inferred_type_via_bag("o", tree_sitter::Point { row, column: 4 });
+    assert_eq!(at(rows[0]), class("Widget"), "a comment, then return");
+    assert_eq!(at(rows[1]), class("Widget"), "a call, then throw");
+    assert_ne!(at(rows[2]), class("Widget"), "no exit");
+    assert_eq!(at(rows[3]), class("Widget"), "an exit that is not the last statement");
+}
+
+#[test]
+fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
+    // After a chain whose one arm falls through, the rest of the block runs
+    // where that arm does; a missing `else` falls through where every
+    // condition failed. Every arm leaving, or two falling through, narrows
+    // nothing after. A loop's `else` is no arm of a condition.
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let python = |chain: &str| {
+        let src = format!("class Foo:\n    pass\ndef f(x, z):\n{chain}\n    x.run()\n");
+        let mut parser = python_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+        let row = src.lines().position(|l| l.contains("x.run()")).unwrap();
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        ("    if not isinstance(x, Foo):\n        return\n        log()", "an exit not in last position"),
+        ("    if isinstance(x, Foo):\n        log()\n    else:\n        return", "an else-arm exit"),
+        (
+            "    if not isinstance(x, Foo):\n        return\n    elif z:\n        raise ValueError()\n    else:\n        log()",
+            "only the else falls",
+        ),
+        (
+            "    if z:\n        return\n    elif isinstance(x, Foo):\n        log()\n    else:\n        raise ValueError()",
+            "only the elif falls",
+        ),
+        (
+            "    if isinstance(x, Foo):\n        log()\n    elif z:\n        return\n    else:\n        raise ValueError()",
+            "only the then falls",
+        ),
+        (
+            "    if not isinstance(x, Foo):\n        if z:\n            return\n        else:\n            raise ValueError()",
+            "a nested chain whose every arm leaves",
+        ),
+        ("    if not isinstance(x, Foo):\n        return  # why\n        # and why", "a comment after the exit"),
+    ];
+    for (chain, why) in narrows {
+        assert_eq!(python(chain), class("Foo"), "python: {why}");
+    }
+    let nothing = [
+        ("    if isinstance(x, Foo):\n        return\n    else:\n        raise ValueError()", "every arm leaves"),
+        (
+            "    if isinstance(x, Foo):\n        log()\n    elif z:\n        log()\n    else:\n        return",
+            "two arms fall through",
+        ),
+        (
+            "    if not isinstance(x, Foo):\n        for y in z:\n            break\n        else:\n            return",
+            "a loop's else",
+        ),
+        (
+            "    if not isinstance(x, Foo):\n        try:\n            log()\n        except ValueError:\n            return",
+            "an except clause",
+        ),
+    ];
+    for (chain, why) in nothing {
+        assert_ne!(python(chain), class("Foo"), "python: {why}");
+    }
+
+    let cpp = |chain: &str| {
+        let src = format!("void f(std::optional<Widget> o, bool z) {{\n{chain}\n    o->run();\n}}\n");
+        let fa = cpp_skel(&src).into_file_analysis();
+        let row = src.lines().position(|l| l.contains("o->run()")).unwrap();
+        fa.inferred_type_via_bag("o", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        ("    if (!o) { return; log(); }", "an exit not in last position"),
+        ("    if (o) { log(); } else { return; }", "an else-arm exit"),
+        ("    if (o) { log(); } else /* why */ throw 1;", "a braceless else-arm exit"),
+        ("    if (!o) { return; } else if (z) { throw 1; } else { log(); }", "only the else falls"),
+        ("    if (z) { return; } else if (o) { log(); } else { throw 1; }", "only the else-if falls"),
+        ("    if (o) { log(); } else if (z) { return; } else { throw 1; }", "only the then falls"),
+        ("    if (!o) { if (z) { return; } else { throw 1; } }", "a nested chain whose every arm leaves"),
+        ("    if (!o) {\n        return; // why\n    }", "a comment after the exit"),
+    ];
+    for (chain, why) in narrows {
+        assert_eq!(cpp(chain), class("Widget"), "cpp: {why}");
+    }
+    let nothing = [
+        ("    if (o) { return; } else { throw 1; }", "every arm leaves"),
+        ("    if (o) { log(); } else if (z) { log(); } else { return; }", "two arms fall through"),
+        ("    if (!o) for (;;) break;", "a loop's body is no statement of the arm"),
+        ("    if (!o) { switch (z) { default: return; } }", "a switch"),
+    ];
+    for (chain, why) in nothing {
+        assert_ne!(cpp(chain), class("Widget"), "cpp: {why}");
+    }
+}
+
+#[test]
 fn cpp_optional_same_name_narrows_to_own_inner_type_per_function() {
     // GOAL-3 regression: `annot_text_by_var` is keyed by (name, SCOPE), so two
     // functions each with a `std::optional<...> opt` of a DIFFERENT inner type
@@ -3193,7 +3361,7 @@ fn members_declared_at_one_token_keep_their_own_facts() {
     for s in skel.symbols.iter_mut().filter(|s| s.name == "a" || s.name == "c") {
         s.name_start = call;
     }
-    for fact in skel.member_decl_facts.iter_mut() {
+    for fact in skel.decl_facts.iter_mut() {
         fact.1 = call;
     }
     let fa = skel.into_file_analysis();
@@ -3412,7 +3580,7 @@ typedef union {
     assert_eq!(overlay.len(), 1);
     assert!(overlay[0].starts_with("op_pmtargetgv"), "{overlay:?}");
     // completion: real members offered flat on pm; the synthetic container never
-    let cands = fa.complete_members_for_class("pm", None, None, None);
+    let cands = fa.complete_members_for_class("pm", None, None, false, None);
     let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
     for want in ["op_first", "op_pmreplroot", "op_pmtargetgv", "u2a", "named_u"] {
         assert!(labels.contains(&want), "{want} missing from {labels:?}");
@@ -3868,4 +4036,70 @@ void f(robj *o, iter_t *op) {
 }
 ";
     assert_eq!(member_write_owners("/x/retype.c", src, 7), vec!["declared lp".to_string()]);
+}
+
+#[test]
+fn python_a_none_test_decides_whether_the_subject_holds_a_value() {
+    // `is not None` holding, and `is None` failing, leave the subject what
+    // it held coming in without its None; `is None` holding is None.
+    let src = "\
+class Foo:
+    def run(self): pass
+class A: pass
+class B: pass
+class Holder:
+    p: Optional[Foo]
+    def m(self):
+        if self.p is not None:
+            self.p.run()
+        self.p.run()
+def f(x: Optional[Foo], y: Foo | None, u: A | B | None, z: Foo):
+    if x is not None:
+        x.run()
+    x.run()
+    if y is None:
+        return
+    y.run()
+    if None is not u:
+        u.run()
+    if z is not None:
+        z.run()
+    if x is None:
+        x.run()
+    else:
+        x.run()
+";
+    let (fa, _) = python_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let mut rows: Vec<(usize, Option<InferredType>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+        .filter(|r| r.span.start.row != 22)
+        .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None)))
+        .collect();
+    rows.sort_by_key(|(row, _)| *row);
+    let foo = || Some(InferredType::ClassName("Foo".into()));
+    let nullable = |t: Option<InferredType>| t.map(|t| InferredType::Optional(Box::new(t)));
+    let ab = || {
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName("A".into()), InferredType::ClassName("B".into())],
+            &crate::model::file_analysis::LatticeRules::default(),
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            (8, foo()),
+            (9, nullable(foo())),
+            (12, foo()),
+            (13, nullable(foo())),
+            (16, foo()),
+            (18, ab()),
+            (20, foo()),
+            (24, foo()),
+        ]
+    );
+    // A receiver holding None types no call, so ask the variable.
+    assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 22, column: 8 }), Some(InferredType::Undef));
 }

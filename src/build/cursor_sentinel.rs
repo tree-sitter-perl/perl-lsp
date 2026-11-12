@@ -26,7 +26,7 @@
 
 use crate::build::query_extract::{CursorDocument, MemberSite};
 use crate::model::file_analysis::{
-    expected_member_op, CrossFileLookup, FileAnalysis, InferredType, MemberKind, MemberMode, MemberOp, SpaceSet,
+    expected_member_op, CrossFileLookup, FileAnalysis, InferredType, MemberKind, MemberMode, MemberOp, MemberReach,
     Span,
 };
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
@@ -224,10 +224,14 @@ pub struct MemberCompletionCtx {
     /// `op_fix` corrects it. `Slot::Member.op`'s pack-side answer
     /// (`docs/adr/cursor-slots.md`).
     pub op: crate::model::file_analysis::MemberOp,
-    /// The member namespaces completion offers here (`None`: every one).
-    pub offers: Option<SpaceSet>,
+    /// What the operator reaches, which completion offers (`None`: every
+    /// namespace).
+    pub offers: Option<MemberReach>,
     /// Words the operator may be followed by that name no member.
     pub words: Vec<String>,
+    /// What an accepted item replaces: the member as written, from its
+    /// start (a typed sigil included) to the cursor.
+    pub replace: Span,
 }
 
 ///
@@ -279,19 +283,19 @@ pub fn member_completion_ctx_incremental(
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let facts = doc.facts(&site);
     let op_fix = site.op.and_then(|op| operator_fix(op, site.recv, facts.op?, &patched, analysis, cfg));
-    // A writer who has put something between the operator and the name (php's
-    // `$` in `Foo::$x`) has chosen the access's form, so its own namespaces
-    // are the ones offered; otherwise every namespace the operator reaches.
-    let chosen = site
-        .op
-        .is_some_and(|op| patched[op.end_byte()..site.name.start_byte()].chars().any(|c| !c.is_whitespace()));
-    let (offers, words) = if chosen {
-        let ask = MemberKind { mode: site.mode, spaces: facts.spaces };
-        (Some(analysis.member_spaces().of_ask(ask.legal())), Vec::new())
-    } else {
-        (facts.offers, facts.words)
+    // The written member starts before the cursor, where the two buffers agree.
+    let replace = Span {
+        start: facts.spelled.map_or(site.name.start_position(), |s| s.start),
+        end: byte_to_point(src, cursor),
     };
-    Some(MemberCompletionCtx { receiver_type, op_fix, op: facts.op.unwrap_or(MemberOp::Dot), offers, words })
+    Some(MemberCompletionCtx {
+        receiver_type,
+        op_fix,
+        op: facts.op.unwrap_or(MemberOp::Dot),
+        offers: facts.offers,
+        words: facts.words,
+        replace,
+    })
 }
 
 /// Whether the bytes `start..end` of `written` sit in, or overlap, a span

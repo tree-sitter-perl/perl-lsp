@@ -7,7 +7,7 @@ pub fn perl_pack() -> LangPack {
         id: "perl",
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         names: crate::model::conventions::PERL_SPELLINGS,
-        functions: FunctionLookup::Global,
+        free_names: FreeNameLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         member_spaces: crate::model::conventions::PERL_CONVENTIONS.member_spaces.clone(),
         family_reach: crate::model::conventions::PERL_CONVENTIONS.family_reach,

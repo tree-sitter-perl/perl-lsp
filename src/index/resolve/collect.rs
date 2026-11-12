@@ -181,7 +181,9 @@ pub(crate) fn qualifier_at_point(source: &str, point: tree_sitter::Point) -> Opt
     while start > 0 && is_id(b[start - 1]) {
         start -= 1;
     }
-    if start < 2 || !source.is_char_boundary(start) || &source[start - 2..start] != "::" {
+    // Bytes, not a str slice: `start - 2` can land inside a multi-byte
+    // character (`'¯\_(ツ)_/¯'` with the cursor after `)`).
+    if start < 2 || b[start - 2..start] != *b"::" {
         return None;
     }
     let e = start - 2;
@@ -615,6 +617,9 @@ pub(super) fn symbol_defines_target(
             sym.kind,
             SymKind::Package | SymKind::Class | SymKind::Module
         ),
+        TargetKind::Constant { package } => {
+            crate::model::file_analysis::NameTable::Constant.holds(sym) && sym.package == *package
+        }
         TargetKind::HashKeyOfSub { package, name } => matches!(
             &sym.detail,
             SymbolDetail::HashKeyDef {
@@ -1034,7 +1039,7 @@ pub(super) fn collect_from_analysis(
             // A construction is keyed by its class; whether it runs this
             // constructor is the dispatch check below.
             !target.constructed_classes.is_empty()
-        } else if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) || r.member_site().is_some() {
+        } else if r.free_name_table().is_some() || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1108,7 +1113,12 @@ pub(super) fn collect_from_analysis(
                 };
                 match r.resolved_package() {
                     Some(pinned) => pkg_matches(&Some(pinned.to_string())),
-                    None => {
+                    // A use-map language's bare name resolves by the one
+                    // ladder goto-def walks: the namespace it lands in, not
+                    // the one it is written in.
+                    None => match analysis.names().use_map_sep().and_then(|_| analysis.free_name_declared(r, module_index)) {
+                        Some(landed) => landed.namespace == scope.as_deref().unwrap_or_default(),
+                        None => {
                         // Unqualified + unresolved: derive the caller's own
                         // enclosing namespace positionally (pack) — a plain
                         // `vformat_to(...)` inside `namespace fmt` looks up
@@ -1122,7 +1132,8 @@ pub(super) fn collect_from_analysis(
                             },
                         );
                         pkg_matches(&derived)
-                    }
+                        }
+                    },
                 }
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
@@ -1175,6 +1186,11 @@ pub(super) fn collect_from_analysis(
                     matched
                 }
             }
+            // A constant read references the constant it resolves to, by
+            // the one ladder goto-def walks.
+            (TargetKind::Constant { package }, RefKind::Constant) => analysis
+                .free_name_declared(r, module_index)
+                .is_some_and(|q| q.namespace == package.as_deref().unwrap_or_default()),
             (TargetKind::Package, RefKind::PackageRef) => true,
             (TargetKind::Package, RefKind::FunctionCall | RefKind::ImportedName) => call_names_class,
             // A class member read by BARE name (`x = OP_SCOPE`,

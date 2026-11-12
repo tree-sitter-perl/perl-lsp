@@ -733,15 +733,17 @@ fn ref_type_snippet_completions(ty: &InferredType) -> Vec<CompletionItem> {
 /// one the receiver's pointer depth requires (Mode A — accepting `width` on
 /// `p.` yields `p->width`). `None` leaves the items untouched (operator
 /// already correct, or DEEP receiver shown-only). `offers` narrows the
-/// members to the namespaces the operator reaches, and `words` are offered
-/// beside them as keywords.
+/// members to what the operator reaches, `words` are offered beside them
+/// as keywords, and `replace` is the range every item replaces.
+#[allow(clippy::too_many_arguments)]
 pub fn member_completion_for_type(
     analysis: &FileAnalysis,
     receiver: &crate::model::file_analysis::InferredType,
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     op_fix: Option<(crate::model::file_analysis::Span, String)>,
-    offers: Option<crate::model::file_analysis::SpaceSet>,
+    offers: Option<crate::model::file_analysis::MemberReach>,
     words: &[String],
+    replace: Option<crate::model::file_analysis::Span>,
     point: Point,
 ) -> Option<Vec<CompletionItem>> {
     // The access-specifier gate needs to know whether the
@@ -750,10 +752,15 @@ pub fn member_completion_for_type(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
-    let candidates = analysis.shared_members(&analysis.dispatch_classes_of(receiver, Some(module_index)), |class| {
-        analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref(), offers)
+    let on_receiver = analysis.runs_on_at(point).is_some();
+    let classes = analysis.dispatch_classes_of(receiver, Some(module_index));
+    let candidates = analysis.shared_members(&classes, |class| {
+        analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref(), on_receiver, offers)
     });
-    if candidates.is_empty() {
+    // A class whose every member the operator leaves out (instance methods
+    // only, at a `::` that cannot reach them) still answers its words; a
+    // receiver that names no class answers nothing here.
+    if candidates.is_empty() && (words.is_empty() || classes.is_empty()) {
         return None;
     }
     let mut items: Vec<CompletionItem> = candidates
@@ -770,6 +777,9 @@ pub fn member_completion_for_type(
         kind: Some(CompletionItemKind::KEYWORD),
         ..Default::default()
     }));
+    if let Some(span) = replace {
+        super::signature::retarget_items_to_span(&mut items, span);
+    }
     Some(items)
 }
 

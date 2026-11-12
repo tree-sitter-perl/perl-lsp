@@ -507,6 +507,25 @@
     (function_declarator
       declarator: (field_identifier) @def.method.name
       parameters: (parameter_list) @scope.sub))) @def.method
+; A `static` member is its class's, not an object's: a static member
+; function runs on no object (its body's `this` refers to nothing, and a
+; bare instance member names nothing), and a static data member is read by
+; bare name there all the same.
+(function_definition
+  (storage_class_specifier "static")
+  declarator: [
+    (function_declarator declarator: (field_identifier) @mark.static)
+    (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @mark.static))
+    (reference_declarator (function_declarator declarator: (field_identifier) @mark.static))])
+(field_declaration
+  (storage_class_specifier "static")
+  declarator: [
+    (field_identifier) @mark.static
+    (pointer_declarator declarator: (field_identifier) @mark.static)
+    (reference_declarator (field_identifier) @mark.static)
+    (function_declarator declarator: (field_identifier) @mark.static)
+    (pointer_declarator declarator: (function_declarator declarator: (field_identifier) @mark.static))
+    (reference_declarator (function_declarator declarator: (field_identifier) @mark.static))])
 ; operator overloads: the declarator name is an `operator_name` token
 ; (`operator+`, `operator<<`), not an identifier/field_identifier, so the
 ; name patterns above never see them. In-class decls are Methods; free
@@ -749,8 +768,8 @@
 
 ; `this` is the object the enclosing method runs on, an instance of the
 ; method's class (out-of-line bodies included), never a name to spell a
-; class.
-(this) @receiver.enclosing
+; class; its token refers to that object, as php's `$this` does.
+(this) @receiver.enclosing @ref.receiver
 
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.
@@ -1018,25 +1037,30 @@
 ; Where a condition decides what runs: an `if` body runs where it holds,
 ; its `else` where it fails; a ternary yields its consequence or its
 ; alternative; the right of `&&` runs where the left holds, of `||` where
-; it fails. An `if` whose body only leaves the block, with no `else`,
-; leaves the rest of the block to run where its condition fails. The
-; edge-driven cutoff ends a narrowing at any rebind.
+; it fails. An `else` arm is the statement it holds, so `else if` is the
+; next link of the chain. The edge-driven cutoff ends a narrowing at any
+; rebind.
 (if_statement condition: (condition_clause value: (_) @narrow.cond) consequence: (_) @narrow.then)
-(if_statement condition: (condition_clause value: (_) @narrow.cond) alternative: (_) @narrow.else)
+((if_statement
+   condition: (condition_clause value: (_) @narrow.cond)
+   alternative: (else_clause (_) @narrow.else))
+ (#not-is-kind? @narrow.else comment))
 (conditional_expression condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
-(if_statement
-  condition: (condition_clause value: (_) @narrow.cond)
-  consequence: [
-    (return_statement)
-    (throw_statement)
-    (continue_statement)
-    (break_statement)
-    (compound_statement
-      . [(return_statement) (throw_statement) (continue_statement) (break_statement)] .)]
-  !alternative) @narrow.exit
+
+; A statement that leaves its block: nothing after it there runs, and
+; whether a chain of arms falls through follows from its arms' statements
+; (`query_extract/extract/narrowing.rs`).
+; TODO(noreturn-callee): `std::abort()`, `exit()` and a `[[noreturn]]`
+; function leave too. A callee that never returns is an effect on the
+; callee; mark it once effects and the CFG exist.
+[(return_statement)
+ (co_return_statement)
+ (throw_statement)
+ (continue_statement)
+ (break_statement)] @flow.leaves
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

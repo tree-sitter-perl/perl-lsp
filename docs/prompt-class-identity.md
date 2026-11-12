@@ -45,8 +45,8 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
 4. **The loud half**: the `resolved-by-widening` diagnostics lane
    (`lsp::symbols::widening_diagnostics`, part of `pack_diagnostics`)
    fires on each class token whose identity nothing indexed declares and
-   a same-leaf class answers for, and on each function token the same way
-   (`FileAnalysis::widened_references`):
+   a same-leaf class answers for, and on each function or constant token
+   the same way (`FileAnalysis::widened_references`):
    "nothing indexed declares `A\B`; resolved by its leaf to `X\B`". It
    sits on the reference that names the class — the parent clause, the
    `use` row's leaf — because that is where the fix is written. A member
@@ -148,6 +148,31 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    an instance (C++'s functional cast `Foo(x)`); the reference half reads
    it only through a use-map, so C++, whose spellings are identities, keeps
    its calls calls.
+
+**A free name is its identity too, in its own table.** A bare function
+or constant spelling resolves by `UseMap::free_name_ladder(table, …)`:
+its `use function` / `use const` row (`UseRow::table`), else the
+language's `FreeNameLookup` order — PHP's `NamespaceThenGlobal`, the
+namespace in force's name, then the global one — and a `\`-qualified
+spelling names one rung. `NameTable::holds` is the one test of which
+symbols a table holds (a constant carries `SymbolFlags::CONSTANT`, minted
+by `@mark.constant`), so a function and a constant of one name never meet.
+Each is filed for linkage under `linkage_identity` (`App\LIMIT`; a
+`define('X', …)` def is marked `@def.global` and files as `X`). The
+extractor pins a reference to the first rung its own file declares
+(`FreeCall`); every other consumer asks `FileAnalysis::free_name_declared`
+— the first rung this file or the index declares — so goto-def, hover,
+references and rename read one answer: `\f()` in `namespace App` is the
+global `f` and a bare `f()` there is `App\f` once anything declares it.
+A name nothing declares (a runtime's `PHP_EOL`) answers nothing and is
+not renameable. A constant's value is its own binding's — its declaring
+symbol's place, held file-wide, never a `Variable` of its name, so `$X`
+and `X` in one scope keep their own — and a read the file's own
+declaration answers is an edge to that place. A read of one another file
+declares carries its ladder (`WitnessPayload::FreeValue`), and the
+registry walks it across files the way it walks an unresolved call's
+(`free_name_cross_file`), asking the declaration it reaches what its place
+holds where a call asks what its callable returns (`FreeAsk`).
 
 **A class is a home, not a namespace.** Whose member a declaration is
 and how a name written somewhere resolves are two facts, and the scope

@@ -297,7 +297,8 @@ impl WitnessPayload {
             | WitnessPayload::Derivation
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
-            | WitnessPayload::BrandOverlay { .. } => false,
+            | WitnessPayload::BrandOverlay { .. }
+            | WitnessPayload::FreeValue { .. } => false,
         }
     }
 }
@@ -332,7 +333,8 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
-            | WitnessPayload::BrandOverlay { .. } => {}
+            | WitnessPayload::BrandOverlay { .. }
+            | WitnessPayload::FreeValue { .. } => {}
         }
     }
 }
@@ -504,6 +506,14 @@ pub enum WitnessPayload {
     /// claims it. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Extend(KeyExtension),
+    /// A READ of a free name the writing file does not declare: "the value
+    /// at my attachment is what the declaration of `name` in `table`
+    /// holds", looked up across files by the ladder an unresolved
+    /// `Callee::Function` walks (`ReducerRegistry::free_name_cross_file`),
+    /// `fallback` as there. A read the file's own declaration answers is an
+    /// `Edge` to that declaration's place instead. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    FreeValue { table: crate::model::file_analysis::NameTable, name: String, fallback: Option<String> },
 }
 
 /// What one write adds to the shape it lands in.
@@ -603,6 +613,13 @@ pub enum ProjectionStep {
     /// $out)`). Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     ParamOf { member: String, index: u32 },
+    /// The value once it is set: the base without its null (`?Foo` →
+    /// `Foo`, `A|B|null` → `A|B`), what a passing `isset($x)` / `$x !==
+    /// null` / `if (opt)` / `defined $x` proves of the value it tests. A
+    /// base not known to be possibly unset (a class, `Unknown`) answers
+    /// nothing, so the test never outranks what its read already knows. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Defined,
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

@@ -128,6 +128,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let (pkg, owner_stated) = match (&through, stated) {
         (Some(_), _) => (None, false),
         (None, Some(owner)) => (Some(owner), true),
+        (None, None) if mine(Capture::DefGlobal).is_some() => (None, false),
         (None, None) => (st.package.clone(), false),
     };
     let shaped = (pack.shape_name)(&name);
@@ -150,11 +151,13 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     }
     // A written return resolves like a parameter's type once the walk is
     // done (`resolve_returns`): a spelling at its site, a relative mark
-    // through the class the def is written in.
+    // through the class body the def is written in, which only the walk
+    // knows; outside every class body the mark names none.
     let mut written_return = false;
     let return_type = match mine(Capture::RetType) {
         Some(t) if names_relative(ad, t).is_some() => {
-            written_return = pkg.is_some();
+            st.minted[ix].return_home = super::scopes::enclosing_class(st).map(str::to_string);
+            written_return = st.minted[ix].return_home.is_some();
             None
         }
         Some(t) => {
@@ -241,7 +244,7 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
         let Some(written) = ad.in_match(e.match_id, Capture::RetType) else { continue };
         let t = match names_relative(ad, written) {
             Some(rel) => {
-                let class = st.out.symbols[i].package.clone();
+                let class = st.minted[ix].return_home.take();
                 class.and_then(|c| st.out.relative_class(rel, &c)).map(|c| rel.returns(c))
             }
             None => match st.out.symbols[i].return_type.take() {
@@ -277,10 +280,16 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
     if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
     }
-    // Every other Variable def declares where it is written, from its token on.
+    // Every other Variable def declares where it is written, from its token
+    // on. A free constant is no variable: `$X` is another name than `X`.
     let mut decls: HashMap<String, Vec<(ScopeId, VariableDecl<'static, ()>)>> = HashMap::new();
     let decl = |at, scope_wide| VariableDecl { id: (), view: InView::from(at), gate: None, scope_wide };
-    for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == SymKind::Variable) {
+    let variable = |s: &&SkelSymbol| {
+        s.kind != DefCap::Assigned
+            && s.kind.sym_kind() == SymKind::Variable
+            && !s.flags.contains(crate::model::file_analysis::SymbolFlags::CONSTANT)
+    };
+    for s in out.symbols.iter().filter(variable) {
         decls.entry(s.name.clone()).or_default().push((s.scope, decl(s.name_start, false)));
     }
     let mut order: Vec<usize> = (0..out.symbols.len()).filter(|&i| out.symbols[i].kind == DefCap::Assigned).collect();

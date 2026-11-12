@@ -17,7 +17,7 @@
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::{contains_point, innermost_scope_at, lookup_chain, namespace_range_at, NameSpellings, NamespaceRange, Scope, ScopeId, Span};
+use super::{contains_point, innermost_scope_at, lookup_chain, namespace_range_at, NameSpellings, NamespaceRange, Scope, ScopeId, Span, SymKind, Symbol, SymbolFlags};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
@@ -79,6 +79,31 @@ pub enum NameTable {
     Function,
     /// Free constants (php's `use const`).
     Constant,
+}
+
+impl NameTable {
+    /// Does `sym` bind in this table? A class in the class table; in the
+    /// function table, a function or a value a call can name (a function
+    /// pointer, an enumerator); in the constant table, a free constant.
+    pub fn holds(self, sym: &Symbol) -> bool {
+        let constant = sym.flags.contains(SymbolFlags::CONSTANT);
+        match self {
+            NameTable::Class => sym.kind == SymKind::Class,
+            NameTable::Function => !constant && matches!(sym.kind, SymKind::Sub | SymKind::Variable | SymKind::Enumerator),
+            NameTable::Constant => constant,
+        }
+    }
+
+    /// May `sym`, filed under another namespace, stand in for a reference
+    /// of this table that nothing indexed declares? Only a declaration of
+    /// the table's own kind: a function for a call, never a value a call
+    /// can merely name.
+    pub fn widens_to(self, sym: &Symbol) -> bool {
+        match self {
+            NameTable::Function => sym.kind == SymKind::Sub,
+            table => table.holds(sym),
+        }
+    }
 }
 
 /// The row of `rows` whose name token covers `span`: a token written inside
@@ -260,16 +285,16 @@ impl<'a> UseMap<'a> {
     /// the language looks them up. A qualified spelling names one, resolved
     /// like a class spelling (its head through the class table: a namespace
     /// alias is a class row); a bare one a row of `table` binds names that
-    /// row's; any other bare one is the language's `FunctionLookup` — the
+    /// row's; any other bare one is the language's `FreeNameLookup` — the
     /// global name, or the namespace in force first and then the global
     /// one, whichever is declared.
     pub fn free_name_ladder(
         &self,
         table: NameTable,
         written: &str,
-        lookup: crate::model::conventions::FunctionLookup,
+        lookup: crate::model::conventions::FreeNameLookup,
     ) -> Vec<QualifiedName> {
-        use crate::model::conventions::FunctionLookup;
+        use crate::model::conventions::FreeNameLookup;
         if written.contains(self.sep) {
             return vec![self.resolve(written)];
         }
@@ -278,7 +303,7 @@ impl<'a> UseMap<'a> {
         }
         let global = QualifiedName::new("", written);
         match (lookup, self.own_namespace) {
-            (FunctionLookup::NamespaceThenGlobal, Some(own)) => vec![QualifiedName::new(own, written), global],
+            (FreeNameLookup::NamespaceThenGlobal, Some(own)) => vec![QualifiedName::new(own, written), global],
             _ => vec![global],
         }
     }

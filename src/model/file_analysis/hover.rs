@@ -186,6 +186,11 @@ impl FileAnalysis {
                         return Some(self.format_symbol_hover(self.symbol(sid), source, module_index));
                     }
                 }
+                RefKind::Constant => {
+                    if let Some(sym) = self.free_name_symbol(r) {
+                        return Some(self.format_symbol_hover(sym, source, module_index));
+                    }
+                }
                 RefKind::MethodCall { .. } => {
                     // One section per class the receiver may be, from the
                     // same receiver projection find_def / refs_to read; a

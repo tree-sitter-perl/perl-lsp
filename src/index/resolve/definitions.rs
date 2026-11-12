@@ -1056,14 +1056,15 @@ impl<'a> CandidateSet<'a> {
         // owner-anchored step (`qualifier_at_point` + `member_def_location`),
         // which fires unconditionally for pack routing before this tail.
         //
-        // A call names a function by identity (`function_identities`): it
-        // lands on the first its language looks up that something declares,
-        // and on a same-leaf stand-in only when nothing does, labeled with
-        // the function it actually is.
+        // A call names a function, and a constant read a constant, by
+        // identity (`free_name_identities`): it lands on the first its
+        // language looks up that something declares, and on a same-leaf
+        // stand-in only when nothing does, labeled with the name it actually
+        // is.
         if let Some(r) = analysis.ref_at(point) {
-            if matches!(r.kind, RefKind::FunctionCall | RefKind::ImportedName) {
-                let identities = analysis.function_identities(r);
-                let (decls, widened) = crate::model::file_analysis::callee_declarations(idx, &identities, analysis.names());
+            if let Some(table) = r.free_name_table() {
+                let identities = analysis.free_name_identities(r);
+                let (decls, widened) = crate::model::file_analysis::callee_declarations(idx, table, &identities, analysis.names());
                 let mut decls = decls.into_iter().filter(|d| Url::from_file_path(&d.module.path).is_ok()).peekable();
                 if !widened {
                     if let Some(d) = decls.next() {

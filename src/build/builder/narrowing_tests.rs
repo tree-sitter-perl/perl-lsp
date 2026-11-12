@@ -67,6 +67,78 @@ fn narrow_logical_or_exit() {
 }
 
 #[test]
+fn narrow_block_form_exit_narrows_the_remainder() {
+    // An `if`/`unless` with no other arm whose block ends in an exit is the
+    // block spelling of `return unless G`: the rest of the block runs where
+    // the block was not entered. What runs before the exit, a comment
+    // included, ends there too.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    for (src, why) in [
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { return; }\n    $x->layout;\n}", "unless BLOCK return"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    if (!$x->isa('Widget')) { die \"x\" }\n    $x->layout;\n}", "if !G BLOCK die"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { warn 'no'; return }\n    $x->layout;\n}", "work, then the exit"),
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) {\n        # why\n        exit 1;\n    }\n    $x->layout;\n}", "a comment, then exit"),
+    ] {
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : undef;\n    if (!defined $x) { die \"x\" }\n    $x->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"), "`!defined` exit strips the undef");
+}
+
+#[test]
+fn narrow_block_form_without_exit_narrows_nothing_after() {
+    // A block that may fall through, or a chain with another arm, says
+    // nothing about the rest of the block.
+    for (src, why) in [
+        ("package P;\nsub f {\n    my ($x) = @_;\n    unless ($x->isa('Widget')) { warn 'no'; }\n    $x->layout;\n}", "no exit"),
+        ("package P;\nsub f {\n    my ($x, $y) = @_;\n    unless ($x->isa('Widget')) { return if $y; }\n    $x->layout;\n}", "a conditional exit"),
+    ] {
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+}
+
+#[test]
+fn narrow_after_a_chain_follows_the_one_arm_that_falls_through() {
+    // A block leaves where any of its statements does, and a chain leaves
+    // where every arm does, an `else` among them. After a chain whose one
+    // arm falls through, the rest of the block runs where that arm does.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    let narrows = [
+        ("unless ($x->isa('Widget')) { return; warn 'x'; }", "an exit not in last position"),
+        ("if ($x->isa('Widget')) { warn 'w'; } else { return; }", "an else-arm exit"),
+        ("unless ($x->isa('Widget')) { return; } else { warn 'w'; }", "unless, then else"),
+        ("if (!$x->isa('Widget')) { return; } elsif ($y) { die 'y'; } else { warn 'w'; }", "only the else falls"),
+        ("if ($y) { return; } elsif ($x->isa('Widget')) { warn 'w'; } else { die 'n'; }", "only the elsif falls"),
+        ("if ($x->isa('Widget')) { warn 'w'; } elsif ($y) { return; } else { die 'n'; }", "only the then falls"),
+        ("unless ($x->isa('Widget')) { if ($y) { return; } else { die 'y'; } }", "a nested chain whose every arm leaves"),
+        ("unless ($x->isa('Widget')) {\n        return; # why\n    }", "a comment after the exit"),
+    ];
+    for (chain, why) in narrows {
+        let src = format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let nothing = [
+        ("if ($x->isa('Widget')) { return; } else { die 'n'; }", "every arm leaves"),
+        ("if ($x->isa('Widget')) { warn 'w'; } elsif ($y) { warn 'y'; } else { return; }", "two arms fall through"),
+        ("unless ($x->isa('Widget')) { if ($y) { return; } }", "a nested chain with no else"),
+    ];
+    for (chain, why) in nothing {
+        let src = format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+}
+
+fn fa_type_at(src: &str, var: &str, at: Point) -> Option<InferredType> {
+    build_fa(src).inferred_type_via_bag(var, at)
+}
+
+#[test]
 fn narrow_observed_through_method_dispatch() {
     // The invocant of `$x->paint` inside the block resolves to Foo, so a
     // method call dispatches on the narrowed class (the query seam).
@@ -228,6 +300,58 @@ fn optional_blessed_narrows_to_inner() {
         "package P; use Scalar::Util qw(blessed);\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless blessed $r;\n    $r->go;\n}",
     );
     assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_defined_region_is_an_edge_to_its_read() {
+    // The region holds the subject's read in the guard, stripped when
+    // asked: no fold pass materializes the strip.
+    use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+    let fa = build_fa(
+        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless defined $r;\n    $r->go;\n}",
+    );
+    let read = fa
+        .witnesses
+        .all()
+        .iter()
+        .find_map(|w| match (&w.attachment, &w.payload) {
+            (WitnessAttachment::Place(_), WitnessPayload::Projected { base: WitnessAttachment::Expr(read), step: ProjectionStep::Defined }) => Some(*read),
+            _ => None,
+        })
+        .expect("the guard's region is a Defined projection");
+    assert_eq!((read.start.row, read.start.column), (4, 26), "its base is `$r` as `defined` reads it");
+    assert!(
+        fa.witnesses.for_attachment(&WitnessAttachment::Expr(read)).iter().next().is_some(),
+        "the walk types that read",
+    );
+    assert!(
+        !fa.witnesses.all().iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (WitnessAttachment::Place(_), WitnessPayload::InferredType(InferredType::ClassName(_)))
+        )),
+        "no stripped value is materialized on the place",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 4)), Some(InferredType::ClassName("Foo".into())));
+}
+
+#[test]
+fn a_type_a_conjunct_proves_outranks_its_defined() {
+    // `blessed($t) && $t->isa('Foo')` holds `Foo` past the exit: the proven
+    // type is already defined, so the `blessed` adds nothing beside it.
+    let fa = build_fa(
+        "package P; use Scalar::Util qw(blessed);\nsub use_it {\n    my $t = make();\n    unless (blessed($t) && $t->isa('Foo')) {\n        die 'not a Foo';\n    }\n    $t->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_defined_guard_on_an_untyped_value_keeps_what_its_reads_know() {
+    // `defined $c` on a value nothing types narrows nothing: the deref
+    // inside still says `$c` is a hash.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my ($self, $c) = @_;\n    $c ||= $self->ctx;\n    if (defined $c) {\n        my $d = $c->{d};\n        return $c;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$c", Point::new(6, 15)), Some(InferredType::HashRef));
 }
 
 #[test]

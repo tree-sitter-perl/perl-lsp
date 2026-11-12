@@ -58,11 +58,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Some(Payload::Qualifier(q)) => Some(q.clone()),
         _ => None,
     };
+    let spelled = ad.in_match(e.match_id, Capture::RefSpelled);
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         // `@ref.spelled`: the name as the match spells it, where that is
         // not the reference token's own text.
-        name: (pack.shape_name)(ad.in_match(e.match_id, Capture::RefSpelled).map_or(&e.text, |s| &s.text)),
+        name: (pack.shape_name)(spelled.map_or(&e.text, |s| &s.text)),
         start: e.start,
         end: e.end,
         scope: st.cur_scope,
@@ -72,6 +73,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         constructs: false,
         spaces: space_ask(ad.on(e)),
         qualifier,
+        spelled: spelled.map(Event::span),
     });
 }
 
@@ -79,11 +81,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 pub(super) fn space_ask<'a>(on: impl Iterator<Item = &'a Event>) -> Option<crate::model::file_analysis::SpaceAsk> {
     use crate::model::file_analysis::SpaceAsk;
     on.fold(None, |acc: Option<SpaceAsk>, t| match t.cap {
-        Capture::Space { id, illegal } => {
+        Capture::Space { id, mark } => {
             let a = acc.unwrap_or_default();
             Some(SpaceAsk {
                 search: a.search.with(id),
-                illegal: if illegal { a.illegal.with(id) } else { a.illegal },
+                illegal: if mark == Some(SpaceMark::Illegal) { a.illegal.with(id) } else { a.illegal },
             })
         }
         _ => acc,

@@ -143,9 +143,9 @@ fn cpp_enumerator_carries_parent_enum_as_container_and_type() {
     assert_eq!(red.package.as_deref(), Some("Color"),
         "enum member's container is its enum");
     assert_eq!(
-        fa.inferred_type_via_bag("RED", red.span.start),
+        fa.declared_value_type(red.id, red.span.start, None),
         Some(InferredType::ClassName("Color".to_string())),
-        "enum member's type is its enum, so hover renders `RED: Color`"
+        "enum member's type is its own binding's, so hover renders `RED: Color`"
     );
     // A bare `enum` (no @scope) keeps members in the enclosing scope, so a
     // later bare read of RED still resolves to this def.
@@ -255,7 +255,7 @@ fn member_completion_filters_by_access_specifier() {
          private:\n  void Ref();\n  void Unref();\n  int rep_;\n\
          };\n",
     );
-    let outside_cands = fa.complete_members_for_class("Status", None, None, None);
+    let outside_cands = fa.complete_members_for_class("Status", None, None, false, None);
     let outside: Vec<&str> = outside_cands.iter().map(|c| c.label.as_str()).collect();
     assert!(outside.contains(&"ok"), "{outside:?}");
     assert!(outside.contains(&"Update"), "{outside:?}");
@@ -263,7 +263,7 @@ fn member_completion_filters_by_access_specifier() {
     assert!(!outside.contains(&"Unref"), "private method leaked: {outside:?}");
     assert!(!outside.contains(&"rep_"), "private field leaked: {outside:?}");
 
-    let inside = fa.complete_members_for_class("Status", None, Some("Status"), None);
+    let inside = fa.complete_members_for_class("Status", None, Some("Status"), false, None);
     let inside_labels: Vec<&str> = inside.iter().map(|c| c.label.as_str()).collect();
     for want in ["ok", "Update", "Ref", "Unref", "rep_"] {
         assert!(inside_labels.contains(&want), "{want} missing from self-access: {inside_labels:?}");
@@ -289,7 +289,7 @@ fn member_completion_offers_protected_to_derived_classes() {
     );
     let labels = |class: &str, from: Option<&str>| {
         let mut out: Vec<String> =
-            fa.complete_members_for_class(class, None, from, None).into_iter().map(|c| c.label).collect();
+            fa.complete_members_for_class(class, None, from, false, None).into_iter().map(|c| c.label).collect();
         out.sort();
         out
     };
@@ -937,7 +937,7 @@ class Iterator {\n\
     // `requesting`: None = completing from OUTSIDE the class (public only);
     // Some("Iterator") = from a method of the SAME class (privates too).
     let has = |n: &str, requesting: Option<&str>| {
-        fa.complete_members_for_class("Iterator", None, requesting, None)
+        fa.complete_members_for_class("Iterator", None, requesting, false, None)
             .iter()
             .any(|c| c.label == n)
     };

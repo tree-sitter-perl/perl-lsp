@@ -18,13 +18,16 @@ struct Target {
     resets: bool,
     /// The target token.
     token: Span,
-    /// A `@type.<relative>` annotation's mark and the class in force where
-    /// it is written.
-    relative: Option<(RelativeClass, String)>,
+    /// A `@type.<relative>` annotation's mark and the class body it is
+    /// written in; outside every class body the mark names none.
+    relative: Option<(RelativeClass, Option<String>)>,
     /// The namespace the token's `@space.*` names: a data member's
     /// declaration is its member identity's, so two members of one name in
     /// one class (php's `const X` and `$X`) never share a fact.
     space: Option<crate::model::file_analysis::NamespaceId>,
+    /// The token declares a free constant (`@mark.constant`): its value is
+    /// the constant's own, never a variable's of its name.
+    constant: bool,
 }
 
 #[derive(Default)]
@@ -71,9 +74,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let pack = st.pack;
     let ad = st.adorned;
     let cur_scope = st.cur_scope;
-    let target_scopes = match e.cap {
-        Capture::Flow(FlowCap::Target) => super::defs::binding_scopes(st, e),
-        _ => Vec::new(),
+    let (target_scopes, enclosing) = match e.cap {
+        Capture::Flow(FlowCap::Target) => {
+            (super::defs::binding_scopes(st, e), super::scopes::enclosing_class(st).map(str::to_string))
+        }
+        _ => (Vec::new(), None),
     };
     let f = &mut st.flow;
     let out = &mut st.out;
@@ -100,7 +105,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 Some(token) => ((pack.shape_name)(&token.text), token.span()),
                 None => ((pack.shape_name)(&e.text), span),
             };
-            out.var_reads.push((name.clone(), cur_scope, ref_span));
+            out.var_reads.push(crate::build::query_extract::VarRead { name: name.clone(), scope: cur_scope, span, token: ref_span });
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
@@ -122,6 +127,11 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // function's `Symbol` onto it when undeclared.
             out.return_sites.push((cur_scope, e.span()));
         }
+        Capture::Expr(ExprCap::ReturnClass) => {
+            if !e.text.is_empty() {
+                out.class_returns.push((cur_scope, e.span(), e.text.clone()));
+            }
+        }
         Capture::Flow(FlowCap::Target) => {
             let name = (pack.shape_name)(&e.text);
             let (at, resets) = written_at(ad, e);
@@ -133,15 +143,14 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.text.clone());
                 }
-                if let (Some(rel), Some(class)) = (super::defs::names_relative(ad, annot), st.package.as_ref()) {
-                    relative = Some((rel, class.clone()));
-                }
+                relative = super::defs::names_relative(ad, annot).map(|rel| (rel, enclosing));
             }
             let space = ad.on(e).find_map(|t| match t.cap {
                 Capture::Space { id, .. } => Some(id),
                 _ => None,
             });
-            let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), relative, space };
+            let constant = ad.on(e).any(|t| t.cap == Capture::Mark(MarkCap::Constant));
+            let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), relative, space, constant };
             f.flow_targets.insert(e.match_id, target);
         }
         Capture::Flow(FlowCap::Rebind) => {
@@ -158,7 +167,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // `u->data.ping` types `u->data` as U and finds `ping` there.
             // TypeName (not ClassName) so a typedef'd container chases.
             // It is the field's declared type, so a write never retypes it,
-            // and the declaring token's fact (`member_decl_facts`), so a
+            // and the declaring token's fact (`decl_facts`), so a
             // flattened member of the same name (redis `struct { … *lp; }
             // lp;`) never takes it.
             if let Some(owner) = &st.package {
@@ -169,7 +178,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     payload: WitnessPayload::Edge(WitnessAttachment::TypeName(owner.clone())),
                     span: Span { start: e.start, end: e.start },
                 };
-                out.member_decl_facts.push((cur_scope, e.start, name, w));
+                out.decl_facts.push((cur_scope, e.start, name, w));
             }
         }
         Capture::Domain(DomainCap::Slot) => {
@@ -292,6 +301,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                     constructs: true,
                     spaces: None,
                     qualifier: None,
+                    spelled: None,
                 });
             }
         }
@@ -362,6 +372,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 scope: cur_scope,
                 names,
                 text: e.text.clone(),
+                object: ad.in_match(e.match_id, Capture::Ref(RefCap::Receiver)).is_some(),
             });
         }
         // The assignment node anchors its pattern; its target and source
@@ -439,24 +450,25 @@ pub(super) fn finish(st: &mut ExtractState) {
     // `Variable{name, scope}` slot land witnesses in this order, and the
     // latest wins.
     let targets = f.flow_targets.iter().flat_map(|(&mid, t)| t.scopes.iter().map(move |scope| (mid, t, scope)));
-    // A member declaration's facts are its declaring token's
-    // (`SkeletonAnalysis::member_decl_facts`): `into_file_analysis` lowers
+    // A member's or constant's declaration facts are its declaring token's
+    // (`SkeletonAnalysis::decl_facts`): `into_file_analysis` lowers
     // them to the place of the symbol that token declares. Their fallback
     // attachment is the member, owned by the class its scope names — the one
     // the declaring symbol is filed under (`defs::handle`).
-    let mut member_decls: HashMap<(ScopeId, Point), (ScopeId, Point, String, WitnessAttachment)> = HashMap::new();
-    for (mid, Target { name, at, resets, token, relative, space, .. }, scope) in targets {
+    let mut decl_sites: HashMap<(ScopeId, Point), (ScopeId, Point, String, WitnessAttachment)> = HashMap::new();
+    for (mid, Target { name, at, resets, token, relative, space, constant, .. }, scope) in targets {
         let owner = classes.class_of(*scope).filter(|_| field_scope_span.contains_key(&(name.clone(), *scope)));
-        let decl = owner.is_some().then(|| (*scope, token.start, name.clone()));
+        let decl = (owner.is_some() || *constant).then(|| (*scope, token.start, name.clone()));
         let var = match owner {
             Some(owner) => {
                 let space = st.pack.member_spaces.of_decl(crate::model::file_analysis::SymKind::Field, *space);
-                let att = WitnessAttachment::holds_of(owner, space, name.clone());
-                member_decls.insert((*scope, *at), (*scope, token.start, name.clone(), att.clone()));
-                att
+                WitnessAttachment::holds_of(owner, space, name.clone())
             }
             _ => WitnessAttachment::Variable { name: name.clone(), scope: *scope },
         };
+        if decl.is_some() {
+            decl_sites.insert((*scope, *at), (*scope, token.start, name.clone(), var.clone()));
+        }
         // A data member's write in its class body is its initializer, not a
         // step in a sequence: its declared type holds class-wide, so nothing
         // there retires it.
@@ -478,7 +490,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             // A type naming a class by where it is written is that class,
             // already an identity; any other spelling resolves at its site.
             let annot_type = match relative {
-                Some((rel, class)) => out.relative_class(*rel, class).map(InferredType::ClassName),
+                Some((rel, class)) => class.as_ref().and_then(|c| out.relative_class(*rel, c)).map(InferredType::ClassName),
                 None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
             };
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
@@ -497,7 +509,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                     span: annot_span,
                 };
                 match decl {
-                    Some((scope, token, name)) => out.member_decl_facts.push((scope, token, name, w)),
+                    Some((scope, token, name)) => out.decl_facts.push((scope, token, name, w)),
                     None => out.witnesses.push(w),
                 }
             }
@@ -578,12 +590,20 @@ pub(super) fn finish(st: &mut ExtractState) {
     out.flow_edges.extend(edges);
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
+    // A constant holds its value wherever it is read, a read written above
+    // its declaration included.
+    let file_span = out.scopes.first().map(|s| s.span);
+    let constants: std::collections::HashSet<(ScopeId, Point)> =
+        f.flow_targets.values().filter(|t| t.constant).flat_map(|t| t.scopes.iter().map(|s| (*s, t.at))).collect();
     for fe in &out.flow_edges {
         if let Some(mut w) = fe.lower_to_witness() {
-            match member_decls.get(&(fe.target_scope, fe.target_at)) {
+            match decl_sites.get(&(fe.target_scope, fe.target_at)) {
                 Some((scope, token, name, att)) => {
                     w.attachment = att.clone();
-                    out.member_decl_facts.push((*scope, *token, name.clone(), w));
+                    if let Some(file) = file_span.filter(|_| constants.contains(&(fe.target_scope, fe.target_at))) {
+                        w.span = file;
+                    }
+                    out.decl_facts.push((*scope, *token, name.clone(), w));
                 }
                 None => out.witnesses.push(w),
             }

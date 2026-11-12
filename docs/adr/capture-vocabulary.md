@@ -50,9 +50,11 @@ A name starting with `_` follows tree-sitter's predicate-only convention
 
 A `#set!` directive carries a word no node of the match spells, so its key
 is vocabulary too (`SettingKey`): an unknown key, or one with no value,
-fails the compile. `member.word` is the one key: a word the pattern's
-member operator may be followed by that names no member (php's
-`Foo::class`), which completion offers beside the members.
+fails the compile. `member.word` is a word the pattern's member operator
+may be followed by that names no member (php's `Foo::class`), which
+completion offers beside the members. `return.class` is the class an
+`@expr.return.class` site makes its callable return, by identity (php's
+`Generator` at a `yield`).
 
 ## Decision: structural predicates are a closed set too
 
@@ -109,6 +111,13 @@ promoted constructor parameter, a property and a local). It is opt-in on
 the pattern because two defs in one match are a pair only when the
 document says so; the extractor links them as `Symbol::declared_with`.
 
+`@ref.constant` sits on a free constant's spelled name (php's `LIMIT`,
+`\Lib\LIMIT`), the twin of `@ref.call` in the constant table; which bare
+names are values and not calls, labels or class names is the document's,
+by the node they sit in. `@mark.constant` marks a def as one, and
+`@def.global` beside a def says its name is the global namespace's
+wherever it is written (php's `define('X', 1)`).
+
 `@receiver.<kind>` sits on a receiver token whose value is a class, so a
 call on it dispatches there: the token's `Expr` witness is the one store
 of that class, and the call's lookup reads it like any receiver's value.
@@ -125,6 +134,22 @@ receiver spelling. Bare `@receiver` is the declared receiver, a parameter
 the call runs on the calling method's own receiver, the token naming only
 the class its lookup starts at (php's `self::m()` and `parent::m()`, which
 forward the called class).
+
+`@ref.receiver` beside a `@receiver.<kind>` says the token refers to the
+object the method runs on (php's `$this`, cpp's `this`), not only to a
+class: it mints a read bound to that method (`RefBinding::Receiver`), and
+the token's value and member place are that object's. Which object a body
+runs on is one per-scope fact (`Scope::runs_on`, minted once by the
+extractor): the nearest enclosing method's, a closure inside one included,
+and none inside a class-level (`@mark.static`) method. Every site that
+refers to the object reads it — the token's ref, value and place, and a
+bare instance member in a body that elides its receiver — so in a static
+method they all come up empty. The sites that name the class (`self::`,
+`static::`, `parent::`, a bare static member or static sibling call) read
+the method's class and still answer there. An out-of-line cpp definition
+(`int W::make() { … }`) carries no `static`, which is on the in-class
+declaration only, so its body still runs on an object
+(`TODO(cpp-out-of-line-static)`).
 
 `@rettype` is a callable's declared return, captured in the def's match.
 `@type.enclosing` sits on any written type (a return, a parameter's or
@@ -183,18 +208,47 @@ does not exist yet.
 projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
 
+`@flow.leaves` is a statement that leaves its block unconditionally (a
+return, a throw, a `break`): nothing after it in the block runs. It is the
+document's one statement about control leaving; which arms of a
+condition fall through, and what the rest of a block after them is known
+under, the narrowing family derives by containment over the `@narrow.*`
+positions (`flow-narrowing.md`).
+
 ## Decision: a member operator states what it reaches
 
 `@member.op` sits on the operator token of a member access's match.
 `@member.op.<which>` names the model's `MemberOp` on it, and `@space.<name>`
 on it names a namespace a member written after the operator lives in
-(php's `->`: methods and properties; `::`: methods and constants). On a
-member's name token `@space.<name>` is the namespaces the access searches;
-on its operator it is the namespaces the operator reaches, which is what
-completion offers there (`cursor-context-completion.md`). Extraction reads
-neither off the operator. The cursor reads both, with the access's
-receiver and name, off the same document run over its sentinel reparse
-(`CursorDocument`), so no node kind says which node is a member.
+(php's `->`: methods and properties; `::`: methods, constants and static
+properties). On a member's name token `@space.<name>` is the namespaces the
+access searches; on its operator it is the namespaces the operator reaches,
+which is what completion offers there (`cursor-context-completion.md`).
+Extraction reads neither off the operator. The cursor reads both, with the
+access's receiver and name, off the same document run over its sentinel
+reparse (`CursorDocument`), so no node kind says which node is a member.
+
+A namespace capture may carry a mark, `@space.<name>.<mark>` (`SpaceMark`).
+On a name token, `.illegal` is a namespace the site reaches only wrongly
+(`member-kinds.md`). On an operator, `.forward` says the operator reaches an
+instance member of the namespace only on the object the site already runs
+on: from an instance method of the receiver's class or a class it extends
+(php's `parent::m()`), elsewhere only a static member. `.spelled` says a
+member of the namespace is written after the operator as it is declared
+(php's `Foo::$x`), so completion lists every member of the namespace,
+methods included, by its declared spelling (`Symbol::offered_as`).
+`@member.spelled` is the member's token as written where that is more than
+its name (php's `$x`): what a completion at the site replaces, so a typed
+`$` is replaced, never doubled, and the site reaches only the `.spelled`
+namespaces.
+
+A mark is checked where it sits when the query compiles
+(`vocab::check_space_marks`, over `query_predicates::capture_sites`), the
+way a `#set!` key is (`SettingKey`): `.illegal` is said of a name, so it
+sits on a node; `.forward` and `.spelled` are said of an operator, so they
+sit on a token the document spells (`SpaceMark::sits_on`). Where a capture
+sits is read off the pattern as written, never off a list of node kinds;
+a misplaced mark is a document error, not a silent no-op.
 
 ## Decision: a def with no name is named from its anchor
 

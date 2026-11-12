@@ -114,6 +114,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             package: Some("main".to_string()),
             owner: None,
             implicit_receiver: false,
+            runs_on: None,
             closed: false,
             captures: Vec::new(),
             direct: false,
@@ -418,7 +419,6 @@ fn build_once(
         call_sites: Vec::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
-        defined_narrowings: Vec::new(),
         tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
         rebinds: Default::default(),
@@ -716,7 +716,9 @@ fn build_once(
             .all()
             .iter()
             .filter_map(|w| match (&w.attachment, &w.payload) {
-                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_)) => Some(&**p),
+                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_) | WitnessPayload::Projected { .. }) => {
+                    Some(&**p)
+                }
                 _ => None,
             })
             .collect();

@@ -267,12 +267,12 @@ already says the write may not have run.
 
 ## Polarity and the negative lattice
 
-`GuardFact { subject, op, asserts_when_true }`; `op` is `NarrowOp::To(T)`
-(`isa`/`ref-eq`) or `StripOptional` (`defined`/`blessed`). The region a
+`GuardFact { subject, op, asserts_when_true, read }`; `op` is
+`NarrowOp::To(T)` (`isa`/`ref-eq`) or `Defined { read }` (`defined`/`blessed`). The region a
 guard dominates either asserts the guard TRUE or FALSE;
 `op_for_region(holds)` returns the fact's op when polarity matches, else
 `op.negated()`. `To(_).negated()` is `None` ("not Foo" has no positive
-lookup target → emit nothing, stay wide); `StripOptional.negated()` is
+lookup target → emit nothing, stay wide); `Defined.negated()` is
 `To(Undef)`. So the `defined`-family negatives (`else` of `if (defined
 $x)`, `return if defined $x`, `unless (defined $x)`) narrow to the bottom
 `Undef`, lighting up the early-exit rows **for free** through the
@@ -307,7 +307,31 @@ exception — perlsyn runs the block once before the first test. Nothing
 narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
-diagnostics see each statement-level guard once, as before.
+diagnostics see each statement-level guard once.
+
+"Falls through" is a fact about statements. A block leaves when any of
+its statements leaves, wherever that statement sits, and what follows it
+there is dead: a statement leaves when it is an exit, or when it is an
+`if`/`unless` chain with an `else` whose every arm leaves
+(`block_leaves`). A chain with no `else` has an implicit one, which falls
+through. After a chain whose arms all leave but one, the rest of the
+enclosing block runs where that arm does, through the same
+`narrow_block_remainder`, narrowed as that arm's block is: the first
+arm where its block is entered, an `elsif` where its own guard holds and
+every earlier arm was not entered, the `else` where no earlier arm was
+(`unless ($x->isa('Foo')) { return }`, `if ($x->isa('Foo')) { … } else
+{ die }`, `if (!defined $x) { die; warn … }`). Each arm's guard is recorded once,
+as the arm's. Where no arm falls through, the rest of the block never
+runs and nothing narrows it; where two or more do, the rest runs where
+any of them does, and nothing narrows past the enclosing block either:
+both are the CFG's block-exit join (`docs/prompt-cfg-tier.md` §3.5,
+`TODO(cfg-exit-join)`). An exit is a word read by its spelling
+(`is_exit_expression`'s table: `return`, `die`, `exit`, `croak`,
+`confess`, `last`, `next`, `redo`, `goto`), so a file's own sub named
+`croak` counts as one, and so does a `goto` whose label lies in the rest
+of the block; a callee that never returns is an effect on the callee,
+which replaces the table once effects and the CFG exist
+(`TODO(noreturn-callee)`).
 
 A pack's document states its guards in three parts, and the extractor
 (`query_extract/extract/narrowing.rs`) joins them by containment, the
@@ -319,21 +343,57 @@ fails) or `@narrow.unset` (the swap). A **connective** is a node marked
 `@narrow.not`, `@narrow.and`, `@narrow.or` or `@narrow.group` (a
 parenthesis). A **position** match marks a condition `@narrow.cond` and
 what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
-it fails, and `@narrow.exit` is a statement that leaves its block unless
-the condition fails, so the rest of that block runs where it fails. An
+it fails. An `else` arm is the statement it holds, so a later clause of
+the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
+condition before it. `@narrow.loop` marks a position's construct that
+tests its condition again after each run of its arm (PHP's `while`): a
+`break` in the arm lands after the loop too, so its arms decide nothing
+about what follows. The fall-through derivation and `@narrow.loop` are a
+single-block stand-in for CFG reachability and retire with it
+(`TODO(cfg-exit-join)`). Apart from guards, each document marks every
+statement that leaves its block unconditionally `@flow.leaves` (return,
+throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
+`exit`, which the language reserves, so their spelling names them), and
+the extractor derives the rest by containment, the Perl rule above: a
+condition's statement is the node holding it and its then arm; a chain
+is that statement with every condition whose statement is an else arm of
+the chain; its arms are the narrowest regions its conditions decide, each
+known by every condition deciding a region around it. An arm leaves when
+it, or one of the statements it runs in sequence (its named children
+outside every field: a loop's body is a part of the loop, not a
+statement of the arm), is marked `@flow.leaves` or is a chain that
+leaves. Where exactly one arm falls through, the rest of the block holding
+the chain runs where that arm does, a region of every condition that
+decides it. A comment is no statement, so where it sits does not matter. A
+call that never returns by its callee's nature (`sys.exit()`,
+`std::abort()`, `[[noreturn]]`) is an effect on the callee, to mark once
+effects and the CFG exist (`TODO(noreturn-callee)`). An
 atom climbs to each condition above it through connectives alone (an
 atom inside a call argument is no part of the condition), and the
 connectives on the way decide its value in each of the condition's
 regions, or that the region says nothing about it. The refinement
 attaches in the atom's scope over the region, cut at the subject's next
 rebind (a variable) or disturbance (a place). A failed `is` proves
-nothing; a passing `set` would strip the null from the incoming type,
-which needs a fold the pack tier lacks (TODO(narrow-set-strip)).
+nothing. A value proved set is what it held coming in without its null,
+which only the query knows, so the region carries an edge rather than a
+type: `Projected { base: Expr(the subject's read in the test), step:
+Defined }`. The query materializes the base and keeps each arm it may be
+once set (`?Foo` → `Foo`, `A|B|null` → `A|B`; a value never nullable is
+itself). The test and the regions it decides are disjoint, so the base
+never reads its own narrowing. Where the subject token is a name inside
+its read (php's `w` in `$w`), the base is the read the token names.
 
 PHP's document declares its atoms (`instanceof`; a single-argument
 `isset`, `!== null`; `=== null`, `is_null`), its connectives and its
 positions; a property of `$this` is a place of the method's object
-(`Binding::Receiver`), so a guard on it narrows the property's receiver.
+(`Binding::Receiver`), so a guard on it narrows the property's receiver,
+and a property of a local is a place of that local. A variable read roots
+its places at its value (`$x`, the node a member read names as its
+receiver), while its reference stays on the name token (`x`). `self`,
+`static` and `parent` on the right of `instanceof` carry the
+`@type.enclosing|called|super` marks a written type does, so the atom
+names the class around the guard or the one it extends; `static` names the
+class around it, since the class the call is made on lies beneath it.
 A write ends a place's narrowing where it lands, as it ends a variable's
 (an assignment's end, after every read it makes), so the written access
 reads the place as it held coming in. A member value access carries its
@@ -345,11 +405,14 @@ is a lazy init, as `??=` is.
 Python's document declares `isinstance` and C++'s `dynamic_cast` as
 `@narrow.is` atoms naming their `@narrow.type`, read through the
 language's type spelling first (`isinstance(x, str)` is a string, not a
-class named `str`). C++'s `std::optional` engagement (the subject's own
+class named `str`); `x is not None` is a `set` atom and `x is None` an
+`unset` one. C++'s `std::optional` engagement (the subject's own
 truth, or `has_value()`) names no type: its class is what the pack's
 `narrow_guard` peels off the subject's declared type. So `if not
-isinstance(x, T): return` and `if (!opt) return;` narrow the rest of
-their block.
+isinstance(x, T): return`, `if x is None: return` and `if (!opt) return;`
+narrow the rest of their block. The peel is a stand-in: an optional is a
+class whose `->` and `*` reach its value, and `.` its own members
+(`TODO(cpp-wrapper-deref)`).
 
 ## A tag is a value: `ref` names its subject
 
@@ -386,15 +449,31 @@ outranks. Two tags that disagree join to
 plain `String`. Under unions the same rule holds arm-wise: a guard reads
 a subject only when every arm of `$ref`'s value names the same one.
 
-## `defined`/`blessed` strip via a re-emittable fold pass
+## `defined`/`blessed` strip as an edge to the guard's read
 
-`StripOptional` can't resolve at walk time: the subject's `Optional`
-often comes from a sub return that only converges during the fold. So
-`recognize_*` records the guard (subject, region, and the guard's own
-`query_point` — *before* the region, so the read sees the un-narrowed
-type and the pass's own output can't feed back), and
-`emit_defined_narrowing_witnesses` re-derives `Optional<T> → T` each fold
-iteration (clear-and-emit on tag `defined_narrowing`).
+A `defined`/`blessed` guard's region holds `Projected { base: Expr(read),
+step: Defined }` on the subject's place, minted at walk time like any other
+region fact and cut at the same rebinds and disturbances. `read` is the
+subject as the guard reads it; the walker types that read
+(`emit_expr_witness`), so the strip resolves when asked, through whatever
+the read holds then: a sub return the fold converges, an import only the
+index types. Nothing re-derives it per fold round. The read sits in the
+guard, outside every region the guard decides, so the projection never
+reads its own narrowing. The pack tier states the same strip the same way.
+
+`Defined` answers only over a base known to be possibly undef (`Optional`,
+`Undef`). Over anything else, a class or an `Unknown`, it is no evidence,
+so the region never outranks what the read already knows: a deref's rep
+inside `if (defined $c)` still reads, and an `isa` beside the guard still
+holds. A conjunction that proves a type for a subject drops its `defined`
+of that subject (`conjoin`): the type is already defined, and two regions
+on one span would otherwise tie.
+
+A postfix guard is read where it is written, after the statement it
+decides, so a write in that statement reaches the guard's read
+(`$x = f($x) if defined $x`). The strip then sees the write's value, not
+the value the guard tested; it answers only if that value may be undef
+(`TODO(postfix-guard-read-order)`).
 
 ## Reaching writes
 

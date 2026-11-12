@@ -62,6 +62,7 @@ fn cached_query(language: &Language, pack: &LangPack) -> Result<&'static Compile
     let captures = vocab::capture_table(query.capture_names(), &pack.member_spaces).map_err(|e| format!("query: {e}"))?;
     crate::build::query_predicates::check(&query, language, &[]).map_err(|e| format!("query: {e}"))?;
     vocab::check_settings(&query).map_err(|e| format!("query: {e}"))?;
+    vocab::check_space_marks(source).map_err(|e| format!("query: {e}"))?;
     vocab::check_links(&query, &captures).map_err(|e| match e {
         vocab::LinkError::Pattern(at) => {
             let line = source[..at].lines().count() + 1;

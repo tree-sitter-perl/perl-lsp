@@ -35,6 +35,11 @@ impl FileAnalysis {
                         return Some((sid, true));
                     }
                 }
+                RefKind::Constant => {
+                    if let Some(sym) = self.free_name_symbol(r) {
+                        return Some((sym.id, true));
+                    }
+                }
                 RefKind::MethodCall { .. } => {
                     let classes = self.receiver_classes(r, module_index, ReceiverPolicy::Navigate);
                     // Bare method name (FQ `$o->Foo::Bar::m` resolves `m`).
@@ -1600,7 +1605,10 @@ impl FileAnalysis {
         // by-name cross-file index on — forward and backward share the key.
         // `Enumerator` covers an anonymous-enum constant (no enclosing
         // named scope of its own; it leaks straight to file scope).
+        // A free constant is keyed by its identity in its own table
+        // (`TargetKind::Constant`), never by its bare name.
         matches!(sym.kind, SymKind::Variable | SymKind::Enumerator)
+            && !NameTable::Constant.holds(sym)
             && sym.package.is_none()
             && !sym.name.starts_with(['$', '@', '%'])
             && matches!(self.scope(sym.scope).kind, ScopeKind::File)

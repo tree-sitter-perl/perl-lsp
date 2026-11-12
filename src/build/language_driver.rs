@@ -573,7 +573,7 @@ impl PackDriver {
             // parens or not (`#define X foo` then `X(a)`), so it is a site.
             for (name, span) in body_refs.name_refs {
                 expanded_sites.insert(span);
-                skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span));
+                skel.var_reads.push(crate::build::query_extract::VarRead::token(name, crate::model::file_analysis::ScopeId(0), span));
             }
             // Field/member uses inside bodies (`->op_next`) — untyped here (the
             // receiver is a macro param), resolved to the declaring class and
@@ -905,6 +905,7 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            runs_on: None,
             closed: false,
             captures: Vec::new(),
             direct: false,
@@ -1093,15 +1094,16 @@ fn remap_spans(
         template_params: _,
         // name/scope-keyed — no spans to fix.
         field_types: _,
-        member_decl_facts,
+        decl_facts,
         return_sites,
+        class_returns,
         receivers,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         language: _,
         names: _,
-        functions: _,
+        free_names: _,
         slot_writes,
         member_writes,
         member_reads,
@@ -1157,6 +1159,7 @@ fn remap_spans(
             constructs: _,
             spaces: _,
             qualifier: _,
+            spelled,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member
@@ -1168,8 +1171,15 @@ fn remap_spans(
         if let Some((_op, sp)) = member_op {
             *sp = rspan(*sp);
         }
+        if let Some(sp) = spelled {
+            *sp = rspan(*sp);
+        }
     }
-    for (_, _, span) in var_reads.iter_mut().chain(var_writes.iter_mut()) {
+    for read in var_reads.iter_mut() {
+        read.span = rspan(read.span);
+        read.token = rspan(read.token);
+    }
+    for (_, _, span) in var_writes.iter_mut() {
         *span = rspan(*span);
     }
     for span in write_sites.iter_mut().chain(init_sites.iter_mut()) {
@@ -1194,6 +1204,9 @@ fn remap_spans(
     for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
         *span = rspan(*span);
     }
+    for (_, span, _) in class_returns.iter_mut() {
+        *span = rspan(*span);
+    }
     // Member writes settle through `expr_type_at_span` on the receiver and an
     // edge to the value's `Expr`, both of which speak original coords.
     for w in member_writes.iter_mut() {
@@ -1204,11 +1217,6 @@ fn remap_spans(
     for (w, lands) in place_writes.iter_mut() {
         *w = rspan(*w);
         *lands = r(*lands);
-    }
-    for n in place_narrowings.iter_mut() {
-        let crate::build::query_extract::PlaceNarrowing { subject, refined: _, region } = n;
-        *subject = rspan(*subject);
-        *region = rspan(*region);
     }
     for m in member_reads.iter_mut() {
         let crate::build::query_extract::MemberRead { span, receiver, member: _, token, written: _ } = m;
@@ -1254,14 +1262,20 @@ fn remap_spans(
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };
-    for (_, token, _, _) in member_decl_facts.iter_mut() {
+    for (_, token, _, _) in decl_facts.iter_mut() {
         *token = r(*token);
     }
-    let decl_facts = member_decl_facts.iter_mut().map(|(_, _, _, w)| w);
+    let decl_facts = decl_facts.iter_mut().map(|(_, _, _, w)| w);
     for w in witnesses.iter_mut().chain(variable_regions.iter_mut()).chain(decl_facts) {
         remap_att(&mut w.attachment);
         w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);
+    }
+    for n in place_narrowings.iter_mut() {
+        let crate::build::query_extract::PlaceNarrowing { subject, refined, region } = n;
+        *subject = rspan(*subject);
+        refined.for_each_attachment_mut(&mut remap_att);
+        *region = rspan(*region);
     }
     // Value-flow edges (the provenance tier above the bag) + label/goto refs +
     // moved-from sites + domain-typing sites all carry transformed spans too.
@@ -1468,7 +1482,7 @@ fn mint_erased_macro_reads(
             }
         }
         minted.insert(span);
-        skel.var_reads.push((name, scope, span));
+        skel.var_reads.push(crate::build::query_extract::VarRead::token(name, scope, span));
     }
     minted
 }

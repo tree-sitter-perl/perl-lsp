@@ -900,6 +900,12 @@ impl InferredType {
         (!t.is_undef()).then_some(t)
     }
 
+    /// Whether the value is known to be possibly undef: an `Optional` or
+    /// `Undef` itself. `Unknown` says nothing either way.
+    pub fn may_be_undef(&self) -> bool {
+        matches!(self, InferredType::Optional(_) | InferredType::Undef)
+    }
+
     /// `f` over each value a receiver may be (`receiver_arms`), joined
     /// under `order`. An arm `f` answers nothing for adds no evidence —
     /// whether its member is untyped or absent there: the value is what
@@ -1583,6 +1589,9 @@ fn join_precise(
             Some(T::HashWithKeys { keys: SharedKeys::new(keys), open: *oa || *ob })
         }
         _ if a.is_hash_shaped() && b.is_hash_shaped() => Some(T::HashRef),
+        // TODO(sequence-join-elementwise): two tuples of one arity join slot
+        // by slot; widening them to `ArrayRef` drops what a destructuring
+        // `my ($ok, $host) = f()` reads once one arm is narrower than another.
         _ if a.is_array_shaped() && b.is_array_shaped() => Some(T::ArrayRef),
         (T::Bool, T::Numeric) | (T::Numeric, T::Bool) if order.holds(Subsumption::BoolIntoNumeric) => {
             Some(T::Numeric)

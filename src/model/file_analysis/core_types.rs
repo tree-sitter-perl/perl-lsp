@@ -116,6 +116,13 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// The method whose object this body runs on: the nearest enclosing
+    /// method's, a closure inside one included; `None` in a class-level
+    /// (`STATIC`) method and in code no method encloses. What every site
+    /// that refers to the object reads (`docs/adr/capture-vocabulary.md`).
+    /// Minted by the pack extractor; Perl's receiver is a parameter.
+    #[serde(default)]
+    pub runs_on: Option<SymbolId>,
     /// A body that sees no variable of the code around it but the ones it
     /// captures (`@scope.sub.closed`: php's functions, methods and
     /// closures). Read through `variable_lookup_chain`.
@@ -689,6 +696,12 @@ bitflags::bitflags! {
         /// Named only from its declaring class's code and its descendants'
         /// (`SymbolFlags::access_scope`).
         const PROTECTED = 1 << 25;
+        /// A free constant (php's namespace `const X`, `define('X', …)`):
+        /// it binds in its language's constant table (`NameTable::Constant`),
+        /// so a constant reference reaches it and a variable read never
+        /// does. Minted from a capture (`@mark.constant`), never spelled as
+        /// an attribute.
+        const CONSTANT = 1 << 26;
     }
 }
 
@@ -1244,6 +1257,8 @@ impl Symbol {
     pub fn variable_decl(&self) -> Option<VariableDecl<'_, SymbolId>> {
         let declared = match (self.kind, &self.detail) {
             (_, SymbolDetail::Variable { decl_kind: DeclKind::Implicit | DeclKind::Mention, .. }) => false,
+            // a free constant is named through its table, never read as a variable
+            _ if self.flags.contains(SymbolFlags::CONSTANT) => false,
             (SymKind::Variable, _) | (SymKind::Field, SymbolDetail::Field { .. }) => true,
             _ => false,
         };
@@ -1271,6 +1286,13 @@ impl Symbol {
     /// The name listing views (outline, hover) show the symbol by.
     pub fn listed_name(&self) -> &str {
         self.presentation.label.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The label a member completion offers: as declared (`listed_name`)
+    /// where the operator reaching its namespace has members written so
+    /// (`@space.<name>.spelled`), else its name.
+    pub fn offered_as(&self, spelled: bool) -> String {
+        if spelled { self.listed_name() } else { &self.name }.to_string()
     }
 
     /// The first point a use of this name can see the declaration.
@@ -1517,6 +1539,22 @@ impl SpaceSet {
     pub fn intersects(self, other: SpaceSet) -> bool {
         self.0 & other.0 != 0
     }
+    /// Its namespaces that are also `other`'s.
+    pub fn within(self, other: SpaceSet) -> SpaceSet {
+        SpaceSet(self.0 & other.0)
+    }
+}
+
+/// What a member operator reaches, as its query document tags its token
+/// (`@space.<name>[.<mark>]`): the namespaces a member written after it
+/// lives in, those whose instance members it reaches only on the object
+/// the site runs on (`.forward`), and those whose members are written after
+/// it as declared (`.spelled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemberReach {
+    pub spaces: SpaceSet,
+    pub forward: SpaceSet,
+    pub spelled: SpaceSet,
 }
 
 /// The namespaces a member site may land in, as its query document tagged
@@ -1979,6 +2017,17 @@ impl Ref {
     }
 
     /// The package pin of a `FunctionCall` ref.
+    /// The name table a free name's reference is looked up in: a call's,
+    /// and an imported function's, the function table; a constant read's
+    /// the constant table. `None` for a ref that names no free name.
+    pub fn free_name_table(&self) -> Option<super::NameTable> {
+        match self.kind {
+            RefKind::FunctionCall | RefKind::ImportedName => Some(super::NameTable::Function),
+            RefKind::Constant => Some(super::NameTable::Constant),
+            _ => None,
+        }
+    }
+
     pub fn resolved_package(&self) -> Option<&str> {
         match self.binding.as_ref()? {
             RefBinding::Function { package } => Some(package),
@@ -2110,9 +2159,10 @@ impl Ref {
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
             RefKind::ImportedName => 8,
+            RefKind::Constant => 9,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
-            RefKind::FunctionCall | RefKind::ImportedName => {
+            RefKind::FunctionCall | RefKind::ImportedName | RefKind::Constant => {
                 (1, self.resolved_package().map(str::to_string))
             }
             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => (
@@ -2502,6 +2552,9 @@ pub enum RenameKind {
     /// package context; otherwise package-scoped so cross-file
     /// walks don't rename same-named subs in unrelated packages.
     Function { name: String, package: Option<String> },
+    /// A free constant filed under its namespace (`None`: the global
+    /// one), as a function is under its package.
+    Constant { name: String, package: Option<String> },
     Package(String),
     /// A member with its owning class. Cross-file walks use `class`
     /// to avoid unioning unrelated classes that share a member name
@@ -2623,6 +2676,14 @@ pub enum RefKind {
     /// class's constructor. Kept at the END for bincode variant-index
     /// stability.
     ImportedName,
+    /// A name read as a free constant (php's `LIMIT`, `\Lib\LIMIT`, a
+    /// `use const` row's leaf): a reference to the constant its language's
+    /// constant table names there (`FileAnalysis::free_name_identities`),
+    /// pinned through `Ref::binding` as a call is to its function. It
+    /// calls nothing and is no variable: no call lane reads it, and no
+    /// variable declaration answers it. Kept at the END for bincode
+    /// variant-index stability.
+    Constant,
 }
 
 /// The receiver half of a member access, whatever the member's kind — the

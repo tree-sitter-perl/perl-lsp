@@ -935,6 +935,7 @@ impl FileAnalysis {
         let mut declared = self.symbols.declared_directly_in(scope).iter().map(|sid| &self.symbols[sid.0 as usize]).filter(|s| {
             s.name == name
                 && matches!(s.kind, SymKind::Variable | SymKind::Field)
+                && !super::NameTable::Constant.holds(s)
                 && !matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_variable())
         });
         // A use inside a declaring statement reads what the declaration
@@ -1005,6 +1006,17 @@ impl FileAnalysis {
             .iter()
             .copied()
             .filter(|&v| matches!(self.symbols[v.0 as usize].kind, SymKind::Variable))
+    }
+
+    /// What the declaration `sym` holds at `point`: its own binding's
+    /// value, never that of another declaration spelled like it.
+    pub fn declared_value_type(
+        &self,
+        sym: SymbolId,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        self.subject_type_at(&self.declared_place(sym), point, module_index)
     }
 
     /// The place the variable or member `sym` declares.

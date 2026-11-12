@@ -37,24 +37,48 @@
 
 ; ---- written types ----
 ; `self` names the class it is written in, and `parent` the class it
-; extends, nullable or not, wherever a type is written: a return, a
-; parameter, a property. `static` is late-bound: the class the call is made
-; on, the class it is written in where no call says.
+; extends, nullable or not (`?T`, `T|null`, `null|T` alike), wherever a
+; type is written: a return, a parameter, a property, the class an
+; `instanceof` tests for. `static` is late-bound: the class the call is
+; made on, the class it is written in where no call says.
+; TODO(static-union-arms): a union with another class (`static|Foo`) is
+; no mark; its arms are read as text, where no relative class resolves.
 (([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.enclosing)
  (#eq? @_class "self"))
 (([
+  (union_type . (named_type (name) @_class) . (primitive_type) @_null .)
+  (union_type . (primitive_type) @_null . (named_type (name) @_class) .)
+ ] @type.enclosing)
+ (#eq? @_class "self") (#eq? @_null "null"))
+(([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.called)
  (#eq? @_class "static"))
 (([
+  (union_type . (named_type (name) @_class) . (primitive_type) @_null .)
+  (union_type . (primitive_type) @_null . (named_type (name) @_class) .)
+ ] @type.called)
+ (#eq? @_class "static") (#eq? @_null "null"))
+(([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.super)
  (#eq? @_class "parent"))
+(([
+  (union_type . (named_type (name) @_class) . (primitive_type) @_null .)
+  (union_type . (primitive_type) @_null . (named_type (name) @_class) .)
+ ] @type.super)
+ (#eq? @_class "parent") (#eq? @_null "null"))
+((binary_expression operator: "instanceof" right: (name) @type.enclosing)
+ (#eq? @type.enclosing "self"))
+((binary_expression operator: "instanceof" right: (name) @type.called)
+ (#eq? @type.called "static"))
+((binary_expression operator: "instanceof" right: (name) @type.super)
+ (#eq? @type.super "parent"))
 
 ; ---- callables ----
 ; A declared return is the callable's value at every call; without one,
@@ -62,6 +86,9 @@
 (function_definition name: (name) @def.sub.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.sub
 (method_declaration name: (name) @def.method.name return_type: [(named_type) (primitive_type) (optional_type) (union_type)]? @rettype) @def.method
 (return_statement (_) @expr.return.value)
+; A callable that yields returns a generator, whatever its `return` says.
+((yield_expression) @expr.return.class
+ (#set! return.class "Generator"))
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own. A function, a method or a closure sees no
 ; variable of the code around it but the ones its `use` clause names; an
@@ -107,6 +134,25 @@
 (declaration_list
   (const_declaration
     (const_element (name) @def.field.name @space.constant @flow.target . (_) @flow.source) @def.field))
+
+; ---- free constants ----
+; A constant declared outside a class is a free name of its namespace, in
+; the language's constant table: `const LIMIT` under `namespace App` is
+; `App\LIMIT`, apart from any function or variable of that name. Its value
+; is the one it is declared with.
+((const_declaration
+   (const_element (name) @def.var.name @mark.constant @flow.target . (_) @flow.source) @def.var) @_free
+ (#not-has-parent? @_free declaration_list))
+; `define('LIMIT', 3)` declares the global `\LIMIT`, whatever namespace it
+; is called in, and holds the value it is passed. Only a plain name is read
+; as one; a namespaced string (`define('App\LIMIT', …)`) is not.
+((function_call_expression
+   function: [(name) @_fn (qualified_name . (name) @_fn)]
+   arguments: (arguments
+     . (argument (string (string_content) @def.var.name @mark.constant @flow.target))
+     . (argument (_) @flow.source))) @def.var @def.global
+ (#eq? @_fn "define")
+ (#match? @def.var.name "^[A-Za-z_][A-Za-z0-9_]*$"))
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
@@ -393,17 +439,18 @@
 ; property `$this->x`: `instanceof` that it is the class named, `isset`
 ; and `!== null` that it holds a value, `=== null` and `is_null` that it
 ; holds none. A multi-argument `isset` is a conjunction, so only a single
-; argument is an atom. Loose `==` / `!=` prove nothing: `0 == null` holds.
-; `self`, `static` and `parent` name a class by where they are written,
-; which an atom's type does not read, so they narrow nothing.
+; argument is an atom. A function named from the global namespace
+; (`\is_null`) is the same function; one named from any other namespace is
+; not. Loose `==` / `!=` prove nothing: `0 == null` holds.
+; `instanceof static` proves the class the guard is written in: the class
+; the call is made on is that class or one beneath it.
 ((binary_expression
    left: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]
    operator: "instanceof"
    right: [(name) (qualified_name)] @narrow.type) @narrow.is
- (#not-eq? @narrow.var "this")
- (#not-any-of? @narrow.type "self" "static" "parent"))
+ (#not-eq? @narrow.var "this"))
 ((function_call_expression
-   function: (name) @_fn
+   function: [(name) @_fn (qualified_name . (name) @_fn)]
    arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.set
  (#eq? @_fn "isset")
  (#not-eq? @narrow.var "this"))
@@ -428,7 +475,7 @@
    right: [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) @narrow.unset
  (#not-eq? @narrow.var "this"))
 ((function_call_expression
-   function: (name) @_fn
+   function: [(name) @_fn (qualified_name . (name) @_fn)]
    arguments: (arguments . (argument [(variable_name (name) @narrow.var) (member_access_expression) @narrow.var]) .)) @narrow.unset
  (#eq? @_fn "is_null")
  (#not-eq? @narrow.var "this"))
@@ -440,35 +487,42 @@
 ; Where a condition decides what runs: an `if` or `elseif` body and a
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
-; runs where the left holds, of `||` where it fails. An `if` whose body
-; only leaves the block, with no clause after it, leaves the rest of the
-; block to run where its condition fails.
+; runs where the left holds, of `||` where it fails. An `else` arm is its
+; body. A loop tests its condition again after each run of its body, so
+; what follows it is no arm of that test.
 (if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
-(if_statement condition: (_) @narrow.cond alternative: (_) @narrow.else)
+(if_statement
+  condition: (_) @narrow.cond
+  alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
 (else_if_clause condition: (_) @narrow.cond body: (_) @narrow.then)
 (if_statement
   alternative: (else_if_clause condition: (_) @narrow.cond)
-  alternative: (_) @narrow.else)
-(while_statement condition: (_) @narrow.cond body: (_) @narrow.then)
+  alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+; TODO(cfg-exit-join): `@narrow.loop` and the fall-through it guards stand
+; in for reachability; the CFG retires both, since a `break` is an edge to
+; the loop's exit there.
+(while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
 (conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: ["&&" "and"] right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: ["||" "or"] right: (_) @narrow.else)
-(if_statement
-  condition: (_) @narrow.cond
-  body: [
-    (return_statement)
-    (continue_statement)
-    (break_statement)
-    (exit_statement)
-    (expression_statement (throw_expression))
-    (compound_statement
-      . [(return_statement)
-         (continue_statement)
-         (break_statement)
-         (exit_statement)
-         (expression_statement (throw_expression))] .)]
-  !alternative) @narrow.exit
+
+; A statement that leaves its block: nothing after it there runs, and
+; whether a chain of arms falls through follows from its arms' statements
+; (`query_extract/extract/narrowing.rs`). `die` and a called `exit` are
+; calls by the grammar's reading (`die;` a bare name), and the language
+; reserves both words, so their spelling names them, from the global
+; namespace too (`\exit(1)`).
+; TODO(noreturn-callee): a callee that never returns is an effect on the
+; callee; replace the spelling lookup once effects and the CFG exist.
+[(return_statement)
+ (continue_statement)
+ (break_statement)
+ (exit_statement)
+ (expression_statement (throw_expression))] @flow.leaves
+((expression_statement
+   [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
+ (#any-of? @_exit "die" "exit"))
 
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the
@@ -484,6 +538,52 @@
   function: (qualified_name (name) @ref.call) @ref.spelled
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 (arguments (argument (variadic_unpacking)) @arity.spread)
+
+; ---- constants ----
+; A name, bare or qualified, where a value is read is a constant: it
+; references the constant its spelling names, looked up like a function's
+; (the namespace in force, then the global one). A name anywhere else is a
+; function, a class, a member, a label, a named argument or a declaration,
+; each its own pattern's; `instanceof` names a class. `true`, `false` and
+; `null` are literals of their own, and `die` and `exit` the language's.
+(([(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled] @_value)
+ (#has-parent? @_value
+   echo_statement expression_statement return_statement print_intrinsic
+   throw_expression yield_expression exit_statement
+   assignment_expression augmented_assignment_expression reference_assignment_expression
+   parenthesized_expression conditional_expression unary_op_expression cast_expression
+   clone_expression error_suppression_expression subscript_expression sequence_expression
+   array_element_initializer variadic_unpacking dynamic_variable_name arrow_function
+   case_statement match_condition_list match_conditional_expression match_default_expression
+   for_statement foreach_statement
+   include_expression include_once_expression require_expression require_once_expression
+   simple_parameter property_element property_promotion_parameter static_variable_declaration)
+ (#not-any-of? @_value "die" "exit"))
+(argument
+  !name
+  [(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled])
+(argument
+  name: (_)
+  [(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled])
+(const_element
+  (name)
+  .
+  [(name) @ref.constant
+   (qualified_name (name) @ref.constant) @ref.spelled])
+(enum_case
+  value: [(name) @ref.constant
+          (qualified_name (name) @ref.constant) @ref.spelled])
+(binary_expression
+  left: [(name) @ref.constant
+         (qualified_name (name) @ref.constant) @ref.spelled])
+((binary_expression
+   operator: _ @_op
+   right: [(name) @ref.constant
+           (qualified_name (name) @ref.constant) @ref.spelled])
+ (#not-eq? @_op "instanceof"))
 
 ; ---- members ----
 ; `$x->m()` calls the method `m` of the receiver's class and `$x->p` reads
@@ -609,13 +709,21 @@
 (scoped_call_expression scope: (qualified_name (name) @ref.type) @ref.spelled)
 
 ; What an operator reaches: after `->` or `?->` one of the object's methods
-; or properties, after `::` one of the class's methods or constants, or
-; `class`, the class itself (`Foo::class`). A static property is written
-; `::$x`, its own form. Completion offers what the operator reaches.
+; or properties, after `::` one of the class's methods, constants or static
+; properties, or `class`, the class itself (`Foo::class`). A method `::`
+; reaches runs on no object, so an instance one is reached only where the
+; call forwards the object the calling method runs on: from an instance
+; method of the class named or one it extends (`parent::__construct()`);
+; elsewhere it is PHP's Error. A static property is written after `::` as
+; declared, `$` and all. Completion offers what the operator reaches.
 "->" @member.op.arrow @space.method @space.property
 "?->" @member.op.arrow @space.method @space.property
-("::" @space.method @space.constant
+("::" @space.method.forward @space.constant
  (#set! member.word "class"))
+"::" @space.static_property.spelled
+; The `$` of a static property is part of the member written: completing
+; `Foo::$` replaces it.
+(scoped_property_access_expression name: (variable_name) @member.spelled)
 
 ; ---- construction ----
 ; `new Foo(…)` calls the constructor of the class `Foo` names on its
@@ -711,7 +819,8 @@
 ; class's leaf references the class the row names, so a rename of the class
 ; rewrites the `use` line too; the ref is the leaf alone, since the row it
 ; sits in already names the class in full (`spelled_identity`). An imported
-; function's leaf references the function the row names the same way.
+; function's or constant's leaf references the function or constant the row
+; names the same way.
 (namespace_use_declaration
   (namespace_use_clause
     !type
@@ -727,7 +836,8 @@
 (namespace_use_declaration
   (namespace_use_clause
     type: "const" @import.constant
-    . [(name) (qualified_name)] @import.name
+    . [(name) @import.name @ref.constant
+       (qualified_name (name) @ref.constant) @import.name]
     alias: (name)? @import.alias))
 ; `use A\B\{C, D as E}`: each clause hangs off the shared prefix.
 (namespace_use_declaration
@@ -750,7 +860,7 @@
   (namespace_name) @import.prefix
   body: (namespace_use_group
     (namespace_use_clause
-      . (name) @import.name
+      . (name) @import.name @ref.constant
       alias: (name)? @import.alias)))
 (namespace_use_declaration
   !type
@@ -766,5 +876,5 @@
   body: (namespace_use_group
     (namespace_use_clause
       type: "const" @import.constant
-      . (name) @import.name
+      . (name) @import.name @ref.constant
       alias: (name)? @import.alias)))

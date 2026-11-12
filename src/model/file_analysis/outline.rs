@@ -551,6 +551,10 @@ impl FileAnalysis {
                     }
                     tokens.push(PerlSemanticToken { span: r.span, token_type, modifiers: mods });
                 }
+                // A constant colors like a constant declaration.
+                RefKind::Constant => {
+                    tokens.push(PerlSemanticToken { span: r.span, token_type: TOK_ENUM_MEMBER, modifiers: 0 });
+                }
                 RefKind::MethodCall { method_name_span, .. } => {
                     // Use method_name_span for precise highlighting of just the method name
                     let mods = 0; // TODO: readonly for ro accessors, static for class methods

@@ -8,7 +8,7 @@ pub fn cmake_pack() -> LangPack {
         id: "cmake",
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         names: NameSpellings::NONE,
-        functions: FunctionLookup::Global,
+        free_names: FreeNameLookup::Global,
         construction: crate::model::file_analysis::ConstructionKey::Constructor,
         member_spaces: crate::model::file_analysis::MemberSpaces::PER_FAMILY,
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,

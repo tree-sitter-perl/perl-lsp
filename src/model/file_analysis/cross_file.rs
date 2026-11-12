@@ -1662,16 +1662,18 @@ pub struct CalleeDecl {
     pub identity: String,
 }
 
-/// Where the function a call names (`FileAnalysis::function_identities`)
-/// is declared across files, with the widening verdict: the declarations
-/// of the first of its identities anything `index` holds declares — so a
-/// bare call reaches its namespace's function before the global one —
-/// else, in a use-map language, every function sharing its leaf, stamped
-/// widened, as a class identity nothing indexed declares widens
+/// Where the free name a reference names (`FileAnalysis::free_name_identities`)
+/// is declared across files, in `table` — a call's function, a constant
+/// read's constant — with the widening verdict: the declarations of the
+/// first of its identities anything `index` holds declares — so a bare
+/// name reaches its namespace's before the global one — else, in a use-map
+/// language, every one of the table sharing its leaf, stamped widened, as
+/// a class identity nothing indexed declares widens
 /// (`ScopedLookup::use_map_candidates`): the over-approximation dirty code
 /// wants, said out loud by the caller.
 pub fn callee_declarations(
     index: &dyn CrossFileLookup,
+    table: NameTable,
     identities: &[String],
     names: &NameSpellings,
 ) -> (Vec<CalleeDecl>, bool) {
@@ -1684,7 +1686,7 @@ pub fn callee_declarations(
             .visible_def_candidates(identity)
             .into_iter()
             .filter_map(|c| {
-                declared_in(c, &|fa| fa.declared_callee(identity).map(|s| (s.selection_span, identity.clone())))
+                declared_in(c, &|fa| fa.declared_free_name(table, identity).map(|s| (s.selection_span, identity.clone())))
             })
             .collect();
         if !found.is_empty() {
@@ -1705,7 +1707,7 @@ pub fn callee_declarations(
             declared_in(c, &|fa| {
                 fa.symbols()
                     .iter()
-                    .filter(|s| s.name == leaf && s.kind == SymKind::Sub)
+                    .filter(|s| s.name == leaf && table.widens_to(s))
                     .map(|s| (s.selection_span, fa.linkage_identity(s).into_owned()))
                     .find(|(_, identity)| !identities.contains(identity))
             })
