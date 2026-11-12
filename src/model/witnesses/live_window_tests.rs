@@ -253,7 +253,31 @@ fn a_region_reads_by_the_write_rule_unless_it_is_a_proof() {
     region(&mut proven, WitnessPayload::Proof);
     // No order in hand: nothing is decided, and an undecided proof stands.
     assert_eq!(read(&proven, at(3, 0)), ReducedValue::Type(other.clone()));
-    assert_eq!(read(&proven, at(5, 0)), ReducedValue::Type(base), "past the region the proof is gone");
+    assert_eq!(read(&proven, at(5, 0)), ReducedValue::Type(base.clone()), "past the region the proof is gone");
+    // Asked at no point, a proof holds nowhere: even an advisory bound,
+    // which keeps every written value, does not read the guard's refinement.
+    let mut advisory = WitnessBag::new();
+    advisory.push(bound(base.clone(), Enforcement::Advisory, Extent::Lifetime, at(1, 0)));
+    region(&mut advisory, WitnessPayload::InferredType(other.clone()));
+    region(&mut advisory, WitnessPayload::Proof);
+    assert_eq!(read(&advisory, at(3, 0)), ReducedValue::Type(other));
+    assert_eq!(read_anywhere(&advisory), ReducedValue::Type(base));
+}
+
+fn read_anywhere(bag: &WitnessBag) -> ReducedValue {
+    let att = var();
+    ReducerRegistry::with_defaults().query(
+        bag,
+        &ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: None,
+        },
+    )
 }
 
 /// An advisory bound holds no value to it: a known value stands, and the

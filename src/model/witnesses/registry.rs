@@ -1408,10 +1408,13 @@ impl ReducerRegistry {
         if matches!(v, ReducedValue::FactMap(_)) {
             return v;
         }
-        // A point query's facts are the ones reaching it already.
-        let proven = q.point.is_some()
-            && q.attachment.is_temporal()
-            && materialized.iter().any(|w| matches!(w.payload, WitnessPayload::Proof));
+        // A point query's facts are the ones reaching it already; asked at
+        // no point, a proof holds nowhere in particular, so neither it nor
+        // the region it marks is the binding's value.
+        let pointed = q.point.is_some() && q.attachment.is_temporal();
+        let proofs: Vec<crate::model::file_analysis::Span> =
+            materialized.iter().filter(|w| matches!(w.payload, WitnessPayload::Proof)).map(|w| w.span).collect();
+        let proven = pointed && !proofs.is_empty();
         let mut bound: Option<Option<InferredType>> = None;
         let mut resolve = |state: &mut QueryState| -> Option<InferredType> {
             bound.get_or_insert_with(|| self.bound_type(bag, q, state, ty).filter(InferredType::is_known)).clone()
@@ -1424,11 +1427,11 @@ impl ReducerRegistry {
             (false, Extent::Lifetime | Extent::Entry) => {
                 // Only what the declaration holds counts: a fact made before
                 // it is another binding's.
-                match materialized.iter().all(|w| w.span.start >= stated) {
+                let holds = |w: &Witness| w.span.start >= stated && !proofs.contains(&w.span);
+                match materialized.iter().all(holds) {
                     true => v,
                     false => {
-                        let after: Vec<Witness> =
-                            materialized.iter().filter(|w| w.span.start >= stated).cloned().collect();
+                        let after: Vec<Witness> = materialized.iter().filter(|w| holds(w)).cloned().collect();
                         self.reduce_materialized(&after, q)
                     }
                 }

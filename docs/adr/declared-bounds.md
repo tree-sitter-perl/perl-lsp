@@ -60,7 +60,9 @@ the reducer loop. The reducers fold the value as if no bound were there
      writes put there);
    - a local → what the facts from its declaration on fold to (its
      initializer and the writes after it), read by `read_written`. A fact
-     made before the declaration is another binding's.
+     made before the declaration is another binding's, and a proof and its
+     region count only where a point is asked: at no point a guard holds
+     nowhere, so a whole-life read never takes its refinement.
 3. No value, or an `Unknown` one, reads as the bound: `x: int = f()` reads
    `int`; `T x; x = g();` reads `T`.
 4. A known value reads by the evidence and by how it fits:
