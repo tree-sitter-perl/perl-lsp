@@ -985,6 +985,7 @@ impl<'a> Builder<'a> {
                 binding: pkg.map(|package| RefBinding::Function { package }),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before(span),
             });
         }
     }

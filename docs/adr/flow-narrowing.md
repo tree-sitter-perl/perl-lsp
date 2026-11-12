@@ -474,37 +474,67 @@ on one span would otherwise tie.
 A read asks at its own site, so it sees every fact made before it in the
 source. A statement modifier inverts that: `STMT if G` (`unless`, `while`,
 `until`) evaluates `G` before `STMT`, and `STMT for LIST` evaluates `LIST`
-before it, though both are written after it. The builder states the order
-where it emits the read: a variable read inside a condition or loop list
-carries `EvaluatedBefore(stmt)` on its `Expr` beside its value edge
-(`cst::evaluated_before` finds the statement). Its span stays the read's
-site (rule #14); what changes is which facts reach it. The registry asks
-such a read at a `ReadPoint { at, skips }`: every fact at or before `at`
-except those made inside `skips`. So in `$x = f($x) if defined $x` the
-strip reads the value `defined` tested, not the one the assignment
-leaves, and `$o = Bar->new if $o->alive` calls `alive` on the old `$o`.
-This holds for every read in the condition, `defined` or not.
+before it, though both are written after it.
 
-The skip is a span, not an earlier point: a condition's own writes and
-narrowings still reach the reads after them (`last unless defined($n =
-$n->{parent}) and ref $n`; `... if defined $x && $x->ok`). The constant
-fold reads by the same rule. A receiver's place, hover on a read and the
-fold's binding lookup all ask the read's `ReadPoint`
-(`FileAnalysis::read_point`), never their own span's start.
+The builder mints the order once per file, before the walk: a table of the
+modifiers' heads (`cst::modifier_runs_head_first`), each naming the
+statement it runs before, with the callables inside them
+(`cst::is_callable_boundary`) as regions that run before nothing
+(`build/builder/read_order.rs`). Every builder reader asks that table, so a
+read is ordered the same whichever pass reads it — the walk at the node,
+the narrowing at the modifier, the constant fold, a post-walk pass over the
+refs. The table states the fact in two homes, one per role (rule #14):
+
+- **On the bag**, for what it types: a variable read inside a head carries
+  `EvaluatedBefore(stmt)` on its `Expr` beside its value edge, so the
+  registry's own chase through that `Expr` reads in order.
+- **On the ref**, for what it resolves: every ref and deref site minted
+  inside a head carries `evaluated_before`, and `Ref::read_point()` is the
+  read point a consumer asks. The query entries that type a value at a
+  point (`inferred_type_via_bag_ctx`, `place_type_at`, `subject_type_at`)
+  take a `ReadPoint`, never a bare `Point`: a consumer with a ref passes
+  its read point, and one with only a position (a cursor, a scope's end, a
+  declaration) says so with `ReadPoint::position`. So the undef/Optional
+  deref diagnostics, the closed-shape key lint, the invocant ladder, hover,
+  the hash-key owner pass, the type hierarchy and `--type-at` all read in
+  order without knowing the fact exists.
+
+A `ReadPoint { at, skips }` admits every fact at or before `at` except
+those made inside `skips`. So in `$x = f($x) if defined $x` the strip reads
+the value `defined` tested, not the one the assignment leaves, and `$o =
+Bar->new if $o->alive` calls `alive` on the old `$o`. This holds for every
+read in the head, `defined` or not. The skip is a span, not an earlier
+point: a condition's own writes and narrowings still reach the reads after
+them (`last unless defined($n = $n->{parent}) and ref $n`; `... if defined
+$x && $x->ok`). A binding is lexical, not flow (a `my` is in view from its
+statement's end), so the binding a read names is still asked at `at`.
 
 `do BLOCK while G` runs its block first, so its `G` reads where it is
 written and carries no order fact. A `while`/`until` modifier's condition
 skips the statement as a prefix loop's condition skips its body: no loop
 join yet (`docs/prompt-cfg-tier.md`).
 
-A skip can only remove facts that precede the read. The mirror case
-cannot be stated with one point: the statement's reads of a write its
-condition makes (`push @out, $l while defined($l = <$fh>)`), and a
-C-style `for`'s step reading its body's writes, would need a fact made
-after the read to reach it (`TODO(evaluation-order-later-writes)`). In
-the pack tier no expression that precedes a condition in the source can
-write today: Python's `a if c else b` and comprehension clauses would
-need the fact once `:=` is a write (`TODO(walrus-evaluation-order)`).
+What the shape cannot say:
+
+- **Nested heads.** A read in a head nested in another's head (`$o =
+  Bar->new if do { 1 if $o->alive }`) runs before both statements; a
+  `ReadPoint` skips one, the innermost (`TODO(nested-modifier-skips)`).
+- **A narrowing cut at the statement's write.** A guard region is cut at
+  the first write to its subject in the source, so `return if defined $c;
+  $c = connect() unless $c->ping` ends the exit's `Undef` region at the
+  write, ahead of the head that reads it (`TODO(narrowing-cutoff-read-order)`).
+- **Later writes.** A skip can only remove facts that precede the read.
+  The statement's reads of a write its condition makes (`push @out, $l
+  while defined($l = <$fh>)`), a C-style `for`'s step reading its body's
+  writes, and a Python comprehension's element (`f(x)` in `[f(x) for x in
+  xs]` reads the binding its `for` clause makes after it) need a fact made
+  after the read to reach it. That is a program-order position, which
+  replaces `EvaluatedBefore(Span)` and `ReadPoint::skips` rather than
+  extending them (`TODO(evaluation-order-later-writes)`). In the pack tier
+  no expression that precedes a condition in the source writes today:
+  Python's `a if c else b` would need the fact once `:=` is a write
+  (`TODO(walrus-evaluation-order)`).
+
 Cursor-time completion on text with no recorded read asks at the cursor.
 
 ## Reaching writes

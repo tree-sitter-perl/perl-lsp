@@ -95,6 +95,7 @@ mod visit_bless;
 mod extract;
 mod fold;
 mod consts;
+mod read_order;
 mod docs;
 
 /// A `MethodCall` ref's call site, minted where the walk emits the ref: the
@@ -721,6 +722,8 @@ struct Builder<'a> {
     /// Pending walk work. The CST descent lives here rather than on the
     /// native stack — see `walk.rs`.
     walk_stack: Vec<WalkTask<'a>>,
+    /// Which statement each read in a modifier's head runs before.
+    read_order: read_order::ReadOrder,
     /// Restore the pre-worklist recursive descent (`PERL_LSP_RECURSIVE_WALK=1`).
     /// Read once per build so the walk primitives branch on a bool, not on env.
     /// Test-only: the descent exists for the walk-equivalence net.

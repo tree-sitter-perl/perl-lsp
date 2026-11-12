@@ -685,6 +685,7 @@ impl<'a> Builder<'a> {
                 binding: None,
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before(span),
             });
         }
     }
@@ -813,6 +814,7 @@ impl<'a> Builder<'a> {
                     .map(|owner| crate::model::file_analysis::RefBinding::HashKey { owner, sym: None }),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before(span),
             });
         }
     }

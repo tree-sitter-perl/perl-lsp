@@ -341,6 +341,32 @@ impl WitnessPayload {
     }
 }
 
+impl WitnessPayload {
+    /// Every source span this payload carries outside its attachments
+    /// (`for_each_attachment_mut` reaches theirs). Exhaustive, so a span a
+    /// new payload carries can't be skipped by a span rewrite.
+    pub fn for_each_span_mut(&mut self, f: &mut dyn FnMut(&mut crate::model::file_analysis::Span)) {
+        match self {
+            WitnessPayload::EvaluatedBefore(s) => f(s),
+            WitnessPayload::InferredType(_)
+            | WitnessPayload::Observation(_)
+            | WitnessPayload::Edge(_)
+            | WitnessPayload::ReturnExpr(_)
+            | WitnessPayload::Fact { .. }
+            | WitnessPayload::Derivation
+            | WitnessPayload::Custom { .. }
+            | WitnessPayload::Projected { .. }
+            | WitnessPayload::DomainCompare { .. }
+            | WitnessPayload::Tuple(_)
+            | WitnessPayload::Reset
+            | WitnessPayload::Invoke { .. }
+            | WitnessPayload::BrandOverlay { .. }
+            | WitnessPayload::Extend(_)
+            | WitnessPayload::FreeValue { .. } => {}
+        }
+    }
+}
+
 impl ReturnExpr {
     /// The attachments inside the types this expression names.
     pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {

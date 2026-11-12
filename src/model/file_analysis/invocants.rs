@@ -805,8 +805,8 @@ impl FileAnalysis {
         }
 
         // A narrowed place receiver.
-        if let (Some(place), Some(span)) = (receiver_place, invocant_span) {
-            if let Some(t) = self.place_type_at(place, self.read_point(*span), module_index) {
+        if let (Some(place), Some(_)) = (receiver_place, invocant_span) {
+            if let Some(t) = self.place_type_at(place, r.read_point(), module_index) {
                 if !self.dispatch_classes_of(&t, module_index).is_empty() {
                     return Some(t);
                 }
@@ -877,7 +877,7 @@ impl FileAnalysis {
         let point = invocant_span.map(|s| s.start).unwrap_or(r.span.start);
         let first = invocant.as_bytes()[0];
         if first == b'$' || first == b'@' || first == b'%' {
-            if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
+            if let Some(t) = self.inferred_type_via_bag_ctx(invocant, r.read_point(), module_index) {
                 // A receiver (`$self`/`$class`/...) whose bag
                 // type carries no dispatch class still dispatches on the
                 // enclosing class — identity outranks a classless value

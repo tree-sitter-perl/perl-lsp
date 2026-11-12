@@ -124,7 +124,7 @@ impl<'a> Builder<'a> {
     /// with every earlier straight-line `shift` consumed. `None` outside a
     /// sub, or after a shift that may not have run.
     pub(super) fn arg_window_at(&self, node: Node<'a>) -> Option<InferredType> {
-        self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
+        self.bag_query_variable("@_", self.scope_at_point(node.start_position()), self.read_point_of(node))
     }
 
     /// Innermost scope containing `point`: `innermost_scope_at` over the
@@ -334,6 +334,7 @@ impl<'a> Builder<'a> {
             binding,
             folded_from: None,
             arg_count: None,
+            evaluated_before: self.evaluated_before(span),
         });
     }
 

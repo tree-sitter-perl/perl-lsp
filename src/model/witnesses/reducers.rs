@@ -40,7 +40,9 @@ pub struct ReducerQuery<'a> {
 /// Where a temporal read asks: every fact made at or before `at`, except
 /// those made inside `skips` — the statement the read is evaluated before
 /// though it follows it in the source (`WitnessPayload::EvaluatedBefore`,
-/// `docs/adr/flow-narrowing.md` §Evaluation order).
+/// `docs/adr/flow-narrowing.md` §Evaluation order). A read the builder
+/// recorded carries its own (`Ref::read_point`); a bare position is
+/// `ReadPoint::position`, said out loud.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReadPoint {
     pub at: Point,
@@ -48,6 +50,12 @@ pub struct ReadPoint {
 }
 
 impl ReadPoint {
+    /// A position no recorded read stands at — a cursor, a scope's end, a
+    /// declaration — which every fact made at or before it reaches.
+    pub fn position(at: Point) -> Self {
+        ReadPoint { at, skips: None }
+    }
+
     /// Does a fact made at `site` reach this read?
     pub fn reaches(&self, site: Point) -> bool {
         site <= self.at && !self.skips_site(site)
@@ -56,12 +64,6 @@ impl ReadPoint {
     /// Is `site` inside the statement this read is evaluated before?
     pub fn skips_site(&self, site: Point) -> bool {
         self.skips.is_some_and(|s| s.start <= site && site <= s.end)
-    }
-}
-
-impl From<Point> for ReadPoint {
-    fn from(at: Point) -> Self {
-        ReadPoint { at, skips: None }
     }
 }
 

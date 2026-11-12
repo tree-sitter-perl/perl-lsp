@@ -2539,7 +2539,7 @@ impl ReducerRegistry {
                             // guard's region (docs/adr/flow-narrowing.md). Other
                             // edge sources have no read position; the scope end is
                             // the standing temporal approximation.
-                            let point = read.unwrap_or_else(|| scope_point(ctx.scopes, *scope).into());
+                            let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
                             // Opaque: the read's point picks the binding and the
                             // regions that hold there, so the answer is not the
                             // edge target's alone.
@@ -2552,7 +2552,7 @@ impl ReducerRegistry {
                             state.in_opaque_frame(|state| {
                                 // A read recorded at `Expr(span)` holds what the
                                 // variable holds at the read.
-                                let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::from));
+                                let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position));
                                 self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                             })
                         }
@@ -2640,14 +2640,14 @@ impl ReducerRegistry {
                     let base_t = state.in_opaque_frame(|state| match (base, q.context) {
                         (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
                             // The read's own point, as the Edge arm above.
-                            let point = read.unwrap_or_else(|| scope_point(ctx.scopes, *scope).into());
+                            let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
                             )
                         }
                         (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
-                            let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::from));
+                            let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position));
                             self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                         }
                         _ => {
@@ -2917,7 +2917,7 @@ impl ReducerRegistry {
     ) -> Option<InferredType> {
         let sub_q = ReducerQuery {
             attachment: att,
-            point: if att.is_temporal() { Some(site.into()) } else { q.point },
+            point: if att.is_temporal() { Some(ReadPoint::position(site)) } else { q.point },
             framework: q.framework,
             arity_hint: None,
             // The enclosing call's receiver still binds `$self` inside the
@@ -3210,7 +3210,7 @@ impl ReducerRegistry {
                 FreeAsk::Returns { .. } => (WitnessAttachment::Symbol(sym), None, FrameworkFact::Plain),
                 FreeAsk::Holds(_) => {
                     let place = full.declared_place(sym);
-                    let at = binding_scope_end(&cached_ctx, &place.root).map(ReadPoint::from);
+                    let at = binding_scope_end(&cached_ctx, &place.root).map(ReadPoint::position);
                     let framework = binding_framework(&cached_ctx, &place.root);
                     (WitnessAttachment::Place(Box::new(place)), at, framework)
                 }

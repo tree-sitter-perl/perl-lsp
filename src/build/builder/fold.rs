@@ -815,7 +815,7 @@ impl<'a> Builder<'a> {
             if !var_text.starts_with('$') {
                 continue;
             }
-            let Some(t) = self.bag_query_variable(var_text, r.scope, r.span.start) else {
+            let Some(t) = self.bag_query_variable(var_text, r.scope, r.read_point()) else {
                 continue;
             };
             // The key-access projection, as this pass's contract says:
@@ -916,6 +916,7 @@ impl<'a> Builder<'a> {
                 }),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before(span),
             });
         }
     }
@@ -1113,11 +1114,11 @@ impl<'a> Builder<'a> {
         &self,
         name: &str,
         scope: ScopeId,
-        point: Point,
+        point: crate::model::witnesses::ReadPoint,
     ) -> Option<InferredType> {
         if self.vars_bound {
-            let place = crate::model::file_analysis::Place::variable(self.binding_of(name, point, scope).0);
-            return crate::model::witnesses::query_variable_place(&self.bag, &self.bag_context(), &place, point.into());
+            let place = crate::model::file_analysis::Place::variable(self.binding_of(name, point.at, scope).0);
+            return crate::model::witnesses::query_variable_place(&self.bag, &self.bag_context(), &place, point);
         }
         crate::model::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
     }
@@ -1129,7 +1130,7 @@ impl<'a> Builder<'a> {
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
-        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point.into())
+        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, crate::model::witnesses::ReadPoint::position(point))
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through
@@ -2050,7 +2051,7 @@ impl<'a> Builder<'a> {
                 }
                 // The producer names the container canonically (`$h{k}` is
                 // `%h`, `$h->{k}` is `$h`), so the name is the lookup.
-                let t = self.bag_query_variable(var_text, r.scope, r.span.start)?;
+                let t = self.bag_query_variable(var_text, r.scope, r.read_point())?;
                 Some((i, t.hash_key_class()?.to_string()))
             })
             .collect();

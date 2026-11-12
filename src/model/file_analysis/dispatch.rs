@@ -1033,6 +1033,16 @@ pub struct ArrowDerefSite {
     /// the hints in force are known.
     #[serde(default)]
     pub dies_on_undef: bool,
+    /// As `Ref::evaluated_before`.
+    #[serde(default)]
+    pub evaluated_before: Option<Box<Span>>,
+}
+
+impl ArrowDerefSite {
+    /// As `Ref::read_point`.
+    pub fn read_point(&self) -> crate::model::witnesses::ReadPoint {
+        crate::model::witnesses::ReadPoint { at: self.span.start, skips: self.evaluated_before.as_deref().copied() }
+    }
 }
 
 /// What a recorded guard tests about its subject — the build-time

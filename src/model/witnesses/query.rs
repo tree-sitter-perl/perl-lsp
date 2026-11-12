@@ -142,9 +142,9 @@ pub fn query_variable_type(
     ctx: &BagContext,
     var: &str,
     scope: ScopeId,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
-    reg.query_variable_with_visited(bag, ctx, var, scope, point.into(), None, &mut state)
+    reg.query_variable_with_visited(bag, ctx, var, scope, point, None, &mut state)
 }
