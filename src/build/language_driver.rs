@@ -942,7 +942,8 @@ fn inject_member_blocks(
             // does: the `TypeName` edge is canonical (the hover leaf and the
             // type chase resolve `op_type` → `unsigned short`), and a slot's
             // bound holds class-wide wherever it is stated.
-            if let Some(ty) = BoundType::declared(annot_type(&m.type_text)) {
+            let declared = if m.type_is_pasted { None } else { annot_type(&m.type_text) };
+            if let Some(ty) = BoundType::declared(declared) {
                 let enforcement = annot_enforcement.of_binding(!m.deref_stack.is_empty());
                 skel.witnesses.push(Witness {
                     attachment: WitnessAttachment::Variable { name: m.name.clone(), scope: scope_id },

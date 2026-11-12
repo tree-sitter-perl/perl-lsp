@@ -313,6 +313,25 @@ fn sym_in<'a>(
 
 #[cfg(feature = "cpp")]
 #[test]
+fn a_member_typed_by_its_macros_parameter_declares_no_type() {
+    // `_SV_HEAD(ptrtype)`: each paste names its own `ptrtype`, so the shared
+    // base has no type for `sv_any` to be bounded by; `sv_refcnt` has one.
+    use crate::model::witnesses::WitnessAttachment;
+    let src = "\
+#define _SV_HEAD(ptrtype) ptrtype sv_any; unsigned sv_refcnt;
+struct svrec { _SV_HEAD(void*) };
+";
+    let fa = cpp_driver().analyze(src);
+    let bounded = |name: &str| {
+        let s = sym_in(&fa, name);
+        fa.witnesses.has_declared_bound(&WitnessAttachment::Place(Box::new(fa.declared_place(s.id))))
+    };
+    assert!(!bounded("sv_any"), "the paste, not the base, types sv_any");
+    assert!(bounded("sv_refcnt"));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
 fn macro_body_member_carries_field_payload_like_plain_field() {
     // hitlist-4 family C (findings 4 + 6a): a member declared inside a
     // `#define BASEOP` body must arrive with the SAME payload a plainly-declared
