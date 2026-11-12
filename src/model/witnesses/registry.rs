@@ -3406,6 +3406,109 @@ impl ReducerRegistry {
         declared.then_some(answer)
     }
 
+    /// How evaluating the expression at `att` ends: what it states of itself
+    /// (a local jump, a builtin), and for a call, how its callee ends. `None`
+    /// is no evidence, the top.
+    pub(super) fn expr_ends(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        att: &WitnessAttachment,
+    ) -> Option<Ends> {
+        let mut stated: Option<Ends> = None;
+        let mut join = |e: Ends| stated = Some(stated.map_or(e, |s| s | e));
+        let ws: Vec<Witness> = bag.iter_attachment(att).cloned().collect();
+        for w in &ws {
+            match &w.payload {
+                WitnessPayload::Effect(Effect::Ends(e)) => join(*e),
+                WitnessPayload::Invoke { callee, receiver, .. } => {
+                    join(self.invoke_ends(bag, q, state, w.span.start, callee, receiver.as_ref())?)
+                }
+                // A call reached through its ref (`Expr(call) → Expression`).
+                WitnessPayload::Edge(t @ (WitnessAttachment::Expr(_) | WitnessAttachment::Expression(_))) => {
+                    join(self.expr_ends(bag, q, state, t)?)
+                }
+                _ => {}
+            }
+        }
+        stated
+    }
+
+    /// How a call to `callee` ends: its definition's answer, joined over
+    /// every definition the call may run. A callee the call cannot pin to
+    /// the definitions it runs is an open set, so the top.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_ends(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        site: Point,
+        callee: &Callee,
+        receiver: Option<&WitnessAttachment>,
+    ) -> Option<Ends> {
+        let mut ask = |state: &mut QueryState, att: WitnessAttachment| -> Option<Ends> {
+            let sub_q = ReducerQuery {
+                attachment: &att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: None,
+                receiver: None,
+                args: Vec::new(),
+                context: q.context,
+            };
+            // TODO(effect-cycles): a cut of the cycle guard is the bottom
+            // inside one file (`docs/adr/cfg-tier.md` §Effects); it reads as
+            // no evidence until the CFG's gates read this lane.
+            state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Effects(e) => Some(*e),
+                ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,
+            })
+        };
+        match callee {
+            Callee::Function { name, local, member_of, .. } => {
+                // A class member the eliding body names hides every free
+                // function of the name, as it does for the value.
+                if let Some(class) = member_of {
+                    if let Some(e) = ask(state, WitnessAttachment::effects_of(class.clone(), name.clone())) {
+                        return Some(e);
+                    }
+                }
+                // TODO(effect-cross-file): a free function another file
+                // defines answers through the index's resident table.
+                ask(state, WitnessAttachment::SymbolEffects((*local)?))
+            }
+            // A class the call names runs that class's resolution of the
+            // name, whatever subclasses exist.
+            Callee::Method { name, lookup: Lookup::Named(class), .. } => {
+                ask(state, WitnessAttachment::effects_of(class.clone(), name.clone()))
+            }
+            Callee::Method { name, lookup: Lookup::Super { writer }, .. } => {
+                let ctx = q.context?;
+                let parents = crate::model::file_analysis::parents_of(
+                    writer,
+                    ctx.package_parents,
+                    ctx.module_index,
+                    ctx.app_surface_consumers,
+                );
+                // The first parent in MRO order that defines it is the one
+                // Perl runs; one that states nothing is no evidence.
+                parents.into_iter().find_map(|p| ask(state, WitnessAttachment::effects_of(p, name.clone())))
+            }
+            // TODO(effect-descendants): a receiver may be any subclass of its
+            // class, so the call runs every indexed override; until that
+            // join exists the dispatch is an open set.
+            Callee::Method { lookup: Lookup::Receiver, .. } => {
+                let _ = (receiver, site);
+                None
+            }
+            // A constructor's effect and a code reference's target are not
+            // pinned by the call.
+            Callee::Construct { .. } | Callee::Value(_) => None,
+        }
+    }
+
     /// Scope-chain variable lookup with an explicit visited set.
     /// `query_variable_type` is the public entry; this is the inner loop,
     /// factored out so callers already inside a `query_rec` recursion

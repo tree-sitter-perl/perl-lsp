@@ -755,6 +755,27 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// A call to a builtin the language says ends a fixed way (`die`
+    /// unwinds, `exit` leaves): the call states it on itself. A builtin is
+    /// no sub, so no `Invoke` reaches it; the table is its one home.
+    pub(super) fn push_builtin_ends(&mut self, node: Node<'a>) {
+        use crate::model::witnesses::{Effect, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let name = match node.kind() {
+            "func1op_call_expression" | "func0op_call_expression" => {
+                node.child(0).and_then(|n| n.utf8_text(self.source).ok()).map(str::to_string)
+            }
+            _ => self.forward_callee_name(node),
+        };
+        let Some(ends) = name.as_deref().and_then(crate::model::builtins::builtin_ends) else { return };
+        let span = node_to_span(node);
+        self.push_witness(Witness {
+            attachment: WitnessAttachment::Expr(span),
+            source: WitnessSource::Builder("builtin_ends".into()),
+            payload: WitnessPayload::Effect(Effect::Ends(ends)),
+            span,
+        });
+    }
+
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
         // A written element and the levels on a write's path are the write,
         // not drills: their keys extend the shape

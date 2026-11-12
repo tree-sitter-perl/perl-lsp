@@ -103,10 +103,12 @@ impl<'a> Builder<'a> {
 
             // Call expressions
             "function_call_expression" | "ambiguous_function_call_expression" => {
+                self.push_builtin_ends(node);
                 self.visit_function_call(node);
             }
             // Built-in calls: abs($x), length($s), time(), etc.
             "func1op_call_expression" | "func0op_call_expression" => {
+                self.push_builtin_ends(node);
                 if self.is_shift_call(node) {
                     self.consume_arg_head(node);
                 }
