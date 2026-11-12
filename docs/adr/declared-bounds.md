@@ -232,3 +232,9 @@ $p = realpath($p); }` takes `string`. `TODO(pack-params)`: no pack mints
   so `hisds s` (`typedef char *hisds`) is a value binding and converts.
   Through a class-pointer typedef that drops a fitting subclass to the
   declared class.
+- **A write in a branch narrows past it.** The flow reads the latest
+  write a point reaches and does not join at a block's exit, so after
+  `if ($c) { $p = new Derived; }` a `Base $p` reads `Derived`, exactly as
+  an undeclared local does. A fitting write narrows by the rule above; the
+  missing piece is the block-exit join (`TODO(cfg-exit-join)`), not the
+  bound.
