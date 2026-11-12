@@ -376,11 +376,12 @@ impl FileAnalysis {
     pub fn inferred_type_via_bag_ctx(
         &self,
         var_name: &str,
-        point: Point,
+        point: impl Into<crate::model::witnesses::ReadPoint>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let scope = self.scope_at(point)?;
-        let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
+        let point = point.into();
+        let scope = self.scope_at(point.at)?;
+        let place = Place::variable(self.variable_binding_of(var_name, point.at, scope).0);
         self.subject_type_at(&place, point, module_index)
     }
 
@@ -389,20 +390,34 @@ impl FileAnalysis {
     pub fn place_type_at(
         &self,
         place: &Place,
-        point: Point,
+        point: impl Into<crate::model::witnesses::ReadPoint>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let scope = self.scope_at(point)?;
+        let point = point.into();
+        let scope = self.scope_at(point.at)?;
         crate::model::witnesses::query_place_type(&self.witnesses, &self.bag_context(module_index), place, scope, point)
+    }
+
+    /// Where the read recorded at `span` asks: its own site, less the
+    /// statement the builder found it evaluated before
+    /// (`WitnessPayload::EvaluatedBefore`).
+    pub fn read_point(&self, span: Span) -> crate::model::witnesses::ReadPoint {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let skips = self.witnesses.for_attachment(&WitnessAttachment::Expr(span)).iter().find_map(|w| match w.payload {
+            WitnessPayload::EvaluatedBefore(s) => Some(s),
+            _ => None,
+        });
+        crate::model::witnesses::ReadPoint { at: span.start, skips }
     }
 
     /// What a narrowing subject holds at `point`.
     pub fn subject_type_at(
         &self,
         subject: &Place,
-        point: Point,
+        point: impl Into<crate::model::witnesses::ReadPoint>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
+        let point = point.into();
         if let Some(t) = self.place_type_at(subject, point, module_index) {
             return Some(t);
         }
@@ -412,8 +427,8 @@ impl FileAnalysis {
         // Role-contract param types are gated on the enclosing package's
         // cross-file ancestry, so they resolve here (index in hand), not in
         // the bag the index-free builder seeded.
-        let scope = self.scope_at(point)?;
-        self.gated_param_type_for(self.binding_label(&subject.root).0, scope, point, module_index)
+        let scope = self.scope_at(point.at)?;
+        self.gated_param_type_for(self.binding_label(&subject.root).0, scope, point.at, module_index)
     }
 
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a

@@ -278,6 +278,8 @@
 (if_statement
   alternative: (elif_clause condition: (_) @narrow.cond)
   alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+; TODO(walrus-evaluation-order): `c` runs before `a` in `a if c else b`;
+; once `:=` is a write, a read in `c` must skip `a` (`EvaluatedBefore`).
 (conditional_expression
   (_) @narrow.then
   .

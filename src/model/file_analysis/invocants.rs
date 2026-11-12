@@ -806,7 +806,7 @@ impl FileAnalysis {
 
         // A narrowed place receiver.
         if let (Some(place), Some(span)) = (receiver_place, invocant_span) {
-            if let Some(t) = self.place_type_at(place, span.start, module_index) {
+            if let Some(t) = self.place_type_at(place, self.read_point(*span), module_index) {
                 if !self.dispatch_classes_of(&t, module_index).is_empty() {
                     return Some(t);
                 }

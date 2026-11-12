@@ -334,6 +334,50 @@ fn a_defined_region_is_an_edge_to_its_read() {
     assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 4)), Some(InferredType::ClassName("Foo".into())));
 }
 
+// ── Evaluation order: a statement modifier runs before its statement ──
+
+#[test]
+fn a_postfix_guard_reads_the_value_it_tested() {
+    // `defined $r` runs before the assignment it decides, so the strip
+    // reads `maybe()`'s Optional<Foo>, not the string the write leaves.
+    let fa = build_fa(
+        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub f { return 'x' }\nsub use_it {\n    my $r = maybe();\n    $r = f($r) if defined $r;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 11)), Some(InferredType::ClassName("Foo".into())));
+}
+
+#[test]
+fn every_read_in_a_postfix_condition_runs_before_its_statement() {
+    // Not only `defined`: the receiver of a call in the condition is the
+    // object the statement has not yet replaced.
+    let fa = build_fa("package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if $o->alive;\n}");
+    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_postfix_for_list_runs_before_its_statement() {
+    let fa = build_fa("package P;\nsub u {\n    my $o = Foo->new;\n    $o = 'gone' for $o->items;\n}");
+    assert_eq!(invocant_class_of(&fa, "items").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_postfix_condition_sees_its_own_earlier_writes() {
+    // The statement's write is skipped, the condition's own is not.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $z = Bar->new;\n    $z = 'gone' if ($z = Foo->new) && $z->ok;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "ok").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_do_while_condition_reads_after_its_block() {
+    // `do BLOCK while G` runs the block first: G sees the block's write.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $y = 'Bar';\n    do { $y = 'Foo' } while ($y->more);\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "more").as_deref(), Some("Foo"));
+}
+
 #[test]
 fn a_type_a_conjunct_proves_outranks_its_defined() {
     // `blessed($t) && $t->isa('Foo')` holds `Foo` past the exit: the proven

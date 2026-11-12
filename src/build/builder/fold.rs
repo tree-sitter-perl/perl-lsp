@@ -1117,7 +1117,7 @@ impl<'a> Builder<'a> {
     ) -> Option<InferredType> {
         if self.vars_bound {
             let place = crate::model::file_analysis::Place::variable(self.binding_of(name, point, scope).0);
-            return crate::model::witnesses::query_variable_place(&self.bag, &self.bag_context(), &place, point);
+            return crate::model::witnesses::query_variable_place(&self.bag, &self.bag_context(), &place, point.into());
         }
         crate::model::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
     }
@@ -1129,7 +1129,7 @@ impl<'a> Builder<'a> {
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
-        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point)
+        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point.into())
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through

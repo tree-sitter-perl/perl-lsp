@@ -849,12 +849,26 @@ impl<'a> Builder<'a> {
             return;
         }
         if let Some(payload) = self.expr_payload(node) {
+            let reads_binding = match &payload {
+                WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => t.is_temporal(),
+                _ => false,
+            };
             self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
                 payload,
                 span,
             });
+            // A read the source places after a statement it runs before
+            // must not see that statement's writes (`$x = f($x) if defined $x`).
+            if let Some(stmt) = reads_binding.then(|| crate::cst::evaluated_before(self.syntax, node)).flatten() {
+                self.push_witness(Witness {
+                    attachment: WitnessAttachment::Expr(span),
+                    source: WitnessSource::Builder("evaluation_order".into()),
+                    payload: WitnessPayload::EvaluatedBefore(node_to_span(stmt)),
+                    span,
+                });
+            }
             // `$_[0]` is the call's receiver wherever a call site supplies
             // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
             // `ReturnExprReducer` claims it ahead of the window projection

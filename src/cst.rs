@@ -1463,6 +1463,38 @@ pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound:
     None
 }
 
+/// The statement `node` is evaluated before although it follows it: `node`
+/// is in a statement modifier's condition (`STMT if G`, `unless`, `while`,
+/// `until`) or loop list (`STMT for LIST`), which runs before `STMT`. `do
+/// BLOCK while G` runs its block first, so its condition is read where it
+/// is written. A sub boundary ends the climb: a body runs when called.
+// TODO(evaluation-order-later-writes): the statement's reads of a write its
+// condition makes need a later fact to reach them, which a skip cannot say.
+pub(crate) fn evaluated_before<'a>(syn: &SyntaxForest<'a>, node: Node<'a>) -> Option<Node<'a>> {
+    let mut child = node;
+    for p in syn.ancestors(node) {
+        match p.kind() {
+            "subroutine_declaration_statement"
+            | "method_declaration_statement"
+            | "anonymous_subroutine_expression"
+            | "source_file" => return None,
+            "postfix_conditional_expression" | "postfix_loop_expression" | "postfix_for_expression" => {
+                let stmt = nth_element(p, 0)?;
+                if stmt != child {
+                    // TODO(do-loop-node): the grammar gives `do BLOCK while G`
+                    // the node `STMT while G` has; a node of its own would make
+                    // this a kind.
+                    let body_first = p.kind() == "postfix_loop_expression" && stmt.kind() == "do_expression";
+                    return (!body_first).then_some(stmt);
+                }
+            }
+            _ => {}
+        }
+        child = p;
+    }
+    None
+}
+
 /// The scalar wrapped by a container node's deref varname (`@$h{…}` —
 /// `slice_container_variable > varname > scalar`). `None` for plain
 /// (non-deref) containers, whose varname is a leaf.

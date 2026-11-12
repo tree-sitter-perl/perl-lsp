@@ -91,7 +91,7 @@ pub fn query_place_type(
     ctx: &BagContext,
     place: &crate::model::file_analysis::Place,
     scope: ScopeId,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<InferredType> {
     if place.path.is_empty() {
         return query_variable_place(bag, ctx, place, point);
@@ -122,7 +122,7 @@ pub fn query_variable_place(
     bag: &WitnessBag,
     ctx: &BagContext,
     place: &crate::model::file_analysis::Place,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
@@ -146,5 +146,5 @@ pub fn query_variable_type(
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
-    reg.query_variable_with_visited(bag, ctx, var, scope, point, None, &mut state)
+    reg.query_variable_with_visited(bag, ctx, var, scope, point.into(), None, &mut state)
 }

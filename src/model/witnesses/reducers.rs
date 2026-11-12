@@ -11,7 +11,7 @@ use super::*;
 #[derive(Clone)]
 pub struct ReducerQuery<'a> {
     pub attachment: &'a WitnessAttachment,
-    pub point: Option<tree_sitter::Point>,
+    pub point: Option<ReadPoint>,
     pub framework: FrameworkFact,
     /// Arity hint for arity-dispatch reducers. `Some(N)` = caller passed
     /// N additional args; `None` = unknown (reducer returns the default
@@ -35,6 +35,34 @@ pub struct ReducerQuery<'a> {
     /// lookup. `None` for context-free queries (tests, self-contained
     /// targets).
     pub context: Option<&'a BagContext<'a>>,
+}
+
+/// Where a temporal read asks: every fact made at or before `at`, except
+/// those made inside `skips` — the statement the read is evaluated before
+/// though it follows it in the source (`WitnessPayload::EvaluatedBefore`,
+/// `docs/adr/flow-narrowing.md` §Evaluation order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReadPoint {
+    pub at: Point,
+    pub skips: Option<Span>,
+}
+
+impl ReadPoint {
+    /// Does a fact made at `site` reach this read?
+    pub fn reaches(&self, site: Point) -> bool {
+        site <= self.at && !self.skips_site(site)
+    }
+
+    /// Is `site` inside the statement this read is evaluated before?
+    pub fn skips_site(&self, site: Point) -> bool {
+        self.skips.is_some_and(|s| s.start <= site && site <= s.end)
+    }
+}
+
+impl From<Point> for ReadPoint {
+    fn from(at: Point) -> Self {
+        ReadPoint { at, skips: None }
+    }
 }
 
 /// File-scope context the registry needs to chase edges correctly.
@@ -190,7 +218,7 @@ impl ClassIdentity {
 /// chase follow those instead of asking a reducer —
 /// `docs/adr/flow-narrowing.md` §Reaching writes.
 pub(crate) struct LiveWindow {
-    point: Option<Point>,
+    point: Option<ReadPoint>,
     reset_at: Option<Point>,
 }
 
@@ -201,7 +229,7 @@ impl LiveWindow {
         let point = q
             .point
             .filter(|_| q.attachment.is_temporal());
-        let in_window = |w: &&&Witness| point.is_none_or(|p| w.span.start <= p);
+        let in_window = |w: &&&Witness| point.is_none_or(|p| p.reaches(w.span.start));
         let reset_at = ws
             .iter()
             .filter(in_window)
@@ -212,7 +240,7 @@ impl LiveWindow {
     }
 
     fn in_window(&self, w: &Witness) -> bool {
-        self.point.is_none_or(|p| w.span.start <= p)
+        self.point.is_none_or(|p| p.reaches(w.span.start))
     }
 
     fn admits(&self, w: &Witness) -> bool {
@@ -265,7 +293,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // scope-end, where the call span doesn't contain it). So only narrow
         // for variables; expressions fold every witness.
         let window = LiveWindow::at(ws, q);
-        let narrow_point = window.point;
+        let narrow_point = window.point.map(|p| p.at);
         // Narrowing: with a `point`, pick the narrowest-span
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
@@ -1089,10 +1117,7 @@ impl WitnessReducer for ReturnExprReducer {
         // site — a query before it keeps the rep answer (HashRef pre-,
         // instance post-bless).
         let temporal_gate = |w: &&Witness| match (w.attachment.is_temporal(), q.point) {
-            (true, Some(p)) => {
-                let s = w.span.start;
-                (s.row, s.column) <= (p.row, p.column)
-            }
+            (true, Some(p)) => p.reaches(w.span.start),
             _ => true,
         };
         let mut best: Option<(&Witness, u8)> = None;

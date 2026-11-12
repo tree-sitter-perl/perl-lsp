@@ -469,11 +469,43 @@ holds. A conjunction that proves a type for a subject drops its `defined`
 of that subject (`conjoin`): the type is already defined, and two regions
 on one span would otherwise tie.
 
-A postfix guard is read where it is written, after the statement it
-decides, so a write in that statement reaches the guard's read
-(`$x = f($x) if defined $x`). The strip then sees the write's value, not
-the value the guard tested; it answers only if that value may be undef
-(`TODO(postfix-guard-read-order)`).
+## Evaluation order: a modifier runs before its statement
+
+A read asks at its own site, so it sees every fact made before it in the
+source. A statement modifier inverts that: `STMT if G` (`unless`, `while`,
+`until`) evaluates `G` before `STMT`, and `STMT for LIST` evaluates `LIST`
+before it, though both are written after it. The builder states the order
+where it emits the read: a variable read inside a condition or loop list
+carries `EvaluatedBefore(stmt)` on its `Expr` beside its value edge
+(`cst::evaluated_before` finds the statement). Its span stays the read's
+site (rule #14); what changes is which facts reach it. The registry asks
+such a read at a `ReadPoint { at, skips }`: every fact at or before `at`
+except those made inside `skips`. So in `$x = f($x) if defined $x` the
+strip reads the value `defined` tested, not the one the assignment
+leaves, and `$o = Bar->new if $o->alive` calls `alive` on the old `$o`.
+This holds for every read in the condition, `defined` or not.
+
+The skip is a span, not an earlier point: a condition's own writes and
+narrowings still reach the reads after them (`last unless defined($n =
+$n->{parent}) and ref $n`; `... if defined $x && $x->ok`). The constant
+fold reads by the same rule. A receiver's place, hover on a read and the
+fold's binding lookup all ask the read's `ReadPoint`
+(`FileAnalysis::read_point`), never their own span's start.
+
+`do BLOCK while G` runs its block first, so its `G` reads where it is
+written and carries no order fact. A `while`/`until` modifier's condition
+skips the statement as a prefix loop's condition skips its body: no loop
+join yet (`docs/prompt-cfg-tier.md`).
+
+A skip can only remove facts that precede the read. The mirror case
+cannot be stated with one point: the statement's reads of a write its
+condition makes (`push @out, $l while defined($l = <$fh>)`), and a
+C-style `for`'s step reading its body's writes, would need a fact made
+after the read to reach it (`TODO(evaluation-order-later-writes)`). In
+the pack tier no expression that precedes a condition in the source can
+write today: Python's `a if c else b` and comprehension clauses would
+need the fact once `:=` is a write (`TODO(walrus-evaluation-order)`).
+Cursor-time completion on text with no recorded read asks at the cursor.
 
 ## Reaching writes
 

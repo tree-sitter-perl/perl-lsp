@@ -168,7 +168,7 @@ impl FileAnalysis {
                     }
                     if let Some(sym_id) = r.resolved_symbol() {
                         let sym = self.symbol(sym_id);
-                        return Some(self.format_symbol_hover_at(sym, source, point, module_index));
+                        return Some(self.format_symbol_hover_at(sym, source, self.read_point(r.span), module_index));
                     }
                     // Unresolved variable — try resolve ourselves
                     if let Some(sym) = self.resolve_variable(&r.target_name, point) {
@@ -488,7 +488,7 @@ impl FileAnalysis {
         &self,
         sym: &Symbol,
         source: &str,
-        at: Point,
+        at: impl Into<crate::model::witnesses::ReadPoint>,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
         let line = source_line_at(source, sym.span.start.row);

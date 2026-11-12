@@ -298,7 +298,8 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => false,
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::EvaluatedBefore(_) => false,
         }
     }
 }
@@ -334,7 +335,8 @@ impl WitnessPayload {
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => {}
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::EvaluatedBefore(_) => {}
         }
     }
 }
@@ -514,6 +516,14 @@ pub enum WitnessPayload {
     /// `Edge` to that declaration's place instead. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     FreeValue { table: crate::model::file_analysis::NameTable, name: String, fallback: Option<String> },
+    /// The expression at this attachment is evaluated before the statement
+    /// at `Span`, which comes first in the source: a statement modifier's
+    /// condition (`STMT if G`) or loop list (`STMT for LIST`) runs before
+    /// `STMT`. A read here asks at its own site, but no fact made inside
+    /// that statement reaches it (`ReadPoint::skips`). A sibling of the
+    /// read's own payload; no reducer claims it. Kept at the END for bincode
+    /// variant-index stability.
+    EvaluatedBefore(crate::model::file_analysis::Span),
 }
 
 /// What one write adds to the shape it lands in.
