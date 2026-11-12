@@ -174,7 +174,7 @@ struct Decides {
 /// known by every condition deciding a region around it; the arm where
 /// each one fails is its `else`, and a chain with none has an implicit one
 /// that falls through. A block leaves when one of its statements does
-/// (`@flow.leaves`, or a chain whose every arm leaves), so code after it
+/// (`@ctl.leave.*`, or a chain whose every arm leaves), so code after it
 /// is dead. Where exactly one arm falls through, the rest of the block
 /// after the chain runs where that arm does; where none does it never
 /// runs, and two or more are a join this tier does not take.
@@ -257,7 +257,7 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
         }
         let leaves_here = |n: crate::cst::SyntaxNode<'_, '_>| {
             let site = n.site().id();
-            ad.tags.on(site).any(|ix| ad.events()[ix].cap == Capture::Flow(FlowCap::Leaves))
+            ad.tags.on(site).any(|ix| matches!(ad.events()[ix].cap, Capture::Ctl(c) if c.is_leave()))
                 || chain_leaves.get(&site) == Some(&true)
         };
         let arm_leaves = |arm: NodeId| {

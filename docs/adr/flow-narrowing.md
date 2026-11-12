@@ -351,7 +351,7 @@ tests its condition again after each run of its arm (PHP's `while`): a
 about what follows. The fall-through derivation and `@ctl.loop` are a
 single-block stand-in for CFG reachability and retire with it
 (`TODO(cfg-exit-join)`). Apart from guards, each document marks every
-statement that leaves its block unconditionally `@flow.leaves` (return,
+statement that leaves its block unconditionally `@ctl.leave.<kind>` (return,
 throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
 `exit`, which the language reserves, so their spelling names them), and
 the extractor derives the rest by containment, the Perl rule above: a
@@ -361,7 +361,7 @@ the chain; its arms are the narrowest regions its conditions decide, each
 known by every condition deciding a region around it. An arm leaves when
 it, or one of the statements it runs in sequence (its named children
 outside every field: a loop's body is a part of the loop, not a
-statement of the arm), is marked `@flow.leaves` or is a chain that
+statement of the arm), is marked `@ctl.leave.*` or is a chain that
 leaves. Where exactly one arm falls through, the rest of the block holding
 the chain runs where that arm does, a region of every condition that
 decides it. A comment is no statement, so where it sits does not matter. A

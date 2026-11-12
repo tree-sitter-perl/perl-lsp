@@ -515,13 +515,13 @@
 ; namespace too (`\exit(1)`).
 ; TODO(noreturn-callee): a callee that never returns is an effect on the
 ; callee; replace the spelling lookup once effects and the CFG exist.
-[(return_statement)
- (continue_statement)
- (break_statement)
- (exit_statement)
- (expression_statement (throw_expression))] @flow.leaves
+(return_statement) @ctl.leave.return
+(continue_statement) @ctl.leave.continue
+(break_statement) @ctl.leave.break
+(exit_statement) @ctl.leave.exit
+(expression_statement (throw_expression)) @ctl.leave.throw
 ((expression_statement
-   [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
+   [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @ctl.leave.exit
  (#any-of? @_exit "die" "exit"))
 
 ; ---- how a call ends ----

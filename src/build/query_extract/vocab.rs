@@ -244,10 +244,6 @@ spelled! {
         /// the write initialises it, never overwrites it. The place's own
         /// `Place` capture makes it a write.
         Init = "init",
-        /// A statement that leaves its block unconditionally (a return, a
-        /// throw, a `break`): nothing after it in the block runs. Which
-        /// arms of a condition fall through follows by containment.
-        Leaves = "leaves",
     }
 }
 
@@ -347,6 +343,28 @@ spelled! {
         /// its arm: a `break` in the arm lands after it too, so its arms
         /// decide nothing about what follows.
         Loop = "loop",
+        /// A statement that leaves its block unconditionally, by what it
+        /// leaves to: nothing after it in the block runs. Which arms of a
+        /// condition fall through follows by containment.
+        LeaveReturn = "leave.return",
+        /// … to the nearest handler (`throw`, `raise`).
+        LeaveThrow = "leave.throw",
+        /// … out of the process (php's `exit` and `die`).
+        LeaveExit = "leave.exit",
+        /// … to what follows the loop around it.
+        LeaveBreak = "leave.break",
+        /// … to the next test of the loop around it.
+        LeaveContinue = "leave.continue",
+    }
+}
+
+impl CtlCap {
+    /// A statement that leaves its block, whatever it leaves to.
+    pub fn is_leave(self) -> bool {
+        matches!(
+            self,
+            CtlCap::LeaveReturn | CtlCap::LeaveThrow | CtlCap::LeaveExit | CtlCap::LeaveBreak | CtlCap::LeaveContinue
+        )
     }
 }
 
@@ -816,7 +834,7 @@ impl Capture {
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
-            ["ctl", k] => C::Ctl(CtlCap::parse(k)?),
+            ["ctl", rest @ ..] => C::Ctl(CtlCap::parse(&rest.join("."))?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
             ["unevaluated"] => C::Unevaluated,
             ["param", "region"] => C::ParamRegion,

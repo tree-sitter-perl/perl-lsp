@@ -208,12 +208,14 @@ does not exist yet.
 projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
 
-`@flow.leaves` is a statement that leaves its block unconditionally (a
-return, a throw, a `break`): nothing after it in the block runs. It is the
+`@ctl.leave.<kind>` is a statement that leaves its block unconditionally,
+by what it leaves to: `return`, `throw` (to the nearest handler), `exit`
+(out of the process), `break` (past the loop) or `continue` (to the
+loop's next test). Nothing after it in the block runs. It is the
 document's one statement about control leaving; which arms of a
 condition fall through, and what the rest of a block after them is known
-under, the narrowing family derives by containment over the `@narrow.*`
-positions (`flow-narrowing.md`).
+under, the narrowing family derives by containment over the `@ctl.*`
+positions (`flow-narrowing.md`, `cfg-tier.md`).
 
 ## Decision: a member operator states what it reaches
 
