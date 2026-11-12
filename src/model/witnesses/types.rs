@@ -149,6 +149,22 @@ pub enum WitnessAttachment {
         #[serde(default)]
         aspect: MemberAspect,
     },
+    /// The values of `place` that meet where control paths rejoin: a
+    /// collector, like `BranchArm`. `of` is the construct the join belongs
+    /// to and `role` which of its meeting points this is, so two joins never
+    /// share a key. Each arm is one witness sited where its value leaves the
+    /// arm, and an `Edge(Place)` arm reads the place AT that site; the place
+    /// itself carries a `Reset` and an `Edge` here at the join point, so a
+    /// read past the join folds the arms (`JoinFold`, `docs/adr/cfg-tier.md`).
+    /// Kept at the END for bincode variant-index stability.
+    Join { place: Box<crate::model::file_analysis::Place>, of: Span, role: JoinRole },
+}
+
+/// Which of a construct's meeting points a `Join` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum JoinRole {
+    /// Past a branching construct: the arms that fall through.
+    After,
 }
 
 /// The question a `Member` attachment asks of its member.
@@ -188,6 +204,13 @@ impl WitnessAttachment {
     /// a query at a point reads only what reaches that point.
     pub fn is_temporal(&self) -> bool {
         matches!(self, WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_))
+    }
+
+    /// Is the value here the join of EVERY arm on it, so an arm that cannot
+    /// be typed leaves the whole untyped? (A return-arm or ternary
+    /// collector instead counts the arms it could not type itself.)
+    pub fn folds_every_arm(&self) -> bool {
+        matches!(self, WitnessAttachment::Join { .. })
     }
 
     /// The binding whose whole value this attachment states facts about.

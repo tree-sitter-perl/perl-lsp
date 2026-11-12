@@ -623,6 +623,40 @@ impl WitnessReducer for BranchArmFold {
     }
 }
 
+// ---- Join fold ----
+
+/// The value of a place where control paths rejoin: the join of what it
+/// holds at the end of every arm that reaches the join. Its arms arrive
+/// materialized, an untyped one as `Unknown` (`folds_every_arm`), so one
+/// arm the chase could not type makes the place `Unknown` rather than
+/// letting the others answer for it.
+pub struct JoinFold;
+
+impl WitnessReducer for JoinFold {
+    fn name(&self) -> &str {
+        "join_fold"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::Join { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        let arms: Vec<InferredType> = ws
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::InferredType(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        match crate::model::file_analysis::join_all(&arms, class_order(q)) {
+            Some(t) => ReducedValue::Type(t),
+            None => ReducedValue::None,
+        }
+    }
+}
+
 // ---- Symbol-attached return-arm fold ----
 //
 // Claims `SymbolReturnArm(sub_id)` attachments carrying `InferredType`

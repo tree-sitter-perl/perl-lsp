@@ -1022,6 +1022,8 @@ impl ReducerRegistry {
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
         r.register(Box::new(BranchArmFold));
+        // `Join{..}` is a disjoint attachment shape; order isn't load-bearing.
+        r.register(Box::new(JoinFold));
         r.register(Box::new(FrameworkAwareTypeFold));
         r.register(Box::new(ExprReturn));
         // Member primary-fallback after ReturnExprReducer so
@@ -2543,6 +2545,9 @@ impl ReducerRegistry {
                                 // variable holds at the read.
                                 let point = match q.attachment {
                                     WitnessAttachment::Expr(span) => Some(span.start),
+                                    // A join's arm holds what the place holds
+                                    // where the arm leaves.
+                                    WitnessAttachment::Join { .. } => Some(w.span.start),
                                     _ => binding_scope_end(ctx, &place.root),
                                 };
                                 self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
@@ -2610,6 +2615,16 @@ impl ReducerRegistry {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
+                            span: w.span,
+                        }),
+                        // An arm of a value that every arm makes up is
+                        // still a way in: untyped, it makes the whole
+                        // untyped, rather than leaving the others to speak
+                        // for it.
+                        None if q.attachment.folds_every_arm() => out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(InferredType::Unknown),
                             span: w.span,
                         }),
                         // An edge that didn't resolve drops out — same as a
