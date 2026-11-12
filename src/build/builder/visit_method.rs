@@ -187,14 +187,12 @@ impl<'a> Builder<'a> {
                 .or_else(|| n.text(self.source).map(|s| s.to_string()))
         });
         let receiver_place = invocant_node.and_then(|n| self.place_subject(n));
+        let token_class = invocant_node.and_then(|n| self.token_class(n));
         let invocant = invocant_text.as_ref().map(|s| {
-            // Resolve __PACKAGE__ to enclosing package name. This is THE
-            // canonical producer for ref invocants — varname spelling
-            // normalized above, package token resolved here.
-            if crate::model::conventions::is_current_package_token(s) {
-                crate::model::conventions::Invocant::assume_canonical(
-                    self.current_package.clone().unwrap_or_else(|| s.to_string()),
-                )
+            // THE canonical producer for ref invocants: varname spelling
+            // normalized above, a token naming a class resolved to it here.
+            if let Some(class) = token_class.clone() {
+                crate::model::conventions::Invocant::assume_canonical(class)
             } else if let Some(place) = receiver_place.clone() {
                 crate::model::conventions::Invocant::Place {
                     name: crate::model::conventions::InvocantName::assume_canonical(s),
@@ -309,13 +307,8 @@ impl<'a> Builder<'a> {
                 // class's DBIC source moniker (default = class basename).
                 // Class-level call only; the string arg is the moniker.
                 if name == "source_name" {
-                    let pkg_receiver = node
-                        .child_by_field_name("invocant")
-                        .and_then(|inv| inv.utf8_text(self.source).ok())
-                        .is_some_and(|t| {
-                            crate::model::conventions::is_current_package_token(t)
-                                || self.current_package.as_deref() == Some(t)
-                        });
+                    let pkg_receiver =
+                        node.child_by_field_name("invocant").is_some_and(|inv| self.names_current_package(inv));
                     if pkg_receiver {
                         if let Some(args) = node.child_by_field_name("arguments") {
                             if let Some(sn) = self.first_string_literal_arg(args) {
@@ -414,7 +407,7 @@ impl<'a> Builder<'a> {
                                 crate::model::file_analysis::RefBinding::Function { package }
                             }),
                         );
-                    } else if !crate::model::conventions::is_current_package_token(bw_text) {
+                    } else {
                         // Class-name invocant (`Foo->bar`): the bareword is a
                         // package, not a local sub. Emit a narrower PackageRef
                         // at the invocant span so cursor-on-`Foo` resolves to
@@ -423,7 +416,6 @@ impl<'a> Builder<'a> {
                         // instead of falling through to the wider MethodCall ref
                         // that describes `bar`. ref_at prefers the narrower span,
                         // so the `bar` method-token goto-def (NAV-A) is untouched.
-                        // `__PACKAGE__` is excluded — it's a keyword, not a name.
                         self.add_ref(
                             RefKind::PackageRef,
                             node_to_span(inv_node),
@@ -436,9 +428,7 @@ impl<'a> Builder<'a> {
         }
 
         // DBIC accessor synthesis: __PACKAGE__->add_columns(...), ->has_many(...), etc.
-        let is_pkg_call = invocant_text.as_deref().is_some_and(crate::model::conventions::is_current_package_token)
-            || (invocant_node.map(|n| n.kind()) == Some("package")
-                && invocant_text.as_ref() == self.current_package.as_ref());
+        let is_pkg_call = invocant_node.is_some_and(|n| self.names_current_package(n));
         if is_pkg_call {
             if let Some(ref name) = method_name {
                 // load_components / load_own_components — register components

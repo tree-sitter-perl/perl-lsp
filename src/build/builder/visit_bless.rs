@@ -144,11 +144,10 @@ impl<'a> Builder<'a> {
     /// invocant-class resolver used for method receivers (so `$class` from
     /// `shift`, `__PACKAGE__`, etc. resolve identically).
     pub(super) fn bless_class_of(&self, class_node: Node<'a>) -> Option<String> {
-        // `__PACKAGE__` parses as a func0op call here (not a bareword), so
-        // `invocant_type_at_node`'s bareword arm doesn't catch it — resolve
-        // it to the enclosing package directly.
-        if class_node.utf8_text(self.source).ok().is_some_and(crate::model::conventions::is_current_package_token) {
-            return self.package_for_node(class_node);
+        // `__PACKAGE__` parses as a func0op call (not a bareword), which
+        // `invocant_type_at_node`'s bareword arm doesn't catch.
+        if let Some(class) = self.token_class(class_node) {
+            return Some(class);
         }
         // `bless $r, ref $x` (the clone idiom) blesses into `$x`'s class: the
         // 2nd arg `ref EXPR` yields EXPR's class *name*, so the bless target is

@@ -1136,6 +1136,28 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The class a compile-time token operand names (`__PACKAGE__`), read
+    /// off the token's own type so no consumer spells it.
+    pub(super) fn token_class(&self, node: Node<'a>) -> Option<String> {
+        if node.kind() != "func0op_call_expression" {
+            return None;
+        }
+        match self.infer_expression_result_type(node)? {
+            InferredType::ClassName(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Whether a class operand names the package the walk is in: a token
+    /// naming it, or its name spelled as a bareword class.
+    pub(super) fn names_current_package(&self, node: Node<'a>) -> bool {
+        let Some(cur) = self.current_package.as_deref() else { return false };
+        match self.token_class(node) {
+            Some(c) => c == cur,
+            None => node.kind() == "package" && node.utf8_text(self.source).ok() == Some(cur),
+        }
+    }
+
     /// Infer the result type of an expression (not its operands — those are handled elsewhere).
     /// e.g. `$a + $b` produces Numeric, `$a . $b` produces String.
     pub(super) fn infer_expression_result_type(&self, node: Node<'a>) -> Option<InferredType> {

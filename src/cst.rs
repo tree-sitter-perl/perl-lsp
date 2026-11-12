@@ -1534,11 +1534,11 @@ pub(crate) fn is_element_access_base<'t>(syn: &SyntaxForest<'t>, node: Node<'t>)
 }
 
 /// `Class->new(...)` — a constructor call with a class-shaped invocant.
-/// Returns the invocant text (`Foo::Bar` or `__PACKAGE__`); `None` for
+/// Returns the invocant (`Foo::Bar` or `__PACKAGE__`); `None` for
 /// non-constructor methods and variable/positional invocants, whose class
 /// comes from inference. The caller resolves `__PACKAGE__` — the enclosing
 /// package is builder state this layer doesn't hold.
-pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<&'a str> {
+pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<Node<'a>> {
     use crate::model::conventions::InvocantText;
     let call = MethodCall::cast(node)?;
     if !call
@@ -1548,12 +1548,13 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
     {
         return None;
     }
-    let inv = call.invocant()?.text(src)?;
+    let inv_node = call.invocant()?;
+    let inv = inv_node.text(src)?;
     match InvocantText::parse(inv) {
-        InvocantText::CurrentPackage => Some(inv),
+        InvocantText::CurrentPackage => Some(inv_node),
         // A computed receiver (`(ref $self)->new`) parses to a leading `(`
         // that classifies as Bareword; only a real package name is a class.
-        InvocantText::Bareword(b) if crate::model::conventions::is_bareword_class_name(b, &crate::model::conventions::PERL_SPELLINGS) => Some(inv),
+        InvocantText::Bareword(b) if crate::model::conventions::is_bareword_class_name(b, &crate::model::conventions::PERL_SPELLINGS) => Some(inv_node),
         InvocantText::Bareword(_)
         | InvocantText::Scalar(_)
         | InvocantText::NonScalar(_)

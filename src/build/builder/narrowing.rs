@@ -536,11 +536,7 @@ impl<'a> Builder<'a> {
 
     /// `__PACKAGE__` as a class operand: the enclosing package.
     fn current_package_literal(&self, node: Node<'a>) -> Option<String> {
-        let text = node.utf8_text(self.source).ok()?;
-        if !crate::model::conventions::is_current_package_token(text) {
-            return None;
-        }
-        self.package_for_node(node)
+        self.token_class(node)
     }
 
     /// A scalar `isa`/`DOES` argument (`$x->isa($C)`) that the constant

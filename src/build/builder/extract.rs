@@ -403,10 +403,7 @@ impl<'a> Builder<'a> {
 
     pub(super) fn extract_constructor_class(&self, node: Node<'a>) -> Option<String> {
         let inv = crate::cst::constructor_invocant(node, self.source)?;
-        if crate::model::conventions::is_current_package_token(inv) {
-            return self.current_package.clone();
-        }
-        Some(inv.to_string())
+        self.token_class(inv).or_else(|| inv.utf8_text(self.source).ok().map(str::to_string))
     }
 
     /// The scalar variable names in a paren-list LHS (`my ($a, $b)` /
