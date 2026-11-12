@@ -503,8 +503,8 @@ impl<'a> Builder<'a> {
         for child in arg_nodes.iter().skip(skip_first as usize) {
             match (crate::cst::literal_shape(*child), child.kind()) {
                 (Some(LiteralShape::Str), _) => {
-                    if let Some(text) = self.extract_string_content(*child) {
-                        names.push((text, self.string_content_span(*child)));
+                    if let Some(value) = crate::cst::string_value(*child, self.source) {
+                        names.push(value);
                     }
                 }
                 (None, "bareword" | "autoquoted_bareword") => {
@@ -856,12 +856,12 @@ impl<'a> Builder<'a> {
         // bare-string case first, then recurse into wrappers.
         match crate::cst::literal_shape(args) {
             Some(LiteralShape::Str) => {
-                return self.extract_string_content(args);
+                return crate::cst::string_content_text(args, self.source);
             }
             Some(LiteralShape::List) => {
                 let child = crate::cst::nth_element(args, 0)?;
                 return match crate::cst::literal_shape(child) {
-                    Some(LiteralShape::Str) => self.extract_string_content(child),
+                    Some(LiteralShape::Str) => crate::cst::string_content_text(child, self.source),
                     Some(LiteralShape::List) => self.first_string_literal_arg(child),
                     _ => None,
                 };

@@ -669,7 +669,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let span = if matches!(key_node.kind(), "string_literal" | "interpolated_string_literal") {
-                self.string_content_span(key_node)
+                crate::cst::string_content_span(key_node)
             } else {
                 node_to_span(key_node)
             };
@@ -793,7 +793,7 @@ impl<'a> Builder<'a> {
                 child.kind(),
                 "string_literal" | "interpolated_string_literal"
             ) {
-                self.string_content_span(child)
+                crate::cst::string_content_span(child)
             } else {
                 node_to_span(child)
             };

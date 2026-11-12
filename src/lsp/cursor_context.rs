@@ -730,17 +730,7 @@ fn first_arg_as_string(args: Node, source: &[u8]) -> Option<String> {
     };
     match first.kind() {
         "string_literal" | "interpolated_string_literal" => {
-            // Pull the `string_content` child — quote-flavor-agnostic
-            // (q{}, qq{}, heredocs, '' vs "") and avoids the
-            // trim-delimiters brittleness.
-            for i in 0..first.named_child_count() {
-                if let Some(child) = first.named_child(i) {
-                    if child.kind() == "string_content" {
-                        return child.utf8_text(source).ok().map(|s| s.to_string());
-                    }
-                }
-            }
-            Some(String::new())
+            Some(crate::cst::string_content_text(first, source).unwrap_or_default())
         }
         "bareword" | "autoquoted_bareword" => {
             first.utf8_text(source).ok().map(|s| s.to_string())
@@ -1087,14 +1077,7 @@ fn extract_key_text(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
         "autoquoted_bareword" => node.utf8_text(source).ok().map(|s| s.to_string()),
         "string_literal" | "interpolated_string_literal" => {
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    if child.kind() == "string_content" {
-                        return child.utf8_text(source).ok().map(|s| s.to_string());
-                    }
-                }
-            }
-            Some(String::new())
+            Some(crate::cst::string_content_text(node, source).unwrap_or_default())
         }
         "string_content" => node.utf8_text(source).ok().map(|s| s.to_string()),
         _ => None, // dynamic keys — don't include

@@ -1128,16 +1128,22 @@ pub(crate) fn qw_word_spans(qw_node: Node, src: &[u8], results: &mut Vec<(String
     }
 }
 
-/// The `string_content` text of a quoted node — quote-flavor-agnostic.
+/// The `string_content` child of a quoted node, whatever the quote flavour
+/// (`'…'`, `q{…}`, `qq!…!`, a heredoc). An empty literal has none.
+pub(crate) fn string_content(node: Node) -> Option<Node> {
+    node.named().find(|c| c.kind() == "string_content")
+}
+
+/// A quoted node's value and the span it occupies. `None` for an empty
+/// literal, which has no content to point at.
+pub(crate) fn string_value(node: Node, src: &[u8]) -> Option<(String, Span)> {
+    let content = string_content(node)?;
+    Some((content.utf8_text(src).ok()?.to_string(), node_to_span(content)))
+}
+
+/// `string_value`'s text alone.
 pub(crate) fn string_content_text(node: Node, src: &[u8]) -> Option<String> {
-    for i in 0..node.named_child_count() {
-        if let Some(content) = node.named_child(i) {
-            if content.kind() == "string_content" {
-                return content.utf8_text(src).ok().map(|s| s.to_string());
-            }
-        }
-    }
-    None
+    string_value(node, src).map(|(text, _)| text)
 }
 
 /// The literal content of a quoted node ONLY when it's a plain,
@@ -1145,7 +1151,7 @@ pub(crate) fn string_content_text(node: Node, src: &[u8]) -> Option<String> {
 /// reftype guard (`isa('Foo')`, `ref($x) eq 'HASH'`) needs. Anything
 /// interpolated (`"$cls"`) or empty yields `None`, so an interpolated
 /// argument never reads as a literal class name. Stricter sibling of
-/// `string_content_text`.
+/// `string_value`.
 pub(crate) fn plain_string_literal_text(node: Node, src: &[u8]) -> Option<String> {
     if !matches!(node.kind(), "string_literal" | "interpolated_string_literal") {
         return None;
@@ -1167,14 +1173,7 @@ pub(crate) fn plain_string_literal_text(node: Node, src: &[u8]) -> Option<String
 /// Span of the `string_content` inside a quoted node (selection span);
 /// the whole node when there is none (empty string).
 pub(crate) fn string_content_span(node: Node) -> Span {
-    for i in 0..node.named_child_count() {
-        if let Some(content) = node.named_child(i) {
-            if content.kind() == "string_content" {
-                return node_to_span(content);
-            }
-        }
-    }
-    node_to_span(node)
+    node_to_span(string_content(node).unwrap_or(node))
 }
 
 /// One arm of an `if`/`unless` statement chain.
@@ -1346,8 +1345,8 @@ pub(crate) fn string_list_with_residue(
             return (results, false);
         }
         Some(LiteralShape::Str) => {
-            if let Some(text) = string_content_text(node, src) {
-                return (vec![(text, string_content_span(node))], false);
+            if let Some(value) = string_value(node, src) {
+                return (vec![value], false);
             }
             return (vec![], true);
         }
@@ -1373,8 +1372,8 @@ pub(crate) fn string_list_with_residue(
         match literal_shape(child) {
             Some(LiteralShape::Qw) => qw_word_spans(child, src, &mut results),
             Some(LiteralShape::Str) => {
-                if let Some(text) = string_content_text(child, src) {
-                    results.push((text, string_content_span(child)));
+                if let Some(value) = string_value(child, src) {
+                    results.push(value);
                 } else {
                     residue = true;
                 }
