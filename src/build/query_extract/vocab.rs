@@ -328,15 +328,24 @@ spelled! {
         Or = "or",
         /// A condition that holds where its one operand does (`(…)`).
         Group = "group",
-        /// The condition a position match's arms are taken on.
+    }
+}
+
+spelled! {
+    /// Control structure, as the document declares it (`docs/adr/cfg-tier.md`).
+    /// The narrowing atoms describe a condition; these say where it decides.
+    pub enum CtlCap {
+        /// A construct whose arms are alternatives (`if`, `switch`, `?:`).
+        Branch = "branch",
+        /// The condition a match's arms are taken on.
         Cond = "cond",
         /// What runs where the condition holds.
         Then = "then",
         /// What runs where the condition fails.
         Else = "else",
-        /// A position match's construct that tests its condition again
-        /// after each run of its arm (a loop): a `break` in the arm lands
-        /// after it too, so its arms decide nothing about what follows.
+        /// A construct that tests its condition again after each run of
+        /// its arm: a `break` in the arm lands after it too, so its arms
+        /// decide nothing about what follows.
         Loop = "loop",
     }
 }
@@ -686,9 +695,8 @@ pub enum Capture {
     /// only within it.
     Arm,
     Narrow(NarrowCap),
+    Ctl(CtlCap),
     Move(MoveCap),
-    /// A control-flow construct's span (`@guard.region`).
-    GuardRegion,
     /// An unevaluated operand (`sizeof(...)`, `decltype(...)`).
     Unevaluated,
     ParamRegion,
@@ -808,8 +816,8 @@ impl Capture {
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
+            ["ctl", k] => C::Ctl(CtlCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
-            ["guard", "region"] => C::GuardRegion,
             ["unevaluated"] => C::Unevaluated,
             ["param", "region"] => C::ParamRegion,
             ["receiver"] => C::Receiver,
@@ -887,8 +895,8 @@ impl fmt::Display for Capture {
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Arm => f.write_str("arm"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
+            C::Ctl(k) => write!(f, "ctl.{k}"),
             C::Move(k) => write!(f, "move.{k}"),
-            C::GuardRegion => f.write_str("guard.region"),
             C::Unevaluated => f.write_str("unevaluated"),
             C::ParamRegion => f.write_str("param.region"),
             C::Member(k) => write!(f, "member.{k}"),

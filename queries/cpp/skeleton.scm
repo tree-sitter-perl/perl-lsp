@@ -1001,16 +1001,16 @@
 ; and preprocessor conditionals actually gate a move. Capturing the whole
 ; construct (not just braceless bodies) keeps the pattern uniform; the
 ; containment test does the braced/braceless discrimination.
-(if_statement) @guard.region
-(while_statement) @guard.region
-(for_statement) @guard.region
-(for_range_loop) @guard.region
-(do_statement) @guard.region
-(switch_statement) @guard.region
-(conditional_expression) @guard.region
-(preproc_if) @guard.region
-(preproc_ifdef) @guard.region
-(preproc_elif) @guard.region
+(if_statement) @ctl.branch
+(while_statement) @ctl.loop
+(for_statement) @ctl.loop
+(for_range_loop) @ctl.loop
+(do_statement) @ctl.loop
+(switch_statement) @ctl.branch
+(conditional_expression) @ctl.branch
+(preproc_if) @ctl.branch
+(preproc_ifdef) @ctl.branch
+(preproc_elif) @ctl.branch
 
 ; parameter lists — the use-after-move check reads these to tell a moved LOCAL
 ; (`Widget x;` in the body) from a moved PARAMETER. A moved parameter is
@@ -1057,15 +1057,15 @@
 ; it fails. An `else` arm is the statement it holds, so `else if` is the
 ; next link of the chain. The edge-driven cutoff ends a narrowing at any
 ; rebind.
-(if_statement condition: (condition_clause value: (_) @narrow.cond) consequence: (_) @narrow.then)
+(if_statement condition: (condition_clause value: (_) @ctl.cond) consequence: (_) @ctl.then)
 ((if_statement
-   condition: (condition_clause value: (_) @narrow.cond)
-   alternative: (else_clause (_) @narrow.else))
- (#not-is-kind? @narrow.else comment))
-(conditional_expression condition: (_) @narrow.cond consequence: (_) @narrow.then)
-(conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
-(binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
-(binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
+   condition: (condition_clause value: (_) @ctl.cond)
+   alternative: (else_clause (_) @ctl.else))
+ (#not-is-kind? @ctl.else comment))
+(conditional_expression condition: (_) @ctl.cond consequence: (_) @ctl.then)
+(conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else)
+(binary_expression left: (_) @ctl.cond operator: "&&" right: (_) @ctl.then)
+(binary_expression left: (_) @ctl.cond operator: "||" right: (_) @ctl.else)
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

@@ -286,7 +286,7 @@ fn family(cap: Capture) -> Family {
         | C::AnonAggMember
         | C::Receiver
         | C::NamedReceiver(_) => Family::Flow,
-        C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
+        C::Narrow(_) | C::Ctl(_) | C::Move(_) | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing
         }
         C::Cmd(_) => Family::Commands,
