@@ -100,7 +100,7 @@ impl FileAnalysis {
         };
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -171,7 +171,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -933,7 +933,7 @@ impl FileAnalysis {
         let domain = match reg.query(&bag, &q) {
             ReducedValue::Type(InferredType::ClassName(d)) => d,
             ReducedValue::Type(_)
-            | ReducedValue::FactMap(_)
+            | ReducedValue::FactMap(_) | ReducedValue::Effects(_)
             | ReducedValue::None => return None,
         };
         // Confidence = dominant share, recomputed from the same witnesses the
@@ -1067,7 +1067,7 @@ impl FileAnalysis {
         let reg = ReducerRegistry::with_defaults();
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 

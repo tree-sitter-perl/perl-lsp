@@ -130,6 +130,10 @@ pub enum ReducedValue {
     Type(InferredType),
     FactMap(Vec<(String, FactValue)>),
     None,
+    /// How something ends: the answer of an attachment that
+    /// `asks_effects`, never of one that holds a value. A type reader
+    /// treats it as no type.
+    Effects(super::types::Ends),
 }
 
 pub trait WitnessReducer: Send + Sync {
@@ -654,6 +658,43 @@ impl WitnessReducer for JoinFold {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
+    }
+}
+
+// ---- Effect fold ----
+
+/// How a callable ends: the union of the `Ends` its arms state, from the
+/// highest-priority source present, so a declaration or a plugin's
+/// statement answers instead of the body's inferred arms
+/// (`WitnessSource::priority`). It answers only an attachment that
+/// `asks_effects`: an expression's own effect sits beside its value
+/// witnesses and must never answer a type question asked of it.
+pub struct EffectFold;
+
+impl WitnessReducer for EffectFold {
+    fn name(&self) -> &str {
+        "effect_fold"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.payload, WitnessPayload::Effect(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        if !q.attachment.asks_effects() {
+            return ReducedValue::None;
+        }
+        let Some(top) = ws.iter().map(|w| w.source.priority()).max() else {
+            return ReducedValue::None;
+        };
+        let ends = ws
+            .iter()
+            .filter(|w| w.source.priority() == top)
+            .fold(super::types::Ends::empty(), |acc, w| match &w.payload {
+                WitnessPayload::Effect(super::types::Effect::Ends(e)) => acc | *e,
+                _ => acc,
+            });
+        ReducedValue::Effects(ends)
     }
 }
 

@@ -105,6 +105,12 @@ struct ClassLadder<'a> {
     /// arms, so it rides the hops; a slot, a parameter or a type has none.
     /// A callable is also what a plugin bridge can supply.
     callable: Option<&'a str>,
+    /// Does the walk enter other files (the class's candidate files, plugin
+    /// bridges)? An effect question never chases another file's bag: a
+    /// rehydrated copy has a new address, so the cycle guard would miss a
+    /// call graph that loops back through it (`docs/adr/cfg-tier.md`
+    /// §Effects). Its cross-file answers come from the index instead.
+    cross_file: bool,
     /// The attachment re-keyed to a parent class; `None` when the
     /// attachment has no ancestry to walk.
     rekey: Option<fn(&WitnessAttachment, String) -> WitnessAttachment>,
@@ -129,10 +135,15 @@ impl<'a> ClassLadder<'a> {
         Some(match att {
             WitnessAttachment::Member { owner, name, aspect, .. } => {
                 let returns = *aspect == MemberAspect::Returns;
+                // How a member ends is a callable's question too, and a
+                // call dispatches to the nearest definition whatever it
+                // states, so it walks like `Returns`.
+                let callable = *aspect != MemberAspect::Holds;
                 ClassLadder {
                     owner,
-                    rows_member: Some((name, returns)),
-                    callable: returns.then_some(name.as_str()),
+                    rows_member: Some((name, callable)),
+                    callable: callable.then_some(name.as_str()),
+                    cross_file: *aspect != MemberAspect::Effects,
                     // A parent's member is the same member one class up:
                     // same namespace, same name, same question.
                     rekey: Some(|att, p| match att {
@@ -142,15 +153,24 @@ impl<'a> ClassLadder<'a> {
                         _ => unreachable!("rekey is minted from its own attachment"),
                     }),
                     rungs_on_parents: returns,
-                    untyped_settles: returns,
-                    site: if returns { "moc_primary" } else { "field" },
-                    fetch_tag: if returns { "mocsite.primary" } else { "mocsite.field" },
+                    untyped_settles: callable,
+                    site: match aspect {
+                        MemberAspect::Returns => "moc_primary",
+                        MemberAspect::Holds => "field",
+                        MemberAspect::Effects => "effects",
+                    },
+                    fetch_tag: match aspect {
+                        MemberAspect::Returns => "mocsite.primary",
+                        MemberAspect::Holds => "mocsite.field",
+                        MemberAspect::Effects => "mocsite.effects",
+                    },
                 }
             }
             WitnessAttachment::Param { package, .. } => ClassLadder {
                 owner: package,
                 rows_member: None,
                 callable: None,
+                cross_file: true,
                 rekey: Some(|att, p| match att {
                     WitnessAttachment::Param { name, index, .. } => {
                         WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
@@ -166,6 +186,7 @@ impl<'a> ClassLadder<'a> {
                 owner: name,
                 rows_member: None,
                 callable: None,
+                cross_file: true,
                 // An alias names one type; the alias graph has no ancestry.
                 rekey: None,
                 rungs_on_parents: false,
@@ -1042,6 +1063,10 @@ impl ReducerRegistry {
         r.register(Box::new(DomainCoherenceFold));
         // `Param{..}` is a disjoint attachment shape; order isn't load-bearing.
         r.register(Box::new(ParamBindingReducer));
+        // The effect lane's attachments carry no type payload, so its fold
+        // is disjoint from every type fold; it answers only an effect
+        // question, whatever it claims.
+        r.register(Box::new(EffectFold));
         // Last — fallback for "this Symbol's stored return type".
         r.register(Box::new(SubReturnReducer));
         r
@@ -1345,6 +1370,16 @@ impl ReducerRegistry {
         {
             return ReducedValue::Type(InferredType::Unknown);
         }
+        // A member this file defines answers how it ends from its own
+        // definition: a child's override that states nothing is no evidence
+        // (the top), never its parent's answer. A cut beneath this frame is
+        // the cycle's to fold, so it settles nothing.
+        if let WitnessAttachment::Member { owner, space, name, aspect: MemberAspect::Effects } = q.attachment {
+            if v == ReducedValue::None && defines_member_here(bag, owner, *space, name) {
+                let complete = state.low_cut >= pos;
+                return if complete { ReducedValue::Effects(super::types::Ends::all()) } else { v };
+            }
+        }
         if let Some(ladder) = &ladder {
             if let Some(found) = self.class_fallback(bag, q, state, ladder) {
                 return found;
@@ -1408,6 +1443,7 @@ impl ReducerRegistry {
         let ctx = q.context?;
         let mut rungs = RungAnswers::default();
         match ctx.module_index {
+            _ if !ladder.cross_file => {}
             Some(idx) => {
                 if let Some(v) = self.class_candidates_node(bag, q, state, ctx, idx, ladder) {
                     if let Some(v) = rungs.offer(ladder, v) {
@@ -1434,7 +1470,7 @@ impl ReducerRegistry {
                 }
             }
         }
-        Self::class_bridges(ctx, ladder).or_else(|| rungs.rest())
+        ladder.cross_file.then(|| Self::class_bridges(ctx, ladder)).flatten().or_else(|| rungs.rest())
     }
 
     /// Hop (1) of `class_fallback` as a fan-out node (`fan_out_node`). Only
@@ -2472,7 +2508,7 @@ impl ReducerRegistry {
         };
         match answer? {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -2514,6 +2550,32 @@ impl ReducerRegistry {
                 continue;
             }
             match &w.payload {
+                // An edge into the effect lane carries how its target ends,
+                // never a type (the `Member{.., Effects}` mirror, an
+                // inheritance hop).
+                WitnessPayload::Edge(target) if target.asks_effects() => {
+                    let sub_q = ReducerQuery {
+                        attachment: target,
+                        point: q.point,
+                        framework: q.framework,
+                        arity_hint: q.arity_hint,
+                        receiver: q.receiver.clone(),
+                        args: q.args.clone(),
+                        context: q.context,
+                    };
+                    let ends = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                        ReducedValue::Effects(e) => Some(*e),
+                        ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    });
+                    if let Some(e) = ends {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::Effect(super::types::Effect::Ends(e)),
+                            span: w.span,
+                        });
+                    }
+                }
                 WitnessPayload::Edge(target) => {
                     let resolved = match (target, q.context) {
                         (
@@ -2599,7 +2661,7 @@ impl ReducerRegistry {
                             let chase = |state: &mut QueryState| {
                                 match &*self.query_rec(bag, &sub_q, state) {
                                     ReducedValue::Type(t) => Some(t.clone()),
-                                    ReducedValue::FactMap(_)
+                                    ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                     | ReducedValue::None => None,
                                 }
                             };
@@ -2675,7 +2737,7 @@ impl ReducerRegistry {
                             };
                             match &*self.query_rec(bag, &sub_q, state) {
                                 ReducedValue::Type(t) => Some(t.clone()),
-                                ReducedValue::FactMap(_)
+                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                 | ReducedValue::None => None,
                             }
                         }
@@ -2707,7 +2769,7 @@ impl ReducerRegistry {
                                         state.in_opaque_frame(|state| {
                                             match &*self.query_rec(bag, &sub_q, state) {
                                                 ReducedValue::Type(t) => Some(t.clone()),
-                                                ReducedValue::FactMap(_)
+                                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                                 | ReducedValue::None => None,
                                             }
                                         })
@@ -2770,7 +2832,7 @@ impl ReducerRegistry {
                                         state.in_opaque_frame(|state| {
                                             match &*self.query_rec(bag, &sub_q, state) {
                                                 ReducedValue::Type(t) => Some(t.clone()),
-                                                ReducedValue::FactMap(_)
+                                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                                 | ReducedValue::None => None,
                                             }
                                         })
@@ -2807,7 +2869,7 @@ impl ReducerRegistry {
                                         state.in_opaque_frame(|state| {
                                             match &*self.query_rec(bag, &sub_q, state) {
                                                 ReducedValue::Type(t) => Some(t.clone()),
-                                                ReducedValue::FactMap(_)
+                                                ReducedValue::FactMap(_) | ReducedValue::Effects(_)
                                                 | ReducedValue::None => None,
                                             }
                                         })
@@ -2850,7 +2912,7 @@ impl ReducerRegistry {
                         let t = state.in_opaque_frame(|state| {
                             match &*self.query_rec(bag, &sub_q, state) {
                                 ReducedValue::Type(t) => Some(t.clone()),
-                                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                             }
                         });
                         match t {
@@ -2879,7 +2941,7 @@ impl ReducerRegistry {
                         let sub_q = ReducerQuery { attachment: att, ..q.clone() };
                         state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                             ReducedValue::Type(t) => Some(t.clone()),
-                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                         })
                     });
                     out.push(Witness {
@@ -2941,7 +3003,7 @@ impl ReducerRegistry {
         };
         state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         })
     }
 
@@ -2995,7 +3057,7 @@ impl ReducerRegistry {
             };
             let member = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                 ReducedValue::Type(t) => Some(t.clone()),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             });
             if member.is_some() {
                 return member;
@@ -3099,7 +3161,7 @@ impl ReducerRegistry {
             };
             state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                 ReducedValue::Type(t) => Some(t.clone()),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             })
         });
         let constructs = matches!(callee, Callee::Method { constructs: true, .. });
@@ -3239,7 +3301,7 @@ impl ReducerRegistry {
             };
             match &*self.query_rec(&full.witnesses, &q, state) {
                 ReducedValue::Type(t) => Some(t.clone()),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             }
         };
         // Two passes so the R4 retry can never SHADOW a later exporter's raw
@@ -3386,7 +3448,7 @@ impl ReducerRegistry {
         };
         match &*self.query_rec(bag, &q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 }
@@ -3418,7 +3480,7 @@ impl ReducerRegistry {
         };
         match &*self.query_rec(bag, &q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 }
@@ -3426,6 +3488,16 @@ impl ReducerRegistry {
 /// Where an edge with no read position asks a binding from: the end of the
 /// scope the binding lives in, so every fact made in that scope holds; a
 /// package variable's is the file's.
+/// Does this bag define callable `name` on `owner` itself? Any fact on the
+/// member's `Returns` attachment says so, except an edge to the same member
+/// one class up, which is how an inherited one is reached.
+fn defines_member_here(bag: &WitnessBag, owner: &str, space: crate::model::file_analysis::NamespaceId, name: &str) -> bool {
+    let returns = WitnessAttachment::Member { owner: owner.to_string(), space, name: name.to_string(), aspect: MemberAspect::Returns };
+    bag.iter_attachment(&returns).any(|w| {
+        !matches!(&w.payload, WitnessPayload::Edge(WitnessAttachment::Member { name: n, .. }) if n == name)
+    })
+}
+
 fn binding_scope_end(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> Option<Point> {
     use crate::model::file_analysis::Binding;
     let home = match binding {

@@ -333,7 +333,7 @@ impl<'a> Builder<'a> {
                 };
                 let resolved = match reg.query(&self.bag, &q) {
                     ReducedValue::Type(t) => Some(t),
-                    ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                 };
                 // Marks are a value's, not a sub's return contract: the
                 // snapshot compares bases so a branded implicit return
@@ -1085,7 +1085,7 @@ impl<'a> Builder<'a> {
         };
         match reg.query(&self.bag, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -1193,7 +1193,7 @@ impl<'a> Builder<'a> {
                 Some(InferredType::ClassName(package))
             }
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -1473,7 +1473,7 @@ impl<'a> Builder<'a> {
                 };
                 match reg.query(&self.bag, &q) {
                     ReducedValue::Type(t) => Some(t),
-                    ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
                 }
             });
 
@@ -1612,6 +1612,17 @@ impl<'a> Builder<'a> {
             let Some(class) = sym.package.clone() else { continue };
             let is_primary = method_on_class_seen.insert((class.clone(), sym.name.clone()));
             if is_primary {
+                // How it ends rides the same mirror, minted only where the
+                // symbol states something: a member defined here with no
+                // effect answers the top without one.
+                if self.bag.iter_attachment(&WitnessAttachment::SymbolEffects(sym.id)).next().is_some() {
+                    writeback_witnesses.push(Witness {
+                        attachment: WitnessAttachment::effects_of(class.clone(), sym.name.clone()),
+                        source: WitnessSource::Builder("local_return".into()),
+                        payload: WitnessPayload::Edge(WitnessAttachment::SymbolEffects(sym.id)),
+                        span: sym.span,
+                    });
+                }
                 writeback_witnesses.push(Witness {
                     attachment: WitnessAttachment::returns_of(class, sym.name.clone()),
                     source: WitnessSource::Builder("local_return".into()),
@@ -1961,17 +1972,30 @@ impl<'a> Builder<'a> {
             // and therefore brand — without a vendored Mojolicious.
             // Sub overrides stay symbol-keyed (they name a package
             // function, not a class method).
-            let payload = match &ov.return_type {
+            let payload = ov.return_type.as_ref().map(|r| match r {
                 plugin::OverrideReturn::Type(t) => WitnessPayload::InferredType(t.clone()),
                 plugin::OverrideReturn::Expr(e) => WitnessPayload::ReturnExpr(e.clone()),
-            };
+            });
+            let effect = ov.ends.as_deref().map(|e| {
+                WitnessPayload::Effect(crate::model::witnesses::Effect::Ends(plugin::OverrideEnds::set(e)))
+            });
             if let plugin::OverrideTarget::Method { class, name } = &ov.target {
-                self.push_witness(Witness {
-                    attachment: WitnessAttachment::returns_of(class.clone(), name.clone()),
-                    source: WitnessSource::Plugin(plugin_id.clone()),
-                    payload: payload.clone(),
-                    span: zero,
-                });
+                if let Some(payload) = &payload {
+                    self.push_witness(Witness {
+                        attachment: WitnessAttachment::returns_of(class.clone(), name.clone()),
+                        source: WitnessSource::Plugin(plugin_id.clone()),
+                        payload: payload.clone(),
+                        span: zero,
+                    });
+                }
+                if let Some(effect) = &effect {
+                    self.push_witness(Witness {
+                        attachment: WitnessAttachment::effects_of(class.clone(), name.clone()),
+                        source: WitnessSource::Plugin(plugin_id.clone()),
+                        payload: effect.clone(),
+                        span: zero,
+                    });
+                }
             }
             // Collect target SymbolIds in a snapshot so we can mutate
             // self.bag + self.type_provenance below without holding
@@ -1996,6 +2020,15 @@ impl<'a> Builder<'a> {
                 // Zero-extent span — core-synthesized witness, no
                 // user-visible "because: …" anchor needed beyond the
                 // provenance entry below.
+                if let Some(effect) = &effect {
+                    self.push_witness(Witness {
+                        attachment: WitnessAttachment::SymbolEffects(sym_id),
+                        source: WitnessSource::Plugin(plugin_id.clone()),
+                        payload: effect.clone(),
+                        span: zero,
+                    });
+                }
+                let Some(payload) = &payload else { continue };
                 self.push_witness(Witness {
                     attachment: WitnessAttachment::Symbol(sym_id),
                     source: WitnessSource::Plugin(plugin_id.clone()),

@@ -1261,6 +1261,8 @@ fn remap_spans(
         | WitnessAttachment::SymbolReturnArm(_)
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
+        | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Effects, .. }
+        | WitnessAttachment::SymbolEffects(_)
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::Place(_) => {}
     };

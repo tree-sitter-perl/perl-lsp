@@ -131,7 +131,8 @@ fn registry_with_bar_override() -> Arc<PluginRegistry> {
                 class: "Foo".into(),
                 name: "bar".into(),
             },
-            return_type: crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Baz".into())),
+            return_type: Some(crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Baz".into()))),
+            ends: None,
             reason: "test fixture: pin Foo::bar to Baz".into(),
         }],
     }));
@@ -423,4 +424,62 @@ fn fold_converges_on_self_recursive_call_binding() {
         fa_twice.sub_return_type_at_arity("fetch_object", Some(2)),
         "settled answer changed under an extra fold pass"
     );
+}
+
+// ---- Effects: a plugin states how a call ends ------------------------------
+
+fn registry_with_fail_unwinding() -> Arc<PluginRegistry> {
+    let mut reg = PluginRegistry::new();
+    reg.register(Box::new(OverrideOnlyPlugin {
+        id: "test-effects",
+        triggers: vec![Trigger::Always],
+        overrides: vec![TypeOverride {
+            target: OverrideTarget::Method { class: "Foo".into(), name: "fail".into() },
+            return_type: None,
+            ends: Some(vec![crate::build::plugin::OverrideEnds::Unwinds]),
+            reason: "test fixture: Foo::fail throws".into(),
+        }],
+    }));
+    Arc::new(reg)
+}
+
+/// An override that states only how a call ends reaches the callable and
+/// its class, is inherited by a subclass that does not define the method,
+/// and is NOT inherited by one that does: an override that states nothing
+/// is no evidence, never its parent's answer. Its return type is left to
+/// inference.
+#[test]
+fn plugin_stated_ends_reach_the_callable_and_its_heirs() {
+    use crate::model::witnesses::{query_ends, Ends, WitnessAttachment};
+    let source = r#"
+        package Foo;
+        sub fail { return 1 }
+        package Heir;
+        our @ISA = ('Foo');
+        package Own;
+        our @ISA = ('Foo');
+        sub fail { return 2 }
+    "#;
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let fail = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "fail" && s.package.as_deref() == Some("Foo"))
+        .expect("Foo::fail");
+    assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
+    assert!(
+        !matches!(fa.return_type_provenance(fail.id), TypeProvenance::PluginOverride { .. }),
+        "an ends-only override states no return type"
+    );
+    let ctx = fa.bag_context(None);
+    let ends_of = |class: &str| query_ends(&fa.witnesses, &WitnessAttachment::effects_of(class, "fail"), Some(&ctx));
+    assert_eq!(ends_of("Foo"), Ends::UNWINDS);
+    assert_eq!(ends_of("Heir"), Ends::UNWINDS, "inherited");
+    assert_eq!(ends_of("Own"), Ends::all(), "an own definition that states nothing is the top");
+    let own = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "fail" && s.package.as_deref() == Some("Own"))
+        .expect("Own::fail");
+    assert_eq!(fa.symbol_ends(own.id), Ends::all());
 }

@@ -224,6 +224,7 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
    - `TypeNameReducer` — disjoint class-keyed fallback shape (typedef/using aliases); order here isn't load-bearing.
    - `FieldValueReducer` — claims the `Member{..}` Holds aspect (a member's stored values): a member declaration's edge and each write to a slot (`$obj->{k} = …`, `obj.k = …`), agreed as arms (two classes are no answer); order here isn't load-bearing.
    - `DomainCoherenceFold` — the `Member{..}` Holds aspect (int-used-as-enum domain vote); order here isn't load-bearing.
+   - `EffectFold` — the effect lane: `Effect` payloads on `SymbolEffects(sid)` / `Member{.., Effects}`, joined by union from the highest-priority source, answering `ReducedValue::Effects(Ends)` and only to an attachment that `asks_effects` (`docs/adr/cfg-tier.md` §Effects). Nothing stated reads as the top (`query_ends`); the class ladder walks it in-file only.
    - `SubReturnReducer` — `Symbol(_) + InferredType` latest-wins, runs last; backstop when no higher-priority reducer answered.
 
 **Single shared query path.** `query_variable_type(bag, scopes, framework, var, scope, point)` and `query_sub_return_type(bag, symbols, name, arity_hint, ...)` in `model/witnesses/query.rs` are the only scope-walk + framework + reducer dispatch sites. `FileAnalysis::inferred_type_via_bag` / `sub_return_type_at_arity` (query-time) and `Builder::bag_query_attachment` / `bag_query_expr_span` (build-time) are thin wrappers over the registry. Identical rules in both by construction.

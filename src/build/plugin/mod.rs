@@ -999,11 +999,41 @@ pub struct RefTagFunction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeOverride {
     pub target: OverrideTarget,
-    pub return_type: OverrideReturn,
+    /// What a call returns; absent when the override states only how a
+    /// call ends.
+    #[serde(default)]
+    pub return_type: Option<OverrideReturn>,
     /// Free-form prose surfacing in `TypeProvenance::PluginOverride.reason`.
     /// Read by humans only — keep it explanatory ("returns $self via
     /// the @_-shift / array-slice idiom that inference doesn't model").
     pub reason: String,
+    /// How a call ends (`ends: ["unwinds"]` for a framework's `throw`),
+    /// so core never knows the name (`docs/adr/cfg-tier.md` §Effects).
+    #[serde(default)]
+    pub ends: Option<Vec<OverrideEnds>>,
+}
+
+/// One way a call may end, as a manifest spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverrideEnds {
+    Completes,
+    Unwinds,
+    Exits,
+}
+
+impl OverrideEnds {
+    /// The set a manifest's list states.
+    pub fn set(list: &[OverrideEnds]) -> crate::model::witnesses::Ends {
+        use crate::model::witnesses::Ends;
+        list.iter().fold(Ends::empty(), |acc, e| {
+            acc | match e {
+                OverrideEnds::Completes => Ends::COMPLETES,
+                OverrideEnds::Unwinds => Ends::UNWINDS,
+                OverrideEnds::Exits => Ends::EXITS,
+            }
+        })
+    }
 }
 
 /// What an override says a call returns: a type, or a `ReturnExpr` that the

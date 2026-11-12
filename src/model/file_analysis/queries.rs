@@ -535,7 +535,7 @@ impl FileAnalysis {
         };
         let primary = match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         };
         // Fallback for a chain receiver whose class the BUILDER couldn't
         // pin (so `emit_method_call_return_edges` never emitted the
@@ -568,7 +568,7 @@ impl FileAnalysis {
             };
             match reg.query(&self.witnesses, &mq) {
                 ReducedValue::Type(t) => Some(t),
-                ReducedValue::FactMap(_) | ReducedValue::None => None,
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
             }
         });
         resolved.map(|t| {
@@ -612,7 +612,7 @@ impl FileAnalysis {
         };
         match reg.query(&self.witnesses, &q) {
             ReducedValue::Type(t) => Some(t),
-            ReducedValue::FactMap(_) | ReducedValue::None => None,
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
         }
     }
 
@@ -1212,6 +1212,17 @@ impl FileAnalysis {
     #[allow(dead_code)] // public type-query API; used by tooling/tests
     pub fn sub_return_type(&self, name: &str) -> Option<InferredType> {
         self.sub_return_type_at_arity(name, None)
+    }
+
+    /// How a call to this callable ends, as far as this file states
+    /// (`docs/adr/cfg-tier.md` §Effects). Nothing stated is the top.
+    pub fn symbol_ends(&self, sym_id: SymbolId) -> crate::model::witnesses::Ends {
+        let ctx = self.bag_context(None);
+        crate::model::witnesses::query_ends(
+            &self.witnesses,
+            &crate::model::witnesses::WitnessAttachment::SymbolEffects(sym_id),
+            Some(&ctx),
+        )
     }
 
     /// Provenance of a symbol's return type — `Inferred` by default,
