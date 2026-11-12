@@ -5226,6 +5226,7 @@ function f(Sized $c) {
 /// A guard naming a class nothing here declares is undecided, whether the
 /// bound is a class, a nullable one or a union: the class may well
 /// implement it, so the guard's class stands.
+#[cfg(feature = "php")]
 #[test]
 fn a_guard_on_an_unseen_class_stands_under_a_nullable_bound() {
     let src = "<?php
