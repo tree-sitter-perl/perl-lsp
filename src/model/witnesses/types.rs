@@ -283,6 +283,18 @@ impl WitnessAttachment {
     pub fn folds_every_arm(&self) -> bool {
         matches!(self, WitnessAttachment::Join { .. })
     }
+    /// Whether this names the evaluation of an expression (its value as it
+    /// is computed) rather than a slot that holds values: only an
+    /// evaluation can be `Never`.
+    pub fn is_evaluation(&self) -> bool {
+        matches!(
+            self,
+            WitnessAttachment::Expr(_)
+                | WitnessAttachment::Expression(_)
+                | WitnessAttachment::BranchArm(_)
+                | WitnessAttachment::SymbolReturnArm(_)
+        )
+    }
 
     /// Does this attachment ask how something ends rather than what it
     /// holds? Its answer is `ReducedValue::Effects`, and an edge to it

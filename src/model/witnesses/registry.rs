@@ -1333,8 +1333,21 @@ impl ReducerRegistry {
         pos: u32,
         state: &mut QueryState,
     ) -> ReducedValue {
+        // An expression that states it does not complete (a local jump, a
+        // builtin that dies) has the value of one that never comes back,
+        // whatever else it would type to.
+        if matches!(q.attachment, WitnessAttachment::Expr(_)) && stated_never_completes(bag, q.attachment) {
+            return ReducedValue::Type(InferredType::Never);
+        }
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+        // `Never` types an evaluation, never a slot: a callable whose every
+        // arm leaves yields no value (its effect says why), and a place or a
+        // member written only by expressions that leave holds none. So it
+        // never reaches a return type, a conclusion or the Surface.
+        if matches!(&v, ReducedValue::Type(InferredType::Never)) && !q.attachment.is_evaluation() {
+            return ReducedValue::None;
+        }
         let ladder = ClassLadder::of(q.attachment);
         if v != ReducedValue::None && ladder.as_ref().is_none_or(|l| l.settles(&v)) {
             return v;
@@ -3021,6 +3034,10 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
+        // A call that cannot come back has no value to look up.
+        if self.invoke_ends(bag, q, state, site, callee, receiver).is_some_and(|e| !e.completes()) {
+            return Some(InferredType::Never);
+        }
         let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r));
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
@@ -3448,7 +3465,7 @@ impl ReducerRegistry {
         callee: &Callee,
         receiver: Option<&WitnessAttachment>,
     ) -> Option<Ends> {
-        let mut ask = |state: &mut QueryState, att: WitnessAttachment| -> Option<Ends> {
+        let ask = |state: &mut QueryState, att: WitnessAttachment| -> Option<Ends> {
             let sub_q = ReducerQuery {
                 attachment: &att,
                 point: q.point,
@@ -3588,9 +3605,6 @@ impl ReducerRegistry {
     }
 }
 
-/// Where an edge with no read position asks a binding from: the end of the
-/// scope the binding lives in, so every fact made in that scope holds; a
-/// package variable's is the file's.
 /// Does this bag define callable `name` on `owner` itself? Any fact on the
 /// member's `Returns` attachment says so, except an edge to the same member
 /// one class up, which is how an inherited one is reached.
@@ -3601,6 +3615,20 @@ fn defines_member_here(bag: &WitnessBag, owner: &str, space: crate::model::file_
     })
 }
 
+/// Whether `att` states of itself an effect that never completes.
+fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
+    let mut stated: Option<super::types::Ends> = None;
+    for w in bag.iter_attachment(att) {
+        if let WitnessPayload::Effect(super::types::Effect::Ends(e)) = &w.payload {
+            stated = Some(stated.map_or(*e, |s| s | *e));
+        }
+    }
+    stated.is_some_and(|e| !e.completes())
+}
+
+/// Where an edge with no read position asks a binding from: the end of the
+/// scope the binding lives in, so every fact made in that scope holds; a
+/// package variable's is the file's.
 fn binding_scope_end(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> Option<Point> {
     use crate::model::file_analysis::Binding;
     let home = match binding {

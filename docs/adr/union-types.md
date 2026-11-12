@@ -12,6 +12,8 @@ whole-program engine) needs that join on a finite-height lattice.
 reads it, through `join_all` / `join_return_arms`. It is total:
 
 - equal → that type; `Unknown` absorbs (it is the lattice's top)
+- `Never` is the identity: an arm that does not complete drops out
+  (`join(Never, T) = T`)
 - an `Undef` or `Optional` arm makes the result `Optional<the rest>`
 - otherwise each arm folds into an arm it joins precisely with
   (`join_precise`: a class into its ancestor, an object over a hash
@@ -19,7 +21,11 @@ reads it, through `join_all` / `join_return_arms`. It is total:
   `Bool` into `Numeric`), and the rest stand side by side as a union
 
 `None` is bottom (no evidence) and is never produced by a join of
-two types; `join_all` answers `None` only for no arms.
+two types; `join_all` answers `None` only for no arms. `Never` is not
+`None`: it says the expression leaves, and only an evaluation answers it
+(`WitnessAttachment::is_evaluation`). A slot that would hold only `Never`
+holds nothing, and `join_return_arms` answers `None` when the only arms
+that come back are undef (`docs/adr/cfg-tier.md` §Effects).
 
 `TypeOrder` is the only inheritance the join sees: `isa` for
 subsumption, `common_class` for widening. In-file folds without a bag

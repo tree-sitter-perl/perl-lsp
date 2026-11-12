@@ -52,15 +52,17 @@ fn a_class_member_reads_through_its_mirror() {
     assert_eq!(query_ends(&bag, &WitnessAttachment::effects_of("Foo", "bail"), None), Ends::EXITS);
 }
 
-/// An expression's own effect sits beside its value: a type question
-/// asked of it never answers with the effect.
+/// A type question asked of an expression never answers with its effect:
+/// one that may complete answers its value, one that cannot answers `Never`.
 #[test]
 fn an_expression_effect_never_answers_its_type() {
     let mut bag = WitnessBag::new();
-    let att = WitnessAttachment::Expr(Span { start: at(1), end: at(2) });
-    push(&mut bag, att.clone(), builder(), ends(Ends::UNWINDS));
-    let q = ReducerQuery {
-        attachment: &att,
+    let may = WitnessAttachment::Expr(Span { start: at(1), end: at(2) });
+    let cannot = WitnessAttachment::Expr(Span { start: at(3), end: at(4) });
+    push(&mut bag, may.clone(), builder(), ends(Ends::COMPLETES | Ends::UNWINDS));
+    push(&mut bag, cannot.clone(), builder(), ends(Ends::UNWINDS));
+    let q = |attachment| ReducerQuery {
+        attachment,
         point: None,
         framework: FrameworkFact::Plain,
         arity_hint: None,
@@ -68,9 +70,12 @@ fn an_expression_effect_never_answers_its_type() {
         args: Vec::new(),
         context: None,
     };
-    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q), ReducedValue::None);
-    push(&mut bag, att.clone(), builder(), WitnessPayload::InferredType(InferredType::String));
-    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q), ReducedValue::Type(InferredType::String));
+    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q(&may)), ReducedValue::None);
+    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q(&cannot)), ReducedValue::Type(InferredType::Never));
+    push(&mut bag, may.clone(), builder(), WitnessPayload::InferredType(InferredType::String));
+    push(&mut bag, cannot.clone(), builder(), WitnessPayload::InferredType(InferredType::String));
+    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q(&may)), ReducedValue::Type(InferredType::String));
+    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q(&cannot)), ReducedValue::Type(InferredType::Never));
 }
 
 #[test]

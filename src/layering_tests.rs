@@ -415,6 +415,38 @@ fn inferred_type_has_no_production_caller() {
     );
 }
 
+/// `Never` is a projection of the effect lane, made where the registry
+/// answers an expression or a call and nowhere else (`docs/adr/cfg-tier.md`
+/// §Effects). A builtin row, a declared type, a plugin override or a
+/// witness that wrote it would store what only the effect may say.
+/// Count-exact, shrink-only; patterns (`=>`, `matches!`, `| …`) don't count.
+#[test]
+fn never_is_made_only_by_the_registry() {
+    const SITES: &[(&str, usize, &str)] = &[
+        ("model/witnesses/registry.rs", 2, "an expression that states it leaves; a call whose callee cannot come back"),
+        ("model/file_analysis/queries.rs", 1, "the call arms of `expr_type_at_span`, which read a call's return beside the registry"),
+    ];
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for (path, _layer, _stem) in source_files() {
+        let text = fs::read_to_string(&path).unwrap();
+        let n = text
+            .lines()
+            .map(str::trim_start)
+            .filter(|t| !t.starts_with("//") && t.contains("InferredType::Never"))
+            .filter(|t| !t.contains("=>") && !t.contains("matches!") && !t.starts_with('|'))
+            .count();
+        if n > 0 {
+            let rel = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            found.push((rel, n));
+        }
+    }
+    found.sort();
+    let mut want: Vec<(String, usize)> = SITES.iter().map(|(p, n, _)| (p.to_string(), *n)).collect();
+    want.sort();
+    assert_eq!(found, want, "`InferredType::Never` is constructed outside the registry's projection sites");
+}
+
 /// Human type labels read in the file's language: `FileAnalysis::render_type`
 /// / `display_type_of` carry the language's words (`type_label`), so an
 /// adapter or index site rendering with the vocabulary-free engine spelling

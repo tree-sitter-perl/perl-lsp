@@ -545,3 +545,27 @@ fn a_call_ends_the_way_the_definitions_it_runs_end() {
     assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
     assert_eq!(fa.symbol_ends(plain.id), Ends::all(), "a definition that states nothing");
 }
+
+/// `Never` is how a value fold sees an expression that does not complete:
+/// it answers where the expression states it leaves or calls a callee that
+/// never comes back, and the join drops it, so an arm that leaves is no
+/// arm. A callable whose every arm leaves yields no value.
+#[test]
+fn an_arm_that_never_comes_back_drops_out_of_the_value() {
+    let source = "package Foo;\nsub fail { return 1 }\nsub dies { die 'x' }\nsub maybe { return 1 if $_[0]; die 'x' }\nmy $a = die 'x';\nmy $b = fail();\nmy $c = $_[0] ? 'v' : die 'x';\nmy $d = $_[1] // fail();\nmy $s = 'a';\nmy $e = $s // fail();\n";
+    let fa = build_with(source, registry_with_fail_unwinding());
+    let type_of = |row: usize, from: &str| -> Option<InferredType> {
+        let line = source.lines().nth(row).unwrap();
+        let start = line.find(from).unwrap();
+        let end = line.len() - 1;
+        let point = |column| tree_sitter::Point { row, column };
+        fa.expr_type_at_span(crate::model::file_analysis::Span { start: point(start), end: point(end) }, None)
+    };
+    assert_eq!(type_of(4, "die"), Some(InferredType::Never), "a builtin that dies");
+    assert_eq!(type_of(5, "fail"), Some(InferredType::Never), "a call whose callee never comes back");
+    assert_eq!(type_of(6, "$_[0]"), Some(InferredType::String), "the arm that leaves drops out");
+    assert_eq!(type_of(7, "$_[1]"), None, "nothing is known of the left");
+    assert_eq!(type_of(9, "$s"), Some(InferredType::String), "a fallback that leaves leaves the left");
+    assert_eq!(fa.sub_return_type_at_arity("dies", None), None, "no arm comes back");
+    assert_eq!(fa.sub_return_type_at_arity("maybe", None), Some(InferredType::Numeric));
+}
