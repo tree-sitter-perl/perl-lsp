@@ -103,6 +103,7 @@ impl<'a> Builder<'a> {
 
             // Call expressions
             "function_call_expression" | "ambiguous_function_call_expression" => {
+                self.narrow_assertion(node);
                 self.visit_function_call(node);
             }
             // Built-in calls: abs($x), length($s), time(), etc.

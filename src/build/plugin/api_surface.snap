@@ -295,6 +295,14 @@ pub name: String,
 pub tag: crate::model::file_analysis::RefTagFn,
 }
 
+pub struct TypeCheckFunction {
+pub module: String,
+pub name: String,
+pub constraint: String,
+#[serde(default)]
+pub asserts: bool,
+}
+
 pub struct TypeOverride {
 pub target: OverrideTarget,
 pub return_type: OverrideReturn,

@@ -1344,3 +1344,23 @@ sub g {
         ],
     );
 }
+
+#[test]
+fn d6_hash_deref_on_type_check_guard_fires() {
+    // The deref-shape lint reads the guard's rep, so a Type::Tiny check
+    // reaches the lattice, not just the hover type.
+    let src = r#"
+package Main;
+use Types::Standard qw(is_ArrayRef);
+sub g {
+    my ($self, $x) = @_;
+    if (is_ArrayRef($x)) {
+        return $x->{key};
+    }
+    return;
+}
+1;
+"#;
+    let diags = deref_shape_diags(src);
+    assert_eq!(diags.len(), 1, "hash deref on an is_ArrayRef-narrowed receiver fires: {:?}", diags);
+}

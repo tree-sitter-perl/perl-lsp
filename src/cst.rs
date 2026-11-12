@@ -1397,13 +1397,24 @@ pub(crate) enum ArmBound {
 }
 
 /// A call on a variable or place whose callee `tag_of` names as reporting
-/// what a reference is: which function, and the operand. A call or deref
-/// operand (`ref(f($x))`) names nothing a guard could narrow.
+/// what a reference is: which function, and the operand.
 pub(crate) fn ref_tag_call<'a>(
     node: Node<'a>,
     src: &[u8],
     tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
 ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+    subject_call(node, src, tag_of)
+}
+
+/// A one-operand call on a variable or place (`f($x)`, `f $self->{k}`,
+/// `defined $x`) whose callee name `callee` recognises: its answer, and the
+/// operand. A call or deref operand (`ref(f($x))`) names nothing a guard
+/// could narrow.
+pub(crate) fn subject_call<'a, T>(
+    node: Node<'a>,
+    src: &[u8],
+    callee: impl FnOnce(&str) -> Option<T>,
+) -> Option<(T, Node<'a>)> {
     let (name, operand) = match node.kind() {
         "func1op_call_expression" => {
             (node.child(0)?.utf8_text(src).ok()?, node.named().find(|c| c.kind() != "comment")?)
@@ -1413,7 +1424,7 @@ pub(crate) fn ref_tag_call<'a>(
         }
         _ => return None,
     };
-    let via = tag_of(name)?;
+    let via = callee(name)?;
     let operand = peel_groups(operand);
     matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
         .then_some((via, operand))

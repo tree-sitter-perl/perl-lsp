@@ -14,8 +14,7 @@
 // itself a constructor. That unlocks `$self->attr->method` chains where attr
 // is `isa => InstanceOf['X']` or `isa => Maybe[InstanceOf['X']]`.
 //
-// Import scoping (docs/prompt-type-constraint-types.md §"Future: registration
-// moves to the injection level"): when a package does `use Types::Standard
+// Import scoping (docs/adr/type-constraints.md): when a package does `use Types::Standard
 // qw/Str Int/`, those names become known via an Import action — suppressing
 // unresolved-function diagnostics for explicitly imported type constants.
 // `-all` / `:all` / bare use → full vocab emitted.  `GenericCo::Types` and
@@ -117,9 +116,10 @@ fn type_constraint_inner(name, params) {
 // to all of them for -all / bare use). New type constants added to a
 // future Types::Standard release land here, nowhere else.
 
-fn types_standard_exports() {
-    // Base type constants, each shipping is_X / assert_X / to_X companions.
-    let base = [
+// Types::Standard's base type constants. Each ships is_X / assert_X / to_X
+// companions; the export list and the check guards both project from here.
+fn types_standard_bases() {
+    [
         "Any", "Item",
         "Bool",
         "Undef", "Defined", "Value",
@@ -132,11 +132,14 @@ fn types_standard_exports() {
         "Maybe", "Overload", "StrMatch", "OptList", "Tied",
         "Enum",
         "InstanceOf", "ConsumerOf", "HasMethods",
-    ];
+    ]
+}
+
+fn types_standard_exports() {
     // Coercion / validation helpers: exported as plain functions, no companions.
     let standalone = ["slurpy", "MkOpt", "Join", "Split"];
     let out = [];
-    for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
+    for t in types_standard_bases() { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
     for t in standalone { out += t; }
     out
 }
@@ -166,6 +169,22 @@ fn types_common_numeric_exports() {
     ];
     let out = [];
     for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
+    out
+}
+
+// `is_X($v)` checks `$v` against X; `assert_X($v)` dies unless it passes.
+// Both guard `$v` as X's inner type: core folds `constraint` through
+// `type_constraint_inner` and keeps the checks whose constraint has an inner
+// (`is_Object` guards nothing). Types::Common re-exports Types::Standard's companions,
+// so a check imported from either reaches the same entry.
+fn type_check_functions() {
+    let out = [];
+    for lib in ["Types::Standard", "Types::Common"] {
+        for t in types_standard_bases() {
+            out += #{ "module": lib, name: "is_" + t, constraint: t, asserts: false };
+            out += #{ "module": lib, name: "assert_" + t, constraint: t, asserts: true };
+        }
+    }
     out
 }
 
