@@ -573,7 +573,7 @@ impl FileAnalysis {
                 if MemberKind::of_symbol(sym).mode != MemberMode::Value {
                     return None;
                 }
-                self.subject_type_at(&self.declared_place(sym_id), sym.span.end, module_index)
+                self.subject_type_at(&self.declared_place(sym_id), crate::model::witnesses::ReadPoint::position(sym.span.end), module_index)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
@@ -593,7 +593,7 @@ impl FileAnalysis {
                                 && s.package.as_deref() == Some(class.as_str())
                                 && full.symbol_is_class_content(s)
                         })?;
-                        full.subject_type_at(&full.declared_place(sym.id), sym.span.end, None)
+                        full.subject_type_at(&full.declared_place(sym.id), crate::model::witnesses::ReadPoint::position(sym.span.end), None)
                     })
                 })
             }
@@ -640,7 +640,7 @@ impl FileAnalysis {
             // proves unset) initialises it.
             let lazy = r.access == AccessKind::WriteIfUnset
                 || r.access_place().is_some_and(|place| {
-                    self.place_type_at(place, site.name_span.start, module_index) == Some(InferredType::Undef)
+                    self.place_type_at(place, r.read_point_at(site.name_span.start), module_index) == Some(InferredType::Undef)
                 });
             let in_constructor = self.scope_chain(r.scope).iter().any(|&sc| {
                 self.scope(sc)
@@ -1025,14 +1025,14 @@ impl FileAnalysis {
             .unwrap_or_default()
     }
 
-    /// The `TypeName(n)` the declared type of the variable or member `sym`
+    /// The `TypeName(n)` the declared bound of the variable or member `sym`
     /// edges to (the alias edge the skeleton emits for a class-shaped
     /// declared type).
     pub(crate) fn type_name_edge_of(&self, sym: SymbolId) -> Option<String> {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        use crate::model::witnesses::{BoundType, WitnessAttachment, WitnessPayload};
         let place = self.declared_place(sym);
-        self.witnesses.iter_attachment(&WitnessAttachment::Place(Box::new(place))).find_map(|w| match &w.payload {
-            WitnessPayload::Edge(WitnessAttachment::TypeName(target)) => Some(target.clone()),
+        self.witnesses.bounds_of(&WitnessAttachment::Place(Box::new(place))).find_map(|w| match &w.payload {
+            WitnessPayload::Bound { ty: BoundType::Edge(WitnessAttachment::TypeName(target)), .. } => Some(target.clone()),
             _ => None,
         })
     }

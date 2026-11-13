@@ -209,11 +209,15 @@ projects a member (`$o->p`, `self.p`), that member takes the value and its
 token is written, not read.
 
 `@flow.leaves` is a statement that leaves its block unconditionally (a
-return, a throw, a `break`): nothing after it in the block runs. It is the
-document's one statement about control leaving; which arms of a
-condition fall through, and what the rest of a block after them is known
-under, the narrowing family derives by containment over the `@narrow.*`
-positions (`flow-narrowing.md`).
+return, a throw, a `break`): nothing after it in the block runs.
+`@flow.to_loop` says which of those go to the loop around them (`break`,
+`continue`), so a loop's arm that holds one may come back to the test or
+land after the loop, and `@flow.block` marks a statement whose statements
+run in sequence where it stands (a bare block). Those are the document's
+statements about control leaving; which arms of a condition fall through,
+and what the rest of a block after them is known under, the narrowing
+family derives by containment over the `@narrow.*` positions
+(`flow-narrowing.md`).
 
 ## Decision: a member operator states what it reaches
 

@@ -686,11 +686,13 @@ pub fn signature_help(
                         }
                         return base;
                     }
-                    // Local: look up inferred type at end of sub body —
-                    // route through the witness bag so framework + branch
-                    // + arity rules refine the answer.
+                    // Local: the type the parameter is declared to take;
+                    // with no declaration, what the body makes of it at its
+                    // end, through the witness bag so framework + branch +
+                    // arity rules refine the answer.
                     if let Some(ty) = analysis
-                        .inferred_type_via_bag(&p.name, sig_info.body_end)
+                        .param_declared_type(p, Some(module_index))
+                        .or_else(|| analysis.inferred_type_via_bag(&p.name, sig_info.body_end))
                         .filter(InferredType::is_known)
                     {
                         format!("{}: {}", base, analysis.render_type(&ty))

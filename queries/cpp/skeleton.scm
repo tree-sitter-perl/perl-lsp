@@ -798,7 +798,7 @@
 
 ; ---- type witnesses: C++ leaks types at every DECLARATION site (its
 ; static-typing richness — the annot_type predicate carries the load).
-; `T x = init;` emits both the declared-type witness and a flow edge to
+; `T x = init;` emits both the declared bound and a flow edge to
 ; the initializer; `T x;` emits the declared type alone. `auto` defers
 ; to the edge (annot_type returns None), driving the cross-var chase. ----
 (declaration
@@ -927,9 +927,8 @@
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
 ; `x = rhs` writes x once the rhs has read it and replaces what x held, so
-; `x = x.next()` reads the old x on its right.
-; TODO(declared-bounds): the write retires `T x`'s declared type, so an
-; untyped rhs reads unknown (/mnt/project-files/design/php-held-prs/declared-contracts.md).
+; `x = x.next()` reads the old x on its right. `T x`'s declared type
+; outlives the write: an untyped rhs still reads `T`.
 (assignment_expression
   left: (identifier) @flow.target
   operator: "="
@@ -1049,6 +1048,11 @@
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: "&&" right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: "||" right: (_) @narrow.else)
+; A `while` body runs where its condition holds, and the loop tests it again
+; after each run, so a `break` or `continue` in it goes to the loop.
+; TODO(cfg-exit-join): `@narrow.loop` and `@flow.to_loop` stand in for
+; reachability until the CFG's loop edges answer it.
+(while_statement condition: (condition_clause value: (_) @narrow.cond) body: (_) @narrow.then) @narrow.loop
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -1061,6 +1065,10 @@
  (throw_statement)
  (continue_statement)
  (break_statement)] @flow.leaves
+; A `break` or `continue` leaves to the loop (or `switch`) around it, and a
+; bare block's statements run where it stands.
+[(continue_statement) (break_statement)] @flow.to_loop
+(compound_statement) @flow.block
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

@@ -45,12 +45,13 @@ to honor now and are painful retrofits:
 1. **Finding fingerprints key on `(rule, function symbol, Place path)`
    — never line numbers.** Baselines and inline suppressions ride the
    fingerprint, so a code edit that shifts a line must not orphan a
-   suppression. `Place` does not exist yet (Epic 16 Phase B), so this
-   epic cannot use it — but Phase C's suppression key and Phase D's
-   SARIF `ruleId`/location shape must be designed so a fingerprint can
-   become the key **without a format break**. Concretely: do not make
-   the line number part of the suppression's identity, and leave the
-   SARIF result shape room for a `partialFingerprints` entry.
+   suppression. `Place` exists now (Epic 16 Phase B landed it in
+   `model/file_analysis/place.rs`), so a fingerprint can carry it from
+   the start. Phase C's suppression key and Phase D's SARIF
+   `ruleId`/location shape must let it be the key **without a format
+   break**. Concretely: do not make the line number part of the
+   suppression's identity, and leave the SARIF result shape room for a
+   `partialFingerprints` entry.
 2. **must/may is a structured confidence field, not a severity.** The
    brief's framing: "must gates CI, may informs review — the zero-FP
    discipline and a Klocwork-style recall mode become one engine at two
