@@ -171,6 +171,9 @@ pub enum WitnessAttachment {
 pub enum JoinRole {
     /// Past a branching construct: the arms that fall through.
     After,
+    /// A test written after the code it guards (`… if $c`): it runs first,
+    /// so it sees the value entering the construct.
+    Test,
 }
 
 /// The question a `Member` attachment asks of its member.
@@ -346,6 +349,9 @@ pub enum AnnotationKind {
 /// Source tag of the builder's write markers (`WitnessPayload::Reset`) —
 /// provenance only; the payload carries the meaning.
 pub const RESET_SOURCE: &str = "reset";
+
+/// Source tag of the joins `assemble_joins` mints, the point's and the arms'.
+pub const JOIN_SOURCE: &str = "join";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {

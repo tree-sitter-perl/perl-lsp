@@ -982,7 +982,7 @@ fn a_write_inside_a_loop_body_widens_the_read_after_it() {
 #[test]
 fn a_typed_write_in_a_block_types_the_block_and_widens_what_follows() {
     // Inside the block, after the write, the value IS the RHS. Past the
-    // block it is old-or-new.
+    // `if` it is either: the join of the arm's Foo and the bypass's String.
     let fa = build_fa(
         "package P;\nsub m {\n  my $x = 'str';\n  if (c()) {\n    $x = Foo->new;\n    my $i = $x;\n  }\n  my $o = $x;\n}\n1;\n",
     );
@@ -993,8 +993,11 @@ fn a_typed_write_in_a_block_types_the_block_and_widens_what_follows() {
     );
     assert_eq!(
         fa.inferred_type_via_bag("$x", Point::new(7, 11)),
-        Some(InferredType::Unknown),
-        "a read past the block sees neither the stale String nor a Foo that may not have happened",
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName("Foo".into()), InferredType::String],
+            &crate::model::file_analysis::Unordered,
+        ),
+        "a read past the `if` is the old String or the arm's Foo",
     );
 }
 

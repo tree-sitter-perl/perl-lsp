@@ -4,10 +4,6 @@
 //! builder that read the document and dropped with it; nothing here is
 //! stored on a `FileAnalysis`.
 
-// TODO(cfg-joins): the branch joins (design PR 5) are the first production
-// reader of `arm_around`; until then the builder's cross-check runs it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::Span;
 
 /// What a construct does with its arms.
@@ -74,6 +70,7 @@ impl ControlView {
     /// The innermost arm holding `span` that lies inside `within`, the
     /// region whose own run the answer is relative to (a callable's body,
     /// a block). `None`: `span` runs whenever `within` does.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn arm_around(&self, span: Span, within: Span) -> Option<&Arm> {
         self.constructs
             .iter()

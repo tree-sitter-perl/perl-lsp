@@ -403,7 +403,6 @@ impl<'a> Builder<'a> {
         // O(assignments * bag) (6+ s of a 46k-line file's fold). Safe as a
         // snapshot: the RHS typer takes `&self`, and this pass's own pushes
         // land only after the loop, so the bag cannot change mid-loop.
-        let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
         let mut typed_at: std::collections::HashMap<(crate::model::file_analysis::Binding, Point), Vec<usize>> =
             std::collections::HashMap::new();
         {
@@ -419,16 +418,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // The write ref at each LHS scalar, so a rebind can find the scope
-        // that BINDS its variable (the ref is already bound by
-        // `resolve_variable_refs`). Transient, like `typed_at`.
-        let var_ref_at: std::collections::HashMap<Point, usize> = self
-            .refs
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| matches!(r.kind, RefKind::Variable) && r.access == AccessKind::Write)
-            .map(|(i, r)| (r.span.start, i))
-            .collect();
         for &node in &assignments {
             let (Some(left), Some(right)) = (
                 node.child_by_field_name("left"),
@@ -504,96 +493,8 @@ impl<'a> Builder<'a> {
                 }
             }
 
-            let Some(var) = self.get_var_text_from_lhs(left) else { continue };
-            // A declaration binds fresh; a REBIND replaces a belief, and that
-            // is what `Unknown` exists for. Declarations whose RHS nothing can
-            // type stay absent, as they always have.
-            let is_rebind = left.kind() != "variable_declaration";
-            // A rebind that MAY NOT HAPPEN relative to the scope its witness
-            // lands on — under a statement modifier, a ternary arm, a
-            // short-circuit — leaves old-or-new behind: `Unknown`, never its
-            // own value. It still lands (latest-wins retires the prior belief)
-            // at the statement start, so a guard's own condition reads no value
-            // the write has not produced yet. Block-relative on purpose: inside
-            // the block, the block has run; whether it ran at all is the
-            // binding-scope question below.
-            let conditional = is_rebind && crate::cst::conditional_arm(self.syntax, node, crate::cst::ArmBound::Block).is_some();
-            // Innermost scope containing this assignment.
-            let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
-            let scope_idx = self
-                .scopes
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| crate::model::file_analysis::contains_point(&s.span, span.start))
-                .min_by_key(|(_, s)| {
-                    let r = (s.span.end.row.saturating_sub(s.span.start.row)) as u64;
-                    let c = if s.span.start.row == s.span.end.row {
-                        s.span.end.column.saturating_sub(s.span.start.column) as u64
-                    } else {
-                        0
-                    };
-                    r * 1_000_000 + c
-                })
-                .map(|(i, _)| i);
-            drop(_t_scope);
-            let sid = scope_idx.map(|i| self.scopes[i].id).unwrap_or(ScopeId(0));
-
-            // A rebind is a RESET at its site: the flow lane's reassign edge
-            // is the marker on the write's own scope, and every belief before
-            // it dies there (`FrameworkAwareTypeFold`'s cutoff), whatever the
-            // RHS turns out to be. A write inside a nested block holds only
-            // until the block ends; where each block between the write and
-            // the binding rejoins its parent (the end of the statement that
-            // holds it), a marker stands in for the join (`old ⊔ new`, which
-            // no reducer can compute from one attachment; `JoinFold`,
-            // `docs/epics/16-cfg-tier.md` Phase C, answers natively and these
-            // markers go with it). One per level, so a sibling arm never
-            // sees it and a read later in the outer arm still does.
-            if is_rebind {
-                let binding_scope = var_ref_at
-                    .get(&left.start_position())
-                    .and_then(|&i| self.refs[i].resolved_symbol())
-                    .map(|sym| self.symbols[sym.0 as usize].scope)
-                    .filter(|b| *b != sid);
-                if let Some(bsid) = binding_scope {
-                    let mut level = sid;
-                    while let Some(parent) = self.scopes[level.0 as usize].parent {
-                        let span = self.scopes[level.0 as usize].span;
-                        let join = self
-                            .syntax
-                            .ancestors(node)
-                            .find(|a| {
-                                a.kind().ends_with("_statement")
-                                    && a.start_position() <= span.start
-                                    && a.end_position() >= span.end
-                            })
-                            .map_or(span.end, |a| a.end_position());
-                        markers.push((var.clone(), parent, join));
-                        if parent == bsid {
-                            break;
-                        }
-                        level = parent;
-                    }
-                }
-            }
-
-            // A write's value is its flow edge, plain or compound; what this
-            // pass adds is the may-not-happen rebind, `Unknown`. Skipped when
-            // an earlier fold iteration already pushed it.
-            if !conditional {
-                continue;
-            }
-            let ty = InferredType::Unknown;
-            let already_typed = typed_at.get(&(self.binding_of(&var, at, sid).0, at)).is_some_and(|idxs| {
-                idxs.iter().any(|&i| {
-                    matches!(&self.bag.all()[i].payload,
-                        crate::model::witnesses::WitnessPayload::InferredType(t) if t.subsumes_narrowing(&ty))
-                })
-            });
-            if already_typed {
-                continue;
-            }
-            to_push.push((var, sid, write_span, ty));
+            // A rebind's value is its flow edge, plain or compound, and
+            // where paths rejoin `assemble_joins` says what it holds.
         }
 
         for (variable, scope, constraint_span, ty) in to_push {
@@ -603,9 +504,6 @@ impl<'a> Builder<'a> {
                 constraint_span,
                 inferred_type: ty,
             });
-        }
-        for (variable, scope, at) in markers {
-            self.push_reset_marker(variable, scope, at);
         }
     }
 

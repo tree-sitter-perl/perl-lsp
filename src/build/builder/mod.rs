@@ -50,6 +50,7 @@ pub use crate::build::plugin::default_plugin_registry;
 /// while the code lives in its own file (rule #1: still driven by `build()`).
 mod narrowing;
 mod control;
+mod joins;
 
 /// Query-declared plugin capture (`docs/adr/plugin-system.md`):
 /// runs plugin-declared tree-sitter patterns post-walk and dispatches

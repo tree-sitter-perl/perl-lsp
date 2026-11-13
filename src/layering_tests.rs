@@ -1951,6 +1951,7 @@ fn raw_scope_climbs_are_containment_only() {
         chain_call || parent_step || t.contains("scope_parent") || (t.contains("successors(") && t.contains(".parent"))
     });
     let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/joins.rs", 1, "a write's scopes out to its binding: where each join lands and which blocks the write leaves"),
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
         ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),

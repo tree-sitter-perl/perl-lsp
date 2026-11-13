@@ -2,16 +2,13 @@
 //! [`ControlView`]: the same vocabulary every pack document speaks, so the
 //! join builder reads one shape for every language (`docs/adr/cfg-tier.md`).
 
-// TODO(cfg-joins): the branch joins (design PR 5) are the first reader; until
-// then only the cross-check against `cst::conditional_arm` runs the view.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::build::query_extract::{Capture, CtlCap};
 use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind};
 use std::collections::HashMap;
 use tree_sitter::{Node, Query};
 
 static CTL_SCM: &str = include_str!("../../../queries/perl/ctl.scm");
+
 
 /// The compiled control document, compiled once, with each capture id's
 /// parsed `Capture`. The document is compiled into the binary, so a capture
@@ -38,13 +35,12 @@ pub(super) fn ctl_query() -> (&'static Query, &'static [CtlCap]) {
 /// The view over one file's matches of [`ctl_query`]. Arms group by the
 /// construct their pattern captures, so a construct several patterns
 /// describe (an `if` with an `else`) is one construct.
-pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(u32, Node<'t>)>>) -> ControlView {
-    let (_, caps) = ctl_query();
+pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(CtlCap, Node<'t>)>>) -> ControlView {
     let span = super::node_to_span;
     let mut view = ControlView::default();
     let mut by_node: HashMap<usize, usize> = HashMap::new();
     for m in matches {
-        let cap = |i: u32| caps[i as usize];
+        let cap = |c: CtlCap| c;
         let construct = m.iter().find_map(|&(i, n)| {
             let kind = match cap(i) {
                 CtlCap::Branch => ControlKind::Branch,
@@ -91,6 +87,25 @@ pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(u32, Node<
     }
     view.constructs.sort_by_key(|c| (c.span.start.row, c.span.start.column, std::cmp::Reverse((c.span.end.row, c.span.end.column))));
     view
+}
+
+/// The control view of the constructs at `nodes`: each node is tried as a
+/// match's root and nothing below it starts one, so the cost is the nodes'
+/// own, not the file's. The joins ask it of a write's ancestors, which are
+/// the only constructs that can hold the write.
+pub(super) fn control_view_at<'t>(nodes: impl IntoIterator<Item = Node<'t>>, source: &[u8]) -> ControlView {
+    use tree_sitter::StreamingIterator;
+    let (query, caps) = ctl_query();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    cursor.set_max_start_depth(Some(0));
+    let mut out = Vec::new();
+    for node in nodes {
+        let mut it = cursor.matches(query, node, source);
+        while let Some(m) = it.next() {
+            out.push(m.captures.iter().map(|c| (caps[c.index as usize], c.node)).collect::<Vec<_>>());
+        }
+    }
+    control_view(out)
 }
 
 fn leave_kind(c: CtlCap) -> Option<LeaveKind> {
