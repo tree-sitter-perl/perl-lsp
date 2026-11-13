@@ -1451,6 +1451,20 @@ pub(crate) fn ref_tag_call<'a>(
     src: &[u8],
     tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
 ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+    let (via, operand) = ref_tag_operand(node, src, tag_of)?;
+    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
+        .then_some((via, operand))
+}
+
+/// [`ref_tag_call`] for any one-term operand (`ref shift`, `ref $x->m`).
+/// A list or an operator expression in the operand slot is the grammar
+/// reading a named unary as a list operator (`blessed $a, blessed $b`,
+/// `blessed $p ? $p : f()`), not one operand.
+pub(crate) fn ref_tag_operand<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
+) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
     let (name, operand) = match node.kind() {
         "func1op_call_expression" => {
             (node.child(0)?.utf8_text(src).ok()?, node.named().find(|c| c.kind() != "comment")?)
@@ -1460,10 +1474,18 @@ pub(crate) fn ref_tag_call<'a>(
         }
         _ => return None,
     };
-    let via = tag_of(name)?;
     let operand = peel_groups(operand);
-    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
-        .then_some((via, operand))
+    matches!(
+        operand.kind(),
+        "scalar"
+            | "hash_element_expression"
+            | "array_element_expression"
+            | "func0op_call_expression"
+            | "func1op_call_expression"
+            | "function_call_expression"
+            | "method_call_expression"
+    )
+    .then_some((tag_of(name)?, operand))
 }
 
 /// The arm of a conditionally-run construct, between `node` and `bound`,

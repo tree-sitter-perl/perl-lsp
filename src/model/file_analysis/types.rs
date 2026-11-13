@@ -243,13 +243,23 @@ pub enum InferredType {
     /// scope walk stops on it instead of falling through to a shadowed
     /// namesake. Consumers read it as "no information".
     Unknown,
-    /// The string `ref`/`reftype`/`blessed` returns: it names what
-    /// `subject` held at `site`, so comparing it to a literal is a guard on
-    /// `subject` (`docs/adr/flow-narrowing.md`). A `String` to every
-    /// consumer but that guard; it means nothing outside the sub that
-    /// computed it, so the Surface sees `String`. Kept at the END for
-    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
-    RefTagOf { subject: String, site: Span, via: RefTagFn },
+    /// The string `ref`/`reftype`/`blessed` returns: it names what its
+    /// operand held at `site`. Asked of a variable (`subject`), comparing
+    /// it to a literal is a guard on that variable
+    /// (`docs/adr/flow-narrowing.md`). `of` is the operand's value, for a
+    /// function whose string can name a class; the registry lowers it into
+    /// `names`, the class the string spells, and a class name meets its
+    /// class in the join (`Subsumption::ClassNameIsClass`). A `String` to
+    /// every other consumer; it means nothing outside the sub that computed
+    /// it, so the Surface sees `String`. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    RefTagOf {
+        subject: Option<String>,
+        site: Span,
+        via: RefTagFn,
+        of: Option<crate::model::witnesses::WitnessAttachment>,
+        names: Option<String>,
+    },
     /// `A|B`: a value that is one of several types the join could not
     /// put a single type above. Built only by [`join`], so the arms are
     /// canonical: two or more, sorted, deduped, none a union, an
@@ -269,6 +279,16 @@ pub enum RefTagFn {
     Ref,
     RefType,
     Blessed,
+}
+
+impl RefTagFn {
+    /// Can the string name a class? `reftype`'s never does.
+    pub fn can_name_a_class(self) -> bool {
+        match self {
+            RefTagFn::Ref | RefTagFn::Blessed => true,
+            RefTagFn::RefType => false,
+        }
+    }
 }
 
 /// The arms of an [`InferredType::Union`]. The field is private so the
@@ -1106,11 +1126,8 @@ impl InferredType {
     /// variant that grows an attachment can't be skipped by a span rewrite.
     pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut crate::model::witnesses::WitnessAttachment)) {
         match self {
-            InferredType::CodeRef { return_edge } => {
-                if let Some(a) = return_edge {
-                    f(a);
-                }
-            }
+            InferredType::CodeRef { return_edge: Some(a) } | InferredType::RefTagOf { of: Some(a), .. } => f(a),
+            InferredType::CodeRef { return_edge: None } | InferredType::RefTagOf { of: None, .. } => {}
             InferredType::Parametric(ParametricType::Instance { args, .. }) | InferredType::Sequence(args) => {
                 for t in args {
                     t.for_each_attachment_mut(f);
@@ -1142,8 +1159,27 @@ impl InferredType {
             | InferredType::TypeConstraintOf(None)
             | InferredType::Undef
             | InferredType::Bool
-            | InferredType::RefTagOf { .. }
             | InferredType::Unknown => {}
+        }
+    }
+
+    /// The class a method call on this value dispatches to: its class, or
+    /// the class a `ref`/`blessed` string names (Perl calls methods on a
+    /// class's name).
+    pub fn dispatch_name(&self) -> Option<&str> {
+        match self {
+            InferredType::RefTagOf { names, .. } => names.as_deref(),
+            t => t.class_name(),
+        }
+    }
+
+    /// This value as the receiver a method called on it runs with: a
+    /// string naming a class calls the class's method (`(ref $self)->new`),
+    /// whose `$class` is that class.
+    pub fn into_invocant(self) -> InferredType {
+        match self {
+            InferredType::RefTagOf { names: Some(c), .. } => InferredType::ClassName(c),
+            t => t,
         }
     }
 
@@ -1334,6 +1370,10 @@ pub enum Subsumption {
     /// `Bool` folds into `Numeric`: truth is a number (Perl's `1`/`''`,
     /// Python's `bool <: int`, C++ integral promotion).
     BoolIntoNumeric,
+    /// A string naming a class is that class wherever one meets the
+    /// other: Perl calls methods on, and blesses into, a class's name, so
+    /// `ref $proto || $proto` is `$proto`'s class.
+    ClassNameIsClass,
 }
 
 /// The subsumption rules one language declares (`LangPack::lattice`).
@@ -1553,6 +1593,16 @@ fn join_precise(
     use InferredType as T;
     if a == b {
         return Some(a.clone());
+    }
+    if order.holds(Subsumption::ClassNameIsClass) {
+        match (a, b) {
+            (T::RefTagOf { names: Some(c), .. }, other) | (other, T::RefTagOf { names: Some(c), .. })
+                if other.class_name() == Some(c.as_str()) =>
+            {
+                return Some(other.clone());
+            }
+            _ => {}
+        }
     }
     match (a.class_name(), b.class_name()) {
         // TODO(brand-join): one class spelled two ways (a mark, a

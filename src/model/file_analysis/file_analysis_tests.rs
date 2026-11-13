@@ -2516,6 +2516,29 @@ fn a_write_through_another_class_object_is_not_the_readers() {
 }
 
 #[test]
+fn ref_of_the_invocant_names_its_class() {
+    // `ref $proto || $proto` and `ref $_[0] ? ref shift : shift` are the
+    // invocant's class, so the constructor built on them is typed.
+    let fa = build_fa_from_source(
+        "package Node;\nsub new {\n    my $class = ref $_[0] || $_[0];\n    bless { children => [] }, $class;\n}\npackage Doc;\nour @ISA = ('Node');\nsub new {\n    my $class = ref $_[0] ? ref shift : shift;\n    my $self = $class->SUPER::new;\n    $self->{ro} = 1;\n    return $self;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{ro};\n}\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag_ctx("$class", Point { row: 3, column: 0 }, None), Some(InferredType::ClassName("Node".into())));
+    assert_eq!(
+        fa.inferred_type_via_bag_ctx("$class", Point { row: 9, column: 0 }, None).as_ref().and_then(|t| t.dispatch_name()),
+        Some("Doc"),
+    );
+    assert_eq!(fa.inferred_type_via_bag_ctx("$self", Point { row: 10, column: 0 }, None), Some(InferredType::ClassName("Doc".into())));
+    assert_eq!(fa.inferred_type_via_bag_ctx("$x", Point { row: 16, column: 0 }, None), Some(InferredType::Numeric));
+}
+
+#[test]
+fn ref_of_an_unblessed_value_stays_a_string() {
+    let fa = build_fa_from_source("my $h = {};\nmy $t = ref $h;\nmy $u = ref($h) || 'HASH';\n1;\n");
+    assert!(fa.inferred_type_via_bag_ctx("$t", Point { row: 3, column: 0 }, None).is_some_and(|t| t.is_string()));
+    assert!(fa.inferred_type_via_bag_ctx("$u", Point { row: 3, column: 0 }, None).is_some_and(|t| t.is_string()));
+}
+
+#[test]
 fn loader_config_types_register_conf_cross_file() {
     // #25, framework-mediated: `plugin 'GenericCoApp', {...}` in the app
     // types `$conf` inside the plugin's register — callers enumerable

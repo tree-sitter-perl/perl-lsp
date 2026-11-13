@@ -225,7 +225,7 @@ impl FileAnalysis {
                 }
             }
         }
-        if let Some(cn) = t.class_name() {
+        if let Some(cn) = t.dispatch_name() {
             if !out.iter().any(|(c, _)| c == cn) {
                 out.push((cn.to_string(), t.clone()));
             }

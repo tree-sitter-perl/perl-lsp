@@ -863,7 +863,7 @@ impl<'a> Builder<'a> {
         self.bag.remove_by_source_tag("tag_narrowing");
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
         for g in &self.tag_narrowings {
-            let Some(InferredType::RefTagOf { subject, site, via }) =
+            let Some(InferredType::RefTagOf { subject: Some(subject), site, via, .. }) =
                 self.bag_query_place(&g.var, g.scope, g.region.start)
             else {
                 continue;

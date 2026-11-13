@@ -1803,9 +1803,11 @@ fn a_kept_ref_tag_guards_the_variable_it_names() {
     assert_eq!(at("$c", 7, 10).as_ref().and_then(|t| t.class_name()), Some("Bar"));
     assert_eq!(at("$d", 9, 10), None, "`reftype` never names a class");
     assert_eq!(at("$rp", 4, 0), Some(InferredType::RefTagOf {
-        subject: "$p".into(),
+        subject: Some("$p".into()),
         site: Span { start: Point::new(3, 13), end: Point::new(3, 19) },
         via: crate::model::file_analysis::RefTagFn::Ref,
+        of: Some(crate::model::witnesses::WitnessAttachment::Expr(Span { start: Point::new(3, 17), end: Point::new(3, 19) })),
+        names: None,
     }));
 }
 

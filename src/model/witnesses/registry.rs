@@ -2944,6 +2944,40 @@ impl ReducerRegistry {
                         });
                     }
                 }
+                WitnessPayload::InferredType(InferredType::RefTagOf { of: Some(of), names: None, subject, site, via }) => {
+                    // The class a `ref`/`blessed` string spells is the class
+                    // its operand holds, when it holds exactly one.
+                    let of_q = ReducerQuery {
+                        attachment: of,
+                        point: Some(w.span.start),
+                        framework: q.framework,
+                        arity_hint: None,
+                        receiver: None,
+                        args: Vec::new(),
+                        context: q.context,
+                    };
+                    let names = state
+                        .in_opaque_frame(|state| match &*self.query_rec(bag, &of_q, state) {
+                            ReducedValue::Type(t) => Some(t.clone()),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        })
+                        .and_then(|t| match t.receiver_arms() {
+                            [one] => one.class_name().map(str::to_string),
+                            _ => None,
+                        });
+                    out.push(Witness {
+                        attachment: w.attachment.clone(),
+                        source: w.source.clone(),
+                        payload: WitnessPayload::InferredType(InferredType::RefTagOf {
+                            subject: subject.clone(),
+                            site: *site,
+                            via: *via,
+                            of: Some(of.clone()),
+                            names,
+                        }),
+                        span: w.span,
+                    });
+                }
                 _ => out.push(w.clone()),
             }
         }
@@ -2993,7 +3027,7 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
-        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r)).map(InferredType::into_invocant);
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -3064,7 +3098,7 @@ impl ReducerRegistry {
         let lookup_classes = |lookup: &Lookup, recv: &Option<InferredType>| -> Vec<String> {
             match lookup {
                 Lookup::Receiver => {
-                    recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
+                    recv.as_ref().and_then(|t| t.dispatch_name()).map(str::to_string).into_iter().collect()
                 }
                 Lookup::Super { writer } => match q.context {
                     Some(ctx) => crate::model::file_analysis::parents_of(

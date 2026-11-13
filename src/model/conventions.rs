@@ -137,7 +137,7 @@ fn engine_type_words(_: &str) -> Option<&'static str> {
 /// Its subsumption rules: an object is a blessed hash, and truth is a number
 /// (`1` / `''`).
 pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
-    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
+    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric, Subsumption::ClassNameIsClass]),
     special_variable: is_special_variable,
     type_display: engine_type_words,
     // `Foo->new` calls its constructor by name.

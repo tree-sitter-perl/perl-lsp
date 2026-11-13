@@ -151,15 +151,26 @@ impl<'a> Builder<'a> {
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
-        // What a reference is, named for the variable it was asked of: a
-        // comparison of it to a literal guards that variable.
-        if let Some((via, subject)) = self.ref_tag_call(node)
-            .and_then(|(via, operand)| Some((via, crate::cst::canonical_var_name(operand, self.source)?)))
-        {
+        // What a reference is, named for the variable it was asked of (a
+        // comparison of it to a literal guards that variable), and, where
+        // its string can name a class, an edge to the operand that says which.
+        let at = node.start_position();
+        if let Some((via, operand)) = crate::cst::ref_tag_operand(node, self.source, |n| self.ref_tag_fn(n, at)) {
+            let subject = self.ref_tag_call(node)
+                .and_then(|(_, operand)| crate::cst::canonical_var_name(operand, self.source));
+            let of = via.can_name_a_class().then(|| {
+                let att = WitnessAttachment::Expr(node_to_span(operand));
+                if self.bag.for_attachment(&att).is_empty() {
+                    self.emit_expr_witness(operand);
+                }
+                att
+            });
             return Some(WitnessPayload::InferredType(InferredType::RefTagOf {
                 subject,
                 site: node_to_span(node),
                 via,
+                of,
+                names: None,
             }));
         }
         match node.kind() {
