@@ -1260,7 +1260,8 @@ fn remap_spans(
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. }
         | WitnessAttachment::Param { .. }
-        | WitnessAttachment::Place(_) => {}
+        | WitnessAttachment::Place(_)
+        | WitnessAttachment::SlotWrites { .. } => {}
     };
     for (_, token, _, _) in decl_facts.iter_mut() {
         *token = r(*token);
