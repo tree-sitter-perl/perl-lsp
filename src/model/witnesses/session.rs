@@ -52,7 +52,7 @@ struct CandidateKey {
     attachment: WitnessAttachment,
     receiver: Option<String>,
     arity: Option<u32>,
-    point: Option<Point>,
+    point: Option<ReadPoint>,
     framework: FrameworkFact,
 }
 

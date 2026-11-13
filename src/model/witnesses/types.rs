@@ -203,30 +203,6 @@ impl WitnessAttachment {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct RefIdx(pub u32);
 
-/// What a `WitnessSource::Annotation` was declared BY — a closed set, so
-/// a producer cannot mint a spelling nothing reads and `--dump-package`
-/// names the provenance without a string compare.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AnnotationKind {
-    /// A type written explicitly in the source (a declared static type, a
-    /// docblock `@var`). The inlay-hint suppression asks for this: an
-    /// annotated declaration needs no synthetic `: T`.
-    Declared,
-    /// An inherited parameter doc (`@inheritDoc`): the edge to the
-    /// ancestor's `@param`. Priority-tied with `Declared` so its
-    /// materialized answer (`array<X>`) beats the bare container the local
-    /// syntax contributed — at equal priority latest-wins applies and the
-    /// edge lands later, while a dangling edge drops out and leaves the
-    /// declared type standing.
-    InheritedParam,
-    /// A return arm that REFINES a bare declared container (`: array` over
-    /// `return [$q, $a]` — the tuple literal is strictly more informative).
-    /// Annotation priority for the same reason as `InheritedParam`: the
-    /// materialized `Sequence` must beat the `HashRef` annotation, and at
-    /// equal priority latest-wins does it.
-    Refinement,
-}
-
 /// Source tag of the builder's write markers (`WitnessPayload::Reset`) —
 /// provenance only; the payload carries the meaning.
 pub const RESET_SOURCE: &str = "reset";
@@ -241,11 +217,6 @@ pub enum WitnessSource {
     Enrichment(String),
     /// Derived from another ref — rename transport chases these as a DAG.
     DerivedFrom(RefIdx),
-    /// A DECLARED fact — see `AnnotationKind`. A source KIND, so it
-    /// outranks inference by construction and no reducer reads a tag to
-    /// find out. Kept at the END for bincode variant-index stability
-    /// (bump `EXTRACT_VERSION`).
-    Annotation(AnnotationKind),
 }
 
 impl WitnessPayload {
@@ -255,7 +226,9 @@ impl WitnessPayload {
     /// scope-binding walk ask this one question.
     pub fn binds_value(&self) -> bool {
         match self {
-            WitnessPayload::InferredType(_) => true,
+            // A declared binding holds a value from its declaration on,
+            // though the bound is not that value.
+            WitnessPayload::InferredType(_) | WitnessPayload::Bound { .. } => true,
             WitnessPayload::Observation(o) => matches!(o, TypeObservation::BlessTarget(_)),
             _ => false,
         }
@@ -298,7 +271,10 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => false,
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::EvaluatedBefore(_)
+            | WitnessPayload::Bound { .. }
+            | WitnessPayload::Proof => false,
         }
     }
 }
@@ -309,7 +285,10 @@ impl WitnessPayload {
     /// new attachment-bearing shape can't be skipped by a span rewrite.
     pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
         match self {
-            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
+            WitnessPayload::Edge(t)
+            | WitnessPayload::Projected { base: t, .. }
+            | WitnessPayload::Bound { ty: BoundType::Edge(t), .. } => f(t),
+            WitnessPayload::Bound { ty: BoundType::Type(t), .. } => t.for_each_attachment_mut(f),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
             WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| t.for_each_attachment_mut(f)),
             WitnessPayload::Invoke { callee, receiver, args } => {
@@ -334,7 +313,37 @@ impl WitnessPayload {
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => {}
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::EvaluatedBefore(_)
+            | WitnessPayload::Proof => {}
+        }
+    }
+}
+
+impl WitnessPayload {
+    /// Every source span this payload carries outside its attachments
+    /// (`for_each_attachment_mut` reaches theirs). Exhaustive, so a span a
+    /// new payload carries can't be skipped by a span rewrite.
+    pub fn for_each_span_mut(&mut self, f: &mut dyn FnMut(&mut crate::model::file_analysis::Span)) {
+        match self {
+            WitnessPayload::EvaluatedBefore(s) => f(s),
+            WitnessPayload::InferredType(_)
+            | WitnessPayload::Observation(_)
+            | WitnessPayload::Edge(_)
+            | WitnessPayload::ReturnExpr(_)
+            | WitnessPayload::Fact { .. }
+            | WitnessPayload::Derivation
+            | WitnessPayload::Custom { .. }
+            | WitnessPayload::Projected { .. }
+            | WitnessPayload::DomainCompare { .. }
+            | WitnessPayload::Tuple(_)
+            | WitnessPayload::Reset
+            | WitnessPayload::Invoke { .. }
+            | WitnessPayload::BrandOverlay { .. }
+            | WitnessPayload::Extend(_)
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::Bound { .. }
+            | WitnessPayload::Proof => {}
         }
     }
 }
@@ -363,17 +372,11 @@ impl WitnessSource {
     /// Priority for "highest-priority source wins" tie-breaking in
     /// reducers. Plugin overrides dominate everything else (the whole
     /// point of an override is "inference reaches the wrong answer
-    /// here"). An EXPLICIT type annotation (`Annotation`) outranks a
-    /// same-attachment inferred/flow class assertion: in a statically-
-    /// typed pack language the declared type governs member dispatch, so a
-    /// declared `RCPV *rcpv = FOO(...)` must resolve members on `RCPV`,
-    /// never on a flow guess for the initializer (e.g. the uppercase-call
-    /// ctor-convention heuristic that mis-types the macro call). The
-    /// remaining weights only need `Plugin > annotation > everything else`.
+    /// here"). A declared type is no source: it is a `Bound` payload the
+    /// registry caps by.
     pub fn priority(&self) -> u8 {
         match self {
             WitnessSource::Plugin(_) => Self::OVERRIDE_PRIORITY,
-            WitnessSource::Annotation(_) => 20,
             WitnessSource::Builder(_)
             | WitnessSource::Enrichment(_)
             | WitnessSource::DerivedFrom(_) => Self::INFERENCE_PRIORITY,
@@ -389,7 +392,7 @@ impl WitnessSource {
     pub const OVERRIDE_PRIORITY: u8 = 100;
 
     /// Does this source outrank an inferred answer on the same attachment?
-    /// (An annotation or an override; never a flow guess.)
+    /// (An override; never a flow guess.)
     pub fn outranks_inference(&self) -> bool {
         self.priority() > Self::INFERENCE_PRIORITY
     }
@@ -514,6 +517,154 @@ pub enum WitnessPayload {
     /// `Edge` to that declaration's place instead. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     FreeValue { table: crate::model::file_analysis::NameTable, name: String, fallback: Option<String> },
+    /// The expression at this attachment is evaluated before the statement
+    /// at `Span`, which comes first in the source: a statement modifier's
+    /// condition (`STMT if G`) or loop list (`STMT for LIST`) runs before
+    /// `STMT`. A read here asks at its own site, but no fact made inside
+    /// that statement reaches it (`ReadPoint::skips`). A sibling of the
+    /// read's own payload; no reducer claims it. Kept at the END for bincode
+    /// variant-index stability.
+    EvaluatedBefore(crate::model::file_analysis::Span),
+    /// A BOUND on the attachment's value: what a declaration (`x: int`,
+    /// `Foo $p`, `T x;`) says every value it holds is. The type fold reads
+    /// it only as "something was bound before"; what the attachment reads
+    /// as is the registry's one rule over the bound in force
+    /// (`ReducerRegistry::cap_by_bound`, `docs/adr/declared-bounds.md`).
+    /// Its evidence and extent are facts about the declaration, minted with
+    /// it, so a consumer asks the bound and never the language or the
+    /// source. Kept at the END for bincode variant-index stability.
+    Bound { ty: BoundType, evidence: Evidence, extent: Extent },
+    /// The region witness beside it, at the same attachment and span, is a
+    /// guard's PROOF of the value there (`isinstance`, `instanceof`, an
+    /// engaged optional): a run-time test, not a write, so a bound reads
+    /// it by the guard rule (`ReducerRegistry::cap_by_bound`). A sibling of
+    /// the region's own payload, cut with it; no reducer claims it. Kept at
+    /// the END for bincode variant-index stability.
+    Proof,
+}
+
+/// The type a bound states: a type, or an edge into the alias graph
+/// (`TypeName`) that the chase resolves like any other edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BoundType {
+    Type(InferredType),
+    Edge(WitnessAttachment),
+}
+
+impl BoundType {
+    /// The bound a declared type states: a class edges into the alias graph
+    /// (it may be a typedef), any other known type is a leaf, and a type
+    /// nothing can name (`auto`, `void`) states no bound.
+    pub fn declared(t: Option<InferredType>) -> Option<BoundType> {
+        match t {
+            Some(InferredType::ClassName(cn)) => Some(BoundType::Edge(WitnessAttachment::TypeName(cn))),
+            Some(t) if t.is_known() => Some(BoundType::Type(t)),
+            Some(_) | None => None,
+        }
+    }
+}
+
+/// Why a bound holds. Closed: every rule over evidence is an exhaustive
+/// match, so a new kind fails to compile until its rule is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Evidence {
+    /// The source declares it, enforced as the declaration says.
+    Declared(Enforcement),
+}
+
+/// What enforces a declared type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Enforcement {
+    /// Nothing at run time; a checker may (Python's annotations).
+    Advisory,
+    /// The runtime or compiler rejects a value that does not fit (PHP's
+    /// declared types, a C++ pointer or reference binding).
+    Checked,
+    /// A written value is converted to the declared type (a C++ value
+    /// binding slices `Derived` to `Base`).
+    Converted,
+}
+
+impl Enforcement {
+    /// The enforcement of a binding as it holds its value: through a
+    /// pointer or reference nothing is converted, the referent keeps its
+    /// type.
+    pub fn of_binding(self, through_reference: bool) -> Enforcement {
+        match (self, through_reference) {
+            (Enforcement::Converted, true) => Enforcement::Checked,
+            (other, _) => other,
+        }
+    }
+}
+
+/// How long a bound holds, and over what.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Extent {
+    /// A local, for its whole life: a write does not retire it, and a value
+    /// written after the declaration reads by the enforcement's rule.
+    Lifetime,
+    /// A local on entry only (PHP checks a parameter's type when the call
+    /// binds it): a write retires it like any other value.
+    Entry,
+    /// A member's slot, class-wide: its writes are arms of one value no
+    /// single write decides, so the slot reads as its declaration wherever
+    /// it is asked.
+    Slot,
+}
+
+/// What a bound makes of a value read under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundRead {
+    /// The value stands.
+    Value,
+    /// The declared type.
+    Bound,
+    /// Both, for dispatch: the value is the bound's and the guard's at
+    /// once, a meet the lattice has no element for, so the read is their
+    /// join.
+    Both,
+}
+
+impl Evidence {
+    /// How a known value written under the bound reads, given how it fits
+    /// (asked only when the rule reads it). Nothing enforces an advisory
+    /// declaration, so the value stands. A checked one rejects a value that
+    /// does not fit, so a value there that the order cannot place did fit,
+    /// and one that decidedly does not is the bound. A converting binding
+    /// holds the declared type whatever it was given.
+    pub fn read_written(&self, fit: impl FnOnce() -> crate::model::file_analysis::Fit) -> BoundRead {
+        use crate::model::file_analysis::Fit;
+        match self {
+            Evidence::Declared(Enforcement::Advisory) => BoundRead::Value,
+            Evidence::Declared(Enforcement::Converted) => BoundRead::Bound,
+            Evidence::Declared(Enforcement::Checked) => match fit() {
+                Fit::Yes | Fit::Undecided => BoundRead::Value,
+                Fit::No => BoundRead::Bound,
+            },
+        }
+    }
+
+    /// How a guard's proof reads under the bound. A guard tests the value at
+    /// run time, so its proof holds whatever the declaration enforces: it
+    /// stands when it fits or the order cannot place it, as a write does,
+    /// and under an advisory bound always. One that decidedly does not fit
+    /// a checked bound proves a value that is both, which reads as their
+    /// join; a converting binding holds its declared type, so there it is
+    /// the bound.
+    pub fn read_proven(&self, fit: impl FnOnce() -> crate::model::file_analysis::Fit) -> BoundRead {
+        use crate::model::file_analysis::Fit;
+        match self {
+            Evidence::Declared(Enforcement::Advisory) => BoundRead::Value,
+            Evidence::Declared(Enforcement::Checked) => match fit() {
+                Fit::Yes | Fit::Undecided => BoundRead::Value,
+                Fit::No => BoundRead::Both,
+            },
+            Evidence::Declared(Enforcement::Converted) => match fit() {
+                Fit::Yes | Fit::Undecided => BoundRead::Value,
+                Fit::No => BoundRead::Bound,
+            },
+        }
+    }
 }
 
 /// What one write adds to the shape it lands in.
