@@ -508,7 +508,7 @@ fn every_use_observes_on_one_rule() {
         root: Binding::Lexical(self_sym.id),
         path: vec![PathStep::Deref, PathStep::Hash(Slots::One(Slot::Const("items".into())))],
     };
-    assert_eq!(fa.place_type_at(&items, Point::new(6, 0), None), Some(InferredType::ArrayRef));
+    assert_eq!(fa.place_type_at(&items, crate::model::witnesses::ReadPoint::position(Point::new(6, 0)), None), Some(InferredType::ArrayRef));
     assert_eq!(at("$v", 6, 0).as_ref().and_then(|t| t.class_name()), Some("Foo"));
 }
 

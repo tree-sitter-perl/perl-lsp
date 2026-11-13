@@ -178,6 +178,23 @@ pub fn class_isa(
     )
 }
 
+/// Is every class `class` inherits from, itself included, one `declared`
+/// sees, through the same local+cross-file isa seam as [`class_isa`]? Then
+/// an `isa` that walk answers no to is no.
+pub fn ancestry_closed(
+    class: &str,
+    local: &dyn LocalParents,
+    module_index: Option<&dyn CrossFileLookup>,
+    declared: &dyn Fn(&str) -> bool,
+) -> bool {
+    !walk_ancestry(
+        class,
+        crate::model::graph::WalkBound::ISA,
+        |cur| isa_parents(cur, local, module_index),
+        |c| if declared(c) { WalkVerdict::Miss } else { WalkVerdict::Hit },
+    )
+}
+
 /// The one least class every class in `classes` is an instance of, through
 /// the same local+cross-file isa seam as [`class_isa`]. `None` when they
 /// share no ancestor, or when the least shared ancestors are several

@@ -1,14 +1,10 @@
 # Epic 2 — DBIC out of core, phases 2–3 (meta-methods, parametric emission, projection)
 
-> **Status:** scheduled, second. Finishes the standing "core is
-> plugin-free except generic dispatch" commitment.
+> **Status:** Phase A landed (audited 2026-11-12); Phases B–F open.
+> Finishes the standing "core is plugin-free except generic dispatch"
+> commitment.
 > **Design owner-doc:** `docs/prompt-dbic-as-plugin.md` (read it whole —
 > the phase ladder, the projection table, the open questions).
->
-> **Re-baselined:** phase 2 (`meta_methods()`) was drafted against the
-> pre-rework tree in an unmerged PR and does **not** exist on main —
-> `grep -rn 'meta_methods' src/ frameworks/` returns nothing. It is
-> re-absorbed here as Phase A rather than assumed landed.
 
 ## Mission
 
@@ -43,7 +39,6 @@ make sense to fix on the plugin side of the move.
 
 | What | Where | Find it |
 | --- | --- | --- |
-| Hardcoded meta-method / universal list | `src/lsp/symbols/diagnostics.rs` | `grep -n 'universal_methods' src/lsp/symbols/diagnostics.rs` — the true `UNIVERSAL::` surface plus a "DBIC meta-methods" comment block riding along with it |
 | Fold-time ResultSet minting | `src/build/builder/visit_method.rs` | `grep -rn 'extract_resultset_parametric' src/build/` |
 | Its re-emittable dedup set | `src/build/builder/` | `grep -rn 'parametric_emitted_refs' src/build/` (struct field + clear-and-emit doc + insert sites) |
 | Hardcoded DBIC class names in the model | `src/model/file_analysis/invocants.rs` | `grep -n 'DBIx::Class' src/model/file_analysis/invocants.rs` — the result-class predicate encodes `DBIx::Class::Core` / `::Row` / `::Schema` / `::ResultSet` |
@@ -79,6 +74,12 @@ Pinned gaps this epic closes:
 ## Phase breakdown
 
 ### Phase A — `meta_methods()` manifest (re-absorbed phase 2)
+
+**Landed.** The manifest is baked onto `FileAnalysis.plugin`
+(`plugin_facts.rs`); `frameworks/dbic.rhai` and `frameworks/moo.rhai`
+declare their entries; the unresolved-method diagnostic keeps only the
+true `UNIVERSAL::` list inline and chains `analysis.plugin.meta_methods`
+(`lsp/symbols/diagnostics.rs`).
 
 **Goal:** the "methods a framework gives every class of its family"
 list leaves `diagnostics.rs`.
