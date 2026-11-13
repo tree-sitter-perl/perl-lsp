@@ -16,18 +16,30 @@ impl<'a> Builder<'a> {
     pub(super) fn assemble_joins(&mut self) {
         static ASSIGNMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
         let kinds = ASSIGNMENT.get_or_init(|| perl_kind_ids(&["assignment_expression"]));
-        // A declaration binds fresh: there is no old value to join.
-        let assignments: Vec<Node<'a>> = self
+        // A declaration binds fresh: there is no old value to join. Only a
+        // variable's rebind joins; a write to a part of one is a place's.
+        let assignments: Vec<(Node<'a>, String)> = self
             .syntax
             .file_nodes_of_kind(kinds)
             .into_iter()
             .map(|n| n.ts())
-            .filter(|n| n.child_by_field_name("left").is_some_and(|l| l.kind() != "variable_declaration"))
+            .filter_map(|n| {
+                let left = n.child_by_field_name("left").filter(|l| l.kind() != "variable_declaration")?;
+                Some((n, self.get_var_text_from_lhs(left)?))
+            })
             .collect();
         if assignments.is_empty() {
             return;
         }
-        let view = self.control_view();
+        let main = self.syntax.main().root().ts();
+        let mut seen: HashSet<usize> = HashSet::new();
+        let around: Vec<Node<'a>> = assignments
+            .iter()
+            .filter(|(n, _)| self.syntax.root_of(*n) == Some(main))
+            .flat_map(|&(n, _)| std::iter::once(n).chain(self.syntax.ancestors(n)))
+            .filter(|n| seen.insert(n.id()))
+            .collect();
+        let view = super::control::control_view_at(around, self.source);
         // Every arm by its span: a write finds the arms holding it among
         // its own ancestors.
         let mut arm_at: HashMap<Span, Vec<(usize, usize)>> = HashMap::new();
@@ -41,9 +53,7 @@ impl<'a> Builder<'a> {
         let mut minted: HashSet<(Binding, Span, JoinRole)> = HashSet::new();
         let mut witnesses: Vec<Witness> = Vec::new();
         let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
-        for node in assignments {
-            let Some(left) = node.child_by_field_name("left") else { continue };
-            let Some(var) = self.get_var_text_from_lhs(left) else { continue };
+        for (node, var) in assignments {
             let span = node_to_span(node);
             let at = crate::cst::assignment_write_point(node);
             let sid = self.innermost_scope_id_at(span.start);

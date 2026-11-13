@@ -9,13 +9,13 @@ fn parse(source: &str) -> tree_sitter::Tree {
 }
 
 fn view_of(tree: &tree_sitter::Tree, source: &str) -> ControlView {
-    let (query, _) = ctl_query();
+    let (query, caps) = ctl_query();
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut out = Vec::new();
     let mut it = cursor.matches(query, tree.root_node(), source.as_bytes());
     use tree_sitter::StreamingIterator;
     while let Some(m) = it.next() {
-        out.push(m.captures.iter().map(|c| (c.index, c.node)).collect());
+        out.push(m.captures.iter().map(|c| (caps[c.index as usize], c.node)).collect());
     }
     control_view(out)
 }
@@ -155,6 +155,61 @@ fn the_document_and_the_walker_agree_on_the_repository_perl() {
     assert!(all.is_empty(), "{} disagreements:\n{}", all.len(), all.join("\n"));
 }
 
+/// The view read at a file's assignments' ancestors holds, for each of them, the
+/// same arms as the view of the whole file: the joins read the first.
+#[test]
+fn the_view_around_the_writes_holds_what_the_whole_view_does() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for dir in ["test_files", "gold-corpus/run.pl"] {
+        let mut files = vec![root.join(dir)];
+        while let Some(p) = files.pop() {
+            if p.is_dir() {
+                files.extend(std::fs::read_dir(&p).unwrap().flatten().map(|e| e.path()));
+                continue;
+            }
+            if !p.extension().is_some_and(|x| x == "pm" || x == "pl" || x == "t") {
+                continue;
+            }
+            let source = String::from_utf8_lossy(&std::fs::read(&p).unwrap()).into_owned();
+            let tree = parse(&source);
+            let whole = view_of(&tree, &source);
+            let mut writes = Vec::new();
+            let mut stack = vec![tree.root_node()];
+            while let Some(n) = stack.pop() {
+                stack.extend((0..n.named_child_count()).filter_map(|i| n.named_child(i)));
+                if n.kind() == "assignment_expression" {
+                    writes.push(n);
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut nodes = Vec::new();
+            for w in &writes {
+                let mut n = Some(*w);
+                while let Some(x) = n {
+                    if seen.insert(x.id()) {
+                        nodes.push(x);
+                    }
+                    n = x.parent();
+                }
+            }
+            let around = control_view_at(nodes, source.as_bytes());
+            for w in writes {
+                let held = |v: &ControlView| {
+                    let mut out: Vec<_> = v
+                        .constructs
+                        .iter()
+                        .flat_map(|c| c.arms.iter().map(move |a| (c.span, c.kind, a.span, a.role)))
+                        .filter(|(_, _, a, _)| a.start <= node_to_span(w).start && node_to_span(w).end <= a.end)
+                        .collect();
+                    out.sort_by_key(|(c, _, a, _)| (*c, *a));
+                    out
+                };
+                assert_eq!(held(&around), held(&whole), "{} at {:?}", p.display(), w.start_position());
+            }
+        }
+    }
+}
+
 #[test]
 fn constructs_carry_their_roles_and_leaves_their_kinds() {
     let tree = parse(SHAPES);
@@ -179,3 +234,4 @@ fn constructs_carry_their_roles_and_leaves_their_kinds() {
         ]
     );
 }
+
