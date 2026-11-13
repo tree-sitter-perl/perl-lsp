@@ -1898,11 +1898,31 @@ pub struct Ref {
     /// kinds).
     #[serde(default)]
     pub arg_count: Option<usize>,
+    /// The statement this ref's site is evaluated before though it follows
+    /// it in the source — the site is in a statement modifier's head
+    /// (`$x = f($x) if defined $x`). Minted by the builder from the one
+    /// table that says so (`docs/adr/flow-narrowing.md` §Evaluation order);
+    /// read through `read_point`. Boxed: few refs carry one.
+    #[serde(default)]
+    pub evaluated_before: Option<Box<Span>>,
 }
 
 pub use crate::model::conventions::{name_match_key, split_qualified};
 
 impl Ref {
+    /// Where a read at this ref asks: its site, less the statement the site
+    /// is evaluated before. Every consumer typing a value at a ref asks
+    /// this, never `span.start`.
+    pub fn read_point(&self) -> crate::model::witnesses::ReadPoint {
+        self.read_point_at(self.span.start)
+    }
+
+    /// A read at `at`, a point inside this ref's site, which shares the
+    /// site's order fact.
+    pub fn read_point_at(&self, at: Point) -> crate::model::witnesses::ReadPoint {
+        crate::model::witnesses::ReadPoint { at, skips: self.evaluated_before.as_deref().copied() }
+    }
+
     /// The receiver view of a member access (`MethodCall` / `FieldAccess`);
     /// `None` for every other kind.
     pub fn member_site(&self) -> Option<MemberSite<'_>> {

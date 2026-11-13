@@ -259,12 +259,19 @@ impl<'a> SubInfo<'a> {
         None
     }
 
-    /// Inferred type for a param by name (if the analysis resolved one).
-    /// Goes through the canonical bag-aware query so framework rules
-    /// (Mojo `$self` etc.) apply consistently across every consumer.
+    /// The type a param takes, by name: its declared type when a
+    /// declaration states one, else what the body makes of it, through the
+    /// canonical bag-aware query so framework rules (Mojo `$self` etc.)
+    /// apply consistently across every consumer.
     pub fn param_inferred_type(&self, param_name: &str) -> Option<InferredType> {
-        self.analysis
-            .inferred_type_via_bag(param_name, self.primary.span.end)
+        let declared = match &self.primary.detail {
+            SymbolDetail::Sub { params, .. } => params
+                .iter()
+                .find(|p| p.name == param_name)
+                .and_then(|p| self.analysis.param_declared_type(p, None)),
+            _ => None,
+        };
+        declared.or_else(|| self.analysis.inferred_type_via_bag(param_name, self.primary.span.end))
     }
 }
 
