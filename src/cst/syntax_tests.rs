@@ -185,3 +185,45 @@ fn a_kind_scan_finds_what_a_walk_finds_under_every_node() {
         }
     }
 }
+
+#[test]
+fn a_range_is_covered_by_the_smallest_node_holding_it() {
+    let tree = parse(SRC);
+    let forest = SyntaxForest::new(tree.root_node());
+    let nodes = every_node(tree.root_node());
+    for n in nodes.iter().filter(|n| n.start_byte() < n.end_byte()) {
+        let got = forest.covering(n.start_position(), n.end_position()).unwrap().ts();
+        // The deepest node of `n`'s same-range chain: `n` itself or under it.
+        assert_eq!(got.byte_range(), n.byte_range(), "covering {n:?}");
+        assert!(got == *n || forest.ancestors(got).any(|a| a == *n), "{got:?} is not under {n:?}");
+    }
+    // A range no single node spans: the smallest node holding both ends.
+    let x = nodes.iter().find(|n| n.kind() == "scalar" && n.utf8_text(SRC.as_bytes()) == Ok("$x")).unwrap();
+    let decl = forest.ancestors(*x).find(|a| a.kind() == "variable_declaration").unwrap();
+    let mut end = x.end_position();
+    end.column += 1;
+    assert_eq!(forest.covering(x.start_position(), end).unwrap().ts(), decl);
+}
+
+#[test]
+fn a_climb_runs_from_injected_code_on_through_its_host() {
+    let main = parse(EVALS);
+    let r = replacement_range(EVALS, 0);
+    let code = parse_range(EVALS, r.clone());
+    let forest = SyntaxForest::with_injections(
+        main.root_node(),
+        vec![Injection { host: 0, replaces: r.clone(), root: code.root_node() }],
+    );
+    let b = every_node(code.root_node())
+        .into_iter()
+        .find(|n| n.kind() == "scalar" && n.utf8_text(EVALS.as_bytes()) == Ok("$b"))
+        .unwrap();
+    // A span inside the replaced string is answered by the injected parse.
+    let found = forest.covering(b.start_position(), b.end_position()).unwrap();
+    assert_eq!(found.ts(), b);
+    let climb: Vec<Node<'_>> = forest.climb_in_file(found).map(|n| n.ts()).collect();
+    let repl = every_node(main.root_node()).into_iter().find(|n| n.byte_range() == r).unwrap();
+    let at = climb.iter().position(|n| *n == repl).expect("the climb reaches the replaced node");
+    assert_eq!(climb[at - 1], code.root_node(), "the injected root stands in for it");
+    assert_eq!(climb.last(), Some(&main.root_node()));
+}

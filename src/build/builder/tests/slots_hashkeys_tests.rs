@@ -1138,7 +1138,7 @@ sub register {
         super::build_with_plugins(&tree, src.as_bytes(), super::default_plugin_registry())
     };
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    let t = fa.inferred_type_via_bag_ctx("$app", Point::new(4, 10), Some(&idx));
+    let t = fa.inferred_type_via_bag_ctx("$app", crate::model::witnesses::ReadPoint::position(Point::new(4, 10)), Some(&idx));
     assert_eq!(
         t,
         Some(InferredType::ClassName("Mojolicious".into())),

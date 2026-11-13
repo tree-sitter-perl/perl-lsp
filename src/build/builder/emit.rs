@@ -818,12 +818,26 @@ impl<'a> Builder<'a> {
             return;
         }
         if let Some(payload) = self.expr_payload(node) {
+            let reads_binding = match &payload {
+                WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => t.is_temporal(),
+                _ => false,
+            };
             self.push_witness(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("expression".into()),
                 payload,
                 span,
             });
+            // A read the source places after a statement it runs before
+            // must not see that statement's writes (`$x = f($x) if defined $x`).
+            if let Some(stmt) = reads_binding.then(|| self.runs_before(node)).flatten() {
+                self.push_witness(Witness {
+                    attachment: WitnessAttachment::Expr(span),
+                    source: WitnessSource::Builder("evaluation_order".into()),
+                    payload: WitnessPayload::EvaluatedBefore(stmt),
+                    span,
+                });
+            }
             // `$_[0]` is the call's receiver wherever a call site supplies
             // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
             // `ReturnExprReducer` claims it ahead of the window projection
@@ -1209,12 +1223,14 @@ impl<'a> Builder<'a> {
         let Some(name) = crate::cst::canonical_var_name(receiver, self.source) else { return };
         let dies_on_undef = self.deref_dies_on_undef(node, &form);
         let place = crate::model::file_analysis::Place::variable(self.binding_key_here(&name, receiver.start_position()));
+        let span = node_to_span(node);
         self.arrow_deref_sites.push(crate::model::file_analysis::ArrowDerefSite {
             receiver: name,
             place: Box::new(place),
-            span: node_to_span(node),
+            span,
             form,
             dies_on_undef,
+            evaluated_before: self.evaluated_before(node),
         });
     }
 

@@ -2,6 +2,7 @@
 //! expression typing, member-op diagnostics.
 
 use super::*;
+use crate::model::witnesses::ReadPoint;
 
 impl FileAnalysis {
     /// How this analysis's language spells names (`PackFacts::names`).
@@ -338,21 +339,18 @@ impl FileAnalysis {
     }
 
     /// Query the witness bag via the reducer registry for a variable at
-    /// a point. Returns owned `InferredType` because the reducer may
-    /// synthesize a value not stored anywhere.
+    /// a position. Returns owned `InferredType` because the reducer may
+    /// synthesize a value not stored anywhere. A position is no recorded
+    /// read: a consumer typing the read at a ref asks
+    /// `inferred_type_via_bag_ctx` with `Ref::read_point`.
     ///
     /// The bag is the canonical store: `push_type_constraint` (TC
     /// shape), `call_bindings` propagation, framework accessor
     /// synthesis, and cross-file enrichment all push witnesses here.
     pub fn inferred_type_via_bag(&self, var_name: &str, point: Point) -> Option<InferredType> {
-        self.inferred_type_via_bag_ctx(var_name, point, None)
+        self.inferred_type_via_bag_ctx(var_name, ReadPoint::position(point), None)
     }
 
-    /// As `inferred_type_via_bag`, but with a `ModuleIndex` so a variable whose
-    /// value is a cross-file method chain (`my $x = Foo->new->bar`) resolves —
-    /// the chase keeps the index when it crosses the `Variable` edge instead of
-    /// dead-ending. Pass the index from query-time callers (hover/completion);
-    /// the bare wrapper keeps `None` for build-time / single-file callers.
     /// The registry-query context over this analysis. Every bag query
     /// threads the same field set; build it here so adding a field is one
     /// edit, not one per call site.
@@ -373,14 +371,19 @@ impl FileAnalysis {
         }
     }
 
+    /// What the variable `var_name` holds at `point`, with a `ModuleIndex`
+    /// so a variable whose value is a cross-file method chain (`my $x =
+    /// Foo->new->bar`) resolves — the chase keeps the index when it crosses
+    /// the `Variable` edge instead of dead-ending. Pass the index from
+    /// query-time callers (hover/completion).
     pub fn inferred_type_via_bag_ctx(
         &self,
         var_name: &str,
-        point: Point,
+        point: ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let scope = self.scope_at(point)?;
-        let place = Place::variable(self.variable_binding_of(var_name, point, scope).0);
+        let scope = self.scope_at(point.at)?;
+        let place = Place::variable(self.variable_binding_of(var_name, point.at, scope).0);
         self.subject_type_at(&place, point, module_index)
     }
 
@@ -389,18 +392,24 @@ impl FileAnalysis {
     pub fn place_type_at(
         &self,
         place: &Place,
-        point: Point,
+        point: ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        let scope = self.scope_at(point)?;
+        let scope = self.scope_at(point.at)?;
         crate::model::witnesses::query_place_type(&self.witnesses, &self.bag_context(module_index), place, scope, point)
+    }
+
+    /// Where a read of the node at `span` asks: the read point of the ref
+    /// recorded exactly there. `None` for text the build never saw.
+    pub fn read_at(&self, span: Span) -> Option<ReadPoint> {
+        self.ref_at(span.start).filter(|r| r.span == span).map(Ref::read_point)
     }
 
     /// What a narrowing subject holds at `point`.
     pub fn subject_type_at(
         &self,
         subject: &Place,
-        point: Point,
+        point: ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         if let Some(t) = self.place_type_at(subject, point, module_index) {
@@ -412,8 +421,8 @@ impl FileAnalysis {
         // Role-contract param types are gated on the enclosing package's
         // cross-file ancestry, so they resolve here (index in hand), not in
         // the bag the index-free builder seeded.
-        let scope = self.scope_at(point)?;
-        self.gated_param_type_for(self.binding_label(&subject.root).0, scope, point, module_index)
+        let scope = self.scope_at(point.at)?;
+        self.gated_param_type_for(self.binding_label(&subject.root).0, scope, point.at, module_index)
     }
 
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
@@ -1016,7 +1025,28 @@ impl FileAnalysis {
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        self.subject_type_at(&self.declared_place(sym), point, module_index)
+        self.subject_type_at(&self.declared_place(sym), ReadPoint::position(point), module_index)
+    }
+
+    /// The type parameter `param` is DECLARED to take: its declaration's
+    /// bound, read where the call binds it (`ParamInfo::binding_site`), so
+    /// no write in the body moves it. `None` when no declaration bounds it.
+    ///
+    /// TODO(pack-params): pack languages mint no `ParamInfo` yet, so their
+    /// signatures reach no consumer of this; a pack that mints them states
+    /// the binding site at the parameter's name token.
+    pub fn param_declared_type(
+        &self,
+        param: &ParamInfo,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        let at = param.binding_site?;
+        let sym = self.symbols_named(&param.name).iter().copied().find(|&sid| {
+            let s = &self.symbols[sid.0 as usize];
+            s.kind == SymKind::Variable && s.selection_span.start == at
+        })?;
+        let att = crate::model::witnesses::WitnessAttachment::Place(Box::new(self.declared_place(sym)));
+        crate::model::witnesses::query_declared_bound(&self.witnesses, &self.bag_context(module_index), &att)
     }
 
     /// The place the variable or member `sym` declares.
@@ -1116,7 +1146,7 @@ impl FileAnalysis {
                 continue;
             }
             let Some(t) =
-                self.inferred_type_via_bag_ctx(var_text, r.span.start, module_index)
+                self.inferred_type_via_bag_ctx(var_text, r.read_point(), module_index)
             else {
                 continue;
             };

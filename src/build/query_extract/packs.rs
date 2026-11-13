@@ -52,6 +52,11 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
+    /// What enforces the language's own `@type.annot` declarations, minted
+    /// onto each bound they state (`docs/adr/declared-bounds.md`). The
+    /// declaration's default, not its last word: a C++ binding through a
+    /// pointer or reference is checked where a value binding converts.
+    pub annot_enforcement: crate::model::witnesses::Enforcement,
     /// The documentation a `@doc` comment's text states (php's docblock
     /// description, its decoration and tags stripped), or `None` when it
     /// says nothing. Which comments document which declarations is the
@@ -155,6 +160,7 @@ impl LangPack {
             shape_name: _,
             default_name: _,
             annot_type: _,
+            annot_enforcement: _,
             doc_text: _,
             module_paths: _,
             narrow_guard: _,

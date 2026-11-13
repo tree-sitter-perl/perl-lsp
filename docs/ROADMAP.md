@@ -19,19 +19,19 @@ measured scaling envelope, and both are properties of every seam.
 
 | # | Epic | Why now |
 |---|---|---|
-| 1 | [Provider identity](epics/01-provider-identity.md) | A class of confidently-wrong answers, not misses |
-| 2 | [DBIC out of core](epics/02-dbic-out-of-core.md) | Finishes "core is plugin-free except generic dispatch" |
+| 1 | [Provider identity](epics/01-provider-identity.md) | A class of confidently-wrong answers, not misses; the relation and `@INC` landed, 30 consumers left |
+| 2 | [DBIC out of core](epics/02-dbic-out-of-core.md) | Finishes "core is plugin-free except generic dispatch"; `meta_methods` landed |
 | 3 | [Openness](epics/03-openness.md) | One verdict replaces six partial suppression rules; unlocks flag promotion |
 | 4 | [Value provenance, tier 1](epics/04-value-provenance.md) | The named gate for instance brands and the untyped-receiver residual |
 | 5 | [One-seam sweep](epics/05-one-seam-sweep.md) | Small, self-contained; the good warm-up |
-| 6 | [Rename provenance](epics/06-rename-provenance.md) | `folded_from` landed; three residuals left |
+| 6 | [Rename provenance](epics/06-rename-provenance.md) | `folded_from` and override scoping landed; import-list pin and package→file rename left |
 | 7 | [Diagnostic framework](epics/07-diagnostic-framework.md) | The CI-readiness gate |
-| 8 | [Heatmap: parallelize + residuals](epics/08-heatmap-residuals.md) | Runs on one core (up to 17x `--check`); then a verified FP against its own promise |
+| 8 | [Heatmap residuals](epics/08-heatmap-residuals.md) | Orphan routes/tasks/events never reach the dead-code queue, and a verified FP (`sub startup`) breaks its own promise |
 | 9 | [Mojo polish](epics/09-mojo-polish.md) | User-facing feature work |
 | 10 | [CLI analysis + `--migrate`](epics/10-cli-analysis-and-migrate.md) | Rounds out the CLI surface |
 | 11 | [Program boundaries](epics/11-program-boundaries.md) | MAIN-1; ~270 FPs each direction on the AWStats shape |
 | 12 | [Type::Tiny completeness](epics/12-type-tiny-completeness.md) | Check-guards feed a lattice that already exists |
-| 13 | [Pack-language ceiling](epics/13-pack-language-ceiling.md) | Calibration is the ship gate; it is half the work |
+| 13 | [Pack-language ceiling](epics/13-pack-language-ceiling.md) | Calibration is the ship gate and nobody owns it; the framework tier rides the PHP arc after 0.10.0 |
 | 14 | [The per-file stall](epics/14-per-file-stall.md) | C/C++ is unusable at Godot size; nobody has profiled it yet |
 | 15 | [Query paths at scale](epics/15-query-paths-at-scale.md) | Storage holds at 122x; query paths break |
 | 16 | [The CFG tier](epics/16-cfg-tier.md) | UAM, the cpp D-codes and D9 are all parked on it |

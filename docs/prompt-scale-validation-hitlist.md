@@ -40,10 +40,10 @@ Detail for each is in its section below.
 |---|---|
 | `@INC` single-provider tier | **CLOSED** (C) — all four stages, PR #122 |
 | ~10 bookkeeping `get_cached` sites | **OPEN** — deliberate |
-| `cursor_slot.rs:205` | **OPEN** — deferred, reducible |
+| `cursor_slot.rs:205` | **CLOSED** (B) — `detect_slot` reads `DriverCaps::cursor_context` |
 | Merge the two index families | **OPEN** |
 | Iterative builder walk | **CLOSED** PR #123 — both walks byte-agree over the whole suite |
-| Grammar-kind tripwire | **IN FLIGHT** (B) — must accept DECLARED future kinds or it eats the forward-compat arms |
+| Grammar-kind tripwire | **CLOSED** — `kind_comparisons_name_real_grammar_kinds` accepts DECLARED future kinds |
 
 ### Found en route (not original rows)
 | item | status |

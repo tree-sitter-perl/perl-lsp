@@ -1285,10 +1285,10 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
 /// template and `map` only (`grep` filters, it doesn't transform);
 /// anything fancier is an honest miss. The crm idiom that motivated
 /// it: `with map "GenericCo::Sheets::Roles::$_", qw/CSV DB/;`.
-fn map_built_strings(
-    node: Node,
+fn map_built_strings<'t>(
+    node: Node<'t>,
     src: &[u8],
-    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+    fold: &mut dyn FnMut(Node<'t>) -> Vec<(String, Span)>,
 ) -> Vec<(String, Span)> {
     let Some(kw) = node.child(0) else { return vec![] };
     if kw.utf8_text(src).ok() != Some("map") {
@@ -1318,10 +1318,10 @@ fn map_built_strings(
         .collect()
 }
 
-pub(crate) fn string_list(
-    node: Node,
+pub(crate) fn string_list<'t>(
+    node: Node<'t>,
     src: &[u8],
-    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+    fold: &mut dyn FnMut(Node<'t>) -> Vec<(String, Span)>,
 ) -> Vec<(String, Span)> {
     string_list_with_residue(node, src, fold).0
 }
@@ -1333,10 +1333,10 @@ pub(crate) fn string_list(
 /// structural facts (parent edges, export lists) use the flag to mark
 /// the record incomplete instead of silently dropping the item and
 /// presenting a partial list as the whole truth.
-pub(crate) fn string_list_with_residue(
-    node: Node,
+pub(crate) fn string_list_with_residue<'t>(
+    node: Node<'t>,
     src: &[u8],
-    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+    fold: &mut dyn FnMut(Node<'t>) -> Vec<(String, Span)>,
 ) -> (Vec<(String, Span)>, bool) {
     match literal_shape(node) {
         Some(LiteralShape::Qw) => {
@@ -1480,19 +1480,18 @@ pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound:
     let mut up = syn.ancestors(node);
     while let Some(p) = up.next() {
         let is_field = |f: &str| p.child_by_field_name(f).is_some_and(|c| c == child);
-        let arm = match p.kind() {
-            "subroutine_declaration_statement"
-            | "method_declaration_statement"
-            | "anonymous_subroutine_expression"
-            | "source_file" => return None,
+        let kind = p.kind();
+        if is_callable_boundary(kind) || kind == "source_file" {
+            return None;
+        }
+        let arm = match kind {
             "block" if bound == ArmBound::Block => return None,
-            "conditional_statement"
-            | "loop_statement"
-            | "postfix_conditional_expression"
-            | "postfix_loop_expression"
-            | "conditional_expression" => !is_field("condition"),
+            "conditional_statement" | "loop_statement" | "conditional_expression" => !is_field("condition"),
+            "postfix_conditional_expression" | "postfix_loop_expression" | "postfix_for_expression" => {
+                modifier_head(p) != Some(child)
+            }
             "cstyle_for_statement" => !is_field("initialiser") && !is_field("condition"),
-            "for_statement" | "postfix_for_expression" => !is_field("list") && !is_field("variable"),
+            "for_statement" => !is_field("list") && !is_field("variable"),
             "lowprec_logical_expression" => is_field("right"),
             "binary_expression" => {
                 is_field("right")
@@ -1508,6 +1507,47 @@ pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound:
         child = p;
     }
     None
+}
+
+/// The kinds whose body runs when called, not where it is written.
+pub(crate) const CALLABLE_KINDS: &[&str] = &[
+    "subroutine_declaration_statement",
+    "method_declaration_statement",
+    "anonymous_subroutine_expression",
+    "anonymous_method_expression",
+];
+
+/// Does a node of `kind` open a callable body? A climb that asks what runs
+/// around a node stops here.
+pub(crate) fn is_callable_boundary(kind: &str) -> bool {
+    CALLABLE_KINDS.contains(&kind)
+}
+
+/// The statement-modifier kinds: `STMT if G` / `unless`, `STMT while G` /
+/// `until`, `STMT for LIST`.
+pub(crate) const MODIFIER_KINDS: &[&str] =
+    &["postfix_conditional_expression", "postfix_loop_expression", "postfix_for_expression"];
+
+/// A statement modifier's head: its condition, or the list a `for`
+/// modifier runs over. `None` for any other node.
+pub(crate) fn modifier_head<'a>(modifier: Node<'a>) -> Option<Node<'a>> {
+    match modifier.kind() {
+        "postfix_conditional_expression" | "postfix_loop_expression" => modifier.child_by_field_name("condition"),
+        "postfix_for_expression" => modifier.child_by_field_name("list"),
+        _ => None,
+    }
+}
+
+/// A statement modifier whose head runs before the statement written ahead
+/// of it, as `(statement, head)`. `do BLOCK while G` runs its block first,
+/// so it is not one.
+pub(crate) fn modifier_runs_head_first<'a>(modifier: Node<'a>) -> Option<(Node<'a>, Node<'a>)> {
+    let head = modifier_head(modifier)?;
+    let stmt = nth_element(modifier, 0).filter(|s| *s != head)?;
+    // TODO(do-loop-node): the grammar gives `do BLOCK while G` the node
+    // `STMT while G` has; a node of its own would make this a kind.
+    let body_first = modifier.kind() == "postfix_loop_expression" && stmt.kind() == "do_expression";
+    (!body_first).then_some((stmt, head))
 }
 
 /// The scalar wrapped by a container node's deref varname (`@$h{…}` —
