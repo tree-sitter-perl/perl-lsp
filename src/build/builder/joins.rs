@@ -59,7 +59,7 @@ impl<'a> Builder<'a> {
             };
 
             let holding = view.arms_holding(span, within);
-            for (c, _) in &holding {
+            for (c, arm) in &holding {
                 // An `elsif` (a branch that is wholly another's arm) joins
                 // with the construct it is the arm of.
                 if c.kind == ControlKind::Branch && arm_spans.contains(&c.span) {
@@ -87,10 +87,11 @@ impl<'a> Builder<'a> {
                         }
                     }
                     // TODO(cfg-loops): a loop's head and exit joins (design
-                    // PR 7); until then a write in a loop leaves its
-                    // variable unknown past the loop.
+                    // PR 7); until then a write in a modifier loop leaves its
+                    // variable unknown past the loop, and a loop block is a
+                    // block like any other (below).
                     ControlKind::Loop { .. } => {
-                        if minted.insert((binding.clone(), c.span, JoinRole::After)) {
+                        if !self.is_block_at(arm.span) && minted.insert((binding.clone(), c.span, JoinRole::After)) {
                             markers.push((var.clone(), scope, c.span.end));
                         }
                     }
@@ -103,7 +104,7 @@ impl<'a> Builder<'a> {
             let upto = |end: ScopeId| chain.iter().copied().take_while(move |&s| s != end).zip(chain.iter().copied().skip(1));
             for (level, parent) in upto(stop) {
                 let block = self.scopes[level.0 as usize].span;
-                if !holding.iter().any(|(_, a)| a.span == block) {
+                if !holding.iter().any(|(c, a)| c.kind == ControlKind::Branch && a.span == block) {
                     markers.push((var.clone(), parent, self.statement_end_holding(node, block)));
                 }
             }
@@ -136,6 +137,16 @@ impl<'a> Builder<'a> {
             payload,
             span: Span { start: at, end: at },
         }
+    }
+
+    /// Whether the node spanning exactly `span` is a block.
+    fn is_block_at(&self, span: Span) -> bool {
+        self.syntax
+            .main()
+            .root()
+            .ts()
+            .descendant_for_point_range(span.start, span.end)
+            .is_some_and(|n| n.kind() == "block" && node_to_span(n) == span)
     }
 
     /// The end of the statement that holds `block`, seen from `node` inside
