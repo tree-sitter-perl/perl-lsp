@@ -65,9 +65,6 @@ Files to create: `src/diagnostics.rs`, `src/config.rs`. Refactor
 
 ## Analysis subcommands still missing
 
-- `--completions <root> <file> <line> <col>` — completion at position; same
-  engine as LSP, different entry point. Useful for REPLs and custom editor
-  plugins.
 - `--repl-complete` — read accumulated REPL session from stdin, complete at
   end-of-input. Pipes from Reply/Devel::REPL on tab.
 - `--unused-exports <root>` — names in `@EXPORT_OK` no workspace file
@@ -85,8 +82,8 @@ Files to create: `src/diagnostics.rs`, `src/config.rs`. Refactor
   (Moo/Moose/Mojo::Base/DBIC/plain bless).
 
 All are thin wrappers around existing `FileAnalysis` queries. Implementation
-order is roughly the order above (diagnostics + completions first, framework
-audit last).
+order is roughly the order above (diagnostics first, framework audit
+last). Completion at a position already ships as `--completion`.
 
 ## `--migrate` — framework translation
 
