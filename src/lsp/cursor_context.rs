@@ -326,21 +326,14 @@ module_index: Option<&dyn CrossFileLookup>,
     }
 }
 
-/// Resolve an invocant type from its text, using analysis when available.
+/// Without an analysis there is no sub table or use-map to consult, so a
+/// bareword is its own spelling and nothing else has an answer.
 fn resolve_text_invocant(text: &str, point: Point, analysis: Option<&FileAnalysis>) -> Option<InferredType> {
     use crate::model::conventions::InvocantText;
-    match InvocantText::parse(text) {
-        InvocantText::Bareword(b) => Some(InferredType::ClassName(b.to_string())),
-        InvocantText::CurrentPackage | InvocantText::PositionalReceiver => analysis
-            .and_then(|a| a.package_at(point))
-            .map(|p| InferredType::ClassName(p.to_string())),
-        InvocantText::NonScalar(_) => None,
-        InvocantText::Scalar(_) => {
-            // Route through the witness-bag path so framework-aware
-            // resolution (Mojo `sub name`, blessed-hashref, branch arms,
-            // arity) refines the answer.
-            analysis.and_then(|a| a.inferred_type_via_bag(text, point))
-        }
+    match (analysis, InvocantText::parse(text)) {
+        (Some(a), _) => a.invocant_text_type(text, point),
+        (None, InvocantText::Bareword(b)) => Some(InferredType::ClassName(b.to_string())),
+        (None, _) => None,
     }
 }
 

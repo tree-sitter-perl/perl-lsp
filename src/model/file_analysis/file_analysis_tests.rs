@@ -3351,3 +3351,46 @@ fn unknown_return_is_not_displayed() {
     assert_eq!(fa.find_method_return_type("Foo", "a", None, None), Some(InferredType::Unknown));
     assert_eq!(fa.method_detail("Foo", "a", None, None), "Foo");
 }
+
+/// A bareword invocant naming a sub whose zero-argument call returns a
+/// class is that call, for every text-invocant consumer: `shop->buy`
+/// dispatches on what `shop()` returns, not on a class named `shop`.
+#[test]
+fn bareword_invocant_naming_a_class_returning_sub_is_the_call() {
+    let fa = build_fa_from_source(
+        r#"
+package Shop;
+sub new { my $class = shift; return bless {}, $class }
+sub buy { 1 }
+
+package main;
+sub shop { return Shop->new }
+shop->buy;
+        "#,
+    );
+    let point = Point { row: 7, column: 6 };
+    assert_eq!(fa.invocant_text_classes(Some("shop"), point).single(), Some("Shop"));
+    assert_eq!(fa.invocant_text_type("shop", point), Some(InferredType::ClassName("Shop".into())));
+}
+
+/// A receiver reassigned in its method dispatches on its new value: the
+/// inferred type answers before the enclosing package does.
+#[test]
+fn reassigned_receiver_dispatches_on_its_new_value() {
+    let fa = build_fa_from_source(
+        r#"
+package Other;
+sub new { my $class = shift; return bless {}, $class }
+sub o { 1 }
+
+package Mine;
+sub m {
+    my $self = shift;
+    $self = Other->new;
+    $self->o;
+}
+        "#,
+    );
+    let point = Point { row: 9, column: 10 };
+    assert_eq!(fa.invocant_text_classes(Some("$self"), point).single(), Some("Other"));
+}

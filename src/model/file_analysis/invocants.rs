@@ -975,68 +975,56 @@ impl FileAnalysis {
         self.invocant_classes_in_scope(invocant, scope, point).single().map(str::to_string)
     }
 
-    /// Resolve an invocant string to a class name. Internal helper
-    /// used by string-based completion / hover-context paths that
-    /// don't have a `Ref` in hand. The ref-aware
-    /// `receiver_classes` is preferred everywhere a
-    /// `&Ref` is available.
-    pub(super) fn invocant_classes_in_scope(&self, invocant: &str, scope: ScopeId, point: Point) -> ReceiverClasses {
+    /// The value the invocant written `text` (the token left of `->`)
+    /// holds at `point`, for consumers with text but no `Ref`; the
+    /// ref-aware `receiver_classes` is preferred wherever a `&Ref` is in
+    /// hand.
+    ///
+    /// A scalar asks the bag first; a receiver whose value names no class
+    /// falls back to the enclosing class, other scalars do not (an untyped
+    /// `$r->to(...)` must not pretend `to` is the enclosing package's). A
+    /// bareword naming a sub whose zero-argument call returns a class is
+    /// that call, as Perl reads it; any other bareword is a class spelling.
+    pub fn invocant_text_type(&self, text: &str, point: Point) -> Option<InferredType> {
+        self.invocant_text_type_in(text, self.scope_at(point).unwrap_or(ScopeId(0)), point)
+    }
+
+    pub(super) fn invocant_text_type_in(&self, text: &str, scope: ScopeId, point: Point) -> Option<InferredType> {
         use crate::model::conventions::InvocantText;
-        let enclosing = || {
-            for scope_id in &self.scope_chain(scope) {
-                let s = self.scope(*scope_id);
-                if let ScopeKind::Class { ref name } = s.kind {
-                    return Some(name.clone());
-                }
-                if let Some(ref pkg) = s.package {
-                    return Some(pkg.clone());
-                }
-            }
-            None
-        };
-        let class = match InvocantText::parse(invocant) {
+        let enclosing = || self.enclosing_class_for_scope(scope).map(InferredType::ClassName);
+        match InvocantText::parse(text) {
             InvocantText::CurrentPackage | InvocantText::PositionalReceiver => enclosing(),
             InvocantText::NonScalar(_) => None,
             InvocantText::Scalar(_) => {
-                // Scalar invocant → infer type via the witness bag so
-                // framework/branch/arity rules refine the answer; a class
-                // per value it may be.
-                let classes = self
-                    .inferred_type_via_bag(invocant, point)
-                    .map(|t| self.dispatch_classes_of(&t, None))
-                    .unwrap_or_default();
-                if !classes.is_empty() {
-                    return classes;
+                let bag = self.inferred_type_via_bag(text, point);
+                if bag.as_ref().is_some_and(|t| !self.dispatch_classes_of(t, None).is_empty()) {
+                    return bag;
                 }
-                // Enclosing-class fallback only applies to receivers —
-                // other variable invocants whose type we don't
-                // know stay None, not poisoned with the surrounding package.
-                // Otherwise `$r->to(...)` with `$r` un-typed would pretend
-                // `to` is a method on the enclosing package (MyApp), and
-                // goto-def on the method name lands on `package MyApp;`.
-                self.is_receiver_at(invocant, point)
-                    .then(enclosing)
-                    .flatten()
+                self.is_receiver_at(text, point).then(enclosing).flatten().or(bag)
             }
-            InvocantText::Bareword(_) => {
-                // Bareword invocant: ambiguous between class-name and
-                // zero-arg function call. If a sub by this name resolves
-                // (locally or via a cross-file import) to a ClassName
-                // return type when called with zero args, treat the
-                // bareword as the call and use that class. Mirrors the
-                // same rule in `invocant_type_at_node` and
-                // `resolve_invocant_class_tree`.
-                let bare = split_qualified(invocant, self.names()).1;
-                if let Some(InferredType::ClassName(c)) =
-                    self.sub_return_type_at_arity(bare, Some(0))
-                {
-                    Some(c)
-                } else {
-                    Some(self.class_spelling_identity(invocant, point))
+            InvocantText::Bareword(b) => {
+                let bare = split_qualified(b, self.names()).1;
+                match self.sub_return_type_at_arity(bare, Some(0)) {
+                    Some(t @ InferredType::ClassName(_)) => Some(t),
+                    _ => Some(InferredType::ClassName(self.class_spelling_identity(b, point))),
                 }
             }
-        };
-        class.into_iter().collect()
+        }
+    }
+
+    /// The classes `invocant_text_type` dispatches to, one per value the
+    /// invocant may be.
+    pub fn invocant_text_classes(&self, invocant: Option<&str>, point: Point) -> ReceiverClasses {
+        invocant
+            .and_then(|text| self.invocant_text_type(text, point))
+            .map(|t| self.dispatch_classes_of(&t, None))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn invocant_classes_in_scope(&self, invocant: &str, scope: ScopeId, point: Point) -> ReceiverClasses {
+        self.invocant_text_type_in(invocant, scope, point)
+            .map(|t| self.dispatch_classes_of(&t, None))
+            .unwrap_or_default()
     }
 
     /// Find a method definition within a class/package.
