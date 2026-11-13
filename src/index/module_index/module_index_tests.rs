@@ -1060,7 +1060,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     // into Store's own file (hop 1) and found the `Conn->new` slot write.
     let t = fa.inferred_type_via_bag_ctx(
         "$c",
-        tree_sitter::Point { row: 4, column: 0 },
+        crate::model::witnesses::ReadPoint::position(tree_sitter::Point { row: 4, column: 0 }),
         Some(&idx),
     );
     assert_eq!(

@@ -815,7 +815,7 @@ impl<'a> Builder<'a> {
             if !var_text.starts_with('$') {
                 continue;
             }
-            let Some(t) = self.bag_query_variable(var_text, r.scope, r.span.start) else {
+            let Some(t) = self.bag_query_variable(var_text, r.scope, r.read_point()) else {
                 continue;
             };
             // The key-access projection, as this pass's contract says:
@@ -841,9 +841,9 @@ impl<'a> Builder<'a> {
             .map(|n| n.ts())
             .filter(|n| crate::cst::nth_element(*n, 0).is_some_and(|c| c.kind() == "method_call_expression"))
             .collect();
-        // Snapshot resolved (key_span, key_text, access, owner) first
+        // Snapshot resolved (key_span, key_text, access, owner, order) first
         // so the emit loop can `&mut self`.
-        let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner)> = Vec::new();
+        let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner, Option<Box<Span>>)> = Vec::new();
         for &node in &chained {
             let Some(container) = node.named_child(0) else { continue };
             let Some(key_node) = node.child_by_field_name("key") else { continue };
@@ -898,9 +898,10 @@ impl<'a> Builder<'a> {
                 key_text,
                 self.determine_access(node),
                 owner,
+                self.evaluated_before(key_node),
             ));
         }
-        for (span, key_text, access, owner) in pending {
+        for (span, key_text, access, owner, evaluated_before) in pending {
             self.refs.push(Ref {
                 kind: RefKind::HashKeyAccess {
                     var_text: String::new(),
@@ -916,6 +917,7 @@ impl<'a> Builder<'a> {
                 }),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before,
             });
         }
     }
@@ -1113,10 +1115,10 @@ impl<'a> Builder<'a> {
         &self,
         name: &str,
         scope: ScopeId,
-        point: Point,
+        point: crate::model::witnesses::ReadPoint,
     ) -> Option<InferredType> {
         if self.vars_bound {
-            let place = crate::model::file_analysis::Place::variable(self.binding_of(name, point, scope).0);
+            let place = crate::model::file_analysis::Place::variable(self.binding_of(name, point.at, scope).0);
             return crate::model::witnesses::query_variable_place(&self.bag, &self.bag_context(), &place, point);
         }
         crate::model::witnesses::query_variable_type(&self.bag, &self.bag_context(), name, scope, point)
@@ -1129,7 +1131,7 @@ impl<'a> Builder<'a> {
         scope: ScopeId,
         point: Point,
     ) -> Option<InferredType> {
-        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, point)
+        crate::model::witnesses::query_place_type(&self.bag, &self.bag_context(), place, scope, crate::model::witnesses::ReadPoint::position(point))
     }
 
     /// Bag-routed lookup for a sub's return type by name. Goes through
@@ -2050,7 +2052,7 @@ impl<'a> Builder<'a> {
                 }
                 // The producer names the container canonically (`$h{k}` is
                 // `%h`, `$h->{k}` is `$h`), so the name is the lookup.
-                let t = self.bag_query_variable(var_text, r.scope, r.span.start)?;
+                let t = self.bag_query_variable(var_text, r.scope, r.read_point())?;
                 Some((i, t.hash_key_class()?.to_string()))
             })
             .collect();

@@ -30,12 +30,10 @@ edit if the file exists.
 ### Inheritance override scoping (stretch)
 
 Renaming `Animal::speak` should surface `Dog::speak` (intentional API) and
-NOT rename `unrelated::speak` (accidental name collision). Today's
-`rename_sub` searches by name across all files — too aggressive.
-
-Needs reverse parent lookup (`child_classes_of(parent)`) across the
-workspace. Data is there in `package_parents`; building the reverse is a
-scan.
+NOT rename `unrelated::speak` (accidental name collision). The family is
+landed: `OverrideScope::Hierarchy` (the rename default) gathers it over
+`@ISA` edges, never by name. What is left is a regression test pinning
+the unrelated same-named method as untouched.
 
 ## Test coverage to add
 

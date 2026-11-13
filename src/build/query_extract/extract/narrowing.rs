@@ -166,6 +166,8 @@ struct Decides {
     thens: Vec<crate::cst::NodeId>,
     elses: Vec<crate::cst::NodeId>,
     repeats: bool,
+    /// The statement a match names for the chain (`@narrow.stmt`).
+    stmt: Option<crate::cst::NodeId>,
 }
 
 /// A chain is a condition's statement with every condition whose own
@@ -173,14 +175,18 @@ struct Decides {
 /// if`). Its arms are the narrowest regions its conditions decide, each
 /// known by every condition deciding a region around it; the arm where
 /// each one fails is its `else`, and a chain with none has an implicit one
-/// that falls through. A block leaves when one of its statements does
-/// (`@flow.leaves`, or a chain whose every arm leaves), so code after it
-/// is dead. Where exactly one arm falls through, the rest of the block
-/// after the chain runs where that arm does; where none does it never
-/// runs, and two or more are a join this tier does not take.
+/// that falls through, as a condition with no `then` (`G || throw …`) has
+/// one where it holds. A block leaves when one of its statements does
+/// (`@flow.leaves`, a chain whose every arm leaves, or a `@flow.block`
+/// that leaves), so code after it is dead. A loop's arm leaves only where
+/// no `@flow.to_loop` in it reaches the loop, and its implicit `else` is
+/// where its first test fails. Where exactly one arm falls through, the
+/// rest of the block after the chain runs where that arm does; where none
+/// does it never runs, and two or more are a join this tier does not take.
 // TODO(cfg-exit-join): this is reachability worked out inside one block, a
-// stand-in for the CFG; it retires with `@narrow.loop` once the CFG's edges
-// (a `break` to the loop's exit, an exit to the block's) answer it.
+// stand-in for the CFG; it retires with `@narrow.loop` and `@flow.to_loop`
+// once the CFG's edges (a `break` to the loop's exit, an exit to the
+// block's) answer it.
 fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
     use crate::cst::NodeId;
     let tree = ad.tree;
@@ -188,7 +194,7 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
     let mut by_site: HashMap<NodeId, usize> = HashMap::new();
     for e in ad.events().iter().filter(|e| e.cap == Capture::Narrow(NarrowCap::Cond)) {
         let ix = *by_site.entry(e.site).or_insert_with(|| {
-            conds.push(Decides { cond: e.site, thens: Vec::new(), elses: Vec::new(), repeats: false });
+            conds.push(Decides { cond: e.site, thens: Vec::new(), elses: Vec::new(), repeats: false, stmt: None });
             conds.len() - 1
         });
         let d = &mut conds[ix];
@@ -198,6 +204,10 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
                 Capture::Narrow(NarrowCap::Else) => &mut d.elses,
                 Capture::Narrow(NarrowCap::Loop) => {
                     d.repeats = true;
+                    continue;
+                }
+                Capture::Narrow(NarrowCap::Stmt) => {
+                    d.stmt = Some(a.site);
                     continue;
                 }
                 _ => continue,
@@ -212,15 +222,32 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
         (n.start_byte(), n.end_byte())
     };
     let within = |inner: (usize, usize), outer: (usize, usize)| outer.0 <= inner.0 && inner.1 <= outer.1;
-    // A condition's statement is the node holding it and its `then` arm.
+    // A condition's statement is the one its match names, else the node
+    // holding it and its `then` arm.
     let mut stmt_of: HashMap<NodeId, Vec<usize>> = HashMap::new();
+    let mut stmt_by_cond: Vec<Option<NodeId>> = vec![None; conds.len()];
     for (ix, d) in conds.iter().enumerate() {
-        let Some(&then) = d.thens.first() else { continue };
-        let span = range(then);
-        let cond = tree.node(d.cond);
-        let Some(stmt) = cond.ancestors().find(|a| within(span, (a.start_byte(), a.end_byte()))) else { continue };
-        stmt_of.entry(stmt.site().id()).or_default().push(ix);
+        let stmt = match d.stmt {
+            Some(stmt) => stmt,
+            None => {
+                let Some(&then) = d.thens.first() else { continue };
+                let span = range(then);
+                let cond = tree.node(d.cond);
+                let Some(stmt) = cond.ancestors().find(|a| within(span, (a.start_byte(), a.end_byte()))) else {
+                    continue;
+                };
+                stmt.site().id()
+            }
+        };
+        stmt_by_cond[ix] = Some(stmt);
+        stmt_of.entry(stmt).or_default().push(ix);
     }
+    // An arm holds a jump to the loop when one is captured in its subtree,
+    // or on a node sharing its range.
+    let reaches_loop = |arm: NodeId| {
+        let at = tree.node(arm).site().id();
+        ad.within_site(at).any(|ix| ad.events()[ix].cap == Capture::Flow(FlowCap::ToLoop))
+    };
     let linked: std::collections::HashSet<NodeId> = conds.iter().flat_map(|d| d.elses.iter().copied()).collect();
     let mut chains: Vec<(NodeId, Vec<usize>)> = stmt_of
         .iter()
@@ -249,20 +276,19 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
     let mut chain_leaves: HashMap<NodeId, bool> = HashMap::new();
     let mut out = FallThrough::new();
     for (stmt, members) in chains {
-        // A loop's arm is left by `break` to what follows the loop, and a
-        // fall-through of the arm comes back to the test.
-        if members.iter().any(|&m| conds[m].repeats) {
-            chain_leaves.insert(stmt, false);
-            continue;
-        }
+        // A loop's arm comes back to the test where it falls through, and a
+        // `@flow.to_loop` in it may land after the loop with the test still
+        // holding (conservatively, even one an inner loop owns).
+        let repeats = members.iter().any(|&m| conds[m].repeats);
+        let tagged = |site: NodeId, cap: Capture| ad.tags.on(site).any(|ix| ad.events()[ix].cap == cap);
         let leaves_here = |n: crate::cst::SyntaxNode<'_, '_>| {
             let site = n.site().id();
-            ad.tags.on(site).any(|ix| ad.events()[ix].cap == Capture::Flow(FlowCap::Leaves))
-                || chain_leaves.get(&site) == Some(&true)
+            tagged(site, Capture::Flow(FlowCap::Leaves)) || chain_leaves.get(&site) == Some(&true)
         };
+        let is_block = |n: crate::cst::SyntaxNode<'_, '_>| tagged(n.site().id(), Capture::Flow(FlowCap::Block));
         let arm_leaves = |arm: NodeId| {
             let node = tree.node(arm);
-            leaves_here(node) || statements(tree, node).any(|s| leaves_here(s))
+            (leaves_here(node) || runs_out(tree, node, &leaves_here, &is_block)) && !(repeats && reaches_loop(arm))
         };
         let decided: Vec<(NodeId, usize, bool)> = members
             .iter()
@@ -291,6 +317,13 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
         if !has_else {
             falling.push(implicit);
         }
+        for &m in &members {
+            if conds[m].thens.is_empty() {
+                let mut holds = stmt_by_cond[m].map(&known).unwrap_or_default();
+                holds.push((m, true));
+                falling.push(holds);
+            }
+        }
         chain_leaves.insert(stmt, falling.is_empty());
         let [arm] = &falling[..] else { continue };
         let node = tree.node(stmt);
@@ -302,6 +335,17 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
         }
     }
     out
+}
+
+/// True if one of the statements `node` runs in sequence leaves, looking
+/// through each one that is a block of its own.
+fn runs_out<'a, 't>(
+    tree: &'a crate::cst::Structure<'t>,
+    node: crate::cst::SyntaxNode<'a, 't>,
+    leaves_here: &impl Fn(crate::cst::SyntaxNode<'a, 't>) -> bool,
+    is_block: &impl Fn(crate::cst::SyntaxNode<'a, 't>) -> bool,
+) -> bool {
+    statements(tree, node).any(|s| leaves_here(s) || (is_block(s) && runs_out(tree, s, leaves_here, is_block)))
 }
 
 /// The statements `node` runs in sequence: its named children outside
@@ -448,14 +492,18 @@ pub(super) fn finish(st: &mut ExtractState) {
         }
     }
     // Each region ends at the first rebind of its subject's binding, which
-    // only the assembled analysis knows (`bind_variable_regions`).
+    // only the assembled analysis knows (`bind_variable_regions`). Every one
+    // is a guard's proof, and says so beside it, cut with it.
     for (name, refined, region, scope) in pending {
-        out.variable_regions.push(crate::model::witnesses::Witness {
-            attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
-            source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
-            payload: refined,
-            span: region,
-        });
+        let attachment = crate::model::witnesses::WitnessAttachment::Variable { name, scope };
+        for payload in [refined, crate::model::witnesses::WitnessPayload::Proof] {
+            out.variable_regions.push(crate::model::witnesses::Witness {
+                attachment: attachment.clone(),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
+                payload,
+                span: region,
+            });
+        }
     }
     for (name, scope, obs, region) in std::mem::take(&mut st.flow.observations) {
         out.variable_regions.push(crate::model::witnesses::Witness {
