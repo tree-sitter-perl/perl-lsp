@@ -2944,7 +2944,13 @@ impl ReducerRegistry {
                         });
                     }
                 }
-                WitnessPayload::InferredType(InferredType::RefTagOf { of: Some(of), names: None, subject, site, via }) => {
+                // Only where the tag is minted (`Expr(site)` in the file
+                // that wrote it): `of` is a span in that file, and a copy
+                // that travelled into another file's bag would ask a
+                // stranger's expression.
+                WitnessPayload::InferredType(InferredType::RefTagOf { of: Some(of), names: None, subject, site, via })
+                    if w.attachment == WitnessAttachment::Expr(*site) =>
+                {
                     // The class a `ref`/`blessed` string spells is the class
                     // its operand holds, when it holds exactly one.
                     let of_q = ReducerQuery {
