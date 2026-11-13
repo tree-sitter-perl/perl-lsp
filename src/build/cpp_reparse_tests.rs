@@ -635,6 +635,8 @@ struct sv { _SV_HEAD(void*); };
     let names: Vec<&str> = base.members.iter().map(|m| m.name.as_str()).collect();
     // All three fields survive — the comment-truncation no longer drops sv_flags.
     assert_eq!(names, vec!["sv_any", "sv_refcnt", "sv_flags"]);
+    let pasted: Vec<bool> = base.members.iter().map(|m| m.type_is_pasted).collect();
+    assert_eq!(pasted, vec![true, false, false], "only `ptrtype` comes from the paste");
 
     // The parent edge forms despite the comment-truncated def sitting right above
     // the struct (comment neutralization keeps the blanked view parsing clean).

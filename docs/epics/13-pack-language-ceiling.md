@@ -1,7 +1,10 @@
 # Epic 13 — The pack-language ceiling: calibration, diagnostics, framework tier
 
-> **Status:** scheduled (13th) but **pullable to first at any time** —
-> it is the epic that turns a pack language from "parses and answers"
+> **Status:** trimmed 2026-11-12. Phase A (calibration) and Phase D
+> (status pages) are open and unowned. Phase B's first codes shipped
+> with PHP. Phase C (the framework tier) is the PHP arc's framework
+> work, which starts after 0.10.0; the constraints below still bind it.
+> This is the epic that turns a pack language from "parses and answers"
 > into a product.
 > **Design owner-doc:** `docs/prompt-multi-language.md` §"What pack
 > languages still don't get" and §"Calibration is the ship gate".
@@ -11,7 +14,7 @@
 
 ## Mission
 
-Pack languages (C/C++, Python, R, CMake) ship behind opt-in Cargo
+Pack languages (C/C++, PHP, Python, R, CMake) ship behind opt-in Cargo
 features with a `PackDriver` constructor, a `.scm` skeleton and
 predicates — no new Rust types per language. That machinery is landed
 and works. What they do **not** get is the ceiling:
@@ -19,9 +22,12 @@ and works. What they do **not** get is the ceiling:
 1. **A calibration substrate** — the gold-corpus sibling. This is the
    ship gate, not a nice-to-have, and `prompt-multi-language.md`
    budgets it as **half the work**.
-2. **Diagnostics** — deliberately NONE for pack languages until (1)
-   exists, because a diagnostic without a zero-false-positive sweep is
-   a product liability.
+2. **Diagnostics** — promoted one code at a time, each on a
+   zero-false-positive sweep. Two are always on today, both reached
+   only by a use-map pack (PHP): `resolved-by-widening` and
+   `readonly-write` (`lsp/symbols/diagnostics.rs`). C++
+   `use-after-move` is registered and off by default. Every other code
+   waits on (1).
 3. **A framework tier** — keying plugin hooks on capture events the way
    rhai hooks key on `CallContext` today. This is the named open design
    round.
@@ -119,6 +125,11 @@ Gated on Phase A. The rule is the one already in force:
    still off — the named gate it waits on.
 
 ### Phase C — the framework tier (the open design round)
+
+**Owned by the PHP arc's framework work, which starts after 0.10.0.**
+That work plans one extension channel for every language rather than a
+PHP-only one. Everything below binds it, and its PR records which
+tenants a declarative overlay served and which needed a hook.
 
 **Read `prompt-multi-language.md`'s framing before designing:** the
 question is keying plugin hooks on CAPTURE EVENTS the way rhai hooks

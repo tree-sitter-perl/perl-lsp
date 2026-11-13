@@ -11,8 +11,9 @@
 
 Every "couldn't resolve X" decision in the diagnostics uses a
 different, partial suppression rule: a `framework_imports` string set,
-a hardcoded `universal_methods` list, an AUTOLOAD-in-MRO skip, an
-unresolved-ancestor skip, a syntactic `SUPER::`/qualified-name skip,
+a hardcoded `UNIVERSAL::` list plus the plugins' `meta_methods`, an
+AUTOLOAD-in-MRO skip, an unresolved-ancestor skip, a syntactic
+`SUPER::`/qualified-name skip,
 and — the audit's remaining noise class — nothing at all for open-world
 dispatch.
 
@@ -70,7 +71,7 @@ into one type. Name yours distinctly and say why in the ADR.
 | Suppression rule to subsume | Where | Find it |
 | --- | --- | --- |
 | `framework_imports` string set (unresolved-function) | `lsp/symbols/diagnostics.rs` | `grep -n 'framework_imports' src/lsp/symbols/diagnostics.rs` |
-| `universal_methods` hardcoded list | `lsp/symbols/diagnostics.rs` | `grep -n 'universal_methods' src/lsp/symbols/diagnostics.rs` — **Epic 2 Phase A splits this**: the true `UNIVERSAL::` half stays, the framework half becomes `meta_methods`. Both are genuine facts and become INPUTS to the one walk, not a parallel path |
+| The `UNIVERSAL::` list + `meta_methods` | `lsp/symbols/diagnostics.rs` | `grep -n 'meta_methods' src/lsp/symbols/diagnostics.rs` — Epic 2 Phase A split it (landed): the true `UNIVERSAL::` names stay inline, the framework half is the plugins' `meta_methods` manifest. Both are genuine facts and become INPUTS to the one walk, not a parallel path |
 | AUTOLOAD-in-MRO skip | `lsp/symbols/diagnostics.rs` | `grep -n 'AUTOLOAD' src/lsp/symbols/diagnostics.rs` — this IS an openness fact; fold it in |
 | Unresolved-ancestor skip | `model/file_analysis/` | `grep -rn 'class_has_unresolved_ancestor' src/` |
 | `SUPER::`/qualified-name syntactic skip | `lsp/symbols/diagnostics.rs` | `grep -n 'SUPER::' src/lsp/symbols/` — replace with real resolution (Phase C) |
@@ -87,7 +88,7 @@ into one type. Name yours distinctly and say why in the ADR.
   a `Symbol.home_namespace` field migration. This epic needs a QUERY
   ("openness of package P in file F"), not a stored field. If you find
   yourself running a serde migration on `Symbol`, you have overreached.
-- Do NOT delete `universal_methods` / `meta_methods` / `RoleMask` —
+- Do NOT delete the `UNIVERSAL::` list / `meta_methods` / `RoleMask` —
   inputs, not competitors.
 - Do NOT make the walk recursive over arbitrary lexical scopes. Perl
   lexical scopes do not affect method resolution; the chain is package

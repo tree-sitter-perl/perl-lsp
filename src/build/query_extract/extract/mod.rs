@@ -131,6 +131,14 @@ impl<'a, 't> Adorned<'a, 't> {
         self.in_match_ix(mid, cap).map(|ix| &self.events()[ix])
     }
 
+    /// Match `mid`'s declared type and the extent its capture states.
+    fn annot_in_match(&self, mid: usize) -> Option<(&Event, crate::model::witnesses::Extent)> {
+        self.of_match_ixs(mid).find_map(|ix| match self.events()[ix].cap {
+            Capture::TypeAnnot(extent) => Some((&self.events()[ix], extent)),
+            _ => None,
+        })
+    }
+
     fn in_match_ix(&self, mid: usize, cap: Capture) -> Option<usize> {
         self.of_match_ixs(mid).find(|&ix| self.events()[ix].cap == cap)
     }
@@ -185,7 +193,12 @@ impl<'a, 't> Adorned<'a, 't> {
     /// The indices of the captures on `e`'s node and inside it, in
     /// preorder.
     fn within(&self, e: &Event) -> std::ops::Range<usize> {
-        self.tags.positions(self.tree.node(e.site).subtree())
+        self.within_site(e.site)
+    }
+
+    /// As [`Self::within`], for a node.
+    fn within_site(&self, site: crate::cst::NodeId) -> std::ops::Range<usize> {
+        self.tags.positions(self.tree.node(site).subtree())
     }
 
     fn start_byte(&self, e: &Event) -> usize {
@@ -274,14 +287,14 @@ fn family(cap: Capture) -> Family {
         | C::Space { .. } => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
-        C::Flow(FlowCap::Leaves) => Family::Narrowing,
+        C::Flow(FlowCap::Leaves | FlowCap::ToLoop | FlowCap::Block) => Family::Narrowing,
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)
         | C::Arm
         | C::Domain(_)
         | C::Shape(_)
-        | C::TypeAnnot
+        | C::TypeAnnot(_)
         | C::AnonAggMember
         | C::Receiver
         | C::NamedReceiver(_) => Family::Flow,
