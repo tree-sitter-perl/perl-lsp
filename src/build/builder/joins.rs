@@ -97,7 +97,7 @@ impl<'a> Builder<'a> {
                 let scope = holding_scope(c.span);
                 match c.kind {
                     ControlKind::Branch => {
-                        for crate::model::file_analysis::BranchJoin { role, of, lands, arms } in plan.branch_joins(c, None) {
+                        for crate::model::file_analysis::BranchJoin { role, of, lands, arms } in plan.branch_joins(c, None, self.scopes[sid.0 as usize].span) {
                             if !minted.insert((binding.clone(), of, role)) {
                                 continue;
                             }

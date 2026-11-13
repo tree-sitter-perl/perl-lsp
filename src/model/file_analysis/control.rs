@@ -180,9 +180,11 @@ impl<'v> JoinPlan<'v> {
     /// it, and the value entering it, for it and every branch closing one
     /// of its arms. Each arm after the first begins from the value
     /// entering its construct, so an arm never sees a sibling's write,
-    /// whether or not the language makes an arm a scope. A path on which the variable is not yet bound
+    /// whether or not the language makes an arm a scope. A write held to
+    /// a scope (`written_in`, an arm that is a block) is already gone where
+    /// the next arm begins, and needs no entry there. A path on which the variable is not yet bound
     /// reaches no read of it.
-    pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>) -> Vec<BranchJoin> {
+    pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>, written_in: Span) -> Vec<BranchJoin> {
         use crate::model::witnesses::JoinRole;
         let bound = |p: &Point| bound_from.is_none_or(|b| b <= *p);
         let mut arms = Vec::new();
@@ -200,7 +202,12 @@ impl<'v> JoinPlan<'v> {
             // The first arm starts where the test leaves the variable; each
             // one written after another starts over from the entering value.
             let first = k.arms.iter().map(|a| a.span.start).min();
-            let mut lands: Vec<Point> = k.arms.iter().map(|a| a.span.start).filter(|&s| s > entry && Some(s) != first).collect();
+            let mut lands: Vec<Point> = k
+                .arms
+                .iter()
+                .map(|a| a.span.start)
+                .filter(|&s| s > entry && Some(s) != first && contains(written_in, Span { start: s, end: s }))
+                .collect();
             // A test written after what it guards runs first.
             if let Some(cond) = k.cond.filter(|cond| k.arms.iter().all(|a| a.span.end <= cond.start)) {
                 lands.push(cond.start);
@@ -291,7 +298,7 @@ impl super::FileAnalysis {
                 // Held to the scope around the branch, so a sibling block
                 // never sees it.
                 let scope = chain.iter().copied().find(|&s| contains(self.scopes[s.0 as usize].span, c.span)).unwrap_or(stop);
-                for BranchJoin { role, of, lands, arms } in plan.branch_joins(c, bound_from) {
+                for BranchJoin { role, of, lands, arms } in plan.branch_joins(c, bound_from, self.scopes[fe.target_scope.0 as usize].span) {
                     if !minted.insert((binding.clone(), of, role)) {
                         continue;
                     }
