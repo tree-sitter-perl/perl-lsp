@@ -1238,10 +1238,10 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
 /// template and `map` only (`grep` filters, it doesn't transform);
 /// anything fancier is an honest miss. The crm idiom that motivated
 /// it: `with map "GenericCo::Sheets::Roles::$_", qw/CSV DB/;`.
-fn map_built_strings(
-    node: Node,
+fn map_built_strings<'t>(
+    node: Node<'t>,
     src: &[u8],
-    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+    fold: &mut dyn FnMut(Node<'t>) -> Vec<(String, Span)>,
 ) -> Vec<(String, Span)> {
     let Some(kw) = node.child(0) else { return vec![] };
     if kw.utf8_text(src).ok() != Some("map") {
@@ -1271,10 +1271,10 @@ fn map_built_strings(
         .collect()
 }
 
-pub(crate) fn string_list(
-    node: Node,
+pub(crate) fn string_list<'t>(
+    node: Node<'t>,
     src: &[u8],
-    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+    fold: &mut dyn FnMut(Node<'t>) -> Vec<(String, Span)>,
 ) -> Vec<(String, Span)> {
     string_list_with_residue(node, src, fold).0
 }
@@ -1286,10 +1286,10 @@ pub(crate) fn string_list(
 /// structural facts (parent edges, export lists) use the flag to mark
 /// the record incomplete instead of silently dropping the item and
 /// presenting a partial list as the whole truth.
-pub(crate) fn string_list_with_residue(
-    node: Node,
+pub(crate) fn string_list_with_residue<'t>(
+    node: Node<'t>,
     src: &[u8],
-    fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
+    fold: &mut dyn FnMut(Node<'t>) -> Vec<(String, Span)>,
 ) -> (Vec<(String, Span)>, bool) {
     match literal_shape(node) {
         Some(LiteralShape::Qw) => {

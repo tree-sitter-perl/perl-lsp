@@ -1060,7 +1060,7 @@ impl<'a> Builder<'a> {
                             span,
                             form,
                             dies_on_undef,
-                            evaluated_before: self.evaluated_before(span),
+                            evaluated_before: self.evaluated_before(node),
                         });
                     }
                 }

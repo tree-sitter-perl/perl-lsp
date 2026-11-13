@@ -31,7 +31,7 @@ impl<'a> Builder<'a> {
         };
         for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
             let idx = self.refs.len();
-            self.add_ref(RefKind::Variable, span, name, access);
+            self.add_ref_in(node, RefKind::Variable, span, name, access);
             self.refs[idx].folded_from = folded_from;
         }
 
@@ -139,12 +139,7 @@ impl<'a> Builder<'a> {
             if reassigns {
                 self.reassigning_refs.push(self.refs.len());
             }
-            self.add_ref(
-                RefKind::Variable,
-                ref_span,
-                text.to_string(),
-                access,
-            );
+            self.add_ref_in(node, RefKind::Variable, ref_span, text.to_string(), access);
         }
     }
 
@@ -985,7 +980,7 @@ impl<'a> Builder<'a> {
                 binding: pkg.map(|package| RefBinding::Function { package }),
                 folded_from: None,
                 arg_count: None,
-                evaluated_before: self.evaluated_before(span),
+                evaluated_before: self.evaluated_before_span(span),
             });
         }
     }

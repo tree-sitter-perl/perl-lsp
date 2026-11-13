@@ -476,14 +476,19 @@ source. A statement modifier inverts that: `STMT if G` (`unless`, `while`,
 `until`) evaluates `G` before `STMT`, and `STMT for LIST` evaluates `LIST`
 before it, though both are written after it.
 
-The builder mints the order once per file, before the walk: a table of the
-modifiers' heads (`cst::modifier_runs_head_first`), each naming the
-statement it runs before, with the callables inside them
-(`cst::is_callable_boundary`) as regions that run before nothing
-(`build/builder/read_order.rs`). Every builder reader asks that table, so a
-read is ordered the same whichever pass reads it — the walk at the node,
-the narrowing at the modifier, the constant fold, a post-walk pass over the
-refs. The table states the fact in two homes, one per role (rule #14):
+The order is read off the core syntax tree (`docs/adr/core-syntax-tree.md`),
+never a table beside it: a read climbs its node's ancestors
+(`SyntaxForest::climb_in_file`, which runs on from `s///e` code through the
+node it replaces). The first callable it meets (`cst::is_callable_boundary`)
+runs the read when called, so it is evaluated before nothing; the first
+node that is a modifier's head (`cst::modifier_runs_head_first` on its
+parent) names the statement it runs before. A site that holds only a span
+(a plugin's emission, a word of a string list) climbs from the smallest node
+holding it (`SyntaxForest::covering`). Every builder reader asks the same
+climb (`Builder::runs_before`), so a read is ordered the same whichever
+pass reads it — the walk at the node, the narrowing at the modifier, the
+constant fold, a post-walk pass over the refs. The fact lands in two homes,
+one per role (rule #14):
 
 - **On the bag**, for what it types: a variable read inside a head carries
   `EvaluatedBefore(stmt)` on its `Expr` beside its value edge, so the
