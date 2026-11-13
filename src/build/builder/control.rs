@@ -3,7 +3,7 @@
 //! join builder reads one shape for every language (`docs/adr/cfg-tier.md`).
 
 use crate::build::query_extract::{Capture, CtlCap};
-use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind};
+use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind, Span};
 use std::collections::HashMap;
 use tree_sitter::{Node, Query};
 
@@ -32,34 +32,34 @@ pub(super) fn ctl_query() -> (&'static Query, &'static [CtlCap]) {
     (query, caps)
 }
 
-/// The view over one file's matches of [`ctl_query`]. Arms group by the
-/// construct their pattern captures, so a construct several patterns
-/// describe (an `if` with an `else`) is one construct.
-pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(CtlCap, Node<'t>)>>) -> ControlView {
-    let span = super::node_to_span;
+/// The view over one file's matches of a control document, each match its
+/// captures as `(capture, node id, span)`. Arms group by the construct
+/// their pattern captures, so a construct several patterns describe (an
+/// `if` with an `else`) is one construct. Every language's document reads
+/// through this one grouping.
+pub(crate) fn control_view(matches: impl IntoIterator<Item = Vec<(CtlCap, usize, Span)>>) -> ControlView {
     let mut view = ControlView::default();
     let mut by_node: HashMap<usize, usize> = HashMap::new();
     for m in matches {
-        let cap = |c: CtlCap| c;
-        let construct = m.iter().find_map(|&(i, n)| {
-            let kind = match cap(i) {
+        let construct = m.iter().find_map(|&(cap, id, span)| {
+            let kind = match cap {
                 CtlCap::Branch => ControlKind::Branch,
                 CtlCap::Loop => ControlKind::Loop { once: false },
                 CtlCap::LoopOnce => ControlKind::Loop { once: true },
                 _ => return None,
             };
-            Some((n, kind))
+            Some((id, span, kind))
         });
-        let Some((node, kind)) = construct else {
-            for &(i, n) in &m {
-                if let Some(kind) = leave_kind(cap(i)) {
-                    view.leaves.push(Leave { span: span(n), kind });
+        let Some((node, at, kind)) = construct else {
+            for &(cap, _, span) in &m {
+                if let Some(kind) = leave_kind(cap) {
+                    view.leaves.push(Leave { span, kind });
                 }
             }
             continue;
         };
-        let ix = *by_node.entry(node.id()).or_insert_with(|| {
-            view.constructs.push(Construct { span: span(node), kind, cond: None, arms: Vec::new() });
+        let ix = *by_node.entry(node).or_insert_with(|| {
+            view.constructs.push(Construct { span: at, kind, cond: None, arms: Vec::new() });
             view.constructs.len() - 1
         });
         let c = &mut view.constructs[ix];
@@ -67,10 +67,10 @@ pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(CtlCap, No
         if kind == (ControlKind::Loop { once: true }) {
             c.kind = kind;
         }
-        for &(i, n) in &m {
-            let role = match cap(i) {
+        for &(cap, _, span) in &m {
+            let role = match cap {
                 CtlCap::Cond => {
-                    c.cond.get_or_insert(span(n));
+                    c.cond.get_or_insert(span);
                     continue;
                 }
                 CtlCap::Then => ArmRole::When(true),
@@ -79,7 +79,7 @@ pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(CtlCap, No
                 CtlCap::LoopStep => ArmRole::Step,
                 _ => continue,
             };
-            let arm = Arm { span: span(n), role };
+            let arm = Arm { span, role };
             if !c.arms.contains(&arm) {
                 c.arms.push(arm);
             }
@@ -87,6 +87,11 @@ pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(CtlCap, No
     }
     view.constructs.sort_by_key(|c| (c.span.start.row, c.span.start.column, std::cmp::Reverse((c.span.end.row, c.span.end.column))));
     view
+}
+
+/// One match's captures as [`control_view`] reads them.
+fn captured<'t>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>) -> Vec<(CtlCap, usize, Span)> {
+    caps.into_iter().map(|(c, n)| (c, n.id(), super::node_to_span(n))).collect()
 }
 
 /// The control view of the constructs at `nodes`: each node is tried as a
@@ -102,7 +107,7 @@ pub(super) fn control_view_at<'t>(nodes: impl IntoIterator<Item = Node<'t>>, sou
     for node in nodes {
         let mut it = cursor.matches(query, node, source);
         while let Some(m) = it.next() {
-            out.push(m.captures.iter().map(|c| (caps[c.index as usize], c.node)).collect::<Vec<_>>());
+            out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node))));
         }
     }
     control_view(out)

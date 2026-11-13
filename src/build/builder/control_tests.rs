@@ -15,7 +15,7 @@ fn view_of(tree: &tree_sitter::Tree, source: &str) -> ControlView {
     let mut it = cursor.matches(query, tree.root_node(), source.as_bytes());
     use tree_sitter::StreamingIterator;
     while let Some(m) = it.next() {
-        out.push(m.captures.iter().map(|c| (caps[c.index as usize], c.node)).collect());
+        out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node))));
     }
     control_view(out)
 }

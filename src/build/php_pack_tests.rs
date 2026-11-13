@@ -5154,3 +5154,37 @@ fn a_constant_read_holds_the_value_another_file_declares() {
     // the value is the declaring file's: this file alone states none
     assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
 }
+
+/// Past an `if` chain or a short circuit, a variable a branch rebinds holds
+/// what every path leaves it: an arm's write, and the value entering the
+/// branch where no arm writes or none runs.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_branch_joins_what_its_arms_leave() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+function f($c, $d) {
+    $x = new A();
+    if ($c) { $x = new B(); }
+    $y = $x;
+    $z = new A();
+    if ($c) { $z = new B(); } elseif ($d) { g(); } else { $z = new B(); }
+    $w = $z;
+    $t = new A();
+    $c && ($t = new B());
+    $v = $t;
+    $s = new A();
+    if ($c) { $s = new B(); } else { $s = new B(); }
+    $r = $s;
+}
+";
+    let fa = php(src);
+    let both = crate::model::file_analysis::join_all(&[T::ClassName("A".into()), T::ClassName("B".into())], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column: 9 });
+    assert_eq!(at("x", 6), both, "an `if` with no `else`");
+    assert_eq!(at("z", 9), both, "the `elseif` arm that does not write");
+    assert_eq!(at("t", 12), both, "a short circuit");
+    assert_eq!(at("s", 15), Some(T::ClassName("B".into())), "every arm writes");
+}

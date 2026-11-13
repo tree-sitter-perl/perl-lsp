@@ -550,6 +550,16 @@ fn a_branch_joins_what_its_arms_leave() {
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 37)), Some(InferredType::String));
 }
 
+/// A ternary's arms are no scopes: the arm after the one that writes
+/// starts from the value entering the ternary.
+#[test]
+fn a_ternary_arm_never_sees_its_siblings_write() {
+    let fa = build_fa("sub f {\nmy ($c) = @_;\nmy $x = 1;\n$c ? ($x = 'a') : ($x + 0);\nreturn;\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 21)), Some(InferredType::Numeric), "the else arm reads the entering value");
+    let past = fa.inferred_type_via_bag("$x", Point::new(4, 0));
+    assert!(matches!(&past, Some(InferredType::Union(u)) if u.len() == 2), "string or the old number: {past:?}");
+}
+
 /// A postfix test runs before the statement it guards, so it reads the
 /// value entering the statement, not the one the statement writes.
 #[test]

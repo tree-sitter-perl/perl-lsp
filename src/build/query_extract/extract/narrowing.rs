@@ -41,9 +41,6 @@ pub(super) struct State {
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
-        // Control-flow construct spans: the use-after-move check reads these
-        // to decide whether a move is straight-line in its scope.
-        Capture::Ctl(CtlCap::Branch | CtlCap::Loop) => st.out.control_regions.push(e.span()),
         // Parameter-list spans: the use-after-move check reads these to tell
         // a moved parameter (not flagged) from a moved local.
         Capture::ParamRegion => st.out.param_regions.push(e.span()),
@@ -372,7 +369,22 @@ fn subject_value(ad: &Adorned<'_, '_>, v: &Event) -> Span {
         .map_or(v.span(), Event::span)
 }
 
+/// The document's `@ctl` matches as one view, each match its captures.
+fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlView {
+    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span)>> = Default::default();
+    for e in ad.events() {
+        if let Capture::Ctl(c) = e.cap {
+            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span()));
+        }
+    }
+    crate::build::builder::control::control_view(by_match.into_values())
+}
+
 pub(super) fn finish(st: &mut ExtractState) {
+    st.out.control = control_view(st.adorned);
+    // The use-after-move check reads the constructs' spans to decide
+    // whether a move is straight-line in its scope.
+    st.out.control_regions = st.out.control.constructs.iter().map(|c| c.span).collect();
     let n = &mut st.narrowing;
     let out = &mut st.out;
     // An `is` atom's `@narrow.type` names a class, which the language's

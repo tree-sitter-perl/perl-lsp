@@ -49,7 +49,7 @@ pub use crate::build::plugin::default_plugin_registry;
 /// A child module so its `impl Builder` methods keep private-field access
 /// while the code lives in its own file (rule #1: still driven by `build()`).
 mod narrowing;
-mod control;
+pub(crate) mod control;
 mod joins;
 
 /// Query-declared plugin capture (`docs/adr/plugin-system.md`):

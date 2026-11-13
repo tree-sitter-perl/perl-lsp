@@ -4,7 +4,7 @@
 //! writes; the registry folds them at query time.
 
 use super::*;
-use crate::model::file_analysis::{Arm, ArmRole, Binding, Construct, ControlKind, ControlView, Place};
+use crate::model::file_analysis::{Arm, Binding, Construct, ControlKind, JoinPlan, Place};
 use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
 use std::collections::{HashMap, HashSet};
 
@@ -48,8 +48,7 @@ impl<'a> Builder<'a> {
                 arm_at.entry(a.span).or_default().push((ci, ai));
             }
         }
-        let by_span: HashMap<Span, usize> = view.constructs.iter().enumerate().map(|(i, c)| (c.span, i)).collect();
-        let arm_spans: HashSet<Span> = view.constructs.iter().flat_map(|c| c.arms.iter().map(|a| a.span)).collect();
+        let plan = JoinPlan::new(&view);
         let mut minted: HashSet<(Binding, Span, JoinRole)> = HashSet::new();
         let mut witnesses: Vec<Witness> = Vec::new();
         let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
@@ -92,19 +91,21 @@ impl<'a> Builder<'a> {
             for (c, arm) in &holding {
                 // An `elsif` (a branch that is wholly another's arm) joins
                 // with the construct it is the arm of.
-                if c.kind == ControlKind::Branch && arm_spans.contains(&c.span) {
+                if plan.is_lifted(c) {
                     continue;
                 }
                 let scope = holding_scope(c.span);
                 match c.kind {
                     ControlKind::Branch => {
-                        for (role, of, at, arms) in branch_joins(&view, &by_span, c) {
+                        for crate::model::file_analysis::BranchJoin { role, of, lands, arms } in plan.branch_joins(c, None, self.scopes[sid.0 as usize].span) {
                             if !minted.insert((binding.clone(), of, role)) {
                                 continue;
                             }
                             let join = WitnessAttachment::Join { place: Box::new(Place::variable(binding.clone())), of, role };
-                            witnesses.push(self.join_point(&var, scope, at, WitnessPayload::Reset));
-                            witnesses.push(self.join_point(&var, scope, at, WitnessPayload::Edge(join.clone())));
+                            for at in lands {
+                                witnesses.push(self.join_point(&var, scope, at, WitnessPayload::Reset));
+                                witnesses.push(self.join_point(&var, scope, at, WitnessPayload::Edge(join.clone())));
+                            }
                             let read = WitnessAttachment::Place(Box::new(Place::variable(binding.clone())));
                             for arm_at in arms {
                                 witnesses.push(Witness {
@@ -186,42 +187,5 @@ impl<'a> Builder<'a> {
             .ancestors(node)
             .find(|a| a.kind().ends_with("_statement") && a.start_position() <= block.start && a.end_position() >= block.end)
             .map_or(block.end, |a| a.end_position())
-    }
-}
-
-/// The joins one branch mints: past it, and, when its test is written
-/// after what it guards (`… if $c`), at the test, which sees the value
-/// entering the construct. Each is `(role, of, at, arm read points)`.
-fn branch_joins(view: &ControlView, by_span: &HashMap<Span, usize>, c: &Construct) -> Vec<(JoinRole, Span, Point, Vec<Point>)> {
-    let mut arms = Vec::new();
-    arm_points(view, by_span, c, &mut arms);
-    // Just past the construct: its last arm leaves at its end, and that
-    // arm's read must not meet the join it feeds.
-    let past = Point { row: c.span.end.row, column: c.span.end.column + 1 };
-    let mut out = vec![(JoinRole::After, c.span, past, arms)];
-    if let Some(cond) = c.cond {
-        if c.arms.iter().all(|a| a.span.end <= cond.start) {
-            out.push((JoinRole::Test, c.span, cond.start, vec![c.span.start]));
-        }
-    }
-    out
-}
-
-/// Where each path through `c` leaves it: the end of every arm (an arm that
-/// is itself a branch contributes its own paths), and, when no arm runs
-/// where the test goes one way, the start of its last arm, where the test
-/// has run and no arm has.
-fn arm_points(view: &ControlView, by_span: &HashMap<Span, usize>, c: &Construct, out: &mut Vec<Point>) {
-    for a in &c.arms {
-        match by_span.get(&a.span).map(|&i| &view.constructs[i]) {
-            Some(inner) if inner.kind == ControlKind::Branch && !std::ptr::eq(inner, c) => arm_points(view, by_span, inner, out),
-            _ => out.push(a.span.end),
-        }
-    }
-    let has = |b: bool| c.arms.iter().any(|a: &Arm| a.role == ArmRole::When(b));
-    if !(has(true) && has(false)) {
-        if let Some(last) = c.arms.iter().map(|a| a.span.start).max() {
-            out.push(last);
-        }
     }
 }

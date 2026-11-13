@@ -115,19 +115,32 @@ never answers with the outer's), and consumers ask the value
 A rebind that may not run leaves its variable old-or-new where the paths
 rejoin, and a join says exactly that: past a branch whose arm writes it, the
 variable holds the join of what every path left it (`docs/adr/cfg-tier.md`).
-The builder mints the joins once (`Builder::assemble_joins`), from Perl's
-control document (`queries/perl/ctl.scm`) and the bound writes:
+Every language mints the joins once, from its control document and its
+bound writes: the Perl builder (`Builder::assemble_joins`, over
+`queries/perl/ctl.scm`) and a pack's assembled analysis
+(`FileAnalysis::assemble_joins`, over the `@ctl` captures of its skeleton
+document, after its facts are bound). Both read one plan of the document
+(`JoinPlan`), so a branch means the same in every language:
 
 - **Past the construct**, a `Reset` and an `Edge(Join)` on the variable, held
   to the scope the construct sits in. Each arm that falls through is one
   `Edge(Place)` read where the arm leaves; a construct with no arm for one
-  side of its test adds the bypass, read where the test has run and no arm
-  has. An `elsif` chain is one construct. `JoinFold` joins the arms, and one
-  arm the chase cannot type leaves the join untyped (`Unknown`).
-- **A test written after what it guards** (`$x = f() unless $x`) runs first,
-  so it reads the value entering the statement (`JoinRole::Test`).
+  side of its test adds the bypass, read where the construct is entered. An
+  `elsif` chain is one construct, and so is a branch that closes an arm (the
+  last statement of a python block). `JoinFold` joins the arms, and one arm
+  the chase cannot type leaves the join untyped (`Unknown`).
+- **Each arm begins from the value entering its construct**
+  (`JoinRole::Entry`): read past the test, or at the construct's start when
+  the test runs after what it guards (`$x = f() unless $x`, whose test sees
+  the entering value too). The first arm to run needs no entry, since the
+  test leaves the variable as it entered; an entry is a reset, and a reset
+  to an untyped value outranks a later use's evidence. So a sibling arm never sees a write, whether or
+  not the language makes an arm a scope (Python's and PHP's do not, nor does
+  any language's ternary or short circuit).
+- A path on which the variable is not yet bound (a python name first
+  assigned in one arm) reaches no read of it: it adds no bypass and no entry.
 - Inside an arm the arm has run, so `if (…) { $x = Foo->new; $x->m }` still
-  types the call, and a sibling arm never sees the write.
+  types the call.
 
 Three cases still stand in a reset marker (an untyped join) where their
 joins are not built yet: a loop (`TODO(cfg-loops)`, the loop joins), a block
@@ -249,14 +262,8 @@ the same way once its analysis is assembled and bound
 bindings to key them by.
 
 **A fact made in a nested block is a region.** It holds from where it is made
-to the end of the block it was made in, so the else arm never sees the then
-arm's write, and past the `if` the write is gone. What the variable holds
-after the `if` is the join of "the write ran" and "it did not": a write in a
-nested block also mints a reset marker on each enclosing level, at the end
-of the statement holding that level, up to the binding. With no join of
-values, that marker reads `Unknown` after a write that may have run, the
-same answer the flat walk gave. A join that keeps the value both arms agree
-on is `JoinFold`'s job (`docs/prompt-cfg-tier.md`).
+to the end of the block it was made in, so past the block only a join (or a
+reset marker, where none is built yet) speaks for it.
 
 A key write (`$h->{k} = …`) in a nested block extends the shape on the
 binding with no end: it opens the shape instead (`mutation_extension`), which

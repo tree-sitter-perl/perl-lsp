@@ -4171,3 +4171,14 @@ fn cpp_noreturn_says_a_call_never_comes_back() {
         vec![("bail".into(), never()), ("die_now".into(), never()), ("ok".into(), Ends::all()), ("stop".into(), never())]
     );
 }
+
+/// A C++ branch joins its arms like any other language's, braceless arm
+/// included: two arms that agree leave their agreed type.
+#[test]
+fn cpp_a_branch_joins_what_its_arms_leave() {
+    let src = "void f(bool c) {\n    auto n = 1;\n    if (c) n = 2;\n    auto m = n;\n}\n";
+    let fa = cpp_fa(src);
+    let joined = fa.witnesses.all().iter().any(|w| matches!(w.attachment, crate::model::witnesses::WitnessAttachment::Join { .. }));
+    assert!(joined, "the braceless arm's write joins past the `if`");
+    assert_eq!(fa.inferred_type_via_bag("n", tree_sitter::Point { row: 3, column: 13 }), Some(crate::model::file_analysis::InferredType::Numeric));
+}

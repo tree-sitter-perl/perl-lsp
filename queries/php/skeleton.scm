@@ -490,22 +490,22 @@
 ; runs where the left holds, of `||` where it fails. An `else` arm is its
 ; body. A loop tests its condition again after each run of its body, so
 ; what follows it is no arm of that test.
-(if_statement condition: (_) @ctl.cond body: (_) @ctl.then)
+(if_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (if_statement
   condition: (_) @ctl.cond
-  alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)])
-(else_if_clause condition: (_) @ctl.cond body: (_) @ctl.then)
+  alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)]) @ctl.branch
+(else_if_clause condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (if_statement
-  alternative: (else_if_clause condition: (_) @ctl.cond)
+  alternative: (else_if_clause condition: (_) @ctl.cond) @ctl.branch
   alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)])
 ; TODO(cfg-exit-join): `@ctl.loop` and the fall-through it guards stand
 ; in for reachability; the CFG retires both, since a `break` is an edge to
 ; the loop's exit there.
 (while_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.loop
-(conditional_expression condition: (_) @ctl.cond body: (_) @ctl.then)
-(conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else)
-(binary_expression left: (_) @ctl.cond operator: ["&&" "and"] right: (_) @ctl.then)
-(binary_expression left: (_) @ctl.cond operator: ["||" "or"] right: (_) @ctl.else)
+(conditional_expression condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
+(conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch
+(binary_expression left: (_) @ctl.cond operator: ["&&" "and"] right: (_) @ctl.then) @ctl.branch
+(binary_expression left: (_) @ctl.cond operator: ["||" "or"] right: (_) @ctl.else) @ctl.branch
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
