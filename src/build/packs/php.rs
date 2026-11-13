@@ -45,6 +45,7 @@ pub fn php_pack() -> LangPack {
             _ => None,
         },
         annot_type: declared_type,
+        annot_enforcement: crate::model::witnesses::Enforcement::Checked,
         doc_text: docblock_description,
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.

@@ -17,6 +17,7 @@ pub fn cmake_pack() -> LangPack {
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: |_| None,
+        annot_enforcement: crate::model::witnesses::Enforcement::Advisory,
         doc_text: |_| None,
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.

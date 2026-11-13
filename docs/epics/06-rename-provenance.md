@@ -1,7 +1,8 @@
 # Epic 6 — Rename provenance: the residual
 
-> **Status:** scheduled (6th). Smaller than it was — the headline phase
-> landed.
+> **Status:** Phases A and B open; Phase C's mechanism is landed and
+> only its negative pin is owed (audited 2026-11-12). The headline
+> phase (`folded_from`) landed before this epic was cut.
 > **Design owner-doc:** `docs/prompt-ref-provenance.md` §"What's still
 > missing" (three items; the doc has already been trimmed to them).
 
@@ -78,15 +79,16 @@ in a unit test and note the e2e gap explicitly.
 Renaming `Animal::speak` should offer `Dog::speak` (the override family)
 and must NOT touch `Unrelated::speak`.
 
-The pieces exist: `children_index` (descendants via `GraphView`
-INHERITS_INV) and the override-family machinery the heatmap already
-counts through. **Verify current behavior first** — an `OverrideScope`
-knob may already exist (`grep -rn 'OverrideScope' src/`); this phase may
-be "wire the knob into LSP rename and default it sanely" rather than new
-analysis.
+**The mechanism is landed.** `OverrideScope` (`index/resolve/target.rs`)
+defaults to `Hierarchy` — the override family, gathered over `@ISA`
+edges, never by name — and LSP rename reads it from the client's
+`rename.overrideScope` setting (`lsp/backend/server.rs`); `Dispatch` is
+the precise alternative. `override_scope_hierarchy_unions_dispatch_is_precise`
+(`index/resolve/tests/groups_tests.rs`) pins the family.
 
-The name-collision NEGATIVE test is the acceptance bar:
-`Unrelated::speak` untouched.
+What is owed is the name-collision NEGATIVE test, which is still the
+acceptance bar: `Unrelated::speak`, a same-named method on a class
+outside the hierarchy, stays untouched.
 
 ## Non-goals
 

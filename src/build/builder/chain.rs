@@ -256,7 +256,7 @@ impl<'a> Builder<'a> {
                 // seeded by an earlier visit (plus the framework-aware
                 // `FirstParam → ClassName` projection).
                 let scope = self.scope_at_point(node.start_position());
-                self.bag_query_variable(text, scope, node.start_position())
+                self.bag_query_variable(text, scope, self.read_point_of(node))
             }
             "func0op_call_expression" => self.infer_expression_result_type(node),
             "bareword" | "package" => {
@@ -301,7 +301,7 @@ impl<'a> Builder<'a> {
                 let idx: i32 = index.utf8_text(self.source).ok()?.parse().ok()?;
                 let arr_var = format!("@{}", name);
                 let scope = self.scope_at_point(node.start_position());
-                self.bag_query_variable(&arr_var, scope, node.start_position())
+                self.bag_query_variable(&arr_var, scope, self.read_point_of(node))
                     .and_then(|t| t.element_at(idx).cloned())
             }
             "hash_element_expression" => {

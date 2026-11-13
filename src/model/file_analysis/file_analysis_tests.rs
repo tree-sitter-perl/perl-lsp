@@ -787,12 +787,12 @@ fn defined_strips_an_optional_only_the_index_types() {
     idx.register_workspace_module(std::path::PathBuf::from("/tmp/Maker.pm"), Arc::new(build_fa_from_source(producer)));
     let foo = InferredType::ClassName("Foo".into());
     assert_eq!(
-        fa.inferred_type_via_bag_ctx("$r", Point::new(4, 0), Some(&idx)),
+        fa.inferred_type_via_bag_ctx("$r", crate::model::witnesses::ReadPoint::position(Point::new(4, 0)), Some(&idx)),
         Some(InferredType::Optional(Box::new(foo.clone()))),
         "ahead of the guard `$r` is the import's Optional<Foo>",
     );
     assert_eq!(
-        fa.inferred_type_via_bag_ctx("$r", Point::new(5, 4), Some(&idx)),
+        fa.inferred_type_via_bag_ctx("$r", crate::model::witnesses::ReadPoint::position(Point::new(5, 4)), Some(&idx)),
         Some(foo),
         "past `defined $r` the strip reads the same import",
     );
@@ -2467,7 +2467,7 @@ fn cross_file_slot_write_types_the_read() {
     // and the variable that received it — `$x` rides Edge(Expr(read))
     let t2 = fa.inferred_type_via_bag_ctx(
         "$x",
-        Point { row: 6, column: 0 },
+        crate::model::witnesses::ReadPoint::position(Point { row: 6, column: 0 }),
         Some(&idx),
     );
     assert_eq!(t2, Some(InferredType::ClassName("My::Conn".into())));
@@ -2796,6 +2796,7 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         binding: None,
         folded_from: None,
         arg_count: None,
+        evaluated_before: None,
     };
     // Linking without a resolved owner is a no-op — nothing to attach to.
     r.link_owned_symbol(SymbolId(7));

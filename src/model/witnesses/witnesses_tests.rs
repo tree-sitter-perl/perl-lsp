@@ -364,7 +364,7 @@ fn narrowed_span_wins_over_outer_witness_at_inside_point() {
 
     let inside = ReducerQuery {
         args: Vec::new(),        attachment: &att,
-        point: Some(p(5, 4)),
+        point: Some(ReadPoint::position(p(5, 4))),
         framework: FrameworkFact::Plain,
         arity_hint: None, receiver: None, context: None,
     };
@@ -375,7 +375,7 @@ fn narrowed_span_wins_over_outer_witness_at_inside_point() {
 
     let outside = ReducerQuery {
         args: Vec::new(),        attachment: &att,
-        point: Some(p(2, 0)),
+        point: Some(ReadPoint::position(p(2, 0))),
         framework: FrameworkFact::Plain,
         arity_hint: None, receiver: None, context: None,
     };
