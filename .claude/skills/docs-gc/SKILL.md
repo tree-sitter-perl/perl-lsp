@@ -1,6 +1,6 @@
 ---
 name: docs-gc
-description: Garbage-collect the docs tree — delete landed prompt briefs, convert closed working docs (hitlists, measurement ledgers, spike writeups) into their durable form, repoint references into the owning ADRs, and scrub ADRs to house voice (no historical narrative). Use after a mission/arc lands, or whenever docs/prompt-*.md piles up.
+description: Garbage-collect the docs tree — delete landed prompt briefs, convert closed working docs (hitlists, measurement ledgers, spike writeups) into their durable form, repoint references into the owning ADRs, and scrub ADRs to house voice (no historical narrative). Use after a mission/arc lands, whenever docs/prompt-*.md piles up, and in every release PR to audit docs/epics against main.
 ---
 
 # docs-gc: landed prompts die, ADRs carry the load
@@ -102,6 +102,16 @@ Measurements inside a working doc are the content most worth rescuing
 and the most likely to be stale. A number with no date and no rerun is
 a liability once it outlives the branch that measured it: re-measure it,
 or move it with the date attached.
+
+## Job 4 — audit the epics (every release)
+
+The release PR runs this job, beside the `cache-epochs/` roll-up. Follow
+`docs/epics/README.md` §"Audit at every release": check each epic's
+phases against `main` with source (a grep, a test name, a gold row — not
+memory), mark landed phases with that evidence, fix anchors that no
+longer resolve, retire an epic with nothing left, refresh the slate's
+Status column and date, and give every `docs/prompt-*.md` a coverage-map
+row. An epic an open stack is building is that stack's to update.
 
 ## Verify (non-negotiable)
 
