@@ -1867,7 +1867,6 @@ fn build_facts_are_not_keyed_by_position() {
         ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
         ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
         ("build/query_extract/extract/flow.rs", 4, "reassigned names, declaration sites and constants by start point; member reads by span"),
-        ("build/query_extract/extract/narrowing.rs", 1, "loop exits by start byte, asked whether an arm holds one"),
         ("build/query_extract/places.rs", 4, "the place a name or member read denotes, by the read's span"),
         ("build/query_extract/skeleton.rs", 12, "the skeleton joins capture facts by span: callable owners, receiver classes, call arguments, read places, written and initialised sites, declaration names, claimed refs, settled writes"),
     ];
