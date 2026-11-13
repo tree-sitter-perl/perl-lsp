@@ -1,6 +1,7 @@
 # Epic 9 — Mojo polish: route names, stash intelligence, hooks, transitive plugins
 
-> **Status:** scheduled (9th). The user-facing feature epic.
+> **Status:** Phase A mostly landed (audited 2026-11-12); B–E open.
+> The user-facing feature epic.
 > **Design owner-doc:** `docs/prompt-mojo-todo.md` — read WHOLE; its
 > stash section contains a fully-made design decision (per-action
 > ownership via the brand) that this epic implements as written.
@@ -27,6 +28,15 @@ completion stretch, explicitly droppable.
 ## Phase breakdown
 
 ### Phase A — route naming + `url_for`
+
+**Landed, except Lite auto-naming.** `frameworks/mojo-routes.rhai` mints
+a route-name Handler at `->name('…')` with `url_for`/`redirect_to` as its
+dispatchers and bridges it to `Mojolicious::Controller`, which is what
+string-arg completion enumerates; `plugin_mojo_routes_name_registers_url_for_handle`
+pins it. Open: Mojolicious::Lite routes are keyed by PATH
+(`frameworks/mojo-lite.rhai`), so step 1's documented default name for
+an unnamed Lite route is not minted. The heatmap half of step 4 waits on
+Epic 8 (Handlers are not heatmap-eligible yet).
 
 1. At `->name('show_user')` chain links, `mojo-routes.rhai` emits a
    Handler keyed by the route NAME (display `Route`), bridged the way
