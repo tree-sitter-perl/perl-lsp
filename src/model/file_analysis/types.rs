@@ -1401,6 +1401,12 @@ pub trait TypeOrder {
     fn common_class(&self, classes: &[&str]) -> Option<String>;
     /// The language whose values are joined declares `rule`.
     fn holds(&self, rule: Subsumption) -> bool;
+    /// Does the order see every class `class` inherits from, so that an
+    /// `isa` it answers no to is no? An order that holds no declarations
+    /// sees none.
+    fn ancestry_closed(&self, _class: &str) -> bool {
+        false
+    }
 }
 
 /// A language's rules with no class graph in hand: a class is an instance
@@ -1450,6 +1456,52 @@ impl TypeOrder for Unordered {
 ///   past [`UNION_WIDTH_CAP`]
 pub fn join(a: &InferredType, b: &InferredType, order: &dyn TypeOrder) -> InferredType {
     join_traced(a, b, order, &mut |_| {})
+}
+
+/// Does a value sit within a bound? Three answers, because the class order
+/// a query holds may not see every edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// Joining the value in leaves the bound where it was.
+    Yes,
+    /// It does not, and no edge the order cannot see could change that.
+    No,
+    /// The order cannot place it: the value's ancestry runs past what the
+    /// order sees, so an edge it does not hold could put it under the
+    /// bound. An `Unknown` value is undecided too.
+    Undecided,
+}
+
+/// How `value` fits `bound`, read off the same lattice [`join`] folds by, so
+/// a bound and a fold never disagree about what is above what. A class
+/// whose whole ancestry the order sees (`TypeOrder::ancestry_closed`) is
+/// decided; one with an ancestor the order cannot see is not. A value is
+/// its arms (`receiver_arms`, so `?Iface` and `A|B` bound like `Iface`):
+/// one arm decidedly outside puts it outside, and it is undecided only
+/// when every arm outside is a class the order cannot place.
+pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) -> Fit {
+    if !value.is_known() {
+        return Fit::Undecided;
+    }
+    let top = join(bound, bound, order);
+    let within = |v: &InferredType| join(v, bound, order) == top;
+    if within(value) {
+        return Fit::Yes;
+    }
+    if value.defined_part() != Some(value) && !within(&InferredType::Undef) {
+        return Fit::No;
+    }
+    // TODO(callable-classes): no class sits under `CodeRef`, so `Closure`
+    // (or any class with `__invoke`) decidedly misfits a `callable` bound.
+    let classes = bound.receiver_arms().iter().any(|a| a.class_name().is_some());
+    let mut fit = Fit::Yes;
+    for arm in value.receiver_arms().iter().filter(|a| !within(a)) {
+        match arm.class_name() {
+            Some(c) if classes && !order.ancestry_closed(c) => fit = Fit::Undecided,
+            _ => return Fit::No,
+        }
+    }
+    fit
 }
 
 /// How a join lost precision: the closed set of widening steps, reported to

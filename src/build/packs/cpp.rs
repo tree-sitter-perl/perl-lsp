@@ -44,6 +44,9 @@ pub fn cpp_pack() -> LangPack {
         // C++ declared types ARE the witness source. Primitives → the
         // value lattice; `auto`/`void` defer (None → edge carries);
         // anything else identifier-shaped is a class instance.
+        // TODO(cpp-char-pointer-string): the text is the pointee, so a
+        // `char *s` is bounded by `Numeric` and a string written to it reads
+        // as a number (docs/adr/declared-bounds.md).
         annot_type: |text| {
             use InferredType::*;
             match text.trim() {
@@ -82,6 +85,7 @@ pub fn cpp_pack() -> LangPack {
                 }
             }
         },
+        annot_enforcement: crate::model::witnesses::Enforcement::Converted,
         doc_text: |_| None,
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves

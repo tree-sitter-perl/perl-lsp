@@ -268,7 +268,8 @@ module_index: Option<&dyn CrossFileLookup>,
             // framework / branch / arity rules refine the answer. Keep the
             // index so a role-contract param (`$c`) resolves through
             // cross-file ancestry, not just the local `package_parents`.
-            analysis.inferred_type_via_bag_ctx(text, point, module_index)
+            let at = analysis.read_at(span).unwrap_or(crate::model::witnesses::ReadPoint::position(point));
+            analysis.inferred_type_via_bag_ctx(text, at, module_index)
         }
         "package" | "bareword" => {
             // Bareword = class name
@@ -608,7 +609,10 @@ fn resolve_node_type(
     match node.kind() {
         "scalar" | "array" | "hash" => {
             let text = node.utf8_text(source).ok()?;
-            analysis.inferred_type_via_bag_ctx(text, point, module_index)
+            let at = analysis
+                .read_at(node_to_span(node))
+                .unwrap_or(crate::model::witnesses::ReadPoint::position(point));
+            analysis.inferred_type_via_bag_ctx(text, at, module_index)
         }
         "bareword" | "package" => {
             let text = node.utf8_text(source).ok()?;

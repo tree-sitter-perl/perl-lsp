@@ -168,11 +168,11 @@ impl FileAnalysis {
                     }
                     if let Some(sym_id) = r.resolved_symbol() {
                         let sym = self.symbol(sym_id);
-                        return Some(self.format_symbol_hover_at(sym, source, point, module_index));
+                        return Some(self.format_symbol_hover_at(sym, source, r.read_point(), module_index));
                     }
                     // Unresolved variable — try resolve ourselves
                     if let Some(sym) = self.resolve_variable(&r.target_name, point) {
-                        return Some(self.format_symbol_hover_at(sym, source, point, module_index));
+                        return Some(self.format_symbol_hover_at(sym, source, r.read_point(), module_index));
                     }
                 }
                 RefKind::FunctionCall | RefKind::ImportedName => {
@@ -294,7 +294,7 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
         let render = |analysis: &FileAnalysis, sym: &Symbol| {
-            let base = match analysis.inferred_type_via_bag_ctx(field, sym.span.end, module_index)
+            let base = match analysis.inferred_type_via_bag_ctx(field, crate::model::witnesses::ReadPoint::position(sym.span.end), module_index)
             {
                 Some(ty) => format!("{}: {}", field, self.display_type_of(sym, &ty)),
                 None => field.to_string(),
@@ -481,14 +481,14 @@ impl FileAnalysis {
         source: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
-        self.format_symbol_hover_at(sym, source, sym.selection_span.end, module_index)
+        self.format_symbol_hover_at(sym, source, crate::model::witnesses::ReadPoint::position(sym.selection_span.end), module_index)
     }
 
     pub(super) fn format_symbol_hover_at(
         &self,
         sym: &Symbol,
         source: &str,
-        at: Point,
+        at: crate::model::witnesses::ReadPoint,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> String {
         let line = source_line_at(source, sym.span.start.row);

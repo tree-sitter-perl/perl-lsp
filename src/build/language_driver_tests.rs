@@ -313,11 +313,30 @@ fn sym_in<'a>(
 
 #[cfg(feature = "cpp")]
 #[test]
+fn a_member_typed_by_its_macros_parameter_declares_no_type() {
+    // `_SV_HEAD(ptrtype)`: each paste names its own `ptrtype`, so the shared
+    // base has no type for `sv_any` to be bounded by; `sv_refcnt` has one.
+    use crate::model::witnesses::WitnessAttachment;
+    let src = "\
+#define _SV_HEAD(ptrtype) ptrtype sv_any; unsigned sv_refcnt;
+struct svrec { _SV_HEAD(void*) };
+";
+    let fa = cpp_driver().analyze(src);
+    let bounded = |name: &str| {
+        let s = sym_in(&fa, name);
+        fa.witnesses.has_declared_bound(&WitnessAttachment::Place(Box::new(fa.declared_place(s.id))))
+    };
+    assert!(!bounded("sv_any"), "the paste, not the base, types sv_any");
+    assert!(bounded("sv_refcnt"));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
 fn macro_body_member_carries_field_payload_like_plain_field() {
     // hitlist-4 family C (findings 4 + 6a): a member declared inside a
     // `#define BASEOP` body must arrive with the SAME payload a plainly-declared
     // struct field carries — Field kind, the pointer deref_stack, and the
-    // explicit-annotation (`Annotation(Declared)`) witness — so hover keeps the `*` and
+    // declared bound — so hover keeps the `*` and
     // the redundant inlay hint is suppressed.
     use crate::model::file_analysis::{InferredType, SymKind};
     let src = "\
@@ -336,19 +355,19 @@ struct op { BASEOP };
         "hover keeps the pointer star"
     );
 
-    // finding 6a: the explicit-annotation witness the inlay suppressor keys on
+    // finding 6a: the declared bound the inlay suppressor keys on
     // is present on the member's own place (parity with a plain field).
     let op_type = sym_in(&fa, "op_type");
     assert_eq!(op_type.kind, SymKind::Field);
     assert!(
-        fa.witnesses.has_annotation(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
+        fa.witnesses.has_declared_bound(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
             fa.declared_place(op_type.id),
         ))),
-        "macro-body member carries the declared-type witness"
+        "macro-body member carries the declared bound"
     );
 
     // The renderers then agree: inlay over the member declarations emits no hint
-    // (Field kind + `Annotation` both suppress) — exactly like a plain struct,
+    // (Field kind + the declared bound both suppress) — exactly like a plain struct,
     // whose fields are never hinted either.
     let full = crate::lsp::symbols::inlay_hints(
         &fa,

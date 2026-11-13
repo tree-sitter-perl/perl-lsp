@@ -787,12 +787,12 @@ fn defined_strips_an_optional_only_the_index_types() {
     idx.register_workspace_module(std::path::PathBuf::from("/tmp/Maker.pm"), Arc::new(build_fa_from_source(producer)));
     let foo = InferredType::ClassName("Foo".into());
     assert_eq!(
-        fa.inferred_type_via_bag_ctx("$r", Point::new(4, 0), Some(&idx)),
+        fa.inferred_type_via_bag_ctx("$r", crate::model::witnesses::ReadPoint::position(Point::new(4, 0)), Some(&idx)),
         Some(InferredType::Optional(Box::new(foo.clone()))),
         "ahead of the guard `$r` is the import's Optional<Foo>",
     );
     assert_eq!(
-        fa.inferred_type_via_bag_ctx("$r", Point::new(5, 4), Some(&idx)),
+        fa.inferred_type_via_bag_ctx("$r", crate::model::witnesses::ReadPoint::position(Point::new(5, 4)), Some(&idx)),
         Some(foo),
         "past `defined $r` the strip reads the same import",
     );
@@ -2467,7 +2467,7 @@ fn cross_file_slot_write_types_the_read() {
     // and the variable that received it — `$x` rides Edge(Expr(read))
     let t2 = fa.inferred_type_via_bag_ctx(
         "$x",
-        Point { row: 6, column: 0 },
+        crate::model::witnesses::ReadPoint::position(Point { row: 6, column: 0 }),
         Some(&idx),
     );
     assert_eq!(t2, Some(InferredType::ClassName("My::Conn".into())));
@@ -2500,7 +2500,7 @@ fn constructor_slot_write_through_an_inherited_new_types_the_read() {
     let tree = parser.parse(child_src, None).unwrap();
     let fa = crate::build::builder::build(&tree, child_src.as_bytes());
 
-    let t = fa.inferred_type_via_bag_ctx("$x", Point { row: 11, column: 0 }, Some(&idx));
+    let t = fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point { row: 11, column: 0 }), Some(&idx));
     assert_eq!(t, Some(InferredType::ClassName("My::Conn".into())));
 }
 
@@ -2511,7 +2511,7 @@ fn a_write_through_another_class_object_is_not_the_readers() {
     let fa = build_fa_from_source(
         "package Other;\nsub new { bless {}, shift }\npackage Child;\nsub new { bless {}, shift }\nsub fill {\n    my ($self) = @_;\n    my $o = make_other();\n    $o->{conn} = My::Conn->new;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{conn};\n}\nsub make_other { Other->new }\n1;\n",
     );
-    let t = fa.inferred_type_via_bag_ctx("$x", Point { row: 12, column: 0 }, None);
+    let t = fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point { row: 12, column: 0 }), None);
     assert_ne!(t, Some(InferredType::ClassName("My::Conn".into())));
 }
 
@@ -2522,20 +2522,20 @@ fn ref_of_the_invocant_names_its_class() {
     let fa = build_fa_from_source(
         "package Node;\nsub new {\n    my $class = ref $_[0] || $_[0];\n    bless { children => [] }, $class;\n}\npackage Doc;\nour @ISA = ('Node');\nsub new {\n    my $class = ref $_[0] ? ref shift : shift;\n    my $self = $class->SUPER::new;\n    $self->{ro} = 1;\n    return $self;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{ro};\n}\n1;\n",
     );
-    assert_eq!(fa.inferred_type_via_bag_ctx("$class", Point { row: 3, column: 0 }, None), Some(InferredType::ClassName("Node".into())));
+    assert_eq!(fa.inferred_type_via_bag_ctx("$class", crate::model::witnesses::ReadPoint::position(Point { row: 3, column: 0 }), None), Some(InferredType::ClassName("Node".into())));
     assert_eq!(
-        fa.inferred_type_via_bag_ctx("$class", Point { row: 9, column: 0 }, None).as_ref().and_then(|t| t.dispatch_name()),
+        fa.inferred_type_via_bag_ctx("$class", crate::model::witnesses::ReadPoint::position(Point { row: 9, column: 0 }), None).as_ref().and_then(|t| t.dispatch_name()),
         Some("Doc"),
     );
-    assert_eq!(fa.inferred_type_via_bag_ctx("$self", Point { row: 10, column: 0 }, None), Some(InferredType::ClassName("Doc".into())));
-    assert_eq!(fa.inferred_type_via_bag_ctx("$x", Point { row: 16, column: 0 }, None), Some(InferredType::Numeric));
+    assert_eq!(fa.inferred_type_via_bag_ctx("$self", crate::model::witnesses::ReadPoint::position(Point { row: 10, column: 0 }), None), Some(InferredType::ClassName("Doc".into())));
+    assert_eq!(fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point { row: 16, column: 0 }), None), Some(InferredType::Numeric));
 }
 
 #[test]
 fn ref_of_an_unblessed_value_stays_a_string() {
     let fa = build_fa_from_source("my $h = {};\nmy $t = ref $h;\nmy $u = ref($h) || 'HASH';\n1;\n");
-    assert!(fa.inferred_type_via_bag_ctx("$t", Point { row: 3, column: 0 }, None).is_some_and(|t| t.is_string()));
-    assert!(fa.inferred_type_via_bag_ctx("$u", Point { row: 3, column: 0 }, None).is_some_and(|t| t.is_string()));
+    assert!(fa.inferred_type_via_bag_ctx("$t", crate::model::witnesses::ReadPoint::position(Point { row: 3, column: 0 }), None).is_some_and(|t| t.is_string()));
+    assert!(fa.inferred_type_via_bag_ctx("$u", crate::model::witnesses::ReadPoint::position(Point { row: 3, column: 0 }), None).is_some_and(|t| t.is_string()));
 }
 
 #[test]
@@ -2860,6 +2860,7 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         binding: None,
         folded_from: None,
         arg_count: None,
+        evaluated_before: None,
     };
     // Linking without a resolved owner is a no-op — nothing to attach to.
     r.link_owned_symbol(SymbolId(7));
