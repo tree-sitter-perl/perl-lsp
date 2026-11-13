@@ -121,7 +121,7 @@ impl<'a> Builder<'a> {
 
     /// The write `read` sees: one reaching its site, which skips the
     /// statement a modifier's condition is evaluated before.
-    fn visible_constant(&self, name: &str, read: Node<'_>) -> Option<&Write> {
+    fn visible_constant(&self, name: &str, read: Node<'a>) -> Option<&Write> {
         if !self.consts.written.contains(&name_match_key(name, &PERL_SPELLINGS)) {
             return None;
         }
@@ -130,12 +130,12 @@ impl<'a> Builder<'a> {
     }
 
     /// The constant string values `name` holds where `read` is.
-    pub(super) fn resolve_constant_strings(&self, name: &str, read: Node<'_>) -> Option<Vec<String>> {
+    pub(super) fn resolve_constant_strings(&self, name: &str, read: Node<'a>) -> Option<Vec<String>> {
         self.visible_constant(name, read)?.values.clone()
     }
 
     /// The source literal of a single-literal fold of `name` where `read` is.
-    pub(super) fn constant_string_source(&self, name: &str, read: Node<'_>) -> Option<Span> {
+    pub(super) fn constant_string_source(&self, name: &str, read: Node<'a>) -> Option<Span> {
         self.visible_constant(name, read)?.source
     }
 
@@ -154,7 +154,7 @@ impl<'a> Builder<'a> {
 
     /// Bind the topic `$_` to `values` for the extent of `node`; the outer
     /// topic resumes at its end.
-    pub(super) fn with_topic(&mut self, node: Node<'_>, values: Vec<String>) {
+    pub(super) fn with_topic(&mut self, node: Node<'a>, values: Vec<String>) {
         let outer = self.resolve_constant_strings("$_", node);
         self.push_constant("$_", node.start_position(), Some(values), None);
         self.push_constant("$_", node.end_position(), outer, None);

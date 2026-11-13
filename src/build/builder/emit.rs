@@ -861,7 +861,7 @@ impl<'a> Builder<'a> {
             });
             // A read the source places after a statement it runs before
             // must not see that statement's writes (`$x = f($x) if defined $x`).
-            if let Some(stmt) = reads_binding.then(|| self.read_order.before(span)).flatten() {
+            if let Some(stmt) = reads_binding.then(|| self.runs_before(node)).flatten() {
                 self.push_witness(Witness {
                     attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("evaluation_order".into()),
@@ -1230,7 +1230,7 @@ impl<'a> Builder<'a> {
             span,
             form,
             dies_on_undef,
-            evaluated_before: self.evaluated_before(span),
+            evaluated_before: self.evaluated_before(node),
         });
     }
 
