@@ -242,16 +242,11 @@ fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
         stmt_by_cond[ix] = Some(stmt);
         stmt_of.entry(stmt).or_default().push(ix);
     }
-    let mut to_loop: Vec<usize> = ad
-        .events()
-        .iter()
-        .filter(|e| e.cap == Capture::Flow(FlowCap::ToLoop))
-        .map(|e| range(e.site).0)
-        .collect();
-    to_loop.sort_unstable();
+    // An arm holds a jump to the loop when one is captured in its subtree,
+    // or on a node sharing its range.
     let reaches_loop = |arm: NodeId| {
-        let (lo, hi) = range(arm);
-        to_loop.get(to_loop.partition_point(|&s| s < lo)).is_some_and(|&s| s < hi)
+        let at = tree.node(arm).site().id();
+        ad.within_site(at).any(|ix| ad.events()[ix].cap == Capture::Flow(FlowCap::ToLoop))
     };
     let linked: std::collections::HashSet<NodeId> = conds.iter().flat_map(|d| d.elses.iter().copied()).collect();
     let mut chains: Vec<(NodeId, Vec<usize>)> = stmt_of

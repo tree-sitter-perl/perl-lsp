@@ -193,7 +193,12 @@ impl<'a, 't> Adorned<'a, 't> {
     /// The indices of the captures on `e`'s node and inside it, in
     /// preorder.
     fn within(&self, e: &Event) -> std::ops::Range<usize> {
-        self.tags.positions(self.tree.node(e.site).subtree())
+        self.within_site(e.site)
+    }
+
+    /// As [`Self::within`], for a node.
+    fn within_site(&self, site: crate::cst::NodeId) -> std::ops::Range<usize> {
+        self.tags.positions(self.tree.node(site).subtree())
     }
 
     fn start_byte(&self, e: &Event) -> usize {
