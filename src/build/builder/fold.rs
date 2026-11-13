@@ -841,9 +841,9 @@ impl<'a> Builder<'a> {
             .map(|n| n.ts())
             .filter(|n| crate::cst::nth_element(*n, 0).is_some_and(|c| c.kind() == "method_call_expression"))
             .collect();
-        // Snapshot resolved (key_span, key_text, access, owner) first
+        // Snapshot resolved (key_span, key_text, access, owner, order) first
         // so the emit loop can `&mut self`.
-        let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner)> = Vec::new();
+        let mut pending: Vec<(Span, String, AccessKind, HashKeyOwner, Option<Box<Span>>)> = Vec::new();
         for &node in &chained {
             let Some(container) = node.named_child(0) else { continue };
             let Some(key_node) = node.child_by_field_name("key") else { continue };
@@ -898,9 +898,10 @@ impl<'a> Builder<'a> {
                 key_text,
                 self.determine_access(node),
                 owner,
+                self.evaluated_before(key_node),
             ));
         }
-        for (span, key_text, access, owner) in pending {
+        for (span, key_text, access, owner, evaluated_before) in pending {
             self.refs.push(Ref {
                 kind: RefKind::HashKeyAccess {
                     var_text: String::new(),
@@ -916,7 +917,7 @@ impl<'a> Builder<'a> {
                 }),
                 folded_from: None,
                 arg_count: None,
-                evaluated_before: self.evaluated_before(span),
+                evaluated_before,
             });
         }
     }

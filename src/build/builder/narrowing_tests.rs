@@ -465,6 +465,34 @@ fn a_postfix_condition_key_is_owned_by_the_value_it_reads() {
 }
 
 #[test]
+fn a_callable_in_a_postfix_condition_runs_when_called() {
+    // The sub body runs when it is called, not before the statement, so its
+    // read is not skipped past the statement's write.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if first(sub { $o->alive });\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Bar"));
+}
+
+#[test]
+fn a_read_in_injected_code_in_a_postfix_condition_runs_before_its_statement() {
+    // `s///e` code is its own parse; its climb goes on through the host.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if $s =~ s/x/$o->alive/e;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_ref_cut_to_nothing_in_a_postfix_condition_keeps_its_order() {
+    // `%::`'s tail is empty, so its span sits between the head and the `;`.
+    let fa = build_fa("package P;\nsub u {\n    my $o = 1;\n    $o = 2 if \\%::;\n}");
+    let r = fa.refs().iter().find(|r| r.target_name == "%::").expect("a ref for %::");
+    assert_eq!(r.span.start, r.span.end);
+    assert!(r.evaluated_before.is_some());
+}
+
+#[test]
 fn a_do_while_condition_reads_after_its_block() {
     // `do BLOCK while G` runs the block first: G sees the block's write.
     let fa = build_fa(
