@@ -178,9 +178,9 @@ impl<'v> JoinPlan<'v> {
 
     /// The joins `c` mints for a variable bound from `bound_from`: past
     /// it, and the value entering it, for it and every branch closing one
-    /// of its arms. Each arm begins from the value entering its construct,
-    /// so an arm never sees a sibling's write, whether or not the language
-    /// makes an arm a scope. A path on which the variable is not yet bound
+    /// of its arms. Each arm after the first begins from the value
+    /// entering its construct, so an arm never sees a sibling's write,
+    /// whether or not the language makes an arm a scope. A path on which the variable is not yet bound
     /// reaches no read of it.
     pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>) -> Vec<BranchJoin> {
         use crate::model::witnesses::JoinRole;
@@ -197,7 +197,10 @@ impl<'v> JoinPlan<'v> {
         let mut out = vec![BranchJoin { role: JoinRole::After, of: c.span, lands: vec![past], arms }];
         for k in reached {
             let entry = entry_point(k);
-            let mut lands: Vec<Point> = k.arms.iter().map(|a| a.span.start).filter(|&s| s > entry).collect();
+            // The first arm starts where the test leaves the variable; each
+            // one written after another starts over from the entering value.
+            let first = k.arms.iter().map(|a| a.span.start).min();
+            let mut lands: Vec<Point> = k.arms.iter().map(|a| a.span.start).filter(|&s| s > entry && Some(s) != first).collect();
             // A test written after what it guards runs first.
             if let Some(cond) = k.cond.filter(|cond| k.arms.iter().all(|a| a.span.end <= cond.start)) {
                 lands.push(cond.start);

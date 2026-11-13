@@ -132,7 +132,9 @@ document, after its facts are bound). Both read one plan of the document
 - **Each arm begins from the value entering its construct**
   (`JoinRole::Entry`): read past the test, or at the construct's start when
   the test runs after what it guards (`$x = f() unless $x`, whose test sees
-  the entering value too). So a sibling arm never sees a write, whether or
+  the entering value too). The first arm to run needs no entry, since the
+  test leaves the variable as it entered; an entry is a reset, and a reset
+  to an untyped value outranks a later use's evidence. So a sibling arm never sees a write, whether or
   not the language makes an arm a scope (Python's and PHP's do not, nor does
   any language's ternary or short circuit).
 - A path on which the variable is not yet bound (a python name first
