@@ -16,11 +16,26 @@ impl<'a> Builder<'a> {
     pub(super) fn assemble_joins(&mut self) {
         static ASSIGNMENT: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
         let kinds = ASSIGNMENT.get_or_init(|| perl_kind_ids(&["assignment_expression"]));
-        let assignments: Vec<Node<'a>> = self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| n.ts()).collect();
+        // A declaration binds fresh: there is no old value to join.
+        let assignments: Vec<Node<'a>> = self
+            .syntax
+            .file_nodes_of_kind(kinds)
+            .into_iter()
+            .map(|n| n.ts())
+            .filter(|n| n.child_by_field_name("left").is_some_and(|l| l.kind() != "variable_declaration"))
+            .collect();
         if assignments.is_empty() {
             return;
         }
         let view = self.control_view();
+        // Every arm by its span: a write finds the arms holding it among
+        // its own ancestors.
+        let mut arm_at: HashMap<Span, Vec<(usize, usize)>> = HashMap::new();
+        for (ci, c) in view.constructs.iter().enumerate() {
+            for (ai, a) in c.arms.iter().enumerate() {
+                arm_at.entry(a.span).or_default().push((ci, ai));
+            }
+        }
         let by_span: HashMap<Span, usize> = view.constructs.iter().enumerate().map(|(i, c)| (c.span, i)).collect();
         let arm_spans: HashSet<Span> = view.constructs.iter().flat_map(|c| c.arms.iter().map(|a| a.span)).collect();
         let mut minted: HashSet<(Binding, Span, JoinRole)> = HashSet::new();
@@ -28,10 +43,6 @@ impl<'a> Builder<'a> {
         let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
         for node in assignments {
             let Some(left) = node.child_by_field_name("left") else { continue };
-            // A declaration binds fresh: there is no old value to join.
-            if left.kind() == "variable_declaration" {
-                continue;
-            }
             let Some(var) = self.get_var_text_from_lhs(left) else { continue };
             let span = node_to_span(node);
             let at = crate::cst::assignment_write_point(node);
@@ -58,7 +69,16 @@ impl<'a> Builder<'a> {
                     .unwrap_or(stop)
             };
 
-            let holding = view.arms_holding(span, within);
+            // Innermost first, inside `within`.
+            let holding: Vec<(&Construct, &Arm)> = std::iter::once(node)
+                .chain(self.syntax.ancestors(node))
+                .map(node_to_span)
+                .take_while(|a| within.start <= a.start && a.end <= within.end)
+                .filter_map(|a| arm_at.get(&a))
+                .flatten()
+                .map(|&(ci, ai)| (&view.constructs[ci], &view.constructs[ci].arms[ai]))
+                .filter(|(c, _)| within.start <= c.span.start && c.span.end <= within.end)
+                .collect();
             for (c, arm) in &holding {
                 // An `elsif` (a branch that is wholly another's arm) joins
                 // with the construct it is the arm of.

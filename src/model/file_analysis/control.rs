@@ -80,20 +80,6 @@ impl ControlView {
             // innermost starts last and, on a tie, ends first.
             .max_by_key(|a| (a.span.start.row, a.span.start.column, std::cmp::Reverse((a.span.end.row, a.span.end.column))))
     }
-
-    /// Every arm holding `span` inside `within`, with its construct,
-    /// innermost first.
-    pub fn arms_holding(&self, span: Span, within: Span) -> Vec<(&Construct, &Arm)> {
-        let mut out: Vec<(&Construct, &Arm)> = self
-            .constructs
-            .iter()
-            .filter(|c| contains(within, c.span) && contains(c.span, span))
-            .flat_map(|c| c.arms.iter().map(move |a| (c, a)))
-            .filter(|(_, a)| contains(a.span, span))
-            .collect();
-        out.sort_by_key(|(_, a)| std::cmp::Reverse((a.span.start, std::cmp::Reverse(a.span.end))));
-        out
-    }
 }
 
 fn contains(outer: Span, inner: Span) -> bool {
