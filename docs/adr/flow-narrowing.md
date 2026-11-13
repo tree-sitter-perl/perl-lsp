@@ -348,25 +348,23 @@ what it decides: `@ctl.then` runs where it holds, `@ctl.else` where
 it fails. An `else` arm is the statement it holds, so a later clause of
 the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
 condition before it. `@ctl.loop` marks a position's construct that
-tests its condition again after each run of its arm (PHP's `while`): a
-`break` in the arm lands after the loop too, so its arms decide nothing
-about what follows. The fall-through derivation and `@ctl.loop` are a
-single-block stand-in for CFG reachability and retire with it
-(`TODO(cfg-exit-join)`). Apart from guards, each document marks every
-statement that leaves its block unconditionally `@ctl.leave.<kind>` (return,
-throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
-`exit`, which the language reserves, so their spelling names them), and
-the extractor derives the rest by containment, the Perl rule above: a
-condition's statement is the node holding it and its then arm; a chain
-is that statement with every condition whose statement is an else arm of
-the chain; its arms are the narrowest regions its conditions decide, each
-known by every condition deciding a region around it. An arm leaves when
-it, or one of the statements it runs in sequence (its named children
-outside every field: a loop's body is a part of the loop, not a
-statement of the arm), is marked `@ctl.leave.*` or is a chain that
-leaves. Where exactly one arm falls through, the rest of the block holding
-the chain runs where that arm does, a region of every condition that
-decides it. A comment is no statement, so where it sits does not matter. A
+tests its condition again after each run of its arm (PHP's `while`); its
+arm is narrowed like any other, and it joins nothing yet
+(`TODO(cfg-exit-join)`, retired by the loop's own joins). Apart from
+guards, each document marks every statement that leaves its block
+unconditionally `@ctl.leave.<kind>` (return, throw or raise, `break`,
+`continue`, C++'s `co_return`, PHP's `die` and `exit`, which the language
+reserves, so their spelling names them). A leave counts only where it is
+an arm or one of the statements an arm runs in sequence (its named
+children outside every field: a loop's body is a part of the loop, not a
+statement of the arm, and so is an `except` clause), and the join plan
+the Perl rule above uses decides from there which arms leave. Each test
+records, per construct it decides, the arms it narrows and what it proves
+on a path no arm runs; assembly roots the subject as a place (a member
+through `PackPlaces`, a variable through its binding at the test) and
+mints the same region joins as Perl (`JoinPlan::guard_joins`), each held
+no further than the end of the node the construct runs in, so a test in
+a loop's body or a `try` says nothing past it. A comment is no statement, so where it sits does not matter. A
 call that never returns by its callee's nature (`sys.exit()`,
 `std::abort()`, `[[noreturn]]`) is an effect on the callee, to mark once
 effects and the CFG exist (`TODO(noreturn-callee)`). An

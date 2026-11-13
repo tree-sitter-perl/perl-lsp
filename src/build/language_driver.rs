@@ -1112,6 +1112,8 @@ fn remap_spans(
         place_writes,
         variable_regions,
         control,
+        guards,
+        control_bounds,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1284,6 +1286,17 @@ fn remap_spans(
         refined.for_each_attachment_mut(&mut remap_att);
         *region = rspan(*region);
     }
+    for g in guards.iter_mut() {
+        let crate::build::query_extract::GuardRecord { subject, variable: _, scope: _, of, fact } = g;
+        *subject = rspan(*subject);
+        *of = rspan(*of);
+        match fact {
+            crate::build::query_extract::GuardFact::Seed => {}
+            crate::build::query_extract::GuardFact::Untaken(payload) => payload.for_each_attachment_mut(&mut remap_att),
+            crate::build::query_extract::GuardFact::Narrowed(arm) => *arm = rspan(*arm),
+        }
+    }
+    *control_bounds = std::mem::take(control_bounds).into_iter().map(|(of, end)| (rspan(of), r(end))).collect();
     // Value-flow edges (the provenance tier above the bag) + label/goto refs +
     // moved-from sites + domain-typing sites all carry transformed spans too.
     for fe in flow_edges.iter_mut() {

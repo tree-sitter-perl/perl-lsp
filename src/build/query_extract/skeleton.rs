@@ -312,6 +312,12 @@ pub struct SkeletonAnalysis {
     /// The document's control structure, which the assembled analysis
     /// joins each branch's writes through (`FileAnalysis::assemble_joins`).
     pub control: crate::model::file_analysis::ControlView,
+    /// What each test proves about the constructs it decides, for the joins
+    /// past them.
+    pub guards: Vec<GuardRecord>,
+    /// Per branch, the end of the statements it runs among: how far past
+    /// it a test's join can hold.
+    pub control_bounds: std::collections::HashMap<crate::model::file_analysis::Span, tree_sitter::Point>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -385,6 +391,29 @@ pub struct PlaceNarrowing {
     pub subject: crate::model::file_analysis::Span,
     pub refined: crate::model::witnesses::WitnessPayload,
     pub region: crate::model::file_analysis::Span,
+}
+
+/// One thing a test proves of its subject about the construct it decides
+/// (`of`), before the subject is a place: assembly roots a member subject
+/// from its token, and binds a variable by its name in the test's scope.
+#[derive(Debug, Clone)]
+pub struct GuardRecord {
+    pub subject: crate::model::file_analysis::Span,
+    /// The name the subject reads, unless it is surely a member.
+    pub variable: Option<String>,
+    pub scope: crate::model::file_analysis::ScopeId,
+    pub of: crate::model::file_analysis::Span,
+    pub fact: GuardFact,
+}
+
+#[derive(Debug, Clone)]
+pub enum GuardFact {
+    /// The test is one whose construct's joins may narrow its subject.
+    Seed,
+    /// What it proves where no arm of the construct runs.
+    Untaken(crate::model::witnesses::WitnessPayload),
+    /// An arm it narrows its subject over.
+    Narrowed(crate::model::file_analysis::Span),
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -1596,13 +1625,25 @@ impl SkeletonAnalysis {
         // A receiver carries its place only where a narrowing gives that
         // place a value; anywhere else the place answers nothing, and a box
         // per member ref would be paid for nothing.
+        // A member subject's tests join its place past the constructs they
+        // decide; a local's wait for the assembled analysis to bind them.
+        let guards = std::mem::take(&mut self.guards);
+        let guard_places: Vec<Option<crate::model::file_analysis::Place>> = guards
+            .iter()
+            .map(|g| {
+                use crate::model::file_analysis::Binding;
+                places
+                    .at(g.subject)
+                    .filter(|p| !p.is_variable() && !matches!(p.root, Binding::Package(..) | Binding::Arguments(_)))
+            })
+            .collect();
         let valued: std::collections::HashSet<crate::model::file_analysis::Place> =
-            narrowed.iter().map(|(p, _)| p.clone()).collect();
-        if !narrowed.is_empty() {
+            narrowed.iter().map(|(p, _)| p.clone()).chain(guard_places.iter().flatten().cloned()).collect();
+        let wanted: std::collections::HashSet<_> = valued.iter().map(|p| p.root.clone()).collect();
+        let disturbances = (!wanted.is_empty()).then(|| places.disturbances(&wanted, &place_writes));
+        if let Some(disturbances) = &disturbances {
             use crate::model::file_analysis::Binding;
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessSource};
-            let wanted = narrowed.iter().map(|(p, _)| p.root.clone()).collect();
-            let disturbances = places.disturbances(&wanted, &place_writes);
             for (place, n) in narrowed {
                 if matches!(place.root, Binding::Package(..) | Binding::Arguments(_)) {
                     continue;
@@ -2115,7 +2156,8 @@ impl SkeletonAnalysis {
         // in; the assembled analysis knows each name's binding.
         fa.bind_variable_witnesses();
         fa.bind_variable_regions(std::mem::take(&mut self.variable_regions));
-        fa.assemble_joins(&std::mem::take(&mut self.control));
+        let guards = guard_facts(&fa, guards, guard_places, std::mem::take(&mut self.control_bounds));
+        fa.assemble_joins(&std::mem::take(&mut self.control), guards, disturbances.as_ref());
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
@@ -2464,4 +2506,29 @@ fn fold_ranges_of(scopes: &[crate::model::file_analysis::Scope]) -> Vec<crate::m
         .into_iter()
         .map(|(start_line, end_line)| FoldRange { start_line, end_line, kind: FoldKind::Region })
         .collect()
+}
+
+/// The guard records as facts about places: a member subject at the place
+/// its token roots, a variable at its binding where the test reads it.
+fn guard_facts(
+    fa: &crate::model::file_analysis::FileAnalysis,
+    records: Vec<GuardRecord>,
+    members: Vec<Option<crate::model::file_analysis::Place>>,
+    bounds: std::collections::HashMap<crate::model::file_analysis::Span, tree_sitter::Point>,
+) -> crate::model::file_analysis::GuardFacts {
+    use crate::model::file_analysis::Place;
+    let mut out = crate::model::file_analysis::GuardFacts { bounds, ..Default::default() };
+    for (g, member) in records.into_iter().zip(members) {
+        let place = match (member, &g.variable) {
+            (Some(p), _) => p,
+            (None, Some(name)) => Place::variable(fa.variable_binding_of(name, g.subject.start, g.scope).0),
+            (None, None) => continue,
+        };
+        match g.fact {
+            GuardFact::Seed => out.seeds.push((g.of, place, g.scope)),
+            GuardFact::Untaken(payload) => out.untaken.push((g.of, place, payload)),
+            GuardFact::Narrowed(arm) => out.narrowed.push((place, arm)),
+        }
+    }
+    out
 }

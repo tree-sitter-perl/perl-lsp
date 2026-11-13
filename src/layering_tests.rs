@@ -1951,7 +1951,6 @@ fn raw_scope_climbs_are_containment_only() {
         chain_call || parent_step || t.contains("scope_parent") || (t.contains("successors(") && t.contains(".parent"))
     });
     let allow: &[(&str, usize, &str)] = &[
-        ("build/builder/joins.rs", 1, "a write's scopes out to its binding: where each join lands and which blocks the write leaves"),
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
         ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
@@ -1962,7 +1961,7 @@ fn raw_scope_climbs_are_containment_only() {
         ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
         ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
         ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
-        ("model/file_analysis/control.rs", 1, "a pack write's scopes out to its binding: where each join lands"),
+        ("model/file_analysis/control.rs", 1, "Reach::of: a write's or a test's scopes out to its binding, where each join lands and which blocks the write leaves"),
     ];
     let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
