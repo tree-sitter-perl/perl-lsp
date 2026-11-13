@@ -112,31 +112,29 @@ the scope walk stops on it (a shadowed inner `$x` with its belief gone
 never answers with the outer's), and consumers ask the value
 (`InferredType::is_known()`) rather than matching the variant.
 
-A rebind that may not run is old-or-new no matter what its RHS is, and
-lands as `Unknown` outright. "May not run" is asked at two granularities,
-both spelled once in `cst.rs` (`cst::conditional_arm`, one climb, two
-`ArmBound`s). The climb is exact: a condition, a loop list, a `for`
-initialiser and a short-circuit's left operand run whenever their construct
-does, so only the arm that may be skipped counts.
+A rebind that may not run leaves its variable old-or-new where the paths
+rejoin, and a join says exactly that: past a branch whose arm writes it, the
+variable holds the join of what every path left it (`docs/adr/cfg-tier.md`).
+The builder mints the joins once (`Builder::assemble_joins`), from Perl's
+control document (`queries/perl/ctl.scm`) and the bound writes:
 
-- **Relative to the block the witness lands on**
-  (`ArmBound::Block`): a statement modifier, a
-  ternary arm, a short-circuit. `$x = undef if COND` anchors at the
-  statement start, so the guard's own condition reads no value the write
-  has not produced, and the successor reads no value it may never
-  produce. The block's own `if`/loop does not count — inside the block,
-  the block has run, so `if (…) { $x = Foo->new; $x->m }` still types
-  the call.
-- **Relative to the variable's binding scope.** A write inside a nested
-  block sits on the block's scope, which a read after the block never
-  walks through, so that read would keep the pre-block belief. The honest
-  answer there is `old ⊔ new`, and no reducer can compute it: a reducer
-  sees ONE attachment, and the write landed on the block's. So the fold
-  stands in for the join and puts a reset marker on the binding scope —
-  the one every later read in the variable's extent walks through.
-  **This is an approximation of a join and is deleted when Epic 16's
-  `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
-  is in that epic's table.
+- **Past the construct**, a `Reset` and an `Edge(Join)` on the variable, held
+  to the scope the construct sits in. Each arm that falls through is one
+  `Edge(Place)` read where the arm leaves; a construct with no arm for one
+  side of its test adds the bypass, read where the test has run and no arm
+  has. An `elsif` chain is one construct. `JoinFold` joins the arms, and one
+  arm the chase cannot type leaves the join untyped (`Unknown`).
+- **A test written after what it guards** (`$x = f() unless $x`) runs first,
+  so it reads the value entering the statement (`JoinRole::Test`).
+- Inside an arm the arm has run, so `if (…) { $x = Foo->new; $x->m }` still
+  types the call, and a sibling arm never sees the write.
+
+Three cases still stand in a reset marker (an untyped join) where their
+joins are not built yet: a loop (`TODO(cfg-loops)`, the loop joins), a block
+no construct runs conditionally (a bare block, `eval`, a `map` callback),
+and a write inside a callable to a variable outside it
+(`TODO(closure-call-writes)`: the write reaches the variable only where the
+callable is called).
 
 An **observation** is the other half of the same question: a use of a
 variable or place that reveals what it holds — any deref (`@$x`, `$$x{k}`,
@@ -150,9 +148,8 @@ conditionally-run arm around it (`cst::conditional_arm`: the statement a
 postfix modifier guards, a ternary branch, a short-circuit RHS), else to
 the end of its block, cut at the subject's next rebind
 (`RegionFact::Observe`, sharing `PendingNarrow`'s cutoffs, place subjects
-included). Past an arm the value is a join of the arm and its bypass,
-which `JoinFold` will answer; until then the arm says nothing outside
-itself.
+included). Past an arm an observation says nothing: unlike a write, it
+mints no join.
 
 Declarations do not mint a marker, and that is placement rather than
 principle: a declaration's companions may legitimately sit before it (a
