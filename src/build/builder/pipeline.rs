@@ -570,6 +570,10 @@ fn build_once(
     // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
     bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
 
+    // Where paths rejoin, a rebound variable holds every path's value: the
+    // joins, minted once from the control document and the bound writes.
+    bphase!("assemble_joins", b.assemble_joins());
+
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs
     // post-walk because subs are usually declared after the export list.

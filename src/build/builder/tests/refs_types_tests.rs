@@ -521,7 +521,47 @@ fn a_rebind_in_a_postfix_condition_is_unconditional() {
     );
     let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(4, 0));
     assert_eq!(at("$x"), Some(InferredType::String));
-    assert_eq!(at("$y"), Some(InferredType::Unknown), "the modified statement may not run");
+    let either = crate::model::file_analysis::join_all(&[InferredType::Numeric, InferredType::String], &crate::model::file_analysis::Unordered);
+    assert_eq!(at("$y"), either, "the modified statement may not run: old or new");
+}
+
+/// Past a branch, a rebound variable is what every arm left it: an `else`
+/// that writes too replaces the old value, an `elsif` chain without one
+/// keeps it as a path.
+#[test]
+fn a_branch_joins_what_its_arms_leave() {
+    let fa = build_fa(concat!(
+        "sub f {\n",
+        "my ($c, $d) = @_;\n",
+        "my $x = 1; my $y = 1; my $z = 1;\n",
+        "if ($c) { $x = 'a' } else { $x = 'b' }\n",
+        "if ($c) { $y = 'a' } elsif ($d) { $y = [] }\n",
+        "if ($c) { $z = 'a' }\n",
+        "return;\n",
+        "}\n",
+    ));
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(6, 0));
+    assert_eq!(at("$x"), Some(InferredType::String), "both arms write a string");
+    let y = at("$y");
+    assert!(matches!(&y, Some(InferredType::Union(u)) if u.len() == 3), "string, array or the old number: {y:?}");
+    let z = at("$z");
+    assert!(matches!(&z, Some(InferredType::Union(u)) if u.len() == 2), "string or the old number: {z:?}");
+    // Inside an arm the arm's own value holds; the sibling arm never sees it.
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 37)), Some(InferredType::String));
+}
+
+/// A postfix test runs before the statement it guards, so it reads the
+/// value entering the statement, not the one the statement writes.
+#[test]
+fn a_postfix_test_reads_the_value_before_the_write() {
+    let fa = build_fa("sub f {\nmy $x = 1;\n$x = 'a' unless $x;\nreturn;\n}\n");
+    let x_ref = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "$x" && r.span.start.row == 2)
+        .max_by_key(|r| r.span.start.column)
+        .expect("the test's read");
+    assert_eq!(fa.inferred_type_via_bag("$x", x_ref.span.start), Some(InferredType::Numeric));
 }
 
 /// `&$x` / `&{$x}` call a code ref; `$$x` / `*{$x}` deref a scalar or glob

@@ -2,10 +2,6 @@
 //! [`ControlView`]: the same vocabulary every pack document speaks, so the
 //! join builder reads one shape for every language (`docs/adr/cfg-tier.md`).
 
-// TODO(cfg-joins): the branch joins (design PR 5) are the first reader; until
-// then only the cross-check against `cst::conditional_arm` runs the view.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::build::query_extract::{Capture, CtlCap};
 use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind};
 use std::collections::HashMap;
@@ -91,6 +87,21 @@ pub(super) fn control_view<'t>(matches: impl IntoIterator<Item = Vec<(u32, Node<
     }
     view.constructs.sort_by_key(|c| (c.span.start.row, c.span.start.column, std::cmp::Reverse((c.span.end.row, c.span.end.column))));
     view
+}
+
+impl<'a> super::Builder<'a> {
+    /// The control view of the file's own parse.
+    pub(super) fn control_view(&self) -> ControlView {
+        use tree_sitter::StreamingIterator;
+        let (query, _) = ctl_query();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        let mut out = Vec::new();
+        let mut it = cursor.matches(query, self.syntax.main().root().ts(), self.source);
+        while let Some(m) = it.next() {
+            out.push(m.captures.iter().map(|c| (c.index, c.node)).collect());
+        }
+        control_view(out)
+    }
 }
 
 fn leave_kind(c: CtlCap) -> Option<LeaveKind> {
