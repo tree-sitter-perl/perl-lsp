@@ -149,6 +149,11 @@ impl<'a> Builder<'a> {
         if let Some(class) = self.token_class(class_node) {
             return Some(class);
         }
+        // TODO(bless-reads-ref-tag): the registry now lowers `ref $x` to
+        // `$x`'s class (`RefTagOf::names`), but this build-time path reads
+        // syntax, not the bag; this arm and the `ref` arm of
+        // `bless_class_is_receiver` go once bless asks the bag (removing them
+        // today loses 135 census answers).
         // `bless $r, ref $x` (the clone idiom) blesses into `$x`'s class: the
         // 2nd arg `ref EXPR` yields EXPR's class *name*, so the bless target is
         // EXPR's resolved class. `ref EXPR` as a general value is a String, so
