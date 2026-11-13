@@ -2475,6 +2475,47 @@ fn cross_file_slot_write_types_the_read() {
 
 
 #[test]
+fn constructor_slot_write_through_an_inherited_new_types_the_read() {
+    // The object a constructor writes into comes from the parent's `new` in
+    // ANOTHER file, so the build cannot type it: the write is filed by key
+    // and the read decides it is the child's. Named `$obj`, not `$self`, so
+    // nothing here leans on the receiver's spelling.
+    use std::sync::Arc;
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let parent_src = "package Parent;\nsub new {\n    my $class = shift;\n    my $self = bless {}, $class;\n    return $self->init(@_);\n}\nsub init {\n    my $self = shift;\n    return $self;\n}\n1;\n";
+    {
+        let mut parser = crate::build::builder::create_parser();
+        let tree = parser.parse(parent_src, None).unwrap();
+        let fa = crate::build::builder::build(&tree, parent_src.as_bytes());
+        idx.insert_cache(
+            "Parent",
+            Some(Arc::new(crate::model::file_analysis::CachedModule::new(
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/Parent.pm")),
+                Arc::new(fa),
+            ))),
+        );
+    }
+    let child_src = "package Child;\nour @ISA = ('Parent');\nsub new {\n    my ($class) = @_;\n    my $obj = $class->SUPER::new();\n    $obj->{conn} = My::Conn->new;\n    return $obj;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{conn};\n}\n1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(child_src, None).unwrap();
+    let fa = crate::build::builder::build(&tree, child_src.as_bytes());
+
+    let t = fa.inferred_type_via_bag_ctx("$x", Point { row: 11, column: 0 }, Some(&idx));
+    assert_eq!(t, Some(InferredType::ClassName("My::Conn".into())));
+}
+
+#[test]
+fn a_write_through_another_class_object_is_not_the_readers() {
+    // The filed write joins only the owner its object turns out to be: a
+    // `Child` read never takes what was written into an `Other`.
+    let fa = build_fa_from_source(
+        "package Other;\nsub new { bless {}, shift }\npackage Child;\nsub new { bless {}, shift }\nsub fill {\n    my ($self) = @_;\n    my $o = make_other();\n    $o->{conn} = My::Conn->new;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{conn};\n}\nsub make_other { Other->new }\n1;\n",
+    );
+    let t = fa.inferred_type_via_bag_ctx("$x", Point { row: 12, column: 0 }, None);
+    assert_ne!(t, Some(InferredType::ClassName("My::Conn".into())));
+}
+
+#[test]
 fn loader_config_types_register_conf_cross_file() {
     // #25, framework-mediated: `plugin 'GenericCoApp', {...}` in the app
     // types `$conf` inside the plugin's register — callers enumerable

@@ -2293,13 +2293,62 @@ impl ReducerRegistry {
         if let Some(live) = point.and_then(|p| bag.live_at(q.attachment, p)) {
             return self.materialize_raw(bag, q, state, live, false);
         }
-        let raw = bag.for_attachment(q.attachment);
+        let adopted = self.owned_slot_writes(bag, q, state);
+        let mut raw = bag.for_attachment(q.attachment);
+        raw.extend(adopted.iter());
         if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
             let grown = self.lower_extensions(bag, q, state, &raw);
             let grown = Self::grown_witnesses(&raw, &grown);
             return self.materialize_reaching(bag, q, state, Self::splice_grown(&raw, &grown));
         }
         self.materialize_reaching(bag, q, state, raw)
+    }
+
+    /// The writes of a stored member's `SlotWrites` bucket whose object is
+    /// an instance of the member's owner, as the slot's value edges. The
+    /// build filed them by key because it could not type the object; the
+    /// object is asked here, at the write, where the index can answer.
+    fn owned_slot_writes(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState) -> Vec<Witness> {
+        let WitnessAttachment::Member { owner, space, name, aspect: crate::model::witnesses::MemberAspect::Holds } =
+            q.attachment
+        else {
+            return Vec::new();
+        };
+        let bucket_att = WitnessAttachment::SlotWrites { space: *space, name: name.clone() };
+        let bucket = bag.for_attachment(&bucket_att);
+        if bucket.is_empty() {
+            return Vec::new();
+        }
+        let bucket_q = ReducerQuery {
+            attachment: &bucket_att,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        bucket
+            .into_iter()
+            .filter_map(|w| {
+                let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { return None };
+                // The object is an edge from the write, chased as every
+                // edge is; opaque, since which writes join depends on each
+                // object's value, not on the member's own key.
+                let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
+                let object = state.in_opaque_frame(|state| self.materialize_raw(bag, &bucket_q, state, vec![&probe], true));
+                let owned = object.iter().any(|o| match &o.payload {
+                    WitnessPayload::InferredType(t) => t.receiver_arms().iter().any(|arm| arm.class_name() == Some(owner.as_str())),
+                    _ => false,
+                });
+                owned.then(|| Witness {
+                    attachment: q.attachment.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::Edge(value.clone()),
+                    span: w.span,
+                })
+            })
+            .collect()
     }
 
     /// `materialize_raw` over the witnesses of `raw` that reach the query

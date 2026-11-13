@@ -149,6 +149,15 @@ pub enum WitnessAttachment {
         #[serde(default)]
         aspect: MemberAspect,
     },
+    /// The writes to member `name` (in `space`) whose owner the writing
+    /// file could not name when it was built: `$self->{k} = …` where
+    /// `$self` holds whatever a constructor in another file returned. Each
+    /// witness is a `SlotWrite` payload carrying its receiver, and a read
+    /// of `Member{X, name, Holds}` takes the writes whose receiver turns
+    /// out to be an `X` (`ReducerRegistry::owned_slot_writes`), so the
+    /// owner is decided where the index is. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    SlotWrites { space: crate::model::file_analysis::NamespaceId, name: String },
 }
 
 /// The question a `Member` attachment asks of its member.
@@ -298,7 +307,8 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::BrandOverlay { .. }
-            | WitnessPayload::FreeValue { .. } => false,
+            | WitnessPayload::FreeValue { .. }
+            | WitnessPayload::SlotWrite { .. } => false,
         }
     }
 }
@@ -311,6 +321,10 @@ impl WitnessPayload {
         match self {
             WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
+            WitnessPayload::SlotWrite { receiver, value } => {
+                f(receiver);
+                f(value);
+            }
             WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| t.for_each_attachment_mut(f)),
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
@@ -514,6 +528,11 @@ pub enum WitnessPayload {
     /// `Edge` to that declaration's place instead. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     FreeValue { table: crate::model::file_analysis::NameTable, name: String, fallback: Option<String> },
+    /// One write on a `SlotWrites` bucket: the value at `receiver` is the
+    /// object written, `value` what was stored. No reducer claims it; the
+    /// `Member` read that adopts it chases `value`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    SlotWrite { receiver: WitnessAttachment, value: WitnessAttachment },
 }
 
 /// What one write adds to the shape it lands in.

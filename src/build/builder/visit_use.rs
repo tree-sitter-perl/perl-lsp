@@ -1581,8 +1581,29 @@ impl<'a> Builder<'a> {
         let stored = if op == Some(crate::cst::AssignOp::Plain) { right } else { node };
         if left.kind() == "hash_element_expression" {
             if let Some(key_node) = left.child_by_field_name("key") {
-                self.slot_write_rhs_span
-                    .insert(node_to_span(key_node), node_to_span(stored));
+                // The object written through, as the edge a positionless
+                // read of it takes: a variable's value where its binding's
+                // scope ends (a hash written and then blessed is the object
+                // it becomes), anything else the value of the expression.
+                let receiver = crate::cst::element_deref_base(left).map(|base| {
+                    let plain = crate::cst::is_plain_scalar(base).then(|| base.utf8_text(self.source).ok()).flatten();
+                    match plain.map(|name| self.binding_key_here(name, base.start_position())) {
+                        Some(root @ crate::model::file_analysis::Binding::Lexical(_)) => {
+                            crate::model::witnesses::WitnessAttachment::Place(Box::new(
+                                crate::model::file_analysis::Place { root, path: Vec::new() },
+                            ))
+                        }
+                        _ => {
+                            let att = crate::model::witnesses::WitnessAttachment::Expr(node_to_span(base));
+                            if self.bag.for_attachment(&att).is_empty() {
+                                self.emit_expr_witness(base);
+                            }
+                            att
+                        }
+                    }
+                });
+                let site = super::SlotWriteSite { rhs: node_to_span(stored), receiver };
+                self.slot_write_rhs_span.insert(node_to_span(key_node), site);
             }
         }
         if matches!(

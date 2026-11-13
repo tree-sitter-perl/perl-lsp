@@ -321,11 +321,11 @@ struct Builder<'a> {
     sub_tail: std::collections::HashMap<ScopeId, Vec<TailArm>>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
-    /// the RHS expression's span. `populate_witness_bag`'s mutation loop
-    /// reads it to seed `Member{class, key, Holds} → Edge(Expr(rhs_span))`
-    /// alongside the untyped mutation Fact. Hash-element LHS only; plain
+    /// the RHS expression's span and the span of the reference it writes
+    /// through (`$obj`; `None` for a named hash). `populate_witness_bag`
+    /// reads it to seed the slot's value. Hash-element LHS only; plain
     /// variable assignments never enter it.
-    slot_write_rhs_span: std::collections::HashMap<Span, Span>,
+    slot_write_rhs_span: std::collections::HashMap<Span, SlotWriteSite>,
     /// Assignments where RHS is a function call — resolved in return-type post-pass.
     call_bindings: Vec<CallBinding>,
     /// Assignments where RHS is a method call — resolved in FileAnalysis post-pass.
@@ -806,3 +806,10 @@ mod tests;
 #[cfg(test)]
 #[path = "type_inference_invariants_tests.rs"]
 mod invariants_tests;
+
+/// Where a `$obj->{k} = <rhs>` write's stored value and object come from.
+#[derive(Clone)]
+pub(crate) struct SlotWriteSite {
+    pub(crate) rhs: Span,
+    pub(crate) receiver: Option<crate::model::witnesses::WitnessAttachment>,
+}
