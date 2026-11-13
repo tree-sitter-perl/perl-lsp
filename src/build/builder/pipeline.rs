@@ -421,6 +421,10 @@ fn build_once(
         method_call_ref_dedup: std::collections::HashSet::new(),
         tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
+        place_disturbances: None,
+        untaken_proofs: Vec::new(),
+        guard_seeds: Vec::new(),
+        narrowed_arms: Default::default(),
         rebinds: Default::default(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
@@ -720,9 +724,12 @@ fn build_once(
             .all()
             .iter()
             .filter_map(|w| match (&w.attachment, &w.payload) {
-                (WitnessAttachment::Place(p), WitnessPayload::InferredType(_) | WitnessPayload::Projected { .. }) => {
-                    Some(&**p)
-                }
+                (
+                    WitnessAttachment::Place(p),
+                    WitnessPayload::InferredType(_)
+                    | WitnessPayload::Projected { .. }
+                    | WitnessPayload::Edge(WitnessAttachment::Join { .. }),
+                ) => Some(&**p),
                 _ => None,
             })
             .collect();

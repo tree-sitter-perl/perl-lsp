@@ -685,6 +685,15 @@ struct Builder<'a> {
     /// Every rebind, as a write of the whole variable it binds; built with
     /// the narrowing cutoffs, once the FlowEdges are minted.
     rebinds: crate::model::file_analysis::PlaceDisturbanceIndex,
+    /// Every disturbance of a narrowed place's root, from the same survey:
+    /// where a join for a place with steps stops holding.
+    place_disturbances: Option<crate::model::file_analysis::PlaceDisturbanceIndex>,
+    /// What each test proves on its construct's untaken path, and the
+    /// constructs whose tests prove something: read by `assemble_joins`.
+    untaken_proofs: Vec<narrowing::UntakenProof>,
+    guard_seeds: Vec<narrowing::GuardSeed<'a>>,
+    /// Each arm a test narrows, by the place it narrows there.
+    narrowed_arms: std::collections::HashSet<(Place, Span)>,
 
     /// Recognized guard conditions, for the redundant/contradictory-guard
     /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into

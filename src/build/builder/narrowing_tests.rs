@@ -315,10 +315,13 @@ fn a_defined_region_is_an_edge_to_its_read() {
         .all()
         .iter()
         .find_map(|w| match (&w.attachment, &w.payload) {
-            (WitnessAttachment::Place(_), WitnessPayload::Projected { base: WitnessAttachment::Expr(read), step: ProjectionStep::Defined }) => Some(*read),
+            (
+                WitnessAttachment::Place(_) | WitnessAttachment::Join { .. },
+                WitnessPayload::Projected { base: WitnessAttachment::Expr(read), step: ProjectionStep::Defined },
+            ) => Some(*read),
             _ => None,
         })
-        .expect("the guard's region is a Defined projection");
+        .expect("what the guard proves past the exit is a Defined projection");
     assert_eq!((read.start.row, read.start.column), (4, 26), "its base is `$r` as `defined` reads it");
     assert!(
         fa.witnesses.for_attachment(&WitnessAttachment::Expr(read)).iter().next().is_some(),
@@ -1234,4 +1237,53 @@ fn a_low_precedence_not_and_and_narrow_like_their_symbols() {
     assert_eq!(at(3, 34), Some(InferredType::Undef), "`not defined`");
     assert_eq!(at(4, 33), foo, "an `and` condition");
     assert_eq!(at(6, 4), foo, "`return if not` narrows the remainder");
+}
+
+/// What an exit leaves standing reaches past the block it sits in, one
+/// construct at a time: the branch around it joins only the arms that come
+/// out, and the top level of a file narrows like any block.
+#[test]
+fn an_exit_narrows_past_its_block_through_each_join() {
+    let maybe = "sub maybe { return undef unless 1; return Foo->new; }\n";
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    let nested = format!(
+        "package P;\n{maybe}sub f {{\n    my ($c) = @_;\n    my $r = maybe();\n    if ($c) {{ return unless defined $r; }} else {{ die 'no'; }}\n    $r->go;\n}}"
+    );
+    assert_eq!(fa_type_at(&nested, "$r", Point::new(6, 4)), foo, "both ways out of the `if` leave $r defined");
+    let one_way = format!(
+        "package P;\n{maybe}sub f {{\n    my ($c) = @_;\n    my $r = maybe();\n    if ($c) {{ return unless defined $r; }}\n    $r->go;\n}}"
+    );
+    assert_ne!(fa_type_at(&one_way, "$r", Point::new(6, 4)), foo, "the untaken `if` keeps the undef");
+    let top = format!("package P;\n{maybe}my $r = maybe();\ndie 'no' unless defined $r;\n$r->go;\n");
+    assert_eq!(fa_type_at(&top, "$r", Point::new(4, 0)), foo, "a file's top level is a block like any other");
+}
+
+/// The path a statement modifier skips carries what its test proves, so
+/// a default written where the value is missing leaves no missing value.
+#[test]
+fn the_untaken_path_carries_what_the_test_proves() {
+    let fa = build_fa(
+        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub f {\n    my $r = maybe();\n    $r = Foo->new unless defined $r;\n    $r->go;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 4)), Some(InferredType::ClassName("Foo".into())));
+}
+
+/// An arm that leaves is no way into the join past its branch.
+#[test]
+fn a_leaving_arm_is_no_arm_of_the_join() {
+    let fa = build_fa("sub f {\nmy ($c) = @_;\nmy $x = 1;\nif ($c) { $x = 'a' } else { return }\nreturn $x;\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 7)), Some(InferredType::String));
+    let fa = build_fa("sub f {\nmy ($c) = @_;\nmy $x = 1;\nif ($c) { $x = 'a' } elsif ($x) { die 'x' }\nreturn $x;\n}\n");
+    let x = fa.inferred_type_via_bag("$x", Point::new(4, 7));
+    assert!(matches!(&x, Some(InferredType::Union(u)) if u.len() == 2), "the implicit else still comes out: {x:?}");
+}
+
+/// A place's exit narrowing is a join too, and holds past the branch
+/// around it where every way out narrows it.
+#[test]
+fn a_place_narrows_past_its_block_through_each_join() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($self, $c) = @_;\n    if ($c) { return unless $self->{h}->isa('Foo'); } else { return; }\n    $self->{h}->go;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }

@@ -2654,9 +2654,16 @@ impl ReducerRegistry {
                                 }
                                 _ => q.receiver.clone(),
                             };
+                            // A join's arm holds what the place holds where
+                            // the arm leaves, a part of a variable as much as
+                            // the variable.
+                            let point = match (q.attachment, target) {
+                                (WitnessAttachment::Join { .. }, WitnessAttachment::Place(_)) => Some(w.span.start),
+                                _ => q.point,
+                            };
                             let sub_q = ReducerQuery {
                                 attachment: target,
-                                point: q.point,
+                                point,
                                 framework: q.framework,
                                 arity_hint: q.arity_hint,
                                 receiver,

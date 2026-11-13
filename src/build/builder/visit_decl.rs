@@ -83,7 +83,7 @@ impl<'a> Builder<'a> {
             }
             "lowprec_logical_expression" => {
                 self.narrow_logical_rhs(node);
-                self.narrow_logical_exit(node);
+                self.record_logical_exit_guard(node);
                 self.queue_children(node);
             }
             "conditional_expression" => {

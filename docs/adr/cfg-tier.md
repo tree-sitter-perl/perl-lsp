@@ -35,6 +35,18 @@ across files like every other edge. Joins are minted once, after
 re-emitted by the fold. They are sparse: none is minted where no arm can
 change the place.
 
+An arm control never comes out of is no arm of the join: one holding a
+leaving statement with no arm between them, or a branch with both ways
+covered whose every arm leaves (`JoinPlan`, from the control view's
+leaves). A test changes nothing its subject holds, so a join a test
+makes, rather than a write, lands as a region from past the construct to
+the end of the scope around it instead of a `Reset`: where it answers
+nothing, the value coming in stands. It is minted only where some path is
+gone and every path out carries a proof, and each branch around it takes
+one on the same terms, so a narrowing leaves a block one construct at a
+time. A place with steps has no writes to order a `Reset` against, so its
+joins are regions too, cut at its first disturbance.
+
 Joins answer ordinary type queries (hover, completion, narrowing), not only
 diagnostics. A diagnostic that reports on a narrowed type asks
 `place_state_at`, which also says whether every path was accounted for, and
