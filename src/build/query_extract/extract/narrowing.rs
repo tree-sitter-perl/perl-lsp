@@ -153,152 +153,83 @@ fn positions(ad: &Adorned<'_, '_>, mid: usize) -> Vec<(Span, bool)> {
         .collect()
 }
 
-/// Per condition site, the rest of a block after a chain of arms it
-/// decides, with its value there: where exactly one arm falls through.
-type FallThrough = HashMap<crate::cst::NodeId, Vec<(Span, bool)>>;
-
-/// One condition and what it decides, as sites.
-struct Decides {
-    cond: crate::cst::NodeId,
-    thens: Vec<crate::cst::NodeId>,
-    elses: Vec<crate::cst::NodeId>,
-    repeats: bool,
+/// One condition above an atom that the climb reaches through
+/// connectives alone: its match, the construct it decides, and the path
+/// from the atom up to it. An atom under any other node (an argument of a
+/// call) is no part of the condition around that node.
+struct Decision {
+    mid: usize,
+    of: Span,
+    path: Vec<Connective>,
 }
 
-/// A chain is a condition's statement with every condition whose own
-/// statement is an `else` arm of the chain (`elseif`, `elif`, C++'s `else
-/// if`). Its arms are the narrowest regions its conditions decide, each
-/// known by every condition deciding a region around it; the arm where
-/// each one fails is its `else`, and a chain with none has an implicit one
-/// that falls through. A block leaves when one of its statements does
-/// (`@ctl.leave.*`, or a chain whose every arm leaves), so code after it
-/// is dead. Where exactly one arm falls through, the rest of the block
-/// after the chain runs where that arm does; where none does it never
-/// runs, and two or more are a join this tier does not take.
-// TODO(cfg-exit-join): this is reachability worked out inside one block, a
-// stand-in for the CFG; it retires with `@ctl.loop` once the CFG's edges
-// (a `break` to the loop's exit, an exit to the block's) answer it.
-fn fall_through(ad: &Adorned<'_, '_>) -> FallThrough {
-    use crate::cst::NodeId;
-    let tree = ad.tree;
-    let mut conds: Vec<Decides> = Vec::new();
-    let mut by_site: HashMap<NodeId, usize> = HashMap::new();
-    for e in ad.events().iter().filter(|e| e.cap == Capture::Ctl(CtlCap::Cond)) {
-        let ix = *by_site.entry(e.site).or_insert_with(|| {
-            conds.push(Decides { cond: e.site, thens: Vec::new(), elses: Vec::new(), repeats: false });
-            conds.len() - 1
-        });
-        let d = &mut conds[ix];
-        for a in ad.of_match(e.match_id) {
-            let arms = match a.cap {
-                Capture::Ctl(CtlCap::Then) => &mut d.thens,
-                Capture::Ctl(CtlCap::Else) => &mut d.elses,
-                Capture::Ctl(CtlCap::Loop) => {
-                    d.repeats = true;
-                    continue;
-                }
-                _ => continue,
-            };
-            if !arms.contains(&a.site) {
-                arms.push(a.site);
-            }
+fn decisions(ad: &Adorned<'_, '_>, atom: &Event) -> Vec<Decision> {
+    let mut out = Vec::new();
+    let mut path = Vec::new();
+    let node = ad.tree.node(atom.site);
+    for site in std::iter::once(node).chain(node.enclosing_sites()) {
+        let tags = || ad.tags.on(site.id()).map(|ix| &ad.events()[ix]);
+        if site != node {
+            let Some(c) = tags().find_map(connective) else { break };
+            path.push(c);
         }
-    }
-    let range = |id: NodeId| {
-        let n = tree.node(id);
-        (n.start_byte(), n.end_byte())
-    };
-    let within = |inner: (usize, usize), outer: (usize, usize)| outer.0 <= inner.0 && inner.1 <= outer.1;
-    // A condition's statement is the node holding it and its `then` arm.
-    let mut stmt_of: HashMap<NodeId, Vec<usize>> = HashMap::new();
-    for (ix, d) in conds.iter().enumerate() {
-        let Some(&then) = d.thens.first() else { continue };
-        let span = range(then);
-        let cond = tree.node(d.cond);
-        let Some(stmt) = cond.ancestors().find(|a| within(span, (a.start_byte(), a.end_byte()))) else { continue };
-        stmt_of.entry(stmt.site().id()).or_default().push(ix);
-    }
-    let linked: std::collections::HashSet<NodeId> = conds.iter().flat_map(|d| d.elses.iter().copied()).collect();
-    let mut chains: Vec<(NodeId, Vec<usize>)> = stmt_of
-        .iter()
-        .filter(|(stmt, _)| !linked.contains(stmt))
-        .map(|(&stmt, ixs)| {
-            let mut members = ixs.clone();
-            let mut k = 0;
-            while k < members.len() {
-                for e in &conds[members[k]].elses {
-                    for &ix in stmt_of.get(e).into_iter().flatten() {
-                        if !members.contains(&ix) {
-                            members.push(ix);
-                        }
-                    }
-                }
-                k += 1;
-            }
-            (stmt, members)
-        })
-        .collect();
-    // A chain inside an arm is decided before the arm asks whether it leaves.
-    chains.sort_by_key(|&(stmt, _)| {
-        let (lo, hi) = range(stmt);
-        (hi - lo, lo)
-    });
-    let mut chain_leaves: HashMap<NodeId, bool> = HashMap::new();
-    let mut out = FallThrough::new();
-    for (stmt, members) in chains {
-        // A loop's arm is left by `break` to what follows the loop, and a
-        // fall-through of the arm comes back to the test.
-        if members.iter().any(|&m| conds[m].repeats) {
-            chain_leaves.insert(stmt, false);
-            continue;
-        }
-        let leaves_here = |n: crate::cst::SyntaxNode<'_, '_>| {
-            let site = n.site().id();
-            ad.tags.on(site).any(|ix| matches!(ad.events()[ix].cap, Capture::Ctl(c) if c.is_leave()))
-                || chain_leaves.get(&site) == Some(&true)
-        };
-        let arm_leaves = |arm: NodeId| {
-            let node = tree.node(arm);
-            leaves_here(node) || statements(tree, node).any(|s| leaves_here(s))
-        };
-        let decided: Vec<(NodeId, usize, bool)> = members
-            .iter()
-            .flat_map(|&m| {
-                let d = &conds[m];
-                d.thens.iter().map(move |&a| (a, m, true)).chain(d.elses.iter().map(move |&a| (a, m, false)))
-            })
-            .collect();
-        let mut arms: Vec<NodeId> = Vec::new();
-        for &(a, ..) in &decided {
-            let narrower = decided.iter().any(|&(b, ..)| b != a && within(range(b), range(a)));
-            if !narrower && !arms.contains(&a) {
-                arms.push(a);
-            }
-        }
-        let known = |arm: NodeId| -> Vec<(usize, bool)> {
-            decided.iter().filter(|&&(s, ..)| within(range(arm), range(s))).map(|&(_, m, holds)| (m, holds)).collect()
-        };
-        let implicit: Vec<(usize, bool)> = members.iter().map(|&m| (m, false)).collect();
-        let has_else = arms.iter().any(|&a| {
-            let k = known(a);
-            implicit.iter().all(|f| k.contains(f))
-        });
-        let mut falling: Vec<Vec<(usize, bool)>> =
-            arms.iter().filter(|&&a| !arm_leaves(a)).map(|&a| known(a)).collect();
-        if !has_else {
-            falling.push(implicit);
-        }
-        chain_leaves.insert(stmt, falling.is_empty());
-        let [arm] = &falling[..] else { continue };
-        let node = tree.node(stmt);
-        // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
-        let Some(block) = node.enclosing_sites().next() else { continue };
-        let region = Span { start: node.ts().end_position(), end: block.ts().end_position() };
-        for &(m, holds) in arm {
-            out.entry(conds[m].cond).or_default().push((region, holds));
+        for cond in tags().filter(|t| t.cap == Capture::Ctl(CtlCap::Cond)) {
+            let Some(of) = ad.in_match(cond.match_id, Capture::Ctl(CtlCap::Branch)).map(Event::span) else { continue };
+            out.push(Decision { mid: cond.match_id, of, path: path.clone() });
         }
     }
     out
+}
+
+/// Per branch, the end of the node its statement runs in: past the
+/// branch, a test's join holds no further, since past that end control
+/// may come from where the test never ran.
+fn control_bounds(ad: &Adorned<'_, '_>) -> HashMap<Span, Point> {
+    ad.events()
+        .iter()
+        .filter(|e| e.cap == Capture::Ctl(CtlCap::Branch))
+        .filter_map(|e| Some((e.span(), ad.tree.node(e.site).enclosing_sites().next()?.ts().end_position())))
+        .collect()
+}
+
+/// The value a subject token names: the variable read it is the name token
+/// of (php's `$w` around `w`), else the token's own node.
+fn subject_value(ad: &Adorned<'_, '_>, v: &Event) -> Span {
+    ad.on(v)
+        .filter(|t| t.cap == Capture::Expr(ExprCap::ReadVarName))
+        .find_map(|t| ad.in_match(t.match_id, Capture::Expr(ExprCap::ReadVar)))
+        .map_or(v.span(), Event::span)
+}
+
+/// The document's `@ctl` matches as one view, each match its captures. A
+/// leave counts only as a statement of an arm (or as the arm itself): one
+/// nested in a construct the document does not describe (a loop's `else`,
+/// an `except` clause) says nothing about whether the arm comes out.
+fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlView {
+    let arm_sites: std::collections::HashSet<crate::cst::NodeId> = ad
+        .events()
+        .iter()
+        .filter(|e| matches!(e.cap, Capture::Ctl(CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep)))
+        .map(|e| e.site)
+        .collect();
+    let in_sequence = |site: crate::cst::NodeId| {
+        let node = ad.tree.node(site);
+        arm_sites.contains(&site)
+            || node
+                .enclosing_sites()
+                .next()
+                .is_some_and(|arm| arm_sites.contains(&arm.id()) && statements(ad.tree, arm).any(|s| s.id() == site))
+    };
+    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span)>> = Default::default();
+    for e in ad.events() {
+        if let Capture::Ctl(c) = e.cap {
+            if c.is_leave() && !in_sequence(e.site) {
+                continue;
+            }
+            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span()));
+        }
+    }
+    crate::build::builder::control::control_view(by_match.into_values())
 }
 
 /// The statements `node` runs in sequence: its named children outside
@@ -324,62 +255,6 @@ fn statements<'a, 't>(
     out.into_iter()
 }
 
-/// Every region the atom on `atom`'s node is known in, with its value
-/// there: the positions of each condition above it that the climb
-/// reaches through connectives alone, and the rest of a block a chain it
-/// decides falls through to. An atom under any other node (an argument
-/// of a call) is no part of the condition around that node.
-fn regions_of(ad: &Adorned<'_, '_>, fall: &FallThrough, atom: &Event) -> Vec<(Span, bool)> {
-    let mut out = Vec::new();
-    let mut path = Vec::new();
-    let node = ad.tree.node(atom.site);
-    for site in std::iter::once(node).chain(node.enclosing_sites()) {
-        let tags = || ad.tags.on(site.id()).map(|ix| &ad.events()[ix]);
-        if site != node {
-            let Some(c) = tags().find_map(connective) else { break };
-            path.push(c);
-        }
-        let mut decides = false;
-        for cond in tags().filter(|t| t.cap == Capture::Ctl(CtlCap::Cond)) {
-            decides = true;
-            out.extend(
-                positions(ad, cond.match_id)
-                    .into_iter()
-                    .filter_map(|(region, holds)| Some((region, through(&path, holds)?))),
-            );
-        }
-        if decides {
-            out.extend(
-                fall.get(&site.id())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|&(region, holds)| Some((region, through(&path, holds)?))),
-            );
-        }
-    }
-    out
-}
-
-/// The value a subject token names: the variable read it is the name token
-/// of (php's `$w` around `w`), else the token's own node.
-fn subject_value(ad: &Adorned<'_, '_>, v: &Event) -> Span {
-    ad.on(v)
-        .filter(|t| t.cap == Capture::Expr(ExprCap::ReadVarName))
-        .find_map(|t| ad.in_match(t.match_id, Capture::Expr(ExprCap::ReadVar)))
-        .map_or(v.span(), Event::span)
-}
-
-/// The document's `@ctl` matches as one view, each match its captures.
-fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlView {
-    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span)>> = Default::default();
-    for e in ad.events() {
-        if let Capture::Ctl(c) = e.cap {
-            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span()));
-        }
-    }
-    crate::build::builder::control::control_view(by_match.into_values())
-}
-
 pub(super) fn finish(st: &mut ExtractState) {
     st.out.control = control_view(st.adorned);
     // The use-after-move check reads the constructs' spans to decide
@@ -395,12 +270,14 @@ pub(super) fn finish(st: &mut ExtractState) {
     // optional's inner type). An atom is known where the conditions above
     // it put it.
     let ad = st.adorned;
-    let fall = fall_through(ad);
+    out.control_bounds = control_bounds(ad);
     let mut subjects = std::mem::take(&mut n.narrow_subjects);
     subjects.sort_by_key(|s| s.mid);
     let mut pending = Vec::new();
+    let mut guards = Vec::new();
+    let mut narrowings = Vec::new();
     for Subject { mid, name: subject, scope, annot, relative } in subjects {
-        let Some((kind, node)) = [NarrowCap::Is, NarrowCap::Set, NarrowCap::Unset]
+        let Some((kind, at_atom)) = [NarrowCap::Is, NarrowCap::Set, NarrowCap::Unset]
             .into_iter()
             .find_map(|k| ad.in_match(mid, Capture::Narrow(k)).map(|e| (k, e)))
         else {
@@ -421,44 +298,73 @@ pub(super) fn finish(st: &mut ExtractState) {
             _ => Some(Atom::Set),
         };
         let Some(atom) = atom else { continue };
-        let regions = regions_of(ad, &fall, node);
         // A member subject (`isinstance(self.x, T)`) narrows its place, which
         // only the assembled analysis can root (`PackPlaces`). So may a bare
         // name: only assembly knows whether it is a local or a member of an
         // elided receiver, and it keeps the place only for the member.
         let node = ad.in_match(mid, Capture::Narrow(NarrowCap::Var));
         let member = node.is_some_and(|v| ad.on_ixs(v).any(|i| st.minted[i].projects.is_some()));
-        for (region, holds) in regions {
+        let Some(v) = node else { continue };
+        // What the atom proves of its subject where the condition is `holds`,
+        // read where the test leaves control (`at`).
+        let proof = |holds: bool, at: Point, path: &[Connective]| {
             use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
-            let refined = match atom.proves(holds) {
-                None => continue,
-                Some(Proof::Is(t)) => WitnessPayload::InferredType(match relative {
+            Some(match atom.proves(through(path, holds)?)? {
+                Proof::Is(t) => WitnessPayload::InferredType(match relative {
                     Some(_) => t,
-                    None => written_type_at(out, &st.pack.names, t, region.start),
+                    None => written_type_at(out, &st.pack.names, t, at),
                 }),
                 // The subject as the test reads it: the condition and the
                 // regions it decides are disjoint, so the projection never
                 // reads its own narrowing.
-                Some(Proof::Defined) => match node {
-                    Some(v) => WitnessPayload::Projected {
-                        base: WitnessAttachment::Expr(subject_value(ad, v)),
-                        step: ProjectionStep::Defined,
-                    },
-                    None => continue,
+                Proof::Defined => WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(subject_value(ad, v)),
+                    step: ProjectionStep::Defined,
                 },
-            };
-            if let Some(v) = node {
-                out.place_narrowings.push(crate::build::query_extract::PlaceNarrowing {
+            })
+        };
+        let record = |of: Span, fact: GuardFact| GuardRecord {
+            subject: v.span(),
+            variable: (!member).then(|| subject.clone()),
+            scope,
+            of,
+            fact,
+        };
+        for Decision { mid: cond, of, path } in decisions(ad, at_atom) {
+            let mut decided = false;
+            for (region, holds) in positions(ad, cond) {
+                let Some(refined) = proof(holds, region.start, &path) else { continue };
+                decided = true;
+                guards.push(record(of, GuardFact::Narrowed(region)));
+                narrowings.push(crate::build::query_extract::PlaceNarrowing {
                     subject: v.span(),
                     refined: refined.clone(),
                     region,
                 });
+                if !member {
+                    pending.push((subject.clone(), refined, region, scope));
+                }
             }
-            if !member {
-                pending.push((subject.clone(), refined, region, scope));
+            // A construct with no arm where its condition goes one way runs
+            // none there: that path carries what the test proves.
+            let tested = ad.in_match(cond, Capture::Ctl(CtlCap::Cond)).map_or(of.end, |c| c.span().end);
+            let construct = out.control.constructs.iter().find(|c| c.span == of && c.kind == crate::model::file_analysis::ControlKind::Branch);
+            for holds in [true, false] {
+                if construct.is_some_and(|c| c.arms.iter().any(|a| a.role == crate::model::file_analysis::ArmRole::When(holds))) {
+                    continue;
+                }
+                if let Some(payload) = proof(holds, tested, &path) {
+                    decided = true;
+                    guards.push(record(of, GuardFact::Untaken(payload)));
+                }
+            }
+            if decided {
+                guards.push(record(of, GuardFact::Seed));
             }
         }
     }
+    out.guards.extend(guards);
+    out.place_narrowings.extend(narrowings);
     // Each region ends at the first rebind of its subject's binding, which
     // only the assembled analysis knows (`bind_variable_regions`).
     for (name, refined, region, scope) in pending {

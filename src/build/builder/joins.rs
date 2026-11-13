@@ -5,24 +5,9 @@
 //! query time.
 
 use super::*;
-use crate::model::file_analysis::{Binding, BranchJoin, Construct, ControlKind, JoinArm, JoinPlan, Place, Untaken};
+use crate::model::file_analysis::{guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
 use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
 use std::collections::{HashMap, HashSet};
-
-/// What each test proves of a place on its construct's untaken path, by
-/// construct.
-type Proofs<'p> = HashMap<Span, Vec<(&'p Place, &'p WitnessPayload)>>;
-
-/// Where a place's joins land and stop: the scopes from the site out, the
-/// region the joins stay inside (the binding's scope, or the callable the
-/// site runs in, whichever is nearer), and whether the binding is inside it.
-struct Reach {
-    chain: Vec<ScopeId>,
-    stop: ScopeId,
-    within: Span,
-    home_inside: bool,
-    callable: ScopeId,
-}
 
 impl<'a> Builder<'a> {
     /// For every rebind, a join past each branch whose arm holds it, from
@@ -147,49 +132,26 @@ impl<'a> Builder<'a> {
         // proof about the place, and some path is gone.
         let narrowed = std::mem::take(&mut self.narrowed_arms);
         for seed in &seeds {
-            let Some(found) = plan.construct_at(node_to_span(seed.construct), ControlKind::Branch) else { continue };
-            let c = plan.lifted_into(found);
-            if !plan.drops_a_path(c) {
-                continue;
-            }
             for (place, key_vars) in &seed.places {
                 let home = self.home_of(&place.root, seed.scope);
                 let reach = self.reach(seed.scope, home);
-                if !contains(reach.within, c.span) {
-                    continue;
-                }
                 let bound_from = match &place.root {
                     Binding::Lexical(sym) => Some(self.symbols[sym.0 as usize].span.start),
                     _ => None,
                 };
-                let outer = plan
-                    .arms_holding(c.span.start)
-                    .filter(|(k, _)| !std::ptr::eq(*k, c) && contains(k.span, c.span) && k.span != c.span)
-                    .take_while(|(_, a)| contains(reach.within, a.span))
-                    .filter(|(k, _)| k.kind == ControlKind::Branch && !plan.is_lifted(k) && contains(reach.within, k.span))
-                    .map(|(k, _)| k);
-                let mut joined: Vec<Span> = Vec::new();
-                for k in std::iter::once(c).chain(outer) {
-                    let Some(after) = plan
-                        .branch_joins(k, bound_from, self.scopes[seed.scope.0 as usize].span)
-                        .into_iter()
-                        .find(|j| j.role == JoinRole::After)
-                    else {
-                        break;
-                    };
-                    let proved = |a: &JoinArm| match (a.untaken, a.arm) {
-                        (Some(u), _) => proofs.get(&u.of).is_some_and(|ps| ps.iter().any(|(p, _)| *p == place)),
-                        (None, Some(arm)) => {
-                            narrowed.contains(&(place.clone(), arm)) || joined.iter().any(|&inner| contains(arm, inner))
-                        }
-                        (None, None) => false,
-                    };
-                    if after.arms.is_empty() || !after.arms.iter().all(proved) {
-                        break;
+                let joins = plan.guard_joins(
+                    node_to_span(seed.construct),
+                    reach.within,
+                    bound_from,
+                    |of| proofs.get(&of).is_some_and(|ps| ps.iter().any(|(p, _)| *p == place)),
+                    |arm| narrowed.iter().any(|(p, over)| p == place && contains(*over, arm)),
+                );
+                for (k, after) in joins {
+                    if !minted.insert((place.clone(), after.of, after.role)) {
+                        continue;
                     }
                     let scope = self.holding_scope(&reach, k.span);
-                    self.mint_region(place, key_vars, scope, vec![after], &proofs, &mut minted, &mut witnesses);
-                    joined.push(k.span);
+                    witnesses.extend(self.guard_region(place, key_vars, scope, after, &proofs));
                 }
             }
         }
@@ -228,69 +190,33 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The joins a test makes, each holding as a region: from past the
-    /// construct to the end of `scope`, cut where the place (or a key its
-    /// subscripts read) is first written or disturbed.
-    #[allow(clippy::too_many_arguments)]
-    fn mint_region(
-        &self,
-        place: &Place,
-        key_vars: &[String],
-        scope: ScopeId,
-        joins: Vec<BranchJoin>,
-        proofs: &Proofs<'_>,
-        minted: &mut HashSet<(Place, Span, JoinRole)>,
-        out: &mut Vec<Witness>,
-    ) {
+    /// The join a test makes, holding as a region from past its construct
+    /// to the end of `scope`, cut where the place (or a key its subscripts
+    /// read) is first written or disturbed.
+    fn guard_region(&self, place: &Place, key_vars: &[String], scope: ScopeId, join: BranchJoin, proofs: &Proofs<'_>) -> Vec<Witness> {
         let end = self.scopes[scope.0 as usize].span.end;
-        for BranchJoin { role, of, lands, arms } in joins {
-            if !minted.insert((place.clone(), of, role)) {
-                continue;
-            }
-            let join = WitnessAttachment::Join { place: Box::new(place.clone()), of, role };
-            let mut landed = false;
-            for at in lands {
-                let region = Span { start: at, end };
-                let disturbed = match place.is_variable() {
-                    true => self.rebinds.earliest_in(place, region),
-                    false => self.place_disturbances.as_ref().and_then(|idx| idx.earliest_in(place, region)),
-                };
-                let rebound = key_vars.iter().map(|kv| {
-                    let var = Place::variable(self.binding_of(kv, at, scope).0);
-                    self.rebinds.earliest_in(&var, region)
-                });
-                let Some(region) = crate::model::file_analysis::cut_region(region, std::iter::once(disturbed).chain(rebound))
-                else {
-                    continue;
-                };
-                landed = true;
-                out.push(Witness {
-                    attachment: WitnessAttachment::Place(Box::new(place.clone())),
-                    source: WitnessSource::Builder(JOIN_SOURCE.into()),
-                    payload: WitnessPayload::Edge(join.clone()),
-                    span: region,
-                });
-            }
-            if landed {
-                out.extend(join_arms(&join, place, &arms, proofs));
-            }
-        }
+        guard_region_witnesses(place, join, end, proofs, |region| {
+            let disturbed = match place.is_variable() {
+                true => self.rebinds.earliest_in(place, region),
+                false => self.place_disturbances.as_ref().and_then(|idx| idx.earliest_in(place, region)),
+            };
+            let at = region.start;
+            let rebound = key_vars.iter().map(|kv| {
+                let var = Place::variable(self.binding_of(kv, at, scope).0);
+                self.rebinds.earliest_in(&var, region)
+            });
+            crate::model::file_analysis::cut_region(region, std::iter::once(disturbed).chain(rebound))
+        })
     }
 
     /// The scopes from `sid` out, and where joins minted from there stop.
     fn reach(&self, sid: ScopeId, home: ScopeId) -> Reach {
-        let chain = crate::model::file_analysis::scope_chain_of(&self.scopes, sid);
-        let pos = |id: ScopeId| chain.iter().position(|&s| s == id);
-        let callable = chain.iter().copied().find(|&s| self.scopes[s.0 as usize].kind.is_callable()).unwrap_or(*chain.last().unwrap_or(&sid));
-        let home_inside = pos(home).is_some_and(|h| pos(callable).is_some_and(|c| h <= c));
-        let stop = if home_inside { home } else { callable };
-        let within = self.scopes[stop.0 as usize].span;
-        Reach { chain, stop, within, home_inside, callable }
+        Reach::of(&self.scopes, sid, home)
     }
 
     /// The innermost scope of the reach holding `span`.
     fn holding_scope(&self, reach: &Reach, span: Span) -> ScopeId {
-        reach.chain.iter().copied().find(|&s| contains(self.scopes[s.0 as usize].span, span)).unwrap_or(reach.stop)
+        reach.holding_scope(&self.scopes, span)
     }
 
     /// The scope a binding lives in, as `binding_of` answers it.
@@ -331,30 +257,6 @@ impl<'a> Builder<'a> {
             .find(|a| a.kind().ends_with("_statement") && a.start_position() <= block.start && a.end_position() >= block.end)
             .map_or(block.end, |a| a.end_position())
     }
-}
-
-/// The arms of `join`: the place as it stands where each path comes out,
-/// or, on a path no arm runs, what the test there proves of it.
-fn join_arms(join: &WitnessAttachment, place: &Place, arms: &[JoinArm], proofs: &Proofs<'_>) -> Vec<Witness> {
-    let read = WitnessAttachment::Place(Box::new(place.clone()));
-    let arm = |payload, at| Witness {
-        attachment: join.clone(),
-        source: WitnessSource::Builder(JOIN_SOURCE.into()),
-        payload,
-        span: Span { start: at, end: at },
-    };
-    let mut out = Vec::new();
-    for a in arms {
-        let proved = a.untaken.and_then(|Untaken { of, tested }| {
-            let (_, payload) = proofs.get(&of)?.iter().find(|(p, _)| *p == place)?;
-            Some(((*payload).clone(), tested))
-        });
-        match proved {
-            Some((payload, tested)) => out.push(arm(payload, tested)),
-            None => out.push(arm(WitnessPayload::Edge(read.clone()), a.at)),
-        }
-    }
-    out
 }
 
 fn contains(outer: Span, inner: Span) -> bool {

@@ -2041,6 +2041,28 @@ void f(Holder h) {
 }
 
 #[test]
+fn a_member_narrows_past_its_construct_until_disturbed() {
+    // Where the guard's arm leaves, the place holds what the test proves past
+    // the construct; a write to the place ends that.
+    let run_classes = |src: &str| {
+        let fa = cpp_skel(src).into_file_analysis();
+        let mut classes: Vec<(usize, Option<String>)> = fa
+            .refs()
+            .iter()
+            .filter(|r| r.target_name == "run" && matches!(r.kind, crate::model::file_analysis::RefKind::MethodCall { .. }))
+            .map(|r| (r.span.start.row, fa.method_call_invocant_type(r, None).and_then(|t| t.class_name().map(str::to_string))))
+            .collect();
+        classes.sort();
+        classes
+    };
+    let head = "struct Base { void run(); };\nstruct Derived : Base { void run(); };\nstruct Holder { Base* b; };\n";
+    let narrowed = format!("{head}void f(Holder h) {{\n    if (!dynamic_cast<Derived*>(h.b)) {{\n        return;\n    }}\n    h.b->run();\n}}\n");
+    assert_eq!(run_classes(&narrowed), vec![(7, Some("Derived".to_string()))]);
+    let written = format!("{head}void f(Holder h, Base* o) {{\n    if (!dynamic_cast<Derived*>(h.b)) return;\n    h.b = o;\n    h.b->run();\n}}\n");
+    assert_eq!(run_classes(&written), vec![(6, Some("Base".to_string()))]);
+}
+
+#[test]
 fn cpp_dynamic_cast_narrows_a_member_of_this() {
     // `this->b` and a bare `b` in a member function are one place: either
     // spelling's guard reaches the other's uses.
@@ -2326,6 +2348,52 @@ void k(std::optional<Widget> o) {
     assert_eq!(at(rows[1]), class("Widget"), "a call, then throw");
     assert_ne!(at(rows[2]), class("Widget"), "no exit");
     assert_eq!(at(rows[3]), class("Widget"), "an exit that is not the last statement");
+}
+
+#[test]
+fn a_pack_test_narrows_past_its_construct_through_each_join() {
+    // Past a construct some path of which leaves, a variable holds what each
+    // path that comes out proves: every falling arm a test narrows, an
+    // inner construct already joined, and no further than the statements the
+    // construct runs among (a loop's body, a `try`).
+    use crate::model::file_analysis::InferredType;
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    let python = |body: &str| {
+        let src = format!("class Foo:\n    pass\ndef f(x, z):\n{body}\n    x.run()\n");
+        let mut parser = python_parser();
+        let tree = parser.parse(&src, None).unwrap();
+        let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+        let row = src.lines().position(|l| l.contains("x.run()")).unwrap();
+        fa.inferred_type_via_bag("x", tree_sitter::Point { row, column: 4 })
+    };
+    let narrows = [
+        (
+            "    if isinstance(x, Foo):\n        log()\n    elif isinstance(x, Foo):\n        log()\n    else:\n        return",
+            "two falling arms, each narrowed",
+        ),
+        (
+            "    if z:\n        if not isinstance(x, Foo):\n            return\n    else:\n        if not isinstance(x, Foo):\n            return",
+            "each arm holds a construct already joined",
+        ),
+        ("    if not isinstance(x, Foo):\n        raise ValueError()", "a bodiless path carries what its test proves"),
+    ];
+    for (body, why) in narrows {
+        assert_eq!(python(body), class("Foo"), "python: {why}");
+    }
+    let nothing = [
+        (
+            "    for y in z:\n        if not isinstance(x, Foo):\n            continue\n        log()",
+            "past the loop whose body the test is in",
+        ),
+        (
+            "    try:\n        if not isinstance(x, Foo):\n            raise ValueError()\n    except ValueError:\n        pass",
+            "past the `try` the test is in",
+        ),
+        ("    if z:\n        if not isinstance(x, Foo):\n            return", "one arm unproved"),
+    ];
+    for (body, why) in nothing {
+        assert_ne!(python(body), class("Foo"), "python: {why}");
+    }
 }
 
 #[test]
@@ -4182,3 +4250,4 @@ fn cpp_a_branch_joins_what_its_arms_leave() {
     assert!(joined, "the braceless arm's write joins past the `if`");
     assert_eq!(fa.inferred_type_via_bag("n", tree_sitter::Point { row: 3, column: 13 }), Some(crate::model::file_analysis::InferredType::Numeric));
 }
+

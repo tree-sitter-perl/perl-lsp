@@ -498,9 +498,8 @@
 (if_statement
   alternative: (else_if_clause condition: (_) @ctl.cond) @ctl.branch
   alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)])
-; TODO(cfg-exit-join): `@ctl.loop` and the fall-through it guards stand
-; in for reachability; the CFG retires both, since a `break` is an edge to
-; the loop's exit there.
+; TODO(cfg-exit-join): the loop's own joins (its head, its exit) retire
+; this capture; until then it narrows the body by the loop's test.
 (while_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.loop
 (conditional_expression condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch

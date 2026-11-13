@@ -3331,6 +3331,7 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
         ("{ if ($z) { log_it(); } throw new \\Exception(); }", "a nested block, then the exit"),
         ("{ return; log_it(); }", "an exit that is not the last statement"),
         ("{ return; } else { log_it(); }", "an else clause that falls through"),
+        ("{ return; } elseif ($z) { log_it(); }", "an elseif clause: both ways out of it failed the test"),
     ];
     for (body, why) in exits {
         let src = format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    if (!$y instanceof Foo) {body}\n    $y->run();\n}}\n");
@@ -3340,7 +3341,6 @@ fn an_if_whose_body_ends_in_an_exit_narrows_the_rest_of_the_block() {
     let falls_through = [
         ("{ log_it(); }", "no exit"),
         ("{ if ($z) { return; } }", "an exit only in a nested block"),
-        ("{ return; } elseif ($z) { log_it(); }", "an elseif clause"),
         ("{ diet(); }", "a call that is not die"),
     ];
     for (body, why) in falls_through {
