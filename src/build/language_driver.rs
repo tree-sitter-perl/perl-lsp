@@ -1111,6 +1111,7 @@ fn remap_spans(
         place_narrowings,
         place_writes,
         variable_regions,
+        control,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1311,6 +1312,19 @@ fn remap_spans(
     }
     for span in control_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for c in control.constructs.iter_mut() {
+        let crate::model::file_analysis::Construct { span, kind: _, cond, arms } = c;
+        *span = rspan(*span);
+        if let Some(cond) = cond {
+            *cond = rspan(*cond);
+        }
+        for a in arms {
+            a.span = rspan(a.span);
+        }
+    }
+    for l in control.leaves.iter_mut() {
+        l.span = rspan(l.span);
     }
     for span in param_regions.iter_mut() {
         *span = rspan(*span);

@@ -171,9 +171,9 @@ pub enum WitnessAttachment {
 pub enum JoinRole {
     /// Past a branching construct: the arms that fall through.
     After,
-    /// A test written after the code it guards (`… if $c`): it runs first,
-    /// so it sees the value entering the construct.
-    Test,
+    /// The value entering a construct: where each arm begins, and at a
+    /// test written after the code it guards (`… if $c`), which runs first.
+    Entry,
 }
 
 /// The question a `Member` attachment asks of its member.

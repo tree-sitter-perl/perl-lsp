@@ -1967,3 +1967,58 @@ fn a_write_hovers_the_value_it_writes() {
     let me = hover(Point::new(1, 8));
     assert!(me.ends_with("*method*\n\n*class m.Foo*\n\n*returns: m.Foo*"), "{me}");
 }
+
+/// Past an `if`, a variable a branch rebinds holds what every path leaves
+/// it: each arm's write, and, where no arm runs, what it held before. An
+/// arm's write is no other arm's, and a path that leaves the variable
+/// unbound reaches no read of it.
+#[test]
+fn a_branch_joins_what_its_arms_leave() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+def f(c, d):
+    x = A()
+    if c:
+        x = B()
+    y = x
+    if c:
+        z = A()
+    elif d:
+        z = B()
+    else:
+        z = A()
+    w = z
+    if c:
+        if d:
+            x = B()
+    v = x
+    if c:
+        q = B()
+    else:
+        pass
+    r = q
+    s = A()
+    if c:
+        s = B()
+    elif d:
+        pass
+    t = s
+";
+    let fa = py_in(src, None);
+    let a = InferredType::ClassName("A".into());
+    let b = InferredType::ClassName("B".into());
+    let both = crate::model::file_analysis::join_all(&[a.clone(), b.clone()], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 8));
+    assert_eq!(at("x", 8), both, "a write in the arm, the value before where it does not run");
+    assert_eq!(at("z", 15), both, "an `elif` chain joins every clause");
+    assert_eq!(at("x", 19), both, "a nested branch joins through the arm it closes");
+    assert_eq!(at("q", 24), Some(b.clone()), "the path that never binds `q` reads nothing");
+    assert_eq!(at("s", 30), both, "a chain with no `else` runs none of its arms");
+    let sibling = py_in("class A:\n    pass\nclass B:\n    pass\ndef f(c):\n    x = A()\n    if c:\n        x = B()\n        u = x\n    else:\n        u = x\n", None);
+    let at = |row| sibling.inferred_type_via_bag("x", Point::new(row, 12));
+    assert_eq!(at(8), Some(b), "inside the arm, its own write");
+    assert_eq!(at(10), Some(a), "a sibling arm starts from the value entering the branch");
+}

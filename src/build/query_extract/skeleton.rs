@@ -309,6 +309,9 @@ pub struct SkeletonAnalysis {
     /// narrowing, a use's observation), uncut: once the assembled analysis
     /// binds them, each ends at the first rebind of its binding.
     pub variable_regions: Vec<crate::model::witnesses::Witness>,
+    /// The document's control structure, which the assembled analysis
+    /// joins each branch's writes through (`FileAnalysis::assemble_joins`).
+    pub control: crate::model::file_analysis::ControlView,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -2112,6 +2115,7 @@ impl SkeletonAnalysis {
         // in; the assembled analysis knows each name's binding.
         fa.bind_variable_witnesses();
         fa.bind_variable_regions(std::mem::take(&mut self.variable_regions));
+        fa.assemble_joins(&std::mem::take(&mut self.control));
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
