@@ -308,34 +308,32 @@ A loop tests its condition before every run of its body, so the body is
 an arm too: `while (G)`, `STMT while G` and a C-style `for (…; G; …)`
 narrow by G TRUE, `until` by G FALSE. `do BLOCK while G` is the one
 exception — perlsyn runs the block once before the first test. Nothing
-narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
-rest of the block is the fall-through and takes the opposite polarity.
-Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
-diagnostics see each statement-level guard once.
+narrows after a loop, since `last` leaves with G unchanged.
 
-"Falls through" is a fact about statements. A block leaves when any of
-its statements leaves, wherever that statement sits, and what follows it
-there is dead: a statement leaves when it is an exit, or when it is an
-`if`/`unless` chain with an `else` whose every arm leaves
-(`block_leaves`). A chain with no `else` has an implicit one, which falls
-through. After a chain whose arms all leave but one, the rest of the
-enclosing block runs where that arm does, through the same
-`narrow_block_remainder`, narrowed as that arm's block is: the first
-arm where its block is entered, an `elsif` where its own guard holds and
-every earlier arm was not entered, the `else` where no earlier arm was
-(`unless ($x->isa('Foo')) { return }`, `if ($x->isa('Foo')) { … } else
-{ die }`, `if (!defined $x) { die; warn … }`). Each arm's guard is recorded once,
-as the arm's. Where no arm falls through, the rest of the block never
-runs and nothing narrows it; where two or more do, the rest runs where
-any of them does, and nothing narrows past the enclosing block either:
-both are the CFG's block-exit join (`docs/prompt-cfg-tier.md` §3.5,
-`TODO(cfg-exit-join)`). An exit is a word read by its spelling
-(`is_exit_expression`'s table: `return`, `die`, `exit`, `croak`,
-`confess`, `last`, `next`, `redo`, `goto`), so a file's own sub named
-`croak` counts as one, and so does a `goto` whose label lies in the rest
-of the block; a callee that never returns is an effect on the callee,
-which replaces the table once effects and the CFG exist
-(`TODO(noreturn-callee)`).
+What a test proves reaches past its construct through the construct's
+join (`docs/adr/cfg-tier.md`), never through a region of its own. An arm
+control never comes out of is no way into the join: one holding a
+statement that leaves with no arm between them (`@ctl.leave.*`, or a call
+`is_exit_expression` names until the effect lane decides calls,
+`TODO(cross-file-noreturn)`), or one holding a chain with an `else` whose
+every arm leaves. The path on which no arm runs (the implicit `else`, the
+statement a modifier skips, the right side a short-circuit skips) carries
+what the test proves there, sited where the test leaves control: the
+first arm where its block is entered, an `elsif` where its own guard
+holds and every earlier arm was not entered, the implicit `else` where no
+arm was. So `return unless $x->isa('Foo')`, `if ($x->isa('Foo')) { … }
+else { die }` and `$x = Foo->new unless defined $x` all leave `$x` a
+`Foo`. A test writes nothing, so its join holds as a region from past the
+construct to the end of the scope around it, cut at the subject's next
+rebind or disturbance, and where it answers nothing the value coming in
+still stands. It is minted only where some path is gone and every path
+out carries a proof (an arm the test narrows, a proved untaken path, or an
+arm holding a construct already joined for the place), so each branch
+around it carries the narrowing on out where every way out of that branch
+does too, and the top level of a file narrows like any block. Only an
+exit guard records a `GuardSite` for a statement modifier or a bare
+logical, so the D3/D4 redundancy diagnostics see each statement-level
+guard once.
 
 A pack's document states its guards in three parts, and the extractor
 (`query_extract/extract/narrowing.rs`) joins them by containment, the

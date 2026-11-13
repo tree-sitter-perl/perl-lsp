@@ -99,15 +99,34 @@ fn contains(outer: Span, inner: Span) -> bool {
     start(outer) <= start(inner) && end(inner) <= end(outer)
 }
 
-/// One join a branch mints for a variable: past the construct (`After`)
+/// One join a branch mints for a place: past the construct (`After`)
 /// or the value entering it (`ArmStart`), landing at each of `lands`, fed by
-/// the variable as it stands at each of `arms`.
+/// each of `arms`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchJoin {
     pub role: crate::model::witnesses::JoinRole,
     pub of: Span,
     pub lands: Vec<Point>,
-    pub arms: Vec<Point>,
+    pub arms: Vec<JoinArm>,
+}
+
+/// One path into a join: the place as it stands at `at`, or, where no arm
+/// runs because a test went one way (`untaken`), what that test proves of
+/// the place, when it proves anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinArm {
+    pub at: Point,
+    /// The arm whose end this is, on a path an arm runs.
+    pub arm: Option<Span>,
+    pub untaken: Option<Untaken>,
+}
+
+/// The path through a construct on which no arm runs: the construct, and
+/// where its test leaves control, the site of what the test proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Untaken {
+    pub of: Span,
+    pub tested: Point,
 }
 
 /// A [`ControlView`] indexed for minting joins: which arm holds a point,
@@ -118,6 +137,12 @@ pub struct JoinPlan<'v> {
     /// nearest arm around it.
     arms: Vec<(usize, usize)>,
     around: Vec<Option<usize>>,
+    /// Per arm in `arms`: control never comes out of its end.
+    leaves: Vec<bool>,
+    /// Each construct's index, by its address.
+    index: HashMap<*const Construct, usize>,
+    /// Constructs by their span.
+    at_span: HashMap<Span, Vec<usize>>,
     /// Branches by where they end, for an arm a branch closes.
     ends: HashMap<Point, Vec<usize>>,
     arm_spans: HashSet<Span>,
@@ -151,23 +176,112 @@ impl<'v> JoinPlan<'v> {
             }
         }
         let arm_spans = view.constructs.iter().flat_map(|c| c.arms.iter().map(|a| a.span)).collect();
-        JoinPlan { view, arms, around, ends, arm_spans }
+        let index = view.constructs.iter().enumerate().map(|(i, c)| (c as *const Construct, i)).collect();
+        let mut at_span: HashMap<Span, Vec<usize>> = HashMap::new();
+        for (i, c) in view.constructs.iter().enumerate() {
+            at_span.entry(c.span).or_default().push(i);
+        }
+        let mut plan = JoinPlan { view, leaves: vec![false; arms.len()], arms, around, index, at_span, ends, arm_spans };
+        plan.mark_leaving();
+        plan
+    }
+
+    /// Marks every arm control never comes out of: one a leaving statement
+    /// sits in with no arm between them, or one holding a branch that leaves
+    /// on every path. Inner constructs are decided before the arms around
+    /// them.
+    fn mark_leaving(&mut self) {
+        let view = self.view;
+        for l in &view.leaves {
+            let held = self.holding_ix(l.span.start).find(|&i| contains(self.arm_span(i), l.span));
+            if let Some(i) = held {
+                self.leaves[i] = true;
+            }
+        }
+        let mut order: Vec<usize> = (0..self.view.constructs.len()).collect();
+        order.sort_by_key(|&k| {
+            let s = self.view.constructs[k].span;
+            (std::cmp::Reverse(s.start), s.end)
+        });
+        for k in order {
+            let c = &view.constructs[k];
+            let has = |b: bool| c.arms.iter().any(|a| a.role == ArmRole::When(b));
+            if c.kind != ControlKind::Branch || !(has(true) && has(false)) {
+                continue;
+            }
+            if !(0..c.arms.len()).all(|a| self.leaves[self.arm_ix(k, a)]) {
+                continue;
+            }
+            let holder = self.holding_ix(c.span.start).find(|&i| self.arms[i].0 != k && contains(self.arm_span(i), c.span));
+            if let Some(i) = holder {
+                self.leaves[i] = true;
+            }
+        }
+    }
+
+    fn arm_span(&self, i: usize) -> Span {
+        let (c, a) = self.arms[i];
+        self.view.constructs[c].arms[a].span
+    }
+
+    fn arm_ix(&self, c: usize, a: usize) -> usize {
+        let s = self.view.constructs[c].arms[a].span;
+        let first = self.arms.partition_point(|&k| {
+            let t = self.arm_span_of(k);
+            (t.start, std::cmp::Reverse(t.end)) < (s.start, std::cmp::Reverse(s.end))
+        });
+        (first..self.arms.len()).find(|&i| self.arms[i] == (c, a)).expect("every arm is indexed")
+    }
+
+    fn arm_span_of(&self, (c, a): (usize, usize)) -> Span {
+        self.view.constructs[c].arms[a].span
+    }
+
+    /// The arms holding `at`, innermost first, as indices into `arms`.
+    fn holding_ix(&self, at: Point) -> impl Iterator<Item = usize> + '_ {
+        let last = self.arms.partition_point(|&k| self.arm_span_of(k).start <= at);
+        std::iter::successors(last.checked_sub(1), move |&i| self.around[i]).filter(move |&i| self.arm_span(i).end >= at)
     }
 
     /// The arms holding `at`, innermost first, as `(construct, arm)`.
     pub fn arms_holding(&self, at: Point) -> impl Iterator<Item = (&'v Construct, &'v Arm)> + '_ {
-        let span = |i: usize| {
+        self.holding_ix(at).map(move |i| {
             let (c, a) = self.arms[i];
-            self.view.constructs[c].arms[a].span
-        };
-        let last = self.arms.partition_point(|&(c, a)| self.view.constructs[c].arms[a].span.start <= at);
-        let start = last.checked_sub(1);
-        std::iter::successors(start, move |&i| self.around[i])
-            .filter(move |&i| span(i).end >= at)
-            .map(move |i| {
-                let (c, a) = self.arms[i];
-                (&self.view.constructs[c], &self.view.constructs[c].arms[a])
-            })
+            (&self.view.constructs[c], &self.view.constructs[c].arms[a])
+        })
+    }
+
+    /// Whether some path through `c` (or a branch closing one of its arms)
+    /// is one control never comes out of.
+    pub fn drops_a_path(&self, c: &'v Construct) -> bool {
+        let mut reached = vec![c];
+        self.arm_points(c, &mut Vec::new(), &mut reached);
+        reached.iter().any(|k| {
+            let ix = self.index[&(*k as *const Construct)];
+            (0..k.arms.len()).any(|a| self.leaves[self.arm_ix(ix, a)])
+        })
+    }
+
+    /// The construct `c` joins with: the one it is wholly an arm of (an
+    /// `elsif`), climbing, else itself.
+    pub fn lifted_into(&self, mut c: &'v Construct) -> &'v Construct {
+        for _ in 0..64 {
+            if !self.is_lifted(c) {
+                break;
+            }
+            let Some((outer, _)) = self.arms_holding(c.span.start).find(|(k, a)| a.span == c.span && !std::ptr::eq(*k, c))
+            else {
+                break;
+            };
+            c = outer;
+        }
+        c
+    }
+
+    /// The construct at exactly `span` of `kind`, if the view has one.
+    pub fn construct_at(&self, span: Span, kind: ControlKind) -> Option<&'v Construct> {
+        let view = self.view;
+        self.at_span.get(&span)?.iter().map(|&i| &view.constructs[i]).find(|c| c.kind == kind)
     }
 
     /// A branch that is wholly another's arm (an `elsif`) joins with the
@@ -190,8 +304,8 @@ impl<'v> JoinPlan<'v> {
         let mut arms = Vec::new();
         let mut reached = vec![c];
         self.arm_points(c, &mut arms, &mut reached);
-        arms.retain(bound);
-        arms.sort();
+        arms.retain(|a| bound(&a.at));
+        arms.sort_by_key(|a| (a.at, a.arm.map(|s| (s.start, s.end)), a.untaken.map(|u| (u.tested, u.of.start, u.of.end))));
         arms.dedup();
         // Just past the construct: its last arm leaves at its end, and that
         // arm's read must not meet the join it feeds.
@@ -216,29 +330,33 @@ impl<'v> JoinPlan<'v> {
             lands.dedup();
             // Unbound on entry, an arm's read never comes from the entry.
             if !lands.is_empty() && bound(&entry) {
-                out.push(BranchJoin { role: JoinRole::ArmStart, of: k.span, lands, arms: vec![entry] });
+                out.push(BranchJoin { role: JoinRole::ArmStart, of: k.span, lands, arms: vec![JoinArm { at: entry, arm: None, untaken: None }] });
             }
         }
         out
     }
 
-    /// Where each path through `c` leaves it: the end of every arm (an arm
-    /// a branch closes contributes that branch's paths), and, when no arm
-    /// runs where the test goes one way, where the construct is entered.
-    /// Every branch it passes through lands in `reached`.
-    fn arm_points(&self, c: &'v Construct, out: &mut Vec<Point>, reached: &mut Vec<&'v Construct>) {
-        for a in &c.arms {
+    /// Where each path through `c` comes out of it: the end of every arm
+    /// control comes out of (an arm a branch closes contributes that
+    /// branch's paths), and, when no arm runs where the test goes one way,
+    /// where the construct is entered. Every branch it passes through lands
+    /// in `reached`.
+    fn arm_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>) {
+        let k = self.index[&(c as *const Construct)];
+        for (ai, a) in c.arms.iter().enumerate() {
             match self.closing(c, a).filter(|k| reached.len() < 64 && !reached.iter().any(|r| std::ptr::eq(*r, *k))) {
                 Some(inner) => {
                     reached.push(inner);
                     self.arm_points(inner, out, reached);
                 }
-                None => out.push(a.span.end),
+                None if self.leaves[self.arm_ix(k, ai)] => {}
+                None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None }),
             }
         }
         let has = |b: bool| c.arms.iter().any(|a: &Arm| a.role == ArmRole::When(b));
         if !(has(true) && has(false)) && !c.arms.is_empty() {
-            out.push(entry_point(c));
+            let tested = c.cond.map_or(entry_point(c), |cond| cond.end);
+            out.push(JoinArm { at: entry_point(c), arm: None, untaken: Some(Untaken { of: c.span, tested }) });
         }
     }
 
@@ -290,8 +408,12 @@ impl super::FileAnalysis {
                 Binding::Lexical(sid) => Some(self.symbols[sid.0 as usize].span.start),
                 _ => None,
             };
+            // An arm ending where the write lands (`x = a if c else b`'s
+            // `b`) is part of the value written, not around the write.
+            let written = fe.target_token.unwrap_or(Span { start: fe.source.start, end: at });
             let holding = plan
                 .arms_holding(at)
+                .filter(|(_, a)| contains(a.span, written))
                 .take_while(|(_, a)| contains(within, a.span))
                 .filter(|(c, _)| c.kind == ControlKind::Branch && !plan.is_lifted(c) && contains(within, c.span));
             for (c, _) in holding {
@@ -314,12 +436,12 @@ impl super::FileAnalysis {
                         }
                     }
                     let read = WitnessAttachment::Place(Box::new(place.clone()));
-                    for p in arms {
+                    for arm in arms {
                         joins.push(Witness {
                             attachment: join.clone(),
                             source: source(),
                             payload: WitnessPayload::Edge(read.clone()),
-                            span: Span { start: p, end: p },
+                            span: Span { start: arm.at, end: arm.at },
                         });
                     }
                 }
@@ -331,3 +453,7 @@ impl super::FileAnalysis {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "control_tests.rs"]
+mod tests;

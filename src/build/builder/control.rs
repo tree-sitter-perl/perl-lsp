@@ -94,19 +94,53 @@ fn captured<'t>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>) -> Vec<(CtlC
     caps.into_iter().map(|(c, n)| (c, n.id(), super::node_to_span(n))).collect()
 }
 
-/// The control view of the constructs at `nodes`: each node is tried as a
-/// match's root and nothing below it starts one, so the cost is the nodes'
-/// own, not the file's. The joins ask it of a write's ancestors, which are
-/// the only constructs that can hold the write.
-pub(super) fn control_view_at<'t>(nodes: impl IntoIterator<Item = Node<'t>>, source: &[u8]) -> ControlView {
+/// The control view of the constructs at `nodes`, and of every statement a
+/// branch found there runs in its arms, down to the statements that leave:
+/// what decides whether an arm comes out at its end. Each node is tried as
+/// a match's root and nothing below it starts one, so the cost is the
+/// nodes' own, not the file's. A loop's body is not
+/// entered, since nothing in it decides whether the arm around the loop
+/// comes out. `exits(node)` names a call that leaves by its callee's
+/// nature, until how a call ends is read from the effect lane
+/// (`TODO(cross-file-noreturn)`).
+pub(super) fn control_view_with_leaves<'t>(
+    nodes: impl IntoIterator<Item = Node<'t>>,
+    source: &[u8],
+    exits: impl Fn(Node<'t>) -> bool,
+) -> ControlView {
+    use crate::cst::NodeExt;
     use tree_sitter::StreamingIterator;
     let (query, caps) = ctl_query();
     let mut cursor = tree_sitter::QueryCursor::new();
     cursor.set_max_start_depth(Some(0));
     let mut out = Vec::new();
-    for node in nodes {
+    let mut seen = std::collections::HashSet::new();
+    let mut work: Vec<Node<'t>> = nodes.into_iter().collect();
+    while let Some(node) = work.pop() {
+        if !seen.insert(node.id()) {
+            continue;
+        }
+        if exits(node) {
+            out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node))]);
+        }
         let mut it = cursor.matches(query, node, source);
         while let Some(m) = it.next() {
+            let branch = m.captures.iter().any(|c| caps[c.index as usize] == CtlCap::Branch);
+            for c in m.captures.iter().filter(|_| branch) {
+                if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else) {
+                    continue;
+                }
+                if c.node.kind() == "block" {
+                    for stmt in c.node.elements() {
+                        work.push(stmt);
+                        if stmt.kind() == "expression_statement" {
+                            work.extend(crate::cst::nth_element(stmt, 0));
+                        }
+                    }
+                } else {
+                    work.push(c.node);
+                }
+            }
             out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node))));
         }
     }
