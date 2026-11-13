@@ -100,7 +100,7 @@ fn contains(outer: Span, inner: Span) -> bool {
 }
 
 /// One join a branch mints for a variable: past the construct (`After`)
-/// or the value entering it (`Entry`), landing at each of `lands`, fed by
+/// or the value entering it (`ArmStart`), landing at each of `lands`, fed by
 /// the variable as it stands at each of `arms`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchJoin {
@@ -216,7 +216,7 @@ impl<'v> JoinPlan<'v> {
             lands.dedup();
             // Unbound on entry, an arm's read never comes from the entry.
             if !lands.is_empty() && bound(&entry) {
-                out.push(BranchJoin { role: JoinRole::Entry, of: k.span, lands, arms: vec![entry] });
+                out.push(BranchJoin { role: JoinRole::ArmStart, of: k.span, lands, arms: vec![entry] });
             }
         }
         out

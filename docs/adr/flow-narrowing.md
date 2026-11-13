@@ -130,7 +130,7 @@ document, after its facts are bound). Both read one plan of the document
   last statement of a python block). `JoinFold` joins the arms, and one arm
   the chase cannot type leaves the join untyped (`Unknown`).
 - **Each arm begins from the value entering its construct**
-  (`JoinRole::Entry`): read past the test, or at the construct's start when
+  (`JoinRole::ArmStart`): read past the test, or at the construct's start when
   the test runs after what it guards (`$x = f() unless $x`, whose test sees
   the entering value too). The first arm to run needs no entry, since the
   test leaves the variable as it entered; an entry is a reset, and a reset
