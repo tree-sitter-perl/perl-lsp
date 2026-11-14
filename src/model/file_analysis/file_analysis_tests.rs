@@ -2504,6 +2504,34 @@ fn constructor_slot_write_through_an_inherited_new_types_the_read() {
     assert_eq!(t, Some(InferredType::ClassName("My::Conn".into())));
 }
 
+/// Deterministic cost pin: every class's read of a key the build filed
+/// unowned needs the objects of the same writes. Resolving them once per
+/// bucket keeps a pass of N reads linear; per read it is N chases each.
+#[test]
+fn reads_of_a_filed_key_resolve_its_writes_once() {
+    use crate::model::witnesses::{fold_memo_equiv_enabled, live_window_equiv_enabled, materialize_reads};
+    if live_window_equiv_enabled() || fold_memo_equiv_enabled() {
+        return;
+    }
+    let cost = |classes: usize| {
+        let mut src = String::new();
+        for i in 0..classes {
+            src.push_str(&format!(
+                "package P{i};\nsub new {{ bless {{}}, shift }} sub make{i} {{ P{i}->new }}\nsub fill {{ my $o = make{i}(); $o->{{k}} = My::Conn->new; }}\nsub go {{ my ($self) = @_; my $x = $self->{{k}};\n}}\n"
+            ));
+        }
+        let fa = build_fa_from_source(&src);
+        let before = materialize_reads();
+        for i in 0..classes {
+            let at = crate::model::witnesses::ReadPoint::position(Point { row: 5 * i + 4, column: 0 });
+            assert_eq!(fa.inferred_type_via_bag_ctx("$x", at, None), Some(InferredType::ClassName("My::Conn".into())), "class P{i}");
+        }
+        materialize_reads() - before
+    };
+    let (short, long) = (cost(40), cost(80));
+    assert!(long < short * 3, "40 classes read {short} witnesses, 80 read {long}: superlinear");
+}
+
 #[test]
 fn a_write_through_another_class_object_is_not_the_readers() {
     // The filed write joins only the owner its object turns out to be: a

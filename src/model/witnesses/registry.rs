@@ -530,6 +530,80 @@ fn fold_memo_store(
     });
 }
 
+/// One `SlotWrites` bucket's writes, grouped by the class each write's
+/// object resolved to (`owned_slot_writes`).
+#[derive(Default)]
+struct SlotOwnerIndex {
+    by_class: std::collections::HashMap<String, Vec<Witness>>,
+    /// A chase beneath recorded an exit or was poisoned.
+    exits: bool,
+}
+
+/// What a bucket's index depends on: the bag's content, the bucket, and the
+/// context its objects are chased under (as `FoldMemoKey`), plus the parent
+/// graph's and the index's generations.
+type SlotOwnersKey = (u64, WitnessAttachment, FrameworkFact, usize, Option<u64>, Option<(usize, u64)>);
+
+/// Entries are dead once their bag moves on, so the table is emptied rather
+/// than grown past this.
+const SLOT_OWNERS_CAP: usize = 256;
+
+thread_local! {
+    static SLOT_OWNERS: std::cell::RefCell<std::collections::HashMap<SlotOwnersKey, std::sync::Arc<SlotOwnerIndex>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    static SLOT_OWNERS_BUILDING: std::cell::RefCell<Vec<SlotOwnersKey>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The shared per-bucket index of `owned_slot_writes`, under the fold memo's
+/// rules: off with `PERL_LSP_NO_FOLD_MEMO`, and a query that can reach the
+/// module index is shared only inside a pass that pins that index.
+struct SlotOwners;
+
+impl SlotOwners {
+    fn key(bag: &WitnessBag, q: &ReducerQuery, bucket: &WitnessAttachment) -> Option<SlotOwnersKey> {
+        if build_memos_disabled() || bounds_unfilled() {
+            return None;
+        }
+        let index = q.context.and_then(|ctx| ctx.module_index);
+        if index.is_some() && !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
+            return None;
+        }
+        Some((
+            bag.generation(),
+            bucket.clone(),
+            q.framework,
+            q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize),
+            q.context.map(|ctx| ctx.package_parents.generation()),
+            index.map(|idx| (lookup_addr(idx), idx.resolution_epoch())),
+        ))
+    }
+
+    fn get(key: &SlotOwnersKey) -> Option<std::sync::Arc<SlotOwnerIndex>> {
+        SLOT_OWNERS.with(|m| m.borrow().get(key).cloned())
+    }
+
+    fn put(key: SlotOwnersKey, owners: std::sync::Arc<SlotOwnerIndex>) {
+        SLOT_OWNERS.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.len() >= SLOT_OWNERS_CAP {
+                m.clear();
+            }
+            m.insert(key, owners);
+        });
+    }
+
+    /// `None` when `key` is already being built beneath this call.
+    fn building<T>(key: &SlotOwnersKey, build: impl FnOnce() -> T) -> Option<T> {
+        if SLOT_OWNERS_BUILDING.with(|b| b.borrow().contains(key)) {
+            return None;
+        }
+        SLOT_OWNERS_BUILDING.with(|b| b.borrow_mut().push(key.clone()));
+        let out = build();
+        SLOT_OWNERS_BUILDING.with(|b| b.borrow_mut().pop());
+        Some(out)
+    }
+}
+
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
 /// (two paths reaching one shared sub-attachment) re-chases the shared
@@ -2421,6 +2495,10 @@ impl ReducerRegistry {
     /// an instance of the member's owner, as the slot's value edges. The
     /// build filed them by key because it could not type the object; the
     /// object is asked here, at the write, where the index can answer.
+    ///
+    /// Every owner's read of the key needs the same objects, so the bucket is
+    /// resolved once and kept by class (`SlotOwners`): asked per read, N
+    /// classes writing one key in one file cost N reads of N chases.
     fn owned_slot_writes(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState) -> Vec<Witness> {
         let WitnessAttachment::Member { owner, space, name, aspect: crate::model::witnesses::MemberAspect::Holds } =
             q.attachment
@@ -2428,12 +2506,73 @@ impl ReducerRegistry {
             return Vec::new();
         };
         let bucket_att = WitnessAttachment::SlotWrites { space: *space, name: name.clone() };
-        let bucket = bag.for_attachment(&bucket_att);
-        if bucket.is_empty() {
+        if bag.for_attachment(&bucket_att).is_empty() {
             return Vec::new();
         }
+        let owners = match SlotOwners::key(bag, q, &bucket_att) {
+            Some(key) => match SlotOwners::get(&key) {
+                Some(hit) => {
+                    crate::util::ghost_stats::count("slot_owners.hit");
+                    hit
+                }
+                None => {
+                    crate::util::ghost_stats::count("slot_owners.build");
+                    let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+                    let built = SlotOwners::building(&key, || self.slot_owners(bag, q, &bucket_att));
+                    match built {
+                        Some((owners, settled)) => {
+                            let settled =
+                                settled && QUERY_REC_TRUNCATIONS.with(|c| c.get()) == truncations_before;
+                            if !settled {
+                                crate::util::ghost_stats::count("slot_owners.unsettled");
+                            }
+                            if settled {
+                                SlotOwners::put(key, std::sync::Arc::clone(&owners));
+                            }
+                            owners
+                        }
+                        // The bucket's own objects read this key: answer this read
+                        // on the reader's path, where the cycle guard cuts it.
+                        None => {
+                            crate::util::ghost_stats::count("slot_owners.reentered");
+                            return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+                        }
+                    }
+                }
+            },
+            None => {
+                crate::util::ghost_stats::count("slot_owners.unshared");
+                return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+            }
+        };
+        // An exit recorded beneath the objects' chase was reached through a
+        // combining frame, as it was when each read chased them itself.
+        if owners.exits {
+            state.poisoned = true;
+        }
+        owners
+            .by_class
+            .get(owner.as_str())
+            .map(|writes| {
+                writes
+                    .iter()
+                    .map(|w| Witness { attachment: q.attachment.clone(), ..w.clone() })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Resolve every write's object in the bucket once, from a fresh query:
+    /// what a write's object is does not depend on which owner asks.
+    /// `settled` is false when a chase was cut by a cycle that closed above it.
+    fn slot_owners(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        bucket_att: &WitnessAttachment,
+    ) -> (std::sync::Arc<SlotOwnerIndex>, bool) {
         let bucket_q = ReducerQuery {
-            attachment: &bucket_att,
+            attachment: bucket_att,
             point: None,
             framework: q.framework,
             arity_hint: None,
@@ -2441,7 +2580,60 @@ impl ReducerRegistry {
             args: Vec::new(),
             context: q.context,
         };
-        bucket
+        let mut state = QueryState::new();
+        let mut index = SlotOwnerIndex::default();
+        let (pos, outer_low) = state.enter_frame();
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        for w in bag.for_attachment(bucket_att) {
+            let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { continue };
+            let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
+            let object = self.materialize_raw(bag, &bucket_q, &mut state, vec![&probe], true);
+            let mut classes: Vec<&str> = object
+                .iter()
+                .filter_map(|o| match &o.payload {
+                    WitnessPayload::InferredType(t) => Some(t.receiver_arms()),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|arm| arm.class_name())
+                .collect();
+            classes.sort_unstable();
+            classes.dedup();
+            for class in classes {
+                index.by_class.entry(class.to_string()).or_default().push(Witness {
+                    attachment: bucket_att.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::Edge(value.clone()),
+                    span: w.span,
+                });
+            }
+        }
+        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        index.exits = !state.residual.is_empty() || state.poisoned;
+        (std::sync::Arc::new(index), taint == Taint::CLEAN)
+    }
+
+    /// The bucket chased on the reader's own path: for a read the shared
+    /// index cannot serve (no memo may hold it, or the bucket is being built
+    /// beneath this read).
+    fn owned_slot_writes_on_path(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        bucket_att: &WitnessAttachment,
+        owner: &str,
+    ) -> Vec<Witness> {
+        let bucket_q = ReducerQuery {
+            attachment: bucket_att,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        bag.for_attachment(bucket_att)
             .into_iter()
             .filter_map(|w| {
                 let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { return None };
@@ -2451,7 +2643,7 @@ impl ReducerRegistry {
                 let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
                 let object = state.in_opaque_frame(|state| self.materialize_raw(bag, &bucket_q, state, vec![&probe], true));
                 let owned = object.iter().any(|o| match &o.payload {
-                    WitnessPayload::InferredType(t) => t.receiver_arms().iter().any(|arm| arm.class_name() == Some(owner.as_str())),
+                    WitnessPayload::InferredType(t) => t.receiver_arms().iter().any(|arm| arm.class_name() == Some(owner)),
                     _ => false,
                 });
                 owned.then(|| Witness {
