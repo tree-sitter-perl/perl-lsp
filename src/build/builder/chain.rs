@@ -377,7 +377,7 @@ impl<'a> Builder<'a> {
     pub(super) fn literal_arg_string(&self, arg: Node<'a>) -> Option<String> {
         match arg.kind() {
             "string_literal" | "interpolated_string_literal" => {
-                self.extract_string_content(arg)
+                crate::cst::string_content_text(arg, self.source)
             }
             "autoquoted_bareword" | "bareword" => {
                 arg.utf8_text(self.source).ok().map(|s| s.to_string())

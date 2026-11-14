@@ -1141,39 +1141,6 @@ impl FileAnalysis {
         (uses, parents)
     }
 
-    /// Resolve the classes for an invocant expression text (the token
-    /// left of `->`). A receiver (the variable its producer flagged
-    /// `RECEIVER`) and `__PACKAGE__` fall back to the enclosing package; typed
-    /// scalars go through `inferred_type`; barewords are treated as
-    /// class names verbatim.
-    ///
-    /// This is Perl-semantic resolution, so it belongs on the data
-    /// layer (rule #3). Callers in `symbols.rs` / `cursor_context.rs`
-    /// compose this; they don't repeat the rules.
-    pub fn invocant_text_classes(&self, invocant: Option<&str>, point: Point) -> ReceiverClasses {
-        use crate::model::conventions::InvocantText;
-        let Some(text) = invocant else { return ReceiverClasses::default() };
-        let here = || self.package_at(point).map(str::to_string).into_iter().collect();
-        if self.is_receiver_at(text, point) {
-            return here();
-        }
-        match InvocantText::parse(text) {
-            InvocantText::CurrentPackage | InvocantText::PositionalReceiver => here(),
-            // A class per value the scalar may be: both `ClassName` and
-            // `FirstParam` dispatch — without that, a `my ($c) = @_`
-            // invocant in a controller method (typed `FirstParam { package:
-            // Users }`) answers nothing and dispatch-target completion never
-            // fires for `$c->url_for(|)`. Method completion on the same `$c`
-            // reads the same projection. Rule #3.
-            InvocantText::Scalar(_) => self
-                .inferred_type_via_bag(text, point)
-                .map(|t| self.dispatch_classes_of(&t, None))
-                .unwrap_or_default(),
-            InvocantText::NonScalar(_) => ReceiverClasses::default(),
-            InvocantText::Bareword(b) => [self.class_spelling_identity(b, point)].into_iter().collect(),
-        }
-    }
-
     /// The namespace a class identity carries, for a use-map language: the
     /// qualifier of the FQN, the global namespace spelled `""`. `None`
     /// for a language whose spellings are identities as written, so a

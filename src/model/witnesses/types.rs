@@ -149,6 +149,15 @@ pub enum WitnessAttachment {
         #[serde(default)]
         aspect: MemberAspect,
     },
+    /// The writes to member `name` (in `space`) whose owner the writing
+    /// file could not name when it was built: `$self->{k} = …` where
+    /// `$self` holds whatever a constructor in another file returned. Each
+    /// witness is a `SlotWrite` payload carrying its receiver, and a read
+    /// of `Member{X, name, Holds}` takes the writes whose receiver turns
+    /// out to be an `X` (`ReducerRegistry::owned_slot_writes`), so the
+    /// owner is decided where the index is. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    SlotWrites { space: crate::model::file_analysis::NamespaceId, name: String },
 }
 
 /// The question a `Member` attachment asks of its member.
@@ -274,7 +283,8 @@ impl WitnessPayload {
             | WitnessPayload::FreeValue { .. }
             | WitnessPayload::EvaluatedBefore(_)
             | WitnessPayload::Bound { .. }
-            | WitnessPayload::Proof => false,
+            | WitnessPayload::Proof
+            | WitnessPayload::SlotWrite { .. } => false,
         }
     }
 }
@@ -290,6 +300,10 @@ impl WitnessPayload {
             | WitnessPayload::Bound { ty: BoundType::Edge(t), .. } => f(t),
             WitnessPayload::Bound { ty: BoundType::Type(t), .. } => t.for_each_attachment_mut(f),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
+            WitnessPayload::SlotWrite { receiver, value } => {
+                f(receiver);
+                f(value);
+            }
             WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| t.for_each_attachment_mut(f)),
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
@@ -343,7 +357,8 @@ impl WitnessPayload {
             | WitnessPayload::Extend(_)
             | WitnessPayload::FreeValue { .. }
             | WitnessPayload::Bound { .. }
-            | WitnessPayload::Proof => {}
+            | WitnessPayload::Proof
+            | WitnessPayload::SlotWrite { .. } => {}
         }
     }
 }
@@ -541,6 +556,11 @@ pub enum WitnessPayload {
     /// the region's own payload, cut with it; no reducer claims it. Kept at
     /// the END for bincode variant-index stability.
     Proof,
+    /// One write on a `SlotWrites` bucket: the value at `receiver` is the
+    /// object written, `value` what was stored. No reducer claims it; the
+    /// `Member` read that adopts it chases `value`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    SlotWrite { receiver: WitnessAttachment, value: WitnessAttachment },
 }
 
 /// The type a bound states: a type, or an edge into the alias graph

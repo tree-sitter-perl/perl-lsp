@@ -137,7 +137,7 @@ fn engine_type_words(_: &str) -> Option<&'static str> {
 /// Its subsumption rules: an object is a blessed hash, and truth is a number
 /// (`1` / `''`).
 pub static PERL_CONVENTIONS: LanguageConventions = LanguageConventions {
-    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]),
+    lattice: LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric, Subsumption::ClassNameIsClass]),
     special_variable: is_special_variable,
     type_display: engine_type_words,
     // `Foo->new` calls its constructor by name.
@@ -464,6 +464,32 @@ pub const CURRENT_PACKAGE_TOKEN: &str = "__PACKAGE__";
 /// Whether `text` is `CURRENT_PACKAGE_TOKEN`.
 pub fn is_current_package_token(text: &str) -> bool {
     text == CURRENT_PACKAGE_TOKEN
+}
+
+/// The compile-time tokens that name where they are written. Each is a value,
+/// typed in one place (the builder's `func0op` arm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileTimeToken {
+    /// `__PACKAGE__`: the enclosing package's name.
+    Package,
+    /// `__SUB__`: a reference to the enclosing sub (`use feature 'current_sub'`).
+    Sub,
+    /// `__FILE__`: the file's name.
+    File,
+    /// `__LINE__`: the line number.
+    Line,
+}
+
+impl CompileTimeToken {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            CURRENT_PACKAGE_TOKEN => Some(Self::Package),
+            "__SUB__" => Some(Self::Sub),
+            "__FILE__" => Some(Self::File),
+            "__LINE__" => Some(Self::Line),
+            _ => None,
+        }
+    }
 }
 
 /// Whether `name` is the `ref` builtin, which reports what a reference is.

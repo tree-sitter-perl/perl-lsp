@@ -151,15 +151,26 @@ impl<'a> Builder<'a> {
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
-        // What a reference is, named for the variable it was asked of: a
-        // comparison of it to a literal guards that variable.
-        if let Some((via, subject)) = self.ref_tag_call(node)
-            .and_then(|(via, operand)| Some((via, crate::cst::canonical_var_name(operand, self.source)?)))
-        {
+        // What a reference is, named for the variable it was asked of (a
+        // comparison of it to a literal guards that variable), and, where
+        // its string can name a class, an edge to the operand that says which.
+        let at = node.start_position();
+        if let Some((via, operand)) = crate::cst::ref_tag_operand(node, self.source, |n| self.ref_tag_fn(n, at)) {
+            let subject = self.ref_tag_call(node)
+                .and_then(|(_, operand)| crate::cst::canonical_var_name(operand, self.source));
+            let of = via.can_name_a_class().then(|| {
+                let att = WitnessAttachment::Expr(node_to_span(operand));
+                if self.bag.for_attachment(&att).is_empty() {
+                    self.emit_expr_witness(operand);
+                }
+                att
+            });
             return Some(WitnessPayload::InferredType(InferredType::RefTagOf {
                 subject,
                 site: node_to_span(node),
                 via,
+                of,
+                names: None,
             }));
         }
         match node.kind() {
@@ -264,7 +275,7 @@ impl<'a> Builder<'a> {
             }
             // A `shift` of `@_` is the head of the argument window at its
             // point; the walk's `consume_arg_head` advances the window past it.
-            _ if self.shifts_arg_window(node) => Some(WitnessPayload::Projected {
+            _ if self.is_shift_call(node) => Some(WitnessPayload::Projected {
                 base: WitnessAttachment::Variable {
                     name: "@_".into(),
                     scope: self.scope_at_point(node.start_position()),
@@ -533,17 +544,7 @@ impl<'a> Builder<'a> {
     /// `||`/`//` fold treats these LHSes as the param-default idiom (the
     /// value is the unknown parameter, not the fallback literal's type).
     pub(super) fn is_param_pull(&self, node: Node<'a>) -> bool {
-        if self.is_shift_call(node) {
-            return true;
-        }
-        if node.kind() == "array_element_expression" {
-            if let Some(array) = node.child_by_field_name("array") {
-                return array.kind() == "container_variable"
-                    && array.named_child(0).and_then(|v| v.utf8_text(self.source).ok())
-                        == Some("_");
-            }
-        }
-        false
+        self.is_shift_call(node) || crate::cst::arg_slot_index(node, self.source).is_some()
     }
 
     /// The receiver operand of a method call: `Expr(invocant)` typed as the
@@ -602,27 +603,6 @@ impl<'a> Builder<'a> {
                 }
             })
             .collect()
-    }
-
-    /// A `shift` whose array is `@_` — bare, or spelled `shift @_`.
-    pub(super) fn shifts_arg_window(&self, node: Node<'a>) -> bool {
-        self.is_shift_call(node)
-            && match self.extract_call_args(node).as_slice() {
-                [] => true,
-                [arg] => arg.utf8_text(self.source).ok() == Some("@_"),
-                _ => false,
-            }
-    }
-
-    /// `$_[0]` — the positional-receiver pseudo-invocant of a method
-    /// body. Shared by `invocant_type_at_node`'s array-element arm and
-    /// `expr_payload`'s `Receiver` emission so both agree on the shape.
-    pub(super) fn is_positional_receiver(&self, node: Node<'a>) -> bool {
-        let Some(array) = node.child_by_field_name("array") else { return false };
-        let Some(index) = node.child_by_field_name("index") else { return false };
-        array.kind() == "container_variable"
-            && array.named_child(0).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
-            && index.utf8_text(self.source).ok() == Some("0")
     }
 
     /// Emit the `Expr(span)` witnesses for `node` and (recursively)
@@ -873,7 +853,7 @@ impl<'a> Builder<'a> {
             // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
             // `ReturnExprReducer` claims it ahead of the window projection
             // above, which answers when no receiver is in hand.
-            if self.is_positional_receiver(node) {
+            if crate::cst::is_positional_receiver(node, self.source) {
                 self.push_witness(Witness {
                     attachment: WitnessAttachment::Expr(span),
                     source: WitnessSource::Builder("expression".into()),
@@ -1150,6 +1130,28 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The class a compile-time token operand names (`__PACKAGE__`), read
+    /// off the token's own type so no consumer spells it.
+    pub(super) fn token_class(&self, node: Node<'a>) -> Option<String> {
+        if node.kind() != "func0op_call_expression" {
+            return None;
+        }
+        match self.infer_expression_result_type(node)? {
+            InferredType::ClassName(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Whether a class operand names the package the walk is in: a token
+    /// naming it, or its name spelled as a bareword class.
+    pub(super) fn names_current_package(&self, node: Node<'a>) -> bool {
+        let Some(cur) = self.current_package.as_deref() else { return false };
+        match self.token_class(node) {
+            Some(c) => c == cur,
+            None => node.kind() == "package" && node.utf8_text(self.source).ok() == Some(cur),
+        }
+    }
+
     /// Infer the result type of an expression (not its operands — those are handled elsewhere).
     /// e.g. `$a + $b` produces Numeric, `$a . $b` produces String.
     pub(super) fn infer_expression_result_type(&self, node: Node<'a>) -> Option<InferredType> {
@@ -1184,11 +1186,20 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => Some(InferredType::Numeric),
             "func1op_call_expression" | "func0op_call_expression" => {
                 let name = node.child(0)?.utf8_text(self.source).ok()?;
-                if crate::model::conventions::is_current_package_token(name) {
+                use crate::model::conventions::CompileTimeToken;
+                match CompileTimeToken::parse(name) {
                     // `package_at_pos`, not the scope walk: top-level code
                     // under `package Foo;` sits in the file scope, whose
                     // package is `main`.
-                    return self.package_at_pos(node.start_position()).map(|p| InferredType::ClassName(p.to_string()));
+                    Some(CompileTimeToken::Package) => {
+                        return self.package_at_pos(node.start_position()).map(|p| InferredType::ClassName(p.to_string()));
+                    }
+                    Some(CompileTimeToken::Sub) => {
+                        return Some(InferredType::CodeRef { return_edge: Some(self.coderef_return_edge_for(node)?) });
+                    }
+                    Some(CompileTimeToken::File) => return Some(InferredType::String),
+                    Some(CompileTimeToken::Line) => return Some(InferredType::Numeric),
+                    None => {}
                 }
                 crate::model::builtins::builtin_return_type(name)
             }

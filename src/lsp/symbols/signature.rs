@@ -67,14 +67,8 @@ pub(super) fn string_content_span_at(tree: &Tree, point: Point) -> Option<Span> 
                 // zero-width range at cursor, which makes textEdit
                 // APPEND the label after the user's typed text
                 // (`'/fall' → '/fall/fallback'`) instead of replacing it.
-                let mut walker = node.walk();
-                for child in node.named_children(&mut walker) {
-                    if child.kind() == "string_content" {
-                        return Some(Span {
-                            start: child.start_position(),
-                            end: child.end_position(),
-                        });
-                    }
+                if let Some(content) = crate::cst::string_content(node) {
+                    return Some(crate::cst::node_to_span(content));
                 }
                 // Genuinely empty literal (`''` with cursor between the
                 // quotes). Zero-width range at cursor is correct here —

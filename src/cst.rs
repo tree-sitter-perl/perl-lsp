@@ -635,6 +635,54 @@ pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     node.named().find(|c| c.kind() == "varname")
 }
 
+/// Whether `node` names the sub's argument array: `@_` itself, or the
+/// container of a `$_[N]` slot read.
+pub(crate) fn names_arg_array(node: Node, src: &[u8]) -> bool {
+    matches!(node.kind(), "array" | "container_variable")
+        && varname_child(node).and_then(|v| v.utf8_text(src).ok()) == Some("_")
+}
+
+/// `$_[N]`: the index of a read of one argument slot.
+pub(crate) fn arg_slot_index<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+    if node.kind() != "array_element_expression" {
+        return None;
+    }
+    let array = node.child_by_field_name("array")?;
+    (array.kind() == "container_variable" && names_arg_array(array, src))
+        .then(|| node.child_by_field_name("index"))
+        .flatten()
+}
+
+/// `$_[0]`: the positional receiver of a method body.
+pub(crate) fn is_positional_receiver(node: Node, src: &[u8]) -> bool {
+    arg_slot_index(node, src).is_some_and(|i| i.utf8_text(src).ok() == Some("0"))
+}
+
+/// A call of builtin `op` written with no argument (`shift`, `pop`,
+/// `shift()`), which defaults to the argument array.
+pub(crate) fn is_bare_call_of(node: Node, src: &[u8], op: &str) -> bool {
+    match node.kind() {
+        "bareword" => node.utf8_text(src).ok() == Some(op),
+        "func1op_call_expression" => {
+            nth_element(node, 0).is_none() && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some(op)
+        }
+        "ambiguous_function_call_expression" | "function_call_expression" => node.field_text("function", src) == Some(op),
+        _ => false,
+    }
+}
+
+/// `shift`, or `shift @_` spelled out: one pull off the head of the
+/// argument array.
+pub(crate) fn shifts_arg_array(node: Node, src: &[u8]) -> bool {
+    if is_bare_call_of(node, src, "shift") {
+        return true;
+    }
+    node.kind() == "func1op_call_expression"
+        && node.child(0).and_then(|c| c.utf8_text(src).ok()) == Some("shift")
+        && nth_element(node, 1).is_none()
+        && nth_element(node, 0).is_some_and(|a| a.kind() == "array" && names_arg_array(a, src))
+}
+
 /// `no Module LIST`: a `use_statement` led by the `no` keyword (the grammar
 /// has no `no_statement` kind).
 pub(crate) fn is_negated_use(node: Node) -> bool {
@@ -1080,16 +1128,22 @@ pub(crate) fn qw_word_spans(qw_node: Node, src: &[u8], results: &mut Vec<(String
     }
 }
 
-/// The `string_content` text of a quoted node — quote-flavor-agnostic.
+/// The `string_content` child of a quoted node, whatever the quote flavour
+/// (`'…'`, `q{…}`, `qq!…!`, a heredoc). An empty literal has none.
+pub(crate) fn string_content(node: Node) -> Option<Node> {
+    node.named().find(|c| c.kind() == "string_content")
+}
+
+/// A quoted node's value and the span it occupies. `None` for an empty
+/// literal, which has no content to point at.
+pub(crate) fn string_value(node: Node, src: &[u8]) -> Option<(String, Span)> {
+    let content = string_content(node)?;
+    Some((content.utf8_text(src).ok()?.to_string(), node_to_span(content)))
+}
+
+/// `string_value`'s text alone.
 pub(crate) fn string_content_text(node: Node, src: &[u8]) -> Option<String> {
-    for i in 0..node.named_child_count() {
-        if let Some(content) = node.named_child(i) {
-            if content.kind() == "string_content" {
-                return content.utf8_text(src).ok().map(|s| s.to_string());
-            }
-        }
-    }
-    None
+    string_value(node, src).map(|(text, _)| text)
 }
 
 /// The literal content of a quoted node ONLY when it's a plain,
@@ -1097,7 +1151,7 @@ pub(crate) fn string_content_text(node: Node, src: &[u8]) -> Option<String> {
 /// reftype guard (`isa('Foo')`, `ref($x) eq 'HASH'`) needs. Anything
 /// interpolated (`"$cls"`) or empty yields `None`, so an interpolated
 /// argument never reads as a literal class name. Stricter sibling of
-/// `string_content_text`.
+/// `string_value`.
 pub(crate) fn plain_string_literal_text(node: Node, src: &[u8]) -> Option<String> {
     if !matches!(node.kind(), "string_literal" | "interpolated_string_literal") {
         return None;
@@ -1119,14 +1173,7 @@ pub(crate) fn plain_string_literal_text(node: Node, src: &[u8]) -> Option<String
 /// Span of the `string_content` inside a quoted node (selection span);
 /// the whole node when there is none (empty string).
 pub(crate) fn string_content_span(node: Node) -> Span {
-    for i in 0..node.named_child_count() {
-        if let Some(content) = node.named_child(i) {
-            if content.kind() == "string_content" {
-                return node_to_span(content);
-            }
-        }
-    }
-    node_to_span(node)
+    node_to_span(string_content(node).unwrap_or(node))
 }
 
 /// One arm of an `if`/`unless` statement chain.
@@ -1298,8 +1345,8 @@ pub(crate) fn string_list_with_residue<'t>(
             return (results, false);
         }
         Some(LiteralShape::Str) => {
-            if let Some(text) = string_content_text(node, src) {
-                return (vec![(text, string_content_span(node))], false);
+            if let Some(value) = string_value(node, src) {
+                return (vec![value], false);
             }
             return (vec![], true);
         }
@@ -1325,8 +1372,8 @@ pub(crate) fn string_list_with_residue<'t>(
         match literal_shape(child) {
             Some(LiteralShape::Qw) => qw_word_spans(child, src, &mut results),
             Some(LiteralShape::Str) => {
-                if let Some(text) = string_content_text(child, src) {
-                    results.push((text, string_content_span(child)));
+                if let Some(value) = string_value(child, src) {
+                    results.push(value);
                 } else {
                     residue = true;
                 }
@@ -1404,6 +1451,20 @@ pub(crate) fn ref_tag_call<'a>(
     src: &[u8],
     tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
 ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+    let (via, operand) = ref_tag_operand(node, src, tag_of)?;
+    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
+        .then_some((via, operand))
+}
+
+/// [`ref_tag_call`] for any one-term operand (`ref shift`, `ref $x->m`).
+/// A list or an operator expression in the operand slot is the grammar
+/// reading a named unary as a list operator (`blessed $a, blessed $b`,
+/// `blessed $p ? $p : f()`), not one operand.
+pub(crate) fn ref_tag_operand<'a>(
+    node: Node<'a>,
+    src: &[u8],
+    tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
+) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
     let (name, operand) = match node.kind() {
         "func1op_call_expression" => {
             (node.child(0)?.utf8_text(src).ok()?, node.named().find(|c| c.kind() != "comment")?)
@@ -1413,10 +1474,18 @@ pub(crate) fn ref_tag_call<'a>(
         }
         _ => return None,
     };
-    let via = tag_of(name)?;
     let operand = peel_groups(operand);
-    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
-        .then_some((via, operand))
+    matches!(
+        operand.kind(),
+        "scalar"
+            | "hash_element_expression"
+            | "array_element_expression"
+            | "func0op_call_expression"
+            | "func1op_call_expression"
+            | "function_call_expression"
+            | "method_call_expression"
+    )
+    .then_some((tag_of(name)?, operand))
 }
 
 /// The arm of a conditionally-run construct, between `node` and `bound`,
@@ -1574,11 +1643,11 @@ pub(crate) fn is_element_access_base<'t>(syn: &SyntaxForest<'t>, node: Node<'t>)
 }
 
 /// `Class->new(...)` — a constructor call with a class-shaped invocant.
-/// Returns the invocant text (`Foo::Bar` or `__PACKAGE__`); `None` for
+/// Returns the invocant (`Foo::Bar` or `__PACKAGE__`); `None` for
 /// non-constructor methods and variable/positional invocants, whose class
 /// comes from inference. The caller resolves `__PACKAGE__` — the enclosing
 /// package is builder state this layer doesn't hold.
-pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<&'a str> {
+pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<Node<'a>> {
     use crate::model::conventions::InvocantText;
     let call = MethodCall::cast(node)?;
     if !call
@@ -1588,12 +1657,13 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
     {
         return None;
     }
-    let inv = call.invocant()?.text(src)?;
+    let inv_node = call.invocant()?;
+    let inv = inv_node.text(src)?;
     match InvocantText::parse(inv) {
-        InvocantText::CurrentPackage => Some(inv),
+        InvocantText::CurrentPackage => Some(inv_node),
         // A computed receiver (`(ref $self)->new`) parses to a leading `(`
         // that classifies as Bareword; only a real package name is a class.
-        InvocantText::Bareword(b) if crate::model::conventions::is_bareword_class_name(b, &crate::model::conventions::PERL_SPELLINGS) => Some(inv),
+        InvocantText::Bareword(b) if crate::model::conventions::is_bareword_class_name(b, &crate::model::conventions::PERL_SPELLINGS) => Some(inv_node),
         InvocantText::Bareword(_)
         | InvocantText::Scalar(_)
         | InvocantText::NonScalar(_)

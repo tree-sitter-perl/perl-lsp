@@ -1803,9 +1803,11 @@ fn a_kept_ref_tag_guards_the_variable_it_names() {
     assert_eq!(at("$c", 7, 10).as_ref().and_then(|t| t.class_name()), Some("Bar"));
     assert_eq!(at("$d", 9, 10), None, "`reftype` never names a class");
     assert_eq!(at("$rp", 4, 0), Some(InferredType::RefTagOf {
-        subject: "$p".into(),
+        subject: Some("$p".into()),
         site: Span { start: Point::new(3, 13), end: Point::new(3, 19) },
         via: crate::model::file_analysis::RefTagFn::Ref,
+        of: Some(crate::model::witnesses::WitnessAttachment::Expr(Span { start: Point::new(3, 17), end: Point::new(3, 19) })),
+        names: None,
     }));
 }
 
@@ -1881,4 +1883,39 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
         .collect();
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
+}
+
+// ── compile-time tokens (docs/prompt-magic-tokens.md) ──
+
+#[test]
+fn current_sub_token_is_a_coderef_to_its_own_sub() {
+    // `__SUB__->(…)` recurses: the call's return is the sub's own.
+    let src = "package P;\nuse feature 'current_sub';\nsub count {\n    my ($n) = @_;\n    return 'done' unless $n;\n    my $r = __SUB__->($n - 1);\n    return $r;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(6, 11)), Some(InferredType::String));
+}
+
+#[test]
+fn current_sub_token_in_an_anonymous_sub_names_that_sub() {
+    let src = "package P;\nuse feature 'current_sub';\nmy $f = sub {\n    my ($n) = @_;\n    return 42 unless $n;\n    my $r = __SUB__->($n - 1);\n    return $r;\n};\n";
+    let fa = build_fa(src);
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(6, 11)), Some(InferredType::Numeric));
+}
+
+#[test]
+fn file_and_line_tokens_type_as_string_and_number() {
+    let src = "package P;\nsub f {\n    my $file = __FILE__;\n    my $line = __LINE__;\n    return;\n}\n";
+    let fa = build_fa(src);
+    assert_eq!(fa.inferred_type_via_bag("$file", Point::new(4, 4)), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$line", Point::new(4, 4)), Some(InferredType::Numeric));
+}
+
+#[test]
+fn shift_spelled_with_the_argument_array_is_the_receiver() {
+    // `shift @_` is the bare `shift` written out; both pull the receiver.
+    for pull in ["shift", "shift @_", "shift(@_)"] {
+        let fa = build_fa(&format!("package Calculator;\nsub add {{\n    my $self = {pull};\n    $self;\n}}"));
+        let ty = fa.inferred_type_via_bag("$self", Point::new(3, 5));
+        assert_eq!(ty, Some(InferredType::ClassName("Calculator".into())), "{pull}");
+    }
 }

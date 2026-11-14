@@ -327,21 +327,14 @@ module_index: Option<&dyn CrossFileLookup>,
     }
 }
 
-/// Resolve an invocant type from its text, using analysis when available.
+/// Without an analysis there is no sub table or use-map to consult, so a
+/// bareword is its own spelling and nothing else has an answer.
 fn resolve_text_invocant(text: &str, point: Point, analysis: Option<&FileAnalysis>) -> Option<InferredType> {
     use crate::model::conventions::InvocantText;
-    match InvocantText::parse(text) {
-        InvocantText::Bareword(b) => Some(InferredType::ClassName(b.to_string())),
-        InvocantText::CurrentPackage | InvocantText::PositionalReceiver => analysis
-            .and_then(|a| a.package_at(point))
-            .map(|p| InferredType::ClassName(p.to_string())),
-        InvocantText::NonScalar(_) => None,
-        InvocantText::Scalar(_) => {
-            // Route through the witness-bag path so framework-aware
-            // resolution (Mojo `sub name`, blessed-hashref, branch arms,
-            // arity) refines the answer.
-            analysis.and_then(|a| a.inferred_type_via_bag(text, point))
-        }
+    match (analysis, InvocantText::parse(text)) {
+        (Some(a), _) => a.invocant_text_type(text, point),
+        (None, InvocantText::Bareword(b)) => Some(InferredType::ClassName(b.to_string())),
+        (None, _) => None,
     }
 }
 
@@ -734,17 +727,7 @@ fn first_arg_as_string(args: Node, source: &[u8]) -> Option<String> {
     };
     match first.kind() {
         "string_literal" | "interpolated_string_literal" => {
-            // Pull the `string_content` child — quote-flavor-agnostic
-            // (q{}, qq{}, heredocs, '' vs "") and avoids the
-            // trim-delimiters brittleness.
-            for i in 0..first.named_child_count() {
-                if let Some(child) = first.named_child(i) {
-                    if child.kind() == "string_content" {
-                        return child.utf8_text(source).ok().map(|s| s.to_string());
-                    }
-                }
-            }
-            Some(String::new())
+            Some(crate::cst::string_content_text(first, source).unwrap_or_default())
         }
         "bareword" | "autoquoted_bareword" => {
             first.utf8_text(source).ok().map(|s| s.to_string())
@@ -1091,14 +1074,7 @@ fn extract_key_text(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
         "autoquoted_bareword" => node.utf8_text(source).ok().map(|s| s.to_string()),
         "string_literal" | "interpolated_string_literal" => {
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i) {
-                    if child.kind() == "string_content" {
-                        return child.utf8_text(source).ok().map(|s| s.to_string());
-                    }
-                }
-            }
-            Some(String::new())
+            Some(crate::cst::string_content_text(node, source).unwrap_or_default())
         }
         "string_content" => node.utf8_text(source).ok().map(|s| s.to_string()),
         _ => None, // dynamic keys — don't include

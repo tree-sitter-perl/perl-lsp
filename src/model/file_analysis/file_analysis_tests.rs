@@ -2475,6 +2475,98 @@ fn cross_file_slot_write_types_the_read() {
 
 
 #[test]
+fn constructor_slot_write_through_an_inherited_new_types_the_read() {
+    // The object a constructor writes into comes from the parent's `new` in
+    // ANOTHER file, so the build cannot type it: the write is filed by key
+    // and the read decides it is the child's. Named `$obj`, not `$self`, so
+    // nothing here leans on the receiver's spelling.
+    use std::sync::Arc;
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let parent_src = "package Parent;\nsub new {\n    my $class = shift;\n    my $self = bless {}, $class;\n    return $self->init(@_);\n}\nsub init {\n    my $self = shift;\n    return $self;\n}\n1;\n";
+    {
+        let mut parser = crate::build::builder::create_parser();
+        let tree = parser.parse(parent_src, None).unwrap();
+        let fa = crate::build::builder::build(&tree, parent_src.as_bytes());
+        idx.insert_cache(
+            "Parent",
+            Some(Arc::new(crate::model::file_analysis::CachedModule::new(
+                crate::util::canonical_path::CanonicalPath::fixture(std::path::PathBuf::from("/fake/Parent.pm")),
+                Arc::new(fa),
+            ))),
+        );
+    }
+    let child_src = "package Child;\nour @ISA = ('Parent');\nsub new {\n    my ($class) = @_;\n    my $obj = $class->SUPER::new();\n    $obj->{conn} = My::Conn->new;\n    return $obj;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{conn};\n}\n1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(child_src, None).unwrap();
+    let fa = crate::build::builder::build(&tree, child_src.as_bytes());
+
+    let t = fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point { row: 11, column: 0 }), Some(&idx));
+    assert_eq!(t, Some(InferredType::ClassName("My::Conn".into())));
+}
+
+/// Deterministic cost pin: every class's read of a key the build filed
+/// unowned needs the objects of the same writes. Resolving them once per
+/// bucket keeps a pass of N reads linear; per read it is N chases each.
+#[test]
+fn reads_of_a_filed_key_resolve_its_writes_once() {
+    use crate::model::witnesses::{fold_memo_equiv_enabled, live_window_equiv_enabled, materialize_reads};
+    if live_window_equiv_enabled() || fold_memo_equiv_enabled() {
+        return;
+    }
+    let cost = |classes: usize| {
+        let mut src = String::new();
+        for i in 0..classes {
+            src.push_str(&format!(
+                "package P{i};\nsub new {{ bless {{}}, shift }} sub make{i} {{ P{i}->new }}\nsub fill {{ my $o = make{i}(); $o->{{k}} = My::Conn->new; }}\nsub go {{ my ($self) = @_; my $x = $self->{{k}};\n}}\n"
+            ));
+        }
+        let fa = build_fa_from_source(&src);
+        let before = materialize_reads();
+        for i in 0..classes {
+            let at = crate::model::witnesses::ReadPoint::position(Point { row: 5 * i + 4, column: 0 });
+            assert_eq!(fa.inferred_type_via_bag_ctx("$x", at, None), Some(InferredType::ClassName("My::Conn".into())), "class P{i}");
+        }
+        materialize_reads() - before
+    };
+    let (short, long) = (cost(40), cost(80));
+    assert!(long < short * 3, "40 classes read {short} witnesses, 80 read {long}: superlinear");
+}
+
+#[test]
+fn a_write_through_another_class_object_is_not_the_readers() {
+    // The filed write joins only the owner its object turns out to be: a
+    // `Child` read never takes what was written into an `Other`.
+    let fa = build_fa_from_source(
+        "package Other;\nsub new { bless {}, shift }\npackage Child;\nsub new { bless {}, shift }\nsub fill {\n    my ($self) = @_;\n    my $o = make_other();\n    $o->{conn} = My::Conn->new;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{conn};\n}\nsub make_other { Other->new }\n1;\n",
+    );
+    let t = fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point { row: 12, column: 0 }), None);
+    assert_ne!(t, Some(InferredType::ClassName("My::Conn".into())));
+}
+
+#[test]
+fn ref_of_the_invocant_names_its_class() {
+    // `ref $proto || $proto` and `ref $_[0] ? ref shift : shift` are the
+    // invocant's class, so the constructor built on them is typed.
+    let fa = build_fa_from_source(
+        "package Node;\nsub new {\n    my $class = ref $_[0] || $_[0];\n    bless { children => [] }, $class;\n}\npackage Doc;\nour @ISA = ('Node');\nsub new {\n    my $class = ref $_[0] ? ref shift : shift;\n    my $self = $class->SUPER::new;\n    $self->{ro} = 1;\n    return $self;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{ro};\n}\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag_ctx("$class", crate::model::witnesses::ReadPoint::position(Point { row: 3, column: 0 }), None), Some(InferredType::ClassName("Node".into())));
+    assert_eq!(
+        fa.inferred_type_via_bag_ctx("$class", crate::model::witnesses::ReadPoint::position(Point { row: 9, column: 0 }), None).as_ref().and_then(|t| t.dispatch_name()),
+        Some("Doc"),
+    );
+    assert_eq!(fa.inferred_type_via_bag_ctx("$self", crate::model::witnesses::ReadPoint::position(Point { row: 10, column: 0 }), None), Some(InferredType::ClassName("Doc".into())));
+    assert_eq!(fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point { row: 16, column: 0 }), None), Some(InferredType::Numeric));
+}
+
+#[test]
+fn ref_of_an_unblessed_value_stays_a_string() {
+    let fa = build_fa_from_source("my $h = {};\nmy $t = ref $h;\nmy $u = ref($h) || 'HASH';\n1;\n");
+    assert!(fa.inferred_type_via_bag_ctx("$t", crate::model::witnesses::ReadPoint::position(Point { row: 3, column: 0 }), None).is_some_and(|t| t.is_string()));
+    assert!(fa.inferred_type_via_bag_ctx("$u", crate::model::witnesses::ReadPoint::position(Point { row: 3, column: 0 }), None).is_some_and(|t| t.is_string()));
+}
+
+#[test]
 fn loader_config_types_register_conf_cross_file() {
     // #25, framework-mediated: `plugin 'GenericCoApp', {...}` in the app
     // types `$conf` inside the plugin's register — callers enumerable
@@ -3351,4 +3443,47 @@ fn unknown_return_is_not_displayed() {
     );
     assert_eq!(fa.find_method_return_type("Foo", "a", None, None), Some(InferredType::Unknown));
     assert_eq!(fa.method_detail("Foo", "a", None, None), "Foo");
+}
+
+/// A bareword invocant naming a sub whose zero-argument call returns a
+/// class is that call, for every text-invocant consumer: `shop->buy`
+/// dispatches on what `shop()` returns, not on a class named `shop`.
+#[test]
+fn bareword_invocant_naming_a_class_returning_sub_is_the_call() {
+    let fa = build_fa_from_source(
+        r#"
+package Shop;
+sub new { my $class = shift; return bless {}, $class }
+sub buy { 1 }
+
+package main;
+sub shop { return Shop->new }
+shop->buy;
+        "#,
+    );
+    let point = Point { row: 7, column: 6 };
+    assert_eq!(fa.invocant_text_classes(Some("shop"), point).single(), Some("Shop"));
+    assert_eq!(fa.invocant_text_type("shop", point), Some(InferredType::ClassName("Shop".into())));
+}
+
+/// A receiver reassigned in its method dispatches on its new value: the
+/// inferred type answers before the enclosing package does.
+#[test]
+fn reassigned_receiver_dispatches_on_its_new_value() {
+    let fa = build_fa_from_source(
+        r#"
+package Other;
+sub new { my $class = shift; return bless {}, $class }
+sub o { 1 }
+
+package Mine;
+sub m {
+    my $self = shift;
+    $self = Other->new;
+    $self->o;
+}
+        "#,
+    );
+    let point = Point { row: 9, column: 10 };
+    assert_eq!(fa.invocant_text_classes(Some("$self"), point).single(), Some("Other"));
 }

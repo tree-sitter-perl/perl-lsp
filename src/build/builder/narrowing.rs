@@ -556,11 +556,7 @@ impl<'a> Builder<'a> {
 
     /// `__PACKAGE__` as a class operand: the enclosing package.
     fn current_package_literal(&self, node: Node<'a>) -> Option<String> {
-        let text = node.utf8_text(self.source).ok()?;
-        if !crate::model::conventions::is_current_package_token(text) {
-            return None;
-        }
-        self.package_for_node(node)
+        self.token_class(node)
     }
 
     /// A scalar `isa`/`DOES` argument (`$x->isa($C)`) that the constant
@@ -902,7 +898,7 @@ impl<'a> Builder<'a> {
         self.bag.remove_by_source_tag("tag_narrowing");
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
         for g in &self.tag_narrowings {
-            let Some(InferredType::RefTagOf { subject, site, via }) =
+            let Some(InferredType::RefTagOf { subject: Some(subject), site, via, .. }) =
                 self.bag_query_place(&g.var, g.scope, g.region.start)
             else {
                 continue;
