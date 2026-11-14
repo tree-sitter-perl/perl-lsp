@@ -1001,6 +1001,18 @@ pub struct TypeCheckFunction {
     pub asserts: bool,
 }
 
+/// A method of a type-constraint VALUE that checks its argument
+/// (Type::Tiny's `$type->check($x)` / `$type->assert_valid($x)`): a call
+/// guards the argument as whatever the receiver constrains. The receiver's
+/// type decides, so a `check` on anything but a constraint proves nothing.
+/// `asserts` as for [`TypeCheckFunction`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TypeCheckMethod {
+    pub name: String,
+    #[serde(default)]
+    pub asserts: bool,
+}
+
 /// A [`TypeCheckFunction`] with its constraint folded to the type a passing
 /// check proves. Folding calls into the plugin, so the registry does it once
 /// ([`PluginRegistry::type_checks`]), never per file.
@@ -1296,6 +1308,12 @@ pub trait FrameworkPlugin: Send + Sync {
     /// Library functions that check a value against a type constraint —
     /// see [`TypeCheckFunction`]. Default empty.
     fn type_check_functions(&self) -> &[TypeCheckFunction] {
+        &[]
+    }
+
+    /// Methods of a type-constraint value that check their argument — see
+    /// [`TypeCheckMethod`]. Default empty.
+    fn type_check_methods(&self) -> &[TypeCheckMethod] {
         &[]
     }
 
@@ -1799,6 +1817,11 @@ impl PluginRegistry {
     /// Union of ref-tag functions across the registry.
     pub fn ref_tag_functions<'a>(&'a self) -> impl Iterator<Item = &'a RefTagFunction> + 'a {
         self.plugins.iter().flat_map(|p| p.ref_tag_functions().iter())
+    }
+
+    /// The type-check method named `name`, if any plugin declares one.
+    pub fn type_check_method(&self, name: &str) -> Option<&TypeCheckMethod> {
+        self.plugins.iter().flat_map(|p| p.type_check_methods().iter()).find(|m| m.name == name)
     }
 
     /// Every type-check function whose constraint folds to a type, across

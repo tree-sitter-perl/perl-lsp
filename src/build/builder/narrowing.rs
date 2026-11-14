@@ -128,6 +128,11 @@ pub(super) enum NarrowOp {
     Defined { read: Span },
     /// The tag a [`NarrowSubject::TagOf`] holds equals this literal.
     TagEq(String),
+    /// A type-constraint value at `constraint` admitted the subject: the
+    /// region holds `Projected { base: Expr(constraint), step:
+    /// ConstrainedInner }`, so what it proves is whatever that value
+    /// constrains, answered when asked.
+    Constrained { constraint: Span },
 }
 
 impl NarrowOp {
@@ -138,7 +143,7 @@ impl NarrowOp {
     /// wins). See `docs/adr/flow-narrowing.md` negative-polarity rows.
     fn negated(&self) -> Option<NarrowOp> {
         match self {
-            NarrowOp::To(_) | NarrowOp::TagEq(_) => None,
+            NarrowOp::To(_) | NarrowOp::TagEq(_) | NarrowOp::Constrained { .. } => None,
             NarrowOp::Defined { .. } => Some(NarrowOp::To(InferredType::Undef)),
         }
     }
@@ -152,6 +157,10 @@ impl NarrowOp {
             NarrowOp::Defined { read } => Some(WitnessPayload::Projected {
                 base: WitnessAttachment::Expr(read),
                 step: ProjectionStep::Defined,
+            }),
+            NarrowOp::Constrained { constraint } => Some(WitnessPayload::Projected {
+                base: WitnessAttachment::Expr(constraint),
+                step: ProjectionStep::ConstrainedInner,
             }),
             NarrowOp::TagEq(_) => None,
         }
@@ -364,7 +373,9 @@ fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<
 fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<'a>> {
     let source = builder.source;
     match cond.kind() {
-        "method_call_expression" => recognize_isa_guard(builder, cond, source),
+        "method_call_expression" => {
+            recognize_isa_guard(builder, cond, source).or_else(|| recognize_type_check(builder, cond).map(|(f, _)| f))
+        }
         "equality_expression" => recognize_ref_eq_guard(builder, cond, source),
         "func1op_call_expression" => recognize_defined_guard(builder, cond, source),
         "ambiguous_function_call_expression" | "function_call_expression" => {
@@ -374,10 +385,28 @@ fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact
     }
 }
 
-/// `is_ArrayRef($x)` / `assert_Str($x)` — a plugin-declared type check →
-/// narrow `$x` to what a passing check proves. The second answer says
-/// whether the call dies when the check fails.
+/// A plugin-declared type check → narrow its operand to what a passing
+/// check proves: a function (`is_ArrayRef($x)` / `assert_Str($x)`), or a
+/// method of a constraint value (`$type->check($x)`, `Int->assert_valid($x)`).
+/// The second answer says whether the call dies when the check fails.
 fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(GuardFact<'a>, bool)> {
+    if let Some(mc) = crate::cst::MethodCall::cast(call) {
+        let check = builder.plugins.type_check_method(mc.method()?.utf8_text(builder.source).ok()?)?;
+        let arg = crate::cst::peel_groups(call.child_by_field_name("arguments")?);
+        if !is_subject_node_kind(arg.kind()) {
+            return None;
+        }
+        let constraint = node_to_span(mc.invocant()?);
+        return Some((
+            GuardFact {
+                subject: builder.narrow_subject_of(arg)?,
+                op: NarrowOp::Constrained { constraint },
+                asserts_when_true: true,
+                read: arg,
+            },
+            check.asserts,
+        ));
+    }
     let at = call.start_position();
     let (check, arg) = crate::cst::subject_call(call, builder.source, |name| builder.type_check_fn(name, at))?;
     Some((
@@ -682,7 +711,7 @@ impl<'a> Builder<'a> {
                 NarrowOp::Defined { .. } => GuardPredicate::Defined,
                 // What it proves is a fold answer; D3/D4 read the prior
                 // type at the guard, which a tag guard has no subject for.
-                NarrowOp::TagEq(_) => continue,
+                NarrowOp::TagEq(_) | NarrowOp::Constrained { .. } => continue,
             };
             self.guard_sites.push(GuardSite {
                 subject: fact.subject.subject().clone(),
@@ -804,8 +833,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `assert_X($x);` — a statement that dies unless its check passes is
-    /// `die unless is_X($x)`: the rest of the block runs where it held.
+    /// `assert_X($x);` / `$type->assert_valid($x);` — a statement that dies
+    /// unless its check passes is `die unless is_X($x)`: the rest of the
+    /// block runs where it held.
     pub(super) fn narrow_assertion(&mut self, call: Node<'a>) {
         if self.syntax.parent(call).is_none_or(|p| p.kind() != "expression_statement") {
             return;

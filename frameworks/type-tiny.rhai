@@ -189,6 +189,17 @@ fn type_check_functions() {
     out
 }
 
+// `$type->check($v)` / `$type->assert_valid($v)` on a constraint VALUE
+// (`Int`, `InstanceOf['Foo']`, a `$type` holding one): core narrows `$v` to
+// whatever the receiver constrains, so a `check` on any other object proves
+// nothing.
+fn type_check_methods() {
+    [
+        #{ name: "check", asserts: false },
+        #{ name: "assert_valid", asserts: true },
+    ]
+}
+
 // `use Types::Standard qw/Str Int .../` → emit Import so the named constants
 // are known in this package. The builder's `process_use` already pushes an
 // Import entry for the literal qw-list, but that entry only covers what the

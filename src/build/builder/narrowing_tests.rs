@@ -1482,3 +1482,45 @@ fn check_function_from_types_common() {
         fa.inferred_type_via_bag("$x", Point::new(5, 16))
     );
 }
+
+#[test]
+fn constraint_value_check_narrows_to_what_it_constrains() {
+    // The receiver's TYPE answers: a constant, a variable holding one, and a
+    // parameterized constructor all reach `TypeConstraintOf(T)`. The parens
+    // are Perl's: `InstanceOf['Foo']->check($z)` calls `InstanceOf` on the
+    // result of `['Foo']->check($z)`.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(ArrayRef HashRef InstanceOf);\nsub f {\n    my ($x, $y, $z) = @_;\n    my $t = HashRef;\n    if (ArrayRef->check($x)) {\n        my $v = $x;\n    }\n    if ($t->check($y)) {\n        my $v = $y;\n    }\n    if ((InstanceOf['Foo'])->check($z)) {\n        my $v = $z;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 16)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(9, 16)), Some(InferredType::HashRef));
+    assert_eq!(
+        fa.inferred_type_via_bag("$z", Point::new(12, 16)),
+        Some(InferredType::ClassName("Foo".into()))
+    );
+}
+
+#[test]
+fn check_on_something_that_is_no_constraint_proves_nothing() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x) = @_;\n    my $v = Validator->new;\n    if ($v->check($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None);
+}
+
+#[test]
+fn check_on_a_value_that_may_be_no_constraint_proves_nothing() {
+    // One arm proving nothing voids the proof: `$t` may be the Validator.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(Int);\nsub f {\n    my ($c, $x) = @_;\n    my $t = $c ? Int : Validator->new;\n    if ($t->check($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 16)), None);
+}
+
+#[test]
+fn assert_valid_narrows_the_rest_of_the_block() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(Str);\nsub f {\n    my ($x) = @_;\n    Str->assert_valid($x);\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 13)), Some(InferredType::String));
+}

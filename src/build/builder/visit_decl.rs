@@ -113,7 +113,10 @@ impl<'a> Builder<'a> {
                 }
                 self.visit_func1op(node);
             }
-            "method_call_expression" => self.visit_method_call(node),
+            "method_call_expression" => {
+                self.narrow_assertion(node);
+                self.visit_method_call(node);
+            }
 
             // Code-ref capture: `\&handler` or `\&Pkg::handler`.
             // Emits a FunctionCall ref at the name span so goto-def /

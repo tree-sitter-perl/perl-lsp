@@ -21,7 +21,7 @@ use tree_sitter::Point;
 
 use super::{
     AttributeMacro, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
-    FrameworkModeMaker, FrameworkPlugin, RefTagFunction, TypeCheckFunction, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer,
+    FrameworkModeMaker, FrameworkPlugin, RefTagFunction, TypeCheckFunction, TypeCheckMethod, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer,
     SigHelpQueryContext, Trigger, TypeOverride, UseContext,
 };
 
@@ -287,6 +287,7 @@ pub struct RhaiPlugin {
     framework_mode_makers: Vec<FrameworkModeMaker>,
     ref_tag_functions: Vec<RefTagFunction>,
     type_check_functions: Vec<TypeCheckFunction>,
+    type_check_methods: Vec<TypeCheckMethod>,
     column_keyed_verbs: Vec<String>,
     fluent_verbs: Vec<String>,
     meta_methods: Vec<String>,
@@ -377,6 +378,8 @@ impl RhaiPlugin {
             read_manifest_list(&engine, &ast, &signatures, &id, "ref_tag_functions");
         let type_check_functions: Vec<TypeCheckFunction> =
             read_manifest_list(&engine, &ast, &signatures, &id, "type_check_functions");
+        let type_check_methods: Vec<TypeCheckMethod> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "type_check_methods");
         let column_keyed_verbs: Vec<String> =
             read_manifest_list(&engine, &ast, &signatures, &id, "column_keyed_verbs");
         let fluent_verbs: Vec<String> =
@@ -418,6 +421,7 @@ impl RhaiPlugin {
             framework_mode_makers,
             ref_tag_functions,
             type_check_functions,
+            type_check_methods,
             column_keyed_verbs,
             fluent_verbs,
             meta_methods,
@@ -541,6 +545,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn type_check_functions(&self) -> &[TypeCheckFunction] {
         &self.type_check_functions
+    }
+
+    fn type_check_methods(&self) -> &[TypeCheckMethod] {
+        &self.type_check_methods
     }
 
     fn column_keyed_verbs(&self) -> &[String] {
