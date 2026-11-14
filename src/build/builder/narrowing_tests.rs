@@ -1422,6 +1422,48 @@ fn type_check_function_composes_with_exits() {
     assert_eq!(fa.inferred_type_via_bag("$y", Point::new(6, 13)), Some(InferredType::String));
 }
 
+/// A house type library, built the two ways Type::Tiny documents, and a
+/// consumer of its check functions, registered in one index.
+fn house_library_index() -> crate::index::module_index::ModuleIndex {
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/My/Types.pm"),
+        std::sync::Arc::new(build_fa(
+            "package My::Types;\nuse Type::Library -base, -declare => qw(Name Label Widget);\nuse Type::Utils -all;\nuse Types::Standard qw(Str InstanceOf);\nmy $meta = __PACKAGE__->meta;\n$meta->add_type(name => Name, parent => Str, constraint => sub { length });\n__PACKAGE__->add_type({ name => 'Label', parent => Name });\ndeclare Widget, as InstanceOf['My::Widget'], where { 1 };\n1;\n",
+        )),
+    );
+    idx
+}
+
+#[test]
+fn check_function_reads_the_constraint_its_library_declares() {
+    let idx = house_library_index();
+    let fa = build_fa(
+        "package P;\nuse My::Types qw(is_Name assert_Label is_Widget);\nsub f {\n    my ($x, $y, $z) = @_;\n    if (is_Name($x)) {\n        my $v = $x;\n    }\n    assert_Label($y);\n    return unless is_Widget($z);\n    my $w = $y;\n}",
+    );
+    let at = |var: &str, row, col| {
+        fa.inferred_type_via_bag_ctx(var, crate::model::witnesses::ReadPoint::position(Point::new(row, col)), Some(&idx))
+    };
+    assert_eq!(at("$x", 5, 16), Some(InferredType::String), "add_type's parent is what `Name` constrains");
+    assert_eq!(at("$y", 9, 13), Some(InferredType::String), "a parent named by the library's own constant chains through it");
+    assert_eq!(at("$z", 9, 13), Some(InferredType::ClassName("My::Widget".into())), "Type::Utils `declare … as`");
+    assert_eq!(at("$x", 7, 4), None, "the arm's narrowing stays in the arm");
+}
+
+#[test]
+fn check_function_of_an_unknown_library_proves_nothing() {
+    // No library declares `Thing`: the guard reads an honest unknown, never
+    // the vocabulary's guess and never a wide type it did not have.
+    let idx = house_library_index();
+    let fa = build_fa(
+        "package P;\nuse Elsewhere qw(is_Thing);\nsub f {\n    my $x = [];\n    if (is_Thing($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point::new(5, 16)), Some(&idx)),
+        Some(InferredType::ArrayRef),
+    );
+}
+
 #[test]
 fn bool_check_leaves_undef_possible() {
     // Type::Tiny's Bool passes undef, so a passed check proves no definedness.

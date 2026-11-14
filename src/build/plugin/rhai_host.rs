@@ -288,6 +288,7 @@ pub struct RhaiPlugin {
     ref_tag_functions: Vec<RefTagFunction>,
     type_check_functions: Vec<TypeCheckFunction>,
     type_check_methods: Vec<TypeCheckMethod>,
+    constraint_libraries: Vec<String>,
     column_keyed_verbs: Vec<String>,
     fluent_verbs: Vec<String>,
     meta_methods: Vec<String>,
@@ -380,6 +381,8 @@ impl RhaiPlugin {
             read_manifest_list(&engine, &ast, &signatures, &id, "type_check_functions");
         let type_check_methods: Vec<TypeCheckMethod> =
             read_manifest_list(&engine, &ast, &signatures, &id, "type_check_methods");
+        let constraint_libraries: Vec<String> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "constraint_libraries");
         let column_keyed_verbs: Vec<String> =
             read_manifest_list(&engine, &ast, &signatures, &id, "column_keyed_verbs");
         let fluent_verbs: Vec<String> =
@@ -422,6 +425,7 @@ impl RhaiPlugin {
             ref_tag_functions,
             type_check_functions,
             type_check_methods,
+            constraint_libraries,
             column_keyed_verbs,
             fluent_verbs,
             meta_methods,
@@ -549,6 +553,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn type_check_methods(&self) -> &[TypeCheckMethod] {
         &self.type_check_methods
+    }
+
+    fn constraint_libraries(&self) -> &[String] {
+        &self.constraint_libraries
     }
 
     fn column_keyed_verbs(&self) -> &[String] {

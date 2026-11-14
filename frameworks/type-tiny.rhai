@@ -25,8 +25,124 @@ fn id() { "type-tiny" }
 
 fn api() { 1 }
 
-// Manifest hooks are global (consulted by name), so triggers are irrelevant.
-fn triggers() { [] }
+// Manifest hooks are global (consulted by name); the triggers gate only the
+// patterns, which read a type library's own declarations.
+fn triggers() {
+    [ #{ UsesModule: "Type::Library" }, #{ UsesModule: "Type::Utils" } ]
+}
+
+// A type library's declarations, so a consumer's `is_X($v)` reads the X the
+// library declares. Type::Library's `add_type(name => X, parent => P, …)` (on
+// any receiver: `$meta`, `__PACKAGE__`, `__PACKAGE__->meta` — the
+// `UsesModule` trigger is the gate) and Type::Utils' `declare X, as P, …`.
+// X constrains no more than P does as far as a type can say: a constraint's
+// own `where` refines a value no `InferredType` can follow, so X answers P's
+// constraint value.
+fn patterns() {
+    [
+        #{
+            name: "add_type",
+            query: `
+(method_call_expression
+  method: (_) @verb
+  arguments: [
+    (list_expression) @args
+    (anonymous_hash_expression (list_expression) @args)
+  ]
+  (#eq? @verb "add_type"))
+`,
+            projections: #{ args: ["args"] },
+            expect: [
+                #{ src: "__PACKAGE__->add_type(name => Foo, parent => Str);", matches: 1 },
+                #{ src: "$meta->add_type({ name => 'Foo', parent => Int });", matches: 1 },
+                #{ src: "$meta->add_type;", matches: 0 },
+            ],
+        },
+        #{
+            name: "declare",
+            // `as P, where {…}` passes its args as a list; `as InstanceOf[…]`
+            // passes the one call bare. `parent` flattens either, so its
+            // first arg is P.
+            query: `
+([
+  (ambiguous_function_call_expression
+    function: (_) @verb
+    arguments: (list_expression . (_) @name . [
+      (ambiguous_function_call_expression function: (_) @as arguments: (_) @parent)
+      (function_call_expression function: (_) @as arguments: (_) @parent)
+    ]))
+  (function_call_expression
+    function: (_) @verb
+    arguments: (list_expression . (_) @name . [
+      (ambiguous_function_call_expression function: (_) @as arguments: (_) @parent)
+      (function_call_expression function: (_) @as arguments: (_) @parent)
+    ]))
+]
+(#eq? @verb "declare")
+(#eq? @as "as"))
+`,
+            projections: #{ name: ["str"], parent: ["args"] },
+            expect: [
+                #{ src: "declare Foo, as Str, where { 1 };", matches: 1 },
+                #{ src: "declare 'Foo', as InstanceOf['X'];", matches: 1 },
+                #{ src: "declare(\"Foo\", as(Str));", matches: 1 },
+                #{ src: "declare Foo;", matches: 0 },
+                #{ src: "declare Foo, where { 1 };", matches: 0 },
+            ],
+        },
+    ]
+}
+
+fn on_match(pattern, m) {
+    let pkg = m["package"];
+    if pkg == () { return []; }
+    if pattern == "add_type" {
+        let args = m.captures.args;
+        if args == () || args.args == () { return []; }
+        let name = ();
+        let name_span = ();
+        let parent = ();
+        for pair in classified_pairs(args.args, 0) {
+            if pair.key == "name" && pair.value.Str != () {
+                name = pair.value.Str;
+                name_span = pair.value_span;
+            }
+            if pair.key == "parent" { parent = pair.value_span; }
+        }
+        return declared_constraint(pkg, name, name_span, parent);
+    }
+    if pattern == "declare" {
+        let parent = m.captures.parent;
+        if parent == () || parent.args == () || parent.args.is_empty() { return []; }
+        let name = m.captures.name;
+        return declared_constraint(pkg, name.str, name.span, parent.args[0].span);
+    }
+    []
+}
+
+// The constant sub a declaration installs: calling `X` yields its parent's
+// constraint value.
+fn declared_constraint(pkg, name, span, parent) {
+    if name == () || span == () || parent == () || !is_callable_sub_name(name) { return []; }
+    [#{
+        Method: #{
+            name: name,
+            span: span,
+            selection_span: span,
+            params: [],
+            is_method: false,
+            return_type: (),
+            doc: (),
+            on_class: pkg,
+            display: (),
+            hide_in_outline: false,
+            opaque_return: false,
+            outline_label: (),
+            return_via_edge: #{ Expr: parent },
+            attr: (),
+        }
+    }]
+}
 
 // Which call names are constraint constructors. The 0-arity base constants
 // are constraint VALUES too — `isa => Int` is a Type::Tiny object exactly
@@ -173,20 +289,24 @@ fn types_common_numeric_exports() {
     out
 }
 
-// `is_X($v)` checks `$v` against X; `assert_X($v)` dies unless it passes.
-// Both guard `$v` as X's inner type: core folds `constraint` through
-// `type_constraint_inner` and keeps the checks whose constraint has an inner
-// (`is_Object` guards nothing). Types::Common re-exports Types::Standard's companions,
-// so a check imported from either reaches the same entry.
+// Type::Library gives every constraint X it declares the companions
+// `is_X($v)` (checks `$v` against X) and `assert_X($v)` (dies unless it
+// passes). Both guard `$v` as X's inner type, read from whichever library the
+// call names: one listed in `constraint_libraries` folds X through
+// `type_constraint_inner` (and `is_Object` guards nothing), any other answers
+// from the X that library's own source declares.
 fn type_check_functions() {
-    let out = [];
-    for lib in ["Types::Standard", "Types::Common"] {
-        for t in types_standard_bases() {
-            out += #{ "module": lib, name: "is_" + t, constraint: t, asserts: false };
-            out += #{ "module": lib, name: "assert_" + t, constraint: t, asserts: true };
-        }
-    }
-    out
+    [
+        #{ prefix: "is_", asserts: false },
+        #{ prefix: "assert_", asserts: true },
+    ]
+}
+
+// Libraries this vocabulary speaks for. They build their constraints at
+// runtime, so no declaration in their source can be read; Types::Common
+// re-exports Types::Standard's.
+fn constraint_libraries() {
+    ["Types::Standard", "Types::Common"]
 }
 
 // `$type->check($v)` / `$type->assert_valid($v)` on a constraint VALUE

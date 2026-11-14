@@ -128,11 +128,12 @@ pub(super) enum NarrowOp {
     Defined { read: Span },
     /// The tag a [`NarrowSubject::TagOf`] holds equals this literal.
     TagEq(String),
-    /// A type-constraint value at `constraint` admitted the subject: the
-    /// region holds `Projected { base: Expr(constraint), step:
+    /// The type-constraint value `constraint` holds admitted the subject:
+    /// the region holds `Projected { base: constraint, step:
     /// ConstrainedInner }`, so what it proves is whatever that value
-    /// constrains, answered when asked.
-    Constrained { constraint: Span },
+    /// constrains, answered when asked — a receiver's `Expr`, or the
+    /// constraint a library declares.
+    Constrained { constraint: crate::model::witnesses::WitnessAttachment },
 }
 
 impl NarrowOp {
@@ -159,7 +160,7 @@ impl NarrowOp {
                 step: ProjectionStep::Defined,
             }),
             NarrowOp::Constrained { constraint } => Some(WitnessPayload::Projected {
-                base: WitnessAttachment::Expr(constraint),
+                base: constraint,
                 step: ProjectionStep::ConstrainedInner,
             }),
             NarrowOp::TagEq(_) => None,
@@ -396,7 +397,7 @@ fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(Gu
         if !is_subject_node_kind(arg.kind()) {
             return None;
         }
-        let constraint = node_to_span(mc.invocant()?);
+        let constraint = crate::model::witnesses::WitnessAttachment::Expr(node_to_span(mc.invocant()?));
         return Some((
             GuardFact {
                 subject: builder.narrow_subject_of(arg)?,
@@ -409,10 +410,16 @@ fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(Gu
     }
     let at = call.start_position();
     let (check, arg) = crate::cst::subject_call(call, builder.source, |name| builder.type_check_fn(name, at))?;
+    let op = match check.constraint {
+        crate::build::plugin::CheckedConstraint::Proves(ty) => NarrowOp::To(ty),
+        crate::build::plugin::CheckedConstraint::Declared { library, name } => NarrowOp::Constrained {
+            constraint: crate::model::witnesses::WitnessAttachment::returns_of(library, name),
+        },
+    };
     Some((
         GuardFact {
             subject: builder.narrow_subject_of(arg)?,
-            op: NarrowOp::To(check.proves.clone()),
+            op,
             asserts_when_true: true,
             read: arg,
         },

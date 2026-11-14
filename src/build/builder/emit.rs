@@ -134,10 +134,11 @@ impl<'a> Builder<'a> {
             .map(|f| f.tag)
     }
 
-    /// The plugin-declared type check a call spelled `name` at `at` reaches.
-    pub(super) fn type_check_fn(&self, name: &str, at: Point) -> Option<&plugin::TypeCheck> {
+    /// The type check a call spelled `name` at `at` makes, read off the
+    /// library function it names.
+    pub(super) fn type_check_fn(&self, name: &str, at: Point) -> Option<plugin::TypeCheck> {
         let (module, remote) = self.library_callee(name, at)?;
-        self.plugins.type_checks().iter().find(|f| f.module == module && f.name == remote)
+        self.plugins.type_check(module, remote)
     }
 
     /// The library function a call spelled `name` at `at` names, as

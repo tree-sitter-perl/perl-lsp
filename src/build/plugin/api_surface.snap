@@ -296,9 +296,7 @@ pub tag: crate::model::file_analysis::RefTagFn,
 }
 
 pub struct TypeCheckFunction {
-pub module: String,
-pub name: String,
-pub constraint: String,
+pub prefix: String,
 #[serde(default)]
 pub asserts: bool,
 }

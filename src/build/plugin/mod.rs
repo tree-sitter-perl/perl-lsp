@@ -985,18 +985,16 @@ pub struct RefTagFunction {
     pub tag: crate::model::file_analysis::RefTagFn,
 }
 
-/// A library function that checks its argument against a type constraint
-/// (Types::Standard's `is_ArrayRef` / `assert_Str`): a call to it guards the
-/// operand as `constraint`'s inner type, folded through
-/// `type_constraint_inner`. An `asserts` function dies when the check fails,
-/// so the statement it heads also guards what follows it. Fires only where
-/// the file imported the name from `module` or called it fully qualified,
-/// like [`RefTagFunction`].
+/// A spelling of a type library's check functions: Type::Library gives every
+/// constraint `X` it declares the companions `is_X` (true when its argument
+/// passes) and `assert_X` (dies unless it does), so a call to `<prefix>X`
+/// imported from a library guards its operand as whatever that library's `X`
+/// constrains. An `asserts` spelling dies when the check fails, so the
+/// statement it heads also guards what follows it. Fires only where the file
+/// imported the name or called it fully qualified, like [`RefTagFunction`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TypeCheckFunction {
-    pub module: String,
-    pub name: String,
-    pub constraint: String,
+    pub prefix: String,
     #[serde(default)]
     pub asserts: bool,
 }
@@ -1013,14 +1011,23 @@ pub struct TypeCheckMethod {
     pub asserts: bool,
 }
 
-/// A [`TypeCheckFunction`] with its constraint folded to the type a passing
-/// check proves. Folding calls into the plugin, so the registry does it once
-/// ([`PluginRegistry::type_checks`]), never per file.
+/// What a passing check function proves about its operand.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CheckedConstraint {
+    /// A constraint a plugin's vocabulary owns (Types::Standard's `Int`),
+    /// folded to its inner type without reading the library.
+    Proves(crate::model::file_analysis::InferredType),
+    /// The constraint `name` the library `library` declares: what it
+    /// constrains is answered when asked, from the library's own source.
+    Declared { library: String, name: String },
+}
+
+/// A call's [`TypeCheckFunction`] resolved against the library it names.
+/// Folding calls into the plugin, so the registry memoizes it
+/// ([`PluginRegistry::type_check`]), never per file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeCheck {
-    pub module: String,
-    pub name: String,
-    pub proves: crate::model::file_analysis::InferredType,
+    pub constraint: CheckedConstraint,
     pub asserts: bool,
 }
 
@@ -1305,9 +1312,17 @@ pub trait FrameworkPlugin: Send + Sync {
         &[]
     }
 
-    /// Library functions that check a value against a type constraint —
-    /// see [`TypeCheckFunction`]. Default empty.
+    /// Spellings of a type library's check functions — see
+    /// [`TypeCheckFunction`]. Default empty.
     fn type_check_functions(&self) -> &[TypeCheckFunction] {
+        &[]
+    }
+
+    /// Type libraries whose constraints this plugin's vocabulary folds
+    /// (`type_constraint_inner`) without reading their source — the ones
+    /// that build their types at runtime where no declaration can be read.
+    /// Default empty.
+    fn constraint_libraries(&self) -> &[String] {
         &[]
     }
 
@@ -1610,9 +1625,9 @@ pub struct PluginRegistry {
     /// Whether the background compile has been kicked off. Separate from the
     /// `OnceLock` because the lock is only *set* when the compile finishes.
     combined_walk_started: std::sync::atomic::AtomicBool,
-    /// The type-check functions, folded on first ask. Reset by `register`,
+    /// Resolved type-check calls by `(library, name)`. Reset by `register`,
     /// the registry's only mutation.
-    type_checks: std::sync::OnceLock<Vec<TypeCheck>>,
+    type_checks: std::sync::Mutex<std::collections::HashMap<(String, String), Option<TypeCheck>>>,
     /// Plugins found on disk that did not load, one line each (path and
     /// reason). Kept with the registry so the server can show them: a
     /// refused plugin otherwise only reaches the log.
@@ -1662,7 +1677,7 @@ impl PluginRegistry {
 
     pub fn register(&mut self, plugin: Box<dyn FrameworkPlugin>) {
         self.plugins.push(plugin);
-        self.type_checks = std::sync::OnceLock::new();
+        self.type_checks = Default::default();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1824,21 +1839,33 @@ impl PluginRegistry {
         self.plugins.iter().flat_map(|p| p.type_check_methods().iter()).find(|m| m.name == name)
     }
 
-    /// Every type-check function whose constraint folds to a type, across
-    /// the registry: the constraint goes through `type_constraint_inner` with
-    /// no params, the same fold `isa => Int` takes, and a check whose
-    /// constraint has no inner (`is_Object`) proves nothing.
-    pub fn type_checks(&self) -> &[TypeCheck] {
-        self.type_checks.get_or_init(|| {
-            self.plugins
-                .iter()
-                .flat_map(|p| p.type_check_functions().iter())
-                .filter_map(|f| {
-                    let proves = self.type_constraint_inner(&f.constraint, &[])?.constrained_inner()?.clone();
-                    Some(TypeCheck { module: f.module.clone(), name: f.name.clone(), proves, asserts: f.asserts })
-                })
-                .collect()
-        })
+    /// The check a call to `name` from `library` makes, if its name is a
+    /// check function's spelling. A library a plugin's vocabulary speaks
+    /// for folds the constraint the way `isa => Int` does — and one it owns
+    /// with no inner (`is_Object`) proves nothing; any other library's
+    /// constraint is the one that library declares.
+    pub fn type_check(&self, library: &str, name: &str) -> Option<TypeCheck> {
+        let key = (library.to_string(), name.to_string());
+        if let Some(hit) = self.type_checks.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        let check = self.resolve_type_check(library, name);
+        self.type_checks.lock().unwrap().insert(key, check.clone());
+        check
+    }
+
+    fn resolve_type_check(&self, library: &str, name: &str) -> Option<TypeCheck> {
+        let (constraint, asserts) = self
+            .plugins
+            .iter()
+            .flat_map(|p| p.type_check_functions().iter())
+            .find_map(|f| Some((name.strip_prefix(f.prefix.as_str()).filter(|c| !c.is_empty())?, f.asserts)))?;
+        let owned = self.plugins.iter().any(|p| p.constraint_libraries().iter().any(|l| l == library));
+        let constraint = match owned.then(|| self.type_constraint_inner(constraint, &[])).flatten() {
+            Some(folded) => CheckedConstraint::Proves(folded.constrained_inner()?.clone()),
+            None => CheckedConstraint::Declared { library: library.to_string(), name: constraint.to_string() },
+        };
+        Some(TypeCheck { constraint, asserts })
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose
