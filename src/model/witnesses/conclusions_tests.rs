@@ -439,19 +439,20 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
     };
     let att = WitnessAttachment::returns_of(class.to_string(), name.to_string());
     let _bake = BakeScope::enter();
-    let _ = registry.query(
-        &fa.witnesses,
-        &ReducerQuery {
-            attachment: &att,
-            point: None,
-            framework: FrameworkFact::Plain,
-            arity_hint: None,
-            receiver: None,
-            args: Vec::new(),
-            context: Some(&ctx),
-        },
-    );
-    registry.residuals_of_last_query()
+    registry
+        .query_with_residuals(
+            &fa.witnesses,
+            &ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint: None,
+                receiver: None,
+                args: Vec::new(),
+                context: Some(&ctx),
+            },
+        )
+        .1
 }
 
 /// An exit reached through a CALL frame must not be residualized.

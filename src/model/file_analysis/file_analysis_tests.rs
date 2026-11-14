@@ -2506,7 +2506,8 @@ fn constructor_slot_write_through_an_inherited_new_types_the_read() {
 
 /// Deterministic cost pin: every class's read of a key the build filed
 /// unowned needs the objects of the same writes. Resolving them once per
-/// bucket keeps a pass of N reads linear; per read it is N chases each.
+/// bucket keeps a pass (`query_pass`) of N reads linear; per read it is N
+/// chases each.
 #[test]
 fn reads_of_a_filed_key_resolve_its_writes_once() {
     use crate::model::witnesses::{fold_memo_equiv_enabled, live_window_equiv_enabled, materialize_reads};
@@ -2521,6 +2522,7 @@ fn reads_of_a_filed_key_resolve_its_writes_once() {
             ));
         }
         let fa = build_fa_from_source(&src);
+        let _pass = fa.query_pass(None);
         let before = materialize_reads();
         for i in 0..classes {
             let at = crate::model::witnesses::ReadPoint::position(Point { row: 5 * i + 4, column: 0 });

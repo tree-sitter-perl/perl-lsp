@@ -44,6 +44,9 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
     let start = position_to_point(range.start);
     let end = position_to_point(range.end);
     let mut hints = Vec::new();
+    // One type query per declaration in range: a pass, so answers the
+    // declarations share (an inherited slot's writes) are derived once.
+    let _pass = analysis.query_pass(None);
 
     for sym in analysis.symbols() {
         let decl_point = sym.selection_span.end;

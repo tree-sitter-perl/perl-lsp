@@ -225,17 +225,6 @@ fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
     )
 }
 
-thread_local! {
-    /// Residuals + poison from the most recent top-level `query`.
-    ///
-    /// A thread-local rather than a return value because `query` returns a
-    /// `ReducedValue` to a hundred call sites, and only the bake asks this
-    /// question. Published unconditionally and read only by the bake, which is
-    /// single-threaded per file.
-    static LAST_RESIDUAL: std::cell::RefCell<(bool, Vec<super::ConclusionKey>)> =
-        const { std::cell::RefCell::new((false, Vec::new())) };
-}
-
 /// `(value, effect, taint)` — see `QueryState::memo`.
 type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32);
 
@@ -362,19 +351,34 @@ struct FoldMemo {
     /// query that can reach an index. `Some`: a pass's, which admits exactly
     /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
     owner: Option<PassOwner>,
-    answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>)>,
+    answers: std::collections::HashMap<FoldMemoKey, (MemoAnswer, std::sync::Arc<Effect>)>,
     /// Estimated bytes `answers` holds (`fold_memo_entry_bytes`).
     bytes: usize,
+    /// Keys whose root query is being computed beneath the current one: a
+    /// read that reaches one again answers on its own path instead.
+    in_flight: Vec<FoldMemoKey>,
+}
+
+/// What one memo entry holds: an attachment's answer, or a `SlotWrites`
+/// bucket's writes grouped by owner (`owned_slot_writes`).
+#[derive(Clone)]
+enum MemoAnswer {
+    Reduced(std::sync::Arc<ReducedValue>),
+    SlotOwners(std::sync::Arc<SlotOwnerIndex>),
 }
 
 /// A rough charge for one fold-memo entry: the table's slot, the shared
 /// value, and the effect's rungs. The cap bounds the order of magnitude, not
 /// the byte.
-fn fold_memo_entry_bytes(fk: &FoldMemoKey, effect: &Effect) -> usize {
+fn fold_memo_entry_bytes(fk: &FoldMemoKey, answer: &MemoAnswer, effect: &Effect) -> usize {
     const SLOT: usize = std::mem::size_of::<FoldMemoKey>() + 2 * std::mem::size_of::<usize>();
     const VALUE: usize = 128;
     const RUNG: usize = 96;
-    SLOT + VALUE + fk.2.as_ref().map_or(0, |a| a.len()) + effect.rungs.len() * RUNG
+    let value = match answer {
+        MemoAnswer::Reduced(_) => VALUE,
+        MemoAnswer::SlotOwners(index) => index.by_class.values().map(|ws| VALUE * (ws.len() + 1)).sum(),
+    };
+    SLOT + value + fk.2.as_ref().map_or(0, |a| a.len()) + effect.rungs.len() * RUNG
 }
 
 /// What a pass-scoped memo may answer for. Addresses, not ids: the scope
@@ -548,25 +552,60 @@ fn fold_memo_probe(
     key: &VisitedKey,
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
+    let Some(stamp) = fold_memo_stamp(bag, q) else {
+        return Err(None);
+    };
+    let mut bagless = key.clone();
+    bagless.0 = 0;
+    let fk = fold_memo_key(bagless, q);
+    let hit = with_current_memo(&stamp, |memo| {
+        if let Some(hit) = memo.answers.get(&fk) {
+            return Some(hit.clone());
+        }
+        // An answer that never read its receiver is filed without one.
+        let mut any = fk.clone();
+        any.0.2 = None;
+        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver).cloned()
+    })
+    .flatten();
+    let Some((MemoAnswer::Reduced(cached), effect)) = hit else {
+        return Err(Some(Box::new((stamp, fk))));
+    };
+    crate::util::ghost_stats::count("fold_memo.hit");
+    state.replay(&effect, Some(receiver_hash(&key.2)));
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), effect, Taint::CLEAN));
+    Ok(cached)
+}
+
+/// The generations a query on `bag` answers under, when an open memo may
+/// share it (`None` when no scope is open, or when the answer may depend on
+/// more than the scope pins).
+fn fold_memo_stamp(bag: &WitnessBag, q: &ReducerQuery) -> Option<FoldMemoStamp> {
     let index = q.context.and_then(|ctx| ctx.module_index);
     // Generation 0 is a bag no mutation has named yet; it names nothing.
     if bounds_unfilled()
         || bag.generation() == 0
         || !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index)))
     {
-        return Err(None);
+        return None;
     }
-    let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
-    let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
-    let stamp = FoldMemoStamp {
+    Some(FoldMemoStamp {
         generation: bag.generation(),
         parents_generation: q.context.map(|ctx| ctx.package_parents.generation()),
         epoch: index.map(|idx| idx.resolution_epoch()),
-    };
-    let mut bagless = key.clone();
-    bagless.0 = 0;
-    let fk = (bagless, q.framework, args, scopes);
-    let hit = FOLD_MEMO.with(|m| {
+    })
+}
+
+fn fold_memo_key(key: VisitedKey, q: &ReducerQuery) -> FoldMemoKey {
+    let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
+    let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
+    (key, q.framework, args, scopes)
+}
+
+/// Run `f` on the open memo, first emptying it if `stamp` names generations
+/// it does not hold: they never repeat, so every entry it has is dead.
+fn with_current_memo<T>(stamp: &FoldMemoStamp, f: impl FnOnce(&mut FoldMemo) -> T) -> Option<T> {
+    FOLD_MEMO.with(|m| {
         let mut m = m.borrow_mut();
         let memo = m.as_mut()?;
         if !stamp.matches(memo) {
@@ -579,28 +618,15 @@ fn fold_memo_probe(
             if let Some(epoch) = stamp.epoch {
                 memo.epoch = epoch;
             }
-            return None;
         }
-        if let Some(hit) = memo.answers.get(&fk) {
-            return Some(hit.clone());
-        }
-        // An answer that never read its receiver is filed without one.
-        let mut any = fk.clone();
-        any.0.2 = None;
-        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver).cloned()
-    });
-    let Some((cached, effect)) = hit else {
-        return Err(Some(Box::new((stamp, fk))));
-    };
-    crate::util::ghost_stats::count("fold_memo.hit");
-    state.replay(&effect, Some(receiver_hash(&key.2)));
-    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), effect, Taint::CLEAN));
-    Ok(cached)
+        Some(f(memo))
+    })
 }
 
 /// The generations a probe saw. A query without a context reads no parent
 /// graph, so it leaves the memo's parent generation alone; one without an
 /// index reads no other file, so it leaves the epoch alone.
+#[derive(Clone, Copy)]
 struct FoldMemoStamp {
     generation: u64,
     parents_generation: Option<u64>,
@@ -636,16 +662,20 @@ fn fold_memo_store(
     if !effect.reads_receiver {
         fk.0.2 = None;
     }
+    fold_memo_insert(&stamp, fk, MemoAnswer::Reduced(std::sync::Arc::clone(result)), effect);
+}
+
+fn fold_memo_insert(stamp: &FoldMemoStamp, fk: FoldMemoKey, answer: MemoAnswer, effect: &std::sync::Arc<Effect>) {
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
-            let charge = fold_memo_entry_bytes(&fk, effect);
+            let charge = fold_memo_entry_bytes(&fk, &answer, effect);
             if memo.bytes + charge > FOLD_MEMO_BYTES_CAP {
                 crate::util::ghost_stats::count("fold_memo.clear_cap");
                 memo.answers.clear();
                 memo.bytes = 0;
             }
             crate::util::ghost_stats::count("fold_memo.store");
-            if memo.answers.insert(fk, (std::sync::Arc::clone(result), std::sync::Arc::clone(effect))).is_none() {
+            if memo.answers.insert(fk, (answer, std::sync::Arc::clone(effect))).is_none() {
                 memo.bytes += charge;
             }
         }
@@ -657,73 +687,62 @@ fn fold_memo_store(
 #[derive(Default)]
 struct SlotOwnerIndex {
     by_class: std::collections::HashMap<String, Vec<Witness>>,
-    /// A chase beneath recorded an exit or was poisoned.
-    exits: bool,
 }
 
-/// What a bucket's index depends on: the bag's content, the bucket, and the
-/// context its objects are chased under (as `FoldMemoKey`), plus the parent
-/// graph's and the index's generations.
-type SlotOwnersKey = (u64, WitnessAttachment, FrameworkFact, usize, Option<u64>, Option<(usize, u64)>);
-
-/// Entries are dead once their bag moves on, so the table is emptied rather
-/// than grown past this.
-const SLOT_OWNERS_CAP: usize = 256;
-
-thread_local! {
-    static SLOT_OWNERS: std::cell::RefCell<std::collections::HashMap<SlotOwnersKey, std::sync::Arc<SlotOwnerIndex>>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    static SLOT_OWNERS_BUILDING: std::cell::RefCell<Vec<SlotOwnersKey>> = const { std::cell::RefCell::new(Vec::new()) };
+/// How a read finds its bucket's owner index in the open memo.
+enum SlotOwnersLookup {
+    Hit(std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<Effect>),
+    /// Not held yet: build it and file it under this key.
+    Miss(FoldMemoStamp, FoldMemoKey),
+    /// Being built beneath this read: the bucket's own objects read the key.
+    Reentered,
+    /// No memo may hold it.
+    Unshared,
 }
 
-/// The shared per-bucket index of `owned_slot_writes`, under the fold memo's
-/// rules: off with `PERL_LSP_NO_FOLD_MEMO`, and a query that can reach the
-/// module index is shared only inside a pass that pins that index.
-struct SlotOwners;
-
-impl SlotOwners {
-    fn key(bag: &WitnessBag, q: &ReducerQuery, bucket: &WitnessAttachment) -> Option<SlotOwnersKey> {
-        if build_memos_disabled() || bounds_unfilled() {
-            return None;
+/// The bucket's index is the answer to a root query of the bucket itself,
+/// asked with no receiver and no arguments: what a write's object is does
+/// not depend on which owner asks.
+fn slot_owners_lookup(bag: &WitnessBag, q: &ReducerQuery, bucket: &WitnessAttachment) -> SlotOwnersLookup {
+    let Some(stamp) = fold_memo_stamp(bag, q) else {
+        return SlotOwnersLookup::Unshared;
+    };
+    let bucket_q = ReducerQuery {
+        attachment: bucket,
+        point: None,
+        framework: q.framework,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context: q.context,
+    };
+    let fk = fold_memo_key((0, bucket.clone(), None, None, None), &bucket_q);
+    with_current_memo(&stamp, |memo| {
+        if memo.in_flight.contains(&fk) {
+            return SlotOwnersLookup::Reentered;
         }
-        let index = q.context.and_then(|ctx| ctx.module_index);
-        if index.is_some() && !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
-            return None;
-        }
-        Some((
-            bag.generation(),
-            bucket.clone(),
-            q.framework,
-            q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize),
-            q.context.map(|ctx| ctx.package_parents.generation()),
-            index.map(|idx| (lookup_addr(idx), idx.resolution_epoch())),
-        ))
-    }
-
-    fn get(key: &SlotOwnersKey) -> Option<std::sync::Arc<SlotOwnerIndex>> {
-        SLOT_OWNERS.with(|m| m.borrow().get(key).cloned())
-    }
-
-    fn put(key: SlotOwnersKey, owners: std::sync::Arc<SlotOwnerIndex>) {
-        SLOT_OWNERS.with(|m| {
-            let mut m = m.borrow_mut();
-            if m.len() >= SLOT_OWNERS_CAP {
-                m.clear();
+        match memo.answers.get(&fk) {
+            Some((MemoAnswer::SlotOwners(index), effect)) => {
+                SlotOwnersLookup::Hit(std::sync::Arc::clone(index), std::sync::Arc::clone(effect))
             }
-            m.insert(key, owners);
-        });
-    }
-
-    /// `None` when `key` is already being built beneath this call.
-    fn building<T>(key: &SlotOwnersKey, build: impl FnOnce() -> T) -> Option<T> {
-        if SLOT_OWNERS_BUILDING.with(|b| b.borrow().contains(key)) {
-            return None;
+            _ => SlotOwnersLookup::Miss(stamp, fk),
         }
-        SLOT_OWNERS_BUILDING.with(|b| b.borrow_mut().push(key.clone()));
-        let out = build();
-        SLOT_OWNERS_BUILDING.with(|b| b.borrow_mut().pop());
-        Some(out)
-    }
+    })
+    .unwrap_or(SlotOwnersLookup::Unshared)
+}
+
+/// Mark `fk`'s root query in flight while `build` runs.
+fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
+    FOLD_MEMO.with(|m| m.borrow_mut().as_mut().map(|memo| memo.in_flight.push(fk.clone())));
+    let out = build();
+    FOLD_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut() {
+            if let Some(at) = memo.in_flight.iter().rposition(|k| k == fk) {
+                memo.in_flight.remove(at);
+            }
+        }
+    });
+    out
 }
 
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
@@ -1325,33 +1344,34 @@ impl ReducerRegistry {
     /// The cycle guard is threaded across both edge chases (within one
     /// bag) and the inheritance fallback (which crosses bags), closing
     /// mutual-inheritance loops that span files.
-    /// The residuals of the most recent `query`, if that chase can be
-    /// expressed as an ordered `Link`.
+    /// `query`, plus the chase's residuals when it can be expressed as an
+    /// ordered `Link`.
     ///
-    /// `None` when the chase was poisoned, when it recorded nothing, or when
-    /// it is not a bake — a live query's exits are not residualization
-    /// candidates, and counting them would mint `Link`s from ordinary degraded
-    /// lookups.
-    pub fn residuals_of_last_query(&self) -> Option<Vec<super::ConclusionKey>> {
-        LAST_RESIDUAL.with(|r| {
-            let (poisoned, keys) = &*r.borrow();
-            if *poisoned || keys.is_empty() {
-                return None;
-            }
-            // Order preserved, duplicates dropped: the same parent can be
-            // reached by two candidate files, and a repeated rung would make
-            // the walk redo work rather than change its answer.
-            let mut seen = std::collections::HashSet::new();
-            let out: Vec<_> = keys
-                .iter()
-                .filter(|k| seen.insert((*k).clone()))
-                .cloned()
-                .collect();
-            Some(out)
-        })
+    /// `None` when the chase was poisoned or recorded nothing. Only the bake
+    /// asks: a live query's exits are not residualization candidates, and
+    /// counting them would mint `Link`s from ordinary degraded lookups.
+    pub fn query_with_residuals(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+    ) -> (ReducedValue, Option<Vec<super::ConclusionKey>>) {
+        let (out, effect) = self.query_effect(bag, q);
+        if effect.poison || effect.rungs.is_empty() {
+            return (out, None);
+        }
+        // Order preserved, duplicates dropped: the same parent can be reached
+        // by two candidate files, and a repeated rung would make the walk redo
+        // work rather than change its answer.
+        let mut seen = std::collections::HashSet::new();
+        let rungs = effect.rungs.into_iter().filter(|k| seen.insert(k.clone())).collect();
+        (out, Some(rungs))
     }
 
     pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
+        self.query_effect(bag, q).0
+    }
+
+    fn query_effect(&self, bag: &WitnessBag, q: &ReducerQuery) -> (ReducedValue, Effect) {
         let mut state = QueryState::new();
         // Is the CONCLUSION LAYER CLOSED for the shape that dominates
         // cross-file traffic? A `Member` answer that never reads an
@@ -1379,12 +1399,7 @@ impl ReducerRegistry {
         // Sole boundary where an owned `ReducedValue` is required; the
         // internal recursion threads `Arc` to avoid deep clones per hop.
         let out = (*self.query_rec(bag, q, &mut state)).clone();
-        // Publish for the bake. Cleared-and-set on every query, so a later
-        // query can never be minted from an earlier chase's exits.
         let effect = state.into_effect();
-        LAST_RESIDUAL.with(|r| {
-            *r.borrow_mut() = (effect.poison, effect.rungs);
-        });
         if top_moc {
             crate::util::ghost_stats::count(if TOUCHED_EXPR.with(|c| c.get()) {
                 "moc.touched_expr"
@@ -1392,7 +1407,7 @@ impl ReducerRegistry {
                 "moc.conclusions_only"
             });
         }
-        out
+        (out, effect)
     }
 
     /// Returns an `Arc` so the memo, the cycle-guard early-outs, and the
@@ -2691,47 +2706,37 @@ impl ReducerRegistry {
         if bag.for_attachment(&bucket_att).is_empty() {
             return Vec::new();
         }
-        let owners = match SlotOwners::key(bag, q, &bucket_att) {
-            Some(key) => match SlotOwners::get(&key) {
-                Some(hit) => {
-                    crate::util::ghost_stats::count("slot_owners.hit");
-                    hit
+        let (owners, effect) = match slot_owners_lookup(bag, q, &bucket_att) {
+            SlotOwnersLookup::Hit(owners, effect) => {
+                crate::util::ghost_stats::count("slot_owners.hit");
+                (owners, effect)
+            }
+            SlotOwnersLookup::Miss(stamp, fk) => {
+                crate::util::ghost_stats::count("slot_owners.build");
+                let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+                let (owners, effect, settled) = slot_owners_building(&fk, || self.slot_owners(bag, q, &bucket_att));
+                let settled = settled && QUERY_REC_TRUNCATIONS.with(|c| c.get()) == truncations_before;
+                if settled {
+                    fold_memo_insert(&stamp, fk, MemoAnswer::SlotOwners(std::sync::Arc::clone(&owners)), &effect);
+                } else {
+                    crate::util::ghost_stats::count("slot_owners.unsettled");
                 }
-                None => {
-                    crate::util::ghost_stats::count("slot_owners.build");
-                    let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-                    let built = SlotOwners::building(&key, || self.slot_owners(bag, q, &bucket_att));
-                    match built {
-                        Some((owners, settled)) => {
-                            let settled =
-                                settled && QUERY_REC_TRUNCATIONS.with(|c| c.get()) == truncations_before;
-                            if !settled {
-                                crate::util::ghost_stats::count("slot_owners.unsettled");
-                            }
-                            if settled {
-                                SlotOwners::put(key, std::sync::Arc::clone(&owners));
-                            }
-                            owners
-                        }
-                        // The bucket's own objects read this key: answer this read
-                        // on the reader's path, where the cycle guard cuts it.
-                        None => {
-                            crate::util::ghost_stats::count("slot_owners.reentered");
-                            return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
-                        }
-                    }
-                }
-            },
-            None => {
+                (owners, effect)
+            }
+            // The bucket's own objects read this key: answer this read on
+            // the reader's path, where the cycle guard cuts it.
+            SlotOwnersLookup::Reentered => {
+                crate::util::ghost_stats::count("slot_owners.reentered");
+                return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+            }
+            SlotOwnersLookup::Unshared => {
                 crate::util::ghost_stats::count("slot_owners.unshared");
                 return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
             }
         };
-        // An exit recorded beneath the objects' chase was reached through a
-        // combining frame, as it was when each read chased them itself.
-        if owners.exits {
-            state.poison();
-        }
+        // What the objects' chase recorded was reached through a combining
+        // frame, as it was when each read chased them itself.
+        state.in_opaque_frame(|state| state.replay(&effect, Some(receiver_hash(&None))));
         owners
             .by_class
             .get(owner.as_str())
@@ -2752,7 +2757,7 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         q: &ReducerQuery,
         bucket_att: &WitnessAttachment,
-    ) -> (std::sync::Arc<SlotOwnerIndex>, bool) {
+    ) -> (std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<Effect>, bool) {
         let bucket_q = ReducerQuery {
             attachment: bucket_att,
             point: None,
@@ -2791,8 +2796,7 @@ impl ReducerRegistry {
             }
         }
         let taint = state.leave_frame(pos, outer_low, truncations_before);
-        index.exits = !state.into_effect().is_empty();
-        (std::sync::Arc::new(index), taint == Taint::CLEAN)
+        (std::sync::Arc::new(index), std::sync::Arc::new(state.into_effect()), taint == Taint::CLEAN)
     }
 
     /// The bucket chased on the reader's own path: for a read the shared
