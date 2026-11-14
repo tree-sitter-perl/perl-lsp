@@ -1451,6 +1451,19 @@ fn check_function_reads_the_constraint_its_library_declares() {
 }
 
 #[test]
+fn a_library_declared_check_dispatches_the_narrowed_receiver() {
+    let idx = house_library_index();
+    let fa = build_fa(
+        "package P;\nuse My::Types qw(is_Widget);\nsub f {\n    my ($z) = @_;\n    if (is_Widget($z)) {\n        $z->frob;\n    }\n}",
+    );
+    let frob = fa.refs().iter().find(|r| r.target_name == "frob").expect("the call is a ref");
+    assert_eq!(
+        fa.receiver_classes(frob, Some(&idx), ReceiverPolicy::Navigate).single(),
+        Some("My::Widget"),
+    );
+}
+
+#[test]
 fn check_function_of_an_unknown_library_proves_nothing() {
     // No library declares `Thing`: the guard reads an honest unknown, never
     // the vocabulary's guess and never a wide type it did not have.

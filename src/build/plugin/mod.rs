@@ -1625,9 +1625,9 @@ pub struct PluginRegistry {
     /// Whether the background compile has been kicked off. Separate from the
     /// `OnceLock` because the lock is only *set* when the compile finishes.
     combined_walk_started: std::sync::atomic::AtomicBool,
-    /// Resolved type-check calls by `(library, name)`. Reset by `register`,
+    /// Resolved type-check calls by library, then name. Reset by `register`,
     /// the registry's only mutation.
-    type_checks: std::sync::Mutex<std::collections::HashMap<(String, String), Option<TypeCheck>>>,
+    type_checks: std::sync::RwLock<std::collections::HashMap<String, std::collections::HashMap<String, Option<TypeCheck>>>>,
     /// Plugins found on disk that did not load, one line each (path and
     /// reason). Kept with the registry so the server can show them: a
     /// refused plugin otherwise only reaches the log.
@@ -1843,14 +1843,21 @@ impl PluginRegistry {
     /// check function's spelling. A library a plugin's vocabulary speaks
     /// for folds the constraint the way `isa => Int` does — and one it owns
     /// with no inner (`is_Object`) proves nothing; any other library's
-    /// constraint is the one that library declares.
+    /// constraint is the one that library declares. The spelling is all a
+    /// consumer's build can see, so a non-type library's `is_hashref` is a
+    /// check too: asked, its library declares no `hashref` constraint and it
+    /// proves nothing.
     pub fn type_check(&self, library: &str, name: &str) -> Option<TypeCheck> {
-        let key = (library.to_string(), name.to_string());
-        if let Some(hit) = self.type_checks.lock().unwrap().get(&key) {
+        if let Some(hit) = self.type_checks.read().unwrap().get(library).and_then(|by_name| by_name.get(name)) {
             return hit.clone();
         }
         let check = self.resolve_type_check(library, name);
-        self.type_checks.lock().unwrap().insert(key, check.clone());
+        self.type_checks
+            .write()
+            .unwrap()
+            .entry(library.to_string())
+            .or_default()
+            .insert(name.to_string(), check.clone());
         check
     }
 

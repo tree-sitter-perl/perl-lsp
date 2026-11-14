@@ -302,9 +302,9 @@ fn type_check_functions() {
     ]
 }
 
-// Libraries this vocabulary speaks for. They build their constraints at
-// runtime, so no declaration in their source can be read; Types::Common
-// re-exports Types::Standard's.
+// Libraries this vocabulary speaks for. Types::Standard declares most of its
+// types through `$meta->$add_core_type` and parents held in lexicals, which no
+// pattern reads; Types::Common re-exports Types::Standard's.
 fn constraint_libraries() {
     ["Types::Standard", "Types::Common"]
 }
