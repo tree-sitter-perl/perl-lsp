@@ -120,11 +120,63 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// The statement a read at `node` is evaluated before though the source
+    /// writes it first (`docs/adr/flow-narrowing.md` §Evaluation order): the
+    /// innermost modifier whose head holds `node` names it, unless a callable
+    /// between them runs the read later, when it is called.
+    // TODO(nested-modifier-skips): a read in a head nested in another head
+    // (`$o = Bar->new if do { 1 if $o->alive }`) is evaluated before both
+    // statements; a `ReadPoint` skips one, so the outer one still reaches it.
+    fn statement_run_before(&self, node: crate::cst::SyntaxNode<'_, 'a>) -> Option<Span> {
+        static KINDS: std::sync::OnceLock<(Vec<u16>, Vec<u16>)> = std::sync::OnceLock::new();
+        let (callables, modifiers) = KINDS.get_or_init(|| {
+            (perl_kind_ids(crate::cst::CALLABLE_KINDS), perl_kind_ids(crate::cst::MODIFIER_KINDS))
+        });
+        let mut below: Option<Node<'a>> = None;
+        for n in self.syntax.climb_in_file(node) {
+            let kind = n.kind_id();
+            if callables.contains(&kind) {
+                return None;
+            }
+            if modifiers.contains(&kind) {
+                if let Some((stmt, head)) = crate::cst::modifier_runs_head_first(n.ts()) {
+                    if below == Some(head) {
+                        return Some(node_to_span(stmt));
+                    }
+                }
+            }
+            below = Some(n.ts());
+        }
+        None
+    }
+
+    /// The statement a read of `node` is evaluated before, if any.
+    pub(super) fn runs_before(&self, node: Node<'a>) -> Option<Span> {
+        self.statement_run_before(self.syntax.lift(node)?)
+    }
+
+    /// The order fact a ref or deref site minted for `node` carries.
+    pub(super) fn evaluated_before(&self, node: Node<'a>) -> Option<Box<Span>> {
+        self.runs_before(node).map(Box::new)
+    }
+
+    /// As [`Self::evaluated_before`], for a site that holds only its span (a
+    /// plugin's emission, a word of a string list): the span's node is the
+    /// smallest one holding it.
+    pub(super) fn evaluated_before_span(&self, span: Span) -> Option<Box<Span>> {
+        self.statement_run_before(self.syntax.covering(span.start, span.end)?).map(Box::new)
+    }
+
+    /// Where a read of `node` asks.
+    pub(super) fn read_point_of(&self, node: Node<'a>) -> crate::model::witnesses::ReadPoint {
+        crate::model::witnesses::ReadPoint { at: node.start_position(), skips: self.runs_before(node) }
+    }
+
     /// `@_`'s argument window at `node`'s own point: the sub-entry shape
     /// with every earlier straight-line `shift` consumed. `None` outside a
     /// sub, or after a shift that may not have run.
     pub(super) fn arg_window_at(&self, node: Node<'a>) -> Option<InferredType> {
-        self.bag_query_variable("@_", self.scope_at_point(node.start_position()), node.start_position())
+        self.bag_query_variable("@_", self.scope_at_point(node.start_position()), self.read_point_of(node))
     }
 
     /// Innermost scope containing `point`: `innermost_scope_at` over the
@@ -148,6 +200,11 @@ impl<'a> Builder<'a> {
             SymbolDetail::Sub { params, .. } => params.iter().find(|p| p.name == var)?.binding_site,
             _ => None,
         }
+    }
+
+    /// The callable whose body holds `at`, a named sub or an anonymous one.
+    pub(super) fn enclosing_callable(&self, at: Point) -> Option<SymbolId> {
+        crate::model::file_analysis::owning_callable(&self.scopes, Some(self.scope_at_point(at)))
     }
 
     /// Push the body scope of callable `owner`, recording the pairing both
@@ -315,6 +372,21 @@ impl<'a> Builder<'a> {
         self.add_bound_ref(kind, span, target_name, access, None);
     }
 
+    /// `add_ref` for a ref cut from `node`, whose order is `node`'s: a span
+    /// cut down to nothing (the empty tail of `%::`) sits between two nodes
+    /// and names neither.
+    pub(super) fn add_ref_in(
+        &mut self,
+        node: Node<'a>,
+        kind: RefKind,
+        span: Span,
+        target_name: String,
+        access: AccessKind,
+    ) {
+        let evaluated_before = self.evaluated_before(node);
+        self.push_ref(kind, span, target_name, access, None, evaluated_before);
+    }
+
     /// `add_ref` with a walk-time resolution outcome already in hand (a
     /// `FunctionCall` package pin, a plugin-declared owner).
     pub(super) fn add_bound_ref(
@@ -325,6 +397,19 @@ impl<'a> Builder<'a> {
         access: AccessKind,
         binding: Option<crate::model::file_analysis::RefBinding>,
     ) {
+        let evaluated_before = self.evaluated_before_span(span);
+        self.push_ref(kind, span, target_name, access, binding, evaluated_before);
+    }
+
+    fn push_ref(
+        &mut self,
+        kind: RefKind,
+        span: Span,
+        target_name: String,
+        access: AccessKind,
+        binding: Option<crate::model::file_analysis::RefBinding>,
+        evaluated_before: Option<Box<Span>>,
+    ) {
         self.refs.push(Ref {
             kind,
             span,
@@ -334,6 +419,7 @@ impl<'a> Builder<'a> {
             binding,
             folded_from: None,
             arg_count: None,
+            evaluated_before,
         });
     }
 
@@ -372,7 +458,7 @@ impl<'a> Builder<'a> {
     /// / `refgen_expression` — the bag is canonical and there's no
     /// second consumer that bypasses it.
     ///
-    /// Two recognized shapes:
+    /// Three recognized shapes:
     ///   - `anonymous_subroutine_expression` → `Symbol(sub_id)`,
     ///     looked up in `anon_sub_symbol_by_span`. The bag's
     ///     symbol-keyed reducers (`ReturnExprReducer`,
@@ -381,6 +467,7 @@ impl<'a> Builder<'a> {
     ///     special-case for "this is anonymous."
     ///     The symbol carries the body's return arms (`record_sub_tail`),
     ///     so an anon sub's return is read exactly as a named sub's.
+    ///   - `__SUB__` → `Symbol` of the callable it runs in.
     ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
     ///     `\&$const_folded`) → `Member { package, name }`.
     ///     Bag's MRO + `module_index` machinery resolves it,
@@ -411,6 +498,17 @@ impl<'a> Builder<'a> {
                     (None, _) => (self.current_package.clone()?, raw),
                 };
                 Some(crate::model::witnesses::WitnessAttachment::returns_of(class, name))
+            }
+            // `__SUB__` is the callable it runs in — that symbol itself, so a
+            // same-named sub elsewhere can never answer for it.
+            "func0op_call_expression"
+                if node
+                    .child(0)
+                    .and_then(|t| t.utf8_text(self.source).ok())
+                    .and_then(crate::model::conventions::CompileTimeToken::parse)
+                    == Some(crate::model::conventions::CompileTimeToken::Sub) =>
+            {
+                self.enclosing_callable(node.start_position()).map(crate::model::witnesses::WitnessAttachment::Symbol)
             }
             _ => None,
         }

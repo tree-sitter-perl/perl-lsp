@@ -243,13 +243,23 @@ pub enum InferredType {
     /// scope walk stops on it instead of falling through to a shadowed
     /// namesake. Consumers read it as "no information".
     Unknown,
-    /// The string `ref`/`reftype`/`blessed` returns: it names what
-    /// `subject` held at `site`, so comparing it to a literal is a guard on
-    /// `subject` (`docs/adr/flow-narrowing.md`). A `String` to every
-    /// consumer but that guard; it means nothing outside the sub that
-    /// computed it, so the Surface sees `String`. Kept at the END for
-    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
-    RefTagOf { subject: String, site: Span, via: RefTagFn },
+    /// The string `ref`/`reftype`/`blessed` returns: it names what its
+    /// operand held at `site`. Asked of a variable (`subject`), comparing
+    /// it to a literal is a guard on that variable
+    /// (`docs/adr/flow-narrowing.md`). `of` is the operand's value, for a
+    /// function whose string can name a class; the registry lowers it into
+    /// `names`, the class the string spells, and a class name meets its
+    /// class in the join (`Subsumption::ClassNameIsClass`). A `String` to
+    /// every other consumer; it means nothing outside the sub that computed
+    /// it, so the Surface sees `String`. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    RefTagOf {
+        subject: Option<String>,
+        site: Span,
+        via: RefTagFn,
+        of: Option<crate::model::witnesses::WitnessAttachment>,
+        names: Option<String>,
+    },
     /// `A|B`: a value that is one of several types the join could not
     /// put a single type above. Built only by [`join`], so the arms are
     /// canonical: two or more, sorted, deduped, none a union, an
@@ -269,6 +279,16 @@ pub enum RefTagFn {
     Ref,
     RefType,
     Blessed,
+}
+
+impl RefTagFn {
+    /// Can the string name a class? `reftype`'s never does.
+    pub fn can_name_a_class(self) -> bool {
+        match self {
+            RefTagFn::Ref | RefTagFn::Blessed => true,
+            RefTagFn::RefType => false,
+        }
+    }
 }
 
 /// The arms of an [`InferredType::Union`]. The field is private so the
@@ -1118,11 +1138,8 @@ impl InferredType {
     /// variant that grows an attachment can't be skipped by a span rewrite.
     pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut crate::model::witnesses::WitnessAttachment)) {
         match self {
-            InferredType::CodeRef { return_edge } => {
-                if let Some(a) = return_edge {
-                    f(a);
-                }
-            }
+            InferredType::CodeRef { return_edge: Some(a) } | InferredType::RefTagOf { of: Some(a), .. } => f(a),
+            InferredType::CodeRef { return_edge: None } | InferredType::RefTagOf { of: None, .. } => {}
             InferredType::Parametric(ParametricType::Instance { args, .. }) | InferredType::Sequence(args) => {
                 for t in args {
                     t.for_each_attachment_mut(f);
@@ -1154,8 +1171,27 @@ impl InferredType {
             | InferredType::TypeConstraintOf(None)
             | InferredType::Undef
             | InferredType::Bool
-            | InferredType::RefTagOf { .. }
             | InferredType::Unknown => {}
+        }
+    }
+
+    /// The class a method call on this value dispatches to: its class, or
+    /// the class a `ref`/`blessed` string names (Perl calls methods on a
+    /// class's name).
+    pub fn dispatch_name(&self) -> Option<&str> {
+        match self {
+            InferredType::RefTagOf { names, .. } => names.as_deref(),
+            t => t.class_name(),
+        }
+    }
+
+    /// This value as the receiver a method called on it runs with: a
+    /// string naming a class calls the class's method (`(ref $self)->new`),
+    /// whose `$class` is that class.
+    pub fn into_invocant(self) -> InferredType {
+        match self {
+            InferredType::RefTagOf { names: Some(c), .. } => InferredType::ClassName(c),
+            t => t,
         }
     }
 
@@ -1346,6 +1382,10 @@ pub enum Subsumption {
     /// `Bool` folds into `Numeric`: truth is a number (Perl's `1`/`''`,
     /// Python's `bool <: int`, C++ integral promotion).
     BoolIntoNumeric,
+    /// A string naming a class is that class wherever one meets the
+    /// other: Perl calls methods on, and blesses into, a class's name, so
+    /// `ref $proto || $proto` is `$proto`'s class.
+    ClassNameIsClass,
 }
 
 /// The subsumption rules one language declares (`LangPack::lattice`).
@@ -1373,6 +1413,12 @@ pub trait TypeOrder {
     fn common_class(&self, classes: &[&str]) -> Option<String>;
     /// The language whose values are joined declares `rule`.
     fn holds(&self, rule: Subsumption) -> bool;
+    /// Does the order see every class `class` inherits from, so that an
+    /// `isa` it answers no to is no? An order that holds no declarations
+    /// sees none.
+    fn ancestry_closed(&self, _class: &str) -> bool {
+        false
+    }
 }
 
 /// A language's rules with no class graph in hand: a class is an instance
@@ -1422,6 +1468,52 @@ impl TypeOrder for Unordered {
 ///   past [`UNION_WIDTH_CAP`]
 pub fn join(a: &InferredType, b: &InferredType, order: &dyn TypeOrder) -> InferredType {
     join_traced(a, b, order, &mut |_| {})
+}
+
+/// Does a value sit within a bound? Three answers, because the class order
+/// a query holds may not see every edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// Joining the value in leaves the bound where it was.
+    Yes,
+    /// It does not, and no edge the order cannot see could change that.
+    No,
+    /// The order cannot place it: the value's ancestry runs past what the
+    /// order sees, so an edge it does not hold could put it under the
+    /// bound. An `Unknown` value is undecided too.
+    Undecided,
+}
+
+/// How `value` fits `bound`, read off the same lattice [`join`] folds by, so
+/// a bound and a fold never disagree about what is above what. A class
+/// whose whole ancestry the order sees (`TypeOrder::ancestry_closed`) is
+/// decided; one with an ancestor the order cannot see is not. A value is
+/// its arms (`receiver_arms`, so `?Iface` and `A|B` bound like `Iface`):
+/// one arm decidedly outside puts it outside, and it is undecided only
+/// when every arm outside is a class the order cannot place.
+pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) -> Fit {
+    if !value.is_known() {
+        return Fit::Undecided;
+    }
+    let top = join(bound, bound, order);
+    let within = |v: &InferredType| join(v, bound, order) == top;
+    if within(value) {
+        return Fit::Yes;
+    }
+    if value.defined_part() != Some(value) && !within(&InferredType::Undef) {
+        return Fit::No;
+    }
+    // TODO(callable-classes): no class sits under `CodeRef`, so `Closure`
+    // (or any class with `__invoke`) decidedly misfits a `callable` bound.
+    let classes = bound.receiver_arms().iter().any(|a| a.class_name().is_some());
+    let mut fit = Fit::Yes;
+    for arm in value.receiver_arms().iter().filter(|a| !within(a)) {
+        match arm.class_name() {
+            Some(c) if classes && !order.ancestry_closed(c) => fit = Fit::Undecided,
+            _ => return Fit::No,
+        }
+    }
+    fit
 }
 
 /// How a join lost precision: the closed set of widening steps, reported to
@@ -1565,6 +1657,16 @@ fn join_precise(
     use InferredType as T;
     if a == b {
         return Some(a.clone());
+    }
+    if order.holds(Subsumption::ClassNameIsClass) {
+        match (a, b) {
+            (T::RefTagOf { names: Some(c), .. }, other) | (other, T::RefTagOf { names: Some(c), .. })
+                if other.class_name() == Some(c.as_str()) =>
+            {
+                return Some(other.clone());
+            }
+            _ => {}
+        }
     }
     match (a.class_name(), b.class_name()) {
         // TODO(brand-join): one class spelled two ways (a mark, a

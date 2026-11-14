@@ -1816,28 +1816,120 @@ fn positional_reads_skip_grammar_extras() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/emit.rs", 12, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/emit.rs", 10, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/narrowing.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_calls.rs", 41, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_decl.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_decl.rs", 16, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_use.rs", 16, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/synthetic.rs", 2, "C++ reparse spike: legacy"),
         ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
         ("build/cursor_sentinel.rs", 3, "the domain-comparison operands and the receiver peel over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
-        ("cst.rs", 24, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
-        ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
-        ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("cst.rs", 20, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
+        ("lsp/cursor_context.rs", 4, "the Perl cursor detector (rule #6): legacy"),
     ];
     let drift = allowlist_drift("positional reads (NodeExt::elements)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A fact about a node hangs off the node: a `NodeFacts` column keyed by
+/// `NodeId`, nested by the tree's own parent links
+/// (`docs/adr/core-syntax-tree.md`). A side index keyed by where a node sits
+/// — a map or set keyed by a `Span`, a `Point`, a range or a row/column
+/// pair, or a sorted vector searched with `partition_point` /
+/// `binary_search` — is a second copy of that structure, and every one of
+/// them was justified by a guess about real code ("files without the shape
+/// pay nothing") that corpora have a way of proving wrong. Shrink-only.
+#[test]
+fn build_facts_are_not_keyed_by_position() {
+    let files = layer_files(&[Layer::Build]);
+    let mut seen = HashMap::new();
+    for (rel, text) in &files {
+        let n = position_keyed_sites(&without_test_modules(&code_only(text)));
+        if n > 0 {
+            seen.insert(rel.clone(), n);
+        }
+    }
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/fold.rs", 2, "the hash-key fixup's per-pass snapshots of typed variables and write refs, by position"),
+        ("build/builder/mod.rs", 5, "slot-write RHS and anonymous-sub symbols by span; use, dispatch and method-call emissions deduplicated by span"),
+        ("build/builder/pattern_dispatch.rs", 3, "plugin matches deduplicated by span (walk and fold); a pattern's owner by pattern index, not a position"),
+        ("build/cpp_reparse/defs.rs", 1, "a sorted keyword table, not a position"),
+        ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
+        ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
+        ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
+        ("build/query_extract/extract/flow.rs", 4, "reassigned names, declaration sites and constants by start point; member reads by span"),
+        ("build/query_extract/places.rs", 4, "the place a name or member read denotes, by the read's span"),
+        ("build/query_extract/skeleton.rs", 12, "the skeleton joins capture facts by span: callable owners, receiver classes, call arguments, read places, written and initialised sites, declaration names, claimed refs, settled writes"),
+    ];
+    let drift = allowlist_drift("position-keyed side indexes", &seen, allow);
+    assert!(
+        drift.is_empty(),
+        "{}\n\nRule #1: a fact about a node is a `NodeFacts` column keyed by `NodeId`, and its nesting is \
+         the tree's parent links (`docs/adr/core-syntax-tree.md`): a node in hand is lifted, a \
+         span is answered by `SyntaxForest::covering`. A search that is not over positions is \
+         allowlisted with its reason.",
+        drift.join("\n")
+    );
+}
+
+/// The position-keyed index sites in `code` (`code_only` text): every map or
+/// set type whose key mentions `Span`, `Point` or `Range`, or leads with two
+/// integers (a row/column or byte pair), and every `partition_point` /
+/// `binary_search*` call.
+fn position_keyed_sites(code: &str) -> usize {
+    const MAPS: &[&str] = &["HashMap", "HashSet", "BTreeMap", "BTreeSet", "IndexMap", "IndexSet", "DashMap"];
+    const INTS: &[&str] = &["usize", "u32", "u64", "isize", "i32", "i64"];
+    let b = code.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut n = code.matches(".partition_point(").count() + code.matches(".binary_search").count();
+    for map in MAPS {
+        let mut from = 0;
+        while let Some(at) = code[from..].find(map).map(|i| from + i) {
+            from = at + map.len();
+            if at > 0 && ident(b[at - 1]) || b.get(from).is_some_and(|&c| ident(c)) {
+                continue;
+            }
+            let rest = code[from..].trim_start();
+            let rest = rest.strip_prefix("::").map_or(rest, str::trim_start);
+            let Some(args) = rest.strip_prefix('<') else { continue };
+            // The key: the first generic argument, up to a top-level `,` or `>`.
+            let (mut depth, mut end) = (0usize, args.len());
+            for (i, c) in args.char_indices() {
+                match c {
+                    '<' | '(' | '[' => depth += 1,
+                    '>' if args[..i].ends_with('-') => {}
+                    '>' | ')' | ']' if depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    '>' | ')' | ']' => depth -= 1,
+                    ',' if depth == 0 => {
+                        end = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let key = &args[..end];
+            let words: Vec<&str> =
+                key.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+            let named = words.iter().any(|w| matches!(*w, "Span" | "Point" | "Range"));
+            let pair = key.trim_start().starts_with('(')
+                && words.len() >= 2
+                && words[..2].iter().all(|w| INTS.contains(w));
+            if named || pair {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// Upward and sideways steps go through the core syntax tree
@@ -1920,13 +2012,12 @@ fn raw_scope_climbs_are_containment_only() {
     });
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
-        ("cst/syntax.rs", 3, "the syntax tree's own node parents, not scopes"),
+        ("cst/syntax.rs", 4, "the syntax tree's own node parents, not scopes"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
         ("build/query_extract/extract/mod.rs", 1, "def_scope: a hoisted def is filed in the scope around the one it is written in"),
-        ("model/file_analysis/core_types.rs", 1, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank"),
+        ("model/file_analysis/core_types.rs", 2, "scope_depth: nesting depth, the innermost-scope tie-break and the variable-completion rank; owning_callable: the first body up the tree that names its callable"),
         ("model/file_analysis/class_queries.rs", 3, "a member's declaring scope inside its class body; package_at's innermost scope that names a package; whether a member write sits inside a constructor body, its closures included"),
-        ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
-        ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
+        ("model/file_analysis/invocants.rs", 4, "the enclosing class or package of a scope (x2), the body that elides its receiver, a symbol's class-span containment"),
         ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
         ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
     ];

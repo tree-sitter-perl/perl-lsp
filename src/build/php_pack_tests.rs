@@ -2770,7 +2770,7 @@ class W {
     assert!(var("mine", "return $mine").is_some(), "the object a method runs on, for contrast");
     assert_eq!(var("x", "return $x"), None, "`$this` has no value");
     let member = |name: &str| Place { root: Binding::Receiver(make), path: vec![PathStep::Member(name.into())] };
-    assert_eq!(fa.place_type_at(&member("items"), at(src, "$first", 0), None), None, "`$this->items` has no place");
+    assert_eq!(fa.place_type_at(&member("items"), crate::model::witnesses::ReadPoint::position(at(src, "$first", 0)), None), None, "`$this->items` has no place");
     let self_at = at(src, "self::$inst", 0);
     let self_span = crate::model::file_analysis::Span { start: self_at, end: tree_sitter::Point { row: self_at.row, column: self_at.column + 4 } };
     assert_eq!(fa.expr_type_at_span(self_span, None), Some(InferredType::ClassName("W".into())), "`self` names the class");
@@ -3391,6 +3391,76 @@ fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
     }
 }
 
+/// A bare block leaves where its statements do; a loop whose body always
+/// leaves is left only where its first test fails, unless a `break` or
+/// `continue` in the body goes to the loop.
+#[cfg(feature = "php")]
+#[test]
+fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src_of = |chain: &str| {
+        format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    {chain}\n    $y->run();\n}}\n")
+    };
+    let narrows = [
+        ("if (!$y instanceof Foo) { log_it(); { return; } }", "a bare block that returns"),
+        ("if ($y instanceof Foo) { log_it(); } else { { { die(); } } }", "nested bare blocks in an else"),
+        ("while (!$y instanceof Foo) { return; }", "a loop whose body returns"),
+        ("while (!$y instanceof Foo) { log_it(); throw new \\Exception(); }", "a loop whose body throws"),
+        ("while (!$y instanceof Foo) { if ($z) { return; } else { exit; } }", "a loop body chain whose every arm leaves"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let nothing = [
+        ("if (!$y instanceof Foo) { { log_it(); } }", "a bare block that falls through"),
+        ("while (!$y instanceof Foo) { log_it(); }", "a loop body that falls through"),
+        ("while (!$y instanceof Foo) { if ($z) { break; } return; }", "a break before the exit"),
+        ("while (!$y instanceof Foo) { if ($z) { continue; } return; }", "a continue before the exit"),
+        ("while (!$y instanceof Foo) { foreach ($z as $w) { break; } return; }", "a break an inner loop owns"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
+/// A short-circuit written as a statement is a chain of its own: where its
+/// right side leaves (`throw`, `die`, `exit`), the rest of the block runs
+/// where that side never ran. One whose right side may fall through, or
+/// whose left proves nothing on its own, narrows nothing after.
+#[cfg(feature = "php")]
+#[test]
+fn a_statement_short_circuit_that_leaves_narrows_the_rest_of_the_block() {
+    let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
+    let src_of = |stmt: &str| {
+        format!("<?php\nnamespace App;\nuse Lib\\Foo;\nfunction f($y, $z) {{\n    {stmt}\n    $y->run();\n}}\n")
+    };
+    let narrows = [
+        ("$y instanceof Foo || throw new \\Exception();", "|| throw"),
+        ("$y instanceof Foo or die('no');", "or die()"),
+        ("$y instanceof Foo or die;", "or bare die"),
+        ("$y instanceof Foo or exit(1);", "or exit()"),
+        ("!$y instanceof Foo && throw new \\Exception();", "&& throw"),
+        ("!$y instanceof Foo and die;", "and die"),
+        ("($y instanceof Foo) || throw new \\Exception();", "a parenthesised condition"),
+        ("if ($z) { return; } else $y instanceof Foo || throw new \\Exception();", "an else arm's short-circuit"),
+    ];
+    for (stmt, why) in narrows {
+        let src = src_of(stmt);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), foo, "{why}");
+    }
+    let nothing = [
+        ("$y instanceof Foo || log_it();", "a right side that falls through"),
+        ("$y instanceof Foo && throw new \\Exception();", "a failed instanceof proves nothing"),
+        ("$z || $y instanceof Foo || throw new \\Exception();", "a disjunction proves neither side"),
+    ];
+    for (stmt, why) in nothing {
+        let src = src_of(stmt);
+        assert_eq!(php(&src).inferred_type_via_bag("y", at(&src, "$y->run", 0)), None, "{why}");
+    }
+}
+
 /// A property of `$this` is a place of the method's object: a guard on
 /// it narrows the member's receiver for dispatch, in the arm and after an
 /// early exit, until something may change it.
@@ -3455,7 +3525,7 @@ class Cache {
         path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
     };
     let undef = Some(InferredType::Undef);
-    assert_eq!(fa.place_type_at(&items, at(src, "$first", 0), None), undef, "a property not set");
+    assert_eq!(fa.place_type_at(&items, crate::model::witnesses::ReadPoint::position(at(src, "$first", 0)), None), undef, "a property not set");
     let var = |name, needle| fa.inferred_type_via_bag(name, at(src, needle, 0));
     assert_eq!(var("a", "$one"), None, "a passing isset strips nothing yet");
     assert_eq!(var("a", "$two"), undef);
@@ -3570,7 +3640,7 @@ function g(Cache $c) {
         root: crate::model::file_analysis::Binding::Lexical(c),
         path: vec![crate::model::file_analysis::PathStep::Member("items".into())],
     };
-    let ty = |needle| fa.place_type_at(&items, at(src, needle, 0), None);
+    let ty = |needle| fa.place_type_at(&items, crate::model::witnesses::ReadPoint::position(at(src, needle, 0)), None);
     let undef = Some(InferredType::Undef);
     assert_eq!(ty("$first"), undef, "a property not set");
     assert_eq!(ty("$second"), undef);
@@ -5142,7 +5212,7 @@ fn a_constant_read_holds_the_value_another_file_declares() {
         let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
         let base: &dyn CrossFileLookup = &idx;
         let scoped = ScopedLookup::for_origin(base, &fa, None, LanguageRegistry::pack_visibility(&fa.language));
-        fa.inferred_type_via_bag_ctx(var, at(src, "echo", 0), Some(&scoped))
+        fa.inferred_type_via_bag_ctx(var, crate::model::witnesses::ReadPoint::position(at(src, "echo", 0)), Some(&scoped))
     };
     let numeric = Some(InferredType::Numeric);
     assert_eq!(ty(qualified, "a"), numeric, "a qualified read");
@@ -5153,4 +5223,89 @@ fn a_constant_read_holds_the_value_another_file_declares() {
     assert!(hover.contains("int"), "hover reads the same value: {hover}");
     // the value is the declaring file's: this file alone states none
     assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
+}
+
+/// A parameter's declared type is checked when the call binds it, so it
+/// bounds the local on entry only: a later write retypes it, and a guard
+/// narrows within it. A property's declared type bounds the member for its
+/// life.
+#[cfg(feature = "php")]
+#[test]
+fn a_parameter_is_bounded_on_entry_and_a_property_for_life() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php("<?php
+class Logger { function log() {} }
+class FileLogger extends Logger { function rotate() {} }
+class Svc {
+    private ?Logger $l = null;
+    function __construct() { $this->l = new FileLogger(); }
+    function f() { $x = $this->l; return $x; }
+}
+function g(int $n) { $n = \"s\"; return $n; }
+function h(Logger $q) { $q = mk(); return $q; }
+function k(Logger $q) { return $q; }
+function m(Logger $q) { if ($q instanceof FileLogger) { return $q; } return $q; }
+");
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let logger = || T::ClassName("Logger".into());
+    assert_eq!(at("x", 6, 42), Some(T::Optional(Box::new(logger()))), "a member reads as its declaration");
+    assert_eq!(at("n", 8, 39), Some(T::String), "a write retires an entry bound");
+    assert_ne!(at("q", 9, 43), Some(logger()), "even an untyped one");
+    assert_eq!(at("q", 10, 32), Some(logger()), "unwritten, the parameter holds its declared type");
+    assert_eq!(at("q", 11, 64), Some(T::ClassName("FileLogger".into())), "a guard narrows within the bound");
+}
+
+/// What a parameter takes is its declaration, asked where the call binds it:
+/// a rebinding in the body moves what the body holds, not what callers pass.
+/// The pack mints no `ParamInfo` yet (`TODO(pack-params)`), so the test
+/// states the one a signature would carry: the parameter's token.
+#[cfg(feature = "php")]
+#[test]
+fn a_parameter_takes_its_declared_type_whatever_the_body_rebinds() {
+    use crate::model::file_analysis::{InferredType as T, ParamInfo, SymKind};
+    let src = "<?php
+function load(string $p) { $p = realpath($p); return file($p); }
+";
+    let fa = php(src);
+    let token = at(src, "$p)", 1);
+    let decl = fa.symbols().iter().find(|s| s.kind == SymKind::Variable && s.selection_span.start == token);
+    assert!(decl.is_some(), "the parameter's declaration sits at its token");
+    let param = ParamInfo { name: "p".into(), default: None, is_slurpy: false, is_invocant: false, binding_site: Some(token) };
+    assert_eq!(fa.param_declared_type(&param, None), Some(T::String));
+    assert_ne!(fa.inferred_type_via_bag("p", at(src, "return", 0)), Some(T::String), "the body holds the rebinding");
+}
+
+/// A guard on a class the declared type decidedly does not cover proves a
+/// value that is both, so both classes' members dispatch inside it.
+#[cfg(feature = "php")]
+#[test]
+fn a_guard_outside_the_declared_type_reads_as_both() {
+    let src = "<?php
+interface Sized { function count(); }
+interface Logger { function info($m); }
+function f(Sized $c) {
+    if ($c instanceof Logger) { $c->count(); $c->info(''); }
+}
+";
+    let fa = php(src);
+    let t = fa.inferred_type_via_bag("c", at(src, "$c->count", 0)).expect("a type inside the guard");
+    let classes: Vec<&str> = t.receiver_arms().iter().filter_map(|a| a.class_name()).collect();
+    assert!(classes.contains(&"Sized") && classes.contains(&"Logger"), "{t:?}");
+}
+
+/// A guard naming a class nothing here declares is undecided, whether the
+/// bound is a class, a nullable one or a union: the class may well
+/// implement it, so the guard's class stands.
+#[cfg(feature = "php")]
+#[test]
+fn a_guard_on_an_unseen_class_stands_under_a_nullable_bound() {
+    let src = "<?php
+interface Shape { function area(); }
+function f(?Shape $c) {
+    if ($c instanceof Square) { $c->side(); }
+}
+";
+    let fa = php(src);
+    let t = fa.inferred_type_via_bag("c", at(src, "$c->side", 0)).expect("a type inside the guard");
+    assert_eq!(t, crate::model::file_analysis::InferredType::ClassName("Square".into()));
 }

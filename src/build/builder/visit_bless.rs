@@ -121,7 +121,7 @@ impl<'a> Builder<'a> {
         }
         match node.kind() {
             "scalar" => crate::cst::is_conventional_invocant_scalar(node, self.source),
-            "array_element_expression" => self.is_positional_receiver(node),
+            "array_element_expression" => crate::cst::is_positional_receiver(node, self.source),
             // `ref <invocant>`
             "func1op_call_expression" => {
                 node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("ref")
@@ -144,12 +144,16 @@ impl<'a> Builder<'a> {
     /// invocant-class resolver used for method receivers (so `$class` from
     /// `shift`, `__PACKAGE__`, etc. resolve identically).
     pub(super) fn bless_class_of(&self, class_node: Node<'a>) -> Option<String> {
-        // `__PACKAGE__` parses as a func0op call here (not a bareword), so
-        // `invocant_type_at_node`'s bareword arm doesn't catch it — resolve
-        // it to the enclosing package directly.
-        if class_node.utf8_text(self.source).ok().is_some_and(crate::model::conventions::is_current_package_token) {
-            return self.package_for_node(class_node);
+        // `__PACKAGE__` parses as a func0op call (not a bareword), which
+        // `invocant_type_at_node`'s bareword arm doesn't catch.
+        if let Some(class) = self.token_class(class_node) {
+            return Some(class);
         }
+        // TODO(bless-reads-ref-tag): the registry now lowers `ref $x` to
+        // `$x`'s class (`RefTagOf::names`), but this build-time path reads
+        // syntax, not the bag; this arm and the `ref` arm of
+        // `bless_class_is_receiver` go once bless asks the bag (removing them
+        // today loses 135 census answers).
         // `bless $r, ref $x` (the clone idiom) blesses into `$x`'s class: the
         // 2nd arg `ref EXPR` yields EXPR's class *name*, so the bless target is
         // EXPR's resolved class. `ref EXPR` as a general value is a String, so

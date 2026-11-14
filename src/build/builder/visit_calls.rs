@@ -31,7 +31,7 @@ impl<'a> Builder<'a> {
         };
         for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
             let idx = self.refs.len();
-            self.add_ref(RefKind::Variable, span, name, access);
+            self.add_ref_in(node, RefKind::Variable, span, name, access);
             self.refs[idx].folded_from = folded_from;
         }
 
@@ -139,12 +139,7 @@ impl<'a> Builder<'a> {
             if reassigns {
                 self.reassigning_refs.push(self.refs.len());
             }
-            self.add_ref(
-                RefKind::Variable,
-                ref_span,
-                text.to_string(),
-                access,
-            );
+            self.add_ref_in(node, RefKind::Variable, ref_span, text.to_string(), access);
         }
     }
 
@@ -985,6 +980,7 @@ impl<'a> Builder<'a> {
                 binding: pkg.map(|package| RefBinding::Function { package }),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before_span(span),
             });
         }
     }
@@ -1535,7 +1531,7 @@ impl<'a> Builder<'a> {
             (Some(LiteralShape::Str), "interpolated_string_literal") => {
                 self.try_fold_interpolated_string(expr)
             }
-            (Some(LiteralShape::Str), _) => self.extract_string_content(expr).into_iter().collect(),
+            (Some(LiteralShape::Str), _) => crate::cst::string_content_text(expr, self.source).into_iter().collect(),
             (Some(LiteralShape::List), _) => crate::cst::nth_element(expr, 0)
                 .map(|c| self.enumerate_string_values(c))
                 .unwrap_or_default(),
@@ -1555,7 +1551,7 @@ impl<'a> Builder<'a> {
         let mut acc: Vec<String> = vec![String::new()];
         for child in crate::cst::NodeExt::elements(&node) {
             let pieces: Vec<String> = match child.kind() {
-                "string_literal" => self.extract_string_content(child).into_iter().collect(),
+                "string_literal" => crate::cst::string_content_text(child, self.source).into_iter().collect(),
                 "interpolated_string_literal" => self.try_fold_interpolated_string(child),
                 "binary_expression" => self.try_fold_string_concat(child),
                 "scalar" => {
