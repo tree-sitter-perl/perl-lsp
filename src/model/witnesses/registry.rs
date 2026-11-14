@@ -324,8 +324,20 @@ impl Taint {
 
 /// What a fold-memo answer depends on beyond the per-query key and the
 /// generations the memo holds: the framework and arguments the per-query memo
-/// holds fixed for one query, and which scope table the context reads.
+/// holds fixed for one query, and which scope table the context reads. The
+/// key's bag slot is blanked: the stamp's generation names the bag's content,
+/// and a bag moved or cloned keeps its generation, so the passes over one
+/// analysis share answers wherever its bag lives.
 type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
+
+/// What the fold memo may hold before it empties: entries die with their
+/// generation, but within one a file can store an answer per attachment, and
+/// every worker thread holds its own memo.
+const FOLD_MEMO_BYTES_CAP: usize = 32 << 20;
+
+/// A shared entry with more rungs than this is not stored: a ladder that long
+/// is a fan-out, cheaper to walk again than to hold.
+const FOLD_MEMO_MAX_RUNGS: usize = 64;
 
 /// The answers for one generation of the bag and of the parent graph (and,
 /// for a pass over a finished analysis, of the lookup it resolves under).
@@ -342,6 +354,18 @@ struct FoldMemo {
     /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
     owner: Option<PassOwner>,
     answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>)>,
+    /// Estimated bytes `answers` holds (`fold_memo_entry_bytes`).
+    bytes: usize,
+}
+
+/// A rough charge for one fold-memo entry: the table's slot, the shared
+/// value, and the effect's rungs. The cap bounds the order of magnitude, not
+/// the byte.
+fn fold_memo_entry_bytes(fk: &FoldMemoKey, effect: &Effect) -> usize {
+    const SLOT: usize = std::mem::size_of::<FoldMemoKey>() + 2 * std::mem::size_of::<usize>();
+    const VALUE: usize = 128;
+    const RUNG: usize = 96;
+    SLOT + VALUE + fk.2.as_ref().map_or(0, |a| a.len()) + effect.rungs.len() * RUNG
 }
 
 /// What a pass-scoped memo may answer for. Addresses, not ids: the scope
@@ -430,18 +454,14 @@ impl<'a> FoldMemoScope<'a> {
 pub(crate) fn build_memos_disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
-    #[cfg(test)]
-    let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
-    disabled
+    disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get())
 }
 
-#[cfg(test)]
 thread_local! {
     static FOLD_MEMO_FORCED_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Run `f` with the fold memo off — the control arm of the equivalence net.
-#[cfg(test)]
 pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
     let prev = FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true));
     let out = f();
@@ -450,8 +470,8 @@ pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
-/// touches with the memo off and asserts the analyses agree.
-#[cfg(test)]
+/// touches with the memo off and asserts the analyses agree; on a real run it
+/// checks the persist path's bake and Surface (`encode_analysis`).
 pub(crate) fn fold_memo_equiv_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
@@ -520,7 +540,11 @@ fn fold_memo_probe(
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
     let index = q.context.and_then(|ctx| ctx.module_index);
-    if bounds_unfilled() || !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
+    // Generation 0 is a bag no mutation has named yet; it names nothing.
+    if bounds_unfilled()
+        || bag.generation() == 0
+        || !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index)))
+    {
         return Err(None);
     }
     let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
@@ -530,12 +554,15 @@ fn fold_memo_probe(
         parents_generation: q.context.map(|ctx| ctx.package_parents.generation()),
         epoch: index.map(|idx| idx.resolution_epoch()),
     };
-    let fk = (key.clone(), q.framework, args, scopes);
+    let mut bagless = key.clone();
+    bagless.0 = 0;
+    let fk = (bagless, q.framework, args, scopes);
     let hit = FOLD_MEMO.with(|m| {
         let mut m = m.borrow_mut();
         let memo = m.as_mut()?;
         if !stamp.matches(memo) {
             memo.answers.clear();
+            memo.bytes = 0;
             memo.generation = stamp.generation;
             if let Some(parents_generation) = stamp.parents_generation {
                 memo.parents_generation = parents_generation;
@@ -586,11 +613,23 @@ fn fold_memo_store(
     if q.context.and_then(|ctx| ctx.module_index).is_some_and(super::session::budget_spent) {
         return;
     }
+    if effect.rungs.len() > FOLD_MEMO_MAX_RUNGS {
+        crate::util::ghost_stats::count("fold_memo.long_ladder");
+        return;
+    }
     let (stamp, fk) = *fk;
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
+            let charge = fold_memo_entry_bytes(&fk, effect);
+            if memo.bytes + charge > FOLD_MEMO_BYTES_CAP {
+                crate::util::ghost_stats::count("fold_memo.clear_cap");
+                memo.answers.clear();
+                memo.bytes = 0;
+            }
             crate::util::ghost_stats::count("fold_memo.store");
-            memo.answers.insert(fk, (std::sync::Arc::clone(result), std::sync::Arc::clone(effect)));
+            if memo.answers.insert(fk, (std::sync::Arc::clone(result), std::sync::Arc::clone(effect))).is_none() {
+                memo.bytes += charge;
+            }
         }
     });
 }
