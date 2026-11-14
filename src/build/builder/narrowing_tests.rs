@@ -134,6 +134,86 @@ fn narrow_after_a_chain_follows_the_one_arm_that_falls_through() {
     }
 }
 
+#[test]
+fn narrow_looks_through_a_bare_block() {
+    // A bare block runs where it stands, so it leaves where its statements
+    // do, and the rest of it is a block for a statement-level guard. It is
+    // a loop that runs once, so `last` in it lands right after it.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    let src_of = |chain: &str| format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+    let narrows = [
+        ("unless ($x->isa('Widget')) { warn 'x'; { return; } }", "a bare block that returns"),
+        ("if ($x->isa('Widget')) { warn 'w'; } else { { { die 'n'; } } }", "nested bare blocks in an else"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let nothing = [
+        ("unless ($x->isa('Widget')) { { warn 'x'; } }", "a bare block that falls through"),
+        ("unless ($x->isa('Widget')) { { last if $y; return; } }", "a bare block a `last` leaves"),
+        ("{ warn 'x'; { return unless $x->isa('Widget'); } }", "a guard's narrowing ends with its bare block"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+    // The rest of a bare block is narrowed by a guard inside it.
+    let src = "package P;\nsub f {\n    my ($x) = @_;\n    {\n        return unless $x->isa('Widget');\n        $x->layout;\n    }\n}";
+    assert_eq!(fa_type_at(src, "$x", Point::new(5, 8)), widget, "the rest of the bare block");
+}
+
+#[test]
+fn narrow_after_a_loop_whose_body_always_leaves() {
+    // A body that always leaves never comes back to the test, so the loop
+    // is left only where its first test fails. A `last`, `next` or `redo`
+    // in it, or a body that falls through, says nothing after the loop.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    let src_of = |chain: &str| format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
+    let narrows = [
+        ("while (!$x->isa('Widget')) { return; }", "while"),
+        ("until ($x->isa('Widget')) { warn 'x'; die 'n'; }", "until"),
+        ("while (!$x->isa('Widget')) { if ($y) { return; } else { die 'y'; } }", "a chain whose every arm leaves"),
+        ("for (; !$x->isa('Widget'); ) { return; }", "a C-style for"),
+    ];
+    for (chain, why) in narrows {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
+    }
+    let nothing = [
+        ("while (!$x->isa('Widget')) { warn 'x'; }", "a body that falls through"),
+        ("while (!$x->isa('Widget')) { last if $y; return; }", "a `last` before the exit"),
+        ("while (!$x->isa('Widget')) { next if $y; return; }", "a `next` before the exit"),
+        ("while (!$x->isa('Widget')) { for my $z (@$y) { last; } return; }", "a `last` an inner loop owns"),
+        ("L: while (!$x->isa('Widget')) { return; }", "a labelled loop"),
+    ];
+    for (chain, why) in nothing {
+        let src = src_of(chain);
+        let row = src.lines().position(|l| l.contains("$x->layout")).unwrap();
+        assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), None, "{why}");
+    }
+}
+
+#[test]
+fn narrow_at_file_top_level() {
+    // A script's top level is a block for the rest-of-block rule.
+    let widget = Some(InferredType::ClassName("Widget".into()));
+    for (guard, why) in [
+        ("die unless $x->isa('Widget');", "a postfix exit"),
+        ("$x->isa('Widget') or die;", "an `or die`"),
+        ("unless ($x->isa('Widget')) { exit 1; }", "a block form"),
+        ("while (!$x->isa('Widget')) { exit 1; }", "a loop that always leaves"),
+    ] {
+        let src = format!("my $x = shift;\n{guard}\n$x->layout;\n");
+        assert_eq!(fa_type_at(&src, "$x", Point::new(2, 0)), widget, "{why}");
+    }
+    let src = "my $x = shift;\nwarn 'x' unless $x->isa('Widget');\n$x->layout;\n";
+    assert_eq!(fa_type_at(src, "$x", Point::new(2, 0)), None, "no exit");
+}
+
 fn fa_type_at(src: &str, var: &str, at: Point) -> Option<InferredType> {
     build_fa(src).inferred_type_via_bag(var, at)
 }
@@ -332,6 +412,93 @@ fn a_defined_region_is_an_edge_to_its_read() {
         "no stripped value is materialized on the place",
     );
     assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 4)), Some(InferredType::ClassName("Foo".into())));
+}
+
+// ── Evaluation order: a statement modifier runs before its statement ──
+
+#[test]
+fn a_postfix_guard_reads_the_value_it_tested() {
+    // `defined $r` runs before the assignment it decides, so the strip
+    // reads `maybe()`'s Optional<Foo>, not the string the write leaves.
+    let fa = build_fa(
+        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub f { return 'x' }\nsub use_it {\n    my $r = maybe();\n    $r = f($r) if defined $r;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$r", Point::new(5, 11)), Some(InferredType::ClassName("Foo".into())));
+}
+
+#[test]
+fn every_read_in_a_postfix_condition_runs_before_its_statement() {
+    // Not only `defined`: the receiver of a call in the condition is the
+    // object the statement has not yet replaced.
+    let fa = build_fa("package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if $o->alive;\n}");
+    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_postfix_for_list_runs_before_its_statement() {
+    let fa = build_fa("package P;\nsub u {\n    my $o = Foo->new;\n    $o = 'gone' for $o->items;\n}");
+    assert_eq!(invocant_class_of(&fa, "items").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_postfix_condition_sees_its_own_earlier_writes() {
+    // The statement's write is skipped, the condition's own is not.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $z = Bar->new;\n    $z = 'gone' if ($z = Foo->new) && $z->ok;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "ok").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_postfix_condition_key_is_owned_by_the_value_it_reads() {
+    // The key read in the condition belongs to the object the statement
+    // has not yet replaced.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $cfg = Foo->new;\n    $cfg = Other->new unless $cfg->{loaded};\n}",
+    );
+    let owner = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.target_name == "loaded")
+        .and_then(|r| r.hash_key_owner().cloned());
+    assert_eq!(owner, Some(HashKeyOwner::Class("Foo".into())));
+}
+
+#[test]
+fn a_callable_in_a_postfix_condition_runs_when_called() {
+    // The sub body runs when it is called, not before the statement, so its
+    // read is not skipped past the statement's write.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if first(sub { $o->alive });\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Bar"));
+}
+
+#[test]
+fn a_read_in_injected_code_in_a_postfix_condition_runs_before_its_statement() {
+    // `s///e` code is its own parse; its climb goes on through the host.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if $s =~ s/x/$o->alive/e;\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Foo"));
+}
+
+#[test]
+fn a_ref_cut_to_nothing_in_a_postfix_condition_keeps_its_order() {
+    // `%::`'s tail is empty, so its span sits between the head and the `;`.
+    let fa = build_fa("package P;\nsub u {\n    my $o = 1;\n    $o = 2 if \\%::;\n}");
+    let r = fa.refs().iter().find(|r| r.target_name == "%::").expect("a ref for %::");
+    assert_eq!(r.span.start, r.span.end);
+    assert!(r.evaluated_before.is_some());
+}
+
+#[test]
+fn a_do_while_condition_reads_after_its_block() {
+    // `do BLOCK while G` runs the block first: G sees the block's write.
+    let fa = build_fa(
+        "package P;\nsub u {\n    my $y = 'Bar';\n    do { $y = 'Foo' } while ($y->more);\n}",
+    );
+    assert_eq!(invocant_class_of(&fa, "more").as_deref(), Some("Foo"));
 }
 
 #[test]
@@ -581,7 +748,7 @@ fn narrow_place_block_if_isa() {
         "package P;\nsub f {\n    my ($self) = @_;\n    if ($self->{h}->isa('Foo')) {\n        $self->{h}->go;\n    }\n}",
     );
     assert_eq!(
-        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("h")]), Point::new(4, 8), None),
+        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("h")]), crate::model::witnesses::ReadPoint::position(Point::new(4, 8)), None),
         Some(InferredType::ClassName("Foo".into())),
         "place isa guard narrows the slot inside the block",
     );
@@ -728,7 +895,7 @@ fn narrow_place_ref_eq() {
         "package P;\nsub f {\n    my ($self) = @_;\n    return unless ref($self->{cfg}) eq 'HASH';\n    my $v = $self->{cfg};\n}",
     );
     assert_eq!(
-        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("cfg")]), Point::new(4, 12), None),
+        fa.place_type_at(&lexical_place(&fa, "$self", vec![PathStep::Deref, key("cfg")]), crate::model::witnesses::ReadPoint::position(Point::new(4, 12)), None),
         Some(InferredType::HashRef),
         "ref(place) eq 'HASH' narrows the slot",
     );
@@ -823,7 +990,7 @@ fn narrow_place_direct_hash_isa() {
         "package P;\nsub f {\n    my %h = @_;\n    return unless $h{cfg}->isa('Cfg');\n    $h{cfg}->load;\n}",
     );
     assert_eq!(
-        fa.place_type_at(&lexical_place(&fa, "%h", vec![key("cfg")]), Point::new(4, 4), None),
+        fa.place_type_at(&lexical_place(&fa, "%h", vec![key("cfg")]), crate::model::witnesses::ReadPoint::position(Point::new(4, 4)), None),
         Some(InferredType::ClassName("Cfg".into())),
         "direct hash-element isa guard narrows the slot",
     );

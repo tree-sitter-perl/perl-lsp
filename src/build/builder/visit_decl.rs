@@ -1012,7 +1012,7 @@ impl<'a> Builder<'a> {
 
                 if let Some(right) = assign.child_by_field_name("right") {
                     // Pattern: my (...) = @_
-                    if right.utf8_text(self.source).ok() == Some("@_") {
+                    if right.kind() == "array" && crate::cst::names_arg_array(right, self.source) {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
@@ -1133,42 +1133,14 @@ impl<'a> Builder<'a> {
 
     /// Extract a $_[N]-based parameter: `my $var = $_[N]`.
     pub(super) fn extract_subscript_param(&self, assign: Node<'a>, right: Node<'a>) -> Option<String> {
-        if right.kind() != "array_element_expression" {
-            return None;
-        }
-        // Check that it's $_ (container_variable for @_) being subscripted
-        let container = right.named_child(0)?;
-        if container.kind() != "container_variable" {
-            return None;
-        }
-        // container_variable text is "$_" for @_ subscript
-        let ct = container.utf8_text(self.source).ok()?;
-        if ct != "$_" {
-            return None;
-        }
+        crate::cst::arg_slot_index(right, self.source)?;
         let left = assign.child_by_field_name("left")?;
         self.get_var_text_from_lhs(left)
     }
 
-    /// Check if a node is a `shift` call (bare or with parens).
+    /// A `shift` of the argument array: bare, `shift()`, or `shift @_`.
     pub(super) fn is_shift_call(&self, node: Node<'a>) -> bool {
-        self.is_bare_call_of(node, "shift")
-    }
-
-    /// A call of `op` written with no argument (`shift`, `pop`, `shift()`).
-    fn is_bare_call_of(&self, node: Node<'a>, op: &str) -> bool {
-        match node.kind() {
-            "bareword" => node.utf8_text(self.source).ok() == Some(op),
-            "func1op_call_expression" => {
-                crate::cst::nth_element(node, 0).is_none()
-                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some(op)
-            }
-            "ambiguous_function_call_expression" | "function_call_expression" => {
-                use crate::cst::NodeExt;
-                node.field_text("function", self.source) == Some(op)
-            }
-            _ => false,
-        }
+        crate::cst::shifts_arg_array(node, self.source)
     }
 
     /// Whether `node` reads or hands on the sub's argument array: `@_` or
@@ -1178,15 +1150,13 @@ impl<'a> Builder<'a> {
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
             let hit = match n.kind() {
-                "array" | "container_variable" => {
-                    crate::cst::varname_child(n).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
-                }
+                "array" | "container_variable" => crate::cst::names_arg_array(n, self.source),
                 "goto_expression" => true,
                 "function_call_expression" => {
                     n.child_by_field_name("arguments").is_none()
                         && n.utf8_text(self.source).is_ok_and(|t| t.starts_with('&') && !t.ends_with(')'))
                 }
-                _ => self.is_bare_call_of(n, "shift") || self.is_bare_call_of(n, "pop"),
+                _ => crate::cst::is_bare_call_of(n, self.source, "shift") || crate::cst::is_bare_call_of(n, self.source, "pop"),
             };
             if hit {
                 return true;

@@ -28,7 +28,7 @@ use super::*;
 /// is resolving, which is a different question, not a cycle. Every other
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
-type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
+type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<ReadPoint>);
 /// Each on-path key with its position on the path (`QueryState::path_len`
 /// when it entered), so a cut can say which frame it closed at.
 type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
@@ -451,7 +451,7 @@ fn fold_memo_probe(
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
     let index = q.context.and_then(|ctx| ctx.module_index);
-    if !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
+    if bounds_unfilled() || !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
         return Err(None);
     }
     let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
@@ -528,6 +528,80 @@ fn fold_memo_store(
             memo.answers.insert(fk, (std::sync::Arc::clone(result), recorded_exit));
         }
     });
+}
+
+/// One `SlotWrites` bucket's writes, grouped by the class each write's
+/// object resolved to (`owned_slot_writes`).
+#[derive(Default)]
+struct SlotOwnerIndex {
+    by_class: std::collections::HashMap<String, Vec<Witness>>,
+    /// A chase beneath recorded an exit or was poisoned.
+    exits: bool,
+}
+
+/// What a bucket's index depends on: the bag's content, the bucket, and the
+/// context its objects are chased under (as `FoldMemoKey`), plus the parent
+/// graph's and the index's generations.
+type SlotOwnersKey = (u64, WitnessAttachment, FrameworkFact, usize, Option<u64>, Option<(usize, u64)>);
+
+/// Entries are dead once their bag moves on, so the table is emptied rather
+/// than grown past this.
+const SLOT_OWNERS_CAP: usize = 256;
+
+thread_local! {
+    static SLOT_OWNERS: std::cell::RefCell<std::collections::HashMap<SlotOwnersKey, std::sync::Arc<SlotOwnerIndex>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    static SLOT_OWNERS_BUILDING: std::cell::RefCell<Vec<SlotOwnersKey>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The shared per-bucket index of `owned_slot_writes`, under the fold memo's
+/// rules: off with `PERL_LSP_NO_FOLD_MEMO`, and a query that can reach the
+/// module index is shared only inside a pass that pins that index.
+struct SlotOwners;
+
+impl SlotOwners {
+    fn key(bag: &WitnessBag, q: &ReducerQuery, bucket: &WitnessAttachment) -> Option<SlotOwnersKey> {
+        if build_memos_disabled() || bounds_unfilled() {
+            return None;
+        }
+        let index = q.context.and_then(|ctx| ctx.module_index);
+        if index.is_some() && !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
+            return None;
+        }
+        Some((
+            bag.generation(),
+            bucket.clone(),
+            q.framework,
+            q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize),
+            q.context.map(|ctx| ctx.package_parents.generation()),
+            index.map(|idx| (lookup_addr(idx), idx.resolution_epoch())),
+        ))
+    }
+
+    fn get(key: &SlotOwnersKey) -> Option<std::sync::Arc<SlotOwnerIndex>> {
+        SLOT_OWNERS.with(|m| m.borrow().get(key).cloned())
+    }
+
+    fn put(key: SlotOwnersKey, owners: std::sync::Arc<SlotOwnerIndex>) {
+        SLOT_OWNERS.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.len() >= SLOT_OWNERS_CAP {
+                m.clear();
+            }
+            m.insert(key, owners);
+        });
+    }
+
+    /// `None` when `key` is already being built beneath this call.
+    fn building<T>(key: &SlotOwnersKey, build: impl FnOnce() -> T) -> Option<T> {
+        if SLOT_OWNERS_BUILDING.with(|b| b.borrow().contains(key)) {
+            return None;
+        }
+        SLOT_OWNERS_BUILDING.with(|b| b.borrow_mut().push(key.clone()));
+        let out = build();
+        SLOT_OWNERS_BUILDING.with(|b| b.borrow_mut().pop());
+        Some(out)
+    }
 }
 
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
@@ -1308,6 +1382,7 @@ impl ReducerRegistry {
     ) -> ReducedValue {
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+        let v = self.cap_by_bound(bag, q, state, &materialized, v);
         let ladder = ClassLadder::of(q.attachment);
         if v != ReducedValue::None && ladder.as_ref().is_none_or(|l| l.settles(&v)) {
             return v;
@@ -1378,6 +1453,116 @@ impl ReducerRegistry {
         }
 
         ReducedValue::None
+    }
+
+    /// The one rule a bound states, the same for every attachment
+    /// (`docs/adr/declared-bounds.md`). The reducers fold the value as if no
+    /// bound were there; what it reads as under the bound in force is a
+    /// question the bound's own facts answer:
+    ///
+    /// - a guard's proof holding the point (`WitnessPayload::Proof`) reads
+    ///   by `Evidence::read_proven`;
+    /// - a slot reads as its declaration, whatever its writes put there;
+    /// - a local reads the value its facts from the declaration on fold to,
+    ///   by `Evidence::read_written`;
+    /// - no value, or an `Unknown` one, reads as the bound, unless the
+    ///   bound is set aside while a pass settles (`with_bounds_unfilled`).
+    #[inline(never)]
+    fn cap_by_bound(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        materialized: &[Witness],
+        v: ReducedValue,
+    ) -> ReducedValue {
+        let Some((stated, ty, evidence, extent)) = bound_in_force(bag, q) else {
+            return v;
+        };
+        if matches!(v, ReducedValue::FactMap(_)) {
+            return v;
+        }
+        // A point query's facts are the ones reaching it already; asked at
+        // no point, a proof holds nowhere in particular, so neither it nor
+        // the region it marks is the binding's value.
+        let pointed = q.point.is_some() && q.attachment.is_temporal();
+        let proofs: Vec<crate::model::file_analysis::Span> =
+            materialized.iter().filter(|w| matches!(w.payload, WitnessPayload::Proof)).map(|w| w.span).collect();
+        let proven = pointed && !proofs.is_empty();
+        let mut bound: Option<Option<InferredType>> = None;
+        let mut resolve = |state: &mut QueryState| -> Option<InferredType> {
+            bound.get_or_insert_with(|| self.bound_type(bag, q, state, ty).filter(InferredType::is_known)).clone()
+        };
+        let value = match (proven, extent) {
+            (true, _) => v,
+            // The declaration is the slot's answer, not a stand-in for a
+            // value still to come, so it reads the same while a pass settles.
+            (false, Extent::Slot) => return resolve(state).map_or(v, ReducedValue::Type),
+            (false, Extent::Lifetime | Extent::Entry) => {
+                // Only what the declaration holds counts: a fact made before
+                // it is another binding's.
+                let holds = |w: &Witness| w.span.start >= stated && !proofs.contains(&w.span);
+                match materialized.iter().all(holds) {
+                    true => v,
+                    false => {
+                        let after: Vec<Witness> = materialized.iter().filter(|w| holds(w)).cloned().collect();
+                        self.reduce_materialized(&after, q)
+                    }
+                }
+            }
+        };
+        let t = match value {
+            ReducedValue::Type(t) if t.is_known() => t,
+            ReducedValue::Type(_) | ReducedValue::None if bounds_unfilled() => return value,
+            ReducedValue::Type(_) | ReducedValue::None => {
+                return resolve(state).map_or(value, ReducedValue::Type);
+            }
+            ReducedValue::FactMap(_) => return value,
+        };
+        let order = class_order(q);
+        let mut fit = |state: &mut QueryState| match resolve(state) {
+            Some(b) => crate::model::file_analysis::fit(&t, &b, order),
+            None => crate::model::file_analysis::Fit::Undecided,
+        };
+        let read = match proven {
+            true => evidence.read_proven(|| fit(state)),
+            false => evidence.read_written(|| fit(state)),
+        };
+        let Some(b) = (match read {
+            BoundRead::Value => None,
+            BoundRead::Bound | BoundRead::Both => resolve(state),
+        }) else {
+            return ReducedValue::Type(t);
+        };
+        match read {
+            BoundRead::Value => ReducedValue::Type(t),
+            BoundRead::Bound => ReducedValue::Type(b),
+            BoundRead::Both => ReducedValue::Type(crate::model::file_analysis::join(&t, &b, order)),
+        }
+    }
+
+    /// The type a bound states, its alias edge chased.
+    fn bound_type(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, ty: &BoundType) -> Option<InferredType> {
+        match ty {
+            BoundType::Type(t) => Some(t.clone()),
+            BoundType::Edge(att) => {
+                let sub_q = ReducerQuery {
+                    attachment: att,
+                    point: None,
+                    framework: q.framework,
+                    arity_hint: None,
+                    receiver: None,
+                    args: Vec::new(),
+                    context: q.context,
+                };
+                // Opaque: the answer combines the bound with this frame's
+                // own value, so no exit key names it.
+                match &*state.in_opaque_frame(|state| self.query_rec(bag, &sub_q, state)) {
+                    ReducedValue::Type(t) => Some(t.clone()),
+                    ReducedValue::FactMap(_) | ReducedValue::None => None,
+                }
+            }
+        }
     }
 
     /// The ladder for a class-keyed attachment the local bag couldn't
@@ -2290,16 +2475,185 @@ impl ReducerRegistry {
         // A variable written N times would otherwise cost N on every read of
         // it, and a chain of `$x = $x->m` reads it once per write.
         let point = q.point.filter(|_| q.attachment.is_temporal() && !live_window_disabled());
-        if let Some(live) = point.and_then(|p| bag.live_at(q.attachment, p)) {
+        // The index orders by position alone; a read that skips a statement
+        // takes the full list, so the window sees which facts it skips.
+        if let Some(live) = point.filter(|p| p.skips.is_none()).and_then(|p| bag.live_at(q.attachment, p.at)) {
             return self.materialize_raw(bag, q, state, live, false);
         }
-        let raw = bag.for_attachment(q.attachment);
+        let adopted = self.owned_slot_writes(bag, q, state);
+        let mut raw = bag.for_attachment(q.attachment);
+        raw.extend(adopted.iter());
         if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
             let grown = self.lower_extensions(bag, q, state, &raw);
             let grown = Self::grown_witnesses(&raw, &grown);
             return self.materialize_reaching(bag, q, state, Self::splice_grown(&raw, &grown));
         }
         self.materialize_reaching(bag, q, state, raw)
+    }
+
+    /// The writes of a stored member's `SlotWrites` bucket whose object is
+    /// an instance of the member's owner, as the slot's value edges. The
+    /// build filed them by key because it could not type the object; the
+    /// object is asked here, at the write, where the index can answer.
+    ///
+    /// Every owner's read of the key needs the same objects, so the bucket is
+    /// resolved once and kept by class (`SlotOwners`): asked per read, N
+    /// classes writing one key in one file cost N reads of N chases.
+    fn owned_slot_writes(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState) -> Vec<Witness> {
+        let WitnessAttachment::Member { owner, space, name, aspect: crate::model::witnesses::MemberAspect::Holds } =
+            q.attachment
+        else {
+            return Vec::new();
+        };
+        let bucket_att = WitnessAttachment::SlotWrites { space: *space, name: name.clone() };
+        if bag.for_attachment(&bucket_att).is_empty() {
+            return Vec::new();
+        }
+        let owners = match SlotOwners::key(bag, q, &bucket_att) {
+            Some(key) => match SlotOwners::get(&key) {
+                Some(hit) => {
+                    crate::util::ghost_stats::count("slot_owners.hit");
+                    hit
+                }
+                None => {
+                    crate::util::ghost_stats::count("slot_owners.build");
+                    let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+                    let built = SlotOwners::building(&key, || self.slot_owners(bag, q, &bucket_att));
+                    match built {
+                        Some((owners, settled)) => {
+                            let settled =
+                                settled && QUERY_REC_TRUNCATIONS.with(|c| c.get()) == truncations_before;
+                            if !settled {
+                                crate::util::ghost_stats::count("slot_owners.unsettled");
+                            }
+                            if settled {
+                                SlotOwners::put(key, std::sync::Arc::clone(&owners));
+                            }
+                            owners
+                        }
+                        // The bucket's own objects read this key: answer this read
+                        // on the reader's path, where the cycle guard cuts it.
+                        None => {
+                            crate::util::ghost_stats::count("slot_owners.reentered");
+                            return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+                        }
+                    }
+                }
+            },
+            None => {
+                crate::util::ghost_stats::count("slot_owners.unshared");
+                return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+            }
+        };
+        // An exit recorded beneath the objects' chase was reached through a
+        // combining frame, as it was when each read chased them itself.
+        if owners.exits {
+            state.poisoned = true;
+        }
+        owners
+            .by_class
+            .get(owner.as_str())
+            .map(|writes| {
+                writes
+                    .iter()
+                    .map(|w| Witness { attachment: q.attachment.clone(), ..w.clone() })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Resolve every write's object in the bucket once, from a fresh query:
+    /// what a write's object is does not depend on which owner asks.
+    /// `settled` is false when a chase was cut by a cycle that closed above it.
+    fn slot_owners(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        bucket_att: &WitnessAttachment,
+    ) -> (std::sync::Arc<SlotOwnerIndex>, bool) {
+        let bucket_q = ReducerQuery {
+            attachment: bucket_att,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        let mut state = QueryState::new();
+        let mut index = SlotOwnerIndex::default();
+        let (pos, outer_low) = state.enter_frame();
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        for w in bag.for_attachment(bucket_att) {
+            let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { continue };
+            let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
+            let object = self.materialize_raw(bag, &bucket_q, &mut state, vec![&probe], true);
+            let mut classes: Vec<&str> = object
+                .iter()
+                .filter_map(|o| match &o.payload {
+                    WitnessPayload::InferredType(t) => Some(t.receiver_arms()),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|arm| arm.class_name())
+                .collect();
+            classes.sort_unstable();
+            classes.dedup();
+            for class in classes {
+                index.by_class.entry(class.to_string()).or_default().push(Witness {
+                    attachment: bucket_att.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::Edge(value.clone()),
+                    span: w.span,
+                });
+            }
+        }
+        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        index.exits = !state.residual.is_empty() || state.poisoned;
+        (std::sync::Arc::new(index), taint == Taint::CLEAN)
+    }
+
+    /// The bucket chased on the reader's own path: for a read the shared
+    /// index cannot serve (no memo may hold it, or the bucket is being built
+    /// beneath this read).
+    fn owned_slot_writes_on_path(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        bucket_att: &WitnessAttachment,
+        owner: &str,
+    ) -> Vec<Witness> {
+        let bucket_q = ReducerQuery {
+            attachment: bucket_att,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        bag.for_attachment(bucket_att)
+            .into_iter()
+            .filter_map(|w| {
+                let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { return None };
+                // The object is an edge from the write, chased as every
+                // edge is; opaque, since which writes join depends on each
+                // object's value, not on the member's own key.
+                let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
+                let object = state.in_opaque_frame(|state| self.materialize_raw(bag, &bucket_q, state, vec![&probe], true));
+                let owned = object.iter().any(|o| match &o.payload {
+                    WitnessPayload::InferredType(t) => t.receiver_arms().iter().any(|arm| arm.class_name() == Some(owner)),
+                    _ => false,
+                });
+                owned.then(|| Witness {
+                    attachment: q.attachment.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::Edge(value.clone()),
+                    span: w.span,
+                })
+            })
+            .collect()
     }
 
     /// `materialize_raw` over the witnesses of `raw` that reach the query
@@ -2314,7 +2668,7 @@ impl ReducerRegistry {
         // A variable's fact made in a nested block is a region that ends
         // with the block: past it, the fact is not there at all.
         if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
-            raw.retain(|w| super::reaches(w, p));
+            raw.retain(|w| super::reaches(w, p.at) && !p.skips_site(w.span.start));
         }
         let sole = raw.len() == 1;
         self.materialize_raw(bag, q, state, raw, sole)
@@ -2349,7 +2703,7 @@ impl ReducerRegistry {
             .copied()
             .enumerate()
             .filter(|(_, w)| matches!(w.payload, WitnessPayload::Extend(_)))
-            .filter(|(_, w)| point.is_none_or(|p| w.span.start <= p))
+            .filter(|(_, w)| point.is_none_or(|p| p.reaches(w.span.start)))
             .collect();
         deltas.sort_by_key(|(_, w)| w.span.start);
         // Grown shapes, keyed by the raw index of the delta they stand at.
@@ -2453,7 +2807,7 @@ impl ReducerRegistry {
         let grown = Self::grown_witnesses(raw, grown);
         let base_q = ReducerQuery {
             attachment: q.attachment,
-            point: q.attachment.is_temporal().then_some(at).or(q.point),
+            point: q.attachment.is_temporal().then(|| ReadPoint { at, skips: q.point.and_then(|p| p.skips) }).or(q.point),
             framework: q.framework,
             arity_hint: None,
             receiver: None,
@@ -2506,6 +2860,18 @@ impl ReducerRegistry {
         #[cfg(test)]
         MATERIALIZE_READS.with(|c| c.set(c.get() + raw.len() as u64));
         let window = super::reducers::LiveWindow::at(&raw, q);
+        // A variable read recorded at `Expr(span)` asks at its own site,
+        // less the statement the builder says it is evaluated before.
+        let read = match q.attachment {
+            WitnessAttachment::Expr(span) => Some(ReadPoint {
+                at: span.start,
+                skips: raw.iter().find_map(|w| match w.payload {
+                    WitnessPayload::EvaluatedBefore(s) => Some(s),
+                    _ => None,
+                }),
+            }),
+            _ => None,
+        };
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         for &w in raw.iter() {
             if window.edge_is_dead(&raw, w) {
@@ -2525,10 +2891,7 @@ impl ReducerRegistry {
                             // guard's region (docs/adr/flow-narrowing.md). Other
                             // edge sources have no read position; the scope end is
                             // the standing temporal approximation.
-                            let point = match q.attachment {
-                                WitnessAttachment::Expr(span) => span.start,
-                                _ => scope_point(ctx.scopes, *scope),
-                            };
+                            let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
                             // Opaque: the read's point picks the binding and the
                             // regions that hold there, so the answer is not the
                             // edge target's alone.
@@ -2541,10 +2904,7 @@ impl ReducerRegistry {
                             state.in_opaque_frame(|state| {
                                 // A read recorded at `Expr(span)` holds what the
                                 // variable holds at the read.
-                                let point = match q.attachment {
-                                    WitnessAttachment::Expr(span) => Some(span.start),
-                                    _ => binding_scope_end(ctx, &place.root),
-                                };
+                                let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position));
                                 self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                             })
                         }
@@ -2632,20 +2992,14 @@ impl ReducerRegistry {
                     let base_t = state.in_opaque_frame(|state| match (base, q.context) {
                         (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
                             // The read's own point, as the Edge arm above.
-                            let point = match q.attachment {
-                                WitnessAttachment::Expr(span) => span.start,
-                                _ => scope_point(ctx.scopes, *scope),
-                            };
+                            let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
                             )
                         }
                         (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
-                            let point = match q.attachment {
-                                WitnessAttachment::Expr(span) => Some(span.start),
-                                _ => binding_scope_end(ctx, &place.root),
-                            };
+                            let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position));
                             self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                         }
                         _ => {
@@ -2895,6 +3249,46 @@ impl ReducerRegistry {
                         });
                     }
                 }
+                // Only where the tag is minted (`Expr(site)` in the file
+                // that wrote it): `of` is a span in that file, and a copy
+                // that travelled into another file's bag would ask a
+                // stranger's expression.
+                WitnessPayload::InferredType(InferredType::RefTagOf { of: Some(of), names: None, subject, site, via })
+                    if w.attachment == WitnessAttachment::Expr(*site) =>
+                {
+                    // The class a `ref`/`blessed` string spells is the class
+                    // its operand holds, when it holds exactly one.
+                    let of_q = ReducerQuery {
+                        attachment: of,
+                        point: Some(super::ReadPoint::position(w.span.start)),
+                        framework: q.framework,
+                        arity_hint: None,
+                        receiver: None,
+                        args: Vec::new(),
+                        context: q.context,
+                    };
+                    let names = state
+                        .in_opaque_frame(|state| match &*self.query_rec(bag, &of_q, state) {
+                            ReducedValue::Type(t) => Some(t.clone()),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        })
+                        .and_then(|t| match t.receiver_arms() {
+                            [one] => one.class_name().map(str::to_string),
+                            _ => None,
+                        });
+                    out.push(Witness {
+                        attachment: w.attachment.clone(),
+                        source: w.source.clone(),
+                        payload: WitnessPayload::InferredType(InferredType::RefTagOf {
+                            subject: subject.clone(),
+                            site: *site,
+                            via: *via,
+                            of: Some(of.clone()),
+                            names,
+                        }),
+                        span: w.span,
+                    });
+                }
                 _ => out.push(w.clone()),
             }
         }
@@ -2915,7 +3309,7 @@ impl ReducerRegistry {
     ) -> Option<InferredType> {
         let sub_q = ReducerQuery {
             attachment: att,
-            point: if att.is_temporal() { Some(site) } else { q.point },
+            point: if att.is_temporal() { Some(ReadPoint::position(site)) } else { q.point },
             framework: q.framework,
             arity_hint: None,
             // The enclosing call's receiver still binds `$self` inside the
@@ -2944,7 +3338,7 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
-        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r)).map(InferredType::into_invocant);
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -3015,7 +3409,7 @@ impl ReducerRegistry {
         let lookup_classes = |lookup: &Lookup, recv: &Option<InferredType>| -> Vec<String> {
             match lookup {
                 Lookup::Receiver => {
-                    recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
+                    recv.as_ref().and_then(|t| t.dispatch_name()).map(str::to_string).into_iter().collect()
                 }
                 Lookup::Super { writer } => match q.context {
                     Some(ctx) => crate::model::file_analysis::parents_of(
@@ -3208,7 +3602,7 @@ impl ReducerRegistry {
                 FreeAsk::Returns { .. } => (WitnessAttachment::Symbol(sym), None, FrameworkFact::Plain),
                 FreeAsk::Holds(_) => {
                     let place = full.declared_place(sym);
-                    let at = binding_scope_end(&cached_ctx, &place.root);
+                    let at = binding_scope_end(&cached_ctx, &place.root).map(ReadPoint::position);
                     let framework = binding_framework(&cached_ctx, &place.root);
                     (WitnessAttachment::Place(Box::new(place)), at, framework)
                 }
@@ -3340,7 +3734,7 @@ impl ReducerRegistry {
         ctx: &BagContext,
         var: &str,
         scope: ScopeId,
-        point: Point,
+        point: ReadPoint,
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
@@ -3384,7 +3778,7 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         ctx: &BagContext,
         place: &crate::model::file_analysis::Place,
-        point: Option<Point>,
+        point: Option<ReadPoint>,
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
@@ -3450,7 +3844,7 @@ pub(crate) fn variable_binding_scope(
     scopes: &[Scope],
     var: &str,
     scope: ScopeId,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<ScopeId> {
     let held = bag.variable_scopes(var);
     if held.is_empty() {
@@ -3460,8 +3854,63 @@ pub(crate) fn variable_binding_scope(
         held.contains(&sid)
             && bag
                 .iter_attachment(&WitnessAttachment::Variable { name: var.to_string(), scope: sid })
-                .any(|w| w.span.start <= point)
+                .any(|w| point.reaches(w.span.start))
     })
+}
+
+/// The bound in force at `q`'s point, the latest stated before it, with
+/// where it was stated. A slot's bound holds wherever the slot is asked; a
+/// local's from its declaration on, and an `Entry` one only until the next
+/// write (`WitnessBag::latest_reset`).
+fn bound_in_force<'b>(
+    bag: &'b WitnessBag,
+    q: &ReducerQuery,
+) -> Option<(Point, &'b BoundType, Evidence, Extent)> {
+    let mut bounds = bag.bounds_of(q.attachment).peekable();
+    bounds.peek()?;
+    let point = q.point.filter(|_| q.attachment.is_temporal());
+    let mut retired: Option<Option<Point>> = None;
+    let mut best: Option<(&Witness, &BoundType, Evidence, Extent)> = None;
+    for w in bounds {
+        let WitnessPayload::Bound { ty, evidence, extent } = &w.payload else {
+            continue;
+        };
+        let stated = match extent {
+            Extent::Slot => true,
+            Extent::Lifetime => point.is_none_or(|p| p.reaches(w.span.start) && super::reaches(w, p.at)),
+            Extent::Entry => {
+                point.is_none_or(|p| p.reaches(w.span.start))
+                    && retired
+                        .get_or_insert_with(|| bag.latest_reset(q.attachment, point))
+                        .is_none_or(|r| w.span.start >= r)
+            }
+        };
+        if stated && best.is_none_or(|(b, ..)| w.span.start >= b.span.start) {
+            best = Some((w, ty, *evidence, *extent));
+        }
+    }
+    best.map(|(w, ty, evidence, extent)| (w.span.start, ty, evidence, extent))
+}
+
+thread_local! {
+    static BOUNDS_UNFILLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with no bound standing in for an absent or `Unknown` value. A
+/// pass that keeps every round's facts reads this way while its rounds
+/// settle: a bound filled in for a value a later round finds would be a
+/// fact the settled answer never states (`docs/adr/declared-bounds.md`
+/// §Monotonicity). The fold memo is closed meanwhile, so no answer made
+/// either way is reused the other.
+pub(crate) fn with_bounds_unfilled<R>(f: impl FnOnce() -> R) -> R {
+    let prev = BOUNDS_UNFILLED.with(|c| c.replace(true));
+    let out = f();
+    BOUNDS_UNFILLED.with(|c| c.set(prev));
+    out
+}
+
+fn bounds_unfilled() -> bool {
+    BOUNDS_UNFILLED.with(|c| c.get())
 }
 
 /// Pick the "where am I asking from?" `Point` for a scope-chained

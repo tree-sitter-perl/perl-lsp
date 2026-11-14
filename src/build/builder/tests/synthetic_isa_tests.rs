@@ -1179,7 +1179,7 @@ mod param_types_manifest {
         // rides the FA and resolves cross-file at query time.
         let fa = build_with_catalyst(src);
         let ty = fa
-            .inferred_type_via_bag_ctx("$c", Point::new(4, 14), Some(&idx))
+            .inferred_type_via_bag_ctx("$c", crate::model::witnesses::ReadPoint::position(Point::new(4, 14)), Some(&idx))
             .expect("$c should type via the cross-file Catalyst::Controller ancestry");
         assert!(
             matches!(&ty, InferredType::ClassName(c) if c == "Catalyst"),

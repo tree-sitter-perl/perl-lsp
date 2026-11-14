@@ -86,7 +86,7 @@ impl<'a> CandidateSet<'a> {
             return match &r.kind {
                 RefKind::Variable => {
                     self.origin
-                        .inferred_type_via_bag_ctx(&r.target_name, self.point, self.idx())
+                        .inferred_type_via_bag_ctx(&r.target_name, r.read_point(), self.idx())
                 }
                 // A value read: the receiver's type, then the stored
                 // member's value on it; the bare span's own witnesses when
@@ -108,7 +108,7 @@ impl<'a> CandidateSet<'a> {
         if matches!(sym.kind, SymKind::Variable) {
             return self
                 .origin
-                .inferred_type_via_bag_ctx(&sym.name, sym.span.end, self.idx());
+                .inferred_type_via_bag_ctx(&sym.name, crate::model::witnesses::ReadPoint::position(sym.span.end), self.idx());
         }
         None
     }

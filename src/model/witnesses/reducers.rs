@@ -11,7 +11,7 @@ use super::*;
 #[derive(Clone)]
 pub struct ReducerQuery<'a> {
     pub attachment: &'a WitnessAttachment,
-    pub point: Option<tree_sitter::Point>,
+    pub point: Option<ReadPoint>,
     pub framework: FrameworkFact,
     /// Arity hint for arity-dispatch reducers. `Some(N)` = caller passed
     /// N additional args; `None` = unknown (reducer returns the default
@@ -35,6 +35,36 @@ pub struct ReducerQuery<'a> {
     /// lookup. `None` for context-free queries (tests, self-contained
     /// targets).
     pub context: Option<&'a BagContext<'a>>,
+}
+
+/// Where a temporal read asks: every fact made at or before `at`, except
+/// those made inside `skips` — the statement the read is evaluated before
+/// though it follows it in the source (`WitnessPayload::EvaluatedBefore`,
+/// `docs/adr/flow-narrowing.md` §Evaluation order). A read the builder
+/// recorded carries its own (`Ref::read_point`); a bare position is
+/// `ReadPoint::position`, said out loud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReadPoint {
+    pub at: Point,
+    pub skips: Option<Span>,
+}
+
+impl ReadPoint {
+    /// A position no recorded read stands at — a cursor, a scope's end, a
+    /// declaration — which every fact made at or before it reaches.
+    pub fn position(at: Point) -> Self {
+        ReadPoint { at, skips: None }
+    }
+
+    /// Does a fact made at `site` reach this read?
+    pub fn reaches(&self, site: Point) -> bool {
+        site <= self.at && !self.skips_site(site)
+    }
+
+    /// Is `site` inside the statement this read is evaluated before?
+    pub fn skips_site(&self, site: Point) -> bool {
+        self.skips.is_some_and(|s| s.start <= site && site <= s.end)
+    }
 }
 
 /// File-scope context the registry needs to chase edges correctly.
@@ -83,6 +113,16 @@ impl crate::model::file_analysis::TypeOrder for BagContext<'_> {
 
     fn holds(&self, rule: crate::model::file_analysis::Subsumption) -> bool {
         self.lattice.holds(rule)
+    }
+
+    /// A class this file declares, or one the index has a candidate for.
+    fn ancestry_closed(&self, class: &str) -> bool {
+        use crate::model::file_analysis::SymKind;
+        let declared = |c: &str| {
+            self.symbols.iter().any(|s| matches!(s.kind, SymKind::Class | SymKind::Package) && s.name == c)
+                || self.module_index.is_some_and(|idx| idx.get_cached(c).is_some() || !idx.def_candidates(c).is_empty())
+        };
+        crate::model::file_analysis::ancestry_closed(class, self.package_parents, self.module_index, &declared)
     }
 }
 
@@ -190,7 +230,7 @@ impl ClassIdentity {
 /// chase follow those instead of asking a reducer —
 /// `docs/adr/flow-narrowing.md` §Reaching writes.
 pub(crate) struct LiveWindow {
-    point: Option<Point>,
+    point: Option<ReadPoint>,
     reset_at: Option<Point>,
 }
 
@@ -201,7 +241,7 @@ impl LiveWindow {
         let point = q
             .point
             .filter(|_| q.attachment.is_temporal());
-        let in_window = |w: &&&Witness| point.is_none_or(|p| w.span.start <= p);
+        let in_window = |w: &&&Witness| point.is_none_or(|p| p.reaches(w.span.start));
         let reset_at = ws
             .iter()
             .filter(in_window)
@@ -212,10 +252,10 @@ impl LiveWindow {
     }
 
     fn in_window(&self, w: &Witness) -> bool {
-        self.point.is_none_or(|p| w.span.start <= p)
+        self.point.is_none_or(|p| p.reaches(w.span.start))
     }
 
-    fn admits(&self, w: &Witness) -> bool {
+    pub(crate) fn admits(&self, w: &Witness) -> bool {
         self.in_window(w) && self.reset_at.is_none_or(|r| w.span.start >= r)
     }
 
@@ -251,7 +291,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             WitnessAttachment::Variable { .. } | WitnessAttachment::Place(_) | WitnessAttachment::Expression(_)
         ) && matches!(
             w.payload,
-            WitnessPayload::InferredType(_) | WitnessPayload::Observation(_) | WitnessPayload::Reset
+            WitnessPayload::InferredType(_)
+                | WitnessPayload::Observation(_)
+                | WitnessPayload::Reset
+                | WitnessPayload::Bound { .. }
         )
     }
 
@@ -265,7 +308,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // scope-end, where the call span doesn't contain it). So only narrow
         // for variables; expressions fold every witness.
         let window = LiveWindow::at(ws, q);
-        let narrow_point = window.point;
+        let narrow_point = window.point.map(|p| p.at);
         // Narrowing: with a `point`, pick the narrowest-span
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
@@ -279,8 +322,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 .filter(|w| matches!(w.payload, WitnessPayload::InferredType(_)))
                 .map(|w| w.span.start)
                 .max();
-            // Source priority first (an annotation outranks a flow guess
-            // sharing the same class-wide extent), narrowest span second.
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
@@ -290,12 +331,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         && latest_point_fact.is_none_or(|p| p <= w.span.start)
                     {
                         let area = span_area(&w.span);
-                        let prio = w.source.priority();
-                        let better = narrow.is_none_or(|(nw, a)| {
-                            let np = nw.source.priority();
-                            prio > np || (prio == np && area < a)
-                        });
-                        if better {
+                        if narrow.is_none_or(|(_, a)| area < a) {
                             narrow = Some((*w, area));
                         }
                     }
@@ -325,7 +361,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         let mut str_ = false;
         let mut re = false;
         let mut plain_type: Option<InferredType> = None;
-        let mut plain_type_priority: u8 = 0;
         let mut plain_type_at: Option<Point> = None;
         // Where a rep / scalar-context observation last landed: evidence
         // after a reset revives the variable through those axes.
@@ -376,26 +411,18 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     b @ InferredType::Branded { base, .. } if base.class_name().is_some() => {
                         branded = Some(b.clone())
                     }
-                    // Source priority breaks ties first (an EXPLICIT
-                    // annotation — `Annotation`, priority 20 — governs over
-                    // an inferred flow type, priority 10, whatever the order
-                    // they land in): the C++ `T x = {…}` braced-init case,
-                    // where the initializer's `Numeric` flow witness would
-                    // otherwise clobber the declared container type. This is
-                    // the same annotation-dominates rule the `ClassName`
-                    // class axis above already applies, extended to
-                    // every `InferredType` flavor (`Parametric`, `HashRef`,
-                    // …). Within equal priority: latest wins UNLESS the
-                    // standing answer subsumes the newcomer — structure
-                    // dominates rep (`HashWithKeys` is not downgraded by a
-                    // deref's re-derived `HashRef`), mirroring class-over-rep.
+                    // Latest wins UNLESS the standing answer subsumes the
+                    // newcomer — structure dominates rep (`HashWithKeys` is
+                    // not downgraded by a deref's re-derived `HashRef`),
+                    // mirroring class-over-rep. A declared type is no
+                    // witness here: it bounds what this fold answers
+                    // (`ReducerRegistry::cap_by_bound`).
                     other => {
                         let subsumed = plain_type
                             .as_ref()
                             .is_some_and(|have| have.subsumes_narrowing(other));
-                        if prio > plain_type_priority || (prio == plain_type_priority && !subsumed) {
+                        if !subsumed {
                             plain_type = Some(other.clone());
-                            plain_type_priority = prio;
                             plain_type_at = Some(w.span.start);
                         }
                     }
@@ -408,7 +435,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     let stands = plain_type_at.is_some_and(|at| at >= w.span.start);
                     if !stands && bound_before(w.span.start) {
                         plain_type = Some(InferredType::Unknown);
-                        plain_type_priority = prio;
                         plain_type_at = Some(w.span.start);
                     }
                 }
@@ -439,10 +465,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         }
         // An `Unknown` on the plain axis (a reset the RHS never typed, a
         // join approximation) yields to rep and scalar-context evidence that
-        // lands strictly after it: `$r = f(); $r->{k}` reads the hash. An
-        // annotation-priority `Unknown` is a claim and keeps its place.
+        // lands strictly after it: `$r = f(); $r->{k}` reads the hash.
         if matches!(plain_type, Some(InferredType::Unknown))
-            && plain_type_priority <= WitnessSource::Builder(String::new()).priority()
             && last_observation_at > plain_type_at
         {
             plain_type = None;
@@ -1089,10 +1113,7 @@ impl WitnessReducer for ReturnExprReducer {
         // site — a query before it keeps the rep answer (HashRef pre-,
         // instance post-bless).
         let temporal_gate = |w: &&Witness| match (w.attachment.is_temporal(), q.point) {
-            (true, Some(p)) => {
-                let s = w.span.start;
-                (s.row, s.column) <= (p.row, p.column)
-            }
+            (true, Some(p)) => p.reaches(w.span.start),
             _ => true,
         };
         let mut best: Option<(&Witness, u8)> = None;

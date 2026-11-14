@@ -240,6 +240,7 @@ impl FileAnalysis {
                     binding: gr.binding.clone(),
                     folded_from: None,
                     arg_count: None,
+                    evaluated_before: None,
                 });
             }
         }
@@ -924,7 +925,7 @@ impl FileAnalysis {
                     Place::variable(self.variable_binding_of(&receiver, r.span.start, scope).0)
                 }
             };
-            if let Some(ty) = self.subject_type_at(&subject, r.span.start, module_index) {
+            if let Some(ty) = self.subject_type_at(&subject, r.read_point(), module_index) {
                 out.push(DerefSite {
                     span: r.span,
                     receiver,
@@ -939,7 +940,7 @@ impl FileAnalysis {
         // records them so they join the same stream.
         for s in &self.arrow_deref_sites {
             let subject = (*s.place).clone();
-            if let Some(ty) = self.subject_type_at(&subject, s.span.start, module_index) {
+            if let Some(ty) = self.subject_type_at(&subject, s.read_point(), module_index) {
                 out.push(DerefSite {
                     span: s.span,
                     receiver: s.receiver.clone(),
@@ -988,7 +989,7 @@ impl FileAnalysis {
         let mut out = Vec::new();
         for g in &self.guard_sites {
             let Some(prior) = self
-                .subject_type_at(&g.subject, g.before_point, module_index)
+                .subject_type_at(&g.subject, crate::model::witnesses::ReadPoint::position(g.before_point), module_index)
                 .filter(InferredType::is_known)
             else {
                 continue;

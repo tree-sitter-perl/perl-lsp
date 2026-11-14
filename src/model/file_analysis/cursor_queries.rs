@@ -42,15 +42,8 @@ impl FileAnalysis {
     /// incoming projection groups reference sites by. `None` for top-level
     /// code (import-time calls, scripts): there is no callable to report.
     pub fn enclosing_callable_at(&self, point: Point) -> Option<&Symbol> {
-        // The scope chain carries the owner: the first scope up the chain
-        // that is a callable's body names it.
-        let mut cur = self.scope_at(point);
-        while let Some(id) = cur {
-            let sc = self.scope(id);
-            if let Some(owner) = sc.owner {
-                return Some(self.symbol(owner));
-            }
-            cur = sc.parent;
+        if let Some(owner) = owning_callable(&self.scopes, self.scope_at(point)) {
+            return Some(self.symbol(owner));
         }
         // A body the document mints as a plain block (R) or on another node
         // than its callable carries no owner: the span walk answers there.
