@@ -733,3 +733,29 @@ fn the_evaluated_surface_does_not_depend_on_map_iteration_order() {
          surface, or the driver's diff never converges"
     );
 }
+
+/// The residuals of each query in `asks`, asked in order inside one fold-memo
+/// scope, so every ask after the first can be served from what the earlier
+/// ones stored.
+fn residuals_sharing_memo(fa: &FileAnalysis, asks: &[(&str, &str)]) -> Vec<Option<Vec<ConclusionKey>>> {
+    let _scope = crate::model::witnesses::FoldMemoScope::enter();
+    asks.iter().map(|(class, name)| residuals_for(fa, class, name)).collect()
+}
+
+/// A memo hit records what computing the subtree recorded: shared answers
+/// must leave every ask's residuals exactly as a fresh chase leaves them,
+/// whether the hit is reached transparently or under a combining frame.
+///
+/// Base-verify by making `QueryState::replay` a no-op: the repeated parent
+/// walk loses its rung, and the call frame that re-reaches it stops poisoning.
+#[test]
+fn memo_hits_replay_the_residuals_they_skip() {
+    let fa = analyze(
+        "package B;\nour @ISA = ('Elsewhere::Base');\nsub mk { return B->new->inherited }\nsub new { bless {}, shift }\n1;\n",
+    );
+    let asks = [("B", "inherited"), ("B", "inherited"), ("B", "mk"), ("B", "inherited")];
+    let fresh: Vec<_> = asks.iter().map(|(c, n)| residuals_for(&fa, c, n)).collect();
+    assert!(fresh[0].is_some(), "control: the parent walk records a rung; got {:?}", fresh[0]);
+    assert_eq!(fresh[2], None, "control: the call frame poisons the rung beneath it");
+    assert_eq!(residuals_sharing_memo(&fa, &asks), fresh, "a memo hit changed what the bake records");
+}

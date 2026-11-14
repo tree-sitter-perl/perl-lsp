@@ -236,8 +236,77 @@ thread_local! {
         const { std::cell::RefCell::new((false, Vec::new())) };
 }
 
-/// `(value, recorded_exit, taint)` — see `QueryState::memo`.
-type MemoEntry = (std::sync::Arc<ReducedValue>, bool, u32);
+/// `(value, effect, taint)` — see `QueryState::memo`.
+type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32);
+
+/// What a subtree's chase leaves for the bake: the ladder rungs it recorded at
+/// its own opaque depth, first occurrence first, and whether anything beneath
+/// it poisoned the chase (an unnameable exit, the depth cap, or a rung
+/// recorded inside a combining frame within it). A function of the subtree's
+/// key alone when its answer is `Taint::CLEAN`, so a memo hit replays it
+/// (`QueryState::replay`) and a chase served from a memo records exactly what
+/// recomputing would.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(super) struct Effect {
+    rungs: Vec<super::ConclusionKey>,
+    poison: bool,
+}
+
+impl Effect {
+    fn is_empty(&self) -> bool {
+        self.rungs.is_empty() && !self.poison
+    }
+}
+
+/// The effect of a frame still open: what has been recorded beneath it so far.
+struct EffectFrame {
+    /// `QueryState::opaque_frames` when the frame entered. A rung recorded
+    /// deeper sits under a combining frame between it and this one.
+    depth: u32,
+    effect: Effect,
+    /// Membership for `effect.rungs` once it outgrows a scan.
+    seen: Option<std::collections::HashSet<super::ConclusionKey>>,
+}
+
+impl EffectFrame {
+    fn new(depth: u32) -> Self {
+        EffectFrame { depth, effect: Effect::default(), seen: None }
+    }
+
+    fn add_rung(&mut self, k: &super::ConclusionKey) {
+        const SCAN: usize = 16;
+        let fresh = match &mut self.seen {
+            Some(seen) => seen.insert(k.clone()),
+            None if self.effect.rungs.len() < SCAN => !self.effect.rungs.contains(k),
+            None => {
+                let mut seen: std::collections::HashSet<_> = self.effect.rungs.iter().cloned().collect();
+                let fresh = seen.insert(k.clone());
+                self.seen = Some(seen);
+                fresh
+            }
+        };
+        if fresh {
+            self.effect.rungs.push(k.clone());
+        }
+    }
+
+    /// Fold in an effect recorded at opaque depth `at` (a closed child frame,
+    /// or a memo hit's replay). Below a combining frame a rung is poison, as a
+    /// rung recorded there directly is.
+    fn absorb(&mut self, at: u32, e: &Effect) {
+        if at > self.depth {
+            if !e.is_empty() {
+                crate::util::ghost_stats::count("residual.under_opaque");
+                self.effect.poison = true;
+            }
+            return;
+        }
+        for k in &e.rungs {
+            self.add_rung(k);
+        }
+        self.effect.poison |= e.poison;
+    }
+}
 
 /// The `QueryState::low_cut` a memoized answer replays when it is reused.
 /// Path positions start at 1, so both tainted marks sit at or above the root.
@@ -272,7 +341,7 @@ struct FoldMemo {
     /// query that can reach an index. `Some`: a pass's, which admits exactly
     /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
     owner: Option<PassOwner>,
-    answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>,
+    answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>)>,
 }
 
 /// What a pass-scoped memo may answer for. Addresses, not ids: the scope
@@ -478,16 +547,12 @@ fn fold_memo_probe(
         }
         memo.answers.get(&fk).cloned()
     });
-    let Some((cached, recorded_exit)) = hit else {
+    let Some((cached, effect)) = hit else {
         return Err(Some(Box::new((stamp, fk))));
     };
     crate::util::ghost_stats::count("fold_memo.hit");
-    // The same laundering guard as the per-query memo.
-    if recorded_exit && state.opaque_frames > 0 {
-        crate::util::ghost_stats::count("residual.memo_under_opaque");
-        state.poisoned = true;
-    }
-    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, Taint::CLEAN));
+    state.replay(&effect);
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), effect, Taint::CLEAN));
     Ok(cached)
 }
 
@@ -513,7 +578,7 @@ fn fold_memo_store(
     fk: Box<(FoldMemoStamp, FoldMemoKey)>,
     q: &ReducerQuery,
     result: &std::sync::Arc<ReducedValue>,
-    recorded_exit: bool,
+    effect: &std::sync::Arc<Effect>,
 ) {
     // A walk out of consult budget answers from what it already had, which
     // no cut records; the budget never comes back within a walk, so "still
@@ -525,7 +590,7 @@ fn fold_memo_store(
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
             crate::util::ghost_stats::count("fold_memo.store");
-            memo.answers.insert(fk, (std::sync::Arc::clone(result), recorded_exit));
+            memo.answers.insert(fk, (std::sync::Arc::clone(result), std::sync::Arc::clone(effect)));
         }
     });
 }
@@ -625,7 +690,7 @@ pub(super) struct QueryState {
     /// already walked this query (`fan_out_node`). The bag-free twins of
     /// `visited` and `memo`.
     fan_outs: std::collections::HashMap<FanOutKey, u32>,
-    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, u32)>,
+    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32)>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -635,10 +700,9 @@ pub(super) struct QueryState {
     // no buckets, so a shallow query that never re-reaches a node (the
     // common hover/completion 1–2-hop case) pays nothing for the memo —
     // the table is lazily allocated on the first insert.
-    /// The flag beside each value is "computing this subtree recorded an exit".
-    /// A memo hit skips the subtree, and with it the `note_exit` calls that
-    /// would have poisoned a re-entry from inside a combining frame — so the
-    /// fact has to be carried on the entry instead of re-derived.
+    /// The effect beside each value is what computing the subtree recorded.
+    /// A memo hit skips the subtree, and with it the `note_exit` calls it
+    /// would have made, so the entry carries them and the hit replays them.
     ///
     /// The taint is the `low_cut` a hit replays (`Taint`): `CLEAN` for a
     /// value no frame above it shaped, which is what a fresh query of the key
@@ -654,20 +718,18 @@ pub(super) struct QueryState {
     /// at or below its own position closed every cycle itself.
     low_cut: u32,
     /// Where a BAKE's chase would have consulted the index, in the order the
-    /// ladder reached them.
+    /// ladder reached them, and whether it is poisoned: one `EffectFrame` per
+    /// open `query_rec` frame, the query's own at the bottom.
     ///
     /// Order is the semantics: Perl's DFS-MRO is an ordered ladder, so the
-    /// residuals of an un-poisoned `None` are first-answer-wins candidates and
+    /// rungs of an un-poisoned `None` are first-answer-wins candidates and
     /// become a `Link`'s `targets` verbatim.
-    pub(super) residual: Vec<super::ConclusionKey>,
-    /// The chase reached a point it cannot represent as a portable key, so no
-    /// `Link` may be minted from it.
     ///
-    /// Poison is one-way and never cleared. A chase that combined frames — an
-    /// arm fold, a `materialize` splice into a populated witness list — has an
-    /// answer that is not "whichever ladder rung answers first", and a `Link`
-    /// can only express the latter.
-    pub(super) poisoned: bool,
+    /// Poison is one-way. The chase reached a point it cannot represent as a
+    /// portable key, or combined frames — an arm fold, a `materialize` splice
+    /// into a populated witness list — so its answer is not "whichever ladder
+    /// rung answers first", and a `Link` can only express the latter.
+    effects: Vec<EffectFrame>,
     /// How many COMBINING frames the chase is currently inside.
     ///
     /// A `Link` says "the answer is the first of these keys that answers". That
@@ -697,9 +759,11 @@ impl QueryState {
         key: FanOutKey,
         walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
     ) -> Option<ReducedValue> {
-        if let Some((v, taint)) = self.fan_out_memo.get(&key) {
+        if let Some((v, effect, taint)) = self.fan_out_memo.get(&key) {
+            let (v, effect) = (std::sync::Arc::clone(v), std::sync::Arc::clone(effect));
             self.low_cut = self.low_cut.min(*taint);
-            return (**v != ReducedValue::None).then(|| (**v).clone());
+            self.replay(&effect);
+            return (*v != ReducedValue::None).then(|| (*v).clone());
         }
         if let Some(&at) = self.fan_outs.get(&key) {
             self.close_cut_at(at);
@@ -708,11 +772,13 @@ impl QueryState {
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let (pos, outer_low) = self.enter_frame();
         self.fan_outs.insert(key.clone(), pos);
+        self.push_effect();
         let v = walk(self);
+        let effect = self.pop_effect();
         self.fan_outs.remove(&key);
         let taint = self.leave_frame(pos, outer_low, truncations_before);
         self.fan_out_memo
-            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), taint));
+            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), effect, taint));
         v
     }
 
@@ -756,8 +822,7 @@ impl QueryState {
             memo: std::collections::HashMap::new(),
             path_len: 1,
             low_cut: Taint::CLEAN,
-            residual: Vec::new(),
-            poisoned: false,
+            effects: vec![EffectFrame::new(0)],
             opaque_frames: 0,
         }
     }
@@ -776,20 +841,46 @@ impl QueryState {
             // the surviving rungs would then describe a ladder the answer never
             // actually took, and a `Link` minted from them answers where the
             // chase does not.
-            Some(_) if self.opaque_frames > 0 => {
-                crate::util::ghost_stats::count("residual.under_opaque");
-                self.poisoned = true;
+            Some(k) => {
+                let at = self.opaque_frames;
+                self.open_effect().absorb(at, &Effect { rungs: vec![k], poison: false });
             }
-            Some(k) => self.residual.push(k),
-            None => self.poisoned = true,
+            None => self.poison(),
         }
     }
 
     /// The chase combined frames rather than taking the first answering rung,
     /// so its result is not expressible as an ordered `Link`.
-    #[allow(dead_code)]
     pub(super) fn poison(&mut self) {
-        self.poisoned = true;
+        self.open_effect().effect.poison = true;
+    }
+
+    fn open_effect(&mut self) -> &mut EffectFrame {
+        self.effects.last_mut().expect("the query's own effect frame is never popped")
+    }
+
+    /// Open the effect of a frame about to compute its subtree.
+    fn push_effect(&mut self) {
+        self.effects.push(EffectFrame::new(self.opaque_frames));
+    }
+
+    /// Close the innermost frame's effect and fold it into its parent.
+    fn pop_effect(&mut self) -> std::sync::Arc<Effect> {
+        let frame = self.effects.pop().expect("push_effect pairs with pop_effect");
+        self.open_effect().absorb(frame.depth, &frame.effect);
+        std::sync::Arc::new(frame.effect)
+    }
+
+    /// Record what a memoized subtree recorded when it was computed.
+    fn replay(&mut self, effect: &Effect) {
+        let at = self.opaque_frames;
+        self.open_effect().absorb(at, effect);
+    }
+
+    /// The whole query's effect: its own frame, with every closed frame folded in.
+    fn into_effect(mut self) -> Effect {
+        debug_assert_eq!(self.effects.len(), 1, "an effect frame left open");
+        std::mem::take(&mut self.effects[0].effect)
     }
 
     /// Run `f` with the chase marked as being inside a combining frame.
@@ -1195,8 +1286,9 @@ impl ReducerRegistry {
         let out = (*self.query_rec(bag, q, &mut state)).clone();
         // Publish for the bake. Cleared-and-set on every query, so a later
         // query can never be minted from an earlier chase's exits.
+        let effect = state.into_effect();
         LAST_RESIDUAL.with(|r| {
-            *r.borrow_mut() = (state.poisoned, std::mem::take(&mut state.residual));
+            *r.borrow_mut() = (effect.poison, effect.rungs);
         });
         if top_moc {
             crate::util::ghost_stats::count(if TOUCHED_EXPR.with(|c| c.get()) {
@@ -1292,7 +1384,7 @@ impl ReducerRegistry {
             // separate, non-poison record of the same event: a LIVE chase that
             // truncates is not wrong, it is incomplete, so comparing a
             // conclusion against it proves nothing either way.
-            state.poisoned = true;
+            state.poison();
             state.low_cut = Taint::TRUNCATED;
             // The LIVE counterpart of the poison above, and it has to be
             // thread-local rather than a `QueryState` field: the cap counts
@@ -1319,17 +1411,13 @@ impl ReducerRegistry {
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
-        if let Some((cached, recorded_exit, taint)) = state.memo.get(&key) {
-            let cached = std::sync::Arc::clone(cached);
+        if let Some((cached, effect, taint)) = state.memo.get(&key) {
+            let (cached, effect) = (std::sync::Arc::clone(cached), std::sync::Arc::clone(effect));
             state.low_cut = state.low_cut.min(*taint);
-            // Re-reaching an exiting subtree from inside a combining frame is
-            // the same claim as reaching it there the first time; the memo must
-            // not launder it into a rung just because the first reach happened
-            // to be transparent.
-            if *recorded_exit && state.opaque_frames > 0 {
-                crate::util::ghost_stats::count("residual.memo_under_opaque");
-                state.poisoned = true;
-            }
+            // Re-reaching a subtree records what reaching it the first time
+            // did, at the depth it is re-reached from: under a combining frame
+            // its rungs poison, however transparent the first reach was.
+            state.replay(&effect);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return cached;
         }
@@ -1348,27 +1436,25 @@ impl ReducerRegistry {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
-        let exits_before = state.residual.len();
-        let poison_before = state.poisoned;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let (pos, outer_low) = state.enter_frame();
         state.visited.insert(key.clone(), pos);
         #[cfg(test)]
         QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
+        state.push_effect();
         let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)));
-        let recorded_exit =
-            state.residual.len() > exits_before || (state.poisoned && !poison_before);
+        let effect = state.pop_effect();
         state.visited.remove(&key);
         let taint = state.leave_frame(pos, outer_low, truncations_before);
         // A cycle closed at this frame or beneath it is part of this key's
         // own answer: a fresh query of the key cuts in the same place.
         if let (Some(fk), Taint::CLEAN) = (fold_key, taint) {
-            fold_memo_store(fk, q, &result, recorded_exit);
+            fold_memo_store(fk, q, &result, &effect);
         }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
-        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, taint));
+        state.memo.insert(key, (std::sync::Arc::clone(&result), effect, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
@@ -2548,7 +2634,7 @@ impl ReducerRegistry {
         // An exit recorded beneath the objects' chase was reached through a
         // combining frame, as it was when each read chased them itself.
         if owners.exits {
-            state.poisoned = true;
+            state.poison();
         }
         owners
             .by_class
@@ -2609,7 +2695,7 @@ impl ReducerRegistry {
             }
         }
         let taint = state.leave_frame(pos, outer_low, truncations_before);
-        index.exits = !state.residual.is_empty() || state.poisoned;
+        index.exits = !state.into_effect().is_empty();
         (std::sync::Arc::new(index), taint == Taint::CLEAN)
     }
 
