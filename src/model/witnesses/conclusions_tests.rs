@@ -759,3 +759,56 @@ fn memo_hits_replay_the_residuals_they_skip() {
     assert_eq!(fresh[2], None, "control: the call frame poisons the rung beneath it");
     assert_eq!(residuals_sharing_memo(&fa, &asks), fresh, "a memo hit changed what the bake records");
 }
+
+/// What `Member{class, name}` returns asked under `receiver`.
+fn returns_under(fa: &FileAnalysis, class: &str, name: &str, receiver: &str) -> ReducedValue {
+    let registry = ReducerRegistry::with_defaults();
+    let ctx = crate::model::witnesses::reducers::BagContext {
+        scopes: &fa.scopes,
+        symbols: fa.symbols(),
+        package_framework: &fa.packages,
+        module_index: None,
+        package_parents: &fa.packages,
+        app_surface_consumers: &fa.plugin.app_surface_consumers,
+        lattice: crate::model::conventions::lattice_for(&fa.language),
+        member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
+    };
+    let att = WitnessAttachment::returns_of(class.to_string(), name.to_string());
+    registry.query(
+        &fa.witnesses,
+        &ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: Some(crate::model::file_analysis::InferredType::ClassName(receiver.to_string())),
+            args: Vec::new(),
+            context: Some(&ctx),
+        },
+    )
+}
+
+/// An answer that never read its receiver is filed for every receiver; one
+/// that did stays that receiver's. Asked in both orders, so whichever
+/// receiver computes first, the other gets its own answer.
+///
+/// Base-verify by dropping the `note_receiver_read()` in `eval_return_expr`'s
+/// `Receiver` arm: the inherited constructor answers the first receiver's
+/// class for every later one.
+#[test]
+fn a_memo_answer_is_shared_across_receivers_only_when_it_never_read_one() {
+    let fa = analyze(
+        "package Base;\nsub new { my $class = shift; return bless {}, $class }\nsub conn { return My::Conn->new }\n\
+         package P1;\nour @ISA = ('Base');\npackage P2;\nour @ISA = ('Base');\n1;\n",
+    );
+    let class = |c: &str| ReducedValue::Type(crate::model::file_analysis::InferredType::ClassName(c.into()));
+    assert_eq!(returns_under(&fa, "P1", "new", "P1"), class("P1"), "control: the inherited constructor answers its receiver");
+    let conn = returns_under(&fa, "Base", "conn", "Base");
+    for order in [["P1", "P2"], ["P2", "P1"]] {
+        let _scope = crate::model::witnesses::FoldMemoScope::enter();
+        for r in order {
+            assert_eq!(returns_under(&fa, r, "new", r), class(r), "a shared answer leaked across receivers ({order:?})");
+            assert_eq!(returns_under(&fa, r, "conn", r), conn);
+        }
+    }
+}
