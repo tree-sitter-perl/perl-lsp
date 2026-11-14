@@ -368,10 +368,27 @@ fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact
         "equality_expression" => recognize_ref_eq_guard(builder, cond, source),
         "func1op_call_expression" => recognize_defined_guard(builder, cond, source),
         "ambiguous_function_call_expression" | "function_call_expression" => {
-            recognize_blessed_guard(builder, cond)
+            recognize_blessed_guard(builder, cond).or_else(|| recognize_type_check(builder, cond).map(|(f, _)| f))
         }
         _ => None,
     }
+}
+
+/// `is_ArrayRef($x)` / `assert_Str($x)` — a plugin-declared type check →
+/// narrow `$x` to what a passing check proves. The second answer says
+/// whether the call dies when the check fails.
+fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(GuardFact<'a>, bool)> {
+    let at = call.start_position();
+    let (check, arg) = crate::cst::subject_call(call, builder.source, |name| builder.type_check_fn(name, at))?;
+    Some((
+        GuardFact {
+            subject: builder.narrow_subject_of(arg)?,
+            op: NarrowOp::To(check.proves.clone()),
+            asserts_when_true: true,
+            read: arg,
+        },
+        check.asserts,
+    ))
 }
 
 /// `defined $x` / `defined($x)` → strip `Optional` off the subject.
@@ -784,6 +801,20 @@ impl<'a> Builder<'a> {
         }
         if self.narrow_block_remainder(expr, left, holds_when_true) {
             self.record_guard_sites(left);
+        }
+    }
+
+    /// `assert_X($x);` — a statement that dies unless its check passes is
+    /// `die unless is_X($x)`: the rest of the block runs where it held.
+    pub(super) fn narrow_assertion(&mut self, call: Node<'a>) {
+        if self.syntax.parent(call).is_none_or(|p| p.kind() != "expression_statement") {
+            return;
+        }
+        if !recognize_type_check(self, call).is_some_and(|(_, asserts)| asserts) {
+            return;
+        }
+        if self.narrow_block_remainder(call, call, true) {
+            self.record_guard_sites(call);
         }
     }
 

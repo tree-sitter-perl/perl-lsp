@@ -122,22 +122,37 @@ impl<'a> Builder<'a> {
     /// or a plugin-declared `ref_tag_functions()` entry this file imported
     /// (by its local name) or names fully qualified.
     pub(super) fn ref_tag_fn(&self, name: &str, at: Point) -> Option<crate::model::file_analysis::RefTagFn> {
-        use crate::model::conventions::{is_ref_builtin, split_qualified, PERL_SPELLINGS};
+        use crate::model::conventions::is_ref_builtin;
         use crate::model::file_analysis::RefTagFn;
         if is_ref_builtin(name) {
             return Some(RefTagFn::Ref);
         }
-        let (module, leaf) = split_qualified(name, &PERL_SPELLINGS);
-        self.ref_tag_functions.iter().find_map(|f| {
-            let hit = match module {
-                Some(m) => m == f.module && leaf == f.name,
-                None => self
-                    .imports
-                    .binding(self.import_scope_at(at), name)
-                    .is_some_and(|(i, sym)| i.module_name == f.module && sym.remote() == f.name),
-            };
-            hit.then_some(f.tag)
-        })
+        let (module, remote) = self.library_callee(name, at)?;
+        self.ref_tag_functions
+            .iter()
+            .find(|f| f.module == module && f.name == remote)
+            .map(|f| f.tag)
+    }
+
+    /// The plugin-declared type check a call spelled `name` at `at` reaches.
+    pub(super) fn type_check_fn(&self, name: &str, at: Point) -> Option<&plugin::TypeCheck> {
+        let (module, remote) = self.library_callee(name, at)?;
+        self.plugins.type_checks().iter().find(|f| f.module == module && f.name == remote)
+    }
+
+    /// The library function a call spelled `name` at `at` names, as
+    /// `(module, name in that module)`: the qualifier of a fully qualified
+    /// spelling, else the import binding in scope here. A sub of the file's
+    /// own is no library function, so it names none.
+    fn library_callee<'s>(&'s self, name: &'s str, at: Point) -> Option<(&'s str, &'s str)> {
+        use crate::model::conventions::{split_qualified, PERL_SPELLINGS};
+        match split_qualified(name, &PERL_SPELLINGS) {
+            (Some(module), leaf) => Some((module, leaf)),
+            (None, _) => self
+                .imports
+                .binding(self.import_scope_at(at), name)
+                .map(|(i, sym)| (i.module_name(), sym.remote())),
+        }
     }
 
     /// [`crate::cst::ref_tag_call`] with this file's ref-tag functions.

@@ -1399,3 +1399,86 @@ fn a_low_precedence_not_and_and_narrow_like_their_symbols() {
     assert_eq!(at(4, 33), foo, "an `and` condition");
     assert_eq!(at(6, 4), foo, "`return if not` narrows the remainder");
 }
+
+// ── Type::Tiny check functions (frameworks/type-tiny.rhai `type_check_functions`) ──
+
+#[test]
+fn type_check_function_narrows_its_arm() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_ArrayRef);\nsub f {\n    my ($x) = @_;\n    if (is_ArrayRef($x)) {\n        my $v = $x;\n    }\n    my $w = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(7, 13)), None, "the arm's narrowing stays in the arm");
+}
+
+#[test]
+fn type_check_function_composes_with_exits() {
+    // `unless`, `die unless`, `or die` and the bare paren-less call all come
+    // from the guard machinery the atom plugs into.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard -all;\nsub f {\n    my ($x, $y) = @_;\n    return unless is_HashRef($x);\n    is_Str($y) or die;\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 13)), Some(InferredType::HashRef));
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(6, 13)), Some(InferredType::String));
+}
+
+#[test]
+fn bool_check_leaves_undef_possible() {
+    // Type::Tiny's Bool passes undef, so a passed check proves no definedness.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_Bool);\nsub f {\n    my ($x) = @_;\n    if (is_Bool($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    let t = fa.inferred_type_via_bag("$x", Point::new(5, 16));
+    assert!(t.as_ref().is_some_and(|t| t.may_be_undef()), "{t:?}");
+}
+
+#[test]
+fn assert_function_narrows_the_rest_of_the_block() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(assert_Int assert_ArrayRef);\nsub f {\n    my ($x, $y) = @_;\n    assert_Int($x);\n    assert_ArrayRef $y;\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 13)), Some(InferredType::Numeric));
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(6, 13)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 4)), None, "nothing before the assert");
+}
+
+#[test]
+fn assert_under_a_modifier_narrows_nothing_after_it() {
+    // `assert_Int($x) if $c` dies only where `$c` held: the rest of the
+    // block is not where the check passed.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(assert_Int);\nsub f {\n    my ($x, $c) = @_;\n    assert_Int($x) if $c;\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 13)), None);
+}
+
+#[test]
+fn check_function_needs_the_import() {
+    // A file's own `is_ArrayRef` is just a sub; a qualified call reaches the
+    // library's without an import.
+    let fa = build_fa(
+        "package P;\nsub is_ArrayRef { 1 }\nsub f {\n    my ($x) = @_;\n    if (is_ArrayRef($x)) {\n        my $v = $x;\n    }\n    if (Types::Standard::is_HashRef($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None);
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(8, 16)), Some(InferredType::HashRef));
+}
+
+#[test]
+fn check_without_an_expressible_constraint_narrows_nothing() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_Object);\nsub f {\n    my ($x) = @_;\n    if (is_Object($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None);
+}
+
+#[test]
+fn check_function_from_types_common() {
+    let fa = build_fa(
+        "package P;\nuse Types::Common qw(is_CodeRef);\nsub f {\n    my ($x) = @_;\n    if (is_CodeRef($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    assert!(
+        matches!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), Some(InferredType::CodeRef { .. })),
+        "{:?}",
+        fa.inferred_type_via_bag("$x", Point::new(5, 16))
+    );
+}

@@ -180,6 +180,12 @@ impl<'a> ScopedImport<'a> {
     pub fn explicit_symbols(&self) -> &'a [ImportedSymbol] {
         &self.0.imported_symbols
     }
+
+    /// The module the statement imports from, borrowed for the table's
+    /// lifetime rather than this view's.
+    pub fn module_name(&self) -> &'a str {
+        &self.0.module_name
+    }
 }
 
 /// A keyword a framework installs into a package at its `use` (`has`,

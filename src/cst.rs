@@ -1444,16 +1444,14 @@ pub(crate) enum ArmBound {
 }
 
 /// A call on a variable or place whose callee `tag_of` names as reporting
-/// what a reference is: which function, and the operand. A call or deref
-/// operand (`ref(f($x))`) names nothing a guard could narrow.
+/// what a reference is: which function, and the operand.
 pub(crate) fn ref_tag_call<'a>(
     node: Node<'a>,
     src: &[u8],
     tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
 ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
     let (via, operand) = ref_tag_operand(node, src, tag_of)?;
-    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
-        .then_some((via, operand))
+    is_subject(operand).then_some((via, operand))
 }
 
 /// [`ref_tag_call`] for any one-term operand (`ref shift`, `ref $x->m`).
@@ -1465,16 +1463,8 @@ pub(crate) fn ref_tag_operand<'a>(
     src: &[u8],
     tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
 ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
-    let (name, operand) = match node.kind() {
-        "func1op_call_expression" => {
-            (node.child(0)?.utf8_text(src).ok()?, node.named().find(|c| c.kind() != "comment")?)
-        }
-        "function_call_expression" | "ambiguous_function_call_expression" => {
-            (node.field_text("function", src)?, node.child_by_field_name("arguments")?)
-        }
-        _ => return None,
-    };
-    let operand = peel_groups(operand);
+    let (name, operand) = one_operand_call(node)?;
+    let name = name.utf8_text(src).ok()?;
     matches!(
         operand.kind(),
         "scalar"
@@ -1486,6 +1476,40 @@ pub(crate) fn ref_tag_operand<'a>(
             | "method_call_expression"
     )
     .then_some((tag_of(name)?, operand))
+}
+
+/// A one-operand call on a variable or place (`f($x)`, `f $self->{k}`,
+/// `defined $x`) whose callee name `callee` recognises: its answer, and the
+/// operand. A call or deref operand (`ref(f($x))`) names nothing a guard
+/// could narrow.
+pub(crate) fn subject_call<'a, T>(
+    node: Node<'a>,
+    src: &[u8],
+    callee: impl FnOnce(&str) -> Option<T>,
+) -> Option<(T, Node<'a>)> {
+    let (name, operand) = one_operand_call(node)?;
+    if !is_subject(operand) {
+        return None;
+    }
+    Some((callee(name.utf8_text(src).ok()?)?, operand))
+}
+
+/// A variable or a place in one, the operand a guard can narrow.
+fn is_subject(operand: Node<'_>) -> bool {
+    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
+}
+
+/// A named call with one operand, parens or not: its callee's name node and
+/// the operand, groups peeled.
+fn one_operand_call(node: Node<'_>) -> Option<(Node<'_>, Node<'_>)> {
+    let (name, operand) = match node.kind() {
+        "func1op_call_expression" => (node.child(0)?, node.named().find(|c| c.kind() != "comment")?),
+        "function_call_expression" | "ambiguous_function_call_expression" => {
+            (node.child_by_field_name("function")?, node.child_by_field_name("arguments")?)
+        }
+        _ => return None,
+    };
+    Some((name, peel_groups(operand)))
 }
 
 /// The arm of a conditionally-run construct, between `node` and `bound`,

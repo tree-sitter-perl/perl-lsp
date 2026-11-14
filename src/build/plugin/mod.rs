@@ -985,6 +985,33 @@ pub struct RefTagFunction {
     pub tag: crate::model::file_analysis::RefTagFn,
 }
 
+/// A library function that checks its argument against a type constraint
+/// (Types::Standard's `is_ArrayRef` / `assert_Str`): a call to it guards the
+/// operand as `constraint`'s inner type, folded through
+/// `type_constraint_inner`. An `asserts` function dies when the check fails,
+/// so the statement it heads also guards what follows it. Fires only where
+/// the file imported the name from `module` or called it fully qualified,
+/// like [`RefTagFunction`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TypeCheckFunction {
+    pub module: String,
+    pub name: String,
+    pub constraint: String,
+    #[serde(default)]
+    pub asserts: bool,
+}
+
+/// A [`TypeCheckFunction`] with its constraint folded to the type a passing
+/// check proves. Folding calls into the plugin, so the registry does it once
+/// ([`PluginRegistry::type_checks`]), never per file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeCheck {
+    pub module: String,
+    pub name: String,
+    pub proves: crate::model::file_analysis::InferredType,
+    pub asserts: bool,
+}
+
 /// A plugin-asserted return type for a known sub/method. Plugins ship
 /// these as a static manifest (`overrides()` on the trait, `fn
 /// overrides()` at the top of a `.rhai` script) for cases where
@@ -1263,6 +1290,12 @@ pub trait FrameworkPlugin: Send + Sync {
     /// Library functions whose result names what a reference is — see
     /// [`RefTagFunction`]. Default empty.
     fn ref_tag_functions(&self) -> &[RefTagFunction] {
+        &[]
+    }
+
+    /// Library functions that check a value against a type constraint —
+    /// see [`TypeCheckFunction`]. Default empty.
+    fn type_check_functions(&self) -> &[TypeCheckFunction] {
         &[]
     }
 
@@ -1559,6 +1592,9 @@ pub struct PluginRegistry {
     /// Whether the background compile has been kicked off. Separate from the
     /// `OnceLock` because the lock is only *set* when the compile finishes.
     combined_walk_started: std::sync::atomic::AtomicBool,
+    /// The type-check functions, folded on first ask. Reset by `register`,
+    /// the registry's only mutation.
+    type_checks: std::sync::OnceLock<Vec<TypeCheck>>,
     /// Plugins found on disk that did not load, one line each (path and
     /// reason). Kept with the registry so the server can show them: a
     /// refused plugin otherwise only reaches the log.
@@ -1608,6 +1644,7 @@ impl PluginRegistry {
 
     pub fn register(&mut self, plugin: Box<dyn FrameworkPlugin>) {
         self.plugins.push(plugin);
+        self.type_checks = std::sync::OnceLock::new();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1762,6 +1799,23 @@ impl PluginRegistry {
     /// Union of ref-tag functions across the registry.
     pub fn ref_tag_functions<'a>(&'a self) -> impl Iterator<Item = &'a RefTagFunction> + 'a {
         self.plugins.iter().flat_map(|p| p.ref_tag_functions().iter())
+    }
+
+    /// Every type-check function whose constraint folds to a type, across
+    /// the registry: the constraint goes through `type_constraint_inner` with
+    /// no params, the same fold `isa => Int` takes, and a check whose
+    /// constraint has no inner (`is_Object`) proves nothing.
+    pub fn type_checks(&self) -> &[TypeCheck] {
+        self.type_checks.get_or_init(|| {
+            self.plugins
+                .iter()
+                .flat_map(|p| p.type_check_functions().iter())
+                .filter_map(|f| {
+                    let proves = self.type_constraint_inner(&f.constraint, &[])?.constrained_inner()?.clone();
+                    Some(TypeCheck { module: f.module.clone(), name: f.name.clone(), proves, asserts: f.asserts })
+                })
+                .collect()
+        })
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose
