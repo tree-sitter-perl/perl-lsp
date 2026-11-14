@@ -572,7 +572,7 @@ fn fold_memo_probe(
         return Err(Some(Box::new((stamp, fk))));
     };
     crate::util::ghost_stats::count("fold_memo.hit");
-    state.replay(&effect, Some(receiver_hash(&key.2)));
+    state.replay_hit(&effect, Taint::CLEAN, Some(receiver_hash(&key.2)));
     state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), effect, Taint::CLEAN));
     Ok(cached)
 }
@@ -836,26 +836,49 @@ impl QueryState {
         walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
     ) -> Option<ReducedValue> {
         if let Some((v, effect, taint)) = self.fan_out_memo.get(&key) {
-            let (v, effect) = (std::sync::Arc::clone(v), std::sync::Arc::clone(effect));
-            self.low_cut = self.low_cut.min(*taint);
-            self.replay(&effect, None);
+            let (v, effect, taint) = (std::sync::Arc::clone(v), std::sync::Arc::clone(effect), *taint);
+            self.replay_hit(&effect, taint, None);
             return (*v != ReducedValue::None).then(|| (*v).clone());
         }
-        if let Some(&at) = self.fan_outs.get(&key) {
+        let (v, effect, taint) = self.frame(|s| &mut s.fan_outs, &key, None, |s, _| walk(s))?;
+        self.fan_out_memo
+            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), effect, taint));
+        v
+    }
+
+    /// Compute the subtree of the frame `key` names, or close a cut at it when
+    /// it is already on the path (`None`). `path` is the frame family's
+    /// on-path table; `receiver` is the frame's own (`push_effect`). Returns
+    /// the answer, the subtree's effect and the taint the answer carries.
+    fn frame<K: std::hash::Hash + Eq + Clone, T>(
+        &mut self,
+        path: fn(&mut Self) -> &mut std::collections::HashMap<K, u32>,
+        key: &K,
+        receiver: Option<u64>,
+        body: impl FnOnce(&mut Self, u32) -> T,
+    ) -> Option<(T, std::sync::Arc<Effect>, u32)> {
+        if let Some(&at) = path(self).get(key) {
             self.close_cut_at(at);
             return None;
         }
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let (pos, outer_low) = self.enter_frame();
-        self.fan_outs.insert(key.clone(), pos);
-        self.push_effect(None);
-        let v = walk(self);
+        path(self).insert(key.clone(), pos);
+        self.push_effect(receiver);
+        let v = body(self, pos);
         let effect = self.pop_effect();
-        self.fan_outs.remove(&key);
+        path(self).remove(key);
         let taint = self.leave_frame(pos, outer_low, truncations_before);
-        self.fan_out_memo
-            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), effect, taint));
-        v
+        Some((v, effect, taint))
+    }
+
+    /// A memoized subtree reached again: its taint joins the open mark, and
+    /// its effect is recorded at the depth it is re-reached from — under a
+    /// combining frame its rungs poison, however transparent the first reach
+    /// was.
+    fn replay_hit(&mut self, effect: &Effect, taint: u32, receiver: Option<u64>) {
+        self.low_cut = self.low_cut.min(taint);
+        self.replay(effect, receiver);
     }
 
     /// A cycle guard returned for the frame at path position `at`.
@@ -1522,12 +1545,8 @@ impl ReducerRegistry {
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
         if let Some((cached, effect, taint)) = state.memo.get(&key) {
-            let (cached, effect) = (std::sync::Arc::clone(cached), std::sync::Arc::clone(effect));
-            state.low_cut = state.low_cut.min(*taint);
-            // Re-reaching a subtree records what reaching it the first time
-            // did, at the depth it is re-reached from: under a combining frame
-            // its rungs poison, however transparent the first reach was.
-            state.replay(&effect, Some(receiver_hash(&key.2)));
+            let (cached, effect, taint) = (std::sync::Arc::clone(cached), std::sync::Arc::clone(effect), *taint);
+            state.replay_hit(&effect, taint, Some(receiver_hash(&key.2)));
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return cached;
         }
@@ -1538,24 +1557,16 @@ impl ReducerRegistry {
             }
             Err(fold_key) => fold_key,
         };
-        // `key` has two owners (the visited set, transiently; the memo,
-        // for the rest of the query). Clone once for visited, then move
-        // the original into the memo store below.
-        if let Some(&at) = state.visited.get(&key) {
-            state.close_cut_at(at);
+        let Some((result, effect, taint)) =
+            state.frame(|s| &mut s.visited, &key, Some(receiver_hash(&key.2)), |state, pos| {
+                #[cfg(test)]
+                QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
+                std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)))
+            })
+        else {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
-        }
-        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let (pos, outer_low) = state.enter_frame();
-        state.visited.insert(key.clone(), pos);
-        #[cfg(test)]
-        QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
-        state.push_effect(Some(receiver_hash(&key.2)));
-        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)));
-        let effect = state.pop_effect();
-        state.visited.remove(&key);
-        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        };
         // A cycle closed at this frame or beneath it is part of this key's
         // own answer: a fresh query of the key cuts in the same place.
         if let (Some(fk), Taint::CLEAN) = (fold_key, taint) {
