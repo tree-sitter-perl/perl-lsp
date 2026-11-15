@@ -136,42 +136,86 @@ pub(super) fn control_view_with_leaves<'t>(
     source: &[u8],
     exits: impl Fn(Node<'t>) -> bool,
 ) -> ControlView {
-    use crate::cst::NodeExt;
-    use tree_sitter::StreamingIterator;
-    let (query, caps) = ctl_query();
-    let mut cursor = tree_sitter::QueryCursor::new();
-    cursor.set_max_start_depth(Some(0));
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut work: Vec<Node<'t>> = nodes.into_iter().collect();
-    while let Some(node) = work.pop() {
-        if !seen.insert(node.id()) {
-            continue;
-        }
-        if exits(node) {
-            out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node), "")]);
-        }
-        let mut it = cursor.matches(query, node, source);
-        while let Some(m) = it.next() {
-            for c in m.captures.iter() {
-                if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep) {
-                    continue;
-                }
-                if c.node.kind() == "block" {
-                    for stmt in c.node.elements() {
-                        work.push(stmt);
-                        if stmt.kind() == "expression_statement" {
-                            work.extend(crate::cst::nth_element(stmt, 0));
-                        }
-                    }
-                } else {
-                    work.push(c.node);
-                }
+    let mut walk = ViewWalk::default();
+    walk.walk(nodes, source, &exits, &|_| false);
+    walk.finish()
+}
+
+/// A control view gathered over several walks: the statements around the
+/// writes and tests a file joins, then the bodies of the callables their
+/// gates call, each walk adding what it finds.
+#[derive(Default)]
+pub(super) struct ViewWalk<'s> {
+    out: Vec<Vec<(CtlCap, usize, Span, &'s str)>>,
+    seen: std::collections::HashSet<usize>,
+    gates: Vec<Span>,
+}
+
+impl<'s> ViewWalk<'s> {
+    /// Walks `nodes` as [`control_view_with_leaves`] does. A statement
+    /// `gate` names is a call control comes back from only if its callee
+    /// does ([`ControlView::gates`]); it is returned, and is no leave
+    /// whatever `exits` says.
+    pub(super) fn walk<'t>(
+        &mut self,
+        nodes: impl IntoIterator<Item = Node<'t>>,
+        source: &'s [u8],
+        exits: &dyn Fn(Node<'t>) -> bool,
+        gate: &dyn Fn(Node<'t>) -> bool,
+    ) -> Vec<Node<'t>> {
+        use tree_sitter::StreamingIterator;
+        let (query, caps) = ctl_query();
+        let mut cursor = tree_sitter::QueryCursor::new();
+        cursor.set_max_start_depth(Some(0));
+        let mut gates = Vec::new();
+        let mut work: Vec<Node<'t>> = nodes.into_iter().collect();
+        while let Some(node) = work.pop() {
+            if !self.seen.insert(node.id()) {
+                continue;
             }
-            out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node)), source));
+            if gate(node) {
+                self.gates.push(super::node_to_span(node));
+                gates.push(node);
+            } else if exits(node) {
+                self.out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node), "")]);
+            }
+            let mut it = cursor.matches(query, node, source);
+            while let Some(m) = it.next() {
+                for c in m.captures.iter() {
+                    if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep) {
+                        continue;
+                    }
+                    if c.node.kind() == "block" {
+                        work.extend(statements_of(c.node));
+                    } else {
+                        work.push(c.node);
+                    }
+                }
+                self.out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node)), source));
+            }
+        }
+        gates
+    }
+
+    pub(super) fn finish(self) -> ControlView {
+        let mut view = control_view(self.out);
+        view.gates = self.gates;
+        view
+    }
+}
+
+/// The statements a block runs, each with the expression it holds: where a
+/// construct, a leave or a gate can sit with no arm between it and the block.
+pub(super) fn statements_of(block: Node<'_>) -> Vec<Node<'_>> {
+    use crate::cst::NodeExt;
+    let mut out = Vec::new();
+    for stmt in block.elements() {
+        out.push(stmt);
+        if stmt.kind() == "expression_statement" {
+            out.extend(crate::cst::nth_element(stmt, 0));
         }
     }
-    control_view(out)
+    out
 }
 
 fn leave_kind(c: CtlCap) -> Option<LeaveKind> {

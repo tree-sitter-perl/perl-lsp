@@ -1830,7 +1830,7 @@ impl<'a> Builder<'a> {
 /// the declaring package — with `main` (and its bare `::foo` shorthand)
 /// covering subs in a file that declares no package at all. Nothing here knows
 /// about `CORE`: it names no package this file declares, so it falls out.
-fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>) -> bool {
+pub(super) fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>) -> bool {
     let Some(qualifier) = qualifier else {
         return true;
     };

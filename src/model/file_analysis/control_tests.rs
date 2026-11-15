@@ -30,10 +30,11 @@ fn an_arm_holding_a_leave_is_no_arm_of_the_join() {
         constructs: vec![branch(sp((0, 0), (0, 30)), sp((0, 4), (0, 5)), &[(then, true), (els, false)])],
         labels: Vec::new(),
         leaves: vec![Leave { span: sp((0, 10), (0, 16)), kind: LeaveKind::Return, target: LeaveTarget::Nearest }],
+        gates: Vec::new(),
     };
     let plan = JoinPlan::new(&view);
     assert!(plan.drops_a_path(&view.constructs[0]));
-    assert_eq!(after(&plan, &view.constructs[0]), vec![JoinArm { at: els.end, arm: Some(els), untaken: None }]);
+    assert_eq!(after(&plan, &view.constructs[0]), vec![JoinArm { at: els.end, arm: Some(els), untaken: None, gates: Vec::new() }]);
 }
 
 /// A leave under a nested branch's arm leaves that arm, not the outer one,
@@ -50,6 +51,7 @@ fn a_nested_branch_leaves_its_arm_only_when_every_way_leaves() {
         ],
         leaves,
         labels: Vec::new(),
+        gates: Vec::new(),
     };
     let one = mk(vec![Leave { span: sp((0, 22), (0, 28)), kind: LeaveKind::Return, target: LeaveTarget::Nearest }]);
     let plan = JoinPlan::new(&one);
@@ -86,6 +88,7 @@ fn a_jump_leaves_the_construct_it_can_leave() {
         constructs: vec![lp, switch],
         leaves: vec![jump(20, LeaveKind::Break), jump(30, LeaveKind::Continue), jump(50, LeaveKind::Break)],
         labels: Vec::new(),
+        gates: Vec::new(),
     };
     let plan = JoinPlan::new(&view);
     let c = &view.constructs[0];
@@ -104,6 +107,7 @@ fn a_named_or_counted_jump_leaves_the_loop_it_names() {
         constructs: vec![outer, inner],
         leaves: vec![jump(40, LeaveTarget::Label(0)), jump(60, LeaveTarget::Levels(2)), jump(70, LeaveTarget::Label(1))],
         labels: vec!["OUTER".into(), "NONE".into()],
+        gates: Vec::new(),
     };
     let plan = JoinPlan::new(&view);
     let exits = joined(&plan, &view.constructs[0], JoinRole::Exit);

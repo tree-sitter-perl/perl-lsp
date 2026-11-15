@@ -87,6 +87,10 @@ pub struct ControlView {
     pub leaves: Vec<Leave>,
     /// The names constructs carry and jumps aim at, each once.
     pub labels: Vec<String>,
+    /// Statement-position calls whose callee may not come back: control
+    /// reaches what follows one only if the call returns, which the effect
+    /// lane decides at query time (`docs/adr/cfg-tier.md` §Effects).
+    pub gates: Vec<Span>,
 }
 
 impl ControlView {
@@ -176,7 +180,7 @@ fn before(p: Point) -> Point {
 
 /// The place as it stands at `at`, on a path no test decides.
 fn read(at: Point) -> JoinArm {
-    JoinArm { at, arm: None, untaken: None }
+    JoinArm { at, arm: None, untaken: None, gates: Vec::new() }
 }
 
 /// A loop's arms, by index into its construct's, and where its head lands.
@@ -209,12 +213,15 @@ pub struct BranchJoin {
 /// One path into a join: the place as it stands at `at`, or, where no arm
 /// runs because a test went one way (`untaken`), what that test proves of
 /// the place, when it proves anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinArm {
     pub at: Point,
     /// The arm whose end this is, on a path an arm runs.
     pub arm: Option<Span>,
     pub untaken: Option<Untaken>,
+    /// The calls on the path that control must come back from to reach
+    /// `at` ([`ControlView::gates`]).
+    pub gates: Vec<Span>,
 }
 
 /// The path through a construct on which no arm runs: the construct, and
@@ -235,6 +242,8 @@ pub struct JoinPlan<'v> {
     around: Vec<Option<usize>>,
     /// Per arm in `arms`: control never comes out of its end.
     leaves: Vec<bool>,
+    /// Per arm in `arms`: the gates it holds with no arm between them.
+    gates: Vec<Vec<Span>>,
     /// Each construct's index, by its address.
     index: HashMap<*const Construct, usize>,
     /// Constructs by their span.
@@ -295,8 +304,15 @@ impl<'v> JoinPlan<'v> {
             at_span.entry(c.span).or_default().push(i);
         }
         let aims = aims(view);
-        let mut plan = JoinPlan { view, leaves: vec![false; arms.len()], arms, around, index, at_span, ends, arm_spans, aims };
+        let n = arms.len();
+        let mut plan = JoinPlan { view, leaves: vec![false; n], gates: vec![Vec::new(); n], arms, around, index, at_span, ends, arm_spans, aims };
         plan.mark_leaving();
+        for &g in &view.gates {
+            let held = plan.holding_ix(g.start).find(|&i| contains(plan.arm_span(i), g));
+            if let Some(i) = held {
+                plan.gates[i].push(g);
+            }
+        }
         plan
     }
 
@@ -384,14 +400,58 @@ impl<'v> JoinPlan<'v> {
     }
 
     /// Whether some path through `c` (or a branch closing one of its arms)
-    /// is one control never comes out of.
+    /// is one control never comes out of, or may not be: past a gate.
     pub fn drops_a_path(&self, c: &'v Construct) -> bool {
         let mut reached = vec![c];
         self.arm_points(c, &mut Vec::new(), &mut reached);
         reached.iter().any(|k| {
             let ix = self.index[&(*k as *const Construct)];
-            (0..k.arms.len()).any(|a| self.leaves[self.arm_ix(ix, a)])
+            (0..k.arms.len()).any(|a| {
+                let i = self.arm_ix(ix, a);
+                self.leaves[i] || !self.gates[i].is_empty()
+            })
         })
+    }
+
+    /// How a call to the callable whose body is `body` can end, as its
+    /// statements say: each leave in it, and its end where control comes out
+    /// there, each with the calls on its path ([`JoinArm::gates`]). A jump
+    /// out of the body to nothing the view models comes back to the caller.
+    pub fn body_ends(&self, body: Span) -> Vec<(crate::model::witnesses::Ends, Point, Vec<Span>)> {
+        use crate::model::witnesses::Ends;
+        let direct = |s: Span| {
+            contains(body, s) && !self.holding_ix(s.start).any(|i| contains(self.arm_span(i), s) && contains(body, self.arm_span(i)))
+        };
+        let mut out = Vec::new();
+        let mut cut = false;
+        for (l, aim) in self.view.leaves.iter().zip(&self.aims) {
+            if !contains(body, l.span) {
+                continue;
+            }
+            let ends = match (l.kind, aim) {
+                (LeaveKind::Throw, _) => Ends::UNWINDS,
+                (LeaveKind::Exit, _) => Ends::EXITS,
+                (LeaveKind::Return, _) | (_, Aim::Out) => Ends::COMPLETES,
+                _ => continue,
+            };
+            cut |= direct(l.span);
+            out.push((ends, l.span.start, Vec::new()));
+        }
+        // A branch with both ways covered whose every arm leaves, sitting in
+        // the body itself, leaves too.
+        cut |= self.view.constructs.iter().enumerate().any(|(k, c)| {
+            let has = |b: bool| c.arms.iter().any(|a| a.role == ArmRole::When(b));
+            c.kind == ControlKind::Branch
+                && has(true)
+                && has(false)
+                && direct(c.span)
+                && (0..c.arms.len()).all(|a| self.leaves[self.arm_ix(k, a)])
+        });
+        if !cut {
+            let gates = self.view.gates.iter().copied().filter(|&g| direct(g)).collect();
+            out.push((Ends::COMPLETES, body.end, gates));
+        }
+        out
     }
 
     /// The construct `c` joins with: the one it is wholly an arm of (an
@@ -454,7 +514,7 @@ impl<'v> JoinPlan<'v> {
             lands.dedup();
             // Unbound on entry, an arm's read never comes from the entry.
             if !lands.is_empty() && bound(&entry) {
-                out.push(BranchJoin { role: JoinRole::ArmStart, of: k.span, lands, arms: vec![JoinArm { at: entry, arm: None, untaken: None }] });
+                out.push(BranchJoin { role: JoinRole::ArmStart, of: k.span, lands, arms: vec![read(entry)] });
             }
         }
         out
@@ -636,6 +696,9 @@ impl<'v> JoinPlan<'v> {
             let (after, _) = self.after_join(k, bound_from);
             let proved = |a: &JoinArm| match (a.untaken, a.arm) {
                 (Some(u), _) => untaken_proved(u.of) || narrowed(u.of),
+                // A path past a gate speaks for nothing when control comes
+                // back: the join then answers nothing (`guard_region_witnesses`).
+                _ if !a.gates.is_empty() => true,
                 (None, Some(arm)) => narrowed(arm) || out.iter().any(|(inner, _)| contains(arm, inner.span)),
                 (None, None) => false,
             };
@@ -659,7 +722,7 @@ impl<'v> JoinPlan<'v> {
         let has = |b: bool| c.arms.iter().any(|a: &Arm| a.role == ArmRole::When(b));
         if !(has(true) && has(false)) && !c.arms.is_empty() {
             let tested = c.cond.map_or(entry_point(c), |cond| cond.end);
-            out.push(JoinArm { at: entry_point(c), arm: None, untaken: Some(Untaken { of: c.span, tested }) });
+            out.push(JoinArm { at: entry_point(c), arm: None, untaken: Some(Untaken { of: c.span, tested }), gates: Vec::new() });
         }
     }
 
@@ -669,6 +732,8 @@ impl<'v> JoinPlan<'v> {
     fn arm_end(&self, c: &'v Construct, ai: usize, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>) {
         let a = &c.arms[ai];
         let k = self.index[&(c as *const Construct)];
+        let ix = self.arm_ix(k, ai);
+        let from = out.len();
         match self.closing(c, a).filter(|k| reached.len() < 64 && !reached.iter().any(|r| std::ptr::eq(*r, *k))) {
             Some(inner) if inner.kind == ControlKind::Branch => {
                 reached.push(inner);
@@ -676,8 +741,12 @@ impl<'v> JoinPlan<'v> {
             }
             // Its paths out are paths through `a`, so what holds over `a` holds there.
             Some(inner) => out.extend(self.exit_points(inner).into_iter().map(|p| JoinArm { arm: Some(a.span), ..p })),
-            None if self.leaves[self.arm_ix(k, ai)] => {}
-            None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None }),
+            None if self.leaves[ix] => {}
+            None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None, gates: Vec::new() }),
+        }
+        // Every path out of the arm runs past the calls the arm itself makes.
+        for p in &mut out[from..] {
+            p.gates.extend(self.gates[ix].iter().copied());
         }
     }
 
@@ -760,12 +829,30 @@ pub fn join_arms(
                 let (_, payload) = proofs.get(&of)?.iter().find(|(p, _)| *p == place)?;
                 Some(((*payload).clone(), tested))
             });
-            match proved {
+            let w = match proved {
                 Some((payload, tested)) => arm(payload, tested),
                 None => arm(WitnessPayload::Edge(read.clone()), a.at),
-            }
+            };
+            gated(w, &a.gates, Some)
         })
         .collect()
+}
+
+/// `w`, holding only where control comes back from every call in `gates`;
+/// `inner` decides what it holds when it does.
+fn gated(
+    w: crate::model::witnesses::Witness,
+    gates: &[Span],
+    inner: impl FnOnce(crate::model::witnesses::WitnessPayload) -> Option<crate::model::witnesses::WitnessPayload>,
+) -> crate::model::witnesses::Witness {
+    use crate::model::witnesses::{Witness, WitnessPayload};
+    if gates.is_empty() {
+        return w;
+    }
+    let Witness { attachment, source, payload, span } = w;
+    let arm = inner(payload).map(Box::new);
+    let gates = gates.iter().map(|&g| crate::model::witnesses::WitnessAttachment::Expr(g)).collect();
+    Witness { attachment, source, payload: WitnessPayload::Gated { gates, arm }, span }
 }
 
 /// A region a guard join holds over, from where it lands to `end`, as
@@ -791,7 +878,16 @@ pub fn guard_region_witnesses(
         })
         .collect();
     if !out.is_empty() {
-        out.extend(join_arms(&attachment, place, &arms, proofs));
+        // A path past a gate that comes back is one the test proves nothing
+        // on, so where it runs the region answers nothing and the value
+        // coming in stands, as it does where no path leaves.
+        let gated_arms: Vec<_> = arms.iter().map(|a| a.gates.clone()).collect();
+        out.extend(
+            join_arms(&attachment, place, &arms.iter().cloned().map(|a| JoinArm { gates: Vec::new(), ..a }).collect::<Vec<_>>(), proofs)
+                .into_iter()
+                .zip(gated_arms)
+                .map(|(w, gates)| gated(w, &gates, |_| None)),
+        );
     }
     out
 }

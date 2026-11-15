@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::model::file_analysis::{guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
-use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
+use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, EFFECT_ARM_SOURCE, JOIN_SOURCE};
 use std::collections::{HashMap, HashSet};
 
 impl<'a> Builder<'a> {
@@ -46,8 +46,41 @@ impl<'a> Builder<'a> {
             .filter(|n| seen.insert(n.id()))
             .collect();
         let source = self.source;
-        let view = super::control::control_view_with_leaves(around, source, |n| narrowing::is_exit_expression(n, source));
+        // A statement calling a sub of this file comes back only if the sub
+        // does, which its own body decides: the walk follows each such call
+        // into the body it runs, and every body it reaches mints how it ends.
+        let local = self.local_callables();
+        let callee = |n: Node<'a>| self.local_callee(&local, n);
+        let gate = |n: Node<'a>| callee(n).is_some();
+        let exits = |n: Node<'a>| narrowing::is_exit_expression(n, source);
+        let mut walk = super::control::ViewWalk::default();
+        let mut gates = walk.walk(around, source, &exits, &gate);
+        let mut bodies: Vec<(SymbolId, Node<'a>)> = Vec::new();
+        let mut followed: HashSet<SymbolId> = HashSet::new();
+        let mut i = 0;
+        while i < gates.len() {
+            let g = gates[i];
+            i += 1;
+            let Some(sid) = callee(g).filter(|&sid| followed.insert(sid)) else { continue };
+            let Some(body) = self.callable_body(sid, main) else { continue };
+            bodies.push((sid, body));
+            gates.extend(walk.walk(super::control::statements_of(body), source, &exits, &gate));
+        }
+        let view = walk.finish();
+        drop(local);
+        for g in gates {
+            self.emit_expr_witness(g);
+        }
         let plan = JoinPlan::new(&view);
+        let mut effect_arms: Vec<Witness> = Vec::new();
+        if !bodies.is_empty() {
+            static RETURNS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+            let kinds = RETURNS.get_or_init(|| perl_kind_ids(&["return_expression", "goto_expression"]));
+            let returns: Vec<Span> = self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| node_to_span(n.ts())).collect();
+            for (sid, body) in bodies {
+                effect_arms.extend(self.effect_arms(&plan, sid, body, &returns));
+            }
+        }
         let untaken = std::mem::take(&mut self.untaken_proofs);
         let mut proofs: Proofs<'_> = HashMap::new();
         for p in &untaken {
@@ -154,12 +187,82 @@ impl<'a> Builder<'a> {
             }
         }
 
-        for w in witnesses {
+        for w in witnesses.into_iter().chain(effect_arms) {
             self.push_witness(w);
         }
         for (variable, scope, at) in markers {
             self.push_reset_marker(variable, scope, at);
         }
+    }
+
+    /// The file's subs by name, for [`Self::local_callee`].
+    fn local_callables(&self) -> HashMap<String, Vec<(SymbolId, Option<String>)>> {
+        let mut out: HashMap<String, Vec<(SymbolId, Option<String>)>> = HashMap::new();
+        for s in self.symbols.iter().filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method)) {
+            out.entry(s.name.clone()).or_default().push((s.id, s.package.clone()));
+        }
+        out
+    }
+
+    /// The sub of this file a plain call at `node` runs, by the rule its
+    /// `Invoke` resolves by (`find_callee_symbol`).
+    fn local_callee(&self, local: &HashMap<String, Vec<(SymbolId, Option<String>)>>, node: Node<'a>) -> Option<SymbolId> {
+        if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
+            || self.is_bless_call(node)
+            || self.indirect_method_call(node).is_some()
+        {
+            return None;
+        }
+        let name = self.forward_callee_name(node)?;
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(&name, &crate::model::conventions::PERL_SPELLINGS);
+        local.get(bare)?.iter().find(|(_, pkg)| super::visit_use::qualifier_admits_local_sub(qualifier, pkg.as_deref())).map(|(id, _)| *id)
+    }
+
+    /// The body block of the sub `sid` declares, where `root`'s tree holds it.
+    fn callable_body(&self, sid: SymbolId, root: Node<'a>) -> Option<Node<'a>> {
+        let scope = &self.scopes[self.owner_scope.get(&sid)?.0 as usize];
+        let decl = root.descendant_for_point_range(scope.span.start, scope.span.end)?;
+        decl.child_by_field_name("body").filter(|b| b.kind() == "block")
+    }
+
+    /// How a call to `sid` ends, from its body: a way out per leave and,
+    /// where control reaches it, the body's end past the calls it makes
+    /// there (`JoinPlan::body_ends`). A `return` (or `goto`) anywhere in it,
+    /// in a nested sub's body too, comes back: one too many only says a call
+    /// may come back. A body the parser could not read states nothing, the top.
+    // TODO(effect-leaving-bits): how a body leaves through a call that does
+    // not come back (unwinds or exits) is not minted, so a pure wrapper ends
+    // in no named way; the first reader of the split is try arms (PR 13).
+    fn effect_arms(&self, plan: &JoinPlan<'_>, sid: SymbolId, body: Node<'a>, returns: &[Span]) -> Vec<Witness> {
+        use crate::model::witnesses::{Effect, Ends};
+        if body.has_error() {
+            return Vec::new();
+        }
+        let attachment = WitnessAttachment::SymbolEffects(sid);
+        let arm = |payload: WitnessPayload, at: Point| Witness {
+            attachment: attachment.clone(),
+            source: WitnessSource::Builder(EFFECT_ARM_SOURCE.into()),
+            payload,
+            span: Span { start: at, end: at },
+        };
+        let mut out: Vec<Witness> = plan
+            .body_ends(node_to_span(body))
+            .into_iter()
+            .map(|(ends, at, gates)| {
+                let effect = WitnessPayload::Effect(Effect::Ends(ends));
+                let payload = if gates.is_empty() {
+                    effect
+                } else {
+                    WitnessPayload::Gated { gates: gates.into_iter().map(WitnessAttachment::Expr).collect(), arm: Some(Box::new(effect)) }
+                };
+                arm(payload, at)
+            })
+            .collect();
+        let within = node_to_span(body);
+        if let Some(ret) = returns.iter().find(|&&r| contains(within, r)) {
+            out.push(arm(WitnessPayload::Effect(Effect::Ends(Ends::COMPLETES)), ret.start));
+        }
+        out
     }
 
     /// The joins of a variable, each landing as a write (`Reset` and its

@@ -131,6 +131,25 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
 - A call's effect is the callee's effect, read through the call's existing
   `Invoke` on the `Effects` aspect, memoized per callee. Dispatch joins the
   candidates, including overrides in indexed subclasses.
+- **Gates.** A statement calling a callable of the file is a gate on every
+  path past it (`ControlView::gates`): a join arm, or an arm of how the
+  caller ends, is `Gated` by the calls on its path, and the registry drops
+  it where one of them does not come back. In a test's region a path past
+  a gate that comes back speaks for nothing, so there the region answers
+  nothing and the value coming in stands. A call to nothing the file
+  defines is no gate: it comes back, except a name the exit list still
+  spells (`TODO(cross-file-noreturn)`).
+- **Inference.** A callable a gate calls mints how it ends from its body:
+  each leave in it, any `return` anywhere in it, and its end where control
+  reaches it, gated by the calls it makes there. A body the parser could
+  not read states nothing. How it leaves through a callee is not derived:
+  a body whose every way out runs into a call that does not come back has
+  no way of ending it names (`TODO(effect-leaving-bits)`).
+- **Cycles.** A callable already on the path is assumed to have no way of
+  ending; since "comes back" is inductive, the frame that asked first gets
+  the exact least fixed point. An answer worked out under that assumption
+  is forgotten when the assuming frame closes, so the same question asked
+  later in the query is asked again.
 - It rides the Surface (`MethodSurface.ends`), so a callee edit that changes
   how it ends dirties its consumers and nothing else.
 - Later variants (`OnParam` writes, moves, kills) go on the same lane with

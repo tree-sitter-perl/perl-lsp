@@ -86,7 +86,7 @@ fn fan_out(name: &str) -> FanOutKey {
 fn frame_taint(st: &mut QueryState, inner: impl FnOnce(&mut QueryState)) -> u32 {
     let (pos, outer) = st.enter_frame();
     inner(st);
-    st.leave_frame(pos, outer, QUERY_REC_TRUNCATIONS.with(|c| c.get()))
+    st.leave_frame(pos, outer, QUERY_REC_TRUNCATIONS.with(|c| c.get())).0
 }
 
 /// A fan-out re-entered beneath itself closes at the fan-out's own frame:

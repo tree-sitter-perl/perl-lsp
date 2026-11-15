@@ -642,6 +642,9 @@ pub(super) struct QueryState {
     /// What an open join answers to a recurring arm chased again
     /// (`rechase_recurring`), by its path position.
     join_seeds: std::collections::HashMap<u32, InferredType>,
+    /// Effect answers memoized while a frame on the path was assumed to have
+    /// no way of ending, with that frame's position (`forget_assumed`).
+    assumed: Vec<(u32, VisitedKey)>,
 }
 
 impl QueryState {
@@ -670,7 +673,8 @@ impl QueryState {
         self.fan_outs.insert(key.clone(), pos);
         let v = walk(self);
         self.fan_outs.remove(&key);
-        let taint = self.leave_frame(pos, outer_low, truncations_before);
+        let (taint, _) = self.leave_frame(pos, outer_low, truncations_before);
+        self.forget_assumed(pos);
         self.fan_out_memo
             .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), taint));
         v
@@ -713,17 +717,36 @@ impl QueryState {
     /// fresh query of this frame's key computes (the subtree reached nothing
     /// above it); `PATH` when a cut closed above it; `TRUNCATED` when the
     /// depth cap fired anywhere beneath it, in this state or a nested one.
-    fn leave_frame(&mut self, pos: u32, outer_low: u32, truncations_before: u64) -> u32 {
+    /// Also returns the outermost frame a cut beneath it closed at.
+    fn leave_frame(&mut self, pos: u32, outer_low: u32, truncations_before: u64) -> (u32, u32) {
         self.path_len -= 1;
         let low = self.low_cut;
         self.low_cut = outer_low.min(low);
-        if low == Taint::TRUNCATED || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
+        let taint = if low == Taint::TRUNCATED || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
             Taint::TRUNCATED
         } else if low < pos {
             Taint::PATH
         } else {
             Taint::CLEAN
+        };
+        (taint, low)
+    }
+
+    /// The frame at `pos` has closed: an effect answer computed assuming it
+    /// had no way of ending is no answer once it has one, so it leaves the
+    /// memo (a type answer cut there is only short, and stays).
+    fn forget_assumed(&mut self, pos: u32) {
+        if self.assumed.is_empty() {
+            return;
         }
+        let memo = &mut self.memo;
+        self.assumed.retain(|(cut, key)| {
+            let live = *cut < pos;
+            if !live {
+                memo.remove(key);
+            }
+            live
+        });
     }
 
     pub(super) fn new() -> Self {
@@ -740,6 +763,7 @@ impl QueryState {
             opaque_frames: 0,
             open_joins: Vec::new(),
             join_seeds: std::collections::HashMap::new(),
+            assumed: Vec::new(),
         }
     }
 
@@ -983,6 +1007,17 @@ fn is_subclass_of(child: &str, ancestor: &str, ctx: &BagContext) -> bool {
 /// [`with_stack_headroom`], so how deep a chase can go does not depend on the
 /// thread's stack size or the build profile — one value serves both.
 const QUERY_REC_DEPTH_CAP: u32 = 512;
+
+/// What a question nothing answers gets: nothing, except a question of how
+/// something ends, whose "no evidence" is a value of its own, the top
+/// (`docs/adr/cfg-tier.md` §Effects: bottom and top are never conflated).
+fn no_answer(q: &ReducerQuery) -> ReducedValue {
+    if q.attachment.asks_effects() {
+        ReducedValue::Effects(super::types::Ends::all())
+    } else {
+        ReducedValue::None
+    }
+}
 
 /// Headroom a recursive resolver keeps before it switches to a fresh stack
 /// segment. One `query_rec` hop costs about 5 KiB in a debug build and under
@@ -1301,7 +1336,7 @@ impl ReducerRegistry {
                 }
             });
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
-            return std::sync::Arc::new(ReducedValue::None);
+            return std::sync::Arc::new(no_answer(q));
         }
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
@@ -1338,6 +1373,15 @@ impl ReducerRegistry {
             if let Some(seed) = state.join_seeds.get(&at) {
                 return std::sync::Arc::new(ReducedValue::Type(seed.clone()));
             }
+            // "Can complete" is inductive: a smallest derivation never needs
+            // a callable as its own ancestor, so a callable on the path is
+            // assumed to have no way of ending, and the frame that started
+            // the question gets the exact least fixed point. What the frames
+            // between computed under the assumption is forgotten when it
+            // closes (`forget_assumed`).
+            if q.attachment.asks_effects() {
+                return std::sync::Arc::new(ReducedValue::Effects(super::types::Ends::empty()));
+            }
             return std::sync::Arc::new(ReducedValue::None);
         }
         let exits_before = state.residual.len();
@@ -1351,14 +1395,19 @@ impl ReducerRegistry {
         }
         #[cfg(test)]
         QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
-        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)));
+        let result = match apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)) {
+            ReducedValue::None => no_answer(q),
+            v => v,
+        };
+        let result = std::sync::Arc::new(result);
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
         state.visited.remove(&key);
         if joined {
             state.open_joins.pop();
         }
-        let taint = state.leave_frame(pos, outer_low, truncations_before);
+        let (taint, cut) = state.leave_frame(pos, outer_low, truncations_before);
+        state.forget_assumed(pos);
         // A cycle closed at this frame or beneath it is part of this key's
         // own answer: a fresh query of the key cuts in the same place.
         if let (Some(fk), Taint::CLEAN) = (fold_key, taint) {
@@ -1367,6 +1416,9 @@ impl ReducerRegistry {
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
+        if taint == Taint::PATH && q.attachment.asks_effects() {
+            state.assumed.push((cut, key.clone()));
+        }
         state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
@@ -2717,6 +2769,31 @@ impl ReducerRegistry {
         crate::util::ghost_stats::count_by("materialize.witnesses_read", raw.len() as u64);
         #[cfg(test)]
         MATERIALIZE_READS.with(|c| c.set(c.get() + raw.len() as u64));
+        // A gated witness holds only where control comes back from each of
+        // its gates: dropped where one does not, else read as its arm. A
+        // dropped effect arm still says the callable was looked at, so it
+        // stays as no way of ending, never as no evidence; a path its join
+        // speaks for nothing on, reached, silences the join.
+        let mut opened: Vec<Option<Witness>> = Vec::with_capacity(raw.len());
+        let mut dropped = vec![false; raw.len()];
+        for (i, w) in raw.iter().enumerate() {
+            let WitnessPayload::Gated { gates, arm } = &w.payload else {
+                opened.push(None);
+                continue;
+            };
+            let payload = match (self.gates_come_back(bag, q, state, gates), arm) {
+                (true, Some(a)) => Some((**a).clone()),
+                (true, None) => return Vec::new(),
+                (false, Some(a)) if matches!(**a, WitnessPayload::Effect(_)) => {
+                    Some(WitnessPayload::Effect(super::types::Effect::Ends(super::types::Ends::empty())))
+                }
+                (false, _) => None,
+            };
+            dropped[i] = payload.is_none();
+            opened.push(payload.map(|payload| Witness { attachment: w.attachment.clone(), source: w.source.clone(), payload, span: w.span }));
+        }
+        let raw: Vec<&Witness> =
+            raw.iter().enumerate().filter(|(i, _)| !dropped[*i]).map(|(i, w)| opened[i].as_ref().unwrap_or(w)).collect();
         let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         let mut recurring: Vec<(&Witness, &WitnessAttachment, u32)> = Vec::new();
@@ -3600,6 +3677,19 @@ impl ReducerRegistry {
         declared.then_some(answer)
     }
 
+    /// Whether control comes back from every call in `gates` (each its
+    /// `Expr`): no evidence about one is the top, which comes back.
+    fn gates_come_back(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, gates: &[WitnessAttachment]) -> bool {
+        gates.iter().all(|g| {
+            crate::util::ghost_stats::count("effect.gate");
+            let back = self.expr_ends(bag, q, state, g).is_none_or(|e| e.contains(super::types::Ends::COMPLETES));
+            if !back {
+                crate::util::ghost_stats::count("effect.gate_closed");
+            }
+            back
+        })
+    }
+
     /// How evaluating the expression at `att` ends: what it states of itself
     /// (a local jump, a builtin), and for a call, how its callee ends. `None`
     /// is no evidence, the top.
@@ -3652,9 +3742,8 @@ impl ReducerRegistry {
                 args: Vec::new(),
                 context: q.context,
             };
-            // TODO(effect-cycles): a cut of the cycle guard is the bottom
-            // inside one file (`docs/adr/cfg-tier.md` §Effects); it reads as
-            // no evidence until the CFG's gates read this lane.
+            // A callable on the path answers no way of ending (the cycle
+            // cut, `query_rec`); a depth cap answers nothing, the top.
             state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
                 ReducedValue::Effects(e) => Some(*e),
                 ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,

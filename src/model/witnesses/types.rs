@@ -357,6 +357,8 @@ pub const RESET_SOURCE: &str = "reset";
 
 /// Source tag of the joins `assemble_joins` mints, the point's and the arms'.
 pub const JOIN_SOURCE: &str = "join";
+/// Provenance of an arm of how a callable ends, inferred from its body.
+pub const EFFECT_ARM_SOURCE: &str = "effect_arm";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WitnessSource {
@@ -427,6 +429,7 @@ impl WitnessPayload {
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
             | WitnessPayload::Effect(_) => false,
+            WitnessPayload::Gated { arm, .. } => arm.as_ref().is_some_and(|a| a.is_windowed()),
         }
     }
 }
@@ -455,6 +458,12 @@ impl WitnessPayload {
             }
             WitnessPayload::InferredType(t) => t.for_each_attachment_mut(f),
             WitnessPayload::ReturnExpr(r) => r.for_each_attachment_mut(f),
+            WitnessPayload::Gated { gates, arm } => {
+                gates.iter_mut().for_each(|g| f(g));
+                if let Some(a) = arm {
+                    a.for_each_attachment_mut(f);
+                }
+            }
             WitnessPayload::Observation(_)
             | WitnessPayload::Fact { .. }
             | WitnessPayload::Derivation
@@ -648,6 +657,14 @@ pub enum WitnessPayload {
     /// (`SymbolEffects`, `Member{.., Effects}`). `EffectFold` joins them.
     /// Kept at the END for bincode variant-index stability.
     Effect(Effect),
+    /// One path into a join or one arm of how a callable ends, reached only
+    /// where control comes back from each call in `gates` (statement-position
+    /// calls, each its `Expr`, which says how it ends). The registry drops
+    /// it when one does not come back, and otherwise reads it as `arm`; with
+    /// no `arm` the path is one its join speaks for nothing on, and the join
+    /// answers nothing (`docs/adr/cfg-tier.md` §Effects). Kept at the END for
+    /// bincode variant-index stability.
+    Gated { gates: Vec<WitnessAttachment>, arm: Option<Box<WitnessPayload>> },
 }
 
 /// What one write adds to the shape it lands in.
