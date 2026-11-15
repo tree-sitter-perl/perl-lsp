@@ -4270,6 +4270,18 @@ fn python_a_call_to_a_raising_def_reaches_no_join() {
     assert_eq!(fa.symbol_ends(id("g")), crate::model::witnesses::Ends::UNWINDS);
 }
 
+/// A method call gates too: `$this`'s class resolves it, and a subclass
+/// override that comes back keeps the arm.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_call_to_a_throwing_method_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |sub: &str| format!("<?php\nclass P {{\nfunction fail() {{ throw new E(); }}\nfunction f($c) {{\n$x = 1;\nif ($c) {{ $x = 's'; $this->fail(); }}\n$y = $x;\n}}\n}}\n{sub}\n");
+    assert_eq!(past_a_gated_write("/x/m.php", &src(""), "x", 6), Some(T::Numeric));
+    let soft = "class Q extends P { function fail() { log(); } }";
+    assert!(matches!(past_a_gated_write("/x/m.php", &src(soft), "x", 6), Some(T::Union(_))), "Q::fail comes back");
+}
+
 #[cfg(feature = "php")]
 #[test]
 fn php_a_call_to_a_throwing_function_reaches_no_join() {

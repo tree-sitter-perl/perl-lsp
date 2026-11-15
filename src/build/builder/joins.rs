@@ -209,9 +209,12 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Whether a plain call at `node` gates what follows it: one to a sub
-    /// of this file, or to a sub elsewhere, so no builtin.
+    /// Whether a call at `node` gates what follows it: a method call, or
+    /// a plain call to a sub of this file or elsewhere, so no builtin.
     fn gate_callee(&self, local: &HashMap<String, Vec<(SymbolId, Option<String>)>>, node: Node<'a>) -> bool {
+        if node.kind() == "method_call_expression" {
+            return true;
+        }
         if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
             || self.is_bless_call(node)
             || self.indirect_method_call(node).is_some()

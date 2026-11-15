@@ -1211,7 +1211,7 @@ impl<'a> Builder<'a> {
         let mut seen = std::collections::HashSet::new();
         parents.retain(|p| seen.insert(p.clone()));
         if residue {
-            self.dynamic_parent_packages.insert(pkg.clone());
+            self.package_parents.mark_dynamic(pkg.clone());
         }
         if parents != current && !(parents.is_empty() && !self.package_parents.contains_key(&pkg)) {
             self.package_parents.replace(pkg, parents);

@@ -584,11 +584,6 @@ struct Builder<'a> {
     /// `FileAnalysis.role_requires`.
     role_requires: std::collections::HashMap<String, Vec<String>>,
 
-    /// Packages with at least one parent edge we could not fold to a
-    /// literal name (runtime-generated roles). Flushed into
-    /// `FileAnalysis.dynamic_parent_packages`.
-    dynamic_parent_packages: std::collections::HashSet<String>,
-
     /// Count of dynamic method-dispatch sites (`$obj->$method(...)`) whose
     /// method name is a scalar, not a bareword. Such a call never becomes a
     /// nameable `MethodCall` ref (the dispatched method is unknown at build

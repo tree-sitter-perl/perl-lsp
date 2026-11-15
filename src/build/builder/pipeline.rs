@@ -401,7 +401,6 @@ fn build_once(
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
         role_requires: std::collections::HashMap::new(),
-        dynamic_parent_packages: std::collections::HashSet::new(),
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
@@ -911,7 +910,7 @@ impl<'a> Builder<'a> {
             self.package_framework.clone(),
             self.role_requires.clone(),
             self.role_packages.clone(),
-            self.dynamic_parent_packages.clone(),
+            self.package_parents.dynamic().clone(),
             self.blessing_packages.clone(),
         )
     }

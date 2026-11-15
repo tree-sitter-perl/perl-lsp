@@ -525,11 +525,11 @@ fn a_call_ends_the_way_the_definitions_it_runs_end() {
     };
     assert_eq!(ends_on(4), Ends::UNWINDS, "die");
     assert_eq!(ends_on(5), Ends::EXITS, "exit");
-    // `Foo->m` dispatches on its receiver like `$o->m`: the call does not
-    // say the receiver is the class itself, so both are open until the
-    // descendant join lands.
-    assert_eq!(ends_on(7), Ends::all(), "a receiver may be any subclass");
-    assert_eq!(ends_on(10), Ends::all(), "a receiver may be any subclass");
+    // `Foo->m` dispatches on its receiver like `$o->m`: every class the
+    // receiver may be joins, and no subclass of Foo overrides `fail`.
+    assert_eq!(ends_on(7), Ends::UNWINDS, "Foo's own, no override");
+    assert_eq!(ends_on(8), Ends::all(), "a member that states nothing");
+    assert_eq!(ends_on(10), Ends::UNWINDS, "Foo's own, no override");
     assert_eq!(ends_on(11), Ends::all(), "nothing defines it");
     let pinned = crate::model::file_analysis::Span {
         start: tree_sitter::Point { row: 13, column: 8 },

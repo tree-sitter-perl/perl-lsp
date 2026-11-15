@@ -184,3 +184,68 @@ fn a_guard_left_only_through_a_returning_call_narrows_nothing() {
     let t = fa.inferred_type_via_bag("$x", Point::new(4, 7));
     assert!(!matches!(t, Some(InferredType::Undef) | Some(InferredType::Optional(_))), "{t:?}");
 }
+
+/// A method call gates like a function call: the receiver's class
+/// resolves the name, and a method that dies narrows past its call.
+#[test]
+fn a_method_that_dies_narrows_past_its_call() {
+    let fa = build_fa(
+        "package P;\nsub fail { die $_[1] }\nsub f {\nmy ($self, $c) = @_;\nmy $x = $c ? Foo->new : undef;\n$self->fail('no') unless defined $x;\nreturn $x;\n}\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 0)), Some(InferredType::ClassName("Foo".into())));
+}
+
+/// The receiver may be any subclass of its class: an override that comes
+/// back keeps the arm, as does a receiver whose class nothing says.
+#[test]
+fn an_override_that_returns_or_an_untyped_receiver_keeps_the_arm() {
+    let foo = InferredType::ClassName("Foo".into());
+    let optional = Some(InferredType::Optional(Box::new(foo)));
+    let fa = build_fa(
+        "package P;\nsub fail { die $_[1] }\nsub f {\nmy ($self, $c) = @_;\nmy $x = $c ? Foo->new : undef;\n$self->fail('no') unless defined $x;\nreturn $x;\n}\npackage Q;\nuse parent -norequire, 'P';\nsub fail { warn $_[1] }\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 0)), optional, "Q::fail comes back");
+    let fa = build_fa(
+        "package P;\nsub fail { die $_[1] }\nsub f {\nmy ($o, $c) = @_;\nmy $x = $c ? Foo->new : undef;\n$o->fail('no') unless defined $x;\nreturn $x;\n}\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 0)), optional, "$o may be anything");
+}
+
+/// Across files the index answers: an inherited method another file
+/// defines ends as that file says, and an indexed subclass's override
+/// joins the dispatch.
+#[test]
+fn a_method_another_file_defines_ends_as_that_file_says() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+    let consumer = "package C;\nuse parent 'Base';\nsub f {\nmy ($self, $c) = @_;\nmy $x = $c ? Foo->new : undef;\n$self->fail('no') unless defined $x;\nreturn $x;\n}\n1;\n";
+    let fa = build_fa(consumer);
+    let foo = InferredType::ClassName("Foo".into());
+    let optional = Some(InferredType::Optional(Box::new(foo.clone())));
+    let idx = ModuleIndex::new_for_test();
+    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(idx));
+    idx.register_workspace_module("/tmp/Base.pm".into(), Arc::new(build_fa("package Base;\nsub fail { die $_[1] }\n1;\n")));
+    assert_eq!(at(&idx), Some(foo), "Base::fail dies");
+    idx.register_workspace_module(
+        "/tmp/D.pm".into(),
+        Arc::new(build_fa("package D;\nuse parent -norequire, 'C';\nsub fail { warn $_[1] }\n1;\n")),
+    );
+    assert_eq!(at(&idx), optional, "D overrides it with one that comes back");
+}
+
+/// A file's answer for a name joins every callable of it the file
+/// defines, in any package: one that comes back keeps the gate open.
+#[test]
+fn a_name_one_package_of_a_file_returns_from_keeps_its_gate_open() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+    let consumer = "package C;\nuse Util;\nsub f {\nmy ($c) = @_;\nmy $x = $c ? Foo->new : undef;\nfatal('no') unless defined $x;\nreturn $x;\n}\n";
+    let fa = build_fa(consumer);
+    let optional = Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into()))));
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        "/tmp/Util.pm".into(),
+        Arc::new(build_fa("package Util;\nuse Exporter 'import';\nour @EXPORT = ('fatal');\nsub fatal { die @_ }\npackage Util::Soft;\nsub fatal { warn @_ }\n1;\n")),
+    );
+    assert_eq!(fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(&idx)), optional);
+}

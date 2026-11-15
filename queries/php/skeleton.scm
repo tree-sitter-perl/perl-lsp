@@ -538,7 +538,8 @@
 (function_definition body: (compound_statement) @ctl.body)
 (method_declaration body: (compound_statement) @ctl.body)
 (anonymous_function body: (compound_statement) @ctl.body)
-(expression_statement (function_call_expression) @ctl.gate)
+(expression_statement
+  [(function_call_expression) (member_call_expression) (nullsafe_member_call_expression) (scoped_call_expression)] @ctl.gate)
 
 ; ---- how a call ends ----
 ; A `never` return says a call never comes back; how it leaves is the

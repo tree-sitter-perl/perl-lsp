@@ -58,7 +58,7 @@ impl<'a> Builder<'a> {
         // incomplete: record the fact so `class_has_unresolved_ancestor`
         // keeps inheritance-dependent consumers honest-silent.
         if residue {
-            self.dynamic_parent_packages.insert(pkg.to_string());
+            self.package_parents.mark_dynamic(pkg.to_string());
         }
         let parents: Vec<String> = named.into_iter().map(|(s, _)| s).collect();
         if !parents.is_empty() {

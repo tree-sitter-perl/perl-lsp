@@ -88,6 +88,13 @@ impl ModuleBucket {
         self.modules.is_empty()
     }
 
+    pub fn contains(&self, module: &str) -> bool {
+        match &self.seen {
+            Some(seen) => seen.contains(module),
+            None => self.modules.iter().any(|m| m == module),
+        }
+    }
+
     /// The module names, in first-fed order.
     pub fn as_slice(&self) -> &[String] {
         &self.modules
@@ -451,6 +458,31 @@ impl ModuleEdgeIndexes {
         Some(out)
     }
 
+    /// How a call to `class`'s own `name` ends, from the files providing
+    /// `class`: absent where none of them declares the name, the top where
+    /// one does and is not known not to come back.
+    pub fn member_ends(&self, class: &str, name: &str) -> crate::model::file_analysis::MemberEnds {
+        use crate::model::file_analysis::MemberEnds;
+        use crate::model::witnesses::Ends;
+        let Some(providers) = self.providers.get(class) else { return MemberEnds::Unknown };
+        let declarers = self.names.get(name);
+        let rows = self.ends.get(name);
+        let mut out: Option<Ends> = None;
+        for m in providers.as_slice() {
+            // A module declaring the name in any of its packages may declare
+            // it in this one.
+            if !declarers.as_ref().is_some_and(|d| d.contains(m)) {
+                continue;
+            }
+            let e = rows
+                .as_ref()
+                .and_then(|r| r.iter().find(|(r, _)| r == m).map(|(_, e)| *e))
+                .unwrap_or(Ends::all());
+            out = Some(out.map_or(e, |o| o | e));
+        }
+        out.map_or(MemberEnds::Absent, MemberEnds::Declared)
+    }
+
     /// Drop `path`'s recorded name list (the file itself is gone).
     pub fn remove_path_record(&self, path: &std::path::Path) {
         self.name_records.remove(path);
@@ -480,12 +512,21 @@ impl ModuleEdgeIndexes {
             names: Self::indexable_names(analysis),
             providers: analysis.provided_packages(),
             bridges: analysis.bridge_classes(),
-            ends: analysis
-                .symbols()
-                .iter()
-                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
-                .filter_map(|s| Some((s.name.clone(), analysis.local_ends(s.id).filter(|e| !e.contains(Ends::COMPLETES))?)))
-                .collect(),
+            // One row per name: every callable of it the file defines, in
+            // any package, joined, so a returning one anywhere in the file
+            // keeps the row from closing a gate it may answer.
+            ends: {
+                let mut by_name: std::collections::BTreeMap<&str, Ends> = std::collections::BTreeMap::new();
+                for s in analysis.symbols().iter().filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method)) {
+                    let e = analysis.local_ends(s.id).unwrap_or(Ends::all());
+                    *by_name.entry(s.name.as_str()).or_insert(Ends::empty()) |= e;
+                }
+                by_name
+                    .into_iter()
+                    .filter(|(_, e)| !e.contains(Ends::COMPLETES))
+                    .map(|(n, e)| (n.to_string(), e))
+                    .collect()
+            },
         }
     }
 

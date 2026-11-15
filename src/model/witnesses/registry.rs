@@ -3736,23 +3736,7 @@ impl ReducerRegistry {
         callee: &Callee,
         receiver: Option<&WitnessAttachment>,
     ) -> Option<Ends> {
-        let ask = |state: &mut QueryState, att: WitnessAttachment| -> Option<Ends> {
-            let sub_q = ReducerQuery {
-                attachment: &att,
-                point: q.point,
-                framework: q.framework,
-                arity_hint: None,
-                receiver: None,
-                args: Vec::new(),
-                context: q.context,
-            };
-            // A callable on the path answers no way of ending (the cycle
-            // cut, `query_rec`); a depth cap answers nothing, the top.
-            state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
-                ReducedValue::Effects(e) => Some(*e),
-                ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,
-            })
-        };
+        let ask = |state: &mut QueryState, att: WitnessAttachment| self.ask_ends(bag, q, state, att);
         match callee {
             Callee::Function { name, local, member_of, .. } => {
                 // A class member the eliding body names hides every free
@@ -3790,17 +3774,130 @@ impl ReducerRegistry {
                 // Perl runs; one that states nothing is no evidence.
                 parents.into_iter().find_map(|p| ask(state, WitnessAttachment::effects_of(p, name.clone())))
             }
-            // TODO(effect-descendants): a receiver may be any subclass of its
-            // class, so the call runs every indexed override; until that
-            // join exists the dispatch is an open set.
-            Callee::Method { lookup: Lookup::Receiver, .. } => {
-                let _ = (receiver, site);
-                None
+            // A receiver may be any subclass of its class, so the call runs
+            // that class's resolution or any descendant's override: all of
+            // them join. A name nothing known may fail to come back from
+            // passes without resolving the receiver.
+            Callee::Method { name, lookup: Lookup::Receiver, .. } => {
+                if !self.name_may_not_complete(bag, q, state, name) {
+                    return None;
+                }
+                let t = self.operand_type(bag, q, state, site, receiver?)?;
+                self.receiver_ends(bag, q, state, name, &t)
             }
             // A constructor's effect and a code reference's target are not
             // pinned by the call.
             Callee::Construct { .. } | Callee::Value(_) => None,
         }
+    }
+
+    /// Whether some callable named `name` is known that may not come back:
+    /// one another file defines (the index's resident rows) or one of this
+    /// file. Only skips work; a name it misses answers the top.
+    fn name_may_not_complete(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, name: &str) -> bool {
+        let Some(ctx) = q.context else { return false };
+        if ctx.module_index.is_some_and(|idx| idx.callable_ends(name).is_some()) {
+            return true;
+        }
+        ctx.symbols
+            .iter()
+            .filter(|s| s.name == name && matches!(s.kind, crate::model::file_analysis::SymKind::Sub | crate::model::file_analysis::SymKind::Method))
+            .any(|s| self.ask_ends(bag, q, state, WitnessAttachment::SymbolEffects(s.id)).is_some_and(|e| !e.completes()))
+    }
+
+    /// How a call ends whose receiver holds `t`: joined over every class
+    /// an arm may be and every descendant of it, each by its own
+    /// resolution of `name`. An arm that names no class is an open set.
+    fn receiver_ends(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, name: &str, t: &InferredType) -> Option<Ends> {
+        const FAMILY_CAP: usize = 64;
+        let ctx = q.context?;
+        let mut out: Option<Ends> = None;
+        for arm in t.receiver_arms() {
+            let class = arm.class_name()?;
+            let mut family: Vec<String> = vec![class.to_string()];
+            let mut i = 0;
+            while i < family.len() {
+                if family.len() > FAMILY_CAP {
+                    return None;
+                }
+                let current = family[i].clone();
+                let mut children = ctx.package_parents.local_children(&current);
+                if let Some(idx) = ctx.module_index {
+                    children.extend(idx.direct_children_of(&current).into_iter().map(|(pkg, _)| pkg));
+                }
+                for c in children {
+                    if !family.contains(&c) {
+                        family.push(c);
+                    }
+                }
+                i += 1;
+            }
+            for d in &family {
+                let e = self.resolved_member_ends(bag, q, state, d, name)?;
+                out = Some(out.map_or(e, |o| o | e));
+            }
+        }
+        out
+    }
+
+    /// How `class`'s resolution of `name` ends: the first class up its
+    /// MRO that defines it answers. Not found, or past a class whose
+    /// parents are set at run time or that nothing here or indexed holds,
+    /// it is the top (`AUTOLOAD` included).
+    fn resolved_member_ends(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, class: &str, name: &str) -> Option<Ends> {
+        const MRO_CAP: usize = 64;
+        let ctx = q.context?;
+        let mut seen: Vec<String> = Vec::new();
+        let mut stack: Vec<String> = vec![class.to_string()];
+        while let Some(k) = stack.pop() {
+            if seen.contains(&k) {
+                continue;
+            }
+            if seen.len() >= MRO_CAP {
+                return None;
+            }
+            seen.push(k.clone());
+            let att = WitnessAttachment::effects_of(k.clone(), name.to_string());
+            let WitnessAttachment::Member { space, .. } = &att else { unreachable!("effects_of is a member") };
+            if bag.iter_attachment(&att).next().is_some() || defines_member_here(bag, &k, *space, name) {
+                return self.ask_ends(bag, q, state, att);
+            }
+            let local = !ctx.package_parents.declared_parents(&k).is_empty();
+            match ctx.module_index.map(|idx| idx.member_ends(&k, name)) {
+                Some(crate::model::file_analysis::MemberEnds::Declared(e)) => return Some(e),
+                Some(crate::model::file_analysis::MemberEnds::Absent) => {}
+                Some(crate::model::file_analysis::MemberEnds::Unknown) | None if !local => return None,
+                _ => {}
+            }
+            let dynamic = ctx.package_parents.has_dynamic_parents(&k)
+                || ctx.module_index.is_some_and(|idx| idx.def_candidates(&k).iter().any(|c| c.analysis.has_dynamic_parents(&k)));
+            if dynamic {
+                return None;
+            }
+            let parents = crate::model::file_analysis::parents_of(&k, ctx.package_parents, ctx.module_index, ctx.app_surface_consumers);
+            // Depth first, left to right: Perl's default MRO.
+            stack.extend(parents.into_iter().rev());
+        }
+        None
+    }
+
+    /// The effect lane's answer on `att`. A callable on the path answers
+    /// no way of ending (the cycle cut, `query_rec`); a depth cap answers
+    /// nothing, the top.
+    fn ask_ends(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, att: WitnessAttachment) -> Option<Ends> {
+        let sub_q = ReducerQuery {
+            attachment: &att,
+            point: q.point,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+            ReducedValue::Effects(e) => Some(*e),
+            ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None => None,
+        })
     }
 
     /// Scope-chain variable lookup with an explicit visited set.

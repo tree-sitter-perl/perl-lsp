@@ -165,8 +165,16 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   every declaring module is a candidate, not only those the caller sees
   (`TODO(effect-visibility)`), and a callee whose own end runs through a
   callee elsewhere is the top until the whole-program engine carries it
-  (`TODO(effect-wrappers)`). A method call gates nothing until its
-  descendants join (`TODO(effect-descendants)`).
+  (`TODO(effect-wrappers)`). A file's row for a name joins every
+  callable of it the file defines, in any package.
+- **Dispatch.** A method call gates too. Its receiver may be any class an
+  arm names or any descendant of one, so each of those resolves the name
+  up its MRO and all of them join: a class this file defines answers from
+  its member, one another file defines from the index (`member_ends`: the
+  files providing the class that declare the name, each by its row). A
+  receiver arm naming no class, a class nothing holds, parents set at run
+  time, or a name no class defines is the top. A name no callable known
+  may fail to come back from passes without resolving the receiver.
 - Later variants (`OnParam` writes, moves, kills) go on the same lane with
   their own join; set union is the join of `Ends`, not of the lane.
 

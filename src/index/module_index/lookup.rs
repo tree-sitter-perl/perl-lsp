@@ -352,6 +352,10 @@ impl CrossFileLookup for ModuleIndex {
         self.core.edges.callable_ends(name)
     }
 
+    fn member_ends(&self, class: &str, name: &str) -> crate::model::file_analysis::MemberEnds {
+        self.core.edges.member_ends(class, name)
+    }
+
     fn restamp_owed(&self, path: &std::path::Path, stamped_at: Option<u64>) -> bool {
         // Never stamped: owed, unconditionally. Every rehydrated copy reads
         // `None` (the field is `serde(skip)`), so this is the arm that keeps a

@@ -988,17 +988,16 @@ impl super::FileAnalysis {
         use super::{Binding, Place};
         use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
         let mut view = std::borrow::Cow::Borrowed(view);
-        // A call to a function gates: of this file, its body says how it
-        // ends; of another, that file does (the effect lane, at query time).
-        // A method's dispatch is an open set until its descendants join
-        // (`TODO(effect-descendants)`), so it gates nothing yet.
-        let calls_function = |g: &Span| {
-            self.witnesses.for_attachment(&WitnessAttachment::Expr(*g)).iter().any(|w| {
-                matches!(&w.payload, WitnessPayload::Invoke { callee: crate::model::witnesses::Callee::Function { .. }, .. })
-            })
+        // A call gates: its callee's own file says how it ends, read on the
+        // effect lane at query time.
+        let calls = |g: &Span| {
+            self.witnesses
+                .for_attachment(&WitnessAttachment::Expr(*g))
+                .iter()
+                .any(|w| matches!(&w.payload, WitnessPayload::Invoke { .. }))
         };
-        if !view.gates.iter().all(calls_function) {
-            view.to_mut().gates.retain(calls_function);
+        if !view.gates.iter().all(calls) {
+            view.to_mut().gates.retain(calls);
         }
         let plan = JoinPlan::new(&view);
         let effect_arms: Vec<Witness> = view
@@ -1008,7 +1007,25 @@ impl super::FileAnalysis {
             .filter_map(|b| Some((self.callable_of_body(b.span)?, b.span)))
             .flat_map(|(sid, body)| plan.effect_arms(sid, body))
             .collect();
-        for w in effect_arms {
+        // How a member ends rides the class's member, as its return does,
+        // so a call that dispatches on a receiver finds it.
+        let mut mirrors: Vec<Witness> = Vec::new();
+        for w in &effect_arms {
+            let WitnessAttachment::SymbolEffects(sid) = w.attachment else { continue };
+            let sym = &self.symbols[sid.0 as usize];
+            let Some(class) = sym.package.clone() else { continue };
+            let att = WitnessAttachment::effects_of(class, sym.name.clone());
+            if mirrors.iter().any(|m| m.attachment == att) || !self.witnesses.for_attachment(&att).is_empty() {
+                continue;
+            }
+            mirrors.push(Witness {
+                attachment: att,
+                source: WitnessSource::Builder("effect_arm".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::SymbolEffects(sid)),
+                span: sym.span,
+            });
+        }
+        for w in effect_arms.into_iter().chain(mirrors) {
             self.witnesses.push(w);
         }
         if view.constructs.is_empty() || (self.flow_edges.is_empty() && guards.seeds.is_empty()) {
