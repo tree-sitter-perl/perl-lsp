@@ -927,7 +927,7 @@
 ; `for (auto x : items)` — the range-for var rebinds per element (a Rebind, no
 ; inflowing type yet) so the narrowing cutoff ends a region at the loop.
 (for_range_loop
-  declarator: (identifier) @flow.rebind)
+  declarator: (identifier) @flow.rebind @flow.assign)
 
 ; the std container / optional / smart-pointer resets put a moved-from object
 ; back into a known state: a use after `x.clear()` is NOT a use-after-move. A
@@ -1005,7 +1005,7 @@
 (for_statement) @ctl.loop
 (for_range_loop) @ctl.loop
 (do_statement) @ctl.loop
-(switch_statement) @ctl.branch
+(switch_statement) @ctl.block
 (preproc_if) @ctl.branch
 (preproc_ifdef) @ctl.branch
 (preproc_elif) @ctl.branch
@@ -1064,6 +1064,17 @@
 (conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch
 (binary_expression left: (_) @ctl.cond operator: "&&" right: (_) @ctl.then) @ctl.branch
 (binary_expression left: (_) @ctl.cond operator: "||" right: (_) @ctl.else) @ctl.branch
+; A loop runs its body while its test holds (a range `for` while items
+; remain), a `for`'s update after each pass; a `do` runs its body first. A
+; `break` leaves the `switch` around it as it leaves a loop.
+(while_statement condition: (condition_clause value: (_) @ctl.cond) body: (_) @ctl.loop.body) @ctl.loop
+(for_statement body: (_) @ctl.loop.body) @ctl.loop
+(for_statement condition: (_) @ctl.cond) @ctl.loop
+(for_statement update: (_) @ctl.loop.step) @ctl.loop
+(for_range_loop body: (_) @ctl.loop.body) @ctl.loop
+; A range `for` tests for a next item as it binds it.
+(for_range_loop declarator: (_) @ctl.cond) @ctl.loop
+(do_statement body: (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

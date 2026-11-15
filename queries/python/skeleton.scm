@@ -193,9 +193,12 @@
   !right)
 
 ; `for x in items:` — the loop var rebinds per element (a Rebind, no inflowing
-; type yet) so the narrowing cutoff ends a region at the loop.
+; type yet): each pass replaces what it held, so the narrowing cutoff ends a
+; region at the loop and nothing a pass wrote reaches the next.
 (for_statement
-  left: (identifier) @flow.rebind)
+  left: (identifier) @flow.rebind @flow.assign)
+(for_statement
+  left: [(pattern_list (identifier) @flow.rebind) (tuple_pattern (identifier) @flow.rebind)] @flow.assign)
 
 ; ---- calls: a call's value is an Invoke of its callee on its arguments. The
 ; argument list rides the callee's match, its arguments are the @arity.arg
@@ -276,7 +279,7 @@
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
 ; where the left holds, of `or` where it fails. An `else` arm is its body;
-; the `else` of a loop or a `try` is no arm of a condition.
+; the `else` of a `try` is no arm of a condition.
 (if_statement condition: (_) @ctl.cond consequence: (_) @ctl.then) @ctl.branch
 (if_statement
   condition: (_) @ctl.cond
@@ -297,6 +300,14 @@
   (_) @ctl.else) @ctl.branch
 (boolean_operator left: (_) @ctl.cond operator: "and" right: (_) @ctl.then) @ctl.branch
 (boolean_operator left: (_) @ctl.cond operator: "or" right: (_) @ctl.else) @ctl.branch
+; A loop runs its body while its test holds (a `for` while items remain),
+; and its `else` where the test fails, never after a `break`.
+(while_statement condition: (_) @ctl.cond body: (_) @ctl.loop.body) @ctl.loop
+(for_statement body: (_) @ctl.loop.body) @ctl.loop
+; A `for` tests for a next item as it binds it.
+(for_statement left: (_) @ctl.cond) @ctl.loop
+(while_statement alternative: (else_clause body: (_) @ctl.else)) @ctl.loop
+(for_statement alternative: (else_clause body: (_) @ctl.else)) @ctl.loop
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

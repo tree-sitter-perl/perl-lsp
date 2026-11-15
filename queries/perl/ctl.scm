@@ -8,6 +8,8 @@
 ;   @ctl.then / @ctl.else     what runs where the condition holds / fails
 ;   @ctl.loop.body            what a loop runs while its test holds
 ;   @ctl.loop.step            what runs after each pass, before the next test
+;   @ctl.block.next           a block `last` and `next` leave, testing nothing
+;   @ctl.label                the name a construct carries, or a jump aims at
 ;   @ctl.leave.<kind>         a statement that leaves its block
 ;
 ; Every arm pattern carries its construct, so arms group by construct node.
@@ -47,15 +49,22 @@
 (cstyle_for_statement condition: (_) @ctl.cond) @ctl.loop
 (cstyle_for_statement iterator: (_) @ctl.loop.step) @ctl.loop
 (for_statement block: (_) @ctl.loop.body) @ctl.loop
+; A `foreach` tests for a next item as it binds it.
+(for_statement variable: (_) @ctl.cond) @ctl.loop
 (postfix_loop_expression (do_expression) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
 (postfix_loop_expression . (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop
 (postfix_for_expression . (_) @ctl.loop.body list: (_)) @ctl.loop
+(statement_label label: (_) @ctl.label statement: [(loop_statement) (cstyle_for_statement) (for_statement)] @ctl.loop)
+
+; A bare block is a loop that runs once: `last` and `next` leave it.
+(block_statement) @ctl.block.next
+(statement_label label: (_) @ctl.label statement: (block_statement) @ctl.block.next)
 
 ; ---- leaving ----
 ; `die` and `exit` are calls; how a call ends is the effect lane's
 ; (`model/builtins.rs`). `redo` restarts the body without the test, a back
 ; edge like `next`'s.
 (return_expression) @ctl.leave.return
-(loopex_expression "last") @ctl.leave.break
-(loopex_expression ["next" "redo"]) @ctl.leave.continue
+(loopex_expression "last" (label)? @ctl.label) @ctl.leave.break
+(loopex_expression ["next" "redo"] (label)? @ctl.label) @ctl.leave.continue
 (goto_expression) @ctl.leave.jump

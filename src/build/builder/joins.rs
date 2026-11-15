@@ -68,11 +68,16 @@ impl<'a> Builder<'a> {
             // Innermost first, inside the reach.
             // An arm ending where the write lands (`$x = $c ? 1 : 2`'s `2`)
             // is part of the value written, not around the write.
+            let born = match &binding {
+                Binding::Lexical(sym) => Some(self.symbols[sym.0 as usize].span.start),
+                _ => None,
+            };
             let holding: Vec<&Construct> = plan
                 .arms_holding(at)
                 .filter(|(_, a)| contains(a.span, span))
                 .take_while(|(_, a)| contains(reach.within, a.span))
                 .filter(|(c, _)| contains(reach.within, c.span))
+                .filter(|(c, _)| born.is_none_or(|b| !plan.binds_each_pass(c, b)))
                 .map(|(c, _)| c)
                 .collect();
             for c in &holding {
@@ -81,24 +86,15 @@ impl<'a> Builder<'a> {
                 if plan.is_lifted(c) {
                     continue;
                 }
-                let scope = self.holding_scope(&reach, c.span);
-                match c.kind {
-                    ControlKind::Branch => {
-                        let joins = plan.branch_joins(c, None, self.scopes[sid.0 as usize].span);
-                        self.mint(&var, scope, &place, joins, &proofs, &mut minted, &mut witnesses);
-                    }
-                    // TODO(cfg-loops): a loop's head and exit joins (design
-                    // PR 7); until then a write in a modifier loop leaves its
-                    // variable unknown past the loop, and a loop block is a
-                    // block like any other (below).
-                    ControlKind::Loop { .. } => {
-                        if !self.is_block_at(c.arms.iter().find(|a| contains(a.span, span)).map_or(c.span, |a| a.span))
-                            && minted.insert((place.clone(), c.span, JoinRole::After))
-                        {
-                            markers.push((var.clone(), scope, c.span.end));
-                        }
-                    }
-                }
+                let joins = match c.kind {
+                    ControlKind::Branch => plan.branch_joins(c, None, self.scopes[sid.0 as usize].span),
+                    ControlKind::Loop { .. } => plan.loop_joins(c, None),
+                    ControlKind::Block { .. } => continue,
+                };
+                // Held to the scope around the construct, so a sibling arm
+                // never sees them.
+                let scope = reach.joins_scope(&self.scopes, c.span, &joins);
+                self.mint(&var, scope, &place, joins, &proofs, &mut minted, &mut witnesses);
             }
 
             // A block no construct runs conditionally (a bare block, `eval`,
@@ -107,7 +103,9 @@ impl<'a> Builder<'a> {
             let upto = |end: ScopeId| reach.chain.iter().copied().take_while(move |&s| s != end).zip(reach.chain.iter().copied().skip(1));
             for (level, parent) in upto(reach.stop) {
                 let block = self.scopes[level.0 as usize].span;
-                if !holding.iter().any(|c| c.kind == ControlKind::Branch && c.arms.iter().any(|a| a.span == block)) {
+                // A block a construct joins (its arm, or the construct when it
+                // is the scope, as `for my $i` is) is already accounted for.
+                if !holding.iter().any(|c| c.span == block || c.arms.iter().any(|a| a.span == block)) {
                     markers.push((var.clone(), parent, self.statement_end_holding(node, block)));
                 }
             }
@@ -237,16 +235,6 @@ impl<'a> Builder<'a> {
             payload,
             span: Span { start: at, end: at },
         }
-    }
-
-    /// Whether the node spanning exactly `span` is a block.
-    fn is_block_at(&self, span: Span) -> bool {
-        self.syntax
-            .main()
-            .root()
-            .ts()
-            .descendant_for_point_range(span.start, span.end)
-            .is_some_and(|n| n.kind() == "block" && node_to_span(n) == span)
     }
 
     /// The end of the statement that holds `block`, seen from `node` inside

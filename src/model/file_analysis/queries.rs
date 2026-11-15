@@ -81,22 +81,29 @@ impl FileAnalysis {
 
     /// Whether completion offers `sym` at `point`. A local its first write
     /// declares (`SymbolFlags::SCOPE_WIDE`) binds from the top of its body,
-    /// but is offered only below that write in the body that writes it:
-    /// Perl's `my` rule. A body nested in it runs later, so there it is
-    /// offered wherever the write sits. Binding, goto-def and types keep
-    /// the scope-wide view.
-    ///
-    /// TODO(cfg-loop-locals): in a loop, a local read at the top and first
-    /// written further down is in force on the second pass but is not
-    /// offered above its write. Source order stands in for control flow
-    /// until the CFG work ("Model closures and scopes - with CFG next
-    /// version") gives reaching writes.
+    /// but is offered only where a write of it reaches: below that write in
+    /// the body that writes it (Perl's `my` rule), and in a loop whose head
+    /// carries it round from a later pass. A body nested in it runs later,
+    /// so there it is offered wherever the write sits. Binding, goto-def and
+    /// types keep the scope-wide view.
     pub fn in_completion_view(&self, sym: &Symbol, point: Point) -> bool {
         if !sym.flags.contains(SymbolFlags::SCOPE_WIDE) {
             return true;
         }
         let body = self.scope_at(point).and_then(|s| callable_reach(&self.scopes, s).last());
-        body != Some(sym.scope) || sym.selection_span.start < point
+        body != Some(sym.scope) || sym.selection_span.start < point || self.loop_carries(sym.id, point)
+    }
+
+    /// Whether a loop around `point` carries `sym` into its head: its value
+    /// on a later pass reaches the point.
+    fn loop_carries(&self, sym: SymbolId, point: Point) -> bool {
+        use crate::model::witnesses::{JoinRole, WitnessAttachment, WitnessPayload};
+        let place = WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(sym))));
+        let within = |of: &Span| of.start <= point && point <= of.end;
+        self.witnesses.iter_attachment(&place).any(|w| {
+            w.span.start <= point
+                && matches!(&w.payload, WitnessPayload::Edge(WitnessAttachment::Join { role: JoinRole::Head, of, .. }) if within(of))
+        })
     }
 
     /// Get the scope struct by ID.

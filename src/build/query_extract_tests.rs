@@ -4240,6 +4240,23 @@ fn cpp_noreturn_says_a_call_never_comes_back() {
     );
 }
 
+/// A C++ loop joins its entry and each pass at its head, and past it what
+/// its failed test and each `break` leave; a `break` inside a `switch`
+/// leaves the `switch`, not the loop.
+#[test]
+fn cpp_a_loop_joins_its_entry_its_passes_and_its_exits() {
+    let src = "void f(bool c, int k) {\n    auto x = 1;\n    while (c) { auto u = x; x = \"s\"; }\n    auto v = x;\n    auto y = \"s\";\n    for (int i = 0; i < k; i++) { switch (k) { case 1: if (c) break; } y = 2; }\n    auto w = y;\n}\n";
+    let fa = cpp_fa(src);
+    let head = fa.witnesses.all().iter().any(|w| {
+        matches!(&w.attachment, crate::model::witnesses::WitnessAttachment::Join { role: crate::model::witnesses::JoinRole::Head, .. })
+    });
+    assert!(head, "the body's write joins at the loop's head");
+    let past = fa.inferred_type_via_bag("x", tree_sitter::Point { row: 3, column: 13 });
+    assert!(matches!(past, Some(crate::model::file_analysis::InferredType::Union(_))), "past the loop: either: {past:?}");
+    let switched = fa.inferred_type_via_bag("y", tree_sitter::Point { row: 6, column: 13 });
+    assert!(matches!(switched, Some(crate::model::file_analysis::InferredType::Union(_))), "every pass ends at the body's write: {switched:?}");
+}
+
 /// A C++ branch joins its arms like any other language's, braceless arm
 /// included: two arms that agree leave their agreed type.
 #[test]

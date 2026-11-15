@@ -16,6 +16,9 @@ pub enum ControlKind {
     /// It runs its body while its test holds; `once` when the body runs
     /// before the first test.
     Loop { once: bool },
+    /// It tests nothing, but a `break` aimed at it leaves it (a `switch`),
+    /// and a `continue` too when `next` (Perl's bare block).
+    Block { next: bool },
 }
 
 /// Where an arm runs relative to its construct.
@@ -41,6 +44,8 @@ pub struct Construct {
     pub kind: ControlKind,
     pub cond: Option<Span>,
     pub arms: Vec<Arm>,
+    /// The name a jump can aim at it by, as a [`ControlView::labels`] index.
+    pub label: Option<u32>,
 }
 
 /// Where a leaving statement sends control.
@@ -58,6 +63,20 @@ pub enum LeaveKind {
 pub struct Leave {
     pub span: Span,
     pub kind: LeaveKind,
+    pub target: LeaveTarget,
+}
+
+/// Which construct a `break` or `continue` leaves, of those around it that
+/// it can leave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeaveTarget {
+    /// The innermost.
+    #[default]
+    Nearest,
+    /// The innermost carrying this name ([`ControlView::labels`]).
+    Label(u32),
+    /// The n-th, counting the innermost as one.
+    Levels(u32),
 }
 
 /// One file's control structure: constructs in source order (an outer
@@ -66,6 +85,8 @@ pub struct Leave {
 pub struct ControlView {
     pub constructs: Vec<Construct>,
     pub leaves: Vec<Leave>,
+    /// The names constructs carry and jumps aim at, each once.
+    pub labels: Vec<String>,
 }
 
 impl ControlView {
@@ -97,6 +118,81 @@ fn contains(outer: Span, inner: Span) -> bool {
     let start = |s: Span| (s.start.row, s.start.column);
     let end = |s: Span| (s.end.row, s.end.column);
     start(outer) <= start(inner) && end(inner) <= end(outer)
+}
+
+/// What each leave of `view` aims at ([`Aim`]). Constructs nest, so the
+/// ones open around a leave form a stack, swept once in source order.
+fn aims(view: &ControlView) -> Vec<Aim> {
+    let mut aims = vec![Aim::Out; view.leaves.len()];
+    let mut order: Vec<usize> = (0..view.leaves.len()).filter(|&i| matches!(view.leaves[i].kind, LeaveKind::Break | LeaveKind::Continue)).collect();
+    if order.is_empty() {
+        return aims;
+    }
+    order.sort_by_key(|&i| view.leaves[i].span.start);
+    let mut catching: Vec<usize> =
+        (0..view.constructs.len()).filter(|&k| !matches!(view.constructs[k].kind, ControlKind::Branch)).collect();
+    catching.sort_by_key(|&k| (view.constructs[k].span.start, std::cmp::Reverse(view.constructs[k].span.end)));
+    let span = |k: usize| view.constructs[k].span;
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = catching.into_iter().peekable();
+    for i in order {
+        let l = view.leaves[i];
+        while let Some(k) = next.next_if(|&k| span(k).start <= l.span.start) {
+            while open.last().is_some_and(|&o| !contains(span(o), span(k))) {
+                open.pop();
+            }
+            open.push(k);
+        }
+        while open.last().is_some_and(|&o| !contains(span(o), l.span)) {
+            open.pop();
+        }
+        let leaves = |k: &&usize| match (view.constructs[**k].kind, l.kind) {
+            (ControlKind::Loop { .. }, _) | (ControlKind::Block { .. }, LeaveKind::Break) => true,
+            (ControlKind::Block { next }, _) => next,
+            (ControlKind::Branch, _) => false,
+        };
+        let mut around = open.iter().rev().filter(leaves);
+        let found = match l.target {
+            LeaveTarget::Nearest => around.next(),
+            LeaveTarget::Label(name) => around.find(|&&k| view.constructs[k].label == Some(name)),
+            LeaveTarget::Levels(n) => around.nth((n as usize).saturating_sub(1)),
+        };
+        aims[i] = match (found, l.target) {
+            (Some(&k), _) if matches!(view.constructs[k].kind, ControlKind::Loop { .. }) => Aim::Loop(k),
+            (Some(_), _) | (None, LeaveTarget::Label(_) | LeaveTarget::Levels(_)) => Aim::Through,
+            (None, LeaveTarget::Nearest) => Aim::Out,
+        };
+    }
+    aims
+}
+
+/// The point just before `p`, where a read sees nothing landing at `p`.
+fn before(p: Point) -> Point {
+    match p.column {
+        0 => Point { row: p.row.saturating_sub(1), column: usize::MAX },
+        c => Point { row: p.row, column: c - 1 },
+    }
+}
+
+/// The place as it stands at `at`, on a path no test decides.
+fn read(at: Point) -> JoinArm {
+    JoinArm { at, arm: None, untaken: None }
+}
+
+/// A loop's arms, by index into its construct's, and where its head lands.
+struct LoopParts {
+    ix: usize,
+    body: usize,
+    step: Option<usize>,
+    other: Option<usize>,
+    once: bool,
+    heads: Vec<Point>,
+}
+
+/// Just past `span`: where a join past a construct lands, so a read at
+/// the construct's own end (its last arm's) never meets the join it feeds.
+fn past(span: Span) -> Point {
+    Point { row: span.end.row, column: span.end.column + 1 }
 }
 
 /// One join a branch mints for a place: past the construct (`After`)
@@ -146,6 +242,23 @@ pub struct JoinPlan<'v> {
     /// Branches by where they end, for an arm a branch closes.
     ends: HashMap<Point, Vec<usize>>,
     arm_spans: HashSet<Span>,
+    /// Per leave in the view: for a `break` or `continue`, whether it
+    /// lands somewhere the view models, and the loop it leaves.
+    aims: Vec<Aim>,
+}
+
+/// Where a `break` or `continue` sends control, as the view sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Aim {
+    /// Out of the arms around it, to somewhere they do not reach (a
+    /// `return`, or a jump with no construct to leave in the view).
+    Out,
+    /// Out of loop `k`'s body: past it (`break`) or to its next test.
+    Loop(usize),
+    /// Past a construct the view does not join (a `switch`, a bare block,
+    /// a name or a count that names no construct around it): modelled as
+    /// falling through, so no arm around it is said to leave.
+    Through,
 }
 
 impl<'v> JoinPlan<'v> {
@@ -171,7 +284,7 @@ impl<'v> JoinPlan<'v> {
         }
         let mut ends: HashMap<Point, Vec<usize>> = HashMap::new();
         for (i, c) in view.constructs.iter().enumerate() {
-            if c.kind == ControlKind::Branch {
+            if !c.arms.is_empty() {
                 ends.entry(c.span.end).or_default().push(i);
             }
         }
@@ -181,7 +294,8 @@ impl<'v> JoinPlan<'v> {
         for (i, c) in view.constructs.iter().enumerate() {
             at_span.entry(c.span).or_default().push(i);
         }
-        let mut plan = JoinPlan { view, leaves: vec![false; arms.len()], arms, around, index, at_span, ends, arm_spans };
+        let aims = aims(view);
+        let mut plan = JoinPlan { view, leaves: vec![false; arms.len()], arms, around, index, at_span, ends, arm_spans, aims };
         plan.mark_leaving();
         plan
     }
@@ -192,7 +306,10 @@ impl<'v> JoinPlan<'v> {
     /// them.
     fn mark_leaving(&mut self) {
         let view = self.view;
-        for l in &view.leaves {
+        for (i, l) in view.leaves.iter().enumerate() {
+            if self.aims[i] == Aim::Through {
+                continue;
+            }
             let held = self.holding_ix(l.span.start).find(|&i| contains(self.arm_span(i), l.span));
             if let Some(i) = held {
                 self.mark_left(i);
@@ -343,6 +460,133 @@ impl<'v> JoinPlan<'v> {
         out
     }
 
+    /// The joins loop `c` mints for a place bound from `bound_from`
+    /// (`docs/adr/cfg-tier.md` §Loops). Its `Head`, where each test runs:
+    /// the value entering the loop and the value each pass ends with (past
+    /// the step when there is one, else at the body's end and at each
+    /// `continue`). Its `Exit`, just past it: the value where the test
+    /// fails (past a loop's `else`, which runs there) and at each `break`.
+    /// A step's entry (`ArmStart`): the body's end and each `continue`.
+    ///
+    /// A test written before the body lands the head there, so a write in
+    /// the test stands for the body; a step between the two (a C-style
+    /// `for`) lands it at the body too, where that write is then hidden.
+    pub fn loop_joins(&self, c: &'v Construct, bound_from: Option<Point>) -> Vec<BranchJoin> {
+        use crate::model::witnesses::JoinRole;
+        let Some(parts) = self.loop_parts(c) else { return Vec::new() };
+        let LoopParts { ix, body, step, heads, .. } = parts;
+        let span = |a: usize| c.arms[a].span;
+        let continues: Vec<JoinArm> = self.aimed(ix, LeaveKind::Continue).collect();
+        let first = heads[0];
+        let mut head = vec![read(before(first))];
+        let mut out = Vec::new();
+        match step {
+            Some(s) => {
+                let mut entering = continues;
+                self.pass_end(c, body, &mut entering);
+                self.arm_end(c, s, &mut head, &mut Vec::new());
+                out.push((JoinRole::ArmStart, vec![span(s).start], entering));
+            }
+            None => {
+                self.pass_end(c, body, &mut head);
+                head.extend(continues);
+            }
+        }
+        out.push((JoinRole::Head, heads, head));
+        out.push((JoinRole::Exit, vec![past(c.span)], self.exit_points(c)));
+
+        let bound = |p: Point| bound_from.is_none_or(|b| b <= p);
+        out.into_iter()
+            .map(|(role, mut lands, mut arms)| {
+                arms.retain(|a| bound(a.at));
+                arms.sort_by_key(|a| (a.at, a.arm.map(|s| (s.start, s.end)), a.untaken.map(|u| (u.tested, u.of.start, u.of.end))));
+                arms.dedup();
+                lands.sort();
+                lands.dedup();
+                BranchJoin { role, of: c.span, lands, arms }
+            })
+            .filter(|j| !j.arms.is_empty())
+            .collect()
+    }
+
+    /// Whether a variable bound at `born` is bound afresh on each pass of
+    /// `c`: bound in the test or per-pass binding (`while (my $x = ...)`,
+    /// `for x in xs`), at or after the head and ahead of the body. Nothing
+    /// carries such a binding into the next pass, so the loop joins none.
+    pub fn binds_each_pass(&self, c: &'v Construct, born: Point) -> bool {
+        matches!(c.kind, ControlKind::Loop { .. })
+            && self.loop_parts(c).is_some_and(|p| p.heads[0] <= born && born < c.arms[p.body].span.start)
+    }
+
+    /// A loop's arms by role, and where its head lands, first first.
+    fn loop_parts(&self, c: &'v Construct) -> Option<LoopParts> {
+        let ix = self.index[&(c as *const Construct)];
+        let role = |r: ArmRole| c.arms.iter().position(|a| a.role == r);
+        let (body, step, other) = (role(ArmRole::Body)?, role(ArmRole::Step), role(ArmRole::When(false)));
+        let span = |a: usize| c.arms[a].span;
+        let once = c.kind == (ControlKind::Loop { once: true });
+        let mut heads = vec![span(body).start];
+        match c.cond {
+            Some(_) if once => {}
+            Some(cond) if cond.end <= span(body).start => {
+                heads = vec![cond.start];
+                if step.is_some_and(|s| span(s).start < span(body).start) {
+                    heads.push(span(body).start);
+                }
+            }
+            Some(cond) => heads.push(cond.start),
+            None => {}
+        }
+        heads.extend(other.map(|e| span(e).start));
+        heads.sort();
+        heads.dedup();
+        Some(LoopParts { ix, body, step, other, once, heads })
+    }
+
+    /// Where a pass through loop `c`'s body comes out: the body's end (past
+    /// the test, for a body that runs before it).
+    fn pass_end(&self, c: &'v Construct, body: usize, out: &mut Vec<JoinArm>) {
+        match c.cond {
+            Some(cond) if c.kind == (ControlKind::Loop { once: true }) => {
+                let mut ended = Vec::new();
+                self.arm_end(c, body, &mut ended, &mut Vec::new());
+                if !ended.is_empty() {
+                    out.push(read(cond.end));
+                }
+            }
+            _ => self.arm_end(c, body, out, &mut Vec::new()),
+        }
+    }
+
+    /// The paths out of loop `c`: where its test fails (past its `else`,
+    /// which runs there) and each `break` aimed at it.
+    fn exit_points(&self, c: &'v Construct) -> Vec<JoinArm> {
+        let Some(LoopParts { ix, body, step, other, once, heads }) = self.loop_parts(c) else { return Vec::new() };
+        let mut out = Vec::new();
+        match (other, c.cond) {
+            (Some(e), _) => self.arm_end(c, e, &mut out, &mut Vec::new()),
+            (None, Some(_)) if once => self.pass_end(c, body, &mut out),
+            // Just past the test: what a test holding proves lasts to its
+            // end (`!defined($b) and $n < 9` holds `$b` undef over its
+            // right side), and here it failed. A step written right after
+            // the test (`$i<$n;$i++`) starts there and lands its own join,
+            // which the failed test never reaches, so the read stays short.
+            (None, Some(cond)) => {
+                let at = past(cond);
+                let stepped = step.is_some_and(|s| c.arms[s].span.start <= at);
+                out.push(read(if stepped { cond.end } else { at }));
+            }
+            (None, None) => out.push(read(heads[0])),
+        }
+        out.extend(self.aimed(ix, LeaveKind::Break));
+        out
+    }
+
+    /// Each `kind` jump aimed at loop `ix`, as the place stands there.
+    fn aimed(&self, ix: usize, kind: LeaveKind) -> impl Iterator<Item = JoinArm> + '_ {
+        self.view.leaves.iter().zip(&self.aims).filter(move |(l, aim)| **aim == Aim::Loop(ix) && l.kind == kind).map(|(l, _)| read(l.span.start))
+    }
+
     /// The join past `c` for a place bound from `bound_from`, and every
     /// branch whose paths are `c`'s.
     fn after_join(&self, c: &'v Construct, bound_from: Option<Point>) -> (BranchJoin, Vec<&'v Construct>) {
@@ -353,10 +597,7 @@ impl<'v> JoinPlan<'v> {
         arms.retain(|a| bound_from.is_none_or(|b| b <= a.at));
         arms.sort_by_key(|a| (a.at, a.arm.map(|s| (s.start, s.end)), a.untaken.map(|u| (u.tested, u.of.start, u.of.end))));
         arms.dedup();
-        // Just past the construct: its last arm leaves at its end, and that
-        // arm's read must not meet the join it feeds.
-        let past = Point { row: c.span.end.row, column: c.span.end.column + 1 };
-        (BranchJoin { role: JoinRole::After, of: c.span, lands: vec![past], arms }, reached)
+        (BranchJoin { role: JoinRole::After, of: c.span, lands: vec![past(c.span)], arms }, reached)
     }
 
     /// The joins a test of a place makes, from the branch at `of` (or the
@@ -385,6 +626,9 @@ impl<'v> JoinPlan<'v> {
             .arms_holding(c.span.start)
             .filter(|(k, _)| !std::ptr::eq(*k, c) && contains(k.span, c.span) && k.span != c.span)
             .take_while(|(_, a)| contains(within, a.span))
+            // Past a loop the place holds what its exit joins, which no
+            // test inside it decides.
+            .take_while(|(k, _)| k.kind == ControlKind::Branch)
             .filter(|(k, _)| k.kind == ControlKind::Branch && !self.is_lifted(k) && contains(within, k.span))
             .map(|(k, _)| k);
         let mut out: Vec<(&'v Construct, BranchJoin)> = Vec::new();
@@ -409,16 +653,8 @@ impl<'v> JoinPlan<'v> {
     /// where the construct is entered. Every branch it passes through lands
     /// in `reached`.
     fn arm_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>) {
-        let k = self.index[&(c as *const Construct)];
-        for (ai, a) in c.arms.iter().enumerate() {
-            match self.closing(c, a).filter(|k| reached.len() < 64 && !reached.iter().any(|r| std::ptr::eq(*r, *k))) {
-                Some(inner) => {
-                    reached.push(inner);
-                    self.arm_points(inner, out, reached);
-                }
-                None if self.leaves[self.arm_ix(k, ai)] => {}
-                None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None }),
-            }
+        for ai in 0..c.arms.len() {
+            self.arm_end(c, ai, out, reached);
         }
         let has = |b: bool| c.arms.iter().any(|a: &Arm| a.role == ArmRole::When(b));
         if !(has(true) && has(false)) && !c.arms.is_empty() {
@@ -427,9 +663,27 @@ impl<'v> JoinPlan<'v> {
         }
     }
 
-    /// The outermost branch inside arm `a` of `c` that ends where `a`
-    /// does: its paths are the arm's, since nothing in the arm runs after
-    /// it.
+    /// Where control comes out at the end of arm `ai` of `c`: the paths out
+    /// of a branch or loop closing it, else the arm's end, unless control
+    /// never comes out of it.
+    fn arm_end(&self, c: &'v Construct, ai: usize, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>) {
+        let a = &c.arms[ai];
+        let k = self.index[&(c as *const Construct)];
+        match self.closing(c, a).filter(|k| reached.len() < 64 && !reached.iter().any(|r| std::ptr::eq(*r, *k))) {
+            Some(inner) if inner.kind == ControlKind::Branch => {
+                reached.push(inner);
+                self.arm_points(inner, out, reached);
+            }
+            // Its paths out are paths through `a`, so what holds over `a` holds there.
+            Some(inner) => out.extend(self.exit_points(inner).into_iter().map(|p| JoinArm { arm: Some(a.span), ..p })),
+            None if self.leaves[self.arm_ix(k, ai)] => {}
+            None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None }),
+        }
+    }
+
+    /// The outermost branch or loop inside arm `a` of `c` that ends where
+    /// `a` does: its paths are the arm's, since nothing in the arm runs
+    /// after it.
     fn closing(&self, c: &Construct, a: &Arm) -> Option<&'v Construct> {
         self.ends
             .get(&a.span.end)?
@@ -466,6 +720,17 @@ impl Reach {
     /// The innermost scope of the reach holding `span`.
     pub fn holding_scope(&self, scopes: &[super::Scope], span: Span) -> super::ScopeId {
         self.chain.iter().copied().find(|&s| contains(scopes[s.0 as usize].span, span)).unwrap_or(self.stop)
+    }
+
+    /// The scope a construct's joins are held to: the innermost of the
+    /// reach holding the construct and the furthest point its joins land
+    /// at, short of the reach's own end (a construct closing its scope lands
+    /// just past it).
+    pub fn joins_scope(&self, scopes: &[super::Scope], of: Span, joins: &[BranchJoin]) -> super::ScopeId {
+        let furthest = joins.iter().flat_map(|j| j.lands.iter().copied()).fold(of.end, Point::max);
+        let held = |s: super::ScopeId| contains(scopes[s.0 as usize].span, of);
+        let reaches = |s: super::ScopeId| scopes[s.0 as usize].span.end >= furthest || s == self.stop;
+        self.chain.iter().copied().find(|&s| held(s) && reaches(s)).unwrap_or(self.stop)
     }
 }
 
@@ -580,12 +845,18 @@ impl super::FileAnalysis {
                 .arms_holding(at)
                 .filter(|(_, a)| contains(a.span, written))
                 .take_while(|(_, a)| contains(reach.within, a.span))
-                .filter(|(c, _)| c.kind == ControlKind::Branch && !plan.is_lifted(c) && contains(reach.within, c.span));
+                .filter(|(c, _)| !plan.is_lifted(c) && contains(reach.within, c.span))
+                .filter(|(c, _)| bound_from.is_none_or(|b| !plan.binds_each_pass(c, b)));
             for (c, _) in holding {
-                // Held to the scope around the branch, so a sibling block
-                // never sees it.
-                let scope = reach.holding_scope(&self.scopes, c.span);
-                for BranchJoin { role, of, lands, arms } in plan.branch_joins(c, bound_from, self.scopes[fe.target_scope.0 as usize].span) {
+                let found = match c.kind {
+                    ControlKind::Branch => plan.branch_joins(c, bound_from, self.scopes[fe.target_scope.0 as usize].span),
+                    ControlKind::Loop { .. } => plan.loop_joins(c, bound_from),
+                    ControlKind::Block { .. } => continue,
+                };
+                // Held to the scope around the construct, so a sibling block
+                // never sees them.
+                let scope = reach.joins_scope(&self.scopes, c.span, &found);
+                for BranchJoin { role, of, lands, arms } in found {
                     if !minted.insert((place.clone(), of, role)) {
                         continue;
                     }

@@ -3,7 +3,7 @@
 //! join builder reads one shape for every language (`docs/adr/cfg-tier.md`).
 
 use crate::build::query_extract::{Capture, CtlCap};
-use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind, Span};
+use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind, LeaveTarget, Span};
 use std::collections::HashMap;
 use tree_sitter::{Node, Query};
 
@@ -33,44 +33,64 @@ pub(super) fn ctl_query() -> (&'static Query, &'static [CtlCap]) {
 }
 
 /// The view over one file's matches of a control document, each match its
-/// captures as `(capture, node id, span)`. Arms group by the construct
-/// their pattern captures, so a construct several patterns describe (an
-/// `if` with an `else`) is one construct. Every language's document reads
-/// through this one grouping.
-pub(crate) fn control_view(matches: impl IntoIterator<Item = Vec<(CtlCap, usize, Span)>>) -> ControlView {
+/// captures as `(capture, node id, span, text)`; only a name or a count
+/// needs its text. Arms group by the construct their pattern captures, so
+/// a construct several patterns describe (an `if` with an `else`) is one
+/// construct. Every language's document reads through this one grouping.
+pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, usize, Span, &'s str)>>) -> ControlView {
     let mut view = ControlView::default();
     let mut by_node: HashMap<usize, usize> = HashMap::new();
+    let label = |view: &mut ControlView, text: &str| -> u32 {
+        match view.labels.iter().position(|l| l == text) {
+            Some(i) => i as u32,
+            None => {
+                view.labels.push(text.to_string());
+                (view.labels.len() - 1) as u32
+            }
+        }
+    };
     for m in matches {
-        let construct = m.iter().find_map(|&(cap, id, span)| {
+        let construct = m.iter().find_map(|&(cap, id, span, _)| {
             let kind = match cap {
                 CtlCap::Branch => ControlKind::Branch,
                 CtlCap::Loop => ControlKind::Loop { once: false },
                 CtlCap::LoopOnce => ControlKind::Loop { once: true },
+                CtlCap::Block => ControlKind::Block { next: false },
+                CtlCap::BlockNext => ControlKind::Block { next: true },
                 _ => return None,
             };
             Some((id, span, kind))
         });
         let Some((node, at, kind)) = construct else {
-            for &(cap, _, span) in &m {
+            let target = m.iter().find_map(|&(cap, _, _, text)| match cap {
+                CtlCap::Label => Some(LeaveTarget::Label(label(&mut view, text))),
+                CtlCap::Levels => text.trim().parse().ok().map(LeaveTarget::Levels),
+                _ => None,
+            });
+            for &(cap, _, span, _) in &m {
                 if let Some(kind) = leave_kind(cap) {
-                    view.leaves.push(Leave { span, kind });
+                    view.leaves.push(Leave { span, kind, target: target.unwrap_or_default() });
                 }
             }
             continue;
         };
         let ix = *by_node.entry(node).or_insert_with(|| {
-            view.constructs.push(Construct { span: at, kind, cond: None, arms: Vec::new() });
+            view.constructs.push(Construct { span: at, kind, cond: None, arms: Vec::new(), label: None });
             view.constructs.len() - 1
         });
-        let c = &mut view.constructs[ix];
         // A body that runs before its first test says so in one pattern.
         if kind == (ControlKind::Loop { once: true }) {
-            c.kind = kind;
+            view.constructs[ix].kind = kind;
         }
-        for &(cap, _, span) in &m {
+        for &(cap, _, span, text) in &m {
             let role = match cap {
                 CtlCap::Cond => {
-                    c.cond.get_or_insert(span);
+                    view.constructs[ix].cond.get_or_insert(span);
+                    continue;
+                }
+                CtlCap::Label => {
+                    let name = label(&mut view, text);
+                    view.constructs[ix].label = Some(name);
                     continue;
                 }
                 CtlCap::Then => ArmRole::When(true),
@@ -80,6 +100,7 @@ pub(crate) fn control_view(matches: impl IntoIterator<Item = Vec<(CtlCap, usize,
                 _ => continue,
             };
             let arm = Arm { span, role };
+            let c = &mut view.constructs[ix];
             if !c.arms.contains(&arm) {
                 c.arms.push(arm);
             }
@@ -90,17 +111,24 @@ pub(crate) fn control_view(matches: impl IntoIterator<Item = Vec<(CtlCap, usize,
 }
 
 /// One match's captures as [`control_view`] reads them.
-fn captured<'t>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>) -> Vec<(CtlCap, usize, Span)> {
-    caps.into_iter().map(|(c, n)| (c, n.id(), super::node_to_span(n))).collect()
+fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: &'s [u8]) -> Vec<(CtlCap, usize, Span, &'s str)> {
+    caps.into_iter()
+        .map(|(c, n)| {
+            let text = match c {
+                CtlCap::Label | CtlCap::Levels => n.utf8_text(source).unwrap_or(""),
+                _ => "",
+            };
+            (c, n.id(), super::node_to_span(n), text)
+        })
+        .collect()
 }
 
 /// The control view of the constructs at `nodes`, and of every statement a
-/// branch found there runs in its arms, down to the statements that leave:
-/// what decides whether an arm comes out at its end. Each node is tried as
-/// a match's root and nothing below it starts one, so the cost is the
-/// nodes' own, not the file's. A loop's body is not
-/// entered, since nothing in it decides whether the arm around the loop
-/// comes out. `exits(node)` names a call that leaves by its callee's
+/// construct found there runs in its arms, down to the statements that
+/// leave: what decides whether an arm comes out at its end, and where a
+/// loop's `last` and `next` land. Each node is tried as a match's root and
+/// nothing below it starts one, so the cost is the nodes' own, not the
+/// file's. `exits(node)` names a call that leaves by its callee's
 /// nature, until how a call ends is read from the effect lane
 /// (`TODO(cross-file-noreturn)`).
 pub(super) fn control_view_with_leaves<'t>(
@@ -121,13 +149,12 @@ pub(super) fn control_view_with_leaves<'t>(
             continue;
         }
         if exits(node) {
-            out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node))]);
+            out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node), "")]);
         }
         let mut it = cursor.matches(query, node, source);
         while let Some(m) = it.next() {
-            let branch = m.captures.iter().any(|c| caps[c.index as usize] == CtlCap::Branch);
-            for c in m.captures.iter().filter(|_| branch) {
-                if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else) {
+            for c in m.captures.iter() {
+                if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep) {
                     continue;
                 }
                 if c.node.kind() == "block" {
@@ -141,7 +168,7 @@ pub(super) fn control_view_with_leaves<'t>(
                     work.push(c.node);
                 }
             }
-            out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node))));
+            out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node)), source));
         }
     }
     control_view(out)

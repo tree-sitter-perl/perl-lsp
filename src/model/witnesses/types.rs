@@ -175,6 +175,10 @@ pub enum JoinRole {
     /// begins and at a test written after the code it guards (`… if $c`),
     /// which runs first.
     ArmStart,
+    /// Where a loop tests: the value entering it, and each pass's end.
+    Head,
+    /// Past a loop: where its test fails, and each `break` aimed at it.
+    Exit,
 }
 
 /// The question a `Member` attachment asks of its member.

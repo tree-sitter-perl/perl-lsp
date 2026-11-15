@@ -220,13 +220,13 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
                 .next()
                 .is_some_and(|arm| arm_sites.contains(&arm.id()) && statements(ad.tree, arm).any(|s| s.id() == site))
     };
-    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span)>> = Default::default();
+    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span, &str)>> = Default::default();
     for e in ad.events() {
         if let Capture::Ctl(c) = e.cap {
             if c.is_leave() && !in_sequence(e.site) {
                 continue;
             }
-            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span()));
+            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span(), &e.text));
         }
     }
     crate::build::builder::control::control_view(by_match.into_values())

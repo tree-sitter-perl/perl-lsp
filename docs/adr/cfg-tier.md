@@ -47,6 +47,50 @@ one on the same terms, so a narrowing leaves a block one construct at a
 time. A place with steps has no writes to order a `Reset` against, so its
 joins are regions too, cut at its first disturbance.
 
+## Loops
+
+A loop holding a write mints three joins for the place. Its `Head` lands
+where each test runs (the condition, or the body when there is none or it
+follows the body), fed by the value entering the loop and by each pass's
+end: past the step when there is one, else the body's end and each
+`continue`. A step's entry (`ArmStart`) is fed by the body's end and each
+`continue`. Its `Exit` lands just past the loop, fed by where the test fails
+(read just past the test, so a test that writes the place feeds what it
+wrote; past the loop's `else`, which runs there) and by each `break`. An arm
+whose end a branch or loop closes takes that construct's paths out.
+
+A `foreach` tests for a next item as it binds its variable, so the binding
+is its condition and its head lands there; the binding replaces what the
+variable held (`@flow.assign` on the target), so nothing a pass wrote
+reaches the next. A variable bound at or past the head and ahead of the
+body (`while (my $x = ...)`, `for my $x`) is bound afresh each pass, and
+the loop joins none for it (`JoinPlan::binds_each_pass`). A use where the
+head lands (the test's first read) reads the joined value: an untyped join,
+like an untyped write, yields to a use at or after it.
+
+A `break` or `continue` leaves the innermost construct it can leave, the one
+carrying its name (`last OUTER`), or the n-th (`break 2`). A `switch` takes
+a `break` (`@ctl.block`), and Perl's bare block and php's `switch` take a
+`continue` too (`@ctl.block.next`); a jump that leaves one of those, or names
+nothing around it, is modelled as falling through, since no join is minted
+past them. A narrowing never joins out past a loop: what the place holds
+there is the loop's exit, which no test inside decides.
+
+A loop's recurrence shows up at query time as a cycle through a join. An
+arm whose chase closes at its own join and comes back untyped is chased once
+more with the join answering what its other arms hold: one pass round the
+loop (`rechase_recurring`). Typed then, it says what a pass adds (`$n =
+$n->parent` keeps the class); still untyped (`$p = $p->{up}`), it makes the
+join untyped, as any untyped arm does. A pass met inside a pass is not
+taken (the arm stays untyped), so the work stays one pass deep. An arm
+whose chase closes above its join (a read inside the loop asked first)
+comes back untyped and drops out: it adds nothing the join's other arms do
+not. Both stop short of a fixed point (`TODO(cfg-loop-fixpoint)`: a value a
+later pass changes is missed, and only the fixed point can tell a consumer
+the answer is complete). Completion reads the same
+joins: a local first written further down a loop's body is offered at its
+top, where a later pass carries it (`FileAnalysis::in_completion_view`).
+
 Joins answer ordinary type queries (hover, completion, narrowing), not only
 diagnostics. A diagnostic that reports on a narrowed type asks
 `place_state_at`, which also says whether every path was accounted for, and
@@ -114,8 +158,9 @@ in `fold.rs`, and every `TODO(cfg-exit-join)`, `TODO(noreturn-callee)` and
 
 ## Not in this tier yet
 
-Real loop fixed points (v1's answer for a self-referential loop write, the
-entry type flagged incomplete, awaits approval), later-running bodies and captures,
+Real loop fixed points (`TODO(cfg-loop-fixpoint)`), a loop condition's
+polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
+fails), later-running bodies and captures,
 try/catch arms, readonly-after-constructor, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

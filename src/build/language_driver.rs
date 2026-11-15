@@ -1327,7 +1327,7 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for c in control.constructs.iter_mut() {
-        let crate::model::file_analysis::Construct { span, kind: _, cond, arms } = c;
+        let crate::model::file_analysis::Construct { span, kind: _, cond, arms, label: _ } = c;
         *span = rspan(*span);
         if let Some(cond) = cond {
             *cond = rspan(*cond);

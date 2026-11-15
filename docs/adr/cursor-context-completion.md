@@ -27,9 +27,9 @@ only below its first write in the body that writes it, as Perl offers a
 nested in it runs later, so there the local is offered wherever it is
 written; a python function is offered the module globals written below it.
 Binding, goto-def and types keep the scope-wide view. In a loop, a local
-read at the top and first written further down is not offered above that
-write (`TODO(cfg-loop-locals)`): source order stands in for control flow
-until the scope work has a CFG.
+first written further down the body is offered at its top too, where a
+later pass carries it: the loop's head join for the local is a write that
+reaches there (`docs/adr/cfg-tier.md` §Loops).
 
 ## Half 2: member access — the crux is the erased operator
 

@@ -396,6 +396,7 @@
   left: (list_literal (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)) @flow.assign
 (assignment_expression
   left: (list_literal (pair (_) . (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled .))) @flow.assign
+; Each pass replaces what the loop variable held.
 (foreach_statement . (_) . [
   (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled
   (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
@@ -404,7 +405,7 @@
     (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled
     (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
   ] .)
-])
+] @flow.assign)
 ; A caught exception is an instance of the class the clause names; a
 ; clause naming several (`A | B`) names no single type.
 (catch_clause
@@ -488,8 +489,7 @@
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
 ; runs where the left holds, of `||` where it fails. An `else` arm is its
-; body. A loop tests its condition again after each run of its body, so
-; what follows it is no arm of that test.
+; body.
 (if_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (if_statement
   condition: (_) @ctl.cond
@@ -498,13 +498,22 @@
 (if_statement
   alternative: (else_if_clause condition: (_) @ctl.cond) @ctl.branch
   alternative: [(else_if_clause) @ctl.else (else_clause body: (_) @ctl.else)])
-; TODO(cfg-exit-join): the loop's own joins (its head, its exit) retire
-; this capture; until then it narrows the body by the loop's test.
-(while_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.loop
 (conditional_expression condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.branch
 (conditional_expression condition: (_) @ctl.cond alternative: (_) @ctl.else) @ctl.branch
 (binary_expression left: (_) @ctl.cond operator: ["&&" "and"] right: (_) @ctl.then) @ctl.branch
 (binary_expression left: (_) @ctl.cond operator: ["||" "or"] right: (_) @ctl.else) @ctl.branch
+; A loop runs its body while its test holds (a `foreach` while items
+; remain), a `for`'s update after each pass. `break` and `continue` leave a
+; `switch` as they leave a loop, and `break 2` the second around them.
+(while_statement condition: (_) @ctl.cond body: (_) @ctl.loop.body) @ctl.loop
+(for_statement body: (_) @ctl.loop.body) @ctl.loop
+(for_statement condition: (_) @ctl.cond) @ctl.loop
+(for_statement update: (_) @ctl.loop.step) @ctl.loop
+(foreach_statement body: (_) @ctl.loop.body) @ctl.loop
+; A `foreach` tests for a next item as it binds it.
+(foreach_statement (_) @ctl.cond . body: (_)) @ctl.loop
+(do_statement body: (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
+(switch_statement) @ctl.block.next
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -515,8 +524,8 @@
 ; TODO(noreturn-callee): a callee that never returns is an effect on the
 ; callee; replace the spelling lookup once effects and the CFG exist.
 (return_statement) @ctl.leave.return
-(continue_statement) @ctl.leave.continue
-(break_statement) @ctl.leave.break
+(continue_statement (integer)? @ctl.levels) @ctl.leave.continue
+(break_statement (integer)? @ctl.levels) @ctl.leave.break
 (exit_statement) @ctl.leave.exit
 (expression_statement (throw_expression)) @ctl.leave.throw
 ((expression_statement

@@ -4693,6 +4693,30 @@ function f($p) {
     assert!(fa.resolve_variable("late", tree_sitter::Point::new(3, 4)).is_some(), "it still binds from the top");
 }
 
+/// A local first written further down a loop's body is in force at the
+/// body's top on every pass after the first, so it is offered there.
+#[cfg(feature = "php")]
+#[test]
+fn a_loop_carried_local_is_offered_above_its_write() {
+    let src = "<?php
+function f($xs) {
+    foreach ($xs as $x) {
+
+        $acc = $x;
+    }
+}
+";
+    let fa = php(src);
+    let offered = |row: usize| -> Vec<String> {
+        crate::lsp::symbols::in_scope_completion(&fa, tree_sitter::Point::new(row, 8))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| l == "acc")
+            .collect()
+    };
+    assert_eq!(offered(3), ["acc"], "a later pass reaches it");
+}
+
 /// A receiver the written buffer leaves untyped is typed on the buffer the
 /// sentinel finished only where the written one failed to parse the
 /// access: `Foo::` at the end of a block is an ERROR, so the finished
@@ -5155,6 +5179,36 @@ fn a_constant_read_holds_the_value_another_file_declares() {
     assert_eq!(php(qualified.1).inferred_type_via_bag("a", at(qualified.1, "echo", 0)), None);
 }
 
+/// A loop's head is what enters it or what a pass leaves; past it, what
+/// its failed test or a `break` leaves; `break 2` leaves the loop around.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_loop_joins_its_entry_its_passes_and_its_exits() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+function f($c, $xs) {
+    $x = new A();
+    while ($c) { $u = $x; $x = new B(); }
+    $v = $x;
+    $y = new A();
+    foreach ($xs as $i) { for ($j = 0; $j < 3; $j++) { if ($c) { $y = new B(); break 2; } } $y = new A(); }
+    $w = $y;
+    $z = new A();
+    do { $z = new B(); } while ($c);
+    $t = $z;
+}
+";
+    let fa = php(src);
+    let both = crate::model::file_analysis::join_all(&[T::ClassName("A".into()), T::ClassName("B".into())], &crate::model::file_analysis::Unordered);
+    assert_eq!(fa.inferred_type_via_bag("x", tree_sitter::Point { row: 5, column: 24 }), both, "a later pass reads the body's write");
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column: 9 });
+    assert_eq!(at("x", 6), both, "past the loop: either");
+    assert_eq!(at("y", 9), both, "`break 2` carries the inner write past the outer loop");
+    assert_eq!(at("z", 12), Some(T::ClassName("B".into())), "a `do` body always runs");
+}
+
 /// Past an `if` chain or a short circuit, a variable a branch rebinds holds
 /// what every path leaves it: an arm's write, and the value entering the
 /// branch where no arm writes or none runs.
@@ -5187,4 +5241,15 @@ function f($c, $d) {
     assert_eq!(at("z", 9), both, "the `elseif` arm that does not write");
     assert_eq!(at("t", 12), both, "a short circuit");
     assert_eq!(at("s", 15), Some(T::ClassName("B".into())), "every arm writes");
+}
+
+/// A `foreach` binds its variable afresh each pass, a variable bound before
+/// the loop included: what the body wrote last pass never reaches the next.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_foreach_variable_is_bound_each_pass() {
+    let src = "<?php\nfunction f($xs, $c) {\n    $v = 1;\n    foreach ($xs as $v) {\n        echo $v;\n        if ($c) { $v = [$v]; }\n    }\n}\n";
+    let fa = php(src);
+    let t = fa.inferred_type_via_bag("$v", Point::new(4, 14));
+    assert!(!matches!(t, Some(InferredType::ArrayRef | InferredType::Numeric)), "neither last pass's write nor the entry: {t:?}");
 }

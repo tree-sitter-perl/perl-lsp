@@ -307,7 +307,17 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             }
             if let Some((w, _)) = narrow {
                 if let WitnessPayload::InferredType(t) = &w.payload {
-                    return ReducedValue::Type(t.clone());
+                    // An untyped region yields to a use inside it, as an
+                    // untyped write does (the full fold below).
+                    let used_inside = !t.is_known()
+                        && ws.iter().any(|o| {
+                            matches!(o.payload, WitnessPayload::Observation(_))
+                                && window.admits(o)
+                                && o.span.start >= w.span.start
+                        });
+                    if !used_inside {
+                        return ReducedValue::Type(t.clone());
+                    }
                 }
             }
         }
@@ -443,11 +453,14 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         }
         // An `Unknown` on the plain axis (a reset the RHS never typed, a
         // join approximation) yields to rep and scalar-context evidence that
-        // lands strictly after it: `$r = f(); $r->{k}` reads the hash. An
-        // annotation-priority `Unknown` is a claim and keeps its place.
+        // lands at or after it: `$r = f(); $r->{k}` reads the hash, and a
+        // loop's test reads the value its head join lands right where the
+        // test starts. A write lands past its RHS, so no use in the RHS ties
+        // it. An annotation-priority `Unknown` is a claim and keeps its place.
         if matches!(plain_type, Some(InferredType::Unknown))
             && plain_type_priority <= WitnessSource::Builder(String::new()).priority()
-            && last_observation_at > plain_type_at
+            && last_observation_at.is_some()
+            && last_observation_at >= plain_type_at
         {
             plain_type = None;
         }

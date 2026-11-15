@@ -1902,6 +1902,69 @@ LIMIT = 3
     assert!(offered(9, 0).is_empty(), "module code above the global's write");
 }
 
+/// A local first written further down a loop's body is in force at the
+/// body's top on every pass after the first, so it is offered there.
+#[test]
+fn a_loop_carried_local_is_offered_above_its_write() {
+    let src = "\
+def f(xs):
+    for i in xs:
+        print(i)
+
+        acc = i
+
+def g():
+    print(1)
+
+    late = 2
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let offered = |row: usize| -> Vec<String> {
+        crate::lsp::symbols::in_scope_completion(&fa, Point::new(row, 8))
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|l| ["acc", "late"].contains(&l.as_str()))
+            .collect()
+    };
+    assert_eq!(offered(3), ["acc"], "a later pass reaches it");
+    assert!(offered(8).is_empty(), "no loop carries a local above its write");
+}
+
+/// A loop's head is what enters it or what a pass leaves; past it, what
+/// its failed test (through its `else`) or a `break` leaves.
+#[test]
+fn a_loop_joins_its_entry_its_passes_and_its_exits() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+def f(c, xs):
+    x = A()
+    while c:
+        u = x
+        x = B()
+    v = x
+    y = A()
+    for i in xs:
+        if c:
+            y = B()
+            break
+    else:
+        w = y
+    z = y
+";
+    let fa = py_in(src, None);
+    let a = InferredType::ClassName("A".into());
+    let b = InferredType::ClassName("B".into());
+    let both = crate::model::file_analysis::join_all(&[a.clone(), b.clone()], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 12));
+    assert_eq!(at("x", 7), both, "a later pass reads the body's write");
+    assert_eq!(at("x", 9), both, "past the loop: either");
+    assert_eq!(at("y", 16), Some(a), "the `else` runs only where no `break` left");
+    assert_eq!(fa.inferred_type_via_bag("y", Point::new(17, 8)), both, "past it: the `else`, or the `break`");
+}
+
 /// `x0 = A()` then `x{i+1} = x{i}.add()`: each call's receiver flows
 /// through every call before it.
 fn python_chain(links: usize) -> String {
@@ -2021,4 +2084,28 @@ def f(c, d):
     let at = |row| sibling.inferred_type_via_bag("x", Point::new(row, 12));
     assert_eq!(at(8), Some(b), "inside the arm, its own write");
     assert_eq!(at(10), Some(a), "a sibling arm starts from the value entering the branch");
+}
+
+/// A read inside a loop that reaches the loop's own recurrence (`req` is
+/// last pass's copy) closes the cycle above the head join; the recurring arm
+/// still drops out, so the head reads the entering type.
+#[test]
+fn a_recurrence_asked_from_inside_the_loop_drops_out() {
+    let src = "class PreparedRequest:\n    def copy(self) -> \"PreparedRequest\":\n        return PreparedRequest()\n\ndef resolve(req: PreparedRequest, url):\n    while url:\n        prepared_request = req.copy()\n        h = prepared_request\n        req = prepared_request\n    return req\n";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("prepared_request", Point::new(7, 12)), Some(InferredType::ClassName("PreparedRequest".into())));
+}
+
+/// A `for` binds its target afresh each pass: what the body wrote to it last
+/// pass never reaches the next.
+#[test]
+fn a_for_target_is_bound_each_pass() {
+    let src = "def f(pairs, c):\n    for k, vs in pairs:\n        print(vs)\n        if c:\n            vs = [vs]\n";
+    let fa = py_in(src, None);
+    let t = fa.inferred_type_via_bag("vs", Point::new(2, 14));
+    let fb = py_in("def f(pairs, c):\n    for vs in pairs:\n        print(vs)\n        if c:\n            vs = [vs]\n", None);
+    eprintln!("SINGLE {:?}", fb.inferred_type_via_bag("vs", Point::new(2, 14)));
+    for sy in fa.symbols().iter() { eprintln!("SYM {:?} {} {:?}", sy.id, sy.name, sy.span); }
+    for w in fa.witnesses.all() { eprintln!("DBG {:?} {:?} {:?}", w.attachment, w.payload, w.span); }
+    assert!(!matches!(t, Some(InferredType::ArrayRef)), "last pass's write is gone: {t:?}");
 }

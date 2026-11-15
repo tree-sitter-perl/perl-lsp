@@ -350,6 +350,17 @@ spelled! {
         /// What a loop runs after each pass of its body, before the next
         /// test (a C-style `for`'s iterator, Perl's `continue` block).
         LoopStep = "loop.step",
+        /// A construct that tests nothing but that a `break` aimed at it
+        /// leaves (a `switch`); `block.next` when a `continue` leaves it too
+        /// (Perl's bare block, a loop that runs once; php's `switch`).
+        Block = "block",
+        BlockNext = "block.next",
+        /// The name a loop or block carries, and the one a jump aims at
+        /// (`last OUTER`): a jump with a name leaves the nearest construct
+        /// carrying it.
+        Label = "label",
+        /// How many enclosing constructs a jump leaves (php's `break 2`).
+        Levels = "levels",
         /// A statement that leaves its block unconditionally, by what it
         /// leaves to: nothing after it in the block runs. Which arms of a
         /// condition fall through follows by containment.

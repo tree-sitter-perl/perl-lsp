@@ -142,10 +142,11 @@ document, after its facts are bound). Both read one plan of the document
 - Inside an arm the arm has run, so `if (…) { $x = Foo->new; $x->m }` still
   types the call.
 
-Three cases still stand in a reset marker (an untyped join) where their
-joins are not built yet: a loop (`TODO(cfg-loops)`, the loop joins), a block
-no construct runs conditionally (a bare block, `eval`, a `map` callback),
-and a write inside a callable to a variable outside it
+A loop joins its entry and each pass at its head, and past it where its
+test fails and each `break` (`docs/adr/cfg-tier.md` §Loops). Two cases
+still stand in a reset marker (an untyped join) where their joins are not
+built yet: a block no construct runs conditionally (a bare block, `eval`, a
+`map` callback), and a write inside a callable to a variable outside it
 (`TODO(closure-call-writes)`: the write reaches the variable only where the
 callable is called).
 
@@ -347,10 +348,9 @@ parenthesis). A **position** match marks a condition `@ctl.cond` and
 what it decides: `@ctl.then` runs where it holds, `@ctl.else` where
 it fails. An `else` arm is the statement it holds, so a later clause of
 the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
-condition before it. `@ctl.loop` marks a position's construct that
-tests its condition again after each run of its arm (PHP's `while`); its
-arm is narrowed like any other, and it joins nothing yet
-(`TODO(cfg-exit-join)`, retired by the loop's own joins). Apart from
+condition before it. A loop (`@ctl.loop`, its `@ctl.loop.body` and
+`@ctl.loop.step`) decides no position: what follows it is its exit join's
+(`docs/adr/cfg-tier.md` §Loops). Apart from
 guards, each document marks every statement that leaves its block
 unconditionally `@ctl.leave.<kind>` (return, throw or raise, `break`,
 `continue`, C++'s `co_return`, PHP's `die` and `exit`, which the language

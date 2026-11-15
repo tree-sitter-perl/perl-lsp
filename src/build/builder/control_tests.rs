@@ -15,7 +15,7 @@ fn view_of(tree: &tree_sitter::Tree, source: &str) -> ControlView {
     let mut it = cursor.matches(query, tree.root_node(), source.as_bytes());
     use tree_sitter::StreamingIterator;
     while let Some(m) = it.next() {
-        out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node))));
+        out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node)), source.as_bytes()));
     }
     control_view(out)
 }
@@ -235,8 +235,8 @@ fn constructs_carry_their_roles_and_leaves_their_kinds() {
     );
 }
 
-/// From a construct, the view reaches the statements its arms run, down to
-/// the ones that leave, but not into a loop's body.
+/// From a construct, the view reaches the statements its arms run, a loop's
+/// body among them, down to the ones that leave.
 #[test]
 fn the_view_from_a_construct_reaches_the_leaves_in_its_arms() {
     let source = "if ($c) { foo(); return 1 if $d; die 'x'; } else { for (@l) { last } }\n";
@@ -245,6 +245,6 @@ fn the_view_from_a_construct_reaches_the_leaves_in_its_arms() {
     let view = control_view_with_leaves([stmt], source.as_bytes(), |n| n.kind() == "ambiguous_function_call_expression");
     let mut leaves: Vec<_> = view.leaves.iter().map(|l| (l.kind, &source[l.span.start.column..l.span.end.column])).collect();
     leaves.sort_by_key(|(_, t)| *t);
-    assert_eq!(leaves, vec![(LeaveKind::Throw, "die 'x'"), (LeaveKind::Return, "return 1")]);
+    assert_eq!(leaves, vec![(LeaveKind::Throw, "die 'x'"), (LeaveKind::Break, "last"), (LeaveKind::Return, "return 1")]);
     assert_eq!(view.constructs.len(), 3, "the `if`, the postfix `if`, and the loop: {view:?}");
 }
