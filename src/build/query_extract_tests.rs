@@ -4338,3 +4338,30 @@ fn cpp_a_branch_joins_what_its_arms_leave() {
     assert_eq!(fa.inferred_type_via_bag("n", tree_sitter::Point { row: 3, column: 13 }), Some(crate::model::file_analysis::InferredType::Numeric));
 }
 
+
+/// A def or lambda runs later, so it reads a variable of the code around it
+/// as it may stand then: as narrowed where it was made, or as written after.
+#[cfg(feature = "python")]
+#[test]
+fn python_a_nested_body_reads_writes_after_its_making() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.py", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let narrowed = "def f(p):\n    if isinstance(p, dict):\n        def g():\n            return p\n        p = []\n        g()\n";
+    assert!(matches!(at(narrowed, "p", 3, 19), Some(T::Union(_))), "{:?}", at(narrowed, "p", 3, 19));
+    let rebound = "def f():\n    x = 'a'\n    def g():\n        return x\n    x = 1\n    g()\n";
+    assert!(matches!(at(rebound, "x", 3, 15), Some(T::Union(_))));
+    let lambda = "def f():\n    x = 'a'\n    g = lambda: x\n    x = 1\n    g()\n";
+    assert!(matches!(at(lambda, "x", 2, 16), Some(T::Union(_))));
+    let unwritten = "def f():\n    x = 'a'\n    g = lambda: x\n    g()\n";
+    assert_eq!(at(unwritten, "x", 2, 16), Some(T::String));
+}
+
+/// A php closure holds what `use ($x)` captured as it stood at the closure's
+/// making: a later write outside never reaches it.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_closure_holds_its_capture_as_made() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use ($x) { return $x; };\n$x = 1;\n}\n";
+    assert_eq!(analyzed("/x/a.php", src).inferred_type_via_bag("x", tree_sitter::Point { row: 3, column: 34 }), Some(T::String));
+}

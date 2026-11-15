@@ -179,6 +179,9 @@ pub enum JoinRole {
     Head,
     /// Past a loop: where its test fails, and each `break` aimed at it.
     Exit,
+    /// Where a body that runs later starts: the value where the body was
+    /// made, and after each write from then on.
+    Entry,
 }
 
 /// The question a `Member` attachment asks of its member.

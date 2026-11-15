@@ -1327,3 +1327,28 @@ fn a_bare_call_word_keeps_the_refs_inside_it() {
     assert!(fa.refs().iter().any(|r| r.span.start == Point::new(2, 26)), "the `$module` inside the code deref has a ref");
 }
 
+
+/// A body that runs later reads a captured variable as it may stand when
+/// it runs: the narrowing at its creation is one path, a later write another.
+#[test]
+fn a_closure_read_sees_writes_after_its_creation() {
+    let src = "package P;\nsub f {\n    my ($p) = @_;\n    if (ref $p eq 'HASH') {\n        my $c = sub { $p };\n        $p = [];\n        $c->();\n    }\n}";
+    let t = fa_type_at(src, "$p", Point::new(4, 22));
+    assert_ne!(t, Some(InferredType::HashRef), "{t:?}");
+}
+
+#[test]
+fn a_closure_read_sees_a_rebinding_after_its_creation() {
+    let src = "package P;\nsub f {\n    my $x = 'a';\n    my $c = sub { $x };\n    $x = 42;\n    $c->();\n}";
+    let t = fa_type_at(src, "$x", Point::new(3, 18));
+    assert_ne!(t, Some(InferredType::String), "{t:?}");
+    assert!(t.is_some(), "both paths are typed: {t:?}");
+}
+
+/// Nothing can change a capture nobody writes after the body is made, so
+/// the body reads it as it stood, narrowing included.
+#[test]
+fn a_closure_read_of_an_unwritten_capture_keeps_its_narrowing() {
+    let src = "package P;\nsub f {\n    my ($p) = @_;\n    if (ref $p eq 'HASH') {\n        my $c = sub { $p };\n        $c->();\n    }\n}";
+    assert_eq!(fa_type_at(src, "$p", Point::new(4, 22)), Some(InferredType::HashRef));
+}

@@ -47,6 +47,23 @@ one on the same terms, so a narrowing leaves a block one construct at a
 time. A place with steps has no writes to order a `Reset` against, so its
 joins are regions too, cut at its first disturbance.
 
+## Later-running bodies
+
+A callable's body (`ControlView::bodies`: a sub, a def, a lambda, a php
+closure) runs when it is called, not where it is written. A variable bound
+outside it and read inside it can have been written between the two: at
+any write from the body's making on, inside the body or past it. Where such
+a write exists, the body opens on an `Entry` join (`entry_joins`), landed
+as a region over the callable from the body's start, whose arms are the
+variable where the body was made and after each of those writes. A guard
+around the making is then one arm among several inside the body, and still
+holds outside it. Where no write follows the making, nothing can change the
+variable before the body runs, so nothing is minted and the read sees it as
+made, narrowing included. A closed body (php's) holds what it captures as
+it stood at its making, so it opens on no join (`TODO(capture-by-reference)`
+for `use (&$x)`, owned by the captures work). A named sub can run before its
+text (`TODO(named-sub-entry)`).
+
 ## Loops
 
 A loop holding a write mints three joins for the place. Its `Head` lands
@@ -206,7 +223,7 @@ its document spells them.
 
 Real loop fixed points (`TODO(cfg-loop-fixpoint)`), a loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
-fails), later-running bodies and captures,
+fails), a later-running body's writes reaching the code around it, captures,
 try/catch arms, readonly-after-constructor, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

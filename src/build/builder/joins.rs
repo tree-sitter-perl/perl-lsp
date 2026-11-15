@@ -5,7 +5,7 @@
 //! query time.
 
 use super::*;
-use crate::model::file_analysis::{guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
+use crate::model::file_analysis::{entry_joins, guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
 use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
 use std::collections::{HashMap, HashSet};
 
@@ -79,8 +79,18 @@ impl<'a> Builder<'a> {
             .filter(|(_, body)| !body.has_error())
             .flat_map(|(sid, body)| plan.effect_arms(sid, node_to_span(body)))
             .collect();
+        let writes: Vec<(SymbolId, Point)> = self
+            .flow_edges
+            .iter()
+            .filter_map(|fe| match self.binding_of(&fe.target_name, fe.target_at, fe.target_scope).0 {
+                Binding::Lexical(sid) => Some((sid, fe.target_at)),
+                _ => None,
+            })
+            .collect();
+        let body_facts: Vec<Witness> =
+            effect_arms.into_iter().chain(entry_joins(&self.scopes, &self.symbols, &view.bodies, &self.refs, &writes)).collect();
         if assignments.is_empty() && seeds.is_empty() {
-            for w in effect_arms {
+            for w in body_facts {
                 self.push_witness(w);
             }
             return;
@@ -191,7 +201,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        for w in witnesses.into_iter().chain(effect_arms) {
+        for w in witnesses.into_iter().chain(body_facts) {
             self.push_witness(w);
         }
         for (variable, scope, at) in markers {
