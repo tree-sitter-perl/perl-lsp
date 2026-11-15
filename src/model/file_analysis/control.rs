@@ -1178,7 +1178,13 @@ impl super::FileAnalysis {
     /// where the place is rebound or, for a member place, disturbed
     /// (`place_cut`). For an analysis whose variable facts are bound
     /// (`bind_variable_witnesses`).
-    pub(crate) fn assemble_joins(&mut self, view: &ControlView, guards: GuardFacts, place_cut: Option<&super::PlaceDisturbanceIndex>) {
+    pub(crate) fn assemble_joins(
+        &mut self,
+        view: &ControlView,
+        guards: GuardFacts,
+        place_cut: Option<&super::PlaceDisturbanceIndex>,
+        stores: Vec<MemberStore>,
+    ) {
         use super::{Binding, Place};
         use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
         let mut view = std::borrow::Cow::Borrowed(view);
@@ -1235,16 +1241,26 @@ impl super::FileAnalysis {
         for w in body_joins(&self.scopes, self.symbols(), &view.bodies, self.refs(), &writes) {
             self.witnesses.push(w);
         }
-        if view.constructs.is_empty() || (self.flow_edges.is_empty() && guards.seeds.is_empty()) {
+        let (states, stores) = self.member_states(stores, &view.returns);
+        for w in states {
+            self.witnesses.push(w);
+        }
+        if view.constructs.is_empty() || (self.flow_edges.is_empty() && guards.seeds.is_empty() && stores.is_empty()) {
             return;
         }
         let mut minted: HashSet<(Place, Span, JoinRole)> = HashSet::new();
         let mut joins: Vec<Witness> = Vec::new();
         let source = || WitnessSource::Builder(JOIN_SOURCE.into());
+        let lands_at = |att: &WitnessAttachment, join: &WitnessAttachment, lands: &[Point], out: &mut Vec<Witness>| {
+            for &p in lands {
+                for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
+                    out.push(Witness { attachment: att.clone(), source: source(), payload, span: Span { start: p, end: p } });
+                }
+            }
+        };
         for fe in &self.flow_edges {
             let at = fe.target_at;
             let (binding, home) = self.variable_binding_of(&fe.target_name, at, fe.target_scope);
-            let reach = Reach::of(&self.scopes, fe.target_scope, home);
             let place = Place::variable(binding.clone());
             let bound_from = match binding {
                 Binding::Lexical(sid) => Some(self.symbols[sid.0 as usize].span.start),
@@ -1253,38 +1269,21 @@ impl super::FileAnalysis {
             // An arm ending where the write lands (`x = a if c else b`'s
             // `b`) is part of the value written, not around the write.
             let written = fe.target_token.unwrap_or(Span { start: fe.source.start, end: at });
-            let holding = plan
-                .arms_holding(at)
-                .filter(|(_, a)| contains(a.span, written))
-                .take_while(|(_, a)| contains(reach.within, a.span))
-                .filter(|(c, _)| !plan.is_lifted(c) && contains(reach.within, c.span))
-                .filter(|(c, _)| bound_from.is_none_or(|b| !plan.binds_each_pass(c, b)));
-            for (c, _) in holding {
-                let found = match c.kind {
-                    ControlKind::Branch => plan.branch_joins(c, bound_from, self.scopes[fe.target_scope.0 as usize].span, written),
-                    ControlKind::Loop { .. } => plan.loop_joins(c, bound_from),
-                    ControlKind::Block { .. } => continue,
-                };
-                // Held to the scope around the construct, so a sibling block
-                // never sees them.
-                let scope = reach.joins_scope(&self.scopes, c.span, &found);
-                for BranchJoin { role, of, lands, arms } in found {
-                    if !minted.insert((place.clone(), of, role)) {
-                        continue;
-                    }
-                    let join = WitnessAttachment::Join { place: Box::new(place.clone()), of, role };
-                    for p in lands {
-                        for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
-                            joins.push(Witness {
-                                attachment: WitnessAttachment::Variable { name: fe.target_name.clone(), scope },
-                                source: source(),
-                                payload,
-                                span: Span { start: p, end: p },
-                            });
-                        }
-                    }
-                    joins.extend(join_arms(&join, &place, &arms, &Proofs::new()));
-                }
+            let site = WriteSite { place: &place, at, scope: fe.target_scope, home, bound_from, written };
+            for (scope, join, lands, arms) in self.write_joins(&plan, &site, &mut minted) {
+                let att = WitnessAttachment::Variable { name: fe.target_name.clone(), scope };
+                lands_at(&att, &join, &lands, &mut joins);
+                joins.extend(arms);
+            }
+        }
+        // A member's writes join it as a variable's do; its place is its
+        // own attachment, with no name to bind.
+        let mut member_joins: Vec<Witness> = Vec::new();
+        for (store, home) in &stores {
+            let site = WriteSite { place: &store.place, at: store.at, scope: self.scope_at(store.at).unwrap_or(*home), home: *home, bound_from: None, written: store.token };
+            for (_, join, lands, arms) in self.write_joins(&plan, &site, &mut minted) {
+                lands_at(&WitnessAttachment::Place(Box::new(store.place.clone())), &join, &lands, &mut member_joins);
+                member_joins.extend(arms);
             }
         }
 
@@ -1335,10 +1334,222 @@ impl super::FileAnalysis {
             super::bind_variable_witness(&mut w, &self.scopes, |n, at, sc| self.variable_binding_of(n, at, sc));
             self.witnesses.push(w);
         }
-        for w in regions {
+        for w in member_joins.into_iter().chain(regions) {
             self.witnesses.push(w);
         }
     }
+
+    /// The branch and loop joins a write makes of its place, out to the
+    /// place's binding (or the callable the write runs in): each with the
+    /// scope it is held to, the points it lands at, and its arms.
+    fn write_joins(
+        &self,
+        plan: &JoinPlan<'_>,
+        site: &WriteSite<'_>,
+        minted: &mut HashSet<(super::Place, Span, crate::model::witnesses::JoinRole)>,
+    ) -> Vec<(super::ScopeId, crate::model::witnesses::WitnessAttachment, Vec<Point>, Vec<crate::model::witnesses::Witness>)> {
+        use crate::model::witnesses::WitnessAttachment;
+        let reach = Reach::of(&self.scopes, site.scope, site.home);
+        let holding = plan
+            .arms_holding(site.at)
+            .filter(|(_, a)| contains(a.span, site.written))
+            .take_while(|(_, a)| contains(reach.within, a.span))
+            .filter(|(c, _)| !plan.is_lifted(c) && contains(reach.within, c.span))
+            .filter(|(c, _)| site.bound_from.is_none_or(|b| !plan.binds_each_pass(c, b)));
+        let mut out = Vec::new();
+        for (c, _) in holding {
+            let found = match c.kind {
+                ControlKind::Branch => plan.branch_joins(c, site.bound_from, self.scopes[site.scope.0 as usize].span, site.written),
+                ControlKind::Loop { .. } => plan.loop_joins(c, site.bound_from),
+                ControlKind::Block { .. } => continue,
+            };
+            // Held to the scope around the construct, so a sibling block
+            // never sees them.
+            let scope = reach.joins_scope(&self.scopes, c.span, &found);
+            for BranchJoin { role, of, lands, arms } in found {
+                if !minted.insert((site.place.clone(), of, role)) {
+                    continue;
+                }
+                let join = WitnessAttachment::Join { place: Box::new(site.place.clone()), of, role };
+                let arms = join_arms(&join, site.place, &arms, &Proofs::new());
+                out.push((scope, join, lands, arms));
+            }
+        }
+        out
+    }
+}
+
+/// A write to a write-once member through its own method's receiver
+/// (`FileAnalysis::member_states`).
+#[derive(Debug, Clone)]
+pub struct MemberStore {
+    /// The receiver's member: `Binding::Receiver` of the method, one
+    /// `PathStep::Member`.
+    pub place: super::Place,
+    /// The member token written.
+    pub token: Span,
+    /// Where the write lands.
+    pub at: Point,
+    /// The expression whose whole value the write stores, where it stores
+    /// one.
+    pub value: Option<Span>,
+}
+
+impl super::FileAnalysis {
+    /// What a write-once member holds as its class's methods run
+    /// (`docs/adr/cfg-tier.md` §Write-once members): unset where the
+    /// constructor starts, unless a parameter of the constructor sets it;
+    /// where any other method starts, as the constructor left it; and past
+    /// each write, the value written. The writes it keeps are those made in
+    /// their own method's body, each with that body's scope.
+    ///
+    /// TODO(readonly-construction-calls): a method the constructor calls
+    /// runs before the constructor ends, but starts here as an end leaves
+    /// the member. Owner: the whole-program analysis epic.
+    fn member_states(
+        &self,
+        stores: Vec<MemberStore>,
+        returns: &[Span],
+    ) -> (Vec<crate::model::witnesses::Witness>, Vec<(MemberStore, super::ScopeId)>) {
+        use super::{Binding, ScopeId};
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
+        let mut out = Vec::new();
+        let mut kept = Vec::new();
+        if stores.is_empty() {
+            return (out, kept);
+        }
+        let body_of = |m: super::SymbolId| {
+            self.scopes
+                .iter()
+                .position(|s| s.kind.is_callable() && s.owner == Some(m))
+                .map(|i| ScopeId(i as u32))
+        };
+        let point = |p: Point| Span { start: p, end: p };
+        let fact = |place: &super::Place, payload, span| Witness {
+            attachment: WitnessAttachment::Place(Box::new(place.clone())),
+            source: WitnessSource::Builder(JOIN_SOURCE.into()),
+            payload,
+            span,
+        };
+        let mut seeded: HashSet<super::Place> = HashSet::new();
+        for store in stores {
+            let Binding::Receiver(m) = store.place.root else { continue };
+            let Some(home) = body_of(m) else { continue };
+            let Some(runs_in) = self.callable_around(store.at) else { continue };
+            if !contains(self.scopes[home.0 as usize].span, self.scopes[runs_in.0 as usize].span) {
+                continue;
+            }
+            self.member_entry(&store.place, m, home, returns, &body_of, &mut seeded, &mut out);
+            // A write in a body made inside the method sets the member only
+            // if that body runs, so past where it is made the member may
+            // hold anything.
+            // TODO(readonly-closure-writes): the write reaches the member
+            // only where the body is called. Owner: the whole-program
+            // analysis epic (closure-call-writes).
+            if runs_in != home {
+                out.push(fact(&store.place, WitnessPayload::Reset, point(self.scopes[runs_in.0 as usize].span.end)));
+                continue;
+            }
+            out.push(fact(&store.place, WitnessPayload::Reset, point(store.at)));
+            if let Some(v) = store.value {
+                out.push(fact(&store.place, WitnessPayload::Edge(WitnessAttachment::Expr(v)), point(store.at)));
+            }
+            kept.push((store, home));
+        }
+        (out, kept)
+    }
+
+    /// The state `place` (a member of method `m`'s receiver) starts `m` in:
+    /// the constructor's own seed, or the constructor's end.
+    fn member_entry(
+        &self,
+        place: &super::Place,
+        m: super::SymbolId,
+        home: super::ScopeId,
+        returns: &[Span],
+        body_of: &dyn Fn(super::SymbolId) -> Option<super::ScopeId>,
+        seeded: &mut HashSet<super::Place>,
+        out: &mut Vec<crate::model::witnesses::Witness>,
+    ) {
+        use super::{Binding, InferredType, Place, SymKind, SymbolFlags};
+        use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
+        if !seeded.insert(place.clone()) {
+            return;
+        }
+        let sym = &self.symbols[m.0 as usize];
+        let (Some(class), [super::PathStep::Member(name)]) = (sym.package.as_deref(), place.path.as_slice()) else { return };
+        let Some((ctor, ctor_body)) = self
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymKind::Method && s.package.as_deref() == Some(class) && s.flags.contains(SymbolFlags::CONSTRUCTOR))
+            .find_map(|s| Some((s.id, body_of(s.id)?)))
+        else {
+            return;
+        };
+        let fact = |att: WitnessAttachment, payload, at: Point| Witness {
+            attachment: att,
+            source: WitnessSource::Builder(JOIN_SOURCE.into()),
+            payload,
+            span: Span { start: at, end: at },
+        };
+        let held = Place { root: Binding::Receiver(ctor), path: place.path.clone() };
+        let ctor_span = self.scopes[ctor_body.0 as usize].span;
+        if seeded.insert(held.clone()) || m == ctor {
+            // A promoted parameter is the member, set as the call begins.
+            let promoted = self.symbols.iter().find_map(|s| {
+                let twin = s.declared_with?;
+                (s.kind == SymKind::Field && s.name == *name && s.package.as_deref() == Some(class) && self.symbols[twin.0 as usize].scope == ctor_body)
+                    .then_some(twin)
+            });
+            let payload = match promoted {
+                Some(twin) => WitnessPayload::Edge(WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(twin))))),
+                None => WitnessPayload::InferredType(InferredType::Undef),
+            };
+            out.push(fact(WitnessAttachment::Place(Box::new(held.clone())), payload, ctor_span.start));
+        }
+        // A method its language runs on an object no constructor built
+        // starts from nothing the constructor says.
+        if m == ctor || sym.flags.contains(SymbolFlags::UNCONSTRUCTED) {
+            return;
+        }
+        let body = self.scopes[home.0 as usize].span;
+        let join = WitnessAttachment::Join { place: Box::new(place.clone()), of: body, role: JoinRole::Entry };
+        for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
+            out.push(Witness { attachment: WitnessAttachment::Place(Box::new(place.clone())), source: WitnessSource::Builder(JOIN_SOURCE.into()), payload, span: body });
+        }
+        // The constructor ends where its body does and at each `return`
+        // of its own; a throw builds no object to run a method on.
+        let ends = returns
+            .iter()
+            .filter(|r| contains(ctor_span, **r) && self.callable_around(r.start) == Some(ctor_body))
+            .map(|r| r.end)
+            .chain([ctor_span.end]);
+        for end in ends {
+            out.push(fact(join.clone(), WitnessPayload::Edge(WitnessAttachment::Place(Box::new(held.clone()))), end));
+        }
+    }
+}
+
+impl super::FileAnalysis {
+    /// The innermost callable scope around `at`.
+    fn callable_around(&self, at: Point) -> Option<super::ScopeId> {
+        let sc = self.scope_at(at)?;
+        self.scope_chain(sc).into_iter().find(|s| self.scopes[s.0 as usize].kind.is_callable())
+    }
+}
+
+/// A write as `FileAnalysis::write_joins` places it among the constructs
+/// around it.
+struct WriteSite<'p> {
+    place: &'p super::Place,
+    at: Point,
+    /// The scope the write is made in.
+    scope: super::ScopeId,
+    /// The scope the written place lives in.
+    home: super::ScopeId,
+    bound_from: Option<Point>,
+    /// The tokens written: an arm ending inside them is part of the value.
+    written: Span,
 }
 
 impl super::FileAnalysis {

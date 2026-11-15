@@ -86,6 +86,8 @@ spelled! {
         Private = "private",
         Protected = "protected",
         Constructor = "constructor",
+        /// A method run on an object no constructor built.
+        Unconstructed = "unconstructed",
         Contract = "contract",
         DynamicMembers = "dynamic_members",
         /// A preprocessor macro the document mints under another def kind
@@ -1101,6 +1103,7 @@ impl MarkCap {
             MarkCap::Private => F::PRIVATE,
             MarkCap::Protected => F::PROTECTED,
             MarkCap::Constructor => F::CONSTRUCTOR,
+            MarkCap::Unconstructed => F::UNCONSTRUCTED,
             MarkCap::Contract => F::CONTRACT,
             MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
             MarkCap::Macro => F::MACRO,

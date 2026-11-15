@@ -565,6 +565,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 member: read.member.clone(),
                 spaces: read.spaces,
                 value,
+                place: place.span(),
             });
         }
     }

@@ -289,6 +289,10 @@
 ; The one method `new Foo(...)` invokes; its name belongs to the language.
 ((method_declaration name: (name) @mark.constructor)
  (#eq? @mark.constructor "__construct"))
+; The methods that run on an object no constructor built: a clone's copy
+; (which may set a readonly member again) and an unserialized one.
+((method_declaration name: (name) @mark.unconstructed)
+ (#any-of? @mark.unconstructed "__clone" "__wakeup" "__unserialize"))
 ; A class declaring one of these answers ANY member name at runtime, so it
 ; has no closed member surface to check a name against.
 ((class_declaration

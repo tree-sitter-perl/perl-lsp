@@ -341,6 +341,8 @@ pub struct MemberWrite {
     /// token), resolved like a read of it.
     pub spaces: crate::model::file_analysis::SpaceAsk,
     pub value: crate::model::file_analysis::Span,
+    /// The access written, one of `place_writes`.
+    pub place: crate::model::file_analysis::Span,
 }
 
 /// A member read (`recv.x`, `recv->x`): the whole access, the receiver
@@ -1640,6 +1642,40 @@ impl SkeletonAnalysis {
         let valued: std::collections::HashSet<crate::model::file_analysis::Place> =
             narrowed.iter().map(|(p, _)| p.clone()).chain(guard_places.iter().flatten().cloned()).collect();
         let wanted: std::collections::HashSet<_> = valued.iter().map(|p| p.root.clone()).collect();
+        // A write-once member its own class writes through a method's
+        // receiver: its state runs through the class's methods
+        // (`FileAnalysis::member_states`), and the accesses to it carry its
+        // place so a write asks what it holds there.
+        let member_stores: Vec<crate::model::file_analysis::MemberStore> = {
+            use crate::model::file_analysis::{Binding, PathStep, SymbolFlags};
+            let write_once: std::collections::HashSet<(&str, &str)> = symbols
+                .iter()
+                .filter(|s| s.kind == SymKind::Field && s.flags.contains(SymbolFlags::READONLY))
+                .filter_map(|s| Some((s.package.as_deref()?, s.name.as_str())))
+                .collect();
+            let stored: std::collections::HashMap<Span, Span> = member_writes.iter().map(|w| (w.place, w.value)).collect();
+            let tokens: std::collections::HashMap<Span, Span> = member_reads.iter().map(|m| (m.span, m.token)).collect();
+            place_writes
+                .iter()
+                .filter(|_| !write_once.is_empty())
+                .filter_map(|&(w, at)| {
+                    let place = places.at(w)?;
+                    let (Binding::Receiver(m), [PathStep::Member(name)]) = (&place.root, place.path.as_slice()) else {
+                        return None;
+                    };
+                    let owner = symbols.get(m.0 as usize).filter(|s| s.id == *m).or_else(|| symbols.iter().find(|s| s.id == *m))?;
+                    let class = owner.package.as_deref()?;
+                    write_once.contains(&(class, name.as_str())).then(|| crate::model::file_analysis::MemberStore {
+                        token: tokens.get(&w).copied().unwrap_or(w),
+                        place,
+                        at,
+                        value: stored.get(&w).copied(),
+                    })
+                })
+                .collect()
+        };
+        let tracked: std::collections::HashSet<crate::model::file_analysis::Place> =
+            member_stores.iter().map(|s| s.place.clone()).collect();
         let disturbances = (!wanted.is_empty()).then(|| places.disturbances(&wanted, &place_writes));
         if let Some(disturbances) = &disturbances {
             use crate::model::file_analysis::Binding;
@@ -1729,7 +1765,7 @@ impl SkeletonAnalysis {
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
                         let (inv_span, invocant) = r.invocant.clone()?;
-                        let place = places.access(inv_span, &valued).map(Box::new);
+                        let place = places.access(inv_span, &valued).or_else(|| places.access(inv_span, &tracked)).map(Box::new);
                         let invocant = places.receiver(inv_span, invocant, &valued);
                         if written_members.contains(&span) {
                             access = AccessKind::Write;
@@ -2157,7 +2193,7 @@ impl SkeletonAnalysis {
         fa.bind_variable_witnesses();
         fa.bind_variable_regions(std::mem::take(&mut self.variable_regions));
         let guards = guard_facts(&fa, guards, guard_places, std::mem::take(&mut self.control_bounds));
-        fa.assemble_joins(&std::mem::take(&mut self.control), guards, disturbances.as_ref());
+        fa.assemble_joins(&std::mem::take(&mut self.control), guards, disturbances.as_ref(), member_stores);
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.

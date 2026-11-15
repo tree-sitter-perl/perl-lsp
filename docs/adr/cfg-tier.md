@@ -98,6 +98,32 @@ for the whole comprehension (the element is written ahead of the `for`
 that binds it). An assignment expression inside one (`:=`) binds in the
 function around it, which is not modelled.
 
+## Write-once members
+
+A write-once member (php `readonly`) its own class writes through a
+method's receiver has a state as the class's methods run
+(`FileAnalysis::member_states`). It is unset (`Undef`) where the
+constructor starts, unless a promoted parameter of the constructor is the
+member, which sets it as the call begins. Every other method starts it on
+an `Entry` join of the ways the constructor ends: its body's end and each
+`return` of its own (a throw builds no object to run a method on). A
+method marked `@mark.unconstructed` (php `__clone`, `__wakeup`,
+`__unserialize`) runs on an object no constructor built and starts it on
+nothing. Each write is a reset and an edge to the value written, and joins
+the member past the branches and loops around it as a variable's write
+does. A write in a closure the method makes sets the member only if the
+closure runs, so past where the closure is made the member says nothing
+(`TODO(readonly-closure-writes)`).
+
+`misplaced_member_writes` asks the state where a write lands. Unset is a
+lazy initialisation; a value that is known and cannot be unset is
+`AlreadySet`, a write that fails at runtime. A value nothing typed says
+neither, so it is no finding. The state is the constructor's in this file
+only: a member a parent declares, or a class whose constructor another file
+declares, has none. A method the constructor calls starts as the
+constructor's end leaves the member, though it runs before that end
+(`TODO(readonly-construction-calls)`).
+
 ## Loops
 
 A loop holding a write mints three joins for the place. Its `Head` lands
@@ -261,6 +287,6 @@ A loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
 fails), R's `<<-` (`TODO(write-capture-declarations)`: a write capture
 nothing states yet, so the write binds a local), a comprehension's `:=`,
-try/catch arms, readonly-after-constructor, effects through a wrapper in
+try/catch arms, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

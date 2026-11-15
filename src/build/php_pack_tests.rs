@@ -3027,12 +3027,13 @@ fn readonly_properties_carry_the_flag() {
 
 /// A readonly member written from outside its class family fails; inside
 /// it, only a constructor (its own closures and a subclass's included) or a
-/// `??=` lazy init sets it in good form. A receiver nothing types, or a
+/// `??=` lazy init sets it in good form, and a closure the constructor makes
+/// after setting it would set it again. A receiver nothing types, or a
 /// writable member, is no finding.
 #[cfg(feature = "php")]
 #[test]
 fn readonly_writes_outside_the_class_or_its_constructors_are_reported() {
-    use crate::model::file_analysis::MisplacedWriteKind::{OutsideConstructor as InClass, OutsideFamily as Outside};
+    use crate::model::file_analysis::MisplacedWriteKind::{AlreadySet, OutsideConstructor as InClass, OutsideFamily as Outside};
     let fa = php(READONLY);
     let found: Vec<_> = fa
         .misplaced_member_writes(None)
@@ -3043,6 +3044,7 @@ fn readonly_writes_outside_the_class_or_its_constructors_are_reported() {
     assert_eq!(
         found,
         [
+            at(8, "x", "App\\Point", AlreadySet),
             at(11, "x", "App\\Point", InClass),
             at(12, "x", "App\\Point", InClass),
             at(19, "x", "App\\Point", InClass),
@@ -3155,11 +3157,12 @@ fn set_visibility_is_the_members_set_scope() {
 /// A write outside the member's set scope fails, whether or not the member
 /// is write-once: `private(set)` shuts out a subclass, `protected(set)`
 /// admits it, `public(set)` admits anyone. Only a write-once member has a
-/// constructor to be set in.
+/// constructor to be set in, and once the constructor sets it a method
+/// sets it again.
 #[cfg(feature = "php")]
 #[test]
 fn writes_outside_the_set_scope_are_reported() {
-    use crate::model::file_analysis::MisplacedWriteKind::{OutsideClass, OutsideConstructor, OutsideFamily};
+    use crate::model::file_analysis::MisplacedWriteKind::{AlreadySet, OutsideClass, OutsideFamily};
     let fa = php(SET_SCOPES);
     let found: Vec<_> = fa
         .misplaced_member_writes(None)
@@ -3170,7 +3173,7 @@ fn writes_outside_the_set_scope_are_reported() {
     assert_eq!(
         found,
         [
-            at(13, "own", OutsideConstructor),
+            at(13, "own", AlreadySet),
             at(19, "own", OutsideClass),
             at(21, "mine", OutsideClass),
             at(22, "p", OutsideClass),
@@ -3179,6 +3182,84 @@ fn writes_outside_the_set_scope_are_reported() {
             at(30, "p", OutsideClass),
         ]
     );
+}
+
+/// A readonly member starts each method as the constructor left it: a write
+/// where every way through the constructor set it sets it again, and fails;
+/// one where some way leaves it unset (a branch, an early `return`) is only
+/// set outside the constructor; one where none sets it initialises it. A
+/// promoted parameter is set as the constructor begins, and `__clone` runs
+/// on an object no constructor built.
+#[cfg(feature = "php")]
+#[test]
+fn a_readonly_member_the_constructor_set_is_set_again() {
+    use crate::model::file_analysis::MisplacedWriteKind::{AlreadySet, OutsideConstructor};
+    let fa = php("<?php
+class A {
+    public readonly int $x;
+    public readonly int $y;
+    public readonly int $z;
+    public readonly int $w;
+    public function __construct(public readonly int $p, bool $c) {
+        $this->x = 1;
+        $this->x = 2;
+        if ($c) { $this->y = 3; }
+        if ($c) { return; }
+        $this->z = 4;
+    }
+    public function m() {
+        $this->x = 5;
+        $this->y = 6;
+        $this->z = 7;
+        $this->w = 8;
+        $this->p = 9;
+    }
+    public function __clone() { $this->x = 10; }
+}
+");
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    let at = |row: usize, member: &str, kind| (row, member.to_string(), kind);
+    assert_eq!(
+        found,
+        [
+            at(8, "x", AlreadySet),
+            at(14, "x", AlreadySet),
+            at(15, "y", OutsideConstructor),
+            at(16, "z", OutsideConstructor),
+            at(18, "p", AlreadySet),
+            at(20, "x", OutsideConstructor),
+        ]
+    );
+}
+
+/// A value nothing types says neither set nor unset, and a write in a
+/// closure sets the member only if the closure runs: neither makes a later
+/// write a certain error.
+#[cfg(feature = "php")]
+#[test]
+fn an_unknown_or_closure_write_is_not_surely_set() {
+    use crate::model::file_analysis::MisplacedWriteKind::OutsideConstructor;
+    let fa = php("<?php
+class A {
+    public readonly int $x;
+    public readonly int $y;
+    public function __construct($v) {
+        $this->x = $v;
+        $f = function () { $this->y = 1; };
+    }
+    public function m() { $this->x = 2; $this->y = 3; }
+}
+");
+    let found: Vec<_> = fa
+        .misplaced_member_writes(None)
+        .into_iter()
+        .map(|w| (w.span.start.row, w.member, w.kind))
+        .collect();
+    assert_eq!(found, [(8, "x".to_string(), OutsideConstructor), (8, "y".to_string(), OutsideConstructor)]);
 }
 
 /// The warning names the set scope it is outside: the class alone, or the

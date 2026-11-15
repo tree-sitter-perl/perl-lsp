@@ -1215,9 +1215,10 @@ fn remap_spans(
     // Member writes settle through `expr_type_at_span` on the receiver and an
     // edge to the value's `Expr`, both of which speak original coords.
     for w in member_writes.iter_mut() {
-        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value } = w;
+        let crate::build::query_extract::MemberWrite { receiver, member: _, spaces: _, value, place } = w;
         *receiver = rspan(*receiver);
         *value = rspan(*value);
+        *place = rspan(*place);
     }
     for (w, lands) in place_writes.iter_mut() {
         *w = rspan(*w);

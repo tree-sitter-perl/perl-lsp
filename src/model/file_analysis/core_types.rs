@@ -734,6 +734,11 @@ bitflags::bitflags! {
         /// does. Minted from a capture (`@mark.constant`), never spelled as
         /// an attribute.
         const CONSTANT = 1 << 26;
+        /// A method its language runs on an object no constructor built
+        /// (php's `__clone`, `__wakeup`, `__unserialize`): what the
+        /// constructor left behind says nothing about the state it starts
+        /// in. Minted from a capture (`@mark.unconstructed`).
+        const UNCONSTRUCTED = 1 << 27;
     }
 }
 
@@ -1116,6 +1121,9 @@ pub struct MisplacedWrite {
 /// the most lenient verdict any arm gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MisplacedWriteKind {
+    /// Code of the class family writing a write-once member where it
+    /// surely holds a value already: the write fails at runtime.
+    AlreadySet,
     /// Code outside the declaring class of a member only that class may
     /// set (`AccessScope::Class`): the write fails at runtime.
     OutsideClass,
