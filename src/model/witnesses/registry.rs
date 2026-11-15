@@ -253,6 +253,9 @@ pub(super) struct Effect {
     /// The subtree read the receiver it was asked under, so its answer is
     /// that receiver's alone; without a read it answers for every receiver.
     reads_receiver: bool,
+    /// A cycle closed inside the subtree. Where it closed depends on the
+    /// receivers along the path, so the answer stays its own receiver's.
+    cuts: bool,
 }
 
 impl Effect {
@@ -303,6 +306,7 @@ impl EffectFrame {
     /// rung recorded there directly is.
     fn absorb(&mut self, at: u32, e: &Effect, receiver: u64) {
         self.effect.reads_receiver |= e.reads_receiver && receiver == self.receiver;
+        self.effect.cuts |= e.cuts;
         if at > self.depth {
             if !e.is_empty() {
                 crate::util::ghost_stats::count("residual.under_opaque");
@@ -601,7 +605,7 @@ fn fold_memo_probe(
         // An answer that never read its receiver is filed without one.
         let mut any = fk.clone();
         any.0.2 = None;
-        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver).cloned()
+        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver && !effect.cuts).cloned()
     });
     let Some((cached, effect)) = hit else {
         return Err(Some(Box::new((stamp, fk))));
@@ -647,7 +651,7 @@ fn fold_memo_store(
         return;
     }
     let (stamp, mut fk) = *fk;
-    if !effect.reads_receiver {
+    if !effect.reads_receiver && !effect.cuts {
         fk.0.2 = None;
     }
     FOLD_MEMO.with(|m| {
@@ -856,6 +860,7 @@ impl QueryState {
     /// A cycle guard returned for the frame at path position `at`.
     fn close_cut_at(&mut self, at: u32) {
         self.low_cut = self.low_cut.min(at);
+        self.open_effect().effect.cuts = true;
     }
 
     /// Push a frame: its position, and the mark its subtree restarts from.
@@ -2047,6 +2052,10 @@ impl ReducerRegistry {
             if let Some(hit) =
                 super::session::candidate_answer(idx, &cached.path, &memo_q)
             {
+                // Both memo tiers key a verdict by the receiver it was
+                // derived under and keep no record of whether it read it, so
+                // a hit is that receiver's answer.
+                note_receiver_read();
                 if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
                     return Some(v);
                 }
@@ -2055,6 +2064,7 @@ impl ReducerRegistry {
             // The sweep tier, behind the (cheaper) session memo: a verdict
             // another file's build already derived this sweep.
             if let Some(hit) = idx.sweep_consult_answer(&cached.path, &verdict_key) {
+                note_receiver_read();
                 super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit);
                 if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
                     return Some(v);
