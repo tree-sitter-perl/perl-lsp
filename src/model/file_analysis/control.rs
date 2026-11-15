@@ -558,12 +558,14 @@ impl<'v> JoinPlan<'v> {
     /// a scope (`written_in`, an arm that is a block) is already gone where
     /// the next arm begins, and needs no entry there. A path on which the variable is not yet bound
     /// reaches no read of it.
-    pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>, written_in: Span) -> Vec<BranchJoin> {
+    pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>, written_in: Span, written: Span) -> Vec<BranchJoin> {
         use crate::model::witnesses::JoinRole;
         let bound = |p: &Point| bound_from.is_none_or(|b| b <= *p);
         let (after, reached) = self.after_join(c, bound_from);
         let mut out = vec![after];
-        for k in reached {
+        // An arm starts over from the entering value only past a write in an
+        // arm spelled before it; a construct around no write reads the same.
+        for k in reached.into_iter().filter(|k| contains(k.span, written)) {
             let entry = entry_point(k);
             // The first arm starts where the test leaves the variable; each
             // one written after another starts over from the entering value.
@@ -1058,7 +1060,7 @@ impl super::FileAnalysis {
                 .filter(|(c, _)| bound_from.is_none_or(|b| !plan.binds_each_pass(c, b)));
             for (c, _) in holding {
                 let found = match c.kind {
-                    ControlKind::Branch => plan.branch_joins(c, bound_from, self.scopes[fe.target_scope.0 as usize].span),
+                    ControlKind::Branch => plan.branch_joins(c, bound_from, self.scopes[fe.target_scope.0 as usize].span, written),
                     ControlKind::Loop { .. } => plan.loop_joins(c, bound_from),
                     ControlKind::Block { .. } => continue,
                 };

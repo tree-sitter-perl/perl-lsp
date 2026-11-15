@@ -3075,9 +3075,10 @@ impl ReducerRegistry {
                         };
                         // The base projects on each value it may be. A value
                         // that is never unset is no evidence for `Defined`:
-                        // the read keeps whatever else it knows.
+                        // the read keeps whatever else it knows. An arm of a
+                        // join knows nothing else, so there it is the value.
                         let projected = match step {
-                            ProjectionStep::Defined if !base_ty.may_be_undef() => None,
+                            ProjectionStep::Defined if !base_ty.may_be_undef() && !matches!(q.attachment, WitnessAttachment::Join { .. }) => None,
                             _ => base_ty.join_over_arms(class_order(q), |t| project(t, state)),
                         };
                         if let Some(t) = projected {

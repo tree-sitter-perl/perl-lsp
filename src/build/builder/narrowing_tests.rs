@@ -1287,3 +1287,43 @@ fn a_place_narrows_past_its_block_through_each_join() {
     );
     assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }
+
+/// The test of `return … if G` runs before its arm, so it reads what the
+/// arm's own narrowing never reaches: the write ahead of the statement.
+#[test]
+fn a_postfix_guard_closing_an_arm_reads_the_write_before_it() {
+    let src = "package P;\nsub f {\n    my ($h) = @_;\n    my $buf;\n    if ($h) {\n        $buf = 1;\n    } else {\n        $buf = bar($h);\n        return 1 if !defined($buf);\n    }\n    $buf;\n}";
+    assert_ne!(fa_type_at(src, "$buf", Point::new(8, 29)), Some(InferredType::Undef));
+}
+
+/// An arm closed by `X = … if G` comes out written or untouched: where G
+/// fails, the value read is the one from before the statement.
+#[test]
+fn an_arm_closed_by_a_postfix_write_may_come_out_untouched() {
+    let src = "package P;\nsub f {\n    my ($c, $x, $y) = @_;\n    my $ret;\n    if ($c) {\n        $ret = 'a' if $x;\n    } else {\n        $ret = 'b' if $y;\n    }\n    $ret;\n}";
+    assert_ne!(fa_type_at(src, "$ret", Point::new(9, 4)), Some(InferredType::String));
+}
+
+/// A path where `defined` failed carries the value the test read, though
+/// nothing says what it is: the join is then no type, never the other arm.
+#[test]
+fn a_defined_path_of_an_untyped_value_keeps_the_join_untyped() {
+    let src = "package P;\nsub f {\n    my ($s) = @_;\n    my $j = $s->read;\n    if (!defined $j) {\n        $j = undef if $s;\n    }\n    $j;\n}";
+    assert_ne!(fa_type_at(src, "$j", Point::new(7, 4)), Some(InferredType::Undef));
+}
+
+/// A write in one arm of a chain never reaches a later arm, whatever closes
+/// the arm it sits in.
+#[test]
+fn a_write_in_an_arm_closed_by_a_branch_stays_out_of_later_arms() {
+    let src = "package P;\nsub f {\n  my ($name, $v) = @_;\n  if ($name eq 'a') {\n    $v = '' if !defined($v);\n    if ($v eq '1') {\n      foo(1);\n    } else {\n      foo(2);\n    }\n  } elsif ($name eq 'b') {\n    if (defined $v) {\n        foo(3);\n    }\n  }\n  return;\n}";
+    assert_ne!(fa_type_at(src, "$v", Point::new(11, 8)), Some(InferredType::String));
+}
+
+/// A bare call word still holds what it calls: `\&{"$m\::f"}` reads `$m`.
+#[test]
+fn a_bare_call_word_keeps_the_refs_inside_it() {
+    let fa = build_fa("sub s {\n my $module = shift;\n *{\"JSON::is_bool\"} = \\&{\"$module\\::is_bool\"};\n}\n");
+    assert!(fa.refs().iter().any(|r| r.span.start == Point::new(2, 26)), "the `$module` inside the code deref has a ref");
+}
+

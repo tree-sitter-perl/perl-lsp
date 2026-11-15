@@ -16,7 +16,7 @@ fn branch(span: Span, cond: Span, arms: &[(Span, bool)]) -> Construct {
 }
 
 fn after(plan: &JoinPlan<'_>, c: &Construct) -> Vec<JoinArm> {
-    let joins = plan.branch_joins(c, None, sp((0, 0), (99, 0)));
+    let joins = plan.branch_joins(c, None, sp((0, 0), (99, 0)), c.span);
     joins.into_iter().find(|j| j.role == JoinRole::After).expect("a join past it").arms
 }
 

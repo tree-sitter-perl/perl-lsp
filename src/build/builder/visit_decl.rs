@@ -111,6 +111,7 @@ impl<'a> Builder<'a> {
             // which the call states for.
             "function" if self.syntax.parent(node).is_none_or(|p| p.child_by_field_name("function") != Some(node)) => {
                 self.push_builtin_ends(node);
+                self.queue_children(node);
             }
             // Built-in calls: abs($x), length($s), time(), etc.
             "func1op_call_expression" | "func0op_call_expression" => {

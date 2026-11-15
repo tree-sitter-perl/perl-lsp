@@ -124,7 +124,7 @@ impl<'a> Builder<'a> {
                     continue;
                 }
                 let joins = match c.kind {
-                    ControlKind::Branch => plan.branch_joins(c, None, self.scopes[sid.0 as usize].span),
+                    ControlKind::Branch => plan.branch_joins(c, None, self.scopes[sid.0 as usize].span, span),
                     ControlKind::Loop { .. } => plan.loop_joins(c, None),
                     ControlKind::Block { .. } => continue,
                 };
