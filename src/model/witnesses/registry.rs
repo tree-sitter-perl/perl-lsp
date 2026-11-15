@@ -2774,9 +2774,10 @@ impl ReducerRegistry {
         // dropped effect arm still says the callable was looked at, so it
         // stays as no way of ending, never as no evidence; a path its join
         // speaks for nothing on, reached, silences the join.
-        let mut opened: Vec<Option<Witness>> = Vec::with_capacity(raw.len());
-        let mut dropped = vec![false; raw.len()];
-        for (i, w) in raw.iter().enumerate() {
+        let gated = raw.iter().any(|w| matches!(w.payload, WitnessPayload::Gated { .. }));
+        let mut opened: Vec<Option<Witness>> = Vec::with_capacity(if gated { raw.len() } else { 0 });
+        let mut dropped = vec![false; if gated { raw.len() } else { 0 }];
+        for (i, w) in raw.iter().enumerate().take_while(|_| gated) {
             let WitnessPayload::Gated { gates, arm } = &w.payload else {
                 opened.push(None);
                 continue;
@@ -2792,8 +2793,12 @@ impl ReducerRegistry {
             dropped[i] = payload.is_none();
             opened.push(payload.map(|payload| Witness { attachment: w.attachment.clone(), source: w.source.clone(), payload, span: w.span }));
         }
-        let raw: Vec<&Witness> =
-            raw.iter().enumerate().filter(|(i, _)| !dropped[*i]).map(|(i, w)| opened[i].as_ref().unwrap_or(w)).collect();
+        // Most attachments hold no gated witness; they skip the rebuild.
+        let raw: Vec<&Witness> = if gated {
+            raw.iter().enumerate().filter(|(i, _)| !dropped[*i]).map(|(i, w)| opened[i].as_ref().unwrap_or(w)).collect()
+        } else {
+            raw
+        };
         let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         let mut recurring: Vec<(&Witness, &WitnessAttachment, u32)> = Vec::new();
@@ -3702,8 +3707,7 @@ impl ReducerRegistry {
     ) -> Option<Ends> {
         let mut stated: Option<Ends> = None;
         let mut join = |e: Ends| stated = Some(stated.map_or(e, |s| s | e));
-        let ws: Vec<Witness> = bag.iter_attachment(att).cloned().collect();
-        for w in &ws {
+        for w in bag.iter_attachment(att) {
             match &w.payload {
                 WitnessPayload::Effect(Effect::Ends(e)) => join(*e),
                 WitnessPayload::Invoke { callee, receiver, .. } => {
