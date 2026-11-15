@@ -209,7 +209,7 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
     let arm_sites: std::collections::HashSet<crate::cst::NodeId> = ad
         .events()
         .iter()
-        .filter(|e| matches!(e.cap, Capture::Ctl(CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep)))
+        .filter(|e| matches!(e.cap, Capture::Ctl(CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep | CtlCap::Body)))
         .map(|e| e.site)
         .collect();
     let in_sequence = |site: crate::cst::NodeId| {
@@ -220,16 +220,36 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
                 .next()
                 .is_some_and(|arm| arm_sites.contains(&arm.id()) && statements(ad.tree, arm).any(|s| s.id() == site))
     };
+    let mut returns = Vec::new();
+    let mut unread = Vec::new();
     let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span, &str)>> = Default::default();
     for e in ad.events() {
         if let Capture::Ctl(c) = e.cap {
-            if c.is_leave() && !in_sequence(e.site) {
+            if c == CtlCap::LeaveReturn {
+                returns.push(e.span());
+            }
+            if c == CtlCap::Body && ad.tree.node(e.site).ts().has_error() {
+                unread.push(e.span());
+            }
+            // A gate is the call its statement makes: the statement, the
+            // call's own node or the one around it, is what runs in sequence.
+            let placed = match c {
+                CtlCap::Gate => in_sequence(e.site) || ad.tree.node(e.site).enclosing_sites().next().is_some_and(|s| in_sequence(s.id())),
+                c if c.is_leave() => in_sequence(e.site),
+                _ => true,
+            };
+            if !placed {
                 continue;
             }
             by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span(), &e.text));
         }
     }
-    crate::build::builder::control::control_view(by_match.into_values())
+    let mut view = crate::build::builder::control::control_view(by_match.into_values());
+    for b in &mut view.bodies {
+        b.readable = !unread.contains(&b.span);
+    }
+    view.returns = returns;
+    view
 }
 
 /// The statements `node` runs in sequence: its named children outside

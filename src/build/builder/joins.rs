@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::model::file_analysis::{guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
-use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, EFFECT_ARM_SOURCE, JOIN_SOURCE};
+use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
 use std::collections::{HashMap, HashSet};
 
 impl<'a> Builder<'a> {
@@ -64,23 +64,26 @@ impl<'a> Builder<'a> {
             let Some(sid) = callee(g).filter(|&sid| followed.insert(sid)) else { continue };
             let Some(body) = self.callable_body(sid, main) else { continue };
             bodies.push((sid, body));
+            walk.body(node_to_span(body), !body.has_error());
             gates.extend(walk.walk(super::control::statements_of(body), source, &exits, &gate));
         }
-        let view = walk.finish();
+        let mut view = walk.finish();
         drop(local);
         for g in gates {
             self.emit_expr_witness(g);
         }
-        let plan = JoinPlan::new(&view);
-        let mut effect_arms: Vec<Witness> = Vec::new();
         if !bodies.is_empty() {
             static RETURNS: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
             let kinds = RETURNS.get_or_init(|| perl_kind_ids(&["return_expression", "goto_expression"]));
-            let returns: Vec<Span> = self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| node_to_span(n.ts())).collect();
-            for (sid, body) in bodies {
-                effect_arms.extend(self.effect_arms(&plan, sid, body, &returns));
-            }
+            view.returns = self.syntax.file_nodes_of_kind(kinds).into_iter().map(|n| node_to_span(n.ts())).collect();
         }
+        let plan = JoinPlan::new(&view);
+        // A body the parser could not read states nothing, the top.
+        let effect_arms: Vec<Witness> = bodies
+            .into_iter()
+            .filter(|(_, body)| !body.has_error())
+            .flat_map(|(sid, body)| plan.effect_arms(sid, node_to_span(body)))
+            .collect();
         let untaken = std::mem::take(&mut self.untaken_proofs);
         let mut proofs: Proofs<'_> = HashMap::new();
         for p in &untaken {
@@ -223,46 +226,6 @@ impl<'a> Builder<'a> {
         let scope = &self.scopes[self.owner_scope.get(&sid)?.0 as usize];
         let decl = root.descendant_for_point_range(scope.span.start, scope.span.end)?;
         decl.child_by_field_name("body").filter(|b| b.kind() == "block")
-    }
-
-    /// How a call to `sid` ends, from its body: a way out per leave and,
-    /// where control reaches it, the body's end past the calls it makes
-    /// there (`JoinPlan::body_ends`). A `return` (or `goto`) anywhere in it,
-    /// in a nested sub's body too, comes back: one too many only says a call
-    /// may come back. A body the parser could not read states nothing, the top.
-    // TODO(effect-leaving-bits): how a body leaves through a call that does
-    // not come back (unwinds or exits) is not minted, so a pure wrapper ends
-    // in no named way; the first reader of the split is try arms (PR 13).
-    fn effect_arms(&self, plan: &JoinPlan<'_>, sid: SymbolId, body: Node<'a>, returns: &[Span]) -> Vec<Witness> {
-        use crate::model::witnesses::{Effect, Ends};
-        if body.has_error() {
-            return Vec::new();
-        }
-        let attachment = WitnessAttachment::SymbolEffects(sid);
-        let arm = |payload: WitnessPayload, at: Point| Witness {
-            attachment: attachment.clone(),
-            source: WitnessSource::Builder(EFFECT_ARM_SOURCE.into()),
-            payload,
-            span: Span { start: at, end: at },
-        };
-        let mut out: Vec<Witness> = plan
-            .body_ends(node_to_span(body))
-            .into_iter()
-            .map(|(ends, at, gates)| {
-                let effect = WitnessPayload::Effect(Effect::Ends(ends));
-                let payload = if gates.is_empty() {
-                    effect
-                } else {
-                    WitnessPayload::Gated { gates: gates.into_iter().map(WitnessAttachment::Expr).collect(), arm: Some(Box::new(effect)) }
-                };
-                arm(payload, at)
-            })
-            .collect();
-        let within = node_to_span(body);
-        if let Some(ret) = returns.iter().find(|&&r| contains(within, r)) {
-            out.push(arm(WitnessPayload::Effect(Effect::Ends(Ends::COMPLETES)), ret.start));
-        }
-        out
     }
 
     /// The joins of a variable, each landing as a write (`Reset` and its

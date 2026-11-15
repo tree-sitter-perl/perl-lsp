@@ -375,6 +375,12 @@ spelled! {
         LeaveContinue = "leave.continue",
         /// … to a target the statement names (`goto`).
         LeaveJump = "leave.jump",
+        /// A callable's body: its statements run in sequence, and how it
+        /// ends is how a call to the callable ends.
+        Body = "body",
+        /// A call that is a whole statement: control reaches what follows
+        /// it only if the call comes back.
+        Gate = "gate",
     }
 }
 

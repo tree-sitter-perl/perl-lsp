@@ -3,7 +3,7 @@
 //! join builder reads one shape for every language (`docs/adr/cfg-tier.md`).
 
 use crate::build::query_extract::{Capture, CtlCap};
-use crate::model::file_analysis::{Arm, ArmRole, Construct, ControlKind, ControlView, Leave, LeaveKind, LeaveTarget, Span};
+use crate::model::file_analysis::{Arm, ArmRole, CallableBody, Construct, ControlKind, ControlView, Leave, LeaveKind, LeaveTarget, Span};
 use std::collections::HashMap;
 use tree_sitter::{Node, Query};
 
@@ -68,8 +68,14 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
                 _ => None,
             });
             for &(cap, _, span, _) in &m {
-                if let Some(kind) = leave_kind(cap) {
-                    view.leaves.push(Leave { span, kind, target: target.unwrap_or_default() });
+                match cap {
+                    CtlCap::Body => view.bodies.push(CallableBody { span, readable: true }),
+                    CtlCap::Gate => view.gates.push(span),
+                    _ => {
+                        if let Some(kind) = leave_kind(cap) {
+                            view.leaves.push(Leave { span, kind, target: target.unwrap_or_default() });
+                        }
+                    }
                 }
             }
             continue;
@@ -123,14 +129,8 @@ fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: 
         .collect()
 }
 
-/// The control view of the constructs at `nodes`, and of every statement a
-/// construct found there runs in its arms, down to the statements that
-/// leave: what decides whether an arm comes out at its end, and where a
-/// loop's `last` and `next` land. Each node is tried as a match's root and
-/// nothing below it starts one, so the cost is the nodes' own, not the
-/// file's. `exits(node)` names a call that leaves by its callee's
-/// nature, until how a call ends is read from the effect lane
-/// (`TODO(cross-file-noreturn)`).
+/// One walk's view (`ViewWalk::walk`) with no gates.
+#[cfg(test)]
 pub(super) fn control_view_with_leaves<'t>(
     nodes: impl IntoIterator<Item = Node<'t>>,
     source: &[u8],
@@ -149,13 +149,20 @@ pub(super) struct ViewWalk<'s> {
     out: Vec<Vec<(CtlCap, usize, Span, &'s str)>>,
     seen: std::collections::HashSet<usize>,
     gates: Vec<Span>,
+    bodies: Vec<CallableBody>,
 }
 
 impl<'s> ViewWalk<'s> {
-    /// Walks `nodes` as [`control_view_with_leaves`] does. A statement
-    /// `gate` names is a call control comes back from only if its callee
-    /// does ([`ControlView::gates`]); it is returned, and is no leave
-    /// whatever `exits` says.
+    /// Adds the constructs at `nodes`, and every statement a construct
+    /// found there runs in its arms, down to the statements that leave:
+    /// what decides whether an arm comes out at its end, and where a loop's
+    /// `last` and `next` land. Each node is tried as a match's root and
+    /// nothing below it starts one, so the cost is the nodes' own, not the
+    /// file's. `exits(node)` names a call that leaves by its callee's
+    /// nature (`TODO(cross-file-noreturn)`). A statement `gate` names is a
+    /// call control comes back from only if its callee does
+    /// ([`ControlView::gates`]); it is returned, and is no leave whatever
+    /// `exits` says.
     pub(super) fn walk<'t>(
         &mut self,
         nodes: impl IntoIterator<Item = Node<'t>>,
@@ -197,9 +204,15 @@ impl<'s> ViewWalk<'s> {
         gates
     }
 
+    /// Records a callable's body the walk follows into.
+    pub(super) fn body(&mut self, span: Span, readable: bool) {
+        self.bodies.push(CallableBody { span, readable });
+    }
+
     pub(super) fn finish(self) -> ControlView {
         let mut view = control_view(self.out);
         view.gates = self.gates;
+        view.bodies = self.bodies;
         view
     }
 }

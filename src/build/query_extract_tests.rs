@@ -4214,7 +4214,7 @@ fn php_never_return_says_a_call_never_comes_back() {
     let src = "<?php\nfunction bail(): never { exit(1); }\nfunction ok(): int { return 1; }\nclass C { public function fail(): never { throw new E(); } }\n";
     assert_eq!(
         declared_ends("/x/n.php", src),
-        vec![("C::fail".into(), never()), ("bail".into(), never()), ("fail".into(), never()), ("ok".into(), Ends::all())]
+        vec![("C::fail".into(), never()), ("bail".into(), never()), ("fail".into(), never()), ("ok".into(), Ends::COMPLETES)]
     );
 }
 
@@ -4225,7 +4225,7 @@ fn python_noreturn_says_a_call_never_comes_back() {
     let src = "import typing\nfrom typing import NoReturn\ndef bail() -> NoReturn:\n    raise E()\ndef stop() -> typing.Never:\n    raise E()\ndef ok() -> int:\n    return 1\n";
     assert_eq!(
         declared_ends("/x/n.py", src),
-        vec![("bail".into(), never()), ("ok".into(), Ends::all()), ("stop".into(), never())]
+        vec![("bail".into(), never()), ("ok".into(), Ends::COMPLETES), ("stop".into(), never())]
     );
 }
 
@@ -4236,8 +4236,56 @@ fn cpp_noreturn_says_a_call_never_comes_back() {
     let src = "[[noreturn]] void bail();\n__attribute__((noreturn)) void die_now(int c);\n[[noreturn]] void stop() { throw 1; }\nint ok() { return 1; }\n";
     assert_eq!(
         declared_ends("/x/n.cpp", src),
-        vec![("bail".into(), never()), ("die_now".into(), never()), ("ok".into(), Ends::all()), ("stop".into(), never())]
+        vec![("bail".into(), never()), ("die_now".into(), never()), ("ok".into(), Ends::COMPLETES), ("stop".into(), never())]
     );
+}
+
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn analyzed(path: &str, src: &str) -> crate::model::file_analysis::FileAnalysis {
+    let p = std::path::PathBuf::from(path);
+    crate::build::language_driver::LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p))
+}
+
+/// Past a branch whose arm writes and then calls `call`, what `x` holds at
+/// `row`: the arm's write reaches the join only if the call comes back.
+#[cfg(any(feature = "php", feature = "python", feature = "cpp"))]
+fn past_a_gated_write(path: &str, src: &str, var: &str, row: usize) -> Option<crate::model::file_analysis::InferredType> {
+    analyzed(path, src).inferred_type_via_bag(var, tree_sitter::Point { row, column: 0 })
+}
+
+/// A function of the file that throws, called as a statement, lets no path
+/// past it; one that comes back does (`docs/adr/cfg-tier.md` §Effects).
+#[cfg(feature = "python")]
+#[test]
+fn python_a_call_to_a_raising_def_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |body: &str| format!("def fatal():\n    {body}\ndef f(c):\n    x = 1\n    if c:\n        x = 's'\n        fatal()\n    y = x\n");
+    assert_eq!(past_a_gated_write("/x/g.py", &src("raise E()"), "x", 7), Some(T::Numeric));
+    assert!(matches!(past_a_gated_write("/x/g.py", &src("log()"), "x", 7), Some(T::Union(_))), "a def that comes back");
+    // A def nested in another's body ends as its own body does, not the
+    // outer one's.
+    let fa = analyzed("/x/g.py", "def f():\n    def g():\n        raise E()\n    log()\n");
+    let id = |n: &str| fa.symbols().iter().find(|s| s.name == n).unwrap().id;
+    assert!(fa.symbol_ends(id("f")).contains(crate::model::witnesses::Ends::COMPLETES));
+    assert_eq!(fa.symbol_ends(id("g")), crate::model::witnesses::Ends::UNWINDS);
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_a_call_to_a_throwing_function_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |body: &str| format!("<?php\nfunction fatal() {{ {body} }}\nfunction f($c) {{\n$x = 1;\nif ($c) {{ $x = 's'; fatal(); }}\n$y = $x;\n}}\n");
+    assert_eq!(past_a_gated_write("/x/g.php", &src("throw new E();"), "x", 5), Some(T::Numeric));
+    assert!(matches!(past_a_gated_write("/x/g.php", &src("log();"), "x", 5), Some(T::Union(_))), "a function that comes back");
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_a_call_to_a_throwing_function_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = |body: &str| format!("void fatal() {{ {body} }}\nvoid f(bool c) {{\nauto x = 1;\nif (c) {{ x = \"s\"; fatal(); }}\nauto y = x;\n}}\n");
+    assert_eq!(past_a_gated_write("/x/g.cpp", &src("throw 1;"), "x", 4), Some(T::Numeric));
+    assert!(matches!(past_a_gated_write("/x/g.cpp", &src("log();"), "x", 4), Some(T::Union(_))), "a function that comes back");
 }
 
 /// A C++ loop joins its entry and each pass at its head, and past it what

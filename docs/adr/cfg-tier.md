@@ -139,10 +139,13 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   nothing and the value coming in stands. A call to nothing the file
   defines is no gate: it comes back, except a name the exit list still
   spells (`TODO(cross-file-noreturn)`).
-- **Inference.** A callable a gate calls mints how it ends from its body:
-  each leave in it, any `return` anywhere in it, and its end where control
-  reaches it, gated by the calls it makes there. A body the parser could
-  not read states nothing. How it leaves through a callee is not derived:
+- **Inference.** A callable mints how it ends from its body: each leave
+  in it, any `return` anywhere in it, and its end where control reaches
+  it, gated by the calls it makes there. What sits in a body nested inside
+  it is the nested callable's. A body the parser could not read states
+  nothing. A pack document names the bodies (`@ctl.body`) and the calls
+  that are whole statements (`@ctl.gate`), and every body it names mints;
+  Perl mints the bodies its gates reach. How it leaves through a callee is not derived:
   a body whose every way out runs into a call that does not come back has
   no way of ending it names (`TODO(effect-leaving-bits)`).
 - **Cycles.** A callable already on the path is assumed to have no way of

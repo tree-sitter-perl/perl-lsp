@@ -91,6 +91,20 @@ pub struct ControlView {
     /// reaches what follows one only if the call returns, which the effect
     /// lane decides at query time (`docs/adr/cfg-tier.md` §Effects).
     pub gates: Vec<Span>,
+    /// The callables' bodies: how one ends is how a call to it ends. What
+    /// sits in a body inside another is that body's, not the outer one's.
+    pub bodies: Vec<CallableBody>,
+    /// Every statement that returns, wherever it sits: one the view cannot
+    /// place still says its callable may come back.
+    pub returns: Vec<Span>,
+}
+
+/// A callable's body as the view holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallableBody {
+    pub span: Span,
+    /// Whether the parser read it whole; one it could not states nothing.
+    pub readable: bool,
 }
 
 impl ControlView {
@@ -419,13 +433,16 @@ impl<'v> JoinPlan<'v> {
     /// out of the body to nothing the view models comes back to the caller.
     pub fn body_ends(&self, body: Span) -> Vec<(crate::model::witnesses::Ends, Point, Vec<Span>)> {
         use crate::model::witnesses::Ends;
+        let nested: Vec<Span> =
+            self.view.bodies.iter().map(|b| b.span).filter(|&b| b != body && contains(body, b)).collect();
+        let own = |s: Span| contains(body, s) && !nested.iter().any(|&b| contains(b, s));
         let direct = |s: Span| {
-            contains(body, s) && !self.holding_ix(s.start).any(|i| contains(self.arm_span(i), s) && contains(body, self.arm_span(i)))
+            own(s) && !self.holding_ix(s.start).any(|i| contains(self.arm_span(i), s) && contains(body, self.arm_span(i)))
         };
         let mut out = Vec::new();
         let mut cut = false;
         for (l, aim) in self.view.leaves.iter().zip(&self.aims) {
-            if !contains(body, l.span) {
+            if !own(l.span) {
                 continue;
             }
             let ends = match (l.kind, aim) {
@@ -450,6 +467,44 @@ impl<'v> JoinPlan<'v> {
         if !cut {
             let gates = self.view.gates.iter().copied().filter(|&g| direct(g)).collect();
             out.push((Ends::COMPLETES, body.end, gates));
+        }
+        out
+    }
+
+    /// How a call to `sid`, whose body is `body`, ends, as `Effect` arms on
+    /// its `SymbolEffects`: a way out per leave and, where control reaches
+    /// it, the body's end past the calls it makes there ([`Self::body_ends`]).
+    /// A return anywhere in it, in a nested body too, comes back: one too
+    /// many only says a call may come back.
+    // TODO(effect-leaving-bits): how a body leaves through a call that does
+    // not come back (unwinds or exits) is not minted, so a pure wrapper ends
+    // in no named way; the first reader of the split is try arms (PR 13).
+    pub fn effect_arms(&self, sid: super::SymbolId, body: Span) -> Vec<crate::model::witnesses::Witness> {
+        use crate::model::witnesses::{Effect, Ends, Witness, WitnessAttachment, WitnessPayload, WitnessSource, EFFECT_ARM_SOURCE};
+        let attachment = WitnessAttachment::SymbolEffects(sid);
+        let arm = |payload: WitnessPayload, at: Point| Witness {
+            attachment: attachment.clone(),
+            source: WitnessSource::Builder(EFFECT_ARM_SOURCE.into()),
+            payload,
+            span: Span { start: at, end: at },
+        };
+        let mut out: Vec<Witness> = self
+            .body_ends(body)
+            .into_iter()
+            .map(|(ends, at, gates)| {
+                let effect = WitnessPayload::Effect(Effect::Ends(ends));
+                let payload = match gates.is_empty() {
+                    true => effect,
+                    false => WitnessPayload::Gated {
+                        gates: gates.into_iter().map(WitnessAttachment::Expr).collect(),
+                        arm: Some(Box::new(effect)),
+                    },
+                };
+                arm(payload, at)
+            })
+            .collect();
+        if let Some(ret) = self.view.returns.iter().find(|&&r| contains(body, r)) {
+            out.push(arm(WitnessPayload::Effect(Effect::Ends(Ends::COMPLETES)), ret.start));
         }
         out
     }
@@ -918,10 +973,32 @@ impl super::FileAnalysis {
     pub(crate) fn assemble_joins(&mut self, view: &ControlView, guards: GuardFacts, place_cut: Option<&super::PlaceDisturbanceIndex>) {
         use super::{Binding, Place};
         use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
+        let mut view = std::borrow::Cow::Borrowed(view);
+        // A call gates only where this file says what runs: its `Invoke`
+        // names a callable of the file. Any other comes back, the top.
+        let local = |g: &Span| {
+            self.witnesses.for_attachment(&WitnessAttachment::Expr(*g)).iter().any(|w| {
+                matches!(&w.payload, WitnessPayload::Invoke { callee: crate::model::witnesses::Callee::Function { local, member_of, .. }, .. }
+                    if local.is_some() || member_of.is_some())
+            })
+        };
+        if !view.gates.iter().all(local) {
+            view.to_mut().gates.retain(local);
+        }
+        let plan = JoinPlan::new(&view);
+        let effect_arms: Vec<Witness> = view
+            .bodies
+            .iter()
+            .filter(|b| b.readable)
+            .filter_map(|b| Some((self.callable_of_body(b.span)?, b.span)))
+            .flat_map(|(sid, body)| plan.effect_arms(sid, body))
+            .collect();
+        for w in effect_arms {
+            self.witnesses.push(w);
+        }
         if view.constructs.is_empty() || (self.flow_edges.is_empty() && guards.seeds.is_empty()) {
             return;
         }
-        let plan = JoinPlan::new(view);
         let mut minted: HashSet<(Place, Span, JoinRole)> = HashSet::new();
         let mut joins: Vec<Witness> = Vec::new();
         let source = || WitnessSource::Builder(JOIN_SOURCE.into());
@@ -1022,6 +1099,18 @@ impl super::FileAnalysis {
         for w in regions {
             self.witnesses.push(w);
         }
+    }
+}
+
+impl super::FileAnalysis {
+    /// The callable whose body `body` is: the narrowest callable scope
+    /// holding it that names its owner.
+    fn callable_of_body(&self, body: Span) -> Option<super::SymbolId> {
+        self.scopes
+            .iter()
+            .filter(|s| s.kind.is_callable() && contains(s.span, body))
+            .min_by_key(|s| (std::cmp::Reverse((s.span.start.row, s.span.start.column)), (s.span.end.row, s.span.end.column)))?
+            .owner
     }
 }
 

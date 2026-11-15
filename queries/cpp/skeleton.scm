@@ -1087,6 +1087,13 @@
 (continue_statement) @ctl.leave.continue
 (break_statement) @ctl.leave.break
 
+; How a call to a function ends is how its body does; a call that is a
+; whole statement lets control past it only if it comes back
+; (`docs/adr/cfg-tier.md` §Effects).
+(function_definition body: (compound_statement) @ctl.body)
+(lambda_expression body: (compound_statement) @ctl.body)
+(expression_statement (call_expression) @ctl.gate)
+
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its
 ; moved-from region to THAT arm — a read in a sibling arm (or after the if) is

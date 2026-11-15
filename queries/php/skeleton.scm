@@ -532,6 +532,14 @@
    [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @ctl.leave.exit
  (#any-of? @_exit "die" "exit"))
 
+; How a call to a function ends is how its body does; a call that is a
+; whole statement lets control past it only if it comes back
+; (`docs/adr/cfg-tier.md` §Effects).
+(function_definition body: (compound_statement) @ctl.body)
+(method_declaration body: (compound_statement) @ctl.body)
+(anonymous_function body: (compound_statement) @ctl.body)
+(expression_statement (function_call_expression) @ctl.gate)
+
 ; ---- how a call ends ----
 ; A `never` return says a call never comes back; how it leaves is the
 ; body's business.
