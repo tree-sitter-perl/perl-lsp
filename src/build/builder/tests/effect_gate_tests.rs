@@ -141,11 +141,46 @@ fn a_depth_cap_and_an_open_set_answer_the_top() {
 /// nothing stated, a cycle member and a capped chase alike.
 #[test]
 fn no_effect_question_answers_nothing() {
-    let fa = build_fa("sub quiet { 1 }\nsub a { b() }\nsub b { a() }\nsub f {\nmy ($k) = @_;\nmy $x = 1;\nif ($k) { $x = 'a'; a() }\nreturn $x;\n}\n");
+    let fa = build_fa("sub quiet { 1 + }\nsub a { b() }\nsub b { a() }\nsub f {\nmy ($k) = @_;\nmy $x = 1;\nif ($k) { $x = 'a'; a() }\nreturn $x;\n}\n");
     for name in ["quiet", "a", "b", "f"] {
         let v = raw_effects(&fa, &WitnessAttachment::SymbolEffects(sub_id(&fa, name)));
         assert!(matches!(v, ReducedValue::Effects(_)), "{name}: {v:?}");
     }
     let v = raw_effects(&fa, &WitnessAttachment::SymbolEffects(sub_id(&fa, "quiet")));
-    assert_eq!(v, ReducedValue::Effects(Ends::all()), "nothing stated is the top");
+    assert_eq!(v, ReducedValue::Effects(Ends::all()), "a body the parser could not read states nothing: the top");
+}
+
+/// A sub another file defines ends as that file alone says, read from the
+/// index's resident table: one that dies there narrows past its call here;
+/// one that comes back, or whose end runs through a callee elsewhere
+/// again, does not. Re-registering the provider replaces its answer.
+#[test]
+fn a_sub_another_file_defines_ends_as_that_file_says() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+    let provider = |body: &str| format!("package Util;\nuse Exporter 'import';\nour @EXPORT = ('fatal');\nsub fatal {{ {body} }}\n1;\n");
+    let consumer = "package C;\nuse Util;\nsub f {\nmy ($c) = @_;\nmy $x = $c ? Foo->new : undef;\nfatal('no') unless defined $x;\nreturn $x;\n}\n";
+    let fa = build_fa(consumer);
+    let foo = InferredType::ClassName("Foo".into());
+    let optional = Some(InferredType::Optional(Box::new(foo.clone())));
+    let idx = ModuleIndex::new_for_test();
+    let path = std::path::PathBuf::from("/tmp/Util.pm");
+    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(idx));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 0)), optional, "with no index the call may come back");
+    idx.register_workspace_module(path.clone(), Arc::new(build_fa(&provider("die @_"))));
+    assert_eq!(at(&idx), Some(foo), "the provider's `fatal` dies");
+    idx.register_workspace_module(path.clone(), Arc::new(build_fa(&provider("warn @_"))));
+    assert_eq!(at(&idx), optional, "re-registered, it comes back");
+    idx.register_workspace_module(path, Arc::new(build_fa(&provider("Other::bail(@_)"))));
+    assert_eq!(at(&idx), optional, "its end runs through a callee elsewhere: the top");
+}
+
+/// A test whose only way out is past a call drops no path when the call
+/// comes back, so past it the value coming in stands: the call's arm,
+/// which the test proves undef, is no evidence that the value is undef.
+#[test]
+fn a_guard_left_only_through_a_returning_call_narrows_nothing() {
+    let fa = build_fa("sub f {\nmy ($p) = @_;\nmy $x = $p->{x};\nif (!defined $x) { Other::warn_about('x') }\nreturn $x->id;\n}\n");
+    let t = fa.inferred_type_via_bag("$x", Point::new(4, 7));
+    assert!(!matches!(t, Some(InferredType::Undef) | Some(InferredType::Optional(_))), "{t:?}");
 }

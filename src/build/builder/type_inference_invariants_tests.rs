@@ -475,13 +475,13 @@ fn plugin_stated_ends_reach_the_callable_and_its_heirs() {
     let ends_of = |class: &str| query_ends(&fa.witnesses, &WitnessAttachment::effects_of(class, "fail"), Some(&ctx));
     assert_eq!(ends_of("Foo"), Ends::UNWINDS);
     assert_eq!(ends_of("Heir"), Ends::UNWINDS, "inherited");
-    assert_eq!(ends_of("Own"), Ends::all(), "an own definition that states nothing is the top");
+    assert_eq!(ends_of("Own"), Ends::COMPLETES, "an own definition answers from its own body, never its parent's");
     let own = fa
         .symbols()
         .iter()
         .find(|s| s.name == "fail" && s.package.as_deref() == Some("Own"))
         .expect("Own::fail");
-    assert_eq!(fa.symbol_ends(own.id), Ends::all());
+    assert_eq!(fa.symbol_ends(own.id), Ends::COMPLETES);
 }
 
 /// A local jump ends no way the effect lane counts: `return`, `next`,
@@ -543,7 +543,7 @@ fn a_call_ends_the_way_the_definitions_it_runs_end() {
     let fail = fa.symbols().iter().find(|s| s.name == "fail").expect("fail");
     let plain = fa.symbols().iter().find(|s| s.name == "plain").expect("plain");
     assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
-    assert_eq!(fa.symbol_ends(plain.id), Ends::all(), "a definition that states nothing");
+    assert_eq!(fa.symbol_ends(plain.id), Ends::COMPLETES, "a definition whose body comes back");
 }
 
 /// `Never` is how a value fold sees an expression that does not complete:

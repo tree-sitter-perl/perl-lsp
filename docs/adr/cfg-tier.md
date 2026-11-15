@@ -153,8 +153,20 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   the exact least fixed point. An answer worked out under that assumption
   is forgotten when the assuming frame closes, so the same question asked
   later in the query is asked again.
-- It rides the Surface (`MethodSurface.ends`), so a callee edit that changes
-  how it ends dirties its consumers and nothing else.
+- It rides the Surface (`MethodSurface.ends`, what the file alone can tell:
+  `None` where a path runs through a callee elsewhere), so a callee edit
+  that changes how it ends dirties its consumers and nothing else.
+- **Across files**, a gate on a function another file defines never chases
+  that file's bag: the index keeps, per callable name, the modules whose
+  local answer never comes back (`ModuleEdgeIndexes::ends`, fed with
+  `names` and purged with the module), joined over every module declaring
+  the name; any declarer without a row is the top. A name with no row
+  passes unresolved, which is the pre-filter. Two approximations ride it:
+  every declaring module is a candidate, not only those the caller sees
+  (`TODO(effect-visibility)`), and a callee whose own end runs through a
+  callee elsewhere is the top until the whole-program engine carries it
+  (`TODO(effect-wrappers)`). A method call gates nothing until its
+  descendants join (`TODO(effect-descendants)`).
 - Later variants (`OnParam` writes, moves, kills) go on the same lane with
   their own join; set union is the join of `Ends`, not of the lane.
 

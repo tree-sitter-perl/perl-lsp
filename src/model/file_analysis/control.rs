@@ -194,7 +194,7 @@ fn before(p: Point) -> Point {
 
 /// The place as it stands at `at`, on a path no test decides.
 fn read(at: Point) -> JoinArm {
-    JoinArm { at, arm: None, untaken: None, gates: Vec::new() }
+    JoinArm { at, arm: None, untaken: None, gates: Vec::new(), mute: false }
 }
 
 /// A loop's arms, by index into its construct's, and where its head lands.
@@ -236,6 +236,9 @@ pub struct JoinArm {
     /// The calls on the path that control must come back from to reach
     /// `at` ([`ControlView::gates`]).
     pub gates: Vec<Span>,
+    /// In a test's region: the path proves nothing of the place once its
+    /// gates come back, so where it runs the region answers nothing.
+    pub mute: bool,
 }
 
 /// The path through a construct on which no arm runs: the construct, and
@@ -416,13 +419,19 @@ impl<'v> JoinPlan<'v> {
     /// Whether some path through `c` (or a branch closing one of its arms)
     /// is one control never comes out of, or may not be: past a gate.
     pub fn drops_a_path(&self, c: &'v Construct) -> bool {
+        self.drops_by(c, true)
+    }
+
+    /// As [`Self::drops_a_path`], counting a gate as a way out only when
+    /// `gates` says so.
+    fn drops_by(&self, c: &'v Construct, gates: bool) -> bool {
         let mut reached = vec![c];
         self.arm_points(c, &mut Vec::new(), &mut reached);
         reached.iter().any(|k| {
             let ix = self.index[&(*k as *const Construct)];
             (0..k.arms.len()).any(|a| {
                 let i = self.arm_ix(ix, a);
-                self.leaves[i] || !self.gates[i].is_empty()
+                self.leaves[i] || (gates && !self.gates[i].is_empty())
             })
         })
     }
@@ -746,18 +755,23 @@ impl<'v> JoinPlan<'v> {
             .take_while(|(k, _)| k.kind == ControlKind::Branch)
             .filter(|(k, _)| k.kind == ControlKind::Branch && !self.is_lifted(k) && contains(within, k.span))
             .map(|(k, _)| k);
+        let left = self.drops_by(c, false);
         let mut out: Vec<(&'v Construct, BranchJoin)> = Vec::new();
         for k in std::iter::once(c).chain(outer) {
-            let (after, _) = self.after_join(k, bound_from);
+            let (mut after, _) = self.after_join(k, bound_from);
             let proved = |a: &JoinArm| match (a.untaken, a.arm) {
                 (Some(u), _) => untaken_proved(u.of) || narrowed(u.of),
-                // A path past a gate speaks for nothing when control comes
-                // back: the join then answers nothing (`guard_region_witnesses`).
-                _ if !a.gates.is_empty() => true,
                 (None, Some(arm)) => narrowed(arm) || out.iter().any(|(inner, _)| contains(arm, inner.span)),
                 (None, None) => false,
             };
-            if after.arms.is_empty() || !after.arms.iter().all(proved) {
+            // A path past a gate may still not come back. Where it does, it
+            // speaks for nothing (`guard_region_witnesses`) if it proves
+            // nothing, or if no path leaves but past a gate: then the test
+            // drops no path and the value coming in stands.
+            for a in &mut after.arms {
+                a.mute = !a.gates.is_empty() && (!left || !proved(a));
+            }
+            if after.arms.is_empty() || !after.arms.iter().all(|a| a.mute || proved(a)) {
                 break;
             }
             out.push((k, after));
@@ -777,7 +791,7 @@ impl<'v> JoinPlan<'v> {
         let has = |b: bool| c.arms.iter().any(|a: &Arm| a.role == ArmRole::When(b));
         if !(has(true) && has(false)) && !c.arms.is_empty() {
             let tested = c.cond.map_or(entry_point(c), |cond| cond.end);
-            out.push(JoinArm { at: entry_point(c), arm: None, untaken: Some(Untaken { of: c.span, tested }), gates: Vec::new() });
+            out.push(JoinArm { at: entry_point(c), arm: None, untaken: Some(Untaken { of: c.span, tested }), gates: Vec::new(), mute: false });
         }
     }
 
@@ -797,7 +811,7 @@ impl<'v> JoinPlan<'v> {
             // Its paths out are paths through `a`, so what holds over `a` holds there.
             Some(inner) => out.extend(self.exit_points(inner).into_iter().map(|p| JoinArm { arm: Some(a.span), ..p })),
             None if self.leaves[ix] => {}
-            None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None, gates: Vec::new() }),
+            None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None, gates: Vec::new(), mute: false }),
         }
         // Every path out of the arm runs past the calls the arm itself makes.
         for p in &mut out[from..] {
@@ -936,12 +950,12 @@ pub fn guard_region_witnesses(
         // A path past a gate that comes back is one the test proves nothing
         // on, so where it runs the region answers nothing and the value
         // coming in stands, as it does where no path leaves.
-        let gated_arms: Vec<_> = arms.iter().map(|a| a.gates.clone()).collect();
+        let gated_arms: Vec<_> = arms.iter().map(|a| (a.gates.clone(), a.mute)).collect();
         out.extend(
             join_arms(&attachment, place, &arms.iter().cloned().map(|a| JoinArm { gates: Vec::new(), ..a }).collect::<Vec<_>>(), proofs)
                 .into_iter()
                 .zip(gated_arms)
-                .map(|(w, gates)| gated(w, &gates, |_| None)),
+                .map(|(w, (gates, mute))| gated(w, &gates, |inner| (!mute).then_some(inner))),
         );
     }
     out
@@ -974,16 +988,17 @@ impl super::FileAnalysis {
         use super::{Binding, Place};
         use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
         let mut view = std::borrow::Cow::Borrowed(view);
-        // A call gates only where this file says what runs: its `Invoke`
-        // names a callable of the file. Any other comes back, the top.
-        let local = |g: &Span| {
+        // A call to a function gates: of this file, its body says how it
+        // ends; of another, that file does (the effect lane, at query time).
+        // A method's dispatch is an open set until its descendants join
+        // (`TODO(effect-descendants)`), so it gates nothing yet.
+        let calls_function = |g: &Span| {
             self.witnesses.for_attachment(&WitnessAttachment::Expr(*g)).iter().any(|w| {
-                matches!(&w.payload, WitnessPayload::Invoke { callee: crate::model::witnesses::Callee::Function { local, member_of, .. }, .. }
-                    if local.is_some() || member_of.is_some())
+                matches!(&w.payload, WitnessPayload::Invoke { callee: crate::model::witnesses::Callee::Function { .. }, .. })
             })
         };
-        if !view.gates.iter().all(local) {
-            view.to_mut().gates.retain(local);
+        if !view.gates.iter().all(calls_function) {
+            view.to_mut().gates.retain(calls_function);
         }
         let plan = JoinPlan::new(&view);
         let effect_arms: Vec<Witness> = view

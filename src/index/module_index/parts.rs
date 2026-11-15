@@ -153,6 +153,12 @@ pub struct ModuleEdgeIndexes {
     /// module names skip every sweep, which is why the term is invisible on
     /// Koha and only bites on a CPAN-shaped tree.
     fed_modules: DashMap<String, FedKeys>,
+    /// callable name → the modules declaring one of that name that never
+    /// comes back as far as its own file can tell, with how it ends
+    /// (`docs/adr/cfg-tier.md` §Effects): the one-hop answer for a gate on a
+    /// callable defined elsewhere, and the pre-filter that lets every other
+    /// gate pass unresolved. Derived from the same feed as `names`.
+    pub(super) ends: DashMap<String, Vec<(String, crate::model::witnesses::Ends)>>,
 }
 
 /// The bucket keys one module was fed under, per map — the reverse record
@@ -170,6 +176,7 @@ struct FedKeys {
     children: ModuleBucket,
     specs: ModuleBucket,
     providers: ModuleBucket,
+    ends: ModuleBucket,
 }
 
 /// The symbols-derived parts of one FILE's feed, recorded together so a
@@ -181,6 +188,9 @@ struct FedNames {
     names: Vec<String>,
     providers: Vec<String>,
     bridges: Vec<String>,
+    /// The file's callables that never come back, by name: local answers
+    /// that need the bag, so recorded from the whole copy too.
+    ends: Vec<(String, crate::model::witnesses::Ends)>,
 }
 
 impl FedKeys {
@@ -192,6 +202,7 @@ impl FedKeys {
             (&mut self.children, &other.children),
             (&mut self.specs, &other.specs),
             (&mut self.providers, &other.providers),
+            (&mut self.ends, &other.ends),
         ] {
             for k in src.as_slice() {
                 dst.insert(k);
@@ -211,6 +222,7 @@ impl ModuleEdgeIndexes {
             includers: DashMap::new(),
             name_records: DashMap::new(),
             fed_modules: DashMap::new(),
+            ends: DashMap::new(),
         }
     }
 
@@ -223,7 +235,7 @@ impl ModuleEdgeIndexes {
     /// candidate-set rebuilds (purge + one feed per candidate) and the
     /// warm rebuild can overlap without accumulation.
     pub fn feed(&self, module_name: &str, path: &std::path::Path, analysis: &FileAnalysis) {
-        let FedNames { names, providers, bridges } = if analysis.symbols_are_evicted() {
+        let FedNames { names, providers, bridges, ends } = if analysis.symbols_are_evicted() {
             match self.name_records.get(path) {
                 Some(rec) => rec.clone(),
                 // No record (a stripped copy fed without ever being fed
@@ -259,6 +271,13 @@ impl ModuleEdgeIndexes {
         }
         for pkg in providers {
             push_unique(&self.providers, pkg, &mut fed.providers);
+        }
+        for (name, e) in ends {
+            let mut rows = self.ends.entry(name.clone()).or_default();
+            if !rows.iter().any(|(m, _)| m == module_name) {
+                rows.push((module_name.to_string(), e));
+            }
+            fed.ends.insert(&name);
         }
         // UNION, not replace: several files can feed under one package name
         // (Perl reopens packages anywhere), and `rebuild_name_registration`
@@ -313,6 +332,10 @@ impl ModuleEdgeIndexes {
                 !bucket.is_empty()
             });
         }
+        self.ends.retain(|_, rows| {
+            rows.retain(|(m, _)| m != module_name);
+            !rows.is_empty()
+        });
     }
 
     /// Test-only: the whole edge state, canonically ordered, for comparing
@@ -398,6 +421,34 @@ impl ModuleEdgeIndexes {
                 }
             }
         }
+        for key in fed.ends.as_slice() {
+            if let Some(mut rows) = self.ends.get_mut(key) {
+                rows.retain(|(m, _)| m != module_name);
+            }
+            self.ends.remove_if(key, |_, rows| rows.is_empty());
+        }
+    }
+
+    /// How a call to a callable named `name` that another file defines
+    /// ends, joined over every indexed module declaring the name: `None`
+    /// when none of them is known not to come back (the top, and the
+    /// pre-filter: such a gate passes unresolved).
+    // TODO(effect-visibility): every declaring module is a candidate, not
+    // only those the caller sees, so a name a returning callable shares
+    // anywhere answers the top. The owner is the free-function visibility
+    // tier the definition lookup grows (`ScopedLookup`).
+    pub fn callable_ends(&self, name: &str) -> Option<crate::model::witnesses::Ends> {
+        use crate::model::witnesses::Ends;
+        let rows = self.ends.get(name)?;
+        let mut out = rows.iter().fold(Ends::empty(), |acc, (_, e)| acc | *e);
+        let unknown = self
+            .names
+            .get(name)
+            .is_some_and(|definers| definers.as_slice().iter().any(|m| !rows.iter().any(|(r, _)| r == m)));
+        if unknown {
+            out |= Ends::all();
+        }
+        Some(out)
     }
 
     /// Drop `path`'s recorded name list (the file itself is gone).
@@ -414,6 +465,7 @@ impl ModuleEdgeIndexes {
         self.children.clear();
         self.specs.clear();
         self.providers.clear();
+        self.ends.clear();
         // The marks describe the maps just emptied; keeping them would let
         // a later purge take the sweep for a module with no edges left,
         // and — worse — a re-feed would find its mark already set.
@@ -423,10 +475,17 @@ impl ModuleEdgeIndexes {
     /// The symbol-derived feed parts — the
     /// record they land in is what a stripped copy replays.
     fn symbol_derived_names(analysis: &FileAnalysis) -> FedNames {
+        use crate::model::witnesses::Ends;
         FedNames {
             names: Self::indexable_names(analysis),
             providers: analysis.provided_packages(),
             bridges: analysis.bridge_classes(),
+            ends: analysis
+                .symbols()
+                .iter()
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                .filter_map(|s| Some((s.name.clone(), analysis.local_ends(s.id).filter(|e| !e.contains(Ends::COMPLETES))?)))
+                .collect(),
         }
     }
 

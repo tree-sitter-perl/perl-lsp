@@ -36,7 +36,7 @@ fn an_arm_holding_a_leave_is_no_arm_of_the_join() {
     };
     let plan = JoinPlan::new(&view);
     assert!(plan.drops_a_path(&view.constructs[0]));
-    assert_eq!(after(&plan, &view.constructs[0]), vec![JoinArm { at: els.end, arm: Some(els), untaken: None, gates: Vec::new() }]);
+    assert_eq!(after(&plan, &view.constructs[0]), vec![JoinArm { at: els.end, arm: Some(els), untaken: None, gates: Vec::new(), mute: false }]);
 }
 
 /// A leave under a nested branch's arm leaves that arm, not the outer one,

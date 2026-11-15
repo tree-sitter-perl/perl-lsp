@@ -113,6 +113,12 @@ fn surface_changing_edits_are_unequal() {
         "package Acme::W;\nuse Scalar::Util qw(blessed);\n",
     );
     assert_ne!(s0, surface(&add_import), "import change must change the surface");
+
+    // How a call ends: a sub that dies turned into one that comes back.
+    let dies = "package Acme::W;\nsub fatal { die 'x' }\n1;\n";
+    assert_ne!(surface(dies), surface(&dies.replace("die 'x'", "warn 'x'")), "an effect change must change the surface");
+    // One that still dies, differently, keeps it.
+    assert_eq!(surface(dies), surface(&dies.replace("die 'x'", "my $m = 'y'; die $m")), "same ends, same surface");
 }
 
 /// A key added to a plugin's config hash changes no member anywhere, and is
@@ -441,4 +447,21 @@ fn a_bag_evicted_analysis_projects_a_different_surface() {
          fixture that stopped exercising the bag, make the fixture carry \
          bag-derived surface content again"
     );
+}
+
+/// A body edit that changes how a callee ends dirties the files that call
+/// it, so a narrowing past its call in an open consumer is redone; one that
+/// keeps how it ends dirties nobody.
+#[test]
+fn an_effect_edit_dirties_its_consumers_and_no_other_edit_does() {
+    use std::path::PathBuf;
+    let idx = FreshnessIndex::default();
+    let util = PathBuf::from("/w/Util.pm");
+    let app = PathBuf::from("/w/App.pm");
+    let provider = |body: &str| surface(&format!("package Util;\nuse Exporter 'import';\nour @EXPORT = ('fatal');\nsub fatal {{ {body} }}\n1;\n"));
+    idx.record(&util, provider("die 'a'"));
+    idx.record(&app, surface("package App;\nuse Util;\nsub run { fatal('x') }\n1;\n"));
+    assert_eq!(idx.record(&util, provider("my $m = 'b'; die $m")), SurfaceVerdict::Unchanged, "still dies");
+    assert_eq!(idx.record(&util, provider("warn 'a'")), SurfaceVerdict::Changed, "now comes back");
+    assert!(idx.dirty_consumers(&util).contains(&app));
 }

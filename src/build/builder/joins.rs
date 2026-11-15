@@ -32,9 +32,6 @@ impl<'a> Builder<'a> {
             })
             .collect();
         let seeds = std::mem::take(&mut self.guard_seeds);
-        if assignments.is_empty() && seeds.is_empty() {
-            return;
-        }
         let main = self.syntax.main().root().ts();
         let mut seen: HashSet<usize> = HashSet::new();
         let around: Vec<Node<'a>> = assignments
@@ -46,24 +43,23 @@ impl<'a> Builder<'a> {
             .filter(|n| seen.insert(n.id()))
             .collect();
         let source = self.source;
-        // A statement calling a sub of this file comes back only if the sub
-        // does, which its own body decides: the walk follows each such call
-        // into the body it runs, and every body it reaches mints how it ends.
+        // A statement calling a sub comes back only if the sub does: one of
+        // this file by its own body, every sub's body minting how it ends;
+        // one elsewhere by what its file says (the effect lane, at query
+        // time). A builtin's call states its own effect.
         let local = self.local_callables();
-        let callee = |n: Node<'a>| self.local_callee(&local, n);
-        let gate = |n: Node<'a>| callee(n).is_some();
+        let gate = |n: Node<'a>| self.gate_callee(&local, n);
         let exits = |n: Node<'a>| narrowing::is_exit_expression(n, source);
         let mut walk = super::control::ViewWalk::default();
         let mut gates = walk.walk(around, source, &exits, &gate);
-        let mut bodies: Vec<(SymbolId, Node<'a>)> = Vec::new();
-        let mut followed: HashSet<SymbolId> = HashSet::new();
-        let mut i = 0;
-        while i < gates.len() {
-            let g = gates[i];
-            i += 1;
-            let Some(sid) = callee(g).filter(|&sid| followed.insert(sid)) else { continue };
-            let Some(body) = self.callable_body(sid, main) else { continue };
-            bodies.push((sid, body));
+        let bodies: Vec<(SymbolId, Node<'a>)> = self
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+            .filter_map(|s| Some((s.id, self.callable_body(s.id, main)?)))
+            .collect();
+        crate::util::ghost_stats::count_by("effect.bodies", bodies.len() as u64);
+        for &(_, body) in &bodies {
             walk.body(node_to_span(body), !body.has_error());
             gates.extend(walk.walk(super::control::statements_of(body), source, &exits, &gate));
         }
@@ -84,6 +80,12 @@ impl<'a> Builder<'a> {
             .filter(|(_, body)| !body.has_error())
             .flat_map(|(sid, body)| plan.effect_arms(sid, node_to_span(body)))
             .collect();
+        if assignments.is_empty() && seeds.is_empty() {
+            for w in effect_arms {
+                self.push_witness(w);
+            }
+            return;
+        }
         let untaken = std::mem::take(&mut self.untaken_proofs);
         let mut proofs: Proofs<'_> = HashMap::new();
         for p in &untaken {
@@ -207,18 +209,23 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// The sub of this file a plain call at `node` runs, by the rule its
-    /// `Invoke` resolves by (`find_callee_symbol`).
-    fn local_callee(&self, local: &HashMap<String, Vec<(SymbolId, Option<String>)>>, node: Node<'a>) -> Option<SymbolId> {
+    /// Whether a plain call at `node` gates what follows it: one to a sub
+    /// of this file, or to a sub elsewhere, so no builtin.
+    fn gate_callee(&self, local: &HashMap<String, Vec<(SymbolId, Option<String>)>>, node: Node<'a>) -> bool {
         if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
             || self.is_bless_call(node)
             || self.indirect_method_call(node).is_some()
         {
-            return None;
+            return false;
         }
-        let name = self.forward_callee_name(node)?;
+        let Some(name) = self.forward_callee_name(node) else { return false };
         let (qualifier, bare) = crate::model::file_analysis::split_qualified(&name, &crate::model::conventions::PERL_SPELLINGS);
-        local.get(bare)?.iter().find(|(_, pkg)| super::visit_use::qualifier_admits_local_sub(qualifier, pkg.as_deref())).map(|(id, _)| *id)
+        let here = local
+            .get(bare)
+            .is_some_and(|subs| subs.iter().any(|(_, pkg)| super::visit_use::qualifier_admits_local_sub(qualifier, pkg.as_deref())));
+        // A name the exit list spells still leaves where no sub of the file
+        // answers it (`TODO(cross-file-noreturn)`).
+        here || !(crate::model::builtins::is_builtin(&name) || narrowing::is_exit_expression(node, self.source))
     }
 
     /// The body block of the sub `sid` declares, where `root`'s tree holds it.

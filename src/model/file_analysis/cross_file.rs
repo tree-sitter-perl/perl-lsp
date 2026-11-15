@@ -534,6 +534,12 @@ pub trait CrossFileLookup {
     ) -> Option<std::sync::Arc<crate::model::witnesses::ConclusionMap>> {
         None
     }
+    /// How a call to a callable named `name` defined in another indexed
+    /// file ends, from what each declaring file alone says: `None` when
+    /// none is known not to come back (the top).
+    fn callable_ends(&self, _name: &str) -> Option<crate::model::witnesses::Ends> {
+        None
+    }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>>;
     /// `get_cached` scoped to a querying file's VISIBILITY set (its own path +
     /// its `#include` closure) — see `ModuleIndex::get_cached_scoped`. Default:
@@ -1355,6 +1361,9 @@ impl<'a> ScopedLookup<'a> {
 impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
+    }
+    fn callable_ends(&self, name: &str) -> Option<crate::model::witnesses::Ends> {
+        self.inner.callable_ends(name)
     }
     fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
         self.inner.is_dependency_path(path)

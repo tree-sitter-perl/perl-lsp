@@ -348,6 +348,10 @@ impl CrossFileLookup for ModuleIndex {
         self.core.flush_epoch.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn callable_ends(&self, name: &str) -> Option<crate::model::witnesses::Ends> {
+        self.core.edges.callable_ends(name)
+    }
+
     fn restamp_owed(&self, path: &std::path::Path, stamped_at: Option<u64>) -> bool {
         // Never stamped: owed, unconditionally. Every rehydrated copy reads
         // `None` (the field is `serde(skip)`), so this is the arm that keeps a

@@ -180,14 +180,17 @@ impl<'s> ViewWalk<'s> {
             if !self.seen.insert(node.id()) {
                 continue;
             }
-            if gate(node) {
+            let gated = gate(node);
+            if gated {
                 self.gates.push(super::node_to_span(node));
                 gates.push(node);
-            } else if exits(node) {
-                self.out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node), "")]);
             }
+            // A leave the document names is that leave; `exits` adds only
+            // what it does not name.
+            let mut named = false;
             let mut it = cursor.matches(query, node, source);
             while let Some(m) = it.next() {
+                named |= m.captures.iter().any(|c| c.node.id() == node.id() && caps[c.index as usize].is_leave());
                 for c in m.captures.iter() {
                     if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep) {
                         continue;
@@ -199,6 +202,9 @@ impl<'s> ViewWalk<'s> {
                     }
                 }
                 self.out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node)), source));
+            }
+            if !gated && !named && exits(node) {
+                self.out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node), "")]);
             }
         }
         gates

@@ -3758,9 +3758,16 @@ impl ReducerRegistry {
                         return Some(e);
                     }
                 }
-                // TODO(effect-cross-file): a free function another file
-                // defines answers through the index's resident table.
-                ask(state, WitnessAttachment::SymbolEffects((*local)?))
+                match local {
+                    Some(sid) => ask(state, WitnessAttachment::SymbolEffects(*sid)),
+                    // One defined elsewhere answers from the index's resident
+                    // table, never by chasing that file's bag: a name no
+                    // indexed callable is known not to come back from passes
+                    // unresolved. One whose answer runs through its own
+                    // callees elsewhere is the top until the whole-program
+                    // engine carries it (`TODO(effect-wrappers)`).
+                    None => q.context?.module_index?.callable_ends(name),
+                }
             }
             // A class the call names runs that class's resolution of the
             // name, whatever subclasses exist.

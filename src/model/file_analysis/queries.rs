@@ -1245,6 +1245,38 @@ impl FileAnalysis {
         )
     }
 
+    /// How a call to `sym_id` ends as far as this file alone can tell:
+    /// `None` where a path to one of its ends runs through a call to a
+    /// callable defined elsewhere, which that callable's own file decides.
+    pub fn local_ends(&self, sym_id: SymbolId) -> Option<crate::model::witnesses::Ends> {
+        crate::util::ghost_stats::timed("effect.local_ends", || self.local_ends_inner(sym_id))
+    }
+    fn local_ends_inner(&self, sym_id: SymbolId) -> Option<crate::model::witnesses::Ends> {
+        use crate::model::witnesses::{Callee, WitnessAttachment, WitnessPayload};
+        let mut seen: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
+        let mut work = vec![sym_id];
+        while let Some(sid) = work.pop() {
+            if !seen.insert(sid) {
+                continue;
+            }
+            for w in self.witnesses.for_attachment(&WitnessAttachment::SymbolEffects(sid)) {
+                let WitnessPayload::Gated { gates, .. } = &w.payload else { continue };
+                for g in gates {
+                    for call in self.witnesses.for_attachment(g) {
+                        match &call.payload {
+                            WitnessPayload::Invoke { callee: Callee::Function { local: Some(s), member_of: None, .. }, .. } => {
+                                work.push(*s)
+                            }
+                            WitnessPayload::Invoke { .. } => return None,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Some(self.symbol_ends(sym_id))
+    }
+
     /// Provenance of a symbol's return type — `Inferred` by default,
     /// `PluginOverride` for plugin-declared overrides. Always returns
     /// a value (never `None`) so debug tooling can ask "where did this
