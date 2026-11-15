@@ -55,11 +55,13 @@ poisons, as it would fresh. The bake reads the top-level effect from
 **Receiver reads.** `note_receiver_read` marks the open frame wherever the
 receiver's value is consumed: a `Receiver` / `ReceiverOr` substitution, a
 fresh dispatch derived from it, the first-parameter-is-the-receiver fold,
-and a baked conclusion evaluated against it. Forwarding the receiver to a
+a baked conclusion evaluated against it, and a hit in the session or sweep
+candidate memo (both keyed by the receiver, neither records a read). Forwarding the receiver to a
 sub-query is not a read; the sub-query's read is its parent's only when
-both were asked under the same receiver. An answer with no read is filed
-without its receiver and serves every receiver; one with a read stays that
-receiver's. Without this, N classes reading one inherited slot each chase
+both were asked under the same receiver. An answer with no read and no cycle
+closed in its subtree is filed without its receiver and serves every
+receiver; one with either stays that receiver's. A cut counts because where a
+cycle closes depends on the receivers along the path, read or not. Without this, N classes reading one inherited slot each chase
 that slot's writes under their own receiver, and the memo fills with N
 copies of one answer.
 
@@ -72,12 +74,15 @@ fails without the marks.
 
 `owned_slot_writes` groups a `SlotWrites` bucket's writes by the class each
 write's object resolves to. That index is the answer to a root query of the
-bucket (no receiver, no arguments, a fresh `QueryState`, so it is
-path-independent) and is filed in the same memo as a `MemoAnswer::SlotOwners`
+bucket (no receiver, no arguments, a fresh `QueryState`) and is filed in the same memo as a `MemoAnswer::SlotOwners`
 entry, under the same key, stamp and cap. A read folds the index's effect
 in under a combining frame. A read that reaches its own bucket while the
 bucket is being built (`in_flight`), or that no memo may serve, chases the
-bucket on its own path, where the cycle guard cuts it.
+bucket on its own path, where the cycle guard cuts it. A top-level query
+with no index and no scope open opens one for its own duration, so a slot
+read answers by the index wherever it is asked. A `Reentered` read is the
+one answer that still depends on what is in flight above it, which `Taint`
+does not see.
 
 ## What stays separate
 
@@ -93,7 +98,10 @@ bucket on its own path, where the cycle guard cuts it.
 
 `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
 touches with the memo off and asserts the analyses agree, and re-asks the
-bake and the Surface at encode time with a memo open and with none. On a
+bake and the Surface at encode time with a memo open and with none
+(`without_fold_memo` sets an enclosing scope's memo aside, or the control
+would read the answers it checks). No arm yet covers a pass under a module
+index. On a
 real run the encode-time check counts `fold_memo.equiv.agree` /
 `fold_memo.equiv.differ` and logs a difference; run it with
 `PERL_LSP_MINT_LINKS` both unset and set, since `OpenReason` and
