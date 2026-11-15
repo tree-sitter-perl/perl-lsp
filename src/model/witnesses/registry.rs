@@ -242,6 +242,9 @@ pub(super) struct Effect {
     /// The subtree read the receiver it was asked under, so its answer is
     /// that receiver's alone; without a read it answers for every receiver.
     reads_receiver: bool,
+    /// A cycle closed inside the subtree. Where it closed depends on the
+    /// receivers along the path, so the answer stays its own receiver's.
+    cuts: bool,
 }
 
 impl Effect {
@@ -292,6 +295,7 @@ impl EffectFrame {
     /// rung recorded there directly is.
     fn absorb(&mut self, at: u32, e: &Effect, receiver: u64) {
         self.effect.reads_receiver |= e.reads_receiver && receiver == self.receiver;
+        self.effect.cuts |= e.cuts;
         if at > self.depth {
             if !e.is_empty() {
                 crate::util::ghost_stats::count("residual.under_opaque");
@@ -428,7 +432,8 @@ thread_local! {
 /// nothing. Sharing settled links makes each one answered once.
 pub(crate) struct FoldMemoScope<'a> {
     outer: Option<FoldMemo>,
-    _owner: std::marker::PhantomData<&'a WitnessBag>,
+    /// `!Send`: the scope swaps this thread's memo and must restore it here.
+    _owner: std::marker::PhantomData<(&'a WitnessBag, *const ())>,
 }
 
 impl FoldMemoScope<'static> {
@@ -475,11 +480,24 @@ thread_local! {
 }
 
 /// Run `f` with the fold memo off — the control arm of the equivalence net.
+/// An enclosing scope's memo is set aside too, or the control would read the
+/// answers it exists to check.
 pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
-    let prev = FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true));
-    let out = f();
-    FOLD_MEMO_FORCED_OFF.with(|c| c.set(prev));
-    out
+    struct Restore {
+        forced: bool,
+        memo: Option<FoldMemo>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FOLD_MEMO_FORCED_OFF.with(|c| c.set(self.forced));
+            FOLD_MEMO.with(|m| *m.borrow_mut() = self.memo.take());
+        }
+    }
+    let _restore = Restore {
+        forced: FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true)),
+        memo: FOLD_MEMO.with(|m| m.borrow_mut().take()),
+    };
+    f()
 }
 
 /// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
@@ -565,7 +583,7 @@ fn fold_memo_probe(
         // An answer that never read its receiver is filed without one.
         let mut any = fk.clone();
         any.0.2 = None;
-        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver).cloned()
+        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver && !effect.cuts).cloned()
     })
     .flatten();
     let Some((MemoAnswer::Reduced(cached), effect)) = hit else {
@@ -659,7 +677,7 @@ fn fold_memo_store(
         return;
     }
     let (stamp, mut fk) = *fk;
-    if !effect.reads_receiver {
+    if !effect.reads_receiver && !effect.cuts {
         fk.0.2 = None;
     }
     fold_memo_insert(&stamp, fk, MemoAnswer::Reduced(std::sync::Arc::clone(result)), effect);
@@ -861,6 +879,7 @@ impl QueryState {
     /// A cycle guard returned for the frame at path position `at`.
     fn close_cut_at(&mut self, at: u32) {
         self.low_cut = self.low_cut.min(at);
+        self.open_effect().effect.cuts = true;
     }
 
     /// Push a frame: its position, and the mark its subtree restarts from.
@@ -2048,6 +2067,10 @@ impl ReducerRegistry {
             if let Some(hit) =
                 super::session::candidate_answer(idx, &cached.path, &memo_q)
             {
+                // Both memo tiers key a verdict by the receiver it was
+                // derived under and keep no record of whether it read it, so
+                // a hit is that receiver's answer.
+                note_receiver_read();
                 if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
                     return Some(v);
                 }
@@ -2056,6 +2079,7 @@ impl ReducerRegistry {
             // The sweep tier, behind the (cheaper) session memo: a verdict
             // another file's build already derived this sweep.
             if let Some(hit) = idx.sweep_consult_answer(&cached.path, &verdict_key) {
+                note_receiver_read();
                 super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit);
                 if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
                     return Some(v);
