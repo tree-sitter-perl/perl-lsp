@@ -415,7 +415,8 @@ thread_local! {
 /// nothing. Sharing settled links makes each one answered once.
 pub(crate) struct FoldMemoScope<'a> {
     outer: Option<FoldMemo>,
-    _owner: std::marker::PhantomData<&'a WitnessBag>,
+    /// `!Send`: the scope swaps this thread's memo and must restore it here.
+    _owner: std::marker::PhantomData<(&'a WitnessBag, *const ())>,
 }
 
 impl FoldMemoScope<'static> {
@@ -462,11 +463,24 @@ thread_local! {
 }
 
 /// Run `f` with the fold memo off — the control arm of the equivalence net.
+/// An enclosing scope's memo is set aside too, or the control would read the
+/// answers it exists to check.
 pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
-    let prev = FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true));
-    let out = f();
-    FOLD_MEMO_FORCED_OFF.with(|c| c.set(prev));
-    out
+    struct Restore {
+        forced: bool,
+        memo: Option<FoldMemo>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FOLD_MEMO_FORCED_OFF.with(|c| c.set(self.forced));
+            FOLD_MEMO.with(|m| *m.borrow_mut() = self.memo.take());
+        }
+    }
+    let _restore = Restore {
+        forced: FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true)),
+        memo: FOLD_MEMO.with(|m| m.borrow_mut().take()),
+    };
+    f()
 }
 
 /// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
