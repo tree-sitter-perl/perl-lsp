@@ -19,6 +19,9 @@ pub enum ControlKind {
     /// It tests nothing, but a `break` aimed at it leaves it (a `switch`),
     /// and a `continue` too when `next` (Perl's bare block).
     Block { next: bool },
+    /// It runs its body, and where the body unwinds, a handler; `quiet`
+    /// when an unwinding body lands past it with no handler (Perl's `eval`).
+    Try { quiet: bool },
 }
 
 /// Where an arm runs relative to its construct.
@@ -30,6 +33,15 @@ pub enum ArmRole {
     Body,
     /// What a loop runs after each pass of its body.
     Step,
+    /// What a try runs first.
+    Tried,
+    /// What a try runs where its body unwinds.
+    Handler,
+    /// What a try runs where its body completes, before what follows it
+    /// (python's `try … else`).
+    Settled,
+    /// What a try runs past it on every path.
+    Finally,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +185,7 @@ fn aims(view: &ControlView) -> Vec<Aim> {
         let leaves = |k: &&usize| match (view.constructs[**k].kind, l.kind) {
             (ControlKind::Loop { .. }, _) | (ControlKind::Block { .. }, LeaveKind::Break) => true,
             (ControlKind::Block { next }, _) => next,
-            (ControlKind::Branch, _) => false,
+            (ControlKind::Branch | ControlKind::Try { .. }, _) => false,
         };
         let mut around = open.iter().rev().filter(leaves);
         let found = match l.target {
@@ -362,10 +374,17 @@ impl<'v> JoinPlan<'v> {
         for k in order {
             let c = &view.constructs[k];
             let has = |b: bool| c.arms.iter().any(|a| a.role == ArmRole::When(b));
-            if c.kind != ControlKind::Branch || !(has(true) && has(false)) {
-                continue;
-            }
-            if !(0..c.arms.len()).all(|a| self.leaves[self.arm_ix(k, a)]) {
+            let gone = match c.kind {
+                ControlKind::Branch => has(true) && has(false) && (0..c.arms.len()).all(|a| self.leaves[self.arm_ix(k, a)]),
+                // A try is gone when no path comes out of it.
+                ControlKind::Try { .. } => {
+                    let mut out = Vec::new();
+                    self.try_points(c, &mut out, &mut vec![c], &[]);
+                    out.is_empty()
+                }
+                _ => false,
+            };
+            if !gone {
                 continue;
             }
             let holder = self.holding_ix(c.span.start).find(|&i| self.arms[i].0 != k && contains(self.arm_span(i), c.span));
@@ -432,7 +451,7 @@ impl<'v> JoinPlan<'v> {
     /// `gates` says so.
     fn drops_by(&self, c: &'v Construct, gates: bool) -> bool {
         let mut reached = vec![c];
-        self.arm_points(c, &mut Vec::new(), &mut reached);
+        self.arm_points(c, &mut Vec::new(), &mut reached, &[]);
         reached.iter().any(|k| {
             let ix = self.index[&(*k as *const Construct)];
             (0..k.arms.len()).any(|a| {
@@ -456,8 +475,16 @@ impl<'v> JoinPlan<'v> {
         };
         let mut out = Vec::new();
         let mut cut = false;
+        // A throw a try around it in the body catches lands in its handler.
+        let caught = |s: Span| {
+            self.holding_ix(s.start).filter(|&i| contains(self.arm_span(i), s) && contains(body, self.arm_span(i))).any(|i| {
+                let (k, a) = self.arms[i];
+                let c = &self.view.constructs[k];
+                c.arms[a].role == ArmRole::Tried && Self::catches(c)
+            })
+        };
         for (l, aim) in self.view.leaves.iter().zip(&self.aims) {
-            if !own(l.span) {
+            if !own(l.span) || (l.kind == LeaveKind::Throw && caught(l.span)) {
                 continue;
             }
             let ends = match (l.kind, aim) {
@@ -491,10 +518,6 @@ impl<'v> JoinPlan<'v> {
     /// it, the body's end past the calls it makes there ([`Self::body_ends`]).
     /// A return anywhere in it, in a nested body too, comes back: one too
     /// many only says a call may come back.
-    // TODO(effect-leaving-bits): a body leaving through a call that does not
-    // come back ends the way that call does, whatever catches it in between:
-    // a `die` inside an `eval` or `try` in the body still reads as leaving
-    // the body until try arms land (PR 13).
     pub fn effect_arms(&self, sid: super::SymbolId, body: Span) -> Vec<crate::model::witnesses::Witness> {
         use crate::model::witnesses::{Effect, Ends, Witness, WitnessAttachment, WitnessPayload, WitnessSource, EFFECT_ARM_SOURCE};
         let attachment = WitnessAttachment::SymbolEffects(sid);
@@ -561,14 +584,15 @@ impl<'v> JoinPlan<'v> {
     /// a scope (`written_in`, an arm that is a block) is already gone where
     /// the next arm begins, and needs no entry there. A path on which the variable is not yet bound
     /// reaches no read of it.
-    pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>, written_in: Span, written: Span) -> Vec<BranchJoin> {
+    pub fn branch_joins(&self, c: &'v Construct, bound_from: Option<Point>, written_in: Span, written: Span, writes: &[Point]) -> Vec<BranchJoin> {
         use crate::model::witnesses::JoinRole;
         let bound = |p: &Point| bound_from.is_none_or(|b| b <= *p);
-        let (after, reached) = self.after_join(c, bound_from);
+        let (after, reached) = self.after_join(c, bound_from, writes);
         let mut out = vec![after];
         // An arm starts over from the entering value only past a write in an
         // arm spelled before it; a construct around no write reads the same.
-        for k in reached.into_iter().filter(|k| contains(k.span, written)) {
+        // A try it reaches joins its own arms (`try_joins`).
+        for k in reached.into_iter().filter(|k| k.kind == ControlKind::Branch && contains(k.span, written)) {
             let entry = entry_point(k);
             // The first arm starts where the test leaves the variable; each
             // one written after another starts over from the entering value.
@@ -604,7 +628,7 @@ impl<'v> JoinPlan<'v> {
     /// A test written before the body lands the head there, so a write in
     /// the test stands for the body; a step between the two (a C-style
     /// `for`) lands it at the body too, where that write is then hidden.
-    pub fn loop_joins(&self, c: &'v Construct, bound_from: Option<Point>) -> Vec<BranchJoin> {
+    pub fn loop_joins(&self, c: &'v Construct, bound_from: Option<Point>, writes: &[Point]) -> Vec<BranchJoin> {
         use crate::model::witnesses::JoinRole;
         let Some(parts) = self.loop_parts(c) else { return Vec::new() };
         let LoopParts { ix, body, step, heads, .. } = parts;
@@ -616,17 +640,17 @@ impl<'v> JoinPlan<'v> {
         match step {
             Some(s) => {
                 let mut entering = continues;
-                self.pass_end(c, body, &mut entering);
-                self.arm_end(c, s, &mut head, &mut Vec::new());
+                self.pass_end(c, body, &mut entering, writes);
+                self.arm_end(c, s, &mut head, &mut Vec::new(), writes);
                 out.push((JoinRole::ArmStart, vec![span(s).start], entering));
             }
             None => {
-                self.pass_end(c, body, &mut head);
+                self.pass_end(c, body, &mut head, writes);
                 head.extend(continues);
             }
         }
         out.push((JoinRole::Head, heads, head));
-        out.push((JoinRole::Exit, vec![past(c.span)], self.exit_points(c)));
+        out.push((JoinRole::Exit, vec![past(c.span)], self.exit_points(c, writes)));
 
         let bound = |p: Point| bound_from.is_none_or(|b| b <= p);
         out.into_iter()
@@ -678,27 +702,27 @@ impl<'v> JoinPlan<'v> {
 
     /// Where a pass through loop `c`'s body comes out: the body's end (past
     /// the test, for a body that runs before it).
-    fn pass_end(&self, c: &'v Construct, body: usize, out: &mut Vec<JoinArm>) {
+    fn pass_end(&self, c: &'v Construct, body: usize, out: &mut Vec<JoinArm>, writes: &[Point]) {
         match c.cond {
             Some(cond) if c.kind == (ControlKind::Loop { once: true }) => {
                 let mut ended = Vec::new();
-                self.arm_end(c, body, &mut ended, &mut Vec::new());
+                self.arm_end(c, body, &mut ended, &mut Vec::new(), writes);
                 if !ended.is_empty() {
                     out.push(read(cond.end));
                 }
             }
-            _ => self.arm_end(c, body, out, &mut Vec::new()),
+            _ => self.arm_end(c, body, out, &mut Vec::new(), writes),
         }
     }
 
     /// The paths out of loop `c`: where its test fails (past its `else`,
     /// which runs there) and each `break` aimed at it.
-    fn exit_points(&self, c: &'v Construct) -> Vec<JoinArm> {
+    fn exit_points(&self, c: &'v Construct, writes: &[Point]) -> Vec<JoinArm> {
         let Some(LoopParts { ix, body, step, other, once, heads }) = self.loop_parts(c) else { return Vec::new() };
         let mut out = Vec::new();
         match (other, c.cond) {
-            (Some(e), _) => self.arm_end(c, e, &mut out, &mut Vec::new()),
-            (None, Some(_)) if once => self.pass_end(c, body, &mut out),
+            (Some(e), _) => self.arm_end(c, e, &mut out, &mut Vec::new(), writes),
+            (None, Some(_)) if once => self.pass_end(c, body, &mut out, writes),
             // Just past the test: what a test holding proves lasts to its
             // end (`!defined($b) and $n < 9` holds `$b` undef over its
             // right side), and here it failed. A step written right after
@@ -722,11 +746,11 @@ impl<'v> JoinPlan<'v> {
 
     /// The join past `c` for a place bound from `bound_from`, and every
     /// branch whose paths are `c`'s.
-    fn after_join(&self, c: &'v Construct, bound_from: Option<Point>) -> (BranchJoin, Vec<&'v Construct>) {
+    fn after_join(&self, c: &'v Construct, bound_from: Option<Point>, writes: &[Point]) -> (BranchJoin, Vec<&'v Construct>) {
         use crate::model::witnesses::JoinRole;
         let mut arms = Vec::new();
         let mut reached = vec![c];
-        self.arm_points(c, &mut arms, &mut reached);
+        self.arm_points(c, &mut arms, &mut reached, writes);
         arms.retain(|a| bound_from.is_none_or(|b| b <= a.at));
         arms.sort_by_key(|a| (a.at, a.arm.map(|s| (s.start, s.end)), a.untaken.map(|u| (u.tested, u.of.start, u.of.end))));
         arms.dedup();
@@ -767,7 +791,7 @@ impl<'v> JoinPlan<'v> {
         let left = self.drops_by(c, false);
         let mut out: Vec<(&'v Construct, BranchJoin)> = Vec::new();
         for k in std::iter::once(c).chain(outer) {
-            let (mut after, _) = self.after_join(k, bound_from);
+            let (mut after, _) = self.after_join(k, bound_from, &[]);
             let proved = |a: &JoinArm| match (a.untaken, a.arm) {
                 (Some(u), _) => untaken_proved(u.of) || narrowed(u.of),
                 (None, Some(arm)) => narrowed(arm) || out.iter().any(|(inner, _)| contains(arm, inner.span)),
@@ -793,9 +817,12 @@ impl<'v> JoinPlan<'v> {
     /// branch's paths), and, when no arm runs where the test goes one way,
     /// where the construct is entered. Every branch it passes through lands
     /// in `reached`.
-    fn arm_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>) {
+    fn arm_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>, writes: &[Point]) {
+        if let ControlKind::Try { .. } = c.kind {
+            return self.try_points(c, out, reached, writes);
+        }
         for ai in 0..c.arms.len() {
-            self.arm_end(c, ai, out, reached);
+            self.arm_end(c, ai, out, reached, writes);
         }
         let has = |b: bool| c.arms.iter().any(|a: &Arm| a.role == ArmRole::When(b));
         if !(has(true) && has(false)) && !c.arms.is_empty() {
@@ -807,18 +834,18 @@ impl<'v> JoinPlan<'v> {
     /// Where control comes out at the end of arm `ai` of `c`: the paths out
     /// of a branch or loop closing it, else the arm's end, unless control
     /// never comes out of it.
-    fn arm_end(&self, c: &'v Construct, ai: usize, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>) {
+    fn arm_end(&self, c: &'v Construct, ai: usize, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>, writes: &[Point]) {
         let a = &c.arms[ai];
         let k = self.index[&(c as *const Construct)];
         let ix = self.arm_ix(k, ai);
         let from = out.len();
         match self.closing(c, a).filter(|k| reached.len() < 64 && !reached.iter().any(|r| std::ptr::eq(*r, *k))) {
-            Some(inner) if inner.kind == ControlKind::Branch => {
+            Some(inner) if matches!(inner.kind, ControlKind::Branch | ControlKind::Try { .. }) => {
                 reached.push(inner);
-                self.arm_points(inner, out, reached);
+                self.arm_points(inner, out, reached, writes);
             }
             // Its paths out are paths through `a`, so what holds over `a` holds there.
-            Some(inner) => out.extend(self.exit_points(inner).into_iter().map(|p| JoinArm { arm: Some(a.span), ..p })),
+            Some(inner) => out.extend(self.exit_points(inner, writes).into_iter().map(|p| JoinArm { arm: Some(a.span), ..p })),
             None if self.leaves[ix] => {}
             None => out.push(JoinArm { at: a.span.end, arm: Some(a.span), untaken: None, gates: Vec::new(), mute: false }),
         }
@@ -826,6 +853,91 @@ impl<'v> JoinPlan<'v> {
         for p in &mut out[from..] {
             p.gates.extend(self.gates[ix].iter().copied());
         }
+    }
+
+    /// Where each path through try `c` comes out of it: past its `finally`
+    /// where it has one, else the end of its body (or of what runs where
+    /// the body completes) and of each handler, and for a quiet try,
+    /// wherever its body may unwind ([`Self::unwound`]).
+    fn try_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>, writes: &[Point]) {
+        match c.arms.iter().position(|a| a.role == ArmRole::Finally) {
+            Some(f) => self.arm_end(c, f, out, reached, writes),
+            None => self.try_completions(c, out, reached, writes),
+        }
+    }
+
+    /// The paths into what follows try `c`'s body and handlers: its
+    /// `finally`, or past it.
+    fn try_completions(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>, writes: &[Point]) {
+        let k = self.index[&(c as *const Construct)];
+        let role = |r: ArmRole| c.arms.iter().position(|a| a.role == r);
+        if let Some(t) = role(ArmRole::Tried) {
+            match role(ArmRole::Settled) {
+                // What runs where the body completes is reached only so.
+                Some(s) if !self.leaves[self.arm_ix(k, t)] => self.arm_end(c, s, out, reached, writes),
+                Some(_) => {}
+                None => self.arm_end(c, t, out, reached, writes),
+            }
+        }
+        for h in (0..c.arms.len()).filter(|&a| c.arms[a].role == ArmRole::Handler) {
+            self.arm_end(c, h, out, reached, writes);
+        }
+        if c.kind == (ControlKind::Try { quiet: true }) {
+            out.extend(self.unwound(c, &[ArmRole::Tried], writes));
+        }
+    }
+
+    /// The place as it may stand where try `c` unwinds out of its arms of
+    /// `roles`: as it entered, or past any write in them.
+    // TODO(try-unwind-points): a path unwinds only at a call or a throw, so
+    // a write that no call or throw follows inside the body reaches no
+    // handler. Owner: CFG follow-up (calls as program points).
+    fn unwound(&self, c: &'v Construct, roles: &[ArmRole], writes: &[Point]) -> Vec<JoinArm> {
+        let spans: Vec<Span> = c.arms.iter().filter(|a| roles.contains(&a.role)).map(|a| a.span).collect();
+        std::iter::once(read(entry_point(c)))
+            .chain(writes.iter().filter(|&&w| spans.iter().any(|&s| contains(s, Span { start: w, end: w }))).map(|&w| read(w)))
+            .collect()
+    }
+
+    /// Whether try `c` catches what its body throws.
+    fn catches(c: &Construct) -> bool {
+        c.kind == (ControlKind::Try { quiet: true }) || c.arms.iter().any(|a| a.role == ArmRole::Handler)
+    }
+
+    /// The joins try `c` mints for a place bound from `bound_from`, written
+    /// at `writes` (`docs/adr/cfg-tier.md` §Try): past it (`After`); where
+    /// each handler begins, the place as the body may have unwound it;
+    /// where what runs on completion begins, the body's end; and where its
+    /// `finally` begins, every path into it, unwinding ones included.
+    pub fn try_joins(&self, c: &'v Construct, bound_from: Option<Point>, writes: &[Point]) -> Vec<BranchJoin> {
+        use crate::model::witnesses::JoinRole;
+        let bound = |a: &JoinArm| bound_from.is_none_or(|b| b <= a.at);
+        let arm = |r: ArmRole| c.arms.iter().find(|a| a.role == r);
+        let mut out = vec![self.after_join(c, bound_from, writes).0];
+        let mut push = |of: Span, lands: Vec<Point>, mut arms: Vec<JoinArm>| {
+            arms.retain(bound);
+            arms.sort_by_key(|a| (a.at, a.arm.map(|s| (s.start, s.end))));
+            arms.dedup();
+            if !lands.is_empty() && !arms.is_empty() {
+                out.push(BranchJoin { role: JoinRole::ArmStart, of, lands, arms });
+            }
+        };
+        let handlers: Vec<Point> = c.arms.iter().filter(|a| a.role == ArmRole::Handler).map(|a| a.span.start).collect();
+        if let Some(t) = arm(ArmRole::Tried) {
+            push(t.span, handlers, self.unwound(c, &[ArmRole::Tried], writes));
+        }
+        if let (Some(t), Some(s)) = (c.arms.iter().position(|a| a.role == ArmRole::Tried), arm(ArmRole::Settled)) {
+            let mut ended = Vec::new();
+            self.arm_end(c, t, &mut ended, &mut Vec::new(), writes);
+            push(s.span, vec![s.span.start], ended);
+        }
+        if let Some(f) = arm(ArmRole::Finally) {
+            let mut into = Vec::new();
+            self.try_completions(c, &mut into, &mut Vec::new(), writes);
+            into.extend(self.unwound(c, &[ArmRole::Tried, ArmRole::Handler, ArmRole::Settled], writes));
+            push(f.span, vec![f.span.start], into);
+        }
+        out
     }
 
     /// The outermost branch or loop inside arm `a` of `c` that ends where
@@ -1258,18 +1370,33 @@ impl super::FileAnalysis {
                 }
             }
         };
-        for fe in &self.flow_edges {
+        let bound: Vec<(Place, super::ScopeId)> = self
+            .flow_edges
+            .iter()
+            .map(|fe| {
+                let (binding, home) = self.variable_binding_of(&fe.target_name, fe.target_at, fe.target_scope);
+                (Place::variable(binding), home)
+            })
+            .collect();
+        // Where each place is written: the points a try's body may unwind
+        // from.
+        let mut writes_of: HashMap<&Place, Vec<Point>> = HashMap::new();
+        for ((place, _), fe) in bound.iter().zip(&self.flow_edges) {
+            writes_of.entry(place).or_default().push(fe.target_at);
+        }
+        for (store, _) in &stores {
+            writes_of.entry(&store.place).or_default().push(store.at);
+        }
+        for ((place, home), fe) in bound.iter().zip(&self.flow_edges) {
             let at = fe.target_at;
-            let (binding, home) = self.variable_binding_of(&fe.target_name, at, fe.target_scope);
-            let place = Place::variable(binding.clone());
-            let bound_from = match binding {
+            let bound_from = match place.root {
                 Binding::Lexical(sid) => Some(self.symbols[sid.0 as usize].span.start),
                 _ => None,
             };
             // An arm ending where the write lands (`x = a if c else b`'s
             // `b`) is part of the value written, not around the write.
             let written = fe.target_token.unwrap_or(Span { start: fe.source.start, end: at });
-            let site = WriteSite { place: &place, at, scope: fe.target_scope, home, bound_from, written };
+            let site = WriteSite { place, at, scope: fe.target_scope, home: *home, bound_from, written, writes: &writes_of[place] };
             for (scope, join, lands, arms) in self.write_joins(&plan, &site, &mut minted) {
                 let att = WitnessAttachment::Variable { name: fe.target_name.clone(), scope };
                 lands_at(&att, &join, &lands, &mut joins);
@@ -1280,7 +1407,15 @@ impl super::FileAnalysis {
         // own attachment, with no name to bind.
         let mut member_joins: Vec<Witness> = Vec::new();
         for (store, home) in &stores {
-            let site = WriteSite { place: &store.place, at: store.at, scope: self.scope_at(store.at).unwrap_or(*home), home: *home, bound_from: None, written: store.token };
+            let site = WriteSite {
+                place: &store.place,
+                at: store.at,
+                scope: self.scope_at(store.at).unwrap_or(*home),
+                home: *home,
+                bound_from: None,
+                written: store.token,
+                writes: &writes_of[&store.place],
+            };
             for (_, join, lands, arms) in self.write_joins(&plan, &site, &mut minted) {
                 lands_at(&WitnessAttachment::Place(Box::new(store.place.clone())), &join, &lands, &mut member_joins);
                 member_joins.extend(arms);
@@ -1359,8 +1494,9 @@ impl super::FileAnalysis {
         let mut out = Vec::new();
         for (c, _) in holding {
             let found = match c.kind {
-                ControlKind::Branch => plan.branch_joins(c, site.bound_from, self.scopes[site.scope.0 as usize].span, site.written),
-                ControlKind::Loop { .. } => plan.loop_joins(c, site.bound_from),
+                ControlKind::Branch => plan.branch_joins(c, site.bound_from, self.scopes[site.scope.0 as usize].span, site.written, site.writes),
+                ControlKind::Loop { .. } => plan.loop_joins(c, site.bound_from, site.writes),
+                ControlKind::Try { .. } => plan.try_joins(c, site.bound_from, site.writes),
                 ControlKind::Block { .. } => continue,
             };
             // Held to the scope around the construct, so a sibling block
@@ -1550,6 +1686,9 @@ struct WriteSite<'p> {
     bound_from: Option<Point>,
     /// The tokens written: an arm ending inside them is part of the value.
     written: Span,
+    /// Every write to the place, where it lands: the paths a body may
+    /// unwind from (`JoinPlan::try_joins`).
+    writes: &'p [Point],
 }
 
 impl super::FileAnalysis {

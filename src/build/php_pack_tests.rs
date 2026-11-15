@@ -5334,3 +5334,31 @@ fn php_a_foreach_variable_is_bound_each_pass() {
     let t = fa.inferred_type_via_bag("$v", Point::new(4, 14));
     assert!(!matches!(t, Some(InferredType::ArrayRef | InferredType::Numeric)), "neither last pass's write nor the entry: {t:?}");
 }
+
+/// Past a `try`, a variable holds what the body leaves it or what a
+/// `catch` does; a `catch` starts from any point the body could stop at;
+/// a `finally` write is what comes past.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_try_joins_its_body_and_its_handlers() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+class C {}
+function f() {
+    $x = new A();
+    try { $x = new B(); g(); } catch (Exception $e) { $u = $x; $x = new C(); }
+    $v = $x;
+    $y = new A();
+    try { $y = new B(); } finally { $y = new C(); }
+    $w = $y;
+}
+";
+    let fa = php(src);
+    let two = |a: &str, b: &str| crate::model::file_analysis::join_all(&[T::ClassName(a.into()), T::ClassName(b.into())], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row, column| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column });
+    assert_eq!(at("x", 6, 63), two("A", "B"), "the handler starts from the entry or the body's write");
+    assert_eq!(at("x", 7, 9), two("B", "C"), "past: the body's end or the handler's");
+    assert_eq!(at("y", 10, 9), Some(T::ClassName("C".into())), "a `finally` runs on every path");
+}

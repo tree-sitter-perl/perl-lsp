@@ -16,7 +16,7 @@ fn branch(span: Span, cond: Span, arms: &[(Span, bool)]) -> Construct {
 }
 
 fn after(plan: &JoinPlan<'_>, c: &Construct) -> Vec<JoinArm> {
-    let joins = plan.branch_joins(c, None, sp((0, 0), (99, 0)), c.span);
+    let joins = plan.branch_joins(c, None, sp((0, 0), (99, 0)), c.span, &[]);
     joins.into_iter().find(|j| j.role == JoinRole::After).expect("a join past it").arms
 }
 
@@ -76,7 +76,7 @@ fn looped(span: Span, cond: Option<Span>, body: Span, label: Option<u32>) -> Con
 }
 
 fn joined(plan: &JoinPlan<'_>, c: &Construct, role: JoinRole) -> Vec<Point> {
-    let joins = plan.loop_joins(c, None);
+    let joins = plan.loop_joins(c, None, &[]);
     joins.into_iter().find(|j| j.role == role).map_or_else(Vec::new, |j| j.arms.into_iter().map(|a| a.at).collect())
 }
 

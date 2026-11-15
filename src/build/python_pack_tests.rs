@@ -2109,3 +2109,50 @@ fn a_for_target_is_bound_each_pass() {
     for w in fa.witnesses.all() { eprintln!("DBG {:?} {:?} {:?}", w.attachment, w.payload, w.span); }
     assert!(!matches!(t, Some(InferredType::ArrayRef)), "last pass's write is gone: {t:?}");
 }
+
+/// Past a `try`, a variable holds what the body (or its `else`) leaves it
+/// or what an `except` does; a `finally` write is what comes past.
+#[test]
+fn a_try_joins_its_body_and_its_handlers() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+class C:
+    pass
+def f():
+    x = A()
+    try:
+        x = B()
+        g()
+    except E:
+        x = C()
+    y = x
+    z = A()
+    try:
+        g()
+    except E:
+        pass
+    else:
+        z = B()
+    w = z
+    s = A()
+    try:
+        s = B()
+    finally:
+        s = C()
+    t = s
+";
+    let fa = py_in(src, None);
+    let two = |a: &str, b: &str| {
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName(a.into()), InferredType::ClassName(b.into())],
+            &crate::model::file_analysis::Unordered,
+        )
+    };
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 8));
+    assert_eq!(at("x", 13), two("B", "C"), "the body's end or the handler's");
+    assert_eq!(at("z", 21), two("A", "B"), "the `else` runs when the body ends, the handler leaves the entry");
+    assert_eq!(at("s", 27), Some(InferredType::ClassName("C".into())), "a `finally` runs on every path");
+}

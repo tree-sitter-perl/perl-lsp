@@ -521,6 +521,11 @@
 (foreach_statement (_) @ctl.cond . body: (_)) @ctl.loop
 (do_statement body: (_) @ctl.loop.body condition: (_) @ctl.cond) @ctl.loop.once
 (switch_statement) @ctl.block.next
+; A try runs its body; where the body unwinds, a catch; past both, its
+; finally.
+(try_statement body: (_) @ctl.try.body) @ctl.try
+(try_statement (catch_clause body: (_) @ctl.try.catch)) @ctl.try
+(try_statement (finally_clause body: (_) @ctl.try.finally)) @ctl.try
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

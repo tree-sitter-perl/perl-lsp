@@ -325,6 +325,12 @@
 (for_statement left: (_) @ctl.cond) @ctl.loop
 (while_statement alternative: (else_clause body: (_) @ctl.else)) @ctl.loop
 (for_statement alternative: (else_clause body: (_) @ctl.else)) @ctl.loop
+; A try runs its body; where the body unwinds, an except; where it
+; completes, its else; past them all, its finally.
+(try_statement body: (_) @ctl.try.body) @ctl.try
+(try_statement (except_clause (block) @ctl.try.catch)) @ctl.try
+(try_statement (else_clause body: (_) @ctl.try.else)) @ctl.try
+(try_statement (finally_clause (block) @ctl.try.finally)) @ctl.try
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

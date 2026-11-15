@@ -9,6 +9,8 @@
 ;   @ctl.loop.body            what a loop runs while its test holds
 ;   @ctl.loop.step            what runs after each pass, before the next test
 ;   @ctl.block.next           a block `last` and `next` leave, testing nothing
+;   @ctl.try / @ctl.try.quiet a body and what runs where it dies
+;   @ctl.try.body / .catch / .finally   its arms
 ;   @ctl.label                the name a construct carries, or a jump aims at
 ;   @ctl.leave.<kind>         a statement that leaves its block
 ;
@@ -58,6 +60,14 @@
 
 ; A bare block is a loop that runs once: `last` and `next` leave it.
 (block_statement) @ctl.block.next
+
+; ---- try ----
+; `try` runs its block; where the block dies, its `catch`; past both, its
+; `finally`. An `eval` block catches every death and lands past itself.
+(try_statement try_block: (_) @ctl.try.body) @ctl.try
+(try_statement catch_block: (_) @ctl.try.catch) @ctl.try
+(try_statement finally_block: (_) @ctl.try.finally) @ctl.try
+(eval_expression (block) @ctl.try.body) @ctl.try.quiet
 (statement_label label: (_) @ctl.label statement: (block_statement) @ctl.block.next)
 
 ; ---- leaving ----

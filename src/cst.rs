@@ -1423,7 +1423,7 @@ pub(crate) fn ref_tag_call<'a>(
 /// that holds `node`: an `if`/`elsif`/`else` body or a later branch, a loop
 /// body, a C-style `for`'s iterator, the statement a postfix
 /// `if`/`unless`/`for`/`while` modifies, a ternary branch, the right
-/// operand of a short-circuit. A condition, a loop list, a `for`
+/// operand of a short-circuit, a `try`/`eval` body and its handlers. A condition, a loop list, a `for`
 /// initialiser and a non-short-circuit operand run whenever their
 /// construct does, so the climb passes through them. `None` = `node` runs
 /// whenever its bound does. Scope-crossing conditionality (a write inside
@@ -1446,6 +1446,9 @@ pub(crate) fn conditional_arm<'a>(syn: &SyntaxForest<'a>, node: Node<'a>, bound:
             | "conditional_expression" => !is_field("condition"),
             "cstyle_for_statement" => !is_field("initialiser") && !is_field("condition"),
             "for_statement" | "postfix_for_expression" => !is_field("list") && !is_field("variable"),
+            // A tried body may stop partway; a handler runs only on a throw.
+            "eval_expression" => child.kind() == "block",
+            "try_statement" => !is_field("catch_expr"),
             "lowprec_logical_expression" => is_field("right"),
             "binary_expression" => {
                 is_field("right")

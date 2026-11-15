@@ -107,13 +107,26 @@ impl<'a> Builder<'a> {
         let mut witnesses: Vec<Witness> = Vec::new();
         let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
 
-        for (node, var) in assignments {
-            let span = node_to_span(node);
-            let at = crate::cst::assignment_write_point(node);
-            let sid = self.innermost_scope_id_at(span.start);
-            let (binding, home) = self.binding_of(&var, at, sid);
+        let assignments: Vec<_> = assignments
+            .into_iter()
+            .map(|(node, var)| {
+                let span = node_to_span(node);
+                let at = crate::cst::assignment_write_point(node);
+                let sid = self.innermost_scope_id_at(span.start);
+                let (binding, home) = self.binding_of(&var, at, sid);
+                (node, var, span, at, sid, binding, home)
+            })
+            .collect();
+        // Where each variable is written: the points a try's body may
+        // unwind from.
+        let mut writes_of: HashMap<Binding, Vec<Point>> = HashMap::new();
+        for (_, _, _, at, _, binding, _) in &assignments {
+            writes_of.entry(binding.clone()).or_default().push(*at);
+        }
+        for (node, var, span, at, sid, binding, home) in assignments {
             let reach = self.reach(sid, home);
             let place = Place::variable(binding.clone());
+            let writes = &writes_of[&binding];
 
             // Innermost first, inside the reach.
             // An arm ending where the write lands (`$x = $c ? 1 : 2`'s `2`)
@@ -137,8 +150,9 @@ impl<'a> Builder<'a> {
                     continue;
                 }
                 let joins = match c.kind {
-                    ControlKind::Branch => plan.branch_joins(c, None, self.scopes[sid.0 as usize].span, span),
-                    ControlKind::Loop { .. } => plan.loop_joins(c, None),
+                    ControlKind::Branch => plan.branch_joins(c, None, self.scopes[sid.0 as usize].span, span, writes),
+                    ControlKind::Loop { .. } => plan.loop_joins(c, None, writes),
+                    ControlKind::Try { .. } => plan.try_joins(c, None, writes),
                     ControlKind::Block { .. } => continue,
                 };
                 // Held to the scope around the construct, so a sibling arm

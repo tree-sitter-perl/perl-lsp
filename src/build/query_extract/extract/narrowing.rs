@@ -203,13 +203,13 @@ fn subject_value(ad: &Adorned<'_, '_>, v: &Event) -> Span {
 
 /// The document's `@ctl` matches as one view, each match its captures. A
 /// leave counts only as a statement of an arm (or as the arm itself): one
-/// nested in a construct the document does not describe (a loop's `else`,
-/// an `except` clause) says nothing about whether the arm comes out.
+/// nested in a construct the document does not describe says nothing about
+/// whether the arm comes out.
 fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlView {
     let arm_sites: std::collections::HashSet<crate::cst::NodeId> = ad
         .events()
         .iter()
-        .filter(|e| matches!(e.cap, Capture::Ctl(CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep | CtlCap::Body)))
+        .filter(|e| matches!(e.cap, Capture::Ctl(c) if c.is_arm() || c == CtlCap::Body))
         .map(|e| e.site)
         .collect();
     let in_sequence = |site: crate::cst::NodeId| {
@@ -242,7 +242,7 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
                 continue;
             }
             let tail = match c {
-                CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep => statements(ad.tree, ad.tree.node(e.site)).last().map_or(e.span().end, |s| s.ts().end_position()),
+                c if c.is_arm() => statements(ad.tree, ad.tree.node(e.site)).last().map_or(e.span().end, |s| s.ts().end_position()),
                 _ => e.span().end,
             };
             by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span(), &e.text, tail));

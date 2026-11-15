@@ -175,6 +175,28 @@ diagnostics. A diagnostic that reports on a narrowed type asks
 `place_state_at`, which also says whether every path was accounted for, and
 stays silent when it was not.
 
+## Try
+
+A `try` is a construct of four arm roles: the tried body, its handlers
+(`catch`, `except`), the body that runs when the tried one ends (Python's
+`else`) and `finally`. Perl's `eval BLOCK` is a quiet `try`: no handler,
+but it swallows what its body throws (`@ctl.try.quiet`).
+
+- **A handler starts** from any point the tried body could have stopped
+  at: the value entering the `try`, or past any write in the body
+  (`TODO(try-unwind-points)`: only a call or a throw stops a body, so a
+  write nothing can throw after reaches no handler; exact once calls are
+  program points).
+- **Past the `try`** comes the tried body's end (or its `else` end), each
+  handler's end, and for a quiet `try` the points its body could have
+  stopped at. A `finally` runs on every one of those paths, so where there
+  is one, past the `try` is its end, and it starts from them.
+- A `try` with no path out leaves the arm holding it.
+- A throw in the tried body of a `try` that catches is no leave of the
+  callable; a throw in a handler or a `finally` leaves as anywhere else.
+- `cst::conditional_arm` counts the tried body and every handler as arms,
+  so an observation inside them is bounded to them.
+
 ## Control structure is declared by each language's query document
 
 One `@ctl.*` vocabulary (branch / cond / then / else, loop and its body,
@@ -227,8 +249,9 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   that are whole statements (`@ctl.gate`), and every body it names mints;
   Perl mints the bodies its gates reach. An arm whose path runs into a call
   that does not come back ends the way that call does, so a wrapper round
-  `die` unwinds; a catch between the call and the body's end is not seen
-  yet (`TODO(effect-leaving-bits)`).
+  `die` unwinds. A throw or a call inside the body of a `try` that catches
+  (it has a handler, or it is an `eval`) leaves nothing: the try's own
+  paths out carry it (§Try).
 - **Cycles.** A callable already on the path is assumed to have no way of
   ending; since "comes back" is inductive, the frame that asked first gets
   the exact least fixed point. An answer worked out under that assumption
@@ -287,6 +310,6 @@ A loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
 fails), R's `<<-` (`TODO(write-capture-declarations)`: a write capture
 nothing states yet, so the write binds a local), a comprehension's `:=`,
-try/catch arms, effects through a wrapper in
+Python's `except … as` and `del` unbinding a name, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

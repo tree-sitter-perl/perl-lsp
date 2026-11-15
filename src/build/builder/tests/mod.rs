@@ -38,6 +38,7 @@ mod comment_trivia_tests;
 mod const_fold_tests;
 mod union_tests;
 mod effect_gate_tests;
+mod try_arms_tests;
 
 #[path = "../narrowing_tests.rs"]
 mod narrowing;

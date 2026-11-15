@@ -358,6 +358,20 @@ spelled! {
         /// (Perl's bare block, a loop that runs once; php's `switch`).
         Block = "block",
         BlockNext = "block.next",
+        /// A construct that runs its body and, where the body unwinds, a
+        /// handler (`try`); `try.quiet` when an unwinding body lands past
+        /// it with no handler (Perl's `eval`).
+        Try = "try",
+        TryQuiet = "try.quiet",
+        /// What a try runs first.
+        TryBody = "try.body",
+        /// What a try runs where its body unwinds (`catch`, `except`).
+        TryCatch = "try.catch",
+        /// What a try runs where its body completes, before what follows
+        /// it (python's `try … else`).
+        TryElse = "try.else",
+        /// What a try runs past it on every path (`finally`).
+        TryFinally = "try.finally",
         /// The name a loop or block carries, and the one a jump aims at
         /// (`last OUTER`): a jump with a name leaves the nearest construct
         /// carrying it.
@@ -389,6 +403,22 @@ spelled! {
 
 impl CtlCap {
     /// A statement that leaves its block, whatever it leaves to.
+    /// Whether this captures an arm: code a construct runs as one of its
+    /// paths.
+    pub fn is_arm(self) -> bool {
+        matches!(
+            self,
+            CtlCap::Then
+                | CtlCap::Else
+                | CtlCap::LoopBody
+                | CtlCap::LoopStep
+                | CtlCap::TryBody
+                | CtlCap::TryCatch
+                | CtlCap::TryElse
+                | CtlCap::TryFinally
+        )
+    }
+
     pub fn is_leave(self) -> bool {
         matches!(
             self,

@@ -57,6 +57,8 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
                 CtlCap::LoopOnce => ControlKind::Loop { once: true },
                 CtlCap::Block => ControlKind::Block { next: false },
                 CtlCap::BlockNext => ControlKind::Block { next: true },
+                CtlCap::Try => ControlKind::Try { quiet: false },
+                CtlCap::TryQuiet => ControlKind::Try { quiet: true },
                 _ => return None,
             };
             Some((id, span, kind))
@@ -103,6 +105,10 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
                 CtlCap::Else => ArmRole::When(false),
                 CtlCap::LoopBody => ArmRole::Body,
                 CtlCap::LoopStep => ArmRole::Step,
+                CtlCap::TryBody => ArmRole::Tried,
+                CtlCap::TryCatch => ArmRole::Handler,
+                CtlCap::TryElse => ArmRole::Settled,
+                CtlCap::TryFinally => ArmRole::Finally,
                 _ => continue,
             };
             let arm = Arm { span, role, tail };
@@ -189,7 +195,7 @@ impl<'s> ViewWalk<'s> {
             let mut it = cursor.matches(query, node, source);
             while let Some(m) = it.next() {
                 for c in m.captures.iter() {
-                    if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep) {
+                    if !caps[c.index as usize].is_arm() {
                         continue;
                     }
                     if c.node.kind() == "block" {
