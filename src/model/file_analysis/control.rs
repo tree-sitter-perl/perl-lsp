@@ -108,6 +108,9 @@ pub struct CallableBody {
     pub span: Span,
     /// Whether the parser read it whole; one it could not states nothing.
     pub readable: bool,
+    /// Whether the callable exists from before its text runs (a Perl named
+    /// sub), so it can be called anywhere its variables are bound.
+    pub hoisted: bool,
 }
 
 impl ControlView {
@@ -878,37 +881,21 @@ impl Reach {
     }
 }
 
-/// A body that runs later reads a variable made outside it as it may stand
-/// when the body runs: as it stood where the body was made, or as any write
-/// from then on leaves it, inside the body or past it. Where such a write
-/// exists, the body opens on an `Entry` join of those paths; where none
-/// does, nothing can change the variable before the body runs, so the read
-/// sees it as made outside, narrowing included, and nothing is minted
-/// (`docs/adr/cfg-tier.md` §Later-running bodies). `writes` are the bound
-/// writes, each where it lands.
-///
-/// TODO(named-sub-entry): a named sub can run before its text, so its
-/// paths should be every write from the variable's binding on, not from
-/// the sub's text; owner CFG PR 9b, which places a named sub's writes at
-/// the binding for the same reason.
-pub fn entry_joins(
-    scopes: &[super::Scope],
-    symbols: &[super::Symbol],
-    bodies: &[CallableBody],
-    refs: &[super::Ref],
-    writes: &[(super::SymbolId, Point)],
-) -> Vec<crate::model::witnesses::Witness> {
-    use super::{Binding, Place, RefKind};
-    use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
-    if bodies.is_empty() || writes.is_empty() {
-        return Vec::new();
-    }
-    let mut written: HashMap<super::SymbolId, Vec<Point>> = HashMap::new();
-    for &(sid, at) in writes {
-        written.entry(sid).or_default().push(at);
-    }
-    // The callable scope each body is the body of: the narrowest holding it.
-    let mut body_of: HashMap<super::ScopeId, Span> = HashMap::new();
+/// A write to a lexical variable, where it lands.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundWrite {
+    pub sym: super::SymbolId,
+    pub at: Point,
+    /// The scope the write is made in.
+    pub scope: super::ScopeId,
+    /// A plain assignment to a variable already bound, not its declaration.
+    pub reassigns: bool,
+}
+
+/// Each later-running body by the callable scope it is the body of: the
+/// narrowest callable holding it.
+fn bodies_by_scope(scopes: &[super::Scope], bodies: &[CallableBody]) -> HashMap<super::ScopeId, CallableBody> {
+    let mut out = HashMap::new();
     for b in bodies {
         let callable = scopes
             .iter()
@@ -916,58 +903,138 @@ pub fn entry_joins(
             .filter(|(_, s)| s.kind.is_callable() && contains(s.span, b.span))
             .min_by_key(|(_, s)| (std::cmp::Reverse((s.span.start.row, s.span.start.column)), (s.span.end.row, s.span.end.column)));
         if let Some((i, _)) = callable {
-            body_of.insert(super::ScopeId(i as u32), b.span);
+            out.insert(super::ScopeId(i as u32), *b);
         }
     }
-    // Every body a read sits in, out to the variable's own scope.
-    let mut opened: Vec<(super::SymbolId, super::ScopeId)> = Vec::new();
+    out
+}
+
+/// The later-running bodies `from` sits in that run apart from where
+/// `sym` is bound, innermost first: the callables between `from` and the
+/// variable's own scope. A closed body holds what it captures as it stood
+/// at its making and writes none of it back, so the climb stops at one.
+///
+/// TODO(capture-by-reference): a capture by reference (php's `use (&$x)`)
+/// reads the variable as it stands when the body runs and writes it back;
+/// until a capture says how it binds, every one reads as by value. Owner:
+/// CFG PR 11 (captures).
+fn bodies_around(
+    scopes: &[super::Scope],
+    sym: &super::Symbol,
+    from: super::ScopeId,
+    bodies: &HashMap<super::ScopeId, CallableBody>,
+) -> Vec<(super::ScopeId, CallableBody)> {
+    let mut out = Vec::new();
+    for s in super::scope_chain_of(scopes, from) {
+        let scope = &scopes[s.0 as usize];
+        if s == sym.scope || contains(scope.span, sym.span) || scope.closed {
+            break;
+        }
+        if let Some(b) = bodies.get(&s) {
+            out.push((s, *b));
+        }
+    }
+    out
+}
+
+/// What later-running bodies make of the variables of the code around them
+/// (`docs/adr/cfg-tier.md` §Later-running bodies).
+///
+/// A body reads such a variable as it may stand when it runs: as it stood
+/// where the body was made, or as any write from then on leaves it, inside
+/// the body or past it (every write, for a body that exists before its
+/// text). Where such a write exists the body opens on an `Entry` join of
+/// those paths; where none does, nothing can change the variable before the
+/// body runs, so the read sees it as made, narrowing included, and nothing
+/// is minted.
+///
+/// A body's write reaches the variable wherever the body is called, which
+/// is anywhere from its making on (from the variable's binding, for a body
+/// that exists before its text). The variable gets one `MayBe` of a `Writes`
+/// join of the body's writes there.
+///
+/// TODO(closure-call-writes): the write reaches the variable only where the
+/// body is called; that needs to know which calls can run it. Owner: the
+/// whole-program analysis epic.
+pub fn body_joins(
+    scopes: &[super::Scope],
+    symbols: &[super::Symbol],
+    bodies: &[CallableBody],
+    refs: &[super::Ref],
+    writes: &[BoundWrite],
+) -> Vec<crate::model::witnesses::Witness> {
+    use super::{Binding, Place, RefKind};
+    use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
+    if bodies.is_empty() || writes.is_empty() {
+        return Vec::new();
+    }
+    let body_of = bodies_by_scope(scopes, bodies);
+    let mut written: HashMap<super::SymbolId, Vec<&BoundWrite>> = HashMap::new();
+    for w in writes {
+        written.entry(w.sym).or_default().push(w);
+    }
+    let source = || WitnessSource::Builder(JOIN_SOURCE.into());
+    let read_of = |sid| WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(sid))));
+    let arm = |join: &WitnessAttachment, sid, at: Point| Witness {
+        attachment: join.clone(),
+        source: source(),
+        payload: WitnessPayload::Edge(read_of(sid)),
+        span: Span { start: at, end: at },
+    };
+    let mut out = Vec::new();
+
+    // Reads: every body a read sits in that some write can reach first.
     let mut seen: HashSet<(super::SymbolId, super::ScopeId)> = HashSet::new();
     for r in refs {
         if !matches!(r.kind, RefKind::Variable) || !matches!(r.access, super::AccessKind::Read) {
             continue;
         }
         let Some(sid) = r.resolved_symbol() else { continue };
-        let Some(ats) = written.get(&sid) else { continue };
+        let Some(ws) = written.get(&sid) else { continue };
         let sym = &symbols[sid.0 as usize];
-        for s in super::scope_chain_of(scopes, r.scope) {
-            let scope = &scopes[s.0 as usize];
-            if s == sym.scope || contains(scope.span, sym.span) {
-                break;
-            }
-            // A closed body holds what it captures as it stood at its
-            // making. TODO(capture-by-reference): a capture by reference
-            // (php's `use (&$x)`) reads the variable as it stands when the
-            // body runs, so it should open on the join too; until a
-            // capture says how it binds, every one reads as by value.
-            // Owner: CFG PR 11 (captures).
-            if scope.closed {
+        for (s, body) in bodies_around(scopes, sym, r.scope, &body_of) {
+            let made = scopes[s.0 as usize].span;
+            // The body opens past where it is made, so the path read at
+            // its making never reads the join it feeds.
+            if body.span.start <= made.start || !seen.insert((sid, s)) {
                 continue;
             }
-            if body_of.contains_key(&s) && ats.iter().any(|&at| at >= scope.span.start) && seen.insert((sid, s)) {
-                opened.push((sid, s));
+            let reaches = |w: &&&BoundWrite| body.hoisted || w.at >= made.start;
+            if !ws.iter().filter(reaches).any(|w| w.reassigns || w.at >= made.start) {
+                continue;
             }
+            let join = WitnessAttachment::Join { place: Box::new(Place::variable(Binding::Lexical(sid))), of: body.span, role: JoinRole::Entry };
+            for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
+                out.push(Witness { attachment: read_of(sid), source: source(), payload, span: Span { start: body.span.start, end: made.end } });
+            }
+            out.push(arm(&join, sid, made.start));
+            out.extend(ws.iter().filter(reaches).map(|w| arm(&join, sid, w.at)));
         }
     }
-    let source = || WitnessSource::Builder(JOIN_SOURCE.into());
-    let mut out = Vec::new();
-    for (sid, s) in opened {
-        let made = scopes[s.0 as usize].span;
+
+    // Writes: every body a write sits in, joined in past where it is made.
+    let mut by_body: HashMap<(super::SymbolId, super::ScopeId), Vec<Point>> = HashMap::new();
+    let mut order: Vec<(super::SymbolId, super::ScopeId)> = Vec::new();
+    for w in writes {
+        let sym = &symbols[w.sym.0 as usize];
+        for (s, _) in bodies_around(scopes, sym, w.scope, &body_of) {
+            let ats = by_body.entry((w.sym, s)).or_insert_with(|| {
+                order.push((w.sym, s));
+                Vec::new()
+            });
+            ats.push(w.at);
+        }
+    }
+    for key in order {
+        let (sid, s) = key;
         let body = body_of[&s];
-        // The body opens past where it is made, so the path read at its
-        // making never reads the join it feeds.
-        if body.start <= made.start {
-            continue;
-        }
-        let place = Place::variable(Binding::Lexical(sid));
-        let read = WitnessAttachment::Place(Box::new(place.clone()));
-        let join = WitnessAttachment::Join { place: Box::new(place), of: body, role: JoinRole::Entry };
-        for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
-            out.push(Witness { attachment: read.clone(), source: source(), payload, span: Span { start: body.start, end: made.end } });
-        }
-        let paths = std::iter::once(made.start).chain(written[&sid].iter().copied().filter(|&at| at >= made.start));
-        for at in paths {
-            out.push(Witness { attachment: join.clone(), source: source(), payload: WitnessPayload::Edge(read.clone()), span: Span { start: at, end: at } });
-        }
+        let join = WitnessAttachment::Join { place: Box::new(Place::variable(Binding::Lexical(sid))), of: body.span, role: JoinRole::Writes };
+        let from = match body.hoisted {
+            true => symbols[sid.0 as usize].span.start,
+            false => scopes[s.0 as usize].span.end,
+        };
+        out.push(Witness { attachment: read_of(sid), source: source(), payload: WitnessPayload::MayBe(join.clone()), span: Span { start: from, end: from } });
+        out.extend(by_body[&key].iter().map(|&at| arm(&join, sid, at)));
     }
     out
 }
@@ -1128,15 +1195,15 @@ impl super::FileAnalysis {
         for w in effect_arms.into_iter().chain(mirrors) {
             self.witnesses.push(w);
         }
-        let writes: Vec<(super::SymbolId, Point)> = self
+        let writes: Vec<BoundWrite> = self
             .flow_edges
             .iter()
             .filter_map(|fe| match self.variable_binding_of(&fe.target_name, fe.target_at, fe.target_scope).0 {
-                Binding::Lexical(sid) => Some((sid, fe.target_at)),
+                Binding::Lexical(sym) => Some(BoundWrite { sym, at: fe.target_at, scope: fe.target_scope, reassigns: fe.reassigns }),
                 _ => None,
             })
             .collect();
-        for w in entry_joins(&self.scopes, self.symbols(), &view.bodies, self.refs(), &writes) {
+        for w in body_joins(&self.scopes, self.symbols(), &view.bodies, self.refs(), &writes) {
             self.witnesses.push(w);
         }
         if view.constructs.is_empty() || (self.flow_edges.is_empty() && guards.seeds.is_empty()) {

@@ -50,19 +50,34 @@ joins are regions too, cut at its first disturbance.
 ## Later-running bodies
 
 A callable's body (`ControlView::bodies`: a sub, a def, a lambda, a php
-closure) runs when it is called, not where it is written. A variable bound
-outside it and read inside it can have been written between the two: at
-any write from the body's making on, inside the body or past it. Where such
-a write exists, the body opens on an `Entry` join (`entry_joins`), landed
-as a region over the callable from the body's start, whose arms are the
-variable where the body was made and after each of those writes. A guard
-around the making is then one arm among several inside the body, and still
-holds outside it. Where no write follows the making, nothing can change the
-variable before the body runs, so nothing is minted and the read sees it as
-made, narrowing included. A closed body (php's) holds what it captures as
-it stood at its making, so it opens on no join (`TODO(capture-by-reference)`
-for `use (&$x)`, owned by the captures work). A named sub can run before its
-text (`TODO(named-sub-entry)`).
+closure) runs when it is called, not where it is written (`body_joins`). A
+Perl named sub exists before its text runs (`CallableBody::hoisted`), so it
+can run anywhere its variables are bound.
+
+- *Reads.* A variable bound outside the body and read inside it can have
+  been written between the two: at any write from the body's making on,
+  inside the body or past it (any write at all, for a hoisted body). Where
+  such a write exists, the body opens on an `Entry` join, landed as a region
+  over the callable from the body's start, whose arms are the variable where
+  the body was made and after each of those writes. A guard around the
+  making is then one arm among several inside the body, and still holds
+  outside it. Where none exists, nothing can change the variable before the
+  body runs: nothing is minted, and the read sees it as made, narrowing
+  included.
+- *Writes.* A write inside the body stays a region fact there, and reaches
+  the variable wherever the body is called: the variable gets one
+  `MayBe(Join{.., Writes})` past the body's making (at its binding, for a
+  hoisted body), whose arms are the variable after each of the body's
+  writes. A `MayBe` is not windowed: every read past its site, outside the
+  body, joins the value standing there with it, so a later write never
+  retires it, and an untyped write leaves the read untyped. That is the
+  sound reading without knowing which calls run the body
+  (`TODO(closure-call-writes)`: the write reaches the variable only where
+  the body is called, owned by the whole-program epic).
+
+A closed body (php's) holds what it captures as it stood at its making and
+writes none of it back, so it mints neither (`TODO(capture-by-reference)`
+for `use (&$x)`, owned by the captures work).
 
 ## Loops
 
@@ -223,7 +238,7 @@ its document spells them.
 
 Real loop fixed points (`TODO(cfg-loop-fixpoint)`), a loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
-fails), a later-running body's writes reaching the code around it, captures,
+fails), captures,
 try/catch arms, readonly-after-constructor, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

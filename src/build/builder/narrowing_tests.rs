@@ -1352,3 +1352,32 @@ fn a_closure_read_of_an_unwritten_capture_keeps_its_narrowing() {
     let src = "package P;\nsub f {\n    my ($p) = @_;\n    if (ref $p eq 'HASH') {\n        my $c = sub { $p };\n        $c->();\n    }\n}";
     assert_eq!(fa_type_at(src, "$p", Point::new(4, 22)), Some(InferredType::HashRef));
 }
+
+/// A closure's write reaches the variable wherever the closure is called,
+/// so past its making the variable may hold either value, never no type.
+#[test]
+fn a_closure_write_joins_the_outer_value() {
+    let src = "package P;\nsub f {\n    my $x = 'a';\n    my $c = sub { $x = 42 };\n    $c->();\n    my $y = $x;\n}";
+    let t = fa_type_at(src, "$x", Point::new(5, 13));
+    assert!(matches!(t, Some(InferredType::Union(_))), "{t:?}");
+    // Before the closure is made nothing can have run it.
+    assert_eq!(fa_type_at(src, "$x", Point::new(3, 4)), Some(InferredType::String));
+}
+
+/// Inside the body its own writes stand in order.
+#[test]
+fn a_closure_reads_its_own_write() {
+    let src = "package P;\nsub f {\n    my $x = 'a';\n    my $c = sub { $x = 42; my $z = $x; };\n    $c->();\n}";
+    assert_eq!(fa_type_at(src, "$x", Point::new(3, 35)), Some(InferredType::Numeric));
+}
+
+/// A named sub exists before its text runs: its writes reach the variable
+/// from the binding on, and it reads every write.
+#[test]
+fn a_named_sub_reaches_its_variable_from_the_binding() {
+    let src = "package P;\nmy $x = 'a';\nmy $y = $x;\nsub set { $x = 42 }\nsub get { return $x }\n1;";
+    let t = fa_type_at(src, "$x", Point::new(2, 8));
+    assert!(matches!(t, Some(InferredType::Union(_))), "read before the sub's text: {t:?}");
+    let t = fa_type_at(src, "$x", Point::new(4, 17));
+    assert!(matches!(t, Some(InferredType::Union(_))), "read in another sub: {t:?}");
+}

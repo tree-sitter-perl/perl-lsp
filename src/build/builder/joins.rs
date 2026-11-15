@@ -5,7 +5,7 @@
 //! query time.
 
 use super::*;
-use crate::model::file_analysis::{entry_joins, guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
+use crate::model::file_analysis::{body_joins, BoundWrite, guard_region_witnesses, join_arms, Binding, BranchJoin, Construct, ControlKind, JoinPlan, Place, Proofs, Reach};
 use crate::model::witnesses::{JoinRole, Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
 use std::collections::{HashMap, HashSet};
 
@@ -59,7 +59,10 @@ impl<'a> Builder<'a> {
             .collect();
         crate::util::ghost_stats::count_by("effect.bodies", bodies.len() as u64);
         for &(_, body) in &bodies {
-            walk.body(node_to_span(body), !body.has_error());
+            // A named sub exists before its text runs; an anonymous one
+            // where its expression does.
+            let hoisted = self.syntax.parent(body).is_some_and(|d| d.child_by_field_name("name").is_some());
+            walk.body(node_to_span(body), !body.has_error(), hoisted);
             gates.extend(walk.walk(super::control::statements_of(body), source, &gate));
         }
         let mut view = walk.finish();
@@ -79,16 +82,16 @@ impl<'a> Builder<'a> {
             .filter(|(_, body)| !body.has_error())
             .flat_map(|(sid, body)| plan.effect_arms(sid, node_to_span(body)))
             .collect();
-        let writes: Vec<(SymbolId, Point)> = self
+        let writes: Vec<BoundWrite> = self
             .flow_edges
             .iter()
             .filter_map(|fe| match self.binding_of(&fe.target_name, fe.target_at, fe.target_scope).0 {
-                Binding::Lexical(sid) => Some((sid, fe.target_at)),
+                Binding::Lexical(sym) => Some(BoundWrite { sym, at: fe.target_at, scope: fe.target_scope, reassigns: fe.reassigns }),
                 _ => None,
             })
             .collect();
         let body_facts: Vec<Witness> =
-            effect_arms.into_iter().chain(entry_joins(&self.scopes, &self.symbols, &view.bodies, &self.refs, &writes)).collect();
+            effect_arms.into_iter().chain(body_joins(&self.scopes, &self.symbols, &view.bodies, &self.refs, &writes)).collect();
         if assignments.is_empty() && seeds.is_empty() {
             for w in body_facts {
                 self.push_witness(w);
@@ -157,17 +160,8 @@ impl<'a> Builder<'a> {
                 }
             }
 
-            // TODO(closure-call-writes): a write in a callable reaches its
-            // outer variable only where the callable is called (design
-            // decision 6, owned by whole-program analysis); until calls are
-            // visible the variable is unknown from the callable on.
-            let pos = |id: ScopeId| reach.chain.iter().position(|&s| s == id);
-            if !reach.home_inside && matches!(binding, Binding::Lexical(_)) && pos(home).is_some() {
-                for (level, parent) in upto(home).skip_while(|&(l, _)| l != reach.callable) {
-                    let block = self.scopes[level.0 as usize].span;
-                    markers.push((var.clone(), parent, self.statement_end_holding(node, block)));
-                }
-            }
+            // A write in a callable to a variable outside it reaches the
+            // variable past the callable as a `MayBe` (`body_joins`).
         }
 
         // A test changes nothing a place holds, so its joins never replace

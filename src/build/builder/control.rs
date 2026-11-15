@@ -69,7 +69,7 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
             });
             for &(cap, _, span, _, _) in &m {
                 match cap {
-                    CtlCap::Body => view.bodies.push(CallableBody { span, readable: true }),
+                    CtlCap::Body => view.bodies.push(CallableBody { span, readable: true, hoisted: false }),
                     CtlCap::Gate => view.gates.push(span),
                     _ => {
                         if let Some(kind) = leave_kind(cap) {
@@ -205,8 +205,8 @@ impl<'s> ViewWalk<'s> {
     }
 
     /// Records a callable's body the walk follows into.
-    pub(super) fn body(&mut self, span: Span, readable: bool) {
-        self.bodies.push(CallableBody { span, readable });
+    pub(super) fn body(&mut self, span: Span, readable: bool, hoisted: bool) {
+        self.bodies.push(CallableBody { span, readable, hoisted });
     }
 
     pub(super) fn finish(self) -> ControlView {

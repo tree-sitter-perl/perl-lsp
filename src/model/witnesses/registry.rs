@@ -3972,10 +3972,37 @@ impl ReducerRegistry {
             args: Vec::new(),
             context: Some(ctx),
         };
-        match &*self.query_rec(bag, &q, state) {
+        let held = match &*self.query_rec(bag, &q, state) {
             ReducedValue::Type(t) => Some(t.clone()),
             ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
+        };
+        self.join_may_be(bag, &q, held, state)
+    }
+
+    /// `held`, joined with what every `MayBe` on the place standing at the
+    /// query point may leave it holding. One that holds no type leaves the
+    /// place untyped, as an untyped arm leaves a join.
+    fn join_may_be(&self, bag: &WitnessBag, q: &ReducerQuery, held: Option<InferredType>, state: &mut QueryState) -> Option<InferredType> {
+        let standing = |w: &&Witness| match (&w.payload, q.point) {
+            (WitnessPayload::MayBe(WitnessAttachment::Join { of, .. }), Some(p)) => w.span.start <= p && !(of.start <= p && p <= of.end),
+            (WitnessPayload::MayBe(_), _) => true,
+            _ => false,
+        };
+        let mut may = bag.may_be(q.attachment).filter(standing).peekable();
+        if may.peek().is_none() {
+            return held;
         }
+        let mut t = held?;
+        for w in may {
+            let WitnessPayload::MayBe(target) = &w.payload else { continue };
+            let sub_q = ReducerQuery { attachment: target, point: None, args: Vec::new(), ..q.clone() };
+            let also = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
+            })?;
+            t = crate::model::file_analysis::join(&t, &also, super::reducers::class_order(q));
+        }
+        Some(t)
     }
 }
 

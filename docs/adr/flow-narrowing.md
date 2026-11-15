@@ -146,9 +146,9 @@ A loop joins its entry and each pass at its head, and past it where its
 test fails and each `break` (`docs/adr/cfg-tier.md` §Loops). Two cases
 still stand in a reset marker (an untyped join) where their joins are not
 built yet: a block no construct runs conditionally (a bare block, `eval`, a
-`map` callback), and a write inside a callable to a variable outside it
-(`TODO(closure-call-writes)`: the write reaches the variable only where the
-callable is called).
+`map` callback). A write inside a callable to a variable outside it
+reaches the variable past the callable's making as a `MayBe`
+(`docs/adr/cfg-tier.md` §Later-running bodies).
 
 An **observation** is the other half of the same question: a use of a
 variable or place that reveals what it holds — any deref (`@$x`, `$$x{k}`,

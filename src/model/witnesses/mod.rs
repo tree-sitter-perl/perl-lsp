@@ -65,6 +65,10 @@ pub struct WitnessBag {
     /// order would be memory every small variable pays.
     #[serde(skip)]
     spans: HashMap<WitnessAttachment, SpanOrder>,
+    /// Each place's `MayBe` witnesses, which every read of it past their
+    /// site joins in, so a read finds them without walking the rest.
+    #[serde(skip)]
+    may_be: HashMap<WitnessAttachment, Vec<usize>>,
     /// Names this bag's content: every mutation draws a fresh value from
     /// [`next_generation`], so a memo that outlives one query can tell
     /// whether the bag it answered from is still the bag being asked.
@@ -307,6 +311,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
             index: HashMap::new(),
             var_scopes: HashMap::new(),
             spans: HashMap::new(),
+            may_be: HashMap::new(),
             generation: 0,
             content: None,
         };
@@ -396,6 +401,9 @@ impl WitnessBag {
         }
         slot.push(idx);
         let ordered = (w.attachment.is_temporal() && slot.len() >= SPAN_ORDER_MIN).then(|| w.attachment.clone());
+        if matches!(w.payload, WitnessPayload::MayBe(_)) {
+            self.may_be.entry(w.attachment.clone()).or_default().push(idx);
+        }
         if let Some(c) = &mut self.content {
             *c = c.wrapping_add(witness_hash(&w));
         }
@@ -437,6 +445,11 @@ impl WitnessBag {
         self.index.get(att).into_iter().flatten().map(|&i| (i, &self.witnesses[i]))
     }
 
+    /// The `MayBe` witnesses on `att`.
+    pub fn may_be<'b>(&'b self, att: &WitnessAttachment) -> impl Iterator<Item = &'b Witness> + 'b {
+        self.may_be.get(att).into_iter().flatten().map(|&i| &self.witnesses[i])
+    }
+
     /// The scopes `name` has witnesses on.
     pub fn variable_scopes(&self, name: &str) -> &[crate::model::file_analysis::ScopeId] {
         self.var_scopes.get(name).map(Vec::as_slice).unwrap_or(&[])
@@ -462,7 +475,11 @@ impl WitnessBag {
         self.index.clear();
         self.var_scopes.clear();
         self.spans.clear();
+        self.may_be.clear();
         for (i, w) in self.witnesses.iter().enumerate() {
+            if matches!(w.payload, WitnessPayload::MayBe(_)) {
+                self.may_be.entry(w.attachment.clone()).or_default().push(i);
+            }
             let slot = self.index.entry(w.attachment.clone()).or_default();
             if slot.is_empty() {
                 if let WitnessAttachment::Variable { name, scope } = &w.attachment {

@@ -182,6 +182,9 @@ pub enum JoinRole {
     /// Where a body that runs later starts: the value where the body was
     /// made, and after each write from then on.
     Entry,
+    /// What a later-running body may leave a place holding, as seen from
+    /// outside it: the place after each write the body makes.
+    Writes,
 }
 
 /// The question a `Member` attachment asks of its member.
@@ -431,7 +434,8 @@ impl WitnessPayload {
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
-            | WitnessPayload::Effect(_) => false,
+            | WitnessPayload::Effect(_)
+            | WitnessPayload::MayBe(_) => false,
             WitnessPayload::Gated { arm, .. } => arm.as_ref().is_some_and(|a| a.is_windowed()),
         }
     }
@@ -443,7 +447,7 @@ impl WitnessPayload {
     /// new attachment-bearing shape can't be skipped by a span rewrite.
     pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
         match self {
-            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
+            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } | WitnessPayload::MayBe(t) => f(t),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
             WitnessPayload::Extend(x) => x.value.iter_mut().for_each(|t| t.for_each_attachment_mut(f)),
             WitnessPayload::Invoke { callee, receiver, args } => {
@@ -668,6 +672,14 @@ pub enum WitnessPayload {
     /// answers nothing (`docs/adr/cfg-tier.md` §Effects). Kept at the END for
     /// bincode variant-index stability.
     Gated { gates: Vec<WitnessAttachment>, arm: Option<Box<WitnessPayload>> },
+    /// From this site on the place may also hold what the target holds,
+    /// whatever is written after: a later-running body's writes, which
+    /// reach the place wherever the body is called. Not windowed, so a
+    /// later write never retires it; it does not hold inside the body the
+    /// target's `Join` is of, where the body's own writes stand in order
+    /// (`docs/adr/cfg-tier.md` §Later-running bodies). Kept at the END for
+    /// bincode variant-index stability.
+    MayBe(WitnessAttachment),
 }
 
 /// What one write adds to the shape it lands in.
