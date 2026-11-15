@@ -92,6 +92,37 @@ pub struct SymbolId(pub u32);
 
 // ---- Scope ----
 
+/// A name a callable body takes from outside it (`Scope::captures`).
+/// By value, the body holds the variable as it stood at the body's making;
+/// by reference, the body's name IS the outer variable: no local is
+/// declared, a write inside writes it, and the later-running rules
+/// (`docs/adr/cfg-tier.md` §Later-running bodies) apply as to any variable
+/// the body reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capture {
+    pub name: String,
+    pub from: CaptureFrom,
+    pub by: CaptureBy,
+}
+
+/// Where a captured name is looked up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CaptureFrom {
+    /// The code around the body (php's `use`, python's `nonlocal`).
+    Enclosing,
+    /// The file's top level, past every callable around the body (php's
+    /// and python's `global`).
+    Module,
+}
+
+/// How a captured name binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CaptureBy {
+    Value,
+    Reference,
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scope {
     pub id: ScopeId,
@@ -128,10 +159,11 @@ pub struct Scope {
     /// closures). Read through `variable_lookup_chain`.
     #[serde(default)]
     pub closed: bool,
-    /// The names a closed body takes from the code around it
-    /// (`@closure.capture`, php's `use ($x)`).
+    /// The names this body takes from outside it, each saying from where
+    /// and how (`@closure.capture[.ref|.global]`): php's `use ($x)` /
+    /// `use (&$x)` / `global $x`, python's `nonlocal x` / `global x`.
     #[serde(default)]
-    pub captures: Vec<String>,
+    pub captures: Vec<Capture>,
     /// The names declared in this scope are in force only for code
     /// written directly in it (`@scope.direct`): a use inside a callable,
     /// or inside another such scope, nested here looks past the scope, as
@@ -1183,6 +1215,12 @@ pub struct FlowEdge {
 }
 
 impl FlowEdge {
+    /// The expression whose whole value the write stores, where it stores
+    /// one (`Extraction::Whole`).
+    pub fn stored_value(&self) -> Option<Span> {
+        matches!(self.extraction, Extraction::Whole).then_some(self.source)
+    }
+
     /// Lower to the type-tier witness — the target's type flows from the
     /// source expression. `Whole` is a direct `Variable → Edge(Expr(source))`;
     /// the projecting extractions (Positional/Slurpy/KeyOf) await their

@@ -177,8 +177,8 @@ declaration the write reaches is in force, and is a write of that
 declaration otherwise. The document says so per pattern: `@def.assigned`
 marks such a write. After dedup, `defs::unify_assigned` walks those defs
 in source order; the first one per name that reaches nothing is the
-declaration, re-anchored to the callable around it (`callable_reach`, or
-the file), and is visible from the top of that body, so a read above it in
+declaration, re-anchored where its write chain ends (the callable around
+it, or the file, or past it through a by-reference capture), and is visible from the top of that body, so a read above it in
 a loop reaches it. Every other one becomes a `var_writes` row, minted as a
 `Variable` ref with `AccessKind::Write`. The declaration carries
 `SymbolFlags::SCOPE_WIDE`. One rule, the model's `variable_use`
@@ -189,20 +189,25 @@ binder mints its refs from it and `FileAnalysis::variable_binding` /
 `Symbol::variable_decl` states. It walks two chains of the model's: a read
 looks along `variable_lookup_chain`, which a closed
 body ends unless it captures the name; a write along `write_lookup_chain`,
-which any callable ends unless it captures the name, because assigning a
-name a python or R closure reads from around it makes a local. The
+which any callable ends unless it captures the name by reference,
+because assigning a name a python or R closure reads from around it makes
+a local. The
 model's type queries take the read chain too, so a closed body answers no
 type for a variable around it.
 
 `@scope.sub.closed` is a callable body that sees no variable of the code
 around it (php's functions, methods and closures; an arrow function is a
 plain `@scope.sub` and sees the enclosing function's): `Scope::closed`.
-`@closure.capture` is a name such a body takes from around it (`use
-($x)`), on `Scope::captures`: the chain continues past the closed body for
-that name alone.
-`@def.hoist` files the match's def in the scope around the one it is
-written in, so `use (&$x)` declares `$x` in the enclosing function when it
-does not exist yet.
+`@closure.capture` is a name the callable around it takes from the code
+around it by value (`use ($x)`), on `Scope::captures`: the read chain
+continues past the closed body for that name alone, and a write to it binds
+a local. `@closure.capture.ref` takes it by reference (`use (&$x)`,
+python's `nonlocal x`): both chains continue past the body, so the body's
+writes are the variable's. `@closure.capture.global` takes it by
+reference from the module (`global`): both chains go on past every
+callable to the file's top level. The capture belongs to the nearest
+callable around the statement that states it (`docs/adr/cfg-tier.md`
+§Later-running bodies).
 
 `@flow.place` is the left side of an assignment. When its own read
 projects a member (`$o->p`, `self.p`), that member takes the value and its

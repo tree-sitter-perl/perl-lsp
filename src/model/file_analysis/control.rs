@@ -890,6 +890,9 @@ pub struct BoundWrite {
     pub scope: super::ScopeId,
     /// A plain assignment to a variable already bound, not its declaration.
     pub reassigns: bool,
+    /// The expression whose whole value the write stores, where it stores
+    /// one.
+    pub value: Option<Span>,
 }
 
 /// Each later-running body by the callable scope it is the body of: the
@@ -911,13 +914,9 @@ fn bodies_by_scope(scopes: &[super::Scope], bodies: &[CallableBody]) -> HashMap<
 
 /// The later-running bodies `from` sits in that run apart from where
 /// `sym` is bound, innermost first: the callables between `from` and the
-/// variable's own scope. A closed body holds what it captures as it stood
-/// at its making and writes none of it back, so the climb stops at one.
-///
-/// TODO(capture-by-reference): a capture by reference (php's `use (&$x)`)
-/// reads the variable as it stands when the body runs and writes it back;
-/// until a capture says how it binds, every one reads as by value. Owner:
-/// CFG PR 11 (captures).
+/// variable's own scope. A closed body holds what it captures by value as
+/// it stood at its making and writes none of it back, so the climb stops at
+/// one; a capture by reference is the variable itself, so it climbs on.
 fn bodies_around(
     scopes: &[super::Scope],
     sym: &super::Symbol,
@@ -927,7 +926,8 @@ fn bodies_around(
     let mut out = Vec::new();
     for s in super::scope_chain_of(scopes, from) {
         let scope = &scopes[s.0 as usize];
-        if s == sym.scope || contains(scope.span, sym.span) || scope.closed {
+        let by_reference = scope.captures.iter().any(|c| c.name == sym.name && c.by == super::CaptureBy::Reference);
+        if s == sym.scope || contains(scope.span, sym.span) || (scope.closed && !by_reference) {
             break;
         }
         if let Some(b) = bodies.get(&s) {
@@ -975,10 +975,13 @@ pub fn body_joins(
     }
     let source = || WitnessSource::Builder(JOIN_SOURCE.into());
     let read_of = |sid| WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(sid))));
-    let arm = |join: &WitnessAttachment, sid, at: Point| Witness {
+    // A path through a write is the value it stores, which a write made
+    // inside a later-running body holds only inside it (`confined_writes`);
+    // through anything else it is the variable as it stands there.
+    let arm = |join: &WitnessAttachment, sid, at: Point, value: Option<Span>| Witness {
         attachment: join.clone(),
         source: source(),
-        payload: WitnessPayload::Edge(read_of(sid)),
+        payload: WitnessPayload::Edge(value.map_or_else(|| read_of(sid), WitnessAttachment::Expr)),
         span: Span { start: at, end: at },
     };
     let mut out = Vec::new();
@@ -1007,13 +1010,13 @@ pub fn body_joins(
             for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
                 out.push(Witness { attachment: read_of(sid), source: source(), payload, span: Span { start: body.span.start, end: made.end } });
             }
-            out.push(arm(&join, sid, made.start));
-            out.extend(ws.iter().filter(reaches).map(|w| arm(&join, sid, w.at)));
+            out.push(arm(&join, sid, made.start, None));
+            out.extend(ws.iter().filter(reaches).map(|w| arm(&join, sid, w.at, w.value)));
         }
     }
 
     // Writes: every body a write sits in, joined in past where it is made.
-    let mut by_body: HashMap<(super::SymbolId, super::ScopeId), Vec<Point>> = HashMap::new();
+    let mut by_body: HashMap<(super::SymbolId, super::ScopeId), Vec<&BoundWrite>> = HashMap::new();
     let mut order: Vec<(super::SymbolId, super::ScopeId)> = Vec::new();
     for w in writes {
         let sym = &symbols[w.sym.0 as usize];
@@ -1022,7 +1025,7 @@ pub fn body_joins(
                 order.push((w.sym, s));
                 Vec::new()
             });
-            ats.push(w.at);
+            ats.push(w);
         }
     }
     for key in order {
@@ -1034,7 +1037,31 @@ pub fn body_joins(
             false => scopes[s.0 as usize].span.end,
         };
         out.push(Witness { attachment: read_of(sid), source: source(), payload: WitnessPayload::MayBe(join.clone()), span: Span { start: from, end: from } });
-        out.extend(by_body[&key].iter().map(|&at| arm(&join, sid, at)));
+        out.extend(by_body[&key].iter().map(|w| arm(&join, sid, w.at, w.value)));
+    }
+    out
+}
+
+/// Where each write made inside a later-running body stops holding: the
+/// end of the innermost such body it sits in, past which the variable
+/// reads it through that body's `MayBe`; `None` where the body ends on the
+/// write. Keyed by the written place and the write's site, for
+/// `WitnessBag::confine_writes`.
+pub fn confined_writes(
+    scopes: &[super::Scope],
+    symbols: &[super::Symbol],
+    bodies: &[CallableBody],
+    writes: &[BoundWrite],
+) -> HashMap<(crate::model::witnesses::WitnessAttachment, Point), Option<Point>> {
+    use super::{Binding, Place};
+    let body_of = bodies_by_scope(scopes, bodies);
+    let mut out = HashMap::new();
+    for w in writes {
+        let sym = &symbols[w.sym.0 as usize];
+        let Some((s, _)) = bodies_around(scopes, sym, w.scope, &body_of).into_iter().next() else { continue };
+        let region = super::cut_region(Span { start: w.at, end: scopes[s.0 as usize].span.end }, []);
+        let place = crate::model::witnesses::WitnessAttachment::Place(Box::new(Place::variable(Binding::Lexical(w.sym))));
+        out.insert((place, w.at), region.map(|r| r.end));
     }
     out
 }
@@ -1199,10 +1226,12 @@ impl super::FileAnalysis {
             .flow_edges
             .iter()
             .filter_map(|fe| match self.variable_binding_of(&fe.target_name, fe.target_at, fe.target_scope).0 {
-                Binding::Lexical(sym) => Some(BoundWrite { sym, at: fe.target_at, scope: fe.target_scope, reassigns: fe.reassigns }),
+                Binding::Lexical(sym) => Some(BoundWrite { sym, at: fe.target_at, scope: fe.target_scope, reassigns: fe.reassigns, value: fe.stored_value() }),
                 _ => None,
             })
             .collect();
+        // The Perl builder makes these regions as it lowers them.
+        self.witnesses.confine_writes(&confined_writes(&self.scopes, self.symbols(), &view.bodies, &writes));
         for w in body_joins(&self.scopes, self.symbols(), &view.bodies, self.refs(), &writes) {
             self.witnesses.push(w);
         }

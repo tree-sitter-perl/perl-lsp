@@ -64,20 +64,39 @@ can run anywhere its variables are bound.
   outside it. Where none exists, nothing can change the variable before the
   body runs: nothing is minted, and the read sees it as made, narrowing
   included.
-- *Writes.* A write inside the body stays a region fact there, and reaches
-  the variable wherever the body is called: the variable gets one
-  `MayBe(Join{.., Writes})` past the body's making (at its binding, for a
-  hoisted body), whose arms are the variable after each of the body's
-  writes. A `MayBe` is not windowed: every read past its site, outside the
+- *Writes.* A write inside the body stays a region fact there (from its
+  site to the body's end; one the body ends on holds nowhere in it,
+  `confined_writes`), and reaches the variable wherever the body is called:
+  the variable gets one `MayBe(Join{.., Writes})` past the body's making (at
+  its binding, for a hoisted body), whose arms are the value each of the
+  body's writes stores (the variable after the write, for one that stores
+  no whole value). A `MayBe` is not windowed: every read past its site, outside the
   body, joins the value standing there with it, so a later write never
   retires it, and an untyped write leaves the read untyped. That is the
   sound reading without knowing which calls run the body
   (`TODO(closure-call-writes)`: the write reaches the variable only where
   the body is called, owned by the whole-program epic).
 
-A closed body (php's) holds what it captures as it stood at its making and
-writes none of it back, so it mints neither (`TODO(capture-by-reference)`
-for `use (&$x)`, owned by the captures work).
+**Captures.** A body says which names it takes from outside it
+(`Scope::captures`: a `Capture { name, from, by }`, stated by the
+document's `@closure.capture[.ref|.global]`). By value (php's `use ($x)`)
+the body holds the variable as it stood at its making: a closed body ends
+the walk past it for every other name, writes none of it back, and mints
+neither join; a write to the copy binds a local. By reference (php's
+`use (&$x)`, python's `nonlocal`) the body's name IS the variable around
+it: no local is declared, the read and write chains continue past the body
+(`variable_lookup_chain`, `write_lookup_chain`), and the two rules above
+apply as to any variable the body reaches. From the module (php's and
+python's `global`) the chains go on past every callable around the body to
+the file's top level. A by-reference capture of a name nothing around it
+declares yet declares it where the write chain ends: `use (&$x)` in the
+function around the closure, `global` at the file's top level.
+
+A python comprehension (list, set and dict, and a generator expression) is
+a callable scope of its own whose loop variables are its locals, declared
+for the whole comprehension (the element is written ahead of the `for`
+that binds it). An assignment expression inside one (`:=`) binds in the
+function around it, which is not modelled.
 
 ## Loops
 
@@ -240,7 +259,8 @@ its document spells them.
 
 A loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
-fails), captures,
+fails), R's `<<-` (`TODO(write-capture-declarations)`: a write capture
+nothing states yet, so the write binds a local), a comprehension's `:=`,
 try/catch arms, readonly-after-constructor, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

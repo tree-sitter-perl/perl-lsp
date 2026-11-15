@@ -391,40 +391,66 @@ pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = S
 ///   (`variable_lookup_chain`). Names that are not variables (subs,
 ///   classes) walk past it.
 pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
-    lookup_chain_through(scopes, from, |_| false)
+    let direct = callable_reach(scopes, from).find(|&id| scopes[id.0 as usize].direct);
+    let mut chain = scope_chain_of(scopes, from);
+    chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
+    LookupChain(chain)
 }
 
 /// Where a use of the variable `name` in `from` looks it up: `lookup_chain`,
 /// ended by a closed body that does not capture `name`.
 pub fn variable_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
-    lookup_chain_through(scopes, from, |id| {
-        let scope = &scopes[id.0 as usize];
-        scope.closed && !scope.captures.iter().any(|c| c == name)
+    lookup_chain_through(scopes, from, name, |scope, capture| match capture {
+        None if scope.closed => Pass::Shut,
+        _ => Pass::Through,
     })
 }
 
 /// Where a write of the variable `name` in `from` finds the variable it
 /// writes: no further than its own callable, unless the callable captures
-/// `name`. A write binds in its own callable even where a read would see
-/// past it (a Python or R closure reads the variables around it, and
-/// assigning one makes a local).
+/// `name` by reference. A write binds in its own callable even where a read
+/// would see past it (a Python or R closure reads the variables around it,
+/// and assigning one makes a local; so does assigning a name php's
+/// `use ($x)` took by value).
 ///
-/// TODO(write-capture-declarations): Python's `nonlocal x` / `global x`
-/// and R's `<<-` are captures for writes; nothing states them yet, so such
-/// a write binds a local.
+/// TODO(write-capture-declarations): R's `<<-` is a capture for writes;
+/// nothing states it yet, so such a write binds a local.
 pub fn write_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
-    lookup_chain_through(scopes, from, |id| {
-        let scope = &scopes[id.0 as usize];
-        scope.kind.is_callable() && !scope.captures.iter().any(|c| c == name)
+    lookup_chain_through(scopes, from, name, |scope, capture| match capture {
+        Some(c) if c.by == CaptureBy::Reference => Pass::Through,
+        _ if scope.kind.is_callable() => Pass::Shut,
+        _ => Pass::Through,
     })
 }
 
-/// `lookup_chain`, ended at the first scope `shut` answers for.
-fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> LookupChain {
+/// What a scope on a lookup chain does to the walk.
+enum Pass {
+    Through,
+    Shut,
+}
+
+/// `lookup_chain` for the variable `name`, ended at the first scope `pass`
+/// shuts. A capture from the module takes the walk past every callable
+/// around the capturing scope.
+fn lookup_chain_through(scopes: &[Scope], from: ScopeId, name: &str, pass: impl Fn(&Scope, Option<&Capture>) -> Pass) -> LookupChain {
     let direct = callable_reach(scopes, from).find(|&id| scopes[id.0 as usize].direct);
-    let mut chain = scope_chain_of(scopes, from);
-    if let Some(end) = chain.iter().position(|&id| shut(id)) {
-        chain.truncate(end + 1);
+    let all = scope_chain_of(scopes, from);
+    let mut chain = Vec::with_capacity(all.len());
+    let mut i = 0;
+    while i < all.len() {
+        let scope = &scopes[all[i].0 as usize];
+        let capture = scope.captures.iter().find(|c| c.name == name);
+        chain.push(all[i]);
+        if let Pass::Shut = pass(scope, capture) {
+            break;
+        }
+        i += 1;
+        if capture.is_some_and(|c| c.from == CaptureFrom::Module) {
+            // The module is what no callable encloses.
+            if let Some(last) = all.iter().rposition(|&s| scopes[s.0 as usize].kind.is_callable()) {
+                i = i.max(last + 1);
+            }
+        }
     }
     chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
     LookupChain(chain)

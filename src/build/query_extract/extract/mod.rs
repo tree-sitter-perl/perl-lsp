@@ -252,10 +252,9 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent | C::ParentSuper => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture(..) | C::Context(_) | C::Parent | C::ParentSuper => Family::Scopes,
         C::Def { .. }
         | C::DefPair
-        | C::DefHoist
         | C::DefGlobal
         | C::Qualifier
         | C::OolDef
@@ -370,12 +369,10 @@ impl ExtractState<'_, '_> {
         self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
     }
 
-    /// The scope a def of `kind`, declared in match `match_id` at the
-    /// current event, binds in. A data member belongs to its class body even
+    /// The scope a def of `kind`, declared at the current event, binds in. A data member belongs to its class body even
     /// where it is written inside a callable (php's constructor-promoted
-    /// property); a hoisted def (`@def.hoist`) to the scope around the one
-    /// it is written in.
-    fn def_scope(&self, kind: DefCap, match_id: usize) -> ScopeId {
+    /// property).
+    fn def_scope(&self, kind: DefCap) -> ScopeId {
         match kind {
             DefCap::Field | DefCap::Slot => self.member_scope(),
             DefCap::Sub
@@ -392,13 +389,7 @@ impl ExtractState<'_, '_> {
             | DefCap::Macro
             | DefCap::Reexport
             | DefCap::Union
-            | DefCap::UnionField => match self.adorned.in_match(match_id, Capture::DefHoist).is_some() {
-                true => crate::model::file_analysis::scope_chain_of(&self.out.scopes, self.cur_scope)
-                    .get(1)
-                    .copied()
-                    .unwrap_or(self.cur_scope),
-                false => self.bind_scope(),
-            },
+            | DefCap::UnionField => self.bind_scope(),
         }
     }
 

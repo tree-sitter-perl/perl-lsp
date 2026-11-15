@@ -4365,3 +4365,60 @@ fn php_a_closure_holds_its_capture_as_made() {
     let src = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use ($x) { return $x; };\n$x = 1;\n}\n";
     assert_eq!(analyzed("/x/a.php", src).inferred_type_via_bag("x", tree_sitter::Point { row: 3, column: 34 }), Some(T::String));
 }
+
+/// A php closure's `use (&$x)` is the variable itself: it reads every write
+/// from its making on, and its own write reaches the variable past it. A
+/// write to a `use ($x)` copy stays inside the closure.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_closure_shares_a_capture_by_reference() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.php", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let reads = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use (&$x) { return $x; };\n$x = 1;\n}\n";
+    assert!(matches!(at(reads, "x", 3, 36), Some(T::Union(_))), "{:?}", at(reads, "x", 3, 36));
+    let writes = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use (&$x) { $x = 1; };\n$g();\nreturn $x;\n}\n";
+    assert!(matches!(at(writes, "x", 5, 8), Some(T::Union(_))), "{:?}", at(writes, "x", 5, 8));
+    let copy = "<?php\nfunction f() {\n$x = 'a';\n$g = function() use ($x) { $x = 1; return $x; };\n$g();\nreturn $x;\n}\n";
+    assert_eq!(at(copy, "x", 5, 8), Some(T::String));
+    assert_eq!(at(copy, "x", 3, 43), Some(T::Numeric));
+}
+
+/// php's `global $g` makes the function's `$g` the file's.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_global_declaration_is_the_files_variable() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.php", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let writes = "<?php\n$g = 1;\nfunction b() { global $g; $g = 'x'; }\nb();\necho $g;\n";
+    assert!(matches!(at(writes, "g", 4, 6), Some(T::Union(_))), "{:?}", at(writes, "g", 4, 6));
+    let reads = "<?php\n$g = 1;\nfunction b() { global $g; return $g; }\n";
+    assert_eq!(at(reads, "g", 2, 34), Some(T::Numeric));
+}
+
+/// python's `nonlocal` and `global` make a function's name the variable of
+/// the function around it or of the module: its writes reach that variable.
+#[cfg(feature = "python")]
+#[test]
+fn python_nonlocal_and_global_write_the_outer_variable() {
+    use crate::model::file_analysis::InferredType as T;
+    let at = |s: &str, v: &str, row, column| analyzed("/x/a.py", s).inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let nonlocal = "def outer():\n    n = 1\n    def inner():\n        nonlocal n\n        n = 's'\n        return n\n    inner()\n    return n\n";
+    assert!(matches!(at(nonlocal, "n", 7, 11), Some(T::Union(_))), "{:?}", at(nonlocal, "n", 7, 11));
+    assert_eq!(at(nonlocal, "n", 5, 15), Some(T::String));
+    let global = "g = 1\ndef b():\n    global g\n    g = 's'\nb()\nprint(g)\n";
+    assert!(matches!(at(global, "g", 5, 6), Some(T::Union(_))), "{:?}", at(global, "g", 5, 6));
+    let skips = "g = 1\ndef a():\n    g = 's'\n    def b():\n        global g\n        return g\n";
+    assert_eq!(at(skips, "g", 5, 15), Some(T::Numeric));
+}
+
+/// A comprehension's loop variable is its own: the element reads it, not
+/// the name of the code around it, and the name is untouched past it.
+#[cfg(feature = "python")]
+#[test]
+fn python_a_comprehension_binds_its_own_loop_variable() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "k = 'x'\n[k for k in range(3)]\nprint(k)\n";
+    let fa = analyzed("/x/a.py", src);
+    assert_ne!(fa.inferred_type_via_bag("k", tree_sitter::Point { row: 1, column: 1 }), Some(T::String));
+    assert_eq!(fa.inferred_type_via_bag("k", tree_sitter::Point { row: 2, column: 6 }), Some(T::String));
+}

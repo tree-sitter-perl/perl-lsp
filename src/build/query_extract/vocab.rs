@@ -5,6 +5,7 @@
 //! `docs/adr/capture-vocabulary.md`.
 
 use std::fmt;
+use crate::model::file_analysis::{CaptureBy, CaptureFrom};
 
 /// A closed enum whose variants each carry their query spelling: `parse`
 /// and `spelling` are generated from the one table, so they cannot drift.
@@ -708,10 +709,6 @@ pub enum Capture {
     /// class-body binding: the class's member and the name the body reads).
     /// They are one declaration, linked each way as `Symbol::declared_with`.
     DefPair,
-    /// The match's def declares in the scope around the one it is written
-    /// in (php's `use (&$x)` creates `$x` in the function around the
-    /// closure).
-    DefHoist,
     /// The match's def is named from the global namespace, whatever
     /// namespace it is written in (php's `define('X', 1)` declares `\X`).
     DefGlobal,
@@ -723,9 +720,12 @@ pub enum Capture {
     /// the reference from the node the document tagged down to that leaf.
     RefSpelled,
     Scope(ScopeCap),
-    /// A variable a closure takes from the scope around it (php's
-    /// `use ($x)`): the closure sees that name through its closed boundary.
-    ClosureCapture,
+    /// A variable the callable around it takes from outside
+    /// (`Scope::captures`): `@closure.capture` from the code around it by
+    /// value (php's `use ($x)`), `.ref` by reference (`use (&$x)`,
+    /// python's `nonlocal`), `.global` from the module by reference
+    /// (`global`).
+    ClosureCapture(CaptureFrom, CaptureBy),
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
@@ -827,7 +827,6 @@ impl Capture {
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
             ["def", "pair"] => C::DefPair,
-            ["def", "hoist"] => C::DefHoist,
             ["def", "global"] => C::DefGlobal,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
@@ -839,7 +838,9 @@ impl Capture {
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", "sub", "closed"] => C::Scope(ScopeCap::SubClosed),
-            ["closure", "capture"] => C::ClosureCapture,
+            ["closure", "capture"] => C::ClosureCapture(CaptureFrom::Enclosing, CaptureBy::Value),
+            ["closure", "capture", "ref"] => C::ClosureCapture(CaptureFrom::Enclosing, CaptureBy::Reference),
+            ["closure", "capture", "global"] => C::ClosureCapture(CaptureFrom::Module, CaptureBy::Reference),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
@@ -914,9 +915,10 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::Def { kind, part: DefPart::Anchor } => write!(f, "def.{kind}.anchor"),
             C::DefPair => f.write_str("def.pair"),
-            C::DefHoist => f.write_str("def.hoist"),
             C::DefGlobal => f.write_str("def.global"),
-            C::ClosureCapture => f.write_str("closure.capture"),
+            C::ClosureCapture(CaptureFrom::Enclosing, CaptureBy::Value) => f.write_str("closure.capture"),
+            C::ClosureCapture(CaptureFrom::Enclosing, CaptureBy::Reference) => f.write_str("closure.capture.ref"),
+            C::ClosureCapture(CaptureFrom::Module, _) => f.write_str("closure.capture.global"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),

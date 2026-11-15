@@ -411,7 +411,9 @@
 (catch_clause
   type: (type_list . (named_type) @type.annot .)
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled)
-(global_declaration (variable_name (name) @def.assigned.name) @def.assigned @def.assigned.spelled)
+; `global $x` makes the function's `$x` the file's: declared there when
+; nothing there declares it yet.
+(global_declaration (variable_name (name) @closure.capture.global @def.assigned.name) @def.assigned @def.assigned.spelled)
 (static_variable_declaration
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled
   value: (_)? @flow.source)
@@ -428,12 +430,13 @@
 (unset_statement (_) @flow.place)
 
 ; ---- closures ----
-; `use ($x)` reads the variable of the code around the closure, and the
-; closure body sees it by that name. `use (&$x)` binds it there,
-; declaring it when nothing there does yet.
+; `use ($x)` holds the variable of the code around the closure as it
+; stood at the closure's making. `use (&$x)` is that variable: the
+; closure reads it as it stands when it runs and writes it back, and the
+; clause declares it there when nothing there does yet.
 (anonymous_function_use_clause (variable_name (name) @closure.capture))
 (anonymous_function_use_clause
-  (by_ref (variable_name (name) @closure.capture @def.assigned.name @def.hoist) @def.assigned.spelled) @def.assigned)
+  (by_ref (variable_name (name) @closure.capture.ref @def.assigned.name) @def.assigned.spelled) @def.assigned)
 
 ; ---- guards ----
 ; An atom states what a test proves of its subject, a local `$x` or a

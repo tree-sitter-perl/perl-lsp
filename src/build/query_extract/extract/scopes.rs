@@ -194,11 +194,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 st.context_stack.push((st.scope_stack.len(), kind, value));
             }
         }
-        Capture::ClosureCapture => {
+        Capture::ClosureCapture(from, by) => {
+            // The statement may sit in a block of the body; the body takes it.
+            let body = crate::model::file_analysis::callable_reach(&st.out.scopes, st.cur_scope).last().unwrap_or(st.cur_scope);
             let name = (pack.shape_name)(&e.text);
-            let captures = &mut st.out.scopes[st.cur_scope.0 as usize].captures;
-            if !captures.contains(&name) {
-                captures.push(name);
+            let captures = &mut st.out.scopes[body.0 as usize].captures;
+            if !captures.iter().any(|c| c.name == name) {
+                captures.push(crate::model::file_analysis::Capture { name, from, by });
             }
         }
         Capture::Parent | Capture::ParentSuper => {

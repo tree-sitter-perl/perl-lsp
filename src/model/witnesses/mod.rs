@@ -519,6 +519,36 @@ impl WitnessBag {
         self.rebuild_index();
     }
 
+    /// Confine the writes made inside a later-running body to it: each
+    /// write marker and written value at `(attachment, site)` holds from
+    /// the site to the body's end, and one the body ends on (`None`) holds
+    /// nowhere in it and is dropped. Past the body the variable reads the
+    /// write through the body's `MayBe` (`docs/adr/cfg-tier.md`
+    /// §Later-running bodies).
+    pub fn confine_writes(&mut self, sites: &std::collections::HashMap<(WitnessAttachment, Point), Option<Point>>) {
+        if sites.is_empty() {
+            return;
+        }
+        let end = |w: &Witness| {
+            let write = w.span.start == w.span.end
+                && matches!(w.payload, WitnessPayload::Reset | WitnessPayload::Edge(WitnessAttachment::Expr(_)));
+            match write {
+                true => sites.get(&(w.attachment.clone(), w.span.start)).copied(),
+                false => None,
+            }
+        };
+        self.retain_witnesses(|w| !matches!(end(w), Some(None)));
+        for i in 0..self.witnesses.len() {
+            if let Some(Some(e)) = end(&self.witnesses[i]) {
+                self.witnesses[i].span.end = e;
+            }
+        }
+        if self.content.is_some() {
+            self.track_content();
+        }
+        self.rebuild_index();
+    }
+
     /// Drop every witness past `baseline` and rebuild the index. Lets
     /// enrichment revert post-build additions before re-deriving them,
     /// keeping the bag idempotent across repeat enrichment calls.

@@ -86,7 +86,7 @@ impl<'a> Builder<'a> {
             .flow_edges
             .iter()
             .filter_map(|fe| match self.binding_of(&fe.target_name, fe.target_at, fe.target_scope).0 {
-                Binding::Lexical(sym) => Some(BoundWrite { sym, at: fe.target_at, scope: fe.target_scope, reassigns: fe.reassigns }),
+                Binding::Lexical(sym) => Some(BoundWrite { sym, at: fe.target_at, scope: fe.target_scope, reassigns: fe.reassigns, value: fe.stored_value() }),
                 _ => None,
             })
             .collect();

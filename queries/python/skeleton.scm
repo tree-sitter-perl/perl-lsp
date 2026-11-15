@@ -56,6 +56,23 @@
 (function_definition) @scope.sub
 ; A lambda is a callable too: what it yields is its own.
 (lambda) @scope.sub
+; A comprehension runs in a function of its own: its loop variables are its
+; locals, in force from its first token (the element is written before the
+; `for` that binds it), and never the names of the code around it.
+[(list_comprehension) (set_comprehension) (dictionary_comprehension) (generator_expression)] @scope.sub
+(for_in_clause
+  left: (identifier) @flow.rebind @flow.assign)
+(for_in_clause
+  left: [(pattern_list (identifier) @flow.rebind) (tuple_pattern (identifier) @flow.rebind)] @flow.assign)
+(for_in_clause
+  left: [(identifier) @def.assigned.name @def.assigned
+         (pattern_list (identifier) @def.assigned.name @def.assigned)
+         (tuple_pattern (identifier) @def.assigned.name @def.assigned)])
+
+; `nonlocal x` makes the function's `x` the variable of the function
+; around it; `global x` makes it the module's.
+(nonlocal_statement (identifier) @closure.capture.ref)
+(global_statement (identifier) @closure.capture.global)
 
 ; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is two
 ; things from one token: a data member of the class (`Counter.count`) and a
