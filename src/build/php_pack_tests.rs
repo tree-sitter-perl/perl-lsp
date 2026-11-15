@@ -5362,3 +5362,4 @@ function f() {
     assert_eq!(at("x", 7, 9), two("B", "C"), "past: the body's end or the handler's");
     assert_eq!(at("y", 10, 9), Some(T::ClassName("C".into())), "a `finally` runs on every path");
 }
+

@@ -189,8 +189,11 @@ but it swallows what its body throws (`@ctl.try.quiet`).
   program points).
 - **Past the `try`** comes the tried body's end (or its `else` end), each
   handler's end, and for a quiet `try` the points its body could have
-  stopped at. A `finally` runs on every one of those paths, so where there
-  is one, past the `try` is its end, and it starts from them.
+  stopped at. A `finally` runs on every one of those paths and on the
+  unwinding ones, and starts from all of them; only the completing ones go
+  on past it. A `finally` that writes nothing hands those on unchanged; one
+  that writes is read at its end (`TODO(try-finally-paths)`: on a path
+  where it does not write, that end still carries an unwinding value).
 - A `try` with no path out leaves the arm holding it.
 - A throw in the tried body of a `try` that catches is no leave of the
   callable; a throw in a handler or a `finally` leaves as anywhere else.

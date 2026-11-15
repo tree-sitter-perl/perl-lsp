@@ -861,8 +861,15 @@ impl<'v> JoinPlan<'v> {
     /// wherever its body may unwind ([`Self::unwound`]).
     fn try_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>, writes: &[Point]) {
         match c.arms.iter().position(|a| a.role == ArmRole::Finally) {
-            Some(f) => self.arm_end(c, f, out, reached, writes),
-            None => self.try_completions(c, out, reached, writes),
+            // A `finally` that writes nothing hands each path on as it came
+            // in; only the paths that complete go on past the `try`.
+            // TODO(try-finally-paths): one that writes on some of its paths
+            // carries the unwinding paths' values past it too. Owner: CFG
+            // follow-up (a `finally` run once per kind of entry).
+            Some(f) if writes.iter().any(|&w| contains(c.arms[f].span, Span { start: w, end: w })) => {
+                self.arm_end(c, f, out, reached, writes)
+            }
+            _ => self.try_completions(c, out, reached, writes),
         }
     }
 
