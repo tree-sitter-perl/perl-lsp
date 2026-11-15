@@ -1381,3 +1381,26 @@ fn a_named_sub_reaches_its_variable_from_the_binding() {
     let t = fa_type_at(src, "$x", Point::new(4, 17));
     assert!(matches!(t, Some(InferredType::Union(_))), "read in another sub: {t:?}");
 }
+
+/// A value a loop changes on every pass is every value the passes reach,
+/// not only the first pass's: `$n = $n->next` round a cycle of three
+/// classes holds all three past the loop.
+#[test]
+fn a_loop_carried_value_reaches_its_fixed_point() {
+    let src = "package A;\nsub new { bless {}, shift }\nsub next { return B->new }\npackage B;\nsub new { bless {}, shift }\nsub next { return C->new }\npackage C;\nsub new { bless {}, shift }\nsub next { return A->new }\npackage P;\nsub f {\n    my ($k) = @_;\n    my $n = A->new;\n    while ($k--) {\n        $n = $n->next;\n    }\n    return $n;\n}\n";
+    let t = fa_type_at(src, "$n", Point::new(16, 11));
+    let InferredType::Union(arms) = t.clone().expect("typed") else { panic!("{t:?}") };
+    let names: Vec<_> = arms.iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    assert!(["A", "B", "C"].iter().all(|c| names.iter().any(|n| n == c)), "{t:?}");
+}
+
+/// A read inside the loop that the recurrence runs through reaches the
+/// same fixed point as a read past it.
+#[test]
+fn a_read_inside_a_loop_reaches_the_fixed_point() {
+    let src = "package A;\nsub new { bless {}, shift }\nsub next { return B->new }\npackage B;\nsub new { bless {}, shift }\nsub next { return C->new }\npackage C;\nsub new { bless {}, shift }\nsub next { return A->new }\npackage P;\nsub f {\n    my ($k) = @_;\n    my $n = A->new;\n    while ($k--) {\n        my $m = $n->next;\n        $n = $m;\n    }\n    return $n;\n}\n";
+    let t = fa_type_at(src, "$m", Point::new(15, 13));
+    let InferredType::Union(arms) = t.clone().expect("typed") else { panic!("{t:?}") };
+    let names: Vec<_> = arms.iter().filter_map(|a| a.class_name().map(str::to_string)).collect();
+    assert!(["A", "B", "C"].iter().all(|c| names.iter().any(|n| n == c)), "{t:?}");
+}

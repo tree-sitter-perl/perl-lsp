@@ -642,6 +642,12 @@ pub(super) struct QueryState {
     /// What an open join answers to a recurring arm chased again
     /// (`rechase_recurring`), by its path position.
     join_seeds: std::collections::HashMap<u32, InferredType>,
+    /// Frames a cycle closed at after running through a join opened above
+    /// them: a read inside a loop that the loop's recurrence runs through.
+    recurs_at: std::collections::HashSet<u32>,
+    /// What such a frame answers to its own recurrence while it is asked
+    /// again (`query_rec`'s pass), by its path position.
+    frame_seeds: std::collections::HashMap<u32, InferredType>,
     /// Effect answers memoized while a frame on the path was assumed to have
     /// no way of ending, with that frame's position (`forget_assumed`).
     assumed: Vec<(u32, VisitedKey)>,
@@ -697,6 +703,11 @@ impl QueryState {
         self.fan_out_memo.retain(|_, (_, taint)| *taint > at);
         self.memo.extend(aside.memo);
         self.fan_out_memo.extend(aside.fan_outs);
+    }
+
+    /// How many passes round a loop are open on the path.
+    fn passes_open(&self) -> usize {
+        self.join_seeds.len() + self.frame_seeds.len()
     }
 
     /// A cycle guard returned for the frame at path position `at`.
@@ -763,6 +774,8 @@ impl QueryState {
             opaque_frames: 0,
             open_joins: Vec::new(),
             join_seeds: std::collections::HashMap::new(),
+            recurs_at: std::collections::HashSet::new(),
+            frame_seeds: std::collections::HashMap::new(),
             assumed: Vec::new(),
         }
     }
@@ -1089,6 +1102,12 @@ pub struct ReducerRegistry {
     reducers: Vec<Box<dyn WitnessReducer>>,
 }
 
+/// How many passes round a loop a recurring arm is chased at most.
+const MAX_LOOP_PASSES: u64 = 8;
+
+/// How many passes round loops may be open at once on one path.
+const MAX_PASS_NESTING: usize = 2;
+
 impl ReducerRegistry {
     pub fn new() -> Self {
         Self { reducers: Vec::new() }
@@ -1370,8 +1389,11 @@ impl ReducerRegistry {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             // A join a recurring arm is chased again under answers what its
             // other arms hold (`rechase_recurring`).
-            if let Some(seed) = state.join_seeds.get(&at) {
+            if let Some(seed) = state.join_seeds.get(&at).or_else(|| state.frame_seeds.get(&at)) {
                 return std::sync::Arc::new(ReducedValue::Type(seed.clone()));
+            }
+            if state.open_joins.iter().any(|&j| j > at) {
+                state.recurs_at.insert(at);
             }
             // "Can complete" is inductive: a smallest derivation never needs
             // a callable as its own ancestor, so a callable on the path is
@@ -1399,7 +1421,7 @@ impl ReducerRegistry {
             ReducedValue::None => no_answer(q),
             v => v,
         };
-        let result = std::sync::Arc::new(result);
+        let result = std::sync::Arc::new(self.pass_round_loop(bag, q, pos, result, state));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
         state.visited.remove(&key);
@@ -1422,6 +1444,46 @@ impl ReducerRegistry {
         state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
+    }
+
+    /// A frame a loop's recurrence ran through from inside the loop (a read
+    /// in the body that a later write there depends on) is asked again,
+    /// seeded with its own last answer, until a pass adds nothing: its fixed
+    /// point, as `rechase_recurring` reaches the join's. Passes nest
+    /// `MAX_PASS_NESTING` deep (a loop in a loop); past that the first
+    /// answer dropped a path, so the frame answers nothing, which is sound
+    /// and bounds the work.
+    fn pass_round_loop(&self, bag: &WitnessBag, q: &ReducerQuery, pos: u32, first: ReducedValue, state: &mut QueryState) -> ReducedValue {
+        if !state.recurs_at.remove(&pos) {
+            return first;
+        }
+        if state.passes_open() >= MAX_PASS_NESTING {
+            crate::util::ghost_stats::count("frame.recurrence_too_deep");
+            return no_answer(q);
+        }
+        let ReducedValue::Type(mut seed) = first else { return first };
+        let order = super::reducers::class_order(q);
+        let mut rounds = 1;
+        while rounds < MAX_LOOP_PASSES {
+            rounds += 1;
+            let aside = state.set_aside_answers_through(pos);
+            state.frame_seeds.insert(pos, seed.clone());
+            let next = apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state));
+            state.frame_seeds.remove(&pos);
+            state.restore_answers_through(pos, aside);
+            state.recurs_at.remove(&pos);
+            let ReducedValue::Type(t) = next else {
+                crate::util::ghost_stats::count_by("frame.recurrence_passes", rounds);
+                return next;
+            };
+            let joined = crate::model::file_analysis::join(&seed, &t, order);
+            if joined == seed {
+                break;
+            }
+            seed = joined;
+        }
+        crate::util::ghost_stats::count_by("frame.recurrence_passes", rounds);
+        ReducedValue::Type(seed)
     }
 
     fn query_rec_body(
@@ -2846,12 +2908,9 @@ impl ReducerRegistry {
                         // loop). Closed at the join itself, it is chased again
                         // below, once the other arms say what the join holds.
                         // Closed above it (a read inside the loop asked first),
-                        // it adds nothing the join's other arms do not and
-                        // drops out rather than making the join untyped.
-                        // TODO(cfg-loop-fixpoint): dropping iterates that
-                        // recurrence zero times, so a value a pass changes is
-                        // missed and nothing tells a consumer so; the loop
-                        // fixed point (design PR 10) chases it to a fixed point.
+                        // it drops out of this pass rather than making the join
+                        // untyped; the frame it closed at is then asked again
+                        // round the loop (`pass_round_loop`), where it types.
                         // One that came back typed (`$s = $s . 'x'`) says what
                         // it adds.
                         let untyped = matches!(resolved, None | Some(InferredType::Unknown));
@@ -3179,15 +3238,14 @@ impl ReducerRegistry {
     }
 
     /// The arms of a join that came back untyped through a recurrence on
-    /// the join, chased once more with the join answering what its other
-    /// arms hold: one pass round the loop. An arm that types then says what
+    /// the join, chased again with the join answering what its other arms
+    /// hold: a pass round the loop. An arm that types then says what
     /// a pass adds (`$n = $n->parent` keeps the class); one that still does
     /// not (`$p = $p->{up}`) makes the join untyped, as any untyped arm does.
     /// Anything the pass answers depends on the seed and is cut at the
     /// join, so it is set aside with what the first chase remembered there.
-    /// TODO(cfg-loop-fixpoint): one pass, not a fixed point: a value a
-    /// second pass changes again is missed, and nothing tells a consumer so;
-    /// the loop fixed point (design PR 10) iterates to a fixed point.
+    /// Passes repeat, each seeded with the join of the last, until one adds
+    /// nothing: the loop's fixed point.
     fn rechase_recurring(
         &self,
         bag: &WitnessBag,
@@ -3208,11 +3266,11 @@ impl ReducerRegistry {
         let seed = (!others.is_empty())
             .then(|| crate::model::file_analysis::join_all(&others, &crate::model::file_analysis::Unordered))
             .flatten();
-        // A pass inside a pass (a recurrence met while chasing another
-        // join's pass) is not taken: the arm stays untyped, which is sound
-        // and keeps the work one pass deep.
+        // Passes nest `MAX_PASS_NESTING` deep (a loop in a loop); a deeper
+        // one is not taken: the arm stays untyped, which is sound and bounds
+        // the work.
         let pass = match (join, seed) {
-            (Some(join), Some(seed)) if state.join_seeds.is_empty() => Some((join, seed)),
+            (Some(join), Some(seed)) if state.passes_open() < MAX_PASS_NESTING => Some((join, seed)),
             _ => None,
         };
         let resolved: Vec<Option<InferredType>> = match pass {
@@ -3222,21 +3280,41 @@ impl ReducerRegistry {
                 }
                 recurring.iter().map(|_| None).collect()
             }
-            Some((join, seed)) => {
-                let aside = state.set_aside_answers_through(join);
-                state.join_seeds.insert(join, seed);
-                let outer_low = std::mem::replace(&mut state.low_cut, Taint::CLEAN);
-                let resolved = recurring
-                    .iter()
-                    .map(|&(w, target, _)| {
-                        crate::util::ghost_stats::count("join.recurrence_rechased");
-                        self.chase_edge(bag, q, w, target, sole_witness, state)
-                    })
-                    .collect();
-                state.low_cut = outer_low.min(state.low_cut);
-                state.join_seeds.remove(&join);
-                state.restore_answers_through(join, aside);
-                resolved
+            Some((join, mut seed)) => {
+                let order = super::reducers::class_order(q);
+                let mut rounds = 0;
+                loop {
+                    rounds += 1;
+                    let aside = state.set_aside_answers_through(join);
+                    state.join_seeds.insert(join, seed.clone());
+                    let outer_low = std::mem::replace(&mut state.low_cut, Taint::CLEAN);
+                    let resolved: Vec<Option<InferredType>> = recurring
+                        .iter()
+                        .map(|&(w, target, _)| {
+                            crate::util::ghost_stats::count("join.recurrence_rechased");
+                            self.chase_edge(bag, q, w, target, sole_witness, state)
+                        })
+                        .collect();
+                    state.low_cut = outer_low.min(state.low_cut);
+                    state.join_seeds.remove(&join);
+                    state.restore_answers_through(join, aside);
+                    // A pass that leaves an arm untyped makes the join
+                    // untyped; one that adds nothing the seed holds is the
+                    // fixed point. The lattice is finite and a union widens
+                    // past its arm cap, so the passes end; the cap is the
+                    // dispatcher's guard, never reached on a sound lattice.
+                    let passed: Option<Vec<InferredType>> = resolved.iter().map(|r| r.clone().filter(InferredType::is_known)).collect();
+                    let next = passed.and_then(|ts| {
+                        crate::model::file_analysis::join_all(&[std::slice::from_ref(&seed), &ts].concat(), order)
+                    });
+                    match next {
+                        Some(next) if next != seed && rounds < MAX_LOOP_PASSES => seed = next,
+                        _ => {
+                            crate::util::ghost_stats::count_by("join.recurrence_passes", rounds);
+                            break resolved;
+                        }
+                    }
+                }
             }
         };
         for ((w, _, _), resolved) in recurring.into_iter().zip(resolved) {

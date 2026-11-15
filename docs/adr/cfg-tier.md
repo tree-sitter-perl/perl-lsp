@@ -108,18 +108,20 @@ nothing around it, is modelled as falling through, since no join is minted
 past them. A narrowing never joins out past a loop: what the place holds
 there is the loop's exit, which no test inside decides.
 
-A loop's recurrence shows up at query time as a cycle through a join. An
-arm whose chase closes at its own join and comes back untyped is chased once
-more with the join answering what its other arms hold: one pass round the
-loop (`rechase_recurring`). Typed then, it says what a pass adds (`$n =
-$n->parent` keeps the class); still untyped (`$p = $p->{up}`), it makes the
-join untyped, as any untyped arm does. A pass met inside a pass is not
-taken (the arm stays untyped), so the work stays one pass deep. An arm
-whose chase closes above its join (a read inside the loop asked first)
-comes back untyped and drops out: it adds nothing the join's other arms do
-not. Both stop short of a fixed point (`TODO(cfg-loop-fixpoint)`: a value a
-later pass changes is missed, and only the fixed point can tell a consumer
-the answer is complete). Completion reads the same
+A loop's recurrence shows up at query time as a cycle through a join, and
+the registry chases it to a fixed point, local to the frame that found the
+cycle (the dispatcher owns termination; no reducer and no fold driver
+iterates). An arm whose chase closes at its own join and comes back untyped
+is chased again with the join answering what its other arms hold, then with
+what that pass joined, until a pass adds nothing (`rechase_recurring`): `$n
+= $n->next` round three classes holds all three. One still untyped after a
+pass (`$p = $p->{up}`) makes the join untyped, as any untyped arm does. A
+read inside the loop asked first closes the cycle at its own frame instead:
+the arm drops out of that pass, and the frame is asked again seeded with its
+last answer until it stops moving (`pass_round_loop`). The lattice is finite
+and a union widens past its arm cap, so the passes end; `MAX_LOOP_PASSES`
+guards it. Passes nest two deep (a loop in a loop); a deeper one answers
+nothing, which is sound. Completion reads the same
 joins: a local first written further down a loop's body is offered at its
 top, where a later pass carries it (`FileAnalysis::in_completion_view`).
 
@@ -236,7 +238,7 @@ its document spells them.
 
 ## Not in this tier yet
 
-Real loop fixed points (`TODO(cfg-loop-fixpoint)`), a loop condition's
+A loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
 fails), captures,
 try/catch arms, readonly-after-constructor, effects through a wrapper in
