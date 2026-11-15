@@ -500,6 +500,28 @@ pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// The pass half of the equivalence net: `shared` is a pass's output with
+/// its memo open; `control` re-runs the pass with no memo and no resolution
+/// session, so nothing the shared arm stored can answer it.
+pub(crate) fn check_pass_equiv<T: PartialEq + std::fmt::Debug>(lane: &str, shared: &T, control: impl FnOnce() -> T) {
+    let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+    let control = without_fold_memo(|| super::session::without_session(control));
+    // Without the memo a long chain re-walks its prefix and hits the depth
+    // cap where the shared pass does not; a capped control is incomplete,
+    // so it proves nothing either way.
+    if QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
+        crate::util::ghost_stats::count("fold_memo.equiv.pass_control_truncated");
+        return;
+    }
+    let agree = *shared == control;
+    crate::util::ghost_stats::count(if agree { "fold_memo.equiv.pass_agree" } else { "fold_memo.equiv.pass_differ" });
+    if !agree {
+        log::error!("fold-memo equivalence: the {lane} pass differs with the shared memo:\n shared: {shared:?}\n control: {control:?}");
+        #[cfg(test)]
+        panic!("fold-memo: the shared memo changed the {lane} pass");
+    }
+}
+
 /// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
 /// touches with the memo off and asserts the analyses agree; on a real run it
 /// checks the persist path's bake and Surface (`encode_analysis`).

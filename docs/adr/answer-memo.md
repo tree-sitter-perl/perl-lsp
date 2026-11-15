@@ -100,8 +100,12 @@ does not see.
 touches with the memo off and asserts the analyses agree, and re-asks the
 bake and the Surface at encode time with a memo open and with none
 (`without_fold_memo` sets an enclosing scope's memo aside, or the control
-would read the answers it checks). No arm yet covers a pass under a module
-index. On a
+would read the answers it checks). The two passes over a
+finished analysis — the receiver stamp and diagnostics, the latter under the
+module index — re-run with no memo and no resolution session and compare
+(`check_pass_equiv`, `fold_memo.equiv.pass_agree` / `pass_differ`); a control
+that hits the depth cap is incomplete and is skipped
+(`pass_control_truncated`). On a
 real run the encode-time check counts `fold_memo.equiv.agree` /
 `fold_memo.equiv.differ` and logs a difference; run it with
 `PERL_LSP_MINT_LINKS` both unset and set, since `OpenReason` and
