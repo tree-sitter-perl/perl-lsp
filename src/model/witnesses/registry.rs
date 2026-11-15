@@ -2770,9 +2770,9 @@ impl ReducerRegistry {
         #[cfg(test)]
         MATERIALIZE_READS.with(|c| c.set(c.get() + raw.len() as u64));
         // A gated witness holds only where control comes back from each of
-        // its gates: dropped where one does not, else read as its arm. A
-        // dropped effect arm still says the callable was looked at, so it
-        // stays as no way of ending, never as no evidence; a path its join
+        // its gates: dropped where one does not, else read as its arm. An
+        // effect arm a gate closes ends the way that gate's call does: the
+        // callable was looked at, so never no evidence; a path its join
         // speaks for nothing on, reached, silences the join.
         let gated = raw.iter().any(|w| matches!(w.payload, WitnessPayload::Gated { .. }));
         let mut opened: Vec<Option<Witness>> = Vec::with_capacity(if gated { raw.len() } else { 0 });
@@ -2782,13 +2782,11 @@ impl ReducerRegistry {
                 opened.push(None);
                 continue;
             };
-            let payload = match (self.gates_come_back(bag, q, state, gates), arm) {
-                (true, Some(a)) => Some((**a).clone()),
-                (true, None) => return Vec::new(),
-                (false, Some(a)) if matches!(**a, WitnessPayload::Effect(_)) => {
-                    Some(WitnessPayload::Effect(super::types::Effect::Ends(super::types::Ends::empty())))
-                }
-                (false, _) => None,
+            let payload = match (self.closed_gate(bag, q, state, gates), arm) {
+                (None, Some(a)) => Some((**a).clone()),
+                (None, None) => return Vec::new(),
+                (Some(ends), Some(a)) if matches!(**a, WitnessPayload::Effect(_)) => Some(WitnessPayload::Effect(super::types::Effect::Ends(ends))),
+                (Some(_), _) => None,
             };
             dropped[i] = payload.is_none();
             opened.push(payload.map(|payload| Witness { attachment: w.attachment.clone(), source: w.source.clone(), payload, span: w.span }));
@@ -3682,16 +3680,17 @@ impl ReducerRegistry {
         declared.then_some(answer)
     }
 
-    /// Whether control comes back from every call in `gates` (each its
-    /// `Expr`): no evidence about one is the top, which comes back.
-    fn gates_come_back(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, gates: &[WitnessAttachment]) -> bool {
-        gates.iter().all(|g| {
+    /// How the first call in `gates` (each its `Expr`) that control does not
+    /// come back from ends, or `None` when it comes back from all of them:
+    /// no evidence about one is the top, which comes back.
+    fn closed_gate(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, gates: &[WitnessAttachment]) -> Option<Ends> {
+        gates.iter().find_map(|g| {
             crate::util::ghost_stats::count("effect.gate");
-            let back = self.expr_ends(bag, q, state, g).is_none_or(|e| e.contains(super::types::Ends::COMPLETES));
-            if !back {
+            let ends = self.expr_ends(bag, q, state, g).filter(|e| !e.contains(super::types::Ends::COMPLETES));
+            if ends.is_some() {
                 crate::util::ghost_stats::count("effect.gate_closed");
             }
-            back
+            ends
         })
     }
 

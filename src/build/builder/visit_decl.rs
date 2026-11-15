@@ -106,6 +106,12 @@ impl<'a> Builder<'a> {
                 self.push_builtin_ends(node);
                 self.visit_function_call(node);
             }
+            // A builtin called with no arguments and no parens (`die;`): the
+            // word alone is the call. Inside a call it is the call's name,
+            // which the call states for.
+            "function" if self.syntax.parent(node).is_none_or(|p| p.child_by_field_name("function") != Some(node)) => {
+                self.push_builtin_ends(node);
+            }
             // Built-in calls: abs($x), length($s), time(), etc.
             "func1op_call_expression" | "func0op_call_expression" => {
                 self.push_builtin_ends(node);

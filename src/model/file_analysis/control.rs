@@ -36,6 +36,9 @@ pub enum ArmRole {
 pub struct Arm {
     pub span: Span,
     pub role: ArmRole,
+    /// Where its last statement ends: a construct ending there closes the
+    /// arm even when the arm's own closer (a `}`) follows it.
+    pub tail: Point,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,9 +488,10 @@ impl<'v> JoinPlan<'v> {
     /// it, the body's end past the calls it makes there ([`Self::body_ends`]).
     /// A return anywhere in it, in a nested body too, comes back: one too
     /// many only says a call may come back.
-    // TODO(effect-leaving-bits): how a body leaves through a call that does
-    // not come back (unwinds or exits) is not minted, so a pure wrapper ends
-    // in no named way; the first reader of the split is try arms (PR 13).
+    // TODO(effect-leaving-bits): a body leaving through a call that does not
+    // come back ends the way that call does, whatever catches it in between:
+    // a `die` inside an `eval` or `try` in the body still reads as leaving
+    // the body until try arms land (PR 13).
     pub fn effect_arms(&self, sid: super::SymbolId, body: Span) -> Vec<crate::model::witnesses::Witness> {
         use crate::model::witnesses::{Effect, Ends, Witness, WitnessAttachment, WitnessPayload, WitnessSource, EFFECT_ARM_SOURCE};
         let attachment = WitnessAttachment::SymbolEffects(sid);
@@ -824,7 +828,7 @@ impl<'v> JoinPlan<'v> {
     /// after it.
     fn closing(&self, c: &Construct, a: &Arm) -> Option<&'v Construct> {
         self.ends
-            .get(&a.span.end)?
+            .get(&a.tail)?
             .iter()
             .map(|&i| &self.view.constructs[i])
             .filter(|k| !std::ptr::eq(*k, c) && k.span != c.span && contains(a.span, k.span))

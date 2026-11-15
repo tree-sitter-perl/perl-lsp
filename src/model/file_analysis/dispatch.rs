@@ -1067,6 +1067,12 @@ pub struct GuardSite {
     /// Where to read the subject's prior (un-narrowed) type.
     #[serde(with = "PointDef")]
     pub before_point: Point,
+    /// For a guard on a statement (`STMT if G`, `G or STMT`), the statement:
+    /// the guard decides the rest of the block only where it does not come
+    /// back, which the effect lane says at query time. `None` for a block's
+    /// own guard.
+    #[serde(default)]
+    pub exit: Option<Span>,
 }
 
 /// A D3/D4 verdict on a recorded guard, ready for `symbols.rs` to render.

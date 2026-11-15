@@ -136,18 +136,20 @@ bitflags! { pub struct Ends: u8 { const COMPLETES = 1; const UNWINDS = 2; const 
   caller ends, is `Gated` by the calls on its path, and the registry drops
   it where one of them does not come back. In a test's region a path past
   a gate that comes back speaks for nothing, so there the region answers
-  nothing and the value coming in stands. A call to nothing the file
-  defines is no gate: it comes back, except a name the exit list still
-  spells (`TODO(cross-file-noreturn)`).
+  nothing and the value coming in stands. A builtin is a gate only where
+  the builtin table says it may not come back (`die`, `exit`); Perl's
+  `croak` and `confess` are Carp's subs, read through the index like any
+  other callee another file defines.
 - **Inference.** A callable mints how it ends from its body: each leave
   in it, any `return` anywhere in it, and its end where control reaches
   it, gated by the calls it makes there. What sits in a body nested inside
   it is the nested callable's. A body the parser could not read states
   nothing. A pack document names the bodies (`@ctl.body`) and the calls
   that are whole statements (`@ctl.gate`), and every body it names mints;
-  Perl mints the bodies its gates reach. How it leaves through a callee is not derived:
-  a body whose every way out runs into a call that does not come back has
-  no way of ending it names (`TODO(effect-leaving-bits)`).
+  Perl mints the bodies its gates reach. An arm whose path runs into a call
+  that does not come back ends the way that call does, so a wrapper round
+  `die` unwinds; a catch between the call and the body's end is not seen
+  yet (`TODO(effect-leaving-bits)`).
 - **Cycles.** A callable already on the path is assumed to have no way of
   ending; since "comes back" is inductive, the frame that asked first gets
   the exact least fixed point. An answer worked out under that assumption
@@ -186,17 +188,19 @@ in debug builds). Only an evaluation answers it: a callable whose every
 arm leaves, or a slot written only by expressions that leave, answers
 nothing. Being the identity of `join`, it drops a non-completing arm from
 every value fold (`//`, ternaries, `or return`, return arms) without any
-fold asking the effect lane. Until effects cross files, the short-circuit
-fold keeps its spelled exit flag for callees another file decides
-(`Carp::croak`).
+fold asking the effect lane. A short-circuit whose fallback can only
+leave (`$x // die`, `shift or croak`) peels to its left side the same way.
 
 ## What it retires
 
 `is_exit_expression`'s name list, PHP's name-matched `die`/`exit` calls,
 `narrow_block_remainder`, `@narrow.exit`'s region rule, #434's single-block
 `fall_through`, the `@ctl.loop` on PHP's `while`, the per-level reset markers' `Unknown`
-in `fold.rs`, and every `TODO(cfg-exit-join)`, `TODO(noreturn-callee)` and
-`TODO(cfg-loop-locals)`.
+in `fold.rs`, and every `TODO(cfg-exit-join)`, `TODO(cross-file-noreturn)` and
+`TODO(cfg-loop-locals)`. A pack's runtime functions that never return
+(`sys.exit`, `std::abort`) wait on the pack runtime-function document
+(`TODO(noreturn-callee)`); PHP's `die` and `exit` are reserved words, so
+its document spells them.
 
 ## Not in this tier yet
 

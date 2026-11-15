@@ -49,9 +49,8 @@ impl<'a> Builder<'a> {
         // time). A builtin's call states its own effect.
         let local = self.local_callables();
         let gate = |n: Node<'a>| self.gate_callee(&local, n);
-        let exits = |n: Node<'a>| narrowing::is_exit_expression(n, source);
         let mut walk = super::control::ViewWalk::default();
-        let mut gates = walk.walk(around, source, &exits, &gate);
+        let mut gates = walk.walk(around, source, &gate);
         let bodies: Vec<(SymbolId, Node<'a>)> = self
             .symbols
             .iter()
@@ -61,7 +60,7 @@ impl<'a> Builder<'a> {
         crate::util::ghost_stats::count_by("effect.bodies", bodies.len() as u64);
         for &(_, body) in &bodies {
             walk.body(node_to_span(body), !body.has_error());
-            gates.extend(walk.walk(super::control::statements_of(body), source, &exits, &gate));
+            gates.extend(walk.walk(super::control::statements_of(body), source, &gate));
         }
         let mut view = walk.finish();
         drop(local);
@@ -209,26 +208,31 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Whether a call at `node` gates what follows it: a method call, or
-    /// a plain call to a sub of this file or elsewhere, so no builtin.
+    /// Whether a call at `node` gates what follows it: a method call, a
+    /// plain call to a sub of this file or elsewhere, or a builtin the
+    /// language says does not come back (`die`, `exit`), whose call states
+    /// how it ends on itself.
     fn gate_callee(&self, local: &HashMap<String, Vec<(SymbolId, Option<String>)>>, node: Node<'a>) -> bool {
         if node.kind() == "method_call_expression" {
             return true;
         }
-        if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
-            || self.is_bless_call(node)
-            || self.indirect_method_call(node).is_some()
-        {
-            return false;
-        }
-        let Some(name) = self.forward_callee_name(node) else { return false };
+        let name = match node.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression"
+                if !self.is_bless_call(node) && self.indirect_method_call(node).is_none() =>
+            {
+                self.forward_callee_name(node)
+            }
+            "func1op_call_expression" | "func0op_call_expression" | "function" => self.builtin_call_name(node),
+            _ => None,
+        };
+        let Some(name) = name else { return false };
         let (qualifier, bare) = crate::model::file_analysis::split_qualified(&name, &crate::model::conventions::PERL_SPELLINGS);
         let here = local
             .get(bare)
             .is_some_and(|subs| subs.iter().any(|(_, pkg)| super::visit_use::qualifier_admits_local_sub(qualifier, pkg.as_deref())));
-        // A name the exit list spells still leaves where no sub of the file
-        // answers it (`TODO(cross-file-noreturn)`).
-        here || !(crate::model::builtins::is_builtin(&name) || narrowing::is_exit_expression(node, self.source))
+        here
+            || !crate::model::builtins::is_builtin(&name)
+            || crate::model::builtins::builtin_ends(&name).is_some_and(|e| !e.completes())
     }
 
     /// The body block of the sub `sid` declares, where `root`'s tree holds it.

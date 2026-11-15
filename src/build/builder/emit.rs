@@ -761,9 +761,7 @@ impl<'a> Builder<'a> {
     pub(super) fn push_builtin_ends(&mut self, node: Node<'a>) {
         use crate::model::witnesses::{Effect, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let name = match node.kind() {
-            "func1op_call_expression" | "func0op_call_expression" => {
-                node.child(0).and_then(|n| n.utf8_text(self.source).ok()).map(str::to_string)
-            }
+            "func1op_call_expression" | "func0op_call_expression" | "function" => self.builtin_call_name(node),
             _ => self.forward_callee_name(node),
         };
         let Some(ends) = name.as_deref().and_then(crate::model::builtins::builtin_ends) else { return };
@@ -774,6 +772,13 @@ impl<'a> Builder<'a> {
             payload: WitnessPayload::Effect(Effect::Ends(ends)),
             span,
         });
+    }
+
+    /// The builtin a bare-word call (`die;`, `exit 1`) names: its operator
+    /// token, which the grammar gives no field.
+    pub(super) fn builtin_call_name(&self, node: Node<'a>) -> Option<String> {
+        let token = if node.kind() == "function" { Some(node) } else { node.child(0) };
+        token.and_then(|n| n.utf8_text(self.source).ok()).map(|t| t.trim().to_string())
     }
 
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
@@ -946,26 +951,25 @@ impl<'a> Builder<'a> {
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
             span: node_to_span(lhs),
         });
-        let exits = super::narrowing::is_exit_expression(rhs, self.source);
+        // Whether the fallback leaves is its own answer (`Never`), read at
+        // query time; the fact only says this is a short-circuit.
         self.push_witness(Witness {
             attachment: arm_att.clone(),
             source: WitnessSource::Builder(tags::FACT_SHORT_CIRCUIT.into()),
             payload: WitnessPayload::Fact {
                 family: tags::FACT_SHORT_CIRCUIT.into(),
                 key: String::new(),
-                value: crate::model::witnesses::FactValue::Bool(exits),
+                value: crate::model::witnesses::FactValue::Bool(true),
             },
             span: node_to_span(rhs),
         });
-        if !exits {
-            self.emit_expr_witness(rhs);
-            self.push_witness(Witness {
-                attachment: arm_att.clone(),
-                source: WitnessSource::Builder("fallback_arm".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
-                span: node_to_span(rhs),
-            });
-        }
+        self.emit_expr_witness(rhs);
+        self.push_witness(Witness {
+            attachment: arm_att.clone(),
+            source: WitnessSource::Builder("fallback_arm".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
+            span: node_to_span(rhs),
+        });
         self.push_witness(Witness {
             attachment: WitnessAttachment::Expr(span),
             source: WitnessSource::Builder("branch_arm".into()),

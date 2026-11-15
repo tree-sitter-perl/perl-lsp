@@ -10,7 +10,7 @@ fn branch(span: Span, cond: Span, arms: &[(Span, bool)]) -> Construct {
         span,
         kind: ControlKind::Branch,
         cond: Some(cond),
-        arms: arms.iter().map(|&(span, holds)| Arm { span, role: ArmRole::When(holds) }).collect(),
+        arms: arms.iter().map(|&(span, holds)| Arm { span, role: ArmRole::When(holds), tail: span.end }).collect(),
         label: None,
     }
 }
@@ -72,7 +72,7 @@ fn a_nested_branch_leaves_its_arm_only_when_every_way_leaves() {
 }
 
 fn looped(span: Span, cond: Option<Span>, body: Span, label: Option<u32>) -> Construct {
-    Construct { span, kind: ControlKind::Loop { once: false }, cond, arms: vec![Arm { span: body, role: ArmRole::Body }], label }
+    Construct { span, kind: ControlKind::Loop { once: false }, cond, arms: vec![Arm { span: body, role: ArmRole::Body, tail: body.end }], label }
 }
 
 fn joined(plan: &JoinPlan<'_>, c: &Construct, role: JoinRole) -> Vec<Point> {

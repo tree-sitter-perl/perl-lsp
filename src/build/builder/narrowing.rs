@@ -475,34 +475,6 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
     Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true, read })
 }
 
-/// True if an expression is a guaranteed control-flow exit
-/// (`return`/`die`/`exit`/`croak`/`last`/`next`/`redo`/`goto`): it never
-/// yields a value, so `STMT if/unless G` narrows the rest of the block and
-/// `X || EXIT` is worth only `X`. The words are read by spelling, so a sub
-/// of the file's own named `croak` counts too.
-// TODO(noreturn-callee): a callee that never returns (`croak`, `confess`)
-// is an effect on the callee; replace the spelling lookup once effects and
-// the CFG exist.
-pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
-    const EXITS: [&str; 8] = ["die", "exit", "croak", "confess", "last", "next", "redo", "goto"];
-    match node.kind() {
-        "return_expression" | "last_expression" | "next_expression" | "redo_expression" => true,
-        "function" | "bareword" => node
-            .utf8_text(source)
-            .map(|s| EXITS.contains(&s.trim()))
-            .unwrap_or(false),
-        "func1op_call_expression"
-        | "function_call_expression"
-        | "ambiguous_function_call_expression" => node
-            .child_by_field_name("function")
-            .or_else(|| node.child(0))
-            .and_then(|n| n.utf8_text(source).ok())
-            .map(|s| EXITS.contains(&s.trim()))
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
 impl<'a> Builder<'a> {
     /// Classify a guard's operand into the subject it narrows: a plain
     /// scalar (`Variable`), else a part of a variable whose every
@@ -577,7 +549,7 @@ impl<'a> Builder<'a> {
             // Record the arm's own guard once (not the priors re-walked
             // for cumulative negation) — D3/D4 want each condition once.
             if let Some(c) = own_cond {
-                self.record_guard_sites(c);
+                self.record_guard_sites(c, None);
             }
             let region = node_to_span(blk);
             for (subject, op, read) in self.chain_arm_facts(own_cond.map(|c| (c, enter)), &arms[..k]) {
@@ -664,7 +636,7 @@ impl<'a> Builder<'a> {
     /// condition), and the point at which to read the subject's prior
     /// (un-narrowed) type (the condition's own location, before any
     /// narrowed region). Recognition is shared with emission.
-    fn record_guard_sites(&mut self, condition: Node<'a>) {
+    fn record_guard_sites(&mut self, condition: Node<'a>, exit: Option<Span>) {
         use crate::model::file_analysis::{GuardPredicate, GuardSite};
         let scope = self.current_scope();
         let before = condition.start_position();
@@ -686,6 +658,7 @@ impl<'a> Builder<'a> {
                 asserts_when_true: fact.asserts_when_true,
                 span: node_to_span(literal),
                 before_point: before,
+                exit,
             });
         }
     }
@@ -723,9 +696,7 @@ impl<'a> Builder<'a> {
             self.prove_untaken(subject, op, read, of);
         }
         self.seed_guard_joins(postfix, subjects);
-        if is_exit_expression(modified, self.source) {
-            self.record_guard_sites(condition);
-        }
+        self.record_guard_sites(condition, Some(node_to_span(modified)));
     }
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
@@ -799,15 +770,14 @@ impl<'a> Builder<'a> {
     }
 
     /// `G or EXIT;` / `G and EXIT;` — the bare-logical early-exit idiom
-    /// states its guard for the D3/D4 diagnostics.
+    /// states its guard for the D3/D4 diagnostics, which hold it to a right
+    /// side that does not come back.
     pub(super) fn record_logical_exit_guard(&mut self, expr: Node<'a>) {
         let (left, right) = match logical_shape(expr, self.source) {
             Some(Logical::Or(l, r) | Logical::And(l, r)) => (l, r),
             _ => return,
         };
-        if is_exit_expression(right, self.source) {
-            self.record_guard_sites(left);
-        }
+        self.record_guard_sites(left, Some(node_to_span(right)));
     }
 
     /// A deref observes its operand as the reference its sigil names:

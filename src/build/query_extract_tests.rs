@@ -4291,6 +4291,16 @@ fn php_a_call_to_a_throwing_function_reaches_no_join() {
     assert!(matches!(past_a_gated_write("/x/g.php", &src("log();"), "x", 5), Some(T::Union(_))), "a function that comes back");
 }
 
+/// An arm ending in a chain whose every arm leaves comes out nowhere, though
+/// the arm's own `}` follows the chain's.
+#[cfg(feature = "php")]
+#[test]
+fn php_an_arm_closed_by_a_chain_that_leaves_reaches_no_join() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php\nfunction fatal() { throw new E(); }\nfunction f($c, $d) {\n$x = 1;\nif ($c) { $x = 's'; if ($d) { return; } else { fatal(); } }\n$y = $x;\n}\n";
+    assert_eq!(past_a_gated_write("/x/n.php", src, "x", 5), Some(T::Numeric));
+}
+
 #[cfg(feature = "cpp")]
 #[test]
 fn cpp_a_call_to_a_throwing_function_reaches_no_join() {

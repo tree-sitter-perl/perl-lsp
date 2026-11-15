@@ -576,8 +576,8 @@ impl WitnessReducer for BranchArmFold {
         // a distinct source at emission so this fold can prefer them.
         let mut fallback: Vec<InferredType> = Vec::new();
         let mut undef_arms = 0usize;
-        // `Some(exits)` for a short-circuit, whether or not its arms typed.
-        let mut short_circuit: Option<bool> = None;
+        // Whether this is a short-circuit, whether or not its arms typed.
+        let mut short_circuit = false;
         for w in ws {
             let is_fallback =
                 matches!(&w.source, WitnessSource::Builder(t) if t == "fallback_arm");
@@ -585,20 +585,16 @@ impl WitnessReducer for BranchArmFold {
                 WitnessPayload::InferredType(t) if is_fallback => fallback.push(t.clone()),
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
                 WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
-                WitnessPayload::Fact { family, value, .. } if family == tags::FACT_SHORT_CIRCUIT => {
-                    short_circuit = Some(matches!(value, FactValue::Bool(true)));
-                }
+                WitnessPayload::Fact { family, .. } if family == tags::FACT_SHORT_CIRCUIT => short_circuit = true,
                 _ => {}
             }
         }
-        // TODO(noreturn-callee): the spelled exit flag stands in for callees
-        // whose effect is decided in another file (`Carp::croak`); it goes
-        // with `is_exit_expression` once effects cross files.
-        if let Some(exits) = short_circuit {
-            // `X || return`: when the fallback runs nothing is assigned, so
-            // the value is `X` minus its false part — an `Optional` peels,
-            // and a plain `undef` never gets past the exit.
-            if exits {
+        if short_circuit {
+            // `X || return`: a fallback that never comes back (`Never`)
+            // assigns nothing when it runs, so the value is `X` minus its
+            // false part — an `Optional` peels, and a plain `undef` never
+            // gets past the exit.
+            if !fallback.is_empty() && fallback.iter().all(InferredType::is_never) {
                 return match typed.first().and_then(InferredType::defined_part) {
                     Some(t) => ReducedValue::Type(t.clone()),
                     None => ReducedValue::None,

@@ -312,8 +312,8 @@
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
 ; (`query_extract/extract/narrowing.rs`).
-; TODO(noreturn-callee): `sys.exit()` leaves too. A callee that never
-; returns is an effect on the callee; mark it once effects and the CFG exist.
+; TODO(noreturn-callee): `sys.exit()` leaves too: an effect on the callee,
+; minted from the pack's runtime-function document once one exists.
 (return_statement) @ctl.leave.return
 (raise_statement) @ctl.leave.throw
 (continue_statement) @ctl.leave.continue

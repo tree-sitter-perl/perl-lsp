@@ -1080,8 +1080,8 @@
 ; whether a chain of arms falls through follows from its arms' statements
 ; (`query_extract/extract/narrowing.rs`).
 ; TODO(noreturn-callee): `std::abort()`, `exit()` and a `[[noreturn]]`
-; function leave too. A callee that never returns is an effect on the
-; callee; mark it once effects and the CFG exist.
+; function leave too: an effect on the callee, minted from the pack's
+; runtime-function document (and the declaration) once one exists.
 [(return_statement) (co_return_statement)] @ctl.leave.return
 (throw_statement) @ctl.leave.throw
 (continue_statement) @ctl.leave.continue

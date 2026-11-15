@@ -5,7 +5,7 @@
 use crate::build::query_extract::{Capture, CtlCap};
 use crate::model::file_analysis::{Arm, ArmRole, CallableBody, Construct, ControlKind, ControlView, Leave, LeaveKind, LeaveTarget, Span};
 use std::collections::HashMap;
-use tree_sitter::{Node, Query};
+use tree_sitter::{Node, Point, Query};
 
 static CTL_SCM: &str = include_str!("../../../queries/perl/ctl.scm");
 
@@ -37,7 +37,7 @@ pub(super) fn ctl_query() -> (&'static Query, &'static [CtlCap]) {
 /// needs its text. Arms group by the construct their pattern captures, so
 /// a construct several patterns describe (an `if` with an `else`) is one
 /// construct. Every language's document reads through this one grouping.
-pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, usize, Span, &'s str)>>) -> ControlView {
+pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, usize, Span, &'s str, Point)>>) -> ControlView {
     let mut view = ControlView::default();
     let mut by_node: HashMap<usize, usize> = HashMap::new();
     let label = |view: &mut ControlView, text: &str| -> u32 {
@@ -50,7 +50,7 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
         }
     };
     for m in matches {
-        let construct = m.iter().find_map(|&(cap, id, span, _)| {
+        let construct = m.iter().find_map(|&(cap, id, span, _, _)| {
             let kind = match cap {
                 CtlCap::Branch => ControlKind::Branch,
                 CtlCap::Loop => ControlKind::Loop { once: false },
@@ -62,12 +62,12 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
             Some((id, span, kind))
         });
         let Some((node, at, kind)) = construct else {
-            let target = m.iter().find_map(|&(cap, _, _, text)| match cap {
+            let target = m.iter().find_map(|&(cap, _, _, text, _)| match cap {
                 CtlCap::Label => Some(LeaveTarget::Label(label(&mut view, text))),
                 CtlCap::Levels => text.trim().parse().ok().map(LeaveTarget::Levels),
                 _ => None,
             });
-            for &(cap, _, span, _) in &m {
+            for &(cap, _, span, _, _) in &m {
                 match cap {
                     CtlCap::Body => view.bodies.push(CallableBody { span, readable: true }),
                     CtlCap::Gate => view.gates.push(span),
@@ -88,7 +88,7 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
         if kind == (ControlKind::Loop { once: true }) {
             view.constructs[ix].kind = kind;
         }
-        for &(cap, _, span, text) in &m {
+        for &(cap, _, span, text, tail) in &m {
             let role = match cap {
                 CtlCap::Cond => {
                     view.constructs[ix].cond.get_or_insert(span);
@@ -105,7 +105,7 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
                 CtlCap::LoopStep => ArmRole::Step,
                 _ => continue,
             };
-            let arm = Arm { span, role };
+            let arm = Arm { span, role, tail };
             let c = &mut view.constructs[ix];
             if !c.arms.contains(&arm) {
                 c.arms.push(arm);
@@ -117,27 +117,33 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
 }
 
 /// One match's captures as [`control_view`] reads them.
-fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: &'s [u8]) -> Vec<(CtlCap, usize, Span, &'s str)> {
+fn captured<'t, 's>(caps: impl IntoIterator<Item = (CtlCap, Node<'t>)>, source: &'s [u8]) -> Vec<(CtlCap, usize, Span, &'s str, Point)> {
     caps.into_iter()
         .map(|(c, n)| {
+            use crate::cst::NodeExt;
+            let span = super::node_to_span(n);
+            let tail = match n.kind() {
+                "block" => n.elements().last().map_or(span.end, |s| s.end_position()),
+                _ => span.end,
+            };
             let text = match c {
                 CtlCap::Label | CtlCap::Levels => n.utf8_text(source).unwrap_or(""),
                 _ => "",
             };
-            (c, n.id(), super::node_to_span(n), text)
+            (c, n.id(), span, text, tail)
         })
         .collect()
 }
 
-/// One walk's view (`ViewWalk::walk`) with no gates.
+/// One walk's view (`ViewWalk::walk`), `gate` naming its gates.
 #[cfg(test)]
-pub(super) fn control_view_with_leaves<'t>(
+pub(super) fn control_view_with_gates<'t>(
     nodes: impl IntoIterator<Item = Node<'t>>,
     source: &[u8],
-    exits: impl Fn(Node<'t>) -> bool,
+    gate: impl Fn(Node<'t>) -> bool,
 ) -> ControlView {
     let mut walk = ViewWalk::default();
-    walk.walk(nodes, source, &exits, &|_| false);
+    walk.walk(nodes, source, &gate);
     walk.finish()
 }
 
@@ -146,7 +152,7 @@ pub(super) fn control_view_with_leaves<'t>(
 /// gates call, each walk adding what it finds.
 #[derive(Default)]
 pub(super) struct ViewWalk<'s> {
-    out: Vec<Vec<(CtlCap, usize, Span, &'s str)>>,
+    out: Vec<Vec<(CtlCap, usize, Span, &'s str, Point)>>,
     seen: std::collections::HashSet<usize>,
     gates: Vec<Span>,
     bodies: Vec<CallableBody>,
@@ -158,16 +164,12 @@ impl<'s> ViewWalk<'s> {
     /// what decides whether an arm comes out at its end, and where a loop's
     /// `last` and `next` land. Each node is tried as a match's root and
     /// nothing below it starts one, so the cost is the nodes' own, not the
-    /// file's. `exits(node)` names a call that leaves by its callee's
-    /// nature (`TODO(cross-file-noreturn)`). A statement `gate` names is a
-    /// call control comes back from only if its callee does
-    /// ([`ControlView::gates`]); it is returned, and is no leave whatever
-    /// `exits` says.
+    /// file's. A statement `gate` names is a call control comes back from
+    /// only if its callee does ([`ControlView::gates`]); it is returned.
     pub(super) fn walk<'t>(
         &mut self,
         nodes: impl IntoIterator<Item = Node<'t>>,
         source: &'s [u8],
-        exits: &dyn Fn(Node<'t>) -> bool,
         gate: &dyn Fn(Node<'t>) -> bool,
     ) -> Vec<Node<'t>> {
         use tree_sitter::StreamingIterator;
@@ -180,17 +182,12 @@ impl<'s> ViewWalk<'s> {
             if !self.seen.insert(node.id()) {
                 continue;
             }
-            let gated = gate(node);
-            if gated {
+            if gate(node) {
                 self.gates.push(super::node_to_span(node));
                 gates.push(node);
             }
-            // A leave the document names is that leave; `exits` adds only
-            // what it does not name.
-            let mut named = false;
             let mut it = cursor.matches(query, node, source);
             while let Some(m) = it.next() {
-                named |= m.captures.iter().any(|c| c.node.id() == node.id() && caps[c.index as usize].is_leave());
                 for c in m.captures.iter() {
                     if !matches!(caps[c.index as usize], CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep) {
                         continue;
@@ -202,9 +199,6 @@ impl<'s> ViewWalk<'s> {
                     }
                 }
                 self.out.push(captured(m.captures.iter().map(|c| (caps[c.index as usize], c.node)), source));
-            }
-            if !gated && !named && exits(node) {
-                self.out.push(vec![(CtlCap::LeaveThrow, node.id(), super::node_to_span(node), "")]);
             }
         }
         gates

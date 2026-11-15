@@ -192,7 +192,7 @@ fn the_view_around_the_writes_holds_what_the_whole_view_does() {
                     n = x.parent();
                 }
             }
-            let around = control_view_with_leaves(nodes, source.as_bytes(), |_| false);
+            let around = control_view_with_gates(nodes, source.as_bytes(), |_| false);
             for w in writes {
                 let held = |v: &ControlView| {
                     let mut out: Vec<_> = v
@@ -236,15 +236,17 @@ fn constructs_carry_their_roles_and_leaves_their_kinds() {
 }
 
 /// From a construct, the view reaches the statements its arms run, a loop's
-/// body among them, down to the ones that leave.
+/// body among them, down to the ones that leave and the calls that gate.
 #[test]
 fn the_view_from_a_construct_reaches_the_leaves_in_its_arms() {
     let source = "if ($c) { foo(); return 1 if $d; die 'x'; } else { for (@l) { last } }\n";
     let tree = parse(source);
     let stmt = tree.root_node().named_child(0).unwrap();
-    let view = control_view_with_leaves([stmt], source.as_bytes(), |n| n.kind() == "ambiguous_function_call_expression");
+    let view = control_view_with_gates([stmt], source.as_bytes(), |n| n.kind() == "ambiguous_function_call_expression");
     let mut leaves: Vec<_> = view.leaves.iter().map(|l| (l.kind, &source[l.span.start.column..l.span.end.column])).collect();
     leaves.sort_by_key(|(_, t)| *t);
-    assert_eq!(leaves, vec![(LeaveKind::Throw, "die 'x'"), (LeaveKind::Break, "last"), (LeaveKind::Return, "return 1")]);
+    assert_eq!(leaves, vec![(LeaveKind::Break, "last"), (LeaveKind::Return, "return 1")]);
+    let gates: Vec<_> = view.gates.iter().map(|g| &source[g.start.column..g.end.column]).collect();
+    assert_eq!(gates, vec!["die 'x'"]);
     assert_eq!(view.constructs.len(), 3, "the `if`, the postfix `if`, and the loop: {view:?}");
 }

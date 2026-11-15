@@ -315,9 +315,8 @@ What a test proves reaches past its construct through the construct's
 join (`docs/adr/cfg-tier.md`), never through a region of its own. An arm
 control never comes out of is no way into the join: one holding a
 statement that leaves with no arm between them (`@ctl.leave.*`, or a call
-`is_exit_expression` names until the effect lane decides calls,
-`TODO(cross-file-noreturn)`), or one holding a chain with an `else` whose
-every arm leaves. The path on which no arm runs (the implicit `else`, the
+the effect lane says does not come back), or one holding a chain with an
+`else` whose every arm leaves. The path on which no arm runs (the implicit `else`, the
 statement a modifier skips, the right side a short-circuit skips) carries
 what the test proves there, sited where the test leaves control: the
 first arm where its block is entered, an `elsif` where its own guard
@@ -367,7 +366,7 @@ no further than the end of the node the construct runs in, so a test in
 a loop's body or a `try` says nothing past it. A comment is no statement, so where it sits does not matter. A
 call that never returns by its callee's nature (`sys.exit()`,
 `std::abort()`, `[[noreturn]]`) is an effect on the callee, to mark once
-effects and the CFG exist (`TODO(noreturn-callee)`). An
+the pack's runtime-function document exists (`TODO(noreturn-callee)`). An
 atom climbs to each condition above it through connectives alone (an
 atom inside a call argument is no part of the condition), and the
 connectives on the way decide its value in each of the condition's

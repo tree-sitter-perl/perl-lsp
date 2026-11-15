@@ -521,8 +521,6 @@
 ; calls by the grammar's reading (`die;` a bare name), and the language
 ; reserves both words, so their spelling names them, from the global
 ; namespace too (`\exit(1)`).
-; TODO(noreturn-callee): a callee that never returns is an effect on the
-; callee; replace the spelling lookup once effects and the CFG exist.
 (return_statement) @ctl.leave.return
 (continue_statement (integer)? @ctl.levels) @ctl.leave.continue
 (break_statement (integer)? @ctl.levels) @ctl.leave.break

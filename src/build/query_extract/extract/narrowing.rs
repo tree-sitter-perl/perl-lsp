@@ -222,7 +222,7 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
     };
     let mut returns = Vec::new();
     let mut unread = Vec::new();
-    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span, &str)>> = Default::default();
+    let mut by_match: std::collections::BTreeMap<usize, Vec<(CtlCap, usize, Span, &str, tree_sitter::Point)>> = Default::default();
     for e in ad.events() {
         if let Capture::Ctl(c) = e.cap {
             if c == CtlCap::LeaveReturn {
@@ -241,7 +241,11 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
             if !placed {
                 continue;
             }
-            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span(), &e.text));
+            let tail = match c {
+                CtlCap::Then | CtlCap::Else | CtlCap::LoopBody | CtlCap::LoopStep => statements(ad.tree, ad.tree.node(e.site)).last().map_or(e.span().end, |s| s.ts().end_position()),
+                _ => e.span().end,
+            };
+            by_match.entry(e.match_id).or_default().push((c, e.site.index(), e.span(), &e.text, tail));
         }
     }
     let mut view = crate::build::builder::control::control_view(by_match.into_values());
