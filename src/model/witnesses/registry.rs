@@ -693,9 +693,9 @@ fn fold_memo_insert(stamp: &FoldMemoStamp, fk: FoldMemoKey, answer: MemoAnswer, 
                 memo.bytes = 0;
             }
             crate::util::ghost_stats::count("fold_memo.store");
-            if memo.answers.insert(fk, (answer, std::sync::Arc::clone(effect))).is_none() {
-                memo.bytes += charge;
-            }
+            let replaced = memo.answers.insert(fk.clone(), (answer, std::sync::Arc::clone(effect)));
+            let freed = replaced.map_or(0, |(old, old_effect)| fold_memo_entry_bytes(&fk, &old, &old_effect));
+            memo.bytes = memo.bytes + charge - freed;
         }
     });
 }
@@ -751,16 +751,23 @@ fn slot_owners_lookup(bag: &WitnessBag, q: &ReducerQuery, bucket: &WitnessAttach
 
 /// Mark `fk`'s root query in flight while `build` runs.
 fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
-    FOLD_MEMO.with(|m| m.borrow_mut().as_mut().map(|memo| memo.in_flight.push(fk.clone())));
-    let out = build();
-    FOLD_MEMO.with(|m| {
-        if let Some(memo) = m.borrow_mut().as_mut() {
-            if let Some(at) = memo.in_flight.iter().rposition(|k| k == fk) {
-                memo.in_flight.remove(at);
-            }
+    // Taken off on unwind too: a per-file `catch_unwind` keeps the thread,
+    // and a key left in flight would never be shared again.
+    struct Landed<'k>(&'k FoldMemoKey);
+    impl Drop for Landed<'_> {
+        fn drop(&mut self) {
+            FOLD_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    if let Some(at) = memo.in_flight.iter().rposition(|k| k == self.0) {
+                        memo.in_flight.remove(at);
+                    }
+                }
+            });
         }
-    });
-    out
+    }
+    FOLD_MEMO.with(|m| m.borrow_mut().as_mut().map(|memo| memo.in_flight.push(fk.clone())));
+    let _landed = Landed(fk);
+    build()
 }
 
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
@@ -1353,16 +1360,6 @@ impl ReducerRegistry {
         self.reducers.push(r);
     }
 
-    /// Query the registry for the first reducer returning a non-`None`
-    /// value. Edge materialization runs first: `Edge(target)` witnesses
-    /// on the queried attachment are chased via recursive query and
-    /// replaced by synthetic `InferredType` witnesses (preserving source
-    /// + span) before reducers see the list, so edges compose with
-    /// existing reducers without reducer-side awareness.
-    ///
-    /// The cycle guard is threaded across both edge chases (within one
-    /// bag) and the inheritance fallback (which crosses bags), closing
-    /// mutual-inheritance loops that span files.
     /// `query`, plus the chase's residuals when it can be expressed as an
     /// ordered `Link`.
     ///
@@ -1386,11 +1383,28 @@ impl ReducerRegistry {
         (out, Some(rungs))
     }
 
+    /// Query the registry for the first reducer returning a non-`None`
+    /// value. Edge materialization runs first: `Edge(target)` witnesses
+    /// on the queried attachment are chased via recursive query and
+    /// replaced by synthetic `InferredType` witnesses (preserving source
+    /// + span) before reducers see the list, so edges compose with
+    /// existing reducers without reducer-side awareness.
+    ///
+    /// The cycle guard is threaded across both edge chases (within one
+    /// bag) and the inheritance fallback (which crosses bags), closing
+    /// mutual-inheritance loops that span files.
     pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
         self.query_effect(bag, q).0
     }
 
     fn query_effect(&self, bag: &WitnessBag, q: &ReducerQuery) -> (ReducedValue, Effect) {
+        // A query with no scope open answers through one of its own, so a
+        // slot read resolves the bucket's owners by the same index a scoped
+        // query does: an index-free answer does not depend on where it is asked.
+        let _own_scope = (q.context.and_then(|ctx| ctx.module_index).is_none()
+            && FOLD_MEMO.with(|m| m.borrow().is_none())
+            && !build_memos_disabled())
+        .then(FoldMemoScope::enter);
         let mut state = QueryState::new();
         // Is the CONCLUSION LAYER CLOSED for the shape that dominates
         // cross-file traffic? A `Member` answer that never reads an
@@ -2775,7 +2789,8 @@ impl ReducerRegistry {
 
     /// Resolve every write's object in the bucket once, from a fresh query:
     /// what a write's object is does not depend on which owner asks.
-    /// `settled` is false when a chase was cut by a cycle that closed above it.
+    /// `settled` is false when the depth cap cut a chase beneath it (a fresh
+    /// state has no frame above for a cycle to close at).
     fn slot_owners(
         &self,
         bag: &WitnessBag,
