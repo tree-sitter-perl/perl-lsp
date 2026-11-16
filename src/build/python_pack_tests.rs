@@ -1933,6 +1933,10 @@ fn every_call_on_a_long_chain_gets_a_receiver() {
 /// about twice as much; re-walking the prefix per call would be four times.
 #[test]
 fn a_build_stamp_reduces_each_link_once() {
+    // The equivalence net re-runs every pass with no memo; a cost pin counts both.
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        return;
+    }
     let cost = |links| {
         let src = python_chain(links);
         let before = crate::model::witnesses::query_rec_bodies();

@@ -439,19 +439,20 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
     };
     let att = WitnessAttachment::returns_of(class.to_string(), name.to_string());
     let _bake = BakeScope::enter();
-    let _ = registry.query(
-        &fa.witnesses,
-        &ReducerQuery {
-            attachment: &att,
-            point: None,
-            framework: FrameworkFact::Plain,
-            arity_hint: None,
-            receiver: None,
-            args: Vec::new(),
-            context: Some(&ctx),
-        },
-    );
-    registry.residuals_of_last_query()
+    registry
+        .query_with_residuals(
+            &fa.witnesses,
+            &ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint: None,
+                receiver: None,
+                args: Vec::new(),
+                context: Some(&ctx),
+            },
+        )
+        .1
 }
 
 /// An exit reached through a CALL frame must not be residualized.
@@ -732,4 +733,79 @@ fn the_evaluated_surface_does_not_depend_on_map_iteration_order() {
         "the same keys inserted in a different order must evaluate to the same \
          surface, or the driver's diff never converges"
     );
+}
+
+/// The residuals of each query in `asks`, asked in order inside one fold-memo
+/// scope, so every ask after the first can be served from what the earlier
+/// ones stored.
+fn residuals_sharing_memo(fa: &FileAnalysis, asks: &[(&str, &str)]) -> Vec<Option<Vec<ConclusionKey>>> {
+    let _scope = crate::model::witnesses::FoldMemoScope::enter();
+    asks.iter().map(|(class, name)| residuals_for(fa, class, name)).collect()
+}
+
+/// A memo hit records what computing the subtree recorded: shared answers
+/// must leave every ask's residuals exactly as a fresh chase leaves them,
+/// whether the hit is reached transparently or under a combining frame.
+///
+/// Base-verify by making `QueryState::replay` a no-op: the repeated parent
+/// walk loses its rung, and the call frame that re-reaches it stops poisoning.
+#[test]
+fn memo_hits_replay_the_residuals_they_skip() {
+    let fa = analyze(
+        "package B;\nour @ISA = ('Elsewhere::Base');\nsub mk { return B->new->inherited }\nsub new { bless {}, shift }\n1;\n",
+    );
+    let asks = [("B", "inherited"), ("B", "inherited"), ("B", "mk"), ("B", "inherited")];
+    let fresh: Vec<_> = asks.iter().map(|(c, n)| residuals_for(&fa, c, n)).collect();
+    assert!(fresh[0].is_some(), "control: the parent walk records a rung; got {:?}", fresh[0]);
+    assert_eq!(fresh[2], None, "control: the call frame poisons the rung beneath it");
+    assert_eq!(residuals_sharing_memo(&fa, &asks), fresh, "a memo hit changed what the bake records");
+}
+
+/// What `Member{class, name}` returns asked under `receiver`.
+fn returns_under(fa: &FileAnalysis, class: &str, name: &str, receiver: &str) -> ReducedValue {
+    let registry = ReducerRegistry::with_defaults();
+    let ctx = crate::model::witnesses::reducers::BagContext {
+        scopes: &fa.scopes,
+        symbols: fa.symbols(),
+        package_framework: &fa.packages,
+        module_index: None,
+        package_parents: &fa.packages,
+        app_surface_consumers: &fa.plugin.app_surface_consumers,
+        lattice: crate::model::conventions::lattice_for(&fa.language),
+        member_spaces: crate::model::conventions::member_spaces_for(&fa.language),
+    };
+    let att = WitnessAttachment::returns_of(class.to_string(), name.to_string());
+    registry.query(
+        &fa.witnesses,
+        &ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: None,
+            receiver: Some(crate::model::file_analysis::InferredType::ClassName(receiver.to_string())),
+            args: Vec::new(),
+            context: Some(&ctx),
+        },
+    )
+}
+
+/// The memo files an answer under the receiver it was asked with, so one
+/// receiver's answer never serves another. Asked in both orders, so whichever
+/// receiver computes first, the other gets its own answer.
+#[test]
+fn a_memo_answer_stays_its_own_receivers() {
+    let fa = analyze(
+        "package Base;\nsub new { my $class = shift; return bless {}, $class }\nsub conn { return My::Conn->new }\n\
+         package P1;\nour @ISA = ('Base');\npackage P2;\nour @ISA = ('Base');\n1;\n",
+    );
+    let class = |c: &str| ReducedValue::Type(crate::model::file_analysis::InferredType::ClassName(c.into()));
+    assert_eq!(returns_under(&fa, "P1", "new", "P1"), class("P1"), "control: the inherited constructor answers its receiver");
+    let conn = returns_under(&fa, "Base", "conn", "Base");
+    for order in [["P1", "P2"], ["P2", "P1"]] {
+        let _scope = crate::model::witnesses::FoldMemoScope::enter();
+        for r in order {
+            assert_eq!(returns_under(&fa, r, "new", r), class(r), "a shared answer leaked across receivers ({order:?})");
+            assert_eq!(returns_under(&fa, r, "conn", r), conn);
+        }
+    }
 }

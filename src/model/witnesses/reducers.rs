@@ -1151,9 +1151,7 @@ pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<Infe
         ReturnExpr::Arg(i) => q.args.get(*i as usize).cloned(),
         // The registry resolves `Of` before reducing; one left here had no answer.
         ReturnExpr::Of(_) => None,
-        ReturnExpr::ReceiverOr(fallback) => {
-            Some(q.receiver.clone().unwrap_or_else(|| fallback.clone()))
-        }
+        ReturnExpr::ReceiverOr(fallback) => Some(q.receiver.clone().unwrap_or_else(|| fallback.clone())),
         ReturnExpr::Operator(op) => match op {
             ParametricOp::RowOf(inner) => {
                 // Project eagerly: `RowOf` only has meaning over a

@@ -2506,7 +2506,8 @@ fn constructor_slot_write_through_an_inherited_new_types_the_read() {
 
 /// Deterministic cost pin: every class's read of a key the build filed
 /// unowned needs the objects of the same writes. Resolving them once per
-/// bucket keeps a pass of N reads linear; per read it is N chases each.
+/// bucket keeps a pass (`query_pass`) of N reads linear; per read it is N
+/// chases each.
 #[test]
 fn reads_of_a_filed_key_resolve_its_writes_once() {
     use crate::model::witnesses::{fold_memo_equiv_enabled, live_window_equiv_enabled, materialize_reads};
@@ -2521,6 +2522,7 @@ fn reads_of_a_filed_key_resolve_its_writes_once() {
             ));
         }
         let fa = build_fa_from_source(&src);
+        let _pass = fa.query_pass(None);
         let before = materialize_reads();
         for i in 0..classes {
             let at = crate::model::witnesses::ReadPoint::position(Point { row: 5 * i + 4, column: 0 });
@@ -2530,6 +2532,26 @@ fn reads_of_a_filed_key_resolve_its_writes_once() {
     };
     let (short, long) = (cost(40), cost(80));
     assert!(long < short * 3, "40 classes read {short} witnesses, 80 read {long}: superlinear");
+}
+
+/// A slot read answers alike with and without a scope open. A bucket whose
+/// own objects read the slot (`$o->{next}{next} = ...`) is where a chase on
+/// the reader's path, cut by its cycle guard, would drop a write the shared
+/// index keeps.
+#[test]
+fn a_slot_read_answers_alike_with_and_without_a_scope() {
+    let fa = build_fa_from_source(
+        "package Node;\nsub new { bless {}, shift }\nsub make { Node->new }\nsub link {\n    my ($self, $other) = @_;\n    my $o = make();\n    $o->{next} = Node->new;\n    $o->{next}{next} = Other->new;\n    $self->{next}{next} = $other;\n}\nsub go {\n    my ($self) = @_;\n    my $x = $self->{next};\n    my $y = $x->{next};\n}\n1;\n",
+    );
+    let mut bare = Vec::new();
+    for (v, row) in [("$x", 13), ("$y", 14)] {
+        bare.push(fa.inferred_type_via_bag_ctx(v, crate::model::witnesses::ReadPoint::position(Point { row, column: 0 }), None));
+    }
+    let scoped: Vec<_> = {
+        let _pass = fa.query_pass(None);
+        [("$x", 13), ("$y", 14)].iter().map(|(v, row)| fa.inferred_type_via_bag_ctx(v, crate::model::witnesses::ReadPoint::position(Point { row: *row, column: 0 }), None)).collect()
+    };
+    assert_eq!(bare, scoped);
 }
 
 #[test]
