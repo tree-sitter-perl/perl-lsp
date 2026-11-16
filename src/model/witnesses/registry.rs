@@ -974,6 +974,15 @@ impl QueryState {
         self.fan_out_memo.extend(aside.fan_outs);
     }
 
+    /// A pass refused for depth: what the frame answers then depends on the
+    /// passes open around it, so its answer is cut at the outermost of them
+    /// and never remembered as the key's own.
+    fn refuse_pass(&mut self) {
+        if let Some(&outermost) = self.join_seeds.keys().chain(self.frame_seeds.keys()).min() {
+            self.close_cut_at(outermost);
+        }
+    }
+
     /// How many passes round a loop are open on the path.
     fn passes_open(&self) -> usize {
         self.join_seeds.len() + self.frame_seeds.len()
@@ -1743,6 +1752,7 @@ impl ReducerRegistry {
         }
         if state.passes_open() >= MAX_PASS_NESTING {
             crate::util::ghost_stats::count("frame.recurrence_too_deep");
+            state.refuse_pass();
             return no_answer(q);
         }
         let ReducedValue::Type(mut seed) = first else { return first };
@@ -3883,6 +3893,9 @@ impl ReducerRegistry {
             None => {
                 for &(_, _, cut) in &recurring {
                     state.close_cut_at(cut);
+                }
+                if state.passes_open() >= MAX_PASS_NESTING {
+                    state.refuse_pass();
                 }
                 recurring.iter().map(|_| None).collect()
             }
