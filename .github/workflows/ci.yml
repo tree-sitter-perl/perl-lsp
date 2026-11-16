@@ -67,17 +67,20 @@ jobs:
       - name: Build
         run: cargo build --features cpp,php,python
 
+      # Every test runs once. The plain run is what everyone runs locally, so a
+      # test that reaches a pack language through the driver without its
+      # `#[cfg(feature = "<lang>")]` gate fails here, on its own PR. The featured
+      # run then adds only the tests the features compile in: the plain list is
+      # a subset of the featured one, so the difference is exactly the gated set.
       - name: Test
-        run: cargo test --features cpp,php,python
-
-      # A plain `cargo test` is what everyone runs locally. A test that reaches
-      # a pack language through the driver needs that language's feature, so
-      # one left ungated passes the step above and fails here. Gate it with
-      # `#[cfg(feature = "<lang>")]`. Main only: a second full test build on
-      # every PR push costs more than catching the miss one merge late.
-      - name: Test without language features
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo test
+
+      - name: Test the feature-gated tests
+        run: |
+          list() { cargo test -q "$@" -- --list --format terse | sed -n 's/: test$//p' | sort -u; }
+          list > "$RUNNER_TEMP/plain.txt"
+          list --features cpp,php,python > "$RUNNER_TEMP/featured.txt"
+          cargo test --features cpp,php,python -- --exact $(comm -13 "$RUNNER_TEMP/plain.txt" "$RUNNER_TEMP/featured.txt")
 
   e2e-tests:
     name: E2E tests (headless nvim)
