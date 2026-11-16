@@ -4705,7 +4705,6 @@ fn defines_member_here(bag: &WitnessBag, owner: &str, space: crate::model::file_
     })
 }
 
-/// Whether `att` states of itself an effect that never completes.
 /// Whether the latest write before `q`'s point left its place bound to
 /// nothing (`WitnessPayload::Unbind`, pushed after its write's `Reset`).
 fn unbound_at(bag: &WitnessBag, q: &ReducerQuery) -> bool {
@@ -4726,6 +4725,7 @@ fn unbound_at(bag: &WitnessBag, q: &ReducerQuery) -> bool {
     latest.is_some_and(|(_, u)| u)
 }
 
+/// Whether `att` states of itself an effect that never completes.
 fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
     let mut stated: Option<super::types::Ends> = None;
     for w in bag.iter_attachment(att) {
