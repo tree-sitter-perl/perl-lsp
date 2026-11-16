@@ -165,7 +165,7 @@ fn a_sub_another_file_defines_ends_as_that_file_says() {
     let optional = Some(InferredType::Optional(Box::new(foo.clone())));
     let idx = ModuleIndex::new_for_test();
     let path = std::path::PathBuf::from("/tmp/Util.pm");
-    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(idx));
+    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point::new(6, 0)), Some(idx));
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 0)), optional, "with no index the call may come back");
     idx.register_workspace_module(path.clone(), Arc::new(build_fa(&provider("die @_"))));
     assert_eq!(at(&idx), Some(foo), "the provider's `fatal` dies");
@@ -223,7 +223,7 @@ fn a_method_another_file_defines_ends_as_that_file_says() {
     let foo = InferredType::ClassName("Foo".into());
     let optional = Some(InferredType::Optional(Box::new(foo.clone())));
     let idx = ModuleIndex::new_for_test();
-    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(idx));
+    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point::new(6, 0)), Some(idx));
     idx.register_workspace_module("/tmp/Base.pm".into(), Arc::new(build_fa("package Base;\nsub fail { die $_[1] }\n1;\n")));
     assert_eq!(at(&idx), Some(foo), "Base::fail dies");
     idx.register_workspace_module(
@@ -247,5 +247,5 @@ fn a_name_one_package_of_a_file_returns_from_keeps_its_gate_open() {
         "/tmp/Util.pm".into(),
         Arc::new(build_fa("package Util;\nuse Exporter 'import';\nour @EXPORT = ('fatal');\nsub fatal { die @_ }\npackage Util::Soft;\nsub fatal { warn @_ }\n1;\n")),
     );
-    assert_eq!(fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(&idx)), optional);
+    assert_eq!(fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point::new(6, 0)), Some(&idx)), optional);
 }

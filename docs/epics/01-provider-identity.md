@@ -1,8 +1,11 @@
 # Epic 1 — Provider identity: retire the single-winner assumption
 
-> **Status:** scheduled, FIRST. This is a class of confidently-wrong
-> answers, not a class of misses, which is why it outranks every
-> feature epic on the slate.
+> **Status:** partly landed (audited 2026-11-12). Phase A (the
+> `pkgid-*` rows, all `gold` now), Phase B.2 (`parents_cached` unions
+> every provider) and Phase E (the `@INC` multi-provider tier, PR #122)
+> are done. Open: Phase B.1 and B.3, then Phases C–D — the residual
+> consumer conversion. It is a class of confidently-wrong answers, not a
+> class of misses, which is why it outranks the feature epics.
 > **Design owner-docs:** `docs/open-problems.md` §"Duplicate-package
 > resolution", the commit message of `b32814a0` (the relation's own
 > rationale), and `docs/adr/file-store-and-resolve.md` +
@@ -22,8 +25,9 @@ path — derived, never inserted, which is what killed the order
 dependence), `rebuild_name_registration` is the one mutation seam, and
 gold rows `pkgid-01..05` pin it on `gold-corpus/pkgsplit-fixture`.
 
-What did **not** land is the consumer conversion. **~75 `get_cached`
-call sites still read the derived single winner.** Each is wrong
+What did **not** land is the consumer conversion. **30 non-test
+`get_cached` call sites (2026-11-12; ~75 when this epic was written)
+still read the derived single winner.** Each is wrong
 whenever the queried fact lives in a losing file. This epic converts
 the user-visible ones to the candidate relation and leaves the winner
 only where it is genuinely bookkeeping.
@@ -61,19 +65,21 @@ amount of care at the call site fixes them:
 
 - `module_declaring_method_in_package` returns a module **name**; the
   caller's `get_cached` then takes the winner, not the definer.
-- `parents_cached` is winner-keyed, so a losing file's `use parent`
-  edges are invisible to ancestry.
+- ~~`parents_cached` is winner-keyed~~ — **landed**: it unions
+  `declared_parents` over `visible_def_candidates`, pinned by
+  `pkgid-06-inherited-method-via-losing-file-parent`.
 - Enrichment's import scan, likewise.
-- The `@INC` tier is single-provider **by current construction, not by
-  language semantics**. Per-entrypoint `@INC` (`t/lib` vs `lib` vs a
-  vendored `local/` vs a container image) wants the same `all_defs`
-  relation keyed `(name, root)`, with the asker's own search path as
-  the `ScopedLookup` axis — which `VisibilityAxis::SearchPath` already
-  describes.
+- ~~The `@INC` tier is single-provider~~ — **landed** (PR #122, Phase E
+  below): `resolve_module_paths` enumerates every root, and the
+  `incdual-*` rows pin it.
 
 ## Phase breakdown
 
 ### Phase A — pin the wrong answers first
+
+**Landed.** `gold-corpus/fixtures/perl-package-identity.json`
+(`pkgid-01`..`06`) is all `gold`. New wrong-file rows for Phase C's
+families still go here.
 
 This is the move that worked twice already on this codebase, and it is
 not optional here: a conversion this wide will otherwise land with no
@@ -99,7 +105,7 @@ caller of a single-provider function just moves the bug.
 1. `module_declaring_method_in_package` returns the **definer**, not a
    name to re-look-up. Prefer returning what the caller actually needs
    (the analysis, or a `(path, Arc<FileAnalysis>)`) over a name.
-2. `parents_cached` unions ancestry edges across providers. This runs
+2. **Landed:** `parents_cached` unions ancestry edges across providers. This runs
    through `parents_of` — CLAUDE.md names it as the single
    ancestor-enumeration seam, and that stays true; what changes is
    what feeds it.
@@ -143,6 +149,11 @@ should be roughly what survives; if it is much larger, Phase C is
 incomplete.
 
 ### Phase E — the `@INC` / search-path axis
+
+**Landed** (PR #122; `prompt-scale-validation-hitlist.md` Tier 3). The
+residual is acquisition — a `use lib` root outside the workspace that is
+not on the process `@INC` is ranked but never scanned
+(`gold-corpus/KNOWN-GAPS.md`).
 
 Only if C lands clean. Key `all_defs` by `(name, root)` and let
 `VisibilityAxis::SearchPath` — which already ranks the asker's own
