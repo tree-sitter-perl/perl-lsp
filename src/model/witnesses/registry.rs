@@ -28,7 +28,7 @@ use super::*;
 /// is resolving, which is a different question, not a cycle. Every other
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
-type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
+type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<ReadPoint>);
 /// Each on-path key with its position on the path (`QueryState::path_len`
 /// when it entered), so a cut can say which frame it closed at.
 type VisitedSet = std::collections::HashMap<VisitedKey, u32>;
@@ -246,19 +246,77 @@ fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
     )
 }
 
-thread_local! {
-    /// Residuals + poison from the most recent top-level `query`.
-    ///
-    /// A thread-local rather than a return value because `query` returns a
-    /// `ReducedValue` to a hundred call sites, and only the bake asks this
-    /// question. Published unconditionally and read only by the bake, which is
-    /// single-threaded per file.
-    static LAST_RESIDUAL: std::cell::RefCell<(bool, Vec<super::ConclusionKey>)> =
-        const { std::cell::RefCell::new((false, Vec::new())) };
+/// `(value, effect, taint)` — see `QueryState::memo`.
+type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<ChaseTrace>, u32);
+
+/// What a subtree's chase leaves for the bake: the ladder rungs it recorded at
+/// its own opaque depth, first occurrence first, and whether anything beneath
+/// it poisoned the chase (an unnameable exit, the depth cap, or a rung
+/// recorded inside a combining frame within it). A function of the subtree's
+/// key alone when its answer is `Taint::CLEAN`, so a memo hit replays it
+/// (`QueryState::replay`) and a chase served from a memo records exactly what
+/// recomputing would.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(super) struct ChaseTrace {
+    rungs: Vec<super::ConclusionKey>,
+    poison: bool,
 }
 
-/// `(value, recorded_exit, taint)` — see `QueryState::memo`.
-type MemoEntry = (std::sync::Arc<ReducedValue>, bool, u32);
+impl ChaseTrace {
+    fn is_empty(&self) -> bool {
+        self.rungs.is_empty() && !self.poison
+    }
+}
+
+/// The effect of a frame still open: what has been recorded beneath it so far.
+struct EffectFrame {
+    /// `QueryState::opaque_frames` when the frame entered. A rung recorded
+    /// deeper sits under a combining frame between it and this one.
+    depth: u32,
+    effect: ChaseTrace,
+    /// Membership for `effect.rungs` once it outgrows a scan.
+    seen: Option<std::collections::HashSet<super::ConclusionKey>>,
+}
+
+impl EffectFrame {
+    fn new(depth: u32) -> Self {
+        EffectFrame { depth, effect: ChaseTrace::default(), seen: None }
+    }
+
+    fn add_rung(&mut self, k: &super::ConclusionKey) {
+        const SCAN: usize = 16;
+        let fresh = match &mut self.seen {
+            Some(seen) => seen.insert(k.clone()),
+            None if self.effect.rungs.len() < SCAN => !self.effect.rungs.contains(k),
+            None => {
+                let mut seen: std::collections::HashSet<_> = self.effect.rungs.iter().cloned().collect();
+                let fresh = seen.insert(k.clone());
+                self.seen = Some(seen);
+                fresh
+            }
+        };
+        if fresh {
+            self.effect.rungs.push(k.clone());
+        }
+    }
+
+    /// Fold in an effect recorded at opaque depth `at` (a closed child frame,
+    /// or a memo hit's replay). Below a combining frame a rung is poison, as a
+    /// rung recorded there directly is.
+    fn absorb(&mut self, at: u32, e: &ChaseTrace) {
+        if at > self.depth {
+            if !e.is_empty() {
+                crate::util::ghost_stats::count("residual.under_opaque");
+                self.effect.poison = true;
+            }
+            return;
+        }
+        for k in &e.rungs {
+            self.add_rung(k);
+        }
+        self.effect.poison |= e.poison;
+    }
+}
 
 /// The `QueryState::low_cut` a memoized answer replays when it is reused.
 /// Path positions start at 1, so both tainted marks sit at or above the root.
@@ -276,8 +334,20 @@ impl Taint {
 
 /// What a fold-memo answer depends on beyond the per-query key and the
 /// generations the memo holds: the framework and arguments the per-query memo
-/// holds fixed for one query, and which scope table the context reads.
+/// holds fixed for one query, and which scope table the context reads. The
+/// key's bag slot is blanked: the stamp's generation names the bag's content,
+/// and a bag moved or cloned keeps its generation, so the passes over one
+/// analysis share answers wherever its bag lives.
 type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
+
+/// What the fold memo may hold before it empties: entries die with their
+/// generation, but within one a file can store an answer per attachment, and
+/// every worker thread holds its own memo.
+const FOLD_MEMO_BYTES_CAP: usize = 32 << 20;
+
+/// A shared entry with more rungs than this is not stored: a ladder that long
+/// is a fan-out, cheaper to walk again than to hold.
+const FOLD_MEMO_MAX_RUNGS: usize = 64;
 
 /// The answers for one generation of the bag and of the parent graph (and,
 /// for a pass over a finished analysis, of the lookup it resolves under).
@@ -293,7 +363,34 @@ struct FoldMemo {
     /// query that can reach an index. `Some`: a pass's, which admits exactly
     /// one bag under exactly one lookup (`FoldMemoScope::for_pass`).
     owner: Option<PassOwner>,
-    answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>,
+    answers: std::collections::HashMap<FoldMemoKey, (MemoAnswer, std::sync::Arc<ChaseTrace>)>,
+    /// Estimated bytes `answers` holds (`fold_memo_entry_bytes`).
+    bytes: usize,
+    /// Keys whose root query is being computed beneath the current one: a
+    /// read that reaches one again answers on its own path instead.
+    in_flight: Vec<FoldMemoKey>,
+}
+
+/// What one memo entry holds: an attachment's answer, or a `SlotWrites`
+/// bucket's writes grouped by owner (`owned_slot_writes`).
+#[derive(Clone)]
+enum MemoAnswer {
+    Reduced(std::sync::Arc<ReducedValue>),
+    SlotOwners(std::sync::Arc<SlotOwnerIndex>),
+}
+
+/// A rough charge for one fold-memo entry: the table's slot, the shared
+/// value, and the effect's rungs. The cap bounds the order of magnitude, not
+/// the byte.
+fn fold_memo_entry_bytes(fk: &FoldMemoKey, answer: &MemoAnswer, effect: &ChaseTrace) -> usize {
+    const SLOT: usize = std::mem::size_of::<FoldMemoKey>() + 2 * std::mem::size_of::<usize>();
+    const VALUE: usize = 128;
+    const RUNG: usize = 96;
+    let value = match answer {
+        MemoAnswer::Reduced(_) => VALUE,
+        MemoAnswer::SlotOwners(index) => index.by_class.values().map(|ws| VALUE * (ws.len() + 1)).sum(),
+    };
+    SLOT + value + fk.2.as_ref().map_or(0, |a| a.len()) + effect.rungs.len() * RUNG
 }
 
 /// What a pass-scoped memo may answer for. Addresses, not ids: the scope
@@ -343,7 +440,8 @@ thread_local! {
 /// nothing. Sharing settled links makes each one answered once.
 pub(crate) struct FoldMemoScope<'a> {
     outer: Option<FoldMemo>,
-    _owner: std::marker::PhantomData<&'a WitnessBag>,
+    /// `!Send`: the scope swaps this thread's memo and must restore it here.
+    _owner: std::marker::PhantomData<(&'a WitnessBag, *const ())>,
 }
 
 impl FoldMemoScope<'static> {
@@ -382,28 +480,59 @@ impl<'a> FoldMemoScope<'a> {
 pub(crate) fn build_memos_disabled() -> bool {
     static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
-    #[cfg(test)]
-    let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
-    disabled
+    disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get())
 }
 
-#[cfg(test)]
 thread_local! {
     static FOLD_MEMO_FORCED_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Run `f` with the fold memo off — the control arm of the equivalence net.
-#[cfg(test)]
+/// An enclosing scope's memo is set aside too, or the control would read the
+/// answers it exists to check.
 pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
-    let prev = FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true));
-    let out = f();
-    FOLD_MEMO_FORCED_OFF.with(|c| c.set(prev));
-    out
+    struct Restore {
+        forced: bool,
+        memo: Option<FoldMemo>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FOLD_MEMO_FORCED_OFF.with(|c| c.set(self.forced));
+            FOLD_MEMO.with(|m| *m.borrow_mut() = self.memo.take());
+        }
+    }
+    let _restore = Restore {
+        forced: FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true)),
+        memo: FOLD_MEMO.with(|m| m.borrow_mut().take()),
+    };
+    f()
+}
+
+/// The pass half of the equivalence net: `shared` is a pass's output with
+/// its memo open; `control` re-runs the pass with no memo and no resolution
+/// session, so nothing the shared arm stored can answer it.
+pub(crate) fn check_pass_equiv<T: PartialEq + std::fmt::Debug>(lane: &str, shared: &T, control: impl FnOnce() -> T) {
+    let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+    let control = without_fold_memo(|| super::session::without_session(control));
+    // Without the memo a long chain re-walks its prefix and hits the depth
+    // cap where the shared pass does not; a capped control is incomplete,
+    // so it proves nothing either way.
+    if QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before {
+        crate::util::ghost_stats::count("fold_memo.equiv.pass_control_truncated");
+        return;
+    }
+    let agree = *shared == control;
+    crate::util::ghost_stats::count(if agree { "fold_memo.equiv.pass_agree" } else { "fold_memo.equiv.pass_differ" });
+    if !agree {
+        log::error!("fold-memo equivalence: the {lane} pass differs with the shared memo:\n shared: {shared:?}\n control: {control:?}");
+        #[cfg(test)]
+        panic!("fold-memo: the shared memo changed the {lane} pass");
+    }
 }
 
 /// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
-/// touches with the memo off and asserts the analyses agree.
-#[cfg(test)]
+/// touches with the memo off and asserts the analyses agree; on a real run it
+/// checks the persist path's bake and Surface (`encode_analysis`).
 pub(crate) fn fold_memo_equiv_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
@@ -471,23 +600,56 @@ fn fold_memo_probe(
     key: &VisitedKey,
     state: &mut QueryState,
 ) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
-    let index = q.context.and_then(|ctx| ctx.module_index);
-    if !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index))) {
+    let Some(stamp) = fold_memo_stamp(bag, q) else {
         return Err(None);
+    };
+    let mut bagless = key.clone();
+    bagless.0 = 0;
+    let fk = fold_memo_key(bagless, q);
+    let hit = with_current_memo(&stamp, |memo| memo.answers.get(&fk).cloned()).flatten();
+    let Some((MemoAnswer::Reduced(cached), effect)) = hit else {
+        return Err(Some(Box::new((stamp, fk))));
+    };
+    crate::util::ghost_stats::count("fold_memo.hit");
+    state.replay_hit(&effect, Taint::CLEAN);
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), effect, Taint::CLEAN));
+    Ok(cached)
+}
+
+/// The generations a query on `bag` answers under, when an open memo may
+/// share it (`None` when no scope is open, or when the answer may depend on
+/// more than the scope pins).
+fn fold_memo_stamp(bag: &WitnessBag, q: &ReducerQuery) -> Option<FoldMemoStamp> {
+    let index = q.context.and_then(|ctx| ctx.module_index);
+    // Generation 0 is a bag no mutation has named yet; it names nothing.
+    if bounds_unfilled()
+        || bag.generation() == 0
+        || !FOLD_MEMO.with(|m| m.borrow().as_ref().is_some_and(|memo| memo.admits(bag, index)))
+    {
+        return None;
     }
-    let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
-    let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
-    let stamp = FoldMemoStamp {
+    Some(FoldMemoStamp {
         generation: bag.generation(),
         parents_generation: q.context.map(|ctx| ctx.package_parents.generation()),
         epoch: index.map(|idx| idx.resolution_epoch()),
-    };
-    let fk = (key.clone(), q.framework, args, scopes);
-    let hit = FOLD_MEMO.with(|m| {
+    })
+}
+
+fn fold_memo_key(key: VisitedKey, q: &ReducerQuery) -> FoldMemoKey {
+    let scopes = q.context.map_or(0, |ctx| ctx.scopes.as_ptr() as usize);
+    let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
+    (key, q.framework, args, scopes)
+}
+
+/// Run `f` on the open memo, first emptying it if `stamp` names generations
+/// it does not hold: they never repeat, so every entry it has is dead.
+fn with_current_memo<T>(stamp: &FoldMemoStamp, f: impl FnOnce(&mut FoldMemo) -> T) -> Option<T> {
+    FOLD_MEMO.with(|m| {
         let mut m = m.borrow_mut();
         let memo = m.as_mut()?;
         if !stamp.matches(memo) {
             memo.answers.clear();
+            memo.bytes = 0;
             memo.generation = stamp.generation;
             if let Some(parents_generation) = stamp.parents_generation {
                 memo.parents_generation = parents_generation;
@@ -495,26 +657,15 @@ fn fold_memo_probe(
             if let Some(epoch) = stamp.epoch {
                 memo.epoch = epoch;
             }
-            return None;
         }
-        memo.answers.get(&fk).cloned()
-    });
-    let Some((cached, recorded_exit)) = hit else {
-        return Err(Some(Box::new((stamp, fk))));
-    };
-    crate::util::ghost_stats::count("fold_memo.hit");
-    // The same laundering guard as the per-query memo.
-    if recorded_exit && state.opaque_frames > 0 {
-        crate::util::ghost_stats::count("residual.memo_under_opaque");
-        state.poisoned = true;
-    }
-    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, Taint::CLEAN));
-    Ok(cached)
+        Some(f(memo))
+    })
 }
 
 /// The generations a probe saw. A query without a context reads no parent
 /// graph, so it leaves the memo's parent generation alone; one without an
 /// index reads no other file, so it leaves the epoch alone.
+#[derive(Clone, Copy)]
 struct FoldMemoStamp {
     generation: u64,
     parents_generation: Option<u64>,
@@ -534,7 +685,7 @@ fn fold_memo_store(
     fk: Box<(FoldMemoStamp, FoldMemoKey)>,
     q: &ReducerQuery,
     result: &std::sync::Arc<ReducedValue>,
-    recorded_exit: bool,
+    effect: &std::sync::Arc<ChaseTrace>,
 ) {
     // A walk out of consult budget answers from what it already had, which
     // no cut records; the budget never comes back within a walk, so "still
@@ -542,13 +693,99 @@ fn fold_memo_store(
     if q.context.and_then(|ctx| ctx.module_index).is_some_and(super::session::budget_spent) {
         return;
     }
+    if effect.rungs.len() > FOLD_MEMO_MAX_RUNGS {
+        crate::util::ghost_stats::count("fold_memo.long_ladder");
+        return;
+    }
     let (stamp, fk) = *fk;
+    fold_memo_insert(&stamp, fk, MemoAnswer::Reduced(std::sync::Arc::clone(result)), effect);
+}
+
+fn fold_memo_insert(stamp: &FoldMemoStamp, fk: FoldMemoKey, answer: MemoAnswer, effect: &std::sync::Arc<ChaseTrace>) {
     FOLD_MEMO.with(|m| {
         if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
+            let charge = fold_memo_entry_bytes(&fk, &answer, effect);
+            if memo.bytes + charge > FOLD_MEMO_BYTES_CAP {
+                crate::util::ghost_stats::count("fold_memo.clear_cap");
+                memo.answers.clear();
+                memo.bytes = 0;
+            }
             crate::util::ghost_stats::count("fold_memo.store");
-            memo.answers.insert(fk, (std::sync::Arc::clone(result), recorded_exit));
+            let replaced = memo.answers.insert(fk.clone(), (answer, std::sync::Arc::clone(effect)));
+            let freed = replaced.map_or(0, |(old, old_effect)| fold_memo_entry_bytes(&fk, &old, &old_effect));
+            memo.bytes = memo.bytes + charge - freed;
         }
     });
+}
+
+/// One `SlotWrites` bucket's writes, grouped by the class each write's
+/// object resolved to (`owned_slot_writes`).
+#[derive(Default)]
+struct SlotOwnerIndex {
+    by_class: std::collections::HashMap<String, Vec<Witness>>,
+}
+
+/// How a read finds its bucket's owner index in the open memo.
+enum SlotOwnersLookup {
+    Hit(std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<ChaseTrace>),
+    /// Not held yet: build it and file it under this key.
+    Miss(FoldMemoStamp, FoldMemoKey),
+    /// Being built beneath this read: the bucket's own objects read the key.
+    Reentered,
+    /// No memo may hold it.
+    Unshared,
+}
+
+/// The bucket's index is the answer to a root query of the bucket itself,
+/// asked with no receiver and no arguments: what a write's object is does
+/// not depend on which owner asks.
+fn slot_owners_lookup(bag: &WitnessBag, q: &ReducerQuery, bucket: &WitnessAttachment) -> SlotOwnersLookup {
+    let Some(stamp) = fold_memo_stamp(bag, q) else {
+        return SlotOwnersLookup::Unshared;
+    };
+    let bucket_q = ReducerQuery {
+        attachment: bucket,
+        point: None,
+        framework: q.framework,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context: q.context,
+    };
+    let fk = fold_memo_key((0, bucket.clone(), None, None, None), &bucket_q);
+    with_current_memo(&stamp, |memo| {
+        if memo.in_flight.contains(&fk) {
+            return SlotOwnersLookup::Reentered;
+        }
+        match memo.answers.get(&fk) {
+            Some((MemoAnswer::SlotOwners(index), effect)) => {
+                SlotOwnersLookup::Hit(std::sync::Arc::clone(index), std::sync::Arc::clone(effect))
+            }
+            _ => SlotOwnersLookup::Miss(stamp, fk),
+        }
+    })
+    .unwrap_or(SlotOwnersLookup::Unshared)
+}
+
+/// Mark `fk`'s root query in flight while `build` runs.
+fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
+    // Taken off on unwind too: a per-file `catch_unwind` keeps the thread,
+    // and a key left in flight would never be shared again.
+    struct Landed<'k>(&'k FoldMemoKey);
+    impl Drop for Landed<'_> {
+        fn drop(&mut self) {
+            FOLD_MEMO.with(|m| {
+                if let Some(memo) = m.borrow_mut().as_mut() {
+                    if let Some(at) = memo.in_flight.iter().rposition(|k| k == self.0) {
+                        memo.in_flight.remove(at);
+                    }
+                }
+            });
+        }
+    }
+    FOLD_MEMO.with(|m| m.borrow_mut().as_mut().map(|memo| memo.in_flight.push(fk.clone())));
+    let _landed = Landed(fk);
+    build()
 }
 
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
@@ -568,9 +805,19 @@ fn fold_memo_store(
 /// queries whose context (scopes / module_index / framework) differs.
 /// Remembered answers a recurring arm's pass sets aside
 /// (`QueryState::set_aside_answers_through`).
+/// A frame's computed subtree (`QueryState::frame`).
+struct Framed<T> {
+    value: T,
+    effect: std::sync::Arc<ChaseTrace>,
+    /// The taint the answer carries (`QueryState::leave_frame`).
+    taint: u32,
+    /// The outermost frame a cut beneath it closed at.
+    cut: u32,
+}
+
 struct PathAnswers {
-    memo: Vec<(VisitedKey, (std::sync::Arc<ReducedValue>, bool, u32))>,
-    fan_outs: Vec<(FanOutKey, (std::sync::Arc<ReducedValue>, u32))>,
+    memo: Vec<(VisitedKey, MemoEntry)>,
+    fan_outs: Vec<(FanOutKey, MemoEntry)>,
 }
 
 pub(super) struct QueryState {
@@ -579,7 +826,7 @@ pub(super) struct QueryState {
     /// already walked this query (`fan_out_node`). The bag-free twins of
     /// `visited` and `memo`.
     fan_outs: std::collections::HashMap<FanOutKey, u32>,
-    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, u32)>,
+    fan_out_memo: std::collections::HashMap<FanOutKey, (std::sync::Arc<ReducedValue>, std::sync::Arc<ChaseTrace>, u32)>,
     /// Enriched copies consulted during this query — pinned so memo
     /// entries keyed on their bag ADDRESSES stay valid even if the
     /// overlay's eviction drops its own reference mid-query.
@@ -589,10 +836,9 @@ pub(super) struct QueryState {
     // no buckets, so a shallow query that never re-reaches a node (the
     // common hover/completion 1–2-hop case) pays nothing for the memo —
     // the table is lazily allocated on the first insert.
-    /// The flag beside each value is "computing this subtree recorded an exit".
-    /// A memo hit skips the subtree, and with it the `note_exit` calls that
-    /// would have poisoned a re-entry from inside a combining frame — so the
-    /// fact has to be carried on the entry instead of re-derived.
+    /// The effect beside each value is what computing the subtree recorded.
+    /// A memo hit skips the subtree, and with it the `note_exit` calls it
+    /// would have made, so the entry carries them and the hit replays them.
     ///
     /// The taint is the `low_cut` a hit replays (`Taint`): `CLEAN` for a
     /// value no frame above it shaped, which is what a fresh query of the key
@@ -608,20 +854,18 @@ pub(super) struct QueryState {
     /// at or below its own position closed every cycle itself.
     low_cut: u32,
     /// Where a BAKE's chase would have consulted the index, in the order the
-    /// ladder reached them.
+    /// ladder reached them, and whether it is poisoned: one `EffectFrame` per
+    /// open `query_rec` frame, the query's own at the bottom.
     ///
     /// Order is the semantics: Perl's DFS-MRO is an ordered ladder, so the
-    /// residuals of an un-poisoned `None` are first-answer-wins candidates and
+    /// rungs of an un-poisoned `None` are first-answer-wins candidates and
     /// become a `Link`'s `targets` verbatim.
-    pub(super) residual: Vec<super::ConclusionKey>,
-    /// The chase reached a point it cannot represent as a portable key, so no
-    /// `Link` may be minted from it.
     ///
-    /// Poison is one-way and never cleared. A chase that combined frames — an
-    /// arm fold, a `materialize` splice into a populated witness list — has an
-    /// answer that is not "whichever ladder rung answers first", and a `Link`
-    /// can only express the latter.
-    pub(super) poisoned: bool,
+    /// Poison is one-way. The chase reached a point it cannot represent as a
+    /// portable key, or combined frames — an arm fold, a `materialize` splice
+    /// into a populated witness list — so its answer is not "whichever ladder
+    /// rung answers first", and a `Link` can only express the latter.
+    effects: Vec<EffectFrame>,
     /// How many COMBINING frames the chase is currently inside.
     ///
     /// A `Link` says "the answer is the first of these keys that answers". That
@@ -660,24 +904,49 @@ impl QueryState {
         key: FanOutKey,
         walk: impl FnOnce(&mut Self) -> Option<ReducedValue>,
     ) -> Option<ReducedValue> {
-        if let Some((v, taint)) = self.fan_out_memo.get(&key) {
-            self.low_cut = self.low_cut.min(*taint);
-            return (**v != ReducedValue::None).then(|| (**v).clone());
+        if let Some((v, effect, taint)) = self.fan_out_memo.get(&key) {
+            let (v, effect, taint) = (std::sync::Arc::clone(v), std::sync::Arc::clone(effect), *taint);
+            self.replay_hit(&effect, taint);
+            return (*v != ReducedValue::None).then(|| (*v).clone());
         }
-        if let Some(&at) = self.fan_outs.get(&key) {
+        let Framed { value: v, effect, taint, .. } = self.frame(|s| &mut s.fan_outs, &key, |s, _| walk(s)).ok()?;
+        self.fan_out_memo
+            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), effect, taint));
+        v
+    }
+
+    /// Compute the subtree of the frame `key` names, or close a cut at it when
+    /// it is already on the path (`Err` with its path position). `path` is the frame family's
+    /// on-path table.
+    fn frame<K: std::hash::Hash + Eq + Clone, T>(
+        &mut self,
+        path: fn(&mut Self) -> &mut std::collections::HashMap<K, u32>,
+        key: &K,
+        body: impl FnOnce(&mut Self, u32) -> T,
+    ) -> Result<Framed<T>, u32> {
+        if let Some(&at) = path(self).get(key) {
             self.close_cut_at(at);
-            return None;
+            return Err(at);
         }
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let (pos, outer_low) = self.enter_frame();
-        self.fan_outs.insert(key.clone(), pos);
-        let v = walk(self);
-        self.fan_outs.remove(&key);
-        let (taint, _) = self.leave_frame(pos, outer_low, truncations_before);
+        path(self).insert(key.clone(), pos);
+        self.push_effect();
+        let v = body(self, pos);
+        let effect = self.pop_effect();
+        path(self).remove(key);
+        let (taint, cut) = self.leave_frame(pos, outer_low, truncations_before);
         self.forget_assumed(pos);
-        self.fan_out_memo
-            .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), taint));
-        v
+        Ok(Framed { value: v, effect, taint, cut })
+    }
+
+    /// A memoized subtree reached again: its taint joins the open mark, and
+    /// its effect is recorded at the depth it is re-reached from — under a
+    /// combining frame its rungs poison, however transparent the first reach
+    /// was.
+    fn replay_hit(&mut self, effect: &ChaseTrace, taint: u32) {
+        self.low_cut = self.low_cut.min(taint);
+        self.replay(effect);
     }
 
     /// Set aside every remembered answer that depends on the path at or
@@ -686,7 +955,7 @@ impl QueryState {
     /// and the pass changes what the frame at `at` answers.
     fn set_aside_answers_through(&mut self, at: u32) -> PathAnswers {
         let memo = self.memo.extract_if(|_, (_, _, taint)| *taint <= at).collect();
-        let fan_outs = self.fan_out_memo.extract_if(|_, (_, taint)| *taint <= at).collect();
+        let fan_outs = self.fan_out_memo.extract_if(|_, (_, _, taint)| *taint <= at).collect();
         PathAnswers { memo, fan_outs }
     }
 
@@ -694,7 +963,7 @@ impl QueryState {
     /// `set_aside_answers_through` set aside.
     fn restore_answers_through(&mut self, at: u32, aside: PathAnswers) {
         self.memo.retain(|_, (_, _, taint)| *taint > at);
-        self.fan_out_memo.retain(|_, (_, taint)| *taint > at);
+        self.fan_out_memo.retain(|_, (_, _, taint)| *taint > at);
         self.memo.extend(aside.memo);
         self.fan_out_memo.extend(aside.fan_outs);
     }
@@ -758,8 +1027,7 @@ impl QueryState {
             memo: std::collections::HashMap::new(),
             path_len: 1,
             low_cut: Taint::CLEAN,
-            residual: Vec::new(),
-            poisoned: false,
+            effects: vec![EffectFrame::new(0)],
             opaque_frames: 0,
             open_joins: Vec::new(),
             join_seeds: std::collections::HashMap::new(),
@@ -781,20 +1049,46 @@ impl QueryState {
             // the surviving rungs would then describe a ladder the answer never
             // actually took, and a `Link` minted from them answers where the
             // chase does not.
-            Some(_) if self.opaque_frames > 0 => {
-                crate::util::ghost_stats::count("residual.under_opaque");
-                self.poisoned = true;
+            Some(k) => {
+                let at = self.opaque_frames;
+                self.open_effect().absorb(at, &ChaseTrace { rungs: vec![k], ..ChaseTrace::default() });
             }
-            Some(k) => self.residual.push(k),
-            None => self.poisoned = true,
+            None => self.poison(),
         }
     }
 
     /// The chase combined frames rather than taking the first answering rung,
     /// so its result is not expressible as an ordered `Link`.
-    #[allow(dead_code)]
     pub(super) fn poison(&mut self) {
-        self.poisoned = true;
+        self.open_effect().effect.poison = true;
+    }
+
+    fn open_effect(&mut self) -> &mut EffectFrame {
+        self.effects.last_mut().expect("the query's own effect frame is never popped")
+    }
+
+    /// Open the effect of a frame about to compute its subtree.
+    fn push_effect(&mut self) {
+        self.effects.push(EffectFrame::new(self.opaque_frames));
+    }
+
+    /// Close the innermost frame's effect and fold it into its parent.
+    fn pop_effect(&mut self) -> std::sync::Arc<ChaseTrace> {
+        let frame = self.effects.pop().expect("push_effect pairs with pop_effect");
+        self.open_effect().absorb(frame.depth, &frame.effect);
+        std::sync::Arc::new(frame.effect)
+    }
+
+    /// Record what a memoized subtree recorded when it was computed.
+    fn replay(&mut self, effect: &ChaseTrace) {
+        let at = self.opaque_frames;
+        self.open_effect().absorb(at, effect);
+    }
+
+    /// The whole query's effect: its own frame, with every closed frame folded in.
+    fn into_effect(mut self) -> ChaseTrace {
+        debug_assert_eq!(self.effects.len(), 1, "an effect frame left open");
+        std::mem::take(&mut self.effects[0].effect)
     }
 
     /// Run `f` with the chase marked as being inside a combining frame.
@@ -1151,6 +1445,29 @@ impl ReducerRegistry {
         self.reducers.push(r);
     }
 
+    /// `query`, plus the chase's residuals when it can be expressed as an
+    /// ordered `Link`.
+    ///
+    /// `None` when the chase was poisoned or recorded nothing. Only the bake
+    /// asks: a live query's exits are not residualization candidates, and
+    /// counting them would mint `Link`s from ordinary degraded lookups.
+    pub fn query_with_residuals(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+    ) -> (ReducedValue, Option<Vec<super::ConclusionKey>>) {
+        let (out, effect) = self.query_effect(bag, q);
+        if effect.poison || effect.rungs.is_empty() {
+            return (out, None);
+        }
+        // Order preserved, duplicates dropped: the same parent can be reached
+        // by two candidate files, and a repeated rung would make the walk redo
+        // work rather than change its answer.
+        let mut seen = std::collections::HashSet::new();
+        let rungs = effect.rungs.into_iter().filter(|k| seen.insert(k.clone())).collect();
+        (out, Some(rungs))
+    }
+
     /// Query the registry for the first reducer returning a non-`None`
     /// value. Edge materialization runs first: `Edge(target)` witnesses
     /// on the queried attachment are chased via recursive query and
@@ -1161,33 +1478,18 @@ impl ReducerRegistry {
     /// The cycle guard is threaded across both edge chases (within one
     /// bag) and the inheritance fallback (which crosses bags), closing
     /// mutual-inheritance loops that span files.
-    /// The residuals of the most recent `query`, if that chase can be
-    /// expressed as an ordered `Link`.
-    ///
-    /// `None` when the chase was poisoned, when it recorded nothing, or when
-    /// it is not a bake — a live query's exits are not residualization
-    /// candidates, and counting them would mint `Link`s from ordinary degraded
-    /// lookups.
-    pub fn residuals_of_last_query(&self) -> Option<Vec<super::ConclusionKey>> {
-        LAST_RESIDUAL.with(|r| {
-            let (poisoned, keys) = &*r.borrow();
-            if *poisoned || keys.is_empty() {
-                return None;
-            }
-            // Order preserved, duplicates dropped: the same parent can be
-            // reached by two candidate files, and a repeated rung would make
-            // the walk redo work rather than change its answer.
-            let mut seen = std::collections::HashSet::new();
-            let out: Vec<_> = keys
-                .iter()
-                .filter(|k| seen.insert((*k).clone()))
-                .cloned()
-                .collect();
-            Some(out)
-        })
+    pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
+        self.query_effect(bag, q).0
     }
 
-    pub fn query(&self, bag: &WitnessBag, q: &ReducerQuery) -> ReducedValue {
+    fn query_effect(&self, bag: &WitnessBag, q: &ReducerQuery) -> (ReducedValue, ChaseTrace) {
+        // A query with no scope open answers through one of its own, so a
+        // slot read resolves the bucket's owners by the same index a scoped
+        // query does: an index-free answer does not depend on where it is asked.
+        let _own_scope = (q.context.and_then(|ctx| ctx.module_index).is_none()
+            && FOLD_MEMO.with(|m| m.borrow().is_none())
+            && !build_memos_disabled())
+        .then(FoldMemoScope::enter);
         let mut state = QueryState::new();
         // Is the CONCLUSION LAYER CLOSED for the shape that dominates
         // cross-file traffic? A `Member` answer that never reads an
@@ -1215,11 +1517,7 @@ impl ReducerRegistry {
         // Sole boundary where an owned `ReducedValue` is required; the
         // internal recursion threads `Arc` to avoid deep clones per hop.
         let out = (*self.query_rec(bag, q, &mut state)).clone();
-        // Publish for the bake. Cleared-and-set on every query, so a later
-        // query can never be minted from an earlier chase's exits.
-        LAST_RESIDUAL.with(|r| {
-            *r.borrow_mut() = (state.poisoned, std::mem::take(&mut state.residual));
-        });
+        let effect = state.into_effect();
         if top_moc {
             crate::util::ghost_stats::count(if TOUCHED_EXPR.with(|c| c.get()) {
                 "moc.touched_expr"
@@ -1227,7 +1525,7 @@ impl ReducerRegistry {
                 "moc.conclusions_only"
             });
         }
-        out
+        (out, effect)
     }
 
     /// Returns an `Arc` so the memo, the cycle-guard early-outs, and the
@@ -1314,7 +1612,7 @@ impl ReducerRegistry {
             // separate, non-poison record of the same event: a LIVE chase that
             // truncates is not wrong, it is incomplete, so comparing a
             // conclusion against it proves nothing either way.
-            state.poisoned = true;
+            state.poison();
             state.low_cut = Taint::TRUNCATED;
             // The LIVE counterpart of the poison above, and it has to be
             // thread-local rather than a `QueryState` field: the cap counts
@@ -1341,17 +1639,9 @@ impl ReducerRegistry {
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
-        if let Some((cached, recorded_exit, taint)) = state.memo.get(&key) {
-            let cached = std::sync::Arc::clone(cached);
-            state.low_cut = state.low_cut.min(*taint);
-            // Re-reaching an exiting subtree from inside a combining frame is
-            // the same claim as reaching it there the first time; the memo must
-            // not launder it into a rung just because the first reach happened
-            // to be transparent.
-            if *recorded_exit && state.opaque_frames > 0 {
-                crate::util::ghost_stats::count("residual.memo_under_opaque");
-                state.poisoned = true;
-            }
+        if let Some((cached, effect, taint)) = state.memo.get(&key) {
+            let (cached, effect, taint) = (std::sync::Arc::clone(cached), std::sync::Arc::clone(effect), *taint);
+            state.replay_hit(&effect, taint);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return cached;
         }
@@ -1362,56 +1652,49 @@ impl ReducerRegistry {
             }
             Err(fold_key) => fold_key,
         };
-        // `key` has two owners (the visited set, transiently; the memo,
-        // for the rest of the query). Clone once for visited, then move
-        // the original into the memo store below.
-        if let Some(&at) = state.visited.get(&key) {
-            state.close_cut_at(at);
-            QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
-            // A join a recurring arm is chased again under answers what its
-            // other arms hold (`rechase_recurring`).
-            if let Some(seed) = state.join_seeds.get(&at) {
-                return std::sync::Arc::new(ReducedValue::Type(seed.clone()));
-            }
-            // "Can complete" is inductive: a smallest derivation never needs
-            // a callable as its own ancestor, so a callable on the path is
-            // assumed to have no way of ending, and the frame that started
-            // the question gets the exact least fixed point. What the frames
-            // between computed under the assumption is forgotten when it
-            // closes (`forget_assumed`).
-            if q.attachment.asks_effects() {
-                return std::sync::Arc::new(ReducedValue::Effects(super::types::Ends::empty()));
-            }
-            return std::sync::Arc::new(ReducedValue::None);
-        }
-        let exits_before = state.residual.len();
-        let poison_before = state.poisoned;
-        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let (pos, outer_low) = state.enter_frame();
-        state.visited.insert(key.clone(), pos);
+        // A cut closing at an open join is a loop's recurrence on itself
+        // (`docs/adr/cfg-tier.md` §Loops).
         let joined = matches!(q.attachment, WitnessAttachment::Join { .. });
-        if joined {
-            state.open_joins.push(pos);
-        }
-        #[cfg(test)]
-        QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
-        let result = match apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)) {
-            ReducedValue::None => no_answer(q),
-            v => v,
+        let framed = state.frame(|s| &mut s.visited, &key, |state, pos| {
+            if joined {
+                state.open_joins.push(pos);
+            }
+            #[cfg(test)]
+            QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
+            let result = match apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)) {
+                ReducedValue::None => no_answer(q),
+                v => v,
+            };
+            if joined {
+                state.open_joins.pop();
+            }
+            std::sync::Arc::new(result)
+        });
+        let Framed { value: result, effect, taint, cut } = match framed {
+            Ok(framed) => framed,
+            Err(at) => {
+                QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
+                // A join a recurring arm is chased again under answers what its
+                // other arms hold (`rechase_recurring`).
+                if let Some(seed) = state.join_seeds.get(&at) {
+                    return std::sync::Arc::new(ReducedValue::Type(seed.clone()));
+                }
+                // "Can complete" is inductive: a smallest derivation never needs
+                // a callable as its own ancestor, so a callable on the path is
+                // assumed to have no way of ending, and the frame that started
+                // the question gets the exact least fixed point. What the frames
+                // between computed under the assumption is forgotten when it
+                // closes (`forget_assumed`).
+                if q.attachment.asks_effects() {
+                    return std::sync::Arc::new(ReducedValue::Effects(super::types::Ends::empty()));
+                }
+                return std::sync::Arc::new(ReducedValue::None);
+            }
         };
-        let result = std::sync::Arc::new(result);
-        let recorded_exit =
-            state.residual.len() > exits_before || (state.poisoned && !poison_before);
-        state.visited.remove(&key);
-        if joined {
-            state.open_joins.pop();
-        }
-        let (taint, cut) = state.leave_frame(pos, outer_low, truncations_before);
-        state.forget_assumed(pos);
         // A cycle closed at this frame or beneath it is part of this key's
         // own answer: a fresh query of the key cuts in the same place.
         if let (Some(fk), Taint::CLEAN) = (fold_key, taint) {
-            fold_memo_store(fk, q, &result, recorded_exit);
+            fold_memo_store(fk, q, &result, &effect);
         }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
@@ -1419,7 +1702,7 @@ impl ReducerRegistry {
         if taint == Taint::PATH && q.attachment.asks_effects() {
             state.assumed.push((cut, key.clone()));
         }
-        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, taint));
+        state.memo.insert(key, (std::sync::Arc::clone(&result), effect, taint));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
@@ -1439,6 +1722,7 @@ impl ReducerRegistry {
         }
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+        let v = self.cap_by_bound(bag, q, state, &materialized, v);
         // `Never` types an evaluation, never a slot: a callable whose every
         // arm leaves yields no value (its effect says why), and a place or a
         // member written only by expressions that leave holds none. So it
@@ -1526,6 +1810,116 @@ impl ReducerRegistry {
         }
 
         ReducedValue::None
+    }
+
+    /// The one rule a bound states, the same for every attachment
+    /// (`docs/adr/declared-bounds.md`). The reducers fold the value as if no
+    /// bound were there; what it reads as under the bound in force is a
+    /// question the bound's own facts answer:
+    ///
+    /// - a guard's proof holding the point (`WitnessPayload::Proof`) reads
+    ///   by `Evidence::read_proven`;
+    /// - a slot reads as its declaration, whatever its writes put there;
+    /// - a local reads the value its facts from the declaration on fold to,
+    ///   by `Evidence::read_written`;
+    /// - no value, or an `Unknown` one, reads as the bound, unless the
+    ///   bound is set aside while a pass settles (`with_bounds_unfilled`).
+    #[inline(never)]
+    fn cap_by_bound(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        materialized: &[Witness],
+        v: ReducedValue,
+    ) -> ReducedValue {
+        let Some((stated, ty, evidence, extent)) = bound_in_force(bag, q) else {
+            return v;
+        };
+        if matches!(v, ReducedValue::FactMap(_)) {
+            return v;
+        }
+        // A point query's facts are the ones reaching it already; asked at
+        // no point, a proof holds nowhere in particular, so neither it nor
+        // the region it marks is the binding's value.
+        let pointed = q.point.is_some() && q.attachment.is_temporal();
+        let proofs: Vec<crate::model::file_analysis::Span> =
+            materialized.iter().filter(|w| matches!(w.payload, WitnessPayload::Proof)).map(|w| w.span).collect();
+        let proven = pointed && !proofs.is_empty();
+        let mut bound: Option<Option<InferredType>> = None;
+        let mut resolve = |state: &mut QueryState| -> Option<InferredType> {
+            bound.get_or_insert_with(|| self.bound_type(bag, q, state, ty).filter(InferredType::is_known)).clone()
+        };
+        let value = match (proven, extent) {
+            (true, _) => v,
+            // The declaration is the slot's answer, not a stand-in for a
+            // value still to come, so it reads the same while a pass settles.
+            (false, Extent::Slot) => return resolve(state).map_or(v, ReducedValue::Type),
+            (false, Extent::Lifetime | Extent::Entry) => {
+                // Only what the declaration holds counts: a fact made before
+                // it is another binding's.
+                let holds = |w: &Witness| w.span.start >= stated && !proofs.contains(&w.span);
+                match materialized.iter().all(holds) {
+                    true => v,
+                    false => {
+                        let after: Vec<Witness> = materialized.iter().filter(|w| holds(w)).cloned().collect();
+                        self.reduce_materialized(&after, q)
+                    }
+                }
+            }
+        };
+        let t = match value {
+            ReducedValue::Type(t) if t.is_known() => t,
+            ReducedValue::Type(_) | ReducedValue::None if bounds_unfilled() => return value,
+            ReducedValue::Type(_) | ReducedValue::None => {
+                return resolve(state).map_or(value, ReducedValue::Type);
+            }
+            ReducedValue::FactMap(_) | ReducedValue::Effects(_) => return value,
+        };
+        let order = class_order(q);
+        let mut fit = |state: &mut QueryState| match resolve(state) {
+            Some(b) => crate::model::file_analysis::fit(&t, &b, order),
+            None => crate::model::file_analysis::Fit::Undecided,
+        };
+        let read = match proven {
+            true => evidence.read_proven(|| fit(state)),
+            false => evidence.read_written(|| fit(state)),
+        };
+        let Some(b) = (match read {
+            BoundRead::Value => None,
+            BoundRead::Bound | BoundRead::Both => resolve(state),
+        }) else {
+            return ReducedValue::Type(t);
+        };
+        match read {
+            BoundRead::Value => ReducedValue::Type(t),
+            BoundRead::Bound => ReducedValue::Type(b),
+            BoundRead::Both => ReducedValue::Type(crate::model::file_analysis::join(&t, &b, order)),
+        }
+    }
+
+    /// The type a bound states, its alias edge chased.
+    fn bound_type(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState, ty: &BoundType) -> Option<InferredType> {
+        match ty {
+            BoundType::Type(t) => Some(t.clone()),
+            BoundType::Edge(att) => {
+                let sub_q = ReducerQuery {
+                    attachment: att,
+                    point: None,
+                    framework: q.framework,
+                    arity_hint: None,
+                    receiver: None,
+                    args: Vec::new(),
+                    context: q.context,
+                };
+                // Opaque: the answer combines the bound with this frame's
+                // own value, so no exit key names it.
+                match &*state.in_opaque_frame(|state| self.query_rec(bag, &sub_q, state)) {
+                    ReducedValue::Type(t) => Some(t.clone()),
+                    ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
+                }
+            }
+        }
     }
 
     /// The ladder for a class-keyed attachment the local bag couldn't
@@ -2439,16 +2833,175 @@ impl ReducerRegistry {
         // A variable written N times would otherwise cost N on every read of
         // it, and a chain of `$x = $x->m` reads it once per write.
         let point = q.point.filter(|_| q.attachment.is_temporal() && !live_window_disabled());
-        if let Some(live) = point.and_then(|p| bag.live_at(q.attachment, p)) {
+        // The index orders by position alone; a read that skips a statement
+        // takes the full list, so the window sees which facts it skips.
+        if let Some(live) = point.filter(|p| p.skips.is_none()).and_then(|p| bag.live_at(q.attachment, p.at)) {
             return self.materialize_raw(bag, q, state, live, false);
         }
-        let raw = bag.for_attachment(q.attachment);
+        let adopted = self.owned_slot_writes(bag, q, state);
+        let mut raw = bag.for_attachment(q.attachment);
+        raw.extend(adopted.iter());
         if raw.iter().any(|w| matches!(w.payload, WitnessPayload::Extend(_))) {
             let grown = self.lower_extensions(bag, q, state, &raw);
             let grown = Self::grown_witnesses(&raw, &grown);
             return self.materialize_reaching(bag, q, state, Self::splice_grown(&raw, &grown));
         }
         self.materialize_reaching(bag, q, state, raw)
+    }
+
+    /// The writes of a stored member's `SlotWrites` bucket whose object is
+    /// an instance of the member's owner, as the slot's value edges. The
+    /// build filed them by key because it could not type the object; the
+    /// object is asked here, at the write, where the index can answer.
+    ///
+    /// Every owner's read of the key needs the same objects, so the bucket is
+    /// resolved once and kept by class (`SlotOwners`): asked per read, N
+    /// classes writing one key in one file cost N reads of N chases.
+    fn owned_slot_writes(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState) -> Vec<Witness> {
+        let WitnessAttachment::Member { owner, space, name, aspect: crate::model::witnesses::MemberAspect::Holds } =
+            q.attachment
+        else {
+            return Vec::new();
+        };
+        let bucket_att = WitnessAttachment::SlotWrites { space: *space, name: name.clone() };
+        if bag.for_attachment(&bucket_att).is_empty() {
+            return Vec::new();
+        }
+        let (owners, effect) = match slot_owners_lookup(bag, q, &bucket_att) {
+            SlotOwnersLookup::Hit(owners, effect) => {
+                crate::util::ghost_stats::count("slot_owners.hit");
+                (owners, effect)
+            }
+            SlotOwnersLookup::Miss(stamp, fk) => {
+                crate::util::ghost_stats::count("slot_owners.build");
+                let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+                let (owners, effect, settled) = slot_owners_building(&fk, || self.slot_owners(bag, q, &bucket_att));
+                let settled = settled && QUERY_REC_TRUNCATIONS.with(|c| c.get()) == truncations_before;
+                if settled {
+                    fold_memo_insert(&stamp, fk, MemoAnswer::SlotOwners(std::sync::Arc::clone(&owners)), &effect);
+                } else {
+                    crate::util::ghost_stats::count("slot_owners.unsettled");
+                }
+                (owners, effect)
+            }
+            // The bucket's own objects read this key: answer this read on
+            // the reader's path, where the cycle guard cuts it.
+            SlotOwnersLookup::Reentered => {
+                crate::util::ghost_stats::count("slot_owners.reentered");
+                return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+            }
+            SlotOwnersLookup::Unshared => {
+                crate::util::ghost_stats::count("slot_owners.unshared");
+                return self.owned_slot_writes_on_path(bag, q, state, &bucket_att, owner);
+            }
+        };
+        // What the objects' chase recorded was reached through a combining
+        // frame, as it was when each read chased them itself.
+        state.in_opaque_frame(|state| state.replay(&effect));
+        owners
+            .by_class
+            .get(owner.as_str())
+            .map(|writes| {
+                writes
+                    .iter()
+                    .map(|w| Witness { attachment: q.attachment.clone(), ..w.clone() })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Resolve every write's object in the bucket once, from a fresh query:
+    /// what a write's object is does not depend on which owner asks.
+    /// `settled` is false when the depth cap cut a chase beneath it (a fresh
+    /// state has no frame above for a cycle to close at).
+    fn slot_owners(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        bucket_att: &WitnessAttachment,
+    ) -> (std::sync::Arc<SlotOwnerIndex>, std::sync::Arc<ChaseTrace>, bool) {
+        let bucket_q = ReducerQuery {
+            attachment: bucket_att,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        let mut state = QueryState::new();
+        let mut index = SlotOwnerIndex::default();
+        let (pos, outer_low) = state.enter_frame();
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        for w in bag.for_attachment(bucket_att) {
+            let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { continue };
+            let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
+            let object = self.materialize_raw(bag, &bucket_q, &mut state, vec![&probe], true);
+            let mut classes: Vec<&str> = object
+                .iter()
+                .filter_map(|o| match &o.payload {
+                    WitnessPayload::InferredType(t) => Some(t.receiver_arms()),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|arm| arm.class_name())
+                .collect();
+            classes.sort_unstable();
+            classes.dedup();
+            for class in classes {
+                index.by_class.entry(class.to_string()).or_default().push(Witness {
+                    attachment: bucket_att.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::Edge(value.clone()),
+                    span: w.span,
+                });
+            }
+        }
+        let (taint, _) = state.leave_frame(pos, outer_low, truncations_before);
+        (std::sync::Arc::new(index), std::sync::Arc::new(state.into_effect()), taint == Taint::CLEAN)
+    }
+
+    /// The bucket chased on the reader's own path: for a read the shared
+    /// index cannot serve (no memo may hold it, or the bucket is being built
+    /// beneath this read).
+    fn owned_slot_writes_on_path(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        bucket_att: &WitnessAttachment,
+        owner: &str,
+    ) -> Vec<Witness> {
+        let bucket_q = ReducerQuery {
+            attachment: bucket_att,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        bag.for_attachment(bucket_att)
+            .into_iter()
+            .filter_map(|w| {
+                let WitnessPayload::SlotWrite { receiver, value } = &w.payload else { return None };
+                // The object is an edge from the write, chased as every
+                // edge is; opaque, since which writes join depends on each
+                // object's value, not on the member's own key.
+                let probe = Witness { attachment: bucket_att.clone(), source: w.source.clone(), payload: WitnessPayload::Edge(receiver.clone()), span: w.span };
+                let object = state.in_opaque_frame(|state| self.materialize_raw(bag, &bucket_q, state, vec![&probe], true));
+                let owned = object.iter().any(|o| match &o.payload {
+                    WitnessPayload::InferredType(t) => t.receiver_arms().iter().any(|arm| arm.class_name() == Some(owner)),
+                    _ => false,
+                });
+                owned.then(|| Witness {
+                    attachment: q.attachment.clone(),
+                    source: w.source.clone(),
+                    payload: WitnessPayload::Edge(value.clone()),
+                    span: w.span,
+                })
+            })
+            .collect()
     }
 
     /// `materialize_raw` over the witnesses of `raw` that reach the query
@@ -2463,7 +3016,7 @@ impl ReducerRegistry {
         // A variable's fact made in a nested block is a region that ends
         // with the block: past it, the fact is not there at all.
         if let Some(p) = q.point.filter(|_| q.attachment.is_temporal()) {
-            raw.retain(|w| super::reaches(w, p));
+            raw.retain(|w| super::reaches(w, p.at) && !p.skips_site(w.span.start));
         }
         let sole = raw.len() == 1;
         self.materialize_raw(bag, q, state, raw, sole)
@@ -2498,7 +3051,7 @@ impl ReducerRegistry {
             .copied()
             .enumerate()
             .filter(|(_, w)| matches!(w.payload, WitnessPayload::Extend(_)))
-            .filter(|(_, w)| point.is_none_or(|p| w.span.start <= p))
+            .filter(|(_, w)| point.is_none_or(|p| p.reaches(w.span.start)))
             .collect();
         deltas.sort_by_key(|(_, w)| w.span.start);
         // Grown shapes, keyed by the raw index of the delta they stand at.
@@ -2602,7 +3155,7 @@ impl ReducerRegistry {
         let grown = Self::grown_witnesses(raw, grown);
         let base_q = ReducerQuery {
             attachment: q.attachment,
-            point: q.attachment.is_temporal().then_some(at).or(q.point),
+            point: q.attachment.is_temporal().then(|| ReadPoint { at, skips: q.point.and_then(|p| p.skips) }).or(q.point),
             framework: q.framework,
             arity_hint: None,
             receiver: None,
@@ -2646,6 +3199,7 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         w: &Witness,
         target: &WitnessAttachment,
+        read: Option<ReadPoint>,
         sole_witness: bool,
         state: &mut QueryState,
     ) -> Option<InferredType> {
@@ -2661,10 +3215,7 @@ impl ReducerRegistry {
                 // guard's region (docs/adr/flow-narrowing.md). Other
                 // edge sources have no read position; the scope end is
                 // the standing temporal approximation.
-                let point = match q.attachment {
-                    WitnessAttachment::Expr(span) => span.start,
-                    _ => scope_point(ctx.scopes, *scope),
-                };
+                let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
                 // Opaque: the read's point picks the binding and the
                 // regions that hold there, so the answer is not the
                 // edge target's alone.
@@ -2678,11 +3229,10 @@ impl ReducerRegistry {
                     // A read recorded at `Expr(span)` holds what the
                     // variable holds at the read.
                     let point = match q.attachment {
-                        WitnessAttachment::Expr(span) => Some(span.start),
                         // A join's arm holds what the place holds
                         // where the arm leaves.
-                        WitnessAttachment::Join { .. } => Some(w.span.start),
-                        _ => binding_scope_end(ctx, &place.root),
+                        WitnessAttachment::Join { .. } => Some(ReadPoint::position(w.span.start)),
+                        _ => read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position)),
                     };
                     self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                 })
@@ -2717,7 +3267,9 @@ impl ReducerRegistry {
                 // the arm leaves, a part of a variable as much as
                 // the variable.
                 let point = match (q.attachment, target) {
-                    (WitnessAttachment::Join { .. }, WitnessAttachment::Place(_)) => Some(w.span.start),
+                    (WitnessAttachment::Join { .. }, WitnessAttachment::Place(_)) => {
+                        Some(ReadPoint::position(w.span.start))
+                    }
                     _ => q.point,
                 };
                 let sub_q = ReducerQuery {
@@ -2800,6 +3352,18 @@ impl ReducerRegistry {
             raw
         };
         let window = super::reducers::LiveWindow::at(&raw, q);
+        // A variable read recorded at `Expr(span)` asks at its own site,
+        // less the statement the builder says it is evaluated before.
+        let read = match q.attachment {
+            WitnessAttachment::Expr(span) => Some(ReadPoint {
+                at: span.start,
+                skips: raw.iter().find_map(|w| match w.payload {
+                    WitnessPayload::EvaluatedBefore(s) => Some(s),
+                    _ => None,
+                }),
+            }),
+            _ => None,
+        };
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         let mut recurring: Vec<(&Witness, &WitnessAttachment, u32)> = Vec::new();
         for &w in raw.iter() {
@@ -2838,7 +3402,7 @@ impl ReducerRegistry {
                     // the mark it comes back with is its own.
                     let joined = matches!(q.attachment, WitnessAttachment::Join { .. });
                     let outer_low = joined.then(|| std::mem::replace(&mut state.low_cut, Taint::CLEAN));
-                    let resolved = self.chase_edge(bag, q, w, target, sole_witness, state);
+                    let resolved = self.chase_edge(bag, q, w, target, read, sole_witness, state);
                     if let Some(outer_low) = outer_low {
                         let cut = state.low_cut;
                         state.low_cut = outer_low.min(cut);
@@ -2907,20 +3471,14 @@ impl ReducerRegistry {
                     let base_t = state.in_opaque_frame(|state| match (base, q.context) {
                         (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
                             // The read's own point, as the Edge arm above.
-                            let point = match q.attachment {
-                                WitnessAttachment::Expr(span) => span.start,
-                                _ => scope_point(ctx.scopes, *scope),
-                            };
+                            let point = read.unwrap_or_else(|| ReadPoint::position(scope_point(ctx.scopes, *scope)));
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
                             )
                         }
                         (WitnessAttachment::Place(place), Some(ctx)) if place.is_variable() => {
-                            let point = match q.attachment {
-                                WitnessAttachment::Expr(span) => Some(span.start),
-                                _ => binding_scope_end(ctx, &place.root),
-                            };
+                            let point = read.or_else(|| binding_scope_end(ctx, &place.root).map(ReadPoint::position));
                             self.query_variable_place(bag, ctx, place, point, q.receiver.as_ref(), state)
                         }
                         _ => {
@@ -2978,6 +3536,7 @@ impl ReducerRegistry {
                                 // set, so the arm distribution below IS the
                                 // strip: the null is no arm.
                                 ProjectionStep::Defined => Some(t.clone()),
+                                ProjectionStep::ConstrainedInner => t.constrained_inner().cloned(),
                                 ProjectionStep::Element => match t {
                                     // An element is any of the sequence's values.
                                     crate::model::file_analysis::InferredType::Sequence(elems) => {
@@ -3080,6 +3639,11 @@ impl ReducerRegistry {
                         // the read keeps whatever else it knows.
                         let projected = match step {
                             ProjectionStep::Defined if !base_ty.may_be_undef() => None,
+                            // What a constraint admits is a proof, and a
+                            // value that may be no constraint proves nothing.
+                            ProjectionStep::ConstrainedInner => {
+                                base_ty.join_over_every_arm(class_order(q), |t| project(t, state))
+                            }
                             _ => base_ty.join_over_arms(class_order(q), |t| project(t, state)),
                         };
                         if let Some(t) = projected {
@@ -3170,11 +3734,51 @@ impl ReducerRegistry {
                         });
                     }
                 }
+                // Only where the tag is minted (`Expr(site)` in the file
+                // that wrote it): `of` is a span in that file, and a copy
+                // that travelled into another file's bag would ask a
+                // stranger's expression.
+                WitnessPayload::InferredType(InferredType::RefTagOf { of: Some(of), names: None, subject, site, via })
+                    if w.attachment == WitnessAttachment::Expr(*site) =>
+                {
+                    // The class a `ref`/`blessed` string spells is the class
+                    // its operand holds, when it holds exactly one.
+                    let of_q = ReducerQuery {
+                        attachment: of,
+                        point: Some(super::ReadPoint::position(w.span.start)),
+                        framework: q.framework,
+                        arity_hint: None,
+                        receiver: None,
+                        args: Vec::new(),
+                        context: q.context,
+                    };
+                    let names = state
+                        .in_opaque_frame(|state| match &*self.query_rec(bag, &of_q, state) {
+                            ReducedValue::Type(t) => Some(t.clone()),
+                            ReducedValue::FactMap(_) | ReducedValue::Effects(_) | ReducedValue::None => None,
+                        })
+                        .and_then(|t| match t.receiver_arms() {
+                            [one] => one.class_name().map(str::to_string),
+                            _ => None,
+                        });
+                    out.push(Witness {
+                        attachment: w.attachment.clone(),
+                        source: w.source.clone(),
+                        payload: WitnessPayload::InferredType(InferredType::RefTagOf {
+                            subject: subject.clone(),
+                            site: *site,
+                            via: *via,
+                            of: Some(of.clone()),
+                            names,
+                        }),
+                        span: w.span,
+                    });
+                }
                 _ => out.push(w.clone()),
             }
         }
         if !recurring.is_empty() {
-            self.rechase_recurring(bag, q, state, recurring, sole_witness, &mut out);
+            self.rechase_recurring(bag, q, state, recurring, read, sole_witness, &mut out);
         }
         out
     }
@@ -3195,6 +3799,7 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
         recurring: Vec<(&Witness, &WitnessAttachment, u32)>,
+        read: Option<ReadPoint>,
         sole_witness: bool,
         out: &mut Vec<Witness>,
     ) {
@@ -3231,7 +3836,7 @@ impl ReducerRegistry {
                     .iter()
                     .map(|&(w, target, _)| {
                         crate::util::ghost_stats::count("join.recurrence_rechased");
-                        self.chase_edge(bag, q, w, target, sole_witness, state)
+                        self.chase_edge(bag, q, w, target, read, sole_witness, state)
                     })
                     .collect();
                 state.low_cut = outer_low.min(state.low_cut);
@@ -3264,7 +3869,7 @@ impl ReducerRegistry {
     ) -> Option<InferredType> {
         let sub_q = ReducerQuery {
             attachment: att,
-            point: if att.is_temporal() { Some(site) } else { q.point },
+            point: if att.is_temporal() { Some(ReadPoint::position(site)) } else { q.point },
             framework: q.framework,
             arity_hint: None,
             // The enclosing call's receiver still binds `$self` inside the
@@ -3297,7 +3902,7 @@ impl ReducerRegistry {
         if self.invoke_ends(bag, q, state, site, callee, receiver).is_some_and(|e| !e.completes()) {
             return Some(InferredType::Never);
         }
-        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, site, r)).map(InferredType::into_invocant);
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -3368,7 +3973,7 @@ impl ReducerRegistry {
         let lookup_classes = |lookup: &Lookup, recv: &Option<InferredType>| -> Vec<String> {
             match lookup {
                 Lookup::Receiver => {
-                    recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
+                    recv.as_ref().and_then(|t| t.dispatch_name()).map(str::to_string).into_iter().collect()
                 }
                 Lookup::Super { writer } => match q.context {
                     Some(ctx) => crate::model::file_analysis::parents_of(
@@ -3561,7 +4166,7 @@ impl ReducerRegistry {
                 FreeAsk::Returns { .. } => (WitnessAttachment::Symbol(sym), None, FrameworkFact::Plain),
                 FreeAsk::Holds(_) => {
                     let place = full.declared_place(sym);
-                    let at = binding_scope_end(&cached_ctx, &place.root);
+                    let at = binding_scope_end(&cached_ctx, &place.root).map(ReadPoint::position);
                     let framework = binding_framework(&cached_ctx, &place.root);
                     (WitnessAttachment::Place(Box::new(place)), at, framework)
                 }
@@ -3911,7 +4516,7 @@ impl ReducerRegistry {
         ctx: &BagContext,
         var: &str,
         scope: ScopeId,
-        point: Point,
+        point: ReadPoint,
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
@@ -3955,7 +4560,7 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         ctx: &BagContext,
         place: &crate::model::file_analysis::Place,
-        point: Option<Point>,
+        point: Option<ReadPoint>,
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
@@ -4042,7 +4647,7 @@ pub(crate) fn variable_binding_scope(
     scopes: &[Scope],
     var: &str,
     scope: ScopeId,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<ScopeId> {
     let held = bag.variable_scopes(var);
     if held.is_empty() {
@@ -4052,8 +4657,63 @@ pub(crate) fn variable_binding_scope(
         held.contains(&sid)
             && bag
                 .iter_attachment(&WitnessAttachment::Variable { name: var.to_string(), scope: sid })
-                .any(|w| w.span.start <= point)
+                .any(|w| point.reaches(w.span.start))
     })
+}
+
+/// The bound in force at `q`'s point, the latest stated before it, with
+/// where it was stated. A slot's bound holds wherever the slot is asked; a
+/// local's from its declaration on, and an `Entry` one only until the next
+/// write (`WitnessBag::latest_reset`).
+fn bound_in_force<'b>(
+    bag: &'b WitnessBag,
+    q: &ReducerQuery,
+) -> Option<(Point, &'b BoundType, Evidence, Extent)> {
+    let mut bounds = bag.bounds_of(q.attachment).peekable();
+    bounds.peek()?;
+    let point = q.point.filter(|_| q.attachment.is_temporal());
+    let mut retired: Option<Option<Point>> = None;
+    let mut best: Option<(&Witness, &BoundType, Evidence, Extent)> = None;
+    for w in bounds {
+        let WitnessPayload::Bound { ty, evidence, extent } = &w.payload else {
+            continue;
+        };
+        let stated = match extent {
+            Extent::Slot => true,
+            Extent::Lifetime => point.is_none_or(|p| p.reaches(w.span.start) && super::reaches(w, p.at)),
+            Extent::Entry => {
+                point.is_none_or(|p| p.reaches(w.span.start))
+                    && retired
+                        .get_or_insert_with(|| bag.latest_reset(q.attachment, point))
+                        .is_none_or(|r| w.span.start >= r)
+            }
+        };
+        if stated && best.is_none_or(|(b, ..)| w.span.start >= b.span.start) {
+            best = Some((w, ty, *evidence, *extent));
+        }
+    }
+    best.map(|(w, ty, evidence, extent)| (w.span.start, ty, evidence, extent))
+}
+
+thread_local! {
+    static BOUNDS_UNFILLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with no bound standing in for an absent or `Unknown` value. A
+/// pass that keeps every round's facts reads this way while its rounds
+/// settle: a bound filled in for a value a later round finds would be a
+/// fact the settled answer never states (`docs/adr/declared-bounds.md`
+/// §Monotonicity). The fold memo is closed meanwhile, so no answer made
+/// either way is reused the other.
+pub(crate) fn with_bounds_unfilled<R>(f: impl FnOnce() -> R) -> R {
+    let prev = BOUNDS_UNFILLED.with(|c| c.replace(true));
+    let out = f();
+    BOUNDS_UNFILLED.with(|c| c.set(prev));
+    out
+}
+
+fn bounds_unfilled() -> bool {
+    BOUNDS_UNFILLED.with(|c| c.get())
 }
 
 /// Pick the "where am I asking from?" `Point` for a scope-chained

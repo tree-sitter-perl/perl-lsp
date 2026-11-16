@@ -1438,13 +1438,8 @@ impl<'a> Builder<'a> {
             }
         }
         if wants("is_package_receiver") {
-            // Same rule as the emit-hook path's `is_pkg_call`:
-            // `__PACKAGE__` (any spelling conventions certifies) or a
-            // bareword naming the match site's own package.
-            let is_pkg = crate::model::conventions::is_current_package_token(&data.text)
-                || (node.kind() == "package"
-                    && Some(data.text.as_str()) == self.current_package.as_deref());
-            data.is_package_receiver = Some(is_pkg);
+            // The emit-hook path's `is_pkg_call` asks the same helper.
+            data.is_package_receiver = Some(self.names_current_package(node));
         }
         data
     }

@@ -6,7 +6,7 @@ A Perl LSP server built on ts-parser-perl (crates.io) and tower-lsp.
 
 ```
 cargo build --release
-cargo test                              # unit tests
+cargo test                              # unit tests; CI runs them --features cpp,php,python
 ./e2e/run.sh                            # e2e tests (needs nvim + release build)
 gold-corpus/run.pl                      # gold harness (needs release build + installed substrate)
                                         # BUILD IT `--features cpp`: a plain release build
@@ -16,6 +16,14 @@ gold-corpus/run.pl                      # gold harness (needs release build + in
 perl-lsp --dump-package <root> <pkg>    # debug type inference for a package
 scripts/equiv/run.sh [<base>]           # whole-analysis equivalence vs base (refactor PRs)
 ```
+
+A test that runs a pack-language file through the driver
+(`LanguageRegistry`) only works when that language's feature is compiled
+in, so it carries `#[cfg(feature = "<lang>")]`. CI runs only the featured build,
+so it cannot catch a missing gate. **If a test you run fails because it lacks
+a feature gate, add the gate in the PR you are working on, even when that test
+is outside its scope.** (Tests that build a grammar's parser directly need no
+gate: the grammars are dev-dependencies.)
 
 The gold harness (`gold-corpus/README.md`) is an exact-assertion regression
 net over real CPAN modules from a snapshot-pinned substrate
@@ -105,6 +113,8 @@ See `docs/ROADMAP.md` for the forward design corpus entry point. `docs/adr/file-
 1. **All tree-sitter CST traversal happens inside `build()`.** No other file walks tree-sitter nodes, calls `child_by_field_name`, or uses `TreeCursor`. To add CST-derived data: extend `visit_*` in `build/builder/`. Builder plugins (separate modules taking `&mut FileAnalysis` + `&Tree` + `&[u8]`) are fine — they preserve the single entry point. Multiple post-walk passes inside `build()` are allowed and named (see "Build pipeline phases") for cases needing resolved state.
 
    **Within sanctioned tree consumers, speak `cst.rs`, not raw nodes.** `src/cst.rs` is the typed view over the CST (rust-analyzer style: zero-copy wrappers via `typed_node!` + `cast`, `NodeExt` for field-text/span/named-children, `pair_nodes` for separator-agnostic pair walking, `call_args` for flat call arguments, `varname_child`/`canonical_container_name` for variable identity, `is_conventional_invocant_scalar` for receiver detection). Each grammar trap is encoded there exactly once. New visitor code uses the typed accessors; re-spelling `child_by_field_name(..).utf8_text(..)` chains or a fresh `kind() == "..."` probe for a shape `cst.rs` already models is a bug. A positional read ("the first argument", "the last statement", "the k-th pair") goes through `NodeExt::elements` / `cst::nth_element`: a comment is a grammar extra AND a named child, so raw `named_child(i)` counts it — `layering_tests::positional_reads_skip_grammar_extras` ratchets the raw reads, shrink-only. Name-level Perl conventions (`is_constructor_name`, `is_conventional_invocant_name`) live in `src/model/conventions.rs` — pure `&str`, importable by tree-free layers like `file_analysis`.
+
+   **A fact about a node hangs off the node.** It is a `NodeFacts` column keyed by `NodeId` on the core syntax tree (`src/cst/syntax.rs`, `docs/adr/core-syntax-tree.md`), and its nesting is the tree's parent links — never a side index keyed by `Span`, `Point` or a row/column pair, nor a sorted vector searched by position. `layering_tests::build_facts_are_not_keyed_by_position` ratchets the build layers' position-keyed maps/sets and `partition_point`/`binary_search` sites, shrink-only: the case for such an index is always a guess about how rare a shape is in real code, and corpora prove those guesses wrong.
 
 2. **`model/file_analysis/` is the single source of truth.** All analysis results live in `FileAnalysis`. Query methods belong here. No `tree_sitter` imports.
 
@@ -227,6 +237,8 @@ When a comment grows past a few lines, that's a smell: either the code wants a c
    - `EffectFold` — the effect lane: `Effect` payloads on `SymbolEffects(sid)` / `Member{.., Effects}`, joined by union from the highest-priority source, answering `ReducedValue::Effects(Ends)` and only to an attachment that `asks_effects` (`docs/adr/cfg-tier.md` §Effects). Nothing stated reads as the top (`query_ends`); the class ladder walks it in-file only.
    - `SubReturnReducer` — `Symbol(_) + InferredType` latest-wins, runs last; backstop when no higher-priority reducer answered.
 
+**A declared type is a bound, not a witness.** `x: int`, `Foo $p`, `T x;` mint `WitnessPayload::Bound { ty, evidence, extent }`; no reducer folds it as a value, and one registry step after the reducers (`ReducerRegistry::cap_by_bound`) caps their answer by the bound in force — absent/`Unknown` reads the bound, and a known value reads by the bound's own facts (`Evidence::read_written` / `read_proven`, a guard's producer-minted `WitnessPayload::Proof`, `Extent::Slot` for a member, a three-valued `Fit`), never by a span's shape. Never give a declaration a source priority to make it win (`docs/adr/declared-bounds.md`).
+
 **Single shared query path.** `query_variable_type(bag, scopes, framework, var, scope, point)` and `query_sub_return_type(bag, symbols, name, arity_hint, ...)` in `model/witnesses/query.rs` are the only scope-walk + framework + reducer dispatch sites. `FileAnalysis::inferred_type_via_bag` / `sub_return_type_at_arity` (query-time) and `Builder::bag_query_attachment` / `bag_query_expr_span` (build-time) are thin wrappers over the registry. Identical rules in both by construction.
 
 **`TypeConstraint` is an input-parameter shape.** The struct exists so callers can package `(variable, scope, span, inferred_type)` for `push_type_constraint(tc)`, which translates it into Variable witnesses on the bag. There is no `Vec<TypeConstraint>` field — the bag is the only storage. Enrichment truncates the bag back to `base_witness_count` before re-deriving.
@@ -271,6 +283,7 @@ The fold driver in step 6 is the only place type inference iterates. Adding a ne
 - **Re-emittable passes are clear-and-emit.** Every builder pass that legitimately re-derives its bag contribution per iteration calls `WitnessBag::remove_by_source_tag(...)` at the start of every run, then re-pushes from current state. Current re-emittable tags: `arity_detection` (per-Symbol UnionOnArgs), `method_call_return` (call-site `Invoke`), `local_return` / `plugin_bridge` / `inheritance` (writeback), `call_binding` (propagator). Chain typing's TC-existence check serves the same role for chain-assignment witnesses. Anything else added to a fold step that pushes witnesses MUST follow this idempotency pattern or the worklist will spin.
 - **Walker only observes.** No walk-time function returns a type without first emitting the witness. `emit_expr_witness` is the canonical entry; `expr_payload` carries the closed-syntax bake for literals and the `Edge` payloads for name-dependent shapes. Consumers that need a type at walk time do `emit_expr_witness(node); bag_query_expr_span(span)` — emit first, query after.
 - **Source priority breaks ties.** `WitnessSource::priority()` returns 100 for `Plugin(_)` and 10 for everything else. The `PluginOverrideReducer` runs first in the registry and short-circuits when it sees a higher-priority witness on a Symbol attachment. New "this answer must dominate" sources go on this priority axis — never as a special-case branch in another reducer.
+- **One memo across queries.** Sharing answers between top-level queries is the answer memo (`docs/adr/answer-memo.md`): open a `FoldMemoScope`, never a side table — a bucket index (`SlotOwners`) is an entry in it. An entry carries its subtree's `Effect` (ladder rungs, poison) and a hit replays it, so a memoized chase records what a fresh one would.
 - **`TypeConstraint` writes go through `push_type_constraint(tc)`.** The struct is an input-parameter shape; the helper translates it into Variable witnesses on the bag. No `Vec<TypeConstraint>` field exists — the bag is the only storage. Direct bag pushes that bypass it are equivalent (it's a sugar wrapper that lands the witness at the constraint's start).
 
 ### Debugging type inference

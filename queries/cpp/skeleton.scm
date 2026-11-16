@@ -815,7 +815,7 @@
 
 ; ---- type witnesses: C++ leaks types at every DECLARATION site (its
 ; static-typing richness — the annot_type predicate carries the load).
-; `T x = init;` emits both the declared-type witness and a flow edge to
+; `T x = init;` emits both the declared bound and a flow edge to
 ; the initializer; `T x;` emits the declared type alone. `auto` defers
 ; to the edge (annot_type returns None), driving the cross-var chase. ----
 (declaration
@@ -944,9 +944,8 @@
   (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
 ; `x = rhs` writes x once the rhs has read it and replaces what x held, so
-; `x = x.next()` reads the old x on its right.
-; TODO(declared-bounds): the write retires `T x`'s declared type, so an
-; untyped rhs reads unknown (/mnt/project-files/design/php-held-prs/declared-contracts.md).
+; `x = x.next()` reads the old x on its right. `T x`'s declared type
+; outlives the write: an untyped rhs still reads `T`.
 (assignment_expression
   left: (identifier) @flow.target
   operator: "="
@@ -1086,6 +1085,8 @@
 (throw_statement) @ctl.leave.throw
 (continue_statement) @ctl.leave.continue
 (break_statement) @ctl.leave.break
+; A bare block's statements run where it stands.
+(compound_statement) @flow.block
 
 ; How a call to a function ends is how its body does; a call that is a
 ; whole statement lets control past it only if it comes back
