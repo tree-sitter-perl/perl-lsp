@@ -73,7 +73,7 @@ fn read(bag: &WitnessBag, point: Point) -> ReducedValue {
     let att = WitnessAttachment::Place(Box::new(place()));
     let q = ReducerQuery {
         attachment: &att,
-        point: Some(point),
+        point: Some(crate::model::witnesses::reducers::ReadPoint::position(point)),
         framework: FrameworkFact::Plain,
         arity_hint: None,
         receiver: None,

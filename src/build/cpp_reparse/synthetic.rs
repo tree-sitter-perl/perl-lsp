@@ -32,6 +32,10 @@ pub struct SynMember {
     /// walker the plain-field query lane uses, so a macro-pasted field renders
     /// its `*`s in hover exactly like a directly-declared one (rule #10).
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
+    /// The type spelling names a parameter of a function-like macro
+    /// (`_SV_HEAD(ptrtype)` → `ptrtype sv_any;`): each paste gives the field
+    /// its own type, so the shared base declares none.
+    pub type_is_pasted: bool,
 }
 
 /// One synthetic base minted from a member-block macro (`BASEOP`).
@@ -363,7 +367,10 @@ fn synth_base(
         let ns = name_node.start_byte().saturating_sub(prefix.len());
         let ne = name_node.end_byte().saturating_sub(prefix.len());
         let name_span = Span { start: point_at(ns), end: point_at(ne) };
-        fields.push(SynMember { name, name_span, type_text, deref_stack });
+        let type_is_pasted = type_text
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|tok| site.params.iter().any(|p| p == tok));
+        fields.push(SynMember { name, name_span, type_text, deref_stack, type_is_pasted });
     });
     // Source order (the DFS visit order isn't guaranteed) — deterministic.
     fields.sort_by_key(|m| (m.name_span.start.row, m.name_span.start.column));
@@ -385,6 +392,8 @@ struct VariantSite {
     /// The body's ORIGINAL bytes verbatim (offsets map 1:1 for positioning).
     body: String,
     start_point: tree_sitter::Point,
+    /// A function-like macro's parameter names; empty for an object-like one.
+    params: Vec<String>,
 }
 
 /// Every `#define macro_name` whose body is a field block, with its body node's
@@ -404,13 +413,20 @@ fn field_block_variant_sites(
     while let Some(m) = it.next() {
         let mut name_node: Option<tree_sitter::Node> = None;
         let mut body_node: Option<tree_sitter::Node> = None;
+        let mut params: Vec<String> = Vec::new();
         for c in m.captures {
-            // Object- and function-like field-block macros both mint a base; the
-            // params of a function-like one (`_SV_HEAD(ptrtype)`) are absorbed by
-            // the paste, so only name + body matter for positioning members.
+            // Object- and function-like field-block macros both mint a base;
+            // a function-like one's params position nothing, but a member
+            // typed by one has no type of its own.
             match names[c.index as usize] {
                 "oname" | "fname" => name_node = Some(c.node),
                 "obody" | "fbody" => body_node = Some(c.node),
+                "fparams" => {
+                    params = crate::cst::NodeExt::elements(&c.node)
+                        .filter_map(|p| p.utf8_text(src).ok())
+                        .map(|p| p.trim().to_string())
+                        .collect()
+                }
                 _ => {}
             }
         }
@@ -428,6 +444,7 @@ fn field_block_variant_sites(
             guards: guard_trail(nn, src),
             body: body_text.to_string(),
             start_point: bn.start_position(),
+            params,
         });
     }
     out
