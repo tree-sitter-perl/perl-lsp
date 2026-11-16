@@ -297,6 +297,17 @@ impl WitnessAttachment {
     pub fn folds_every_arm(&self) -> bool {
         matches!(self, WitnessAttachment::Join { .. })
     }
+
+    /// Does the fold here join the arms it could type, and so need to know
+    /// that an arm came back untyped (`tags::FACT_UNTYPED_ARM`)? An `Undef`
+    /// arm says only that the value may be absent: beside an untyped arm it
+    /// says nothing of what the value is.
+    pub fn counts_untyped_arms(&self) -> bool {
+        matches!(
+            self,
+            WitnessAttachment::SymbolReturnArm(_) | WitnessAttachment::Member { aspect: MemberAspect::Holds, .. }
+        )
+    }
     /// Whether this names the evaluation of an expression (its value as it
     /// is computed) rather than a slot that holds values: only an
     /// evaluation can be `Never`.

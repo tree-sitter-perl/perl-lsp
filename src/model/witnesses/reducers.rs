@@ -741,7 +741,7 @@ impl WitnessReducer for SymbolReturnArmFold {
             // all-undef gate below counts ways-out through these Facts, not
             // through the arms it managed to type.
             WitnessPayload::Fact { family, .. } => {
-                family == tags::FACT_UNDEF_ARM || family == tags::FACT_VALUE_ARM
+                family == tags::FACT_UNDEF_ARM || family == tags::FACT_VALUE_ARM || family == tags::FACT_UNTYPED_ARM
             }
             _ => false,
         }
@@ -751,6 +751,7 @@ impl WitnessReducer for SymbolReturnArmFold {
         let mut arms: Vec<InferredType> = Vec::new();
         let mut has_undef_arm = false;
         let mut value_arms = 0usize;
+        let untyped = ws.iter().any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == tags::FACT_UNTYPED_ARM));
         for w in ws {
             match &w.payload {
                 WitnessPayload::InferredType(t) => arms.push(t.clone()),
@@ -775,7 +776,7 @@ impl WitnessReducer for SymbolReturnArmFold {
         // (`return $self->_log(..)` where `_log` returns nothing): with a
         // value arm left untyped, the sub may still return a value, and an
         // `Undef` answer would claim every caller's deref dies.
-        if arms.len() < value_arms && arms.iter().all(|t| t.is_undef()) {
+        if (arms.len() < value_arms || untyped) && arms.iter().all(|t| t.is_undef()) {
             return ReducedValue::None;
         }
         match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm, class_order(_q)) {
@@ -796,6 +797,10 @@ fn agree_slot_arms(ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
             _ => None,
         })
         .collect();
+    let untyped = ws.iter().any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == tags::FACT_UNTYPED_ARM));
+    if untyped && arms.iter().all(InferredType::is_undef) {
+        return ReducedValue::None;
+    }
     match crate::model::file_analysis::join_all(&arms, class_order(q)) {
         Some(t) => ReducedValue::Type(t),
         None => ReducedValue::None,
@@ -958,7 +963,11 @@ impl WitnessReducer for FieldValueReducer {
 
     fn claims(&self, w: &Witness) -> bool {
         matches!(w.attachment, WitnessAttachment::Member { aspect: crate::model::witnesses::MemberAspect::Holds, .. })
-            && matches!(w.payload, WitnessPayload::InferredType(_))
+            && match &w.payload {
+                WitnessPayload::InferredType(_) => true,
+                WitnessPayload::Fact { family, .. } => family == tags::FACT_UNTYPED_ARM,
+                _ => false,
+            }
     }
 
     fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {

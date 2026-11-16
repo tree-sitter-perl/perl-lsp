@@ -5385,3 +5385,24 @@ function f($c) {
     assert_eq!(at("x", 5), Some(T::Optional(Box::new(T::ClassName("A".into())))));
     assert_eq!(at("z", 7), Some(T::Undef));
 }
+
+/// A `null` beside an arm nothing types says only that the value may be
+/// absent, not what it is: the return answers nothing rather than `null`.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_null_return_beside_an_untyped_one_answers_nothing() {
+    let src = "<?php
+class R {
+    public function find($c) {
+        if ($c) { return null; }
+        return unknown_thing();
+    }
+    public function f() {
+        $p = $this->find(1);
+        echo $p;
+    }
+}
+";
+    let fa = php(src);
+    assert_eq!(fa.inferred_type_via_bag("p", tree_sitter::Point { row: 8, column: 13 }), None);
+}

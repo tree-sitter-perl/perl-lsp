@@ -14,7 +14,7 @@ pub fn r_pack() -> LangPack {
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         // A logical is a number in arithmetic (`TRUE + 1` is 2).
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
-        type_display: |_| None,
+        type_display: |tag| (tag == "Undef").then_some("NULL"),
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: |_| None,

@@ -2949,6 +2949,16 @@ impl ReducerRegistry {
                             payload: WitnessPayload::InferredType(InferredType::Unknown),
                             span: w.span,
                         }),
+                        None if q.attachment.counts_untyped_arms() => out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::Fact {
+                                family: super::tags::FACT_UNTYPED_ARM.into(),
+                                key: String::new(),
+                                value: super::types::FactValue::Bool(true),
+                            },
+                            span: w.span,
+                        }),
                         // An edge that didn't resolve drops out — same as a
                         // witness no reducer claims. The write it lowered
                         // still HAPPENED: its `Reset` marker records that.

@@ -31,6 +31,11 @@ pub const FACT_SHORT_CIRCUIT: &str = "short_circuit";
 /// [`InferredType::Undef`]: crate::model::file_analysis::InferredType::Undef
 pub const FACT_VALUE_ARM: &str = "value_arm";
 
+/// An arm whose edge came back untyped, recorded by the chase on an
+/// attachment that `counts_untyped_arms`: the arms a fold sees are then
+/// not every arm there is, so an `Undef` among them is no answer alone.
+pub const FACT_UNTYPED_ARM: &str = "untyped_arm";
+
 /// Which spelling produced an undef arm.
 ///
 /// All three coerce to undef in SCALAR context, which is all any current

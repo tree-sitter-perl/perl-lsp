@@ -28,7 +28,7 @@ pub fn cpp_pack() -> LangPack {
         family_reach: crate::model::file_analysis::FamilyReach::Descendants,
         // `bool` promotes to `int`.
         lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
-        type_display: |_| None,
+        type_display: |tag| (tag == "Undef").then_some("std::nullptr_t"),
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template
