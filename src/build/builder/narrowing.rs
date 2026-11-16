@@ -111,6 +111,12 @@ impl crate::cst::PlaceBinder for SurveyBinder<'_, '_, '_> {
 }
 
 /// What a guard does to the subject's type where it holds.
+///
+/// TODO(perl-guard-proofs): the regions these mint carry no
+/// `WitnessPayload::Proof`, which only a bound reads and Perl declares none.
+/// The first Perl bound (docs/adr/declared-bounds.md) needs them minted
+/// beside each region, as the pack narrowing does, or a guard under it
+/// reads by the write rule.
 #[derive(Clone)]
 pub(super) enum NarrowOp {
     /// `isa` / `ref…eq` prove a concrete type.
@@ -122,6 +128,12 @@ pub(super) enum NarrowOp {
     Defined { read: Span },
     /// The tag a [`NarrowSubject::TagOf`] holds equals this literal.
     TagEq(String),
+    /// The type-constraint value `constraint` holds admitted the subject:
+    /// the region holds `Projected { base: constraint, step:
+    /// ConstrainedInner }`, so what it proves is whatever that value
+    /// constrains, answered when asked — a receiver's `Expr`, or the
+    /// constraint a library declares.
+    Constrained { constraint: crate::model::witnesses::WitnessAttachment },
 }
 
 impl NarrowOp {
@@ -132,7 +144,7 @@ impl NarrowOp {
     /// wins). See `docs/adr/flow-narrowing.md` negative-polarity rows.
     fn negated(&self) -> Option<NarrowOp> {
         match self {
-            NarrowOp::To(_) | NarrowOp::TagEq(_) => None,
+            NarrowOp::To(_) | NarrowOp::TagEq(_) | NarrowOp::Constrained { .. } => None,
             NarrowOp::Defined { .. } => Some(NarrowOp::To(InferredType::Undef)),
         }
     }
@@ -146,6 +158,10 @@ impl NarrowOp {
             NarrowOp::Defined { read } => Some(WitnessPayload::Projected {
                 base: WitnessAttachment::Expr(read),
                 step: ProjectionStep::Defined,
+            }),
+            NarrowOp::Constrained { constraint } => Some(WitnessPayload::Projected {
+                base: constraint,
+                step: ProjectionStep::ConstrainedInner,
             }),
             NarrowOp::TagEq(_) => None,
         }
@@ -358,14 +374,57 @@ fn guard_literal<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<
 fn recognize_atom<'a>(builder: &Builder<'a>, cond: Node<'a>) -> Option<GuardFact<'a>> {
     let source = builder.source;
     match cond.kind() {
-        "method_call_expression" => recognize_isa_guard(builder, cond, source),
+        "method_call_expression" => {
+            recognize_isa_guard(builder, cond, source).or_else(|| recognize_type_check(builder, cond).map(|(f, _)| f))
+        }
         "equality_expression" => recognize_ref_eq_guard(builder, cond, source),
         "func1op_call_expression" => recognize_defined_guard(builder, cond, source),
         "ambiguous_function_call_expression" | "function_call_expression" => {
-            recognize_blessed_guard(builder, cond)
+            recognize_blessed_guard(builder, cond).or_else(|| recognize_type_check(builder, cond).map(|(f, _)| f))
         }
         _ => None,
     }
+}
+
+/// A plugin-declared type check → narrow its operand to what a passing
+/// check proves: a function (`is_ArrayRef($x)` / `assert_Str($x)`), or a
+/// method of a constraint value (`$type->check($x)`, `Int->assert_valid($x)`).
+/// The second answer says whether the call dies when the check fails.
+fn recognize_type_check<'a>(builder: &Builder<'a>, call: Node<'a>) -> Option<(GuardFact<'a>, bool)> {
+    if let Some(mc) = crate::cst::MethodCall::cast(call) {
+        let check = builder.plugins.type_check_method(mc.method()?.utf8_text(builder.source).ok()?)?;
+        let arg = crate::cst::peel_groups(call.child_by_field_name("arguments")?);
+        if !is_subject_node_kind(arg.kind()) {
+            return None;
+        }
+        let constraint = crate::model::witnesses::WitnessAttachment::Expr(node_to_span(mc.invocant()?));
+        return Some((
+            GuardFact {
+                subject: builder.narrow_subject_of(arg)?,
+                op: NarrowOp::Constrained { constraint },
+                asserts_when_true: true,
+                read: arg,
+            },
+            check.asserts,
+        ));
+    }
+    let at = call.start_position();
+    let (check, arg) = crate::cst::subject_call(call, builder.source, |name| builder.type_check_fn(name, at))?;
+    let op = match check.constraint {
+        crate::build::plugin::CheckedConstraint::Proves(ty) => NarrowOp::To(ty),
+        crate::build::plugin::CheckedConstraint::Declared { library, name } => NarrowOp::Constrained {
+            constraint: crate::model::witnesses::WitnessAttachment::returns_of(library, name),
+        },
+    };
+    Some((
+        GuardFact {
+            subject: builder.narrow_subject_of(arg)?,
+            op,
+            asserts_when_true: true,
+            read: arg,
+        },
+        check.asserts,
+    ))
 }
 
 /// `defined $x` / `defined($x)` → strip `Optional` off the subject.
@@ -493,8 +552,8 @@ fn block_leaves(block: Node, source: &[u8]) -> bool {
     block.elements().any(|stmt| statement_leaves(stmt, source))
 }
 
-/// True if a statement leaves its block: an exit, or a conditional with an
-/// `else` whose every arm leaves.
+/// True if a statement leaves its block: an exit, a conditional with an
+/// `else` whose every arm leaves, or a bare block that leaves.
 fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
     match stmt.kind() {
         "expression_statement" => crate::cst::nth_element(stmt, 0).is_some_and(|e| is_exit_expression(e, source)),
@@ -502,8 +561,22 @@ fn statement_leaves(stmt: Node, source: &[u8]) -> bool {
             let arms = crate::cst::conditional_arms(stmt);
             arms.last().is_some_and(|arm| arm.cond.is_none()) && arms.iter().all(|arm| block_leaves(arm.block, source))
         }
+        // A bare block is a loop that runs once (perlsyn).
+        "block_statement" => loop_block_leaves(stmt, source),
         _ => false,
     }
+}
+
+/// True if a loop's block never comes back to the loop or lands after it:
+/// it leaves, and no `last`/`next`/`redo` in it can reach the loop
+/// (conservatively, even one an inner loop owns, or a label names).
+// TODO(cfg-exit-join): a loop-control edge to the loop's exit is the CFG's.
+fn loop_block_leaves(block: Node, source: &[u8]) -> bool {
+    use crate::cst::NodeExt;
+    fn has_loop_control(node: Node) -> bool {
+        node.elements().any(|c| c.kind() == "loopex_expression" || has_loop_control(c))
+    }
+    block_leaves(block, source) && !has_loop_control(block)
 }
 
 impl<'a> Builder<'a> {
@@ -536,11 +609,7 @@ impl<'a> Builder<'a> {
 
     /// `__PACKAGE__` as a class operand: the enclosing package.
     fn current_package_literal(&self, node: Node<'a>) -> Option<String> {
-        let text = node.utf8_text(self.source).ok()?;
-        if !crate::model::conventions::is_current_package_token(text) {
-            return None;
-        }
-        self.package_for_node(node)
+        self.token_class(node)
     }
 
     /// A scalar `isa`/`DOES` argument (`$x->isa($C)`) that the constant
@@ -649,7 +718,7 @@ impl<'a> Builder<'a> {
                 NarrowOp::Defined { .. } => GuardPredicate::Defined,
                 // What it proves is a fold answer; D3/D4 read the prior
                 // type at the guard, which a tag guard has no subject for.
-                NarrowOp::TagEq(_) => continue,
+                NarrowOp::TagEq(_) | NarrowOp::Constrained { .. } => continue,
             };
             self.guard_sites.push(GuardSite {
                 subject: fact.subject.subject().clone(),
@@ -697,8 +766,11 @@ impl<'a> Builder<'a> {
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
     /// run of the body, so the body narrows by G (`until` by its negation),
-    /// and the rebind cutoff ends it at a write. Nothing narrows after the
-    /// loop: `last` leaves with G unchanged.
+    /// and the rebind cutoff ends it at a write. A body that always leaves
+    /// never comes back to the test, so the loop is left only where its
+    /// first test fails, and the rest of the block narrows as after an `if`
+    /// with no `else`; any other body is left with G as the last test or a
+    /// `last` left it (`TODO(cfg-exit-join)`).
     pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
         let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
         else {
@@ -714,6 +786,12 @@ impl<'a> Builder<'a> {
         };
         let enter = stmt.child(0).is_none_or(|k| k.kind() != "until");
         self.narrow_arm(condition, body, enter);
+        if loop_block_leaves(body, self.source) {
+            if let Some(region) = self.rest_of_block(stmt) {
+                self.record_guard_sites(condition);
+                self.narrow_chain_arm(Some((condition, !enter)), &[], region);
+            }
+        }
     }
 
     /// `G ? A : B` — A runs where G holds, B where it fails.
@@ -762,6 +840,21 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `assert_X($x);` / `$type->assert_valid($x);` — a statement that dies
+    /// unless its check passes is `die unless is_X($x)`: the rest of the
+    /// block runs where it held.
+    pub(super) fn narrow_assertion(&mut self, call: Node<'a>) {
+        if self.syntax.parent(call).is_none_or(|p| p.kind() != "expression_statement") {
+            return;
+        }
+        if !recognize_type_check(self, call).is_some_and(|(_, asserts)| asserts) {
+            return;
+        }
+        if self.narrow_block_remainder(call, call, true) {
+            self.record_guard_sites(call);
+        }
+    }
+
     /// Narrow `[statement end .. enclosing-block end]` for a statement-level
     /// guard: the statement `node` is in leaves the block unless
     /// `condition` is `holds_when_true`. False when that statement is no
@@ -781,13 +874,19 @@ impl<'a> Builder<'a> {
 
     /// `[statement end .. enclosing-block end]` for the statement `node` is
     /// in, when that statement is a block's.
-    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
     fn block_remainder(&self, node: Node<'a>) -> Option<Span> {
         let mut stmt = node;
         while !matches!(stmt.kind(), "expression_statement" | "conditional_statement") {
             stmt = self.syntax.parent(stmt)?;
         }
-        let block = self.syntax.parent(stmt).filter(|b| b.kind() == "block")?;
+        self.rest_of_block(stmt)
+    }
+
+    /// `[stmt end .. block end]` when `stmt` is a statement of a block, a
+    /// bare block, or the file's top level.
+    // TODO(cfg-exit-join): narrowing past the enclosing block needs the CFG's block-exit join (docs/prompt-cfg-tier.md §3.5).
+    fn rest_of_block(&self, stmt: Node<'a>) -> Option<Span> {
+        let block = self.syntax.parent(stmt).filter(|b| matches!(b.kind(), "block" | "block_statement" | "source_file"))?;
         Some(Span { start: stmt.end_position(), end: block.end_position() })
     }
 
@@ -867,7 +966,7 @@ impl<'a> Builder<'a> {
         self.bag.remove_by_source_tag("tag_narrowing");
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
         for g in &self.tag_narrowings {
-            let Some(InferredType::RefTagOf { subject, site, via }) =
+            let Some(InferredType::RefTagOf { subject: Some(subject), site, via, .. }) =
                 self.bag_query_place(&g.var, g.scope, g.region.start)
             else {
                 continue;
@@ -946,6 +1045,9 @@ impl<'a> Builder<'a> {
                 });
                 continue;
             }
+            // TODO(narrowing-cutoff-read-order): a write in a modified
+            // statement runs after the modifier's head, so the cut should not
+            // end the region ahead of the head's reads.
             let rebound = |var: &str| {
                 let var = Place::variable(self.binding_of(var, pn.region.start, pn.scope).0);
                 self.rebinds.earliest_in(&var, pn.region)
@@ -1050,12 +1152,14 @@ impl<'a> Builder<'a> {
                         .filter(|r| r.exact && !r.place.is_variable());
                     if let (Some(read), Ok(text)) = (read, receiver.utf8_text(self.source)) {
                         let dies_on_undef = self.deref_dies_on_undef(node, &form);
+                        let span = node_to_span(node);
                         sites.push(crate::model::file_analysis::ArrowDerefSite {
                             receiver: text.to_string(),
                             place: Box::new(read.place),
-                            span: node_to_span(node),
+                            span,
                             form,
                             dies_on_undef,
+                            evaluated_before: self.evaluated_before(node),
                         });
                     }
                 }

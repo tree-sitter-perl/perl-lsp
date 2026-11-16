@@ -265,9 +265,9 @@ impl<'a> Builder<'a> {
             first_named_idx = Some(idx);
             match child.kind() {
                 "string_literal" | "interpolated_string_literal" => {
-                    if let Some(text) = self.extract_string_content(*child) {
+                    if let Some((text, span)) = crate::cst::string_value(*child, self.source) {
                         if !text.starts_with('+') {
-                            attr_names.push((text, self.string_content_span(*child)));
+                            attr_names.push((text, span));
                         }
                     }
                 }
@@ -724,7 +724,7 @@ impl<'a> Builder<'a> {
                 node.utf8_text(self.source).unwrap_or("").to_string(),
             ),
             "string_literal" | "interpolated_string_literal" => {
-                plugin::ValueShape::Str(self.extract_string_content(node).unwrap_or_default())
+                plugin::ValueShape::Str(crate::cst::string_content_text(node, self.source).unwrap_or_default())
             }
             "bareword" | "autoquoted_bareword" => {
                 plugin::ValueShape::Str(node.utf8_text(self.source).unwrap_or("").to_string())
@@ -770,7 +770,7 @@ impl<'a> Builder<'a> {
     pub(super) fn extract_node_string(&self, node: Node<'a>) -> Option<String> {
         match node.kind() {
             "bareword" | "autoquoted_bareword" => node.utf8_text(self.source).ok().map(|s| s.to_string()),
-            "string_literal" | "interpolated_string_literal" => self.extract_string_content(node),
+            "string_literal" | "interpolated_string_literal" => crate::cst::string_content_text(node, self.source),
             _ => None,
         }
     }
@@ -808,15 +808,6 @@ impl<'a> Builder<'a> {
         args
     }
 
-    /// Extract string content from a string_literal node (strips quotes).
-    pub(super) fn extract_string_content(&self, node: Node<'a>) -> Option<String> {
-        crate::cst::string_content_text(node, self.source)
-    }
-
-    pub(super) fn string_content_span(&self, node: Node<'a>) -> Span {
-        crate::cst::string_content_span(node)
-    }
-
     pub(super) fn extract_array_attr_names(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         // Handle bare qw() node directly (e.g. as method arg)
         if node.kind() == "quoted_word_list" {
@@ -848,7 +839,7 @@ impl<'a> Builder<'a> {
     pub(super) fn constraint_param_for(&mut self, el: Node<'a>) -> plugin::ConstraintParam {
         if matches!(el.kind(), "string_literal" | "interpolated_string_literal") {
             return plugin::ConstraintParam {
-                string: self.extract_string_content(el),
+                string: crate::cst::string_content_text(el, self.source),
                 ty: None,
             };
         }
@@ -1004,8 +995,8 @@ impl<'a> Builder<'a> {
         match (crate::cst::literal_shape(node), node.kind()) {
             (Some(LiteralShape::Qw), _) => self.extract_qw_word_spans(node, out),
             (Some(LiteralShape::Str), _) => {
-                if let Some(text) = self.extract_string_content(node) {
-                    out.push((text, self.string_content_span(node)));
+                if let Some(value) = crate::cst::string_value(node, self.source) {
+                    out.push(value);
                 }
             }
             (None, "bareword" | "autoquoted_bareword") => {
@@ -1113,9 +1104,7 @@ impl<'a> Builder<'a> {
                 .utf8_text(self.source)
                 .ok()
                 .map(|t| (t.to_string(), node_to_span(node))),
-            "string_literal" | "interpolated_string_literal" => self
-                .extract_string_content(node)
-                .map(|t| (t, self.string_content_span(node))),
+            "string_literal" | "interpolated_string_literal" => crate::cst::string_value(node, self.source),
             _ => None,
         }
     }

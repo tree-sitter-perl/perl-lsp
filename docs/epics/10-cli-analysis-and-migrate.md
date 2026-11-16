@@ -1,6 +1,7 @@
 # Epic 10 — CLI analysis subcommands + `--migrate`
 
-> **Status:** scheduled (10th).
+> **Status:** Phase A.1 landed as `--completion` (audited 2026-11-12);
+> the rest is open.
 > **Design owner-doc:** `docs/prompt-cli-tools.md` §"Analysis
 > subcommands still missing" and §"`--migrate`" (targets table,
 > implementation shape, phase order).
@@ -18,9 +19,9 @@ order.
 2. `src/lsp/cli/mod.rs` (dispatch), `positions.rs` (the coordinate
    contract), `query.rs` (the verb bodies), `heatmap.rs` (the best
    template for a full report verb).
-3. `CLAUDE.md` §"A verb indexes only the language families its answer
-   can consult" and §"Startup is not one thing" — both are directly
-   about writing a new CLI verb, and both are easy to get quietly wrong.
+3. `CLAUDE.md` §"A process serves ONE language" and §"Startup is not
+   one thing" — both are directly about writing a new CLI verb, and both
+   are easy to get quietly wrong.
 4. For `--migrate`: how `--rename` builds span-based `WorkspaceEdit`s
    (`grep -rn 'fn cli_rename' src/lsp/cli/`) — migrate reuses that
    edit-application shape.
@@ -46,8 +47,9 @@ pattern.
 Each a small `cli_*` fn + a `--help` entry + tests; separate commits, in
 this order:
 
-1. `--completions <root> <file> <line> <col>` — the completion engine at
-   a position. Mirror `--signature-help`'s plumbing (`lock_for_file`).
+1. ~~`--completions`~~ — **landed** as `--completion <root> <file>
+   <line> <col>` (or `--at`), one of the uniform cursor verbs in
+   `main.rs`.
 2. `--dependency-graph <root> [--format dot|json|list]` — module import
    edges from each FA's `imports`, plus parent edges as a distinct edge
    kind; cycles via DFS, reported in all formats. Sweeps the served

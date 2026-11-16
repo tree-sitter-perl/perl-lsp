@@ -195,7 +195,9 @@ impl Slot {
                 if param.is_invocant {
                     return None;
                 }
-                analysis.inferred_type_via_bag(&param.name, sig.body_end)
+                analysis
+                    .param_declared_type(param, module_index)
+                    .or_else(|| analysis.inferred_type_via_bag(&param.name, sig.body_end))
             })
             .collect();
         crate::model::file_analysis::join_all(&types, &analysis.type_order(module_index))
