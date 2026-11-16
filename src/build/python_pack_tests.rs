@@ -2249,3 +2249,25 @@ class S:
     let fa = py_in(src, None);
     assert_ne!(fa.inferred_type_via_bag("a", Point::new(7, 15)), Some(InferredType::Undef));
 }
+
+#[test]
+fn a_field_written_none_and_a_class_holds_that_class_or_none() {
+    let src = "\
+class CID:
+    pass
+class P:
+    headers: CID[str]
+    def __init__(self):
+        self.headers = None
+    def prep(self):
+        self.headers = CID()
+def f(p: P):
+    headers = p.headers
+    return headers
+";
+    let fa = py_in(src, None);
+    assert_eq!(
+        fa.inferred_type_via_bag("headers", Point::new(10, 11)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("CID".into()))))
+    );
+}

@@ -5424,3 +5424,29 @@ class C {
         Some(InferredType::Optional(Box::new(InferredType::ClassName("E".into()))))
     );
 }
+
+#[cfg(feature = "php")]
+#[test]
+fn php_a_nullable_field_read_keeps_null_beside_a_class_write() {
+    let src = "<?php
+class E {}
+class C {
+    private E|null $type = null;
+    public function getType(): E|null
+    {
+        return $this->type;
+    }
+    public function setType(E $type): static
+    {
+        $this->type = $type;
+        return $this;
+    }
+}
+";
+    let fa = php(src);
+    let sp = crate::model::file_analysis::Span { start: tree_sitter::Point { row: 6, column: 15 }, end: tree_sitter::Point { row: 6, column: 26 } };
+    assert_eq!(
+        fa.expr_type_at_span(sp, None),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("E".into()))))
+    );
+}

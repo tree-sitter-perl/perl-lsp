@@ -285,7 +285,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 .max();
             // Source priority first (an annotation outranks a flow guess
             // sharing the same class-wide extent), narrowest span second.
-            let mut narrow: Option<(&Witness, u64)> = None;
+            // Regions that tie on both are arms of one value (a member's
+            // class-wide writes), so they join.
+            let mut narrow: Option<(u8, u64)> = None;
+            let mut tied: Vec<&Witness> = Vec::new();
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
                     if span_contains(&w.span, point)
@@ -293,31 +296,46 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         && window.admits(w)
                         && latest_point_fact.is_none_or(|p| p <= w.span.start)
                     {
-                        let area = span_area(&w.span);
-                        let prio = w.source.priority();
-                        let better = narrow.is_none_or(|(nw, a)| {
-                            let np = nw.source.priority();
-                            prio > np || (prio == np && area < a)
-                        });
-                        if better {
-                            narrow = Some((*w, area));
+                        let key = (w.source.priority(), span_area(&w.span));
+                        match narrow {
+                            Some((np, na)) if key.0 < np || (key.0 == np && key.1 > na) => {}
+                            Some(k) if k == key => tied.push(*w),
+                            _ => {
+                                narrow = Some(key);
+                                tied = vec![*w];
+                            }
                         }
                     }
                 }
             }
-            if let Some((w, _)) = narrow {
-                if let WitnessPayload::InferredType(t) = &w.payload {
-                    // An untyped region yields to a use inside it, as an
-                    // untyped write does (the full fold below).
-                    let used_inside = !t.is_known()
-                        && ws.iter().any(|o| {
-                            matches!(o.payload, WitnessPayload::Observation(_))
-                                && window.admits(o)
-                                && o.span.start >= w.span.start
-                        });
-                    if !used_inside {
-                        return ReducedValue::Type(t.clone());
-                    }
+            let narrowed = match tied.as_slice() {
+                [] => None,
+                [w] => match &w.payload {
+                    WitnessPayload::InferredType(t) => Some((t.clone(), *w)),
+                    _ => None,
+                },
+                arms => {
+                    let types: Vec<InferredType> = arms
+                        .iter()
+                        .filter_map(|w| match &w.payload {
+                            WitnessPayload::InferredType(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    crate::model::file_analysis::join_all(&types, class_order(q)).map(|t| (t, arms[0]))
+                }
+            };
+            if let Some((t, w)) = narrowed {
+                // An untyped region yields to a use inside it, as an
+                // untyped write does (the full fold below).
+                let used_inside = !t.is_known()
+                    && ws.iter().any(|o| {
+                        matches!(o.payload, WitnessPayload::Observation(_))
+                            && window.admits(o)
+                            && o.span.start >= w.span.start
+                    });
+                if !used_inside {
+                    return ReducedValue::Type(t);
                 }
             }
         }
@@ -472,12 +490,13 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         }
         // The class axis wins over rep, consistent or not: the user's intent
         // is object-typed use, and a rep mismatch is a separate diagnostic.
-        // An undef written beside it is no rep but absence: the place holds
-        // the class or nothing.
+        // An undef written or declared beside it is no rep but absence: the
+        // place holds the class or nothing.
         if let Some(name) = class_assertion.name {
             let class = InferredType::ClassName(name);
             return ReducedValue::Type(match plain_type {
                 Some(t) if t.is_undef() => InferredType::Optional(Box::new(class)),
+                Some(InferredType::Optional(inner)) if *inner == class => InferredType::Optional(inner),
                 _ => class,
             });
         }
