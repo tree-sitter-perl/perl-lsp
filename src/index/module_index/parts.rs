@@ -264,6 +264,35 @@ impl ModuleEdgeIndexes {
                 seen.insert(&key);
                 map.entry(key).or_default().insert(module_name);
             };
+        // A module name can hold several files, and its row speaks for all
+        // of them: a second never-returning declaration joins the row, and
+        // a declaration that comes back (no row of its own) widens it — in
+        // either feed order, so ends go in before this file's names do.
+        use crate::model::witnesses::Ends;
+        let fed_before = |name: &str| {
+            self.names
+                .get(name)
+                .is_some_and(|b| b.as_slice().iter().any(|m| m == module_name))
+        };
+        for (name, e) in &ends {
+            let came_back = fed_before(name);
+            let mut rows = self.ends.entry(name.clone()).or_default();
+            match rows.iter_mut().find(|(m, _)| m == module_name) {
+                Some((_, row)) => *row |= *e,
+                None => rows.push((
+                    module_name.to_string(),
+                    if came_back { *e | Ends::COMPLETES } else { *e },
+                )),
+            }
+            fed.ends.insert(name);
+        }
+        for name in names.iter().filter(|n| !ends.iter().any(|(e, _)| e == *n)) {
+            if let Some(mut rows) = self.ends.get_mut(name.as_str()) {
+                if let Some((_, row)) = rows.iter_mut().find(|(m, _)| m == module_name) {
+                    *row |= Ends::COMPLETES;
+                }
+            }
+        }
         for name in names {
             push_unique(&self.names, name, &mut fed.names);
         }
@@ -278,13 +307,6 @@ impl ModuleEdgeIndexes {
         }
         for pkg in providers {
             push_unique(&self.providers, pkg, &mut fed.providers);
-        }
-        for (name, e) in ends {
-            let mut rows = self.ends.entry(name.clone()).or_default();
-            if !rows.iter().any(|(m, _)| m == module_name) {
-                rows.push((module_name.to_string(), e));
-            }
-            fed.ends.insert(&name);
         }
         // UNION, not replace: several files can feed under one package name
         // (Perl reopens packages anywhere), and `rebuild_name_registration`
