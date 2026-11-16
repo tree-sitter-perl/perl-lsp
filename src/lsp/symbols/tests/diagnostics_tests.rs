@@ -390,6 +390,47 @@ sub f {
     assert!(undef_deref_diags(src).is_empty(), "no guard, no Undef, no warning");
 }
 
+#[test]
+fn d1_a_postfix_condition_reads_before_its_statement() {
+    // `$x->done` runs before the statement that writes `undef`: the
+    // receiver is the object, not the value the statement leaves.
+    let src = r#"
+package P;
+sub f {
+    my $x = Foo->new;
+    $x = undef if $x->done;
+}
+1;
+"#;
+    let diags = undef_deref_diags(src);
+    assert!(diags.is_empty(), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
+}
+
+#[test]
+fn d1_a_postfix_condition_reads_none_of_its_statements_writes() {
+    // `$c->ping` runs before the statement writes `$c`: its receiver is the
+    // `my $c` the analysis holds no value for, never the `Foo` written.
+    // TODO(narrowing-cutoff-read-order): with `return if defined $c` ahead,
+    // the exit's `Undef` region is cut at the statement's write, which
+    // precedes the read in the source, so the die still goes unreported.
+    let src = r#"
+package P;
+sub f {
+    my $c;
+    $c = Foo->new unless $c->ping;
+}
+1;
+"#;
+    let analysis = parse_analysis(src);
+    let typed: Vec<_> = analysis
+        .deref_receiver_sites(None)
+        .into_iter()
+        .filter(|s| matches!(&s.form, crate::model::file_analysis::DerefForm::Method(m) if m == "ping"))
+        .map(|s| s.receiver_ty)
+        .collect();
+    assert!(typed.is_empty(), "{typed:?}");
+}
+
 // D8 — extend `unresolved-method` to cross-file-resolvable classes. A
 // cached module whose internal package name IS the class queried (so
 // resolution keys line up), unlike `fake_cached`'s always-`Fake` package.
@@ -1343,4 +1384,24 @@ sub g {
             ("contradictory-guard".into(), "'$x' is always defined here; this guard can never pass".into()),
         ],
     );
+}
+
+#[test]
+fn d6_hash_deref_on_type_check_guard_fires() {
+    // The deref-shape lint reads the guard's rep, so a Type::Tiny check
+    // reaches the lattice, not just the hover type.
+    let src = r#"
+package Main;
+use Types::Standard qw(is_ArrayRef);
+sub g {
+    my ($self, $x) = @_;
+    if (is_ArrayRef($x)) {
+        return $x->{key};
+    }
+    return;
+}
+1;
+"#;
+    let diags = deref_shape_diags(src);
+    assert_eq!(diags.len(), 1, "hash deref on an is_ArrayRef-narrowed receiver fires: {:?}", diags);
 }

@@ -441,6 +441,11 @@ pub fn index_workspace_with_index(
                 // read/parse and a changed-under-us stamp — the watcher (or
                 // next warm) owns the fresher truth either way.
                 Ok(Some((analysis, stamp))) => {
+                    // The bake and both Surface projections ask the finished
+                    // analysis, index withheld, the same questions; one memo
+                    // answers each once. Keyed by the bag's generation, so it
+                    // survives the analysis moving into its parts.
+                    let _answer_memo = crate::model::witnesses::FoldMemoScope::enter();
                     // Projections that read the bag run on the whole
                     // analysis; the persisted generation is encoded whole;
                     // only then is the resident copy stripped.

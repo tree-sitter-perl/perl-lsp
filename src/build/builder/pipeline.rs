@@ -970,36 +970,32 @@ impl<'a> Builder<'a> {
         // write states it. The edge routes through the same canonical chase
         // as implicit-return chains; `FieldValueReducer` agrees the
         // per-write arms. Honest-skip if the owner is a `Sub` (not a
-        // class), or the RHS is unknown — never a bare slot seed.
+        // class), or the RHS is unknown — never a bare slot seed. A write
+        // through an object the build cannot type yet is filed under
+        // `SlotWrites{key}` with its receiver instead: the build has no
+        // index, so the owner is the reader's to decide.
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
+        let mut unowned_writes: Vec<(String, Span, Span, WitnessAttachment)> = Vec::new();
         for r in &self.refs {
-            if let (RefKind::HashKeyAccess { var_text, .. }, AccessKind::Write) =
-                (&r.kind, r.access)
-            {
-                let resolved_owner = match r.hash_key_owner() {
-                    Some(o @ (HashKeyOwner::Class(_) | HashKeyOwner::Sub { .. })) => Some(o.clone()),
-                    _ => {
-                        if var_text == "$self" {
-                            let scope = &self.scopes[r.scope.0 as usize];
-                            scope.package.clone().map(HashKeyOwner::Class)
-                        } else {
-                            None
-                        }
+            if !matches!((&r.kind, r.access), (RefKind::HashKeyAccess { .. }, AccessKind::Write)) {
+                continue;
+            }
+            let site = self.slot_write_rhs_span.get(&r.span).cloned();
+            match r.hash_key_owner() {
+                Some(o @ (HashKeyOwner::Class(_) | HashKeyOwner::Sub { .. })) => {
+                    if let (HashKeyOwner::Class(class), Some(site)) = (o, site) {
+                        slot_writes.push((class.clone(), r.target_name.clone(), r.span, site.rhs));
                     }
-                };
-                if let Some(o) = resolved_owner {
-                    if let HashKeyOwner::Class(class) = &o {
-                        if let Some(rhs_span) = self.slot_write_rhs_span.get(&r.span) {
-                            slot_writes.push((
-                                class.clone(),
-                                r.target_name.clone(),
-                                r.span,
-                                *rhs_span,
-                            ));
-                        }
+                    mutations.push((o.clone(), r.target_name.clone(), r.span));
+                }
+                // The object written through is not typed yet — its value may
+                // come from a constructor in another file — so the write is
+                // filed by key, and the read decides whose it is.
+                _ => {
+                    if let Some(SlotWriteSite { rhs, receiver: Some(receiver) }) = site {
+                        unowned_writes.push((r.target_name.clone(), r.span, rhs, receiver));
                     }
-                    mutations.push((o, r.target_name.clone(), r.span));
                 }
             }
         }
@@ -1027,6 +1023,25 @@ impl<'a> Builder<'a> {
                 attachment: WitnessAttachment::holds_of(class, crate::model::conventions::PERL_CONVENTIONS.member_spaces.values, key),
                 source: WitnessSource::Builder("slot_write".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
+                span,
+            });
+        }
+        for (key, span, rhs_span, receiver) in unowned_writes {
+            // The same honest skip as an owned write: an unresolved RHS seeds
+            // nothing.
+            if self.bag_query_expr_span(rhs_span).is_none() {
+                continue;
+            }
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SlotWrites {
+                    space: crate::model::conventions::PERL_CONVENTIONS.member_spaces.values,
+                    name: key,
+                },
+                source: WitnessSource::Builder("slot_write".into()),
+                payload: WitnessPayload::SlotWrite {
+                    receiver,
+                    value: WitnessAttachment::Expr(rhs_span),
+                },
                 span,
             });
         }
