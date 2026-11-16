@@ -67,14 +67,8 @@ pub(super) fn string_content_span_at(tree: &Tree, point: Point) -> Option<Span> 
                 // zero-width range at cursor, which makes textEdit
                 // APPEND the label after the user's typed text
                 // (`'/fall' → '/fall/fallback'`) instead of replacing it.
-                let mut walker = node.walk();
-                for child in node.named_children(&mut walker) {
-                    if child.kind() == "string_content" {
-                        return Some(Span {
-                            start: child.start_position(),
-                            end: child.end_position(),
-                        });
-                    }
+                if let Some(content) = crate::cst::string_content(node) {
+                    return Some(crate::cst::node_to_span(content));
                 }
                 // Genuinely empty literal (`''` with cursor between the
                 // quotes). Zero-width range at cursor is correct here —
@@ -692,11 +686,13 @@ pub fn signature_help(
                         }
                         return base;
                     }
-                    // Local: look up inferred type at end of sub body —
-                    // route through the witness bag so framework + branch
-                    // + arity rules refine the answer.
+                    // Local: the type the parameter is declared to take;
+                    // with no declaration, what the body makes of it at its
+                    // end, through the witness bag so framework + branch +
+                    // arity rules refine the answer.
                     if let Some(ty) = analysis
-                        .inferred_type_via_bag(&p.name, sig_info.body_end)
+                        .param_declared_type(p, Some(module_index))
+                        .or_else(|| analysis.inferred_type_via_bag(&p.name, sig_info.body_end))
                         .filter(InferredType::is_known)
                     {
                         format!("{}: {}", base, analysis.render_type(&ty))
