@@ -1399,3 +1399,183 @@ fn a_low_precedence_not_and_and_narrow_like_their_symbols() {
     assert_eq!(at(4, 33), foo, "an `and` condition");
     assert_eq!(at(6, 4), foo, "`return if not` narrows the remainder");
 }
+
+// ── Type::Tiny check functions (frameworks/type-tiny.rhai `type_check_functions`) ──
+
+#[test]
+fn type_check_function_narrows_its_arm() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_ArrayRef);\nsub f {\n    my ($x) = @_;\n    if (is_ArrayRef($x)) {\n        my $v = $x;\n    }\n    my $w = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(7, 13)), None, "the arm's narrowing stays in the arm");
+}
+
+#[test]
+fn type_check_function_composes_with_exits() {
+    // `unless`, `die unless`, `or die` and the bare paren-less call all come
+    // from the guard machinery the atom plugs into.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard -all;\nsub f {\n    my ($x, $y) = @_;\n    return unless is_HashRef($x);\n    is_Str($y) or die;\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 13)), Some(InferredType::HashRef));
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(6, 13)), Some(InferredType::String));
+}
+
+/// A house type library, built the two ways Type::Tiny documents, and a
+/// consumer of its check functions, registered in one index.
+fn house_library_index() -> crate::index::module_index::ModuleIndex {
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_workspace_module(
+        std::path::PathBuf::from("/tmp/My/Types.pm"),
+        std::sync::Arc::new(build_fa(
+            "package My::Types;\nuse Type::Library -base, -declare => qw(Name Label Widget);\nuse Type::Utils -all;\nuse Types::Standard qw(Str InstanceOf);\nmy $meta = __PACKAGE__->meta;\n$meta->add_type(name => Name, parent => Str, constraint => sub { length });\n__PACKAGE__->add_type({ name => 'Label', parent => Name });\ndeclare Widget, as InstanceOf['My::Widget'], where { 1 };\n1;\n",
+        )),
+    );
+    idx
+}
+
+#[test]
+fn check_function_reads_the_constraint_its_library_declares() {
+    let idx = house_library_index();
+    let fa = build_fa(
+        "package P;\nuse My::Types qw(is_Name assert_Label is_Widget);\nsub f {\n    my ($x, $y, $z) = @_;\n    if (is_Name($x)) {\n        my $v = $x;\n    }\n    assert_Label($y);\n    return unless is_Widget($z);\n    my $w = $y;\n}",
+    );
+    let at = |var: &str, row, col| {
+        fa.inferred_type_via_bag_ctx(var, crate::model::witnesses::ReadPoint::position(Point::new(row, col)), Some(&idx))
+    };
+    assert_eq!(at("$x", 5, 16), Some(InferredType::String), "add_type's parent is what `Name` constrains");
+    assert_eq!(at("$y", 9, 13), Some(InferredType::String), "a parent named by the library's own constant chains through it");
+    assert_eq!(at("$z", 9, 13), Some(InferredType::ClassName("My::Widget".into())), "Type::Utils `declare … as`");
+    assert_eq!(at("$x", 7, 4), None, "the arm's narrowing stays in the arm");
+}
+
+#[test]
+fn a_library_declared_check_dispatches_the_narrowed_receiver() {
+    let idx = house_library_index();
+    let fa = build_fa(
+        "package P;\nuse My::Types qw(is_Widget);\nsub f {\n    my ($z) = @_;\n    if (is_Widget($z)) {\n        $z->frob;\n    }\n}",
+    );
+    let frob = fa.refs().iter().find(|r| r.target_name == "frob").expect("the call is a ref");
+    assert_eq!(
+        fa.receiver_classes(frob, Some(&idx), ReceiverPolicy::Navigate).single(),
+        Some("My::Widget"),
+    );
+}
+
+#[test]
+fn check_function_of_an_unknown_library_proves_nothing() {
+    // No library declares `Thing`: the guard reads an honest unknown, never
+    // the vocabulary's guess and never a wide type it did not have.
+    let idx = house_library_index();
+    let fa = build_fa(
+        "package P;\nuse Elsewhere qw(is_Thing);\nsub f {\n    my $x = [];\n    if (is_Thing($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point::new(5, 16)), Some(&idx)),
+        Some(InferredType::ArrayRef),
+    );
+}
+
+#[test]
+fn bool_check_leaves_undef_possible() {
+    // Type::Tiny's Bool passes undef, so a passed check proves no definedness.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_Bool);\nsub f {\n    my ($x) = @_;\n    if (is_Bool($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    let t = fa.inferred_type_via_bag("$x", Point::new(5, 16));
+    assert!(t.as_ref().is_some_and(|t| t.may_be_undef()), "{t:?}");
+}
+
+#[test]
+fn assert_function_narrows_the_rest_of_the_block() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(assert_Int assert_ArrayRef);\nsub f {\n    my ($x, $y) = @_;\n    assert_Int($x);\n    assert_ArrayRef $y;\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 13)), Some(InferredType::Numeric));
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(6, 13)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(4, 4)), None, "nothing before the assert");
+}
+
+#[test]
+fn assert_under_a_modifier_narrows_nothing_after_it() {
+    // `assert_Int($x) if $c` dies only where `$c` held: the rest of the
+    // block is not where the check passed.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(assert_Int);\nsub f {\n    my ($x, $c) = @_;\n    assert_Int($x) if $c;\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 13)), None);
+}
+
+#[test]
+fn check_function_needs_the_import() {
+    // A file's own `is_ArrayRef` is just a sub; a qualified call reaches the
+    // library's without an import.
+    let fa = build_fa(
+        "package P;\nsub is_ArrayRef { 1 }\nsub f {\n    my ($x) = @_;\n    if (is_ArrayRef($x)) {\n        my $v = $x;\n    }\n    if (Types::Standard::is_HashRef($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None);
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(8, 16)), Some(InferredType::HashRef));
+}
+
+#[test]
+fn check_without_an_expressible_constraint_narrows_nothing() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(is_Object);\nsub f {\n    my ($x) = @_;\n    if (is_Object($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None);
+}
+
+#[test]
+fn check_function_from_types_common() {
+    let fa = build_fa(
+        "package P;\nuse Types::Common qw(is_CodeRef);\nsub f {\n    my ($x) = @_;\n    if (is_CodeRef($x)) {\n        my $v = $x;\n    }\n}",
+    );
+    assert!(
+        matches!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), Some(InferredType::CodeRef { .. })),
+        "{:?}",
+        fa.inferred_type_via_bag("$x", Point::new(5, 16))
+    );
+}
+
+#[test]
+fn constraint_value_check_narrows_to_what_it_constrains() {
+    // The receiver's TYPE answers: a constant, a variable holding one, and a
+    // parameterized constructor all reach `TypeConstraintOf(T)`. The parens
+    // are Perl's: `InstanceOf['Foo']->check($z)` calls `InstanceOf` on the
+    // result of `['Foo']->check($z)`.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(ArrayRef HashRef InstanceOf);\nsub f {\n    my ($x, $y, $z) = @_;\n    my $t = HashRef;\n    if (ArrayRef->check($x)) {\n        my $v = $x;\n    }\n    if ($t->check($y)) {\n        my $v = $y;\n    }\n    if ((InstanceOf['Foo'])->check($z)) {\n        my $v = $z;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 16)), Some(InferredType::ArrayRef));
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(9, 16)), Some(InferredType::HashRef));
+    assert_eq!(
+        fa.inferred_type_via_bag("$z", Point::new(12, 16)),
+        Some(InferredType::ClassName("Foo".into()))
+    );
+}
+
+#[test]
+fn check_on_something_that_is_no_constraint_proves_nothing() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x) = @_;\n    my $v = Validator->new;\n    if ($v->check($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 16)), None);
+}
+
+#[test]
+fn check_on_a_value_that_may_be_no_constraint_proves_nothing() {
+    // One arm proving nothing voids the proof: `$t` may be the Validator.
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(Int);\nsub f {\n    my ($c, $x) = @_;\n    my $t = $c ? Int : Validator->new;\n    if ($t->check($x)) {\n        my $w = $x;\n    }\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 16)), None);
+}
+
+#[test]
+fn assert_valid_narrows_the_rest_of_the_block() {
+    let fa = build_fa(
+        "package P;\nuse Types::Standard qw(Str);\nsub f {\n    my ($x) = @_;\n    Str->assert_valid($x);\n    my $v = $x;\n}",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 13)), Some(InferredType::String));
+}
