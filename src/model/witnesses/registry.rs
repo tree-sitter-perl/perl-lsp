@@ -788,6 +788,23 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
     build()
 }
 
+/// A frame's computed subtree (`QueryState::frame`).
+struct Framed<T> {
+    value: T,
+    effect: std::sync::Arc<ChaseTrace>,
+    /// The taint the answer carries (`QueryState::leave_frame`).
+    taint: u32,
+    /// The outermost frame a cut beneath it closed at.
+    cut: u32,
+}
+
+/// Remembered answers a recurring arm's pass sets aside
+/// (`QueryState::set_aside_answers_through`).
+struct PathAnswers {
+    memo: Vec<(VisitedKey, MemoEntry)>,
+    fan_outs: Vec<(FanOutKey, MemoEntry)>,
+}
+
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
 /// (two paths reaching one shared sub-attachment) re-chases the shared
@@ -803,23 +820,6 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
 /// what any other off-path reentry would compute. The memo is dropped
 /// when the top-level query returns, so it never leaks state across
 /// queries whose context (scopes / module_index / framework) differs.
-/// Remembered answers a recurring arm's pass sets aside
-/// (`QueryState::set_aside_answers_through`).
-/// A frame's computed subtree (`QueryState::frame`).
-struct Framed<T> {
-    value: T,
-    effect: std::sync::Arc<ChaseTrace>,
-    /// The taint the answer carries (`QueryState::leave_frame`).
-    taint: u32,
-    /// The outermost frame a cut beneath it closed at.
-    cut: u32,
-}
-
-struct PathAnswers {
-    memo: Vec<(VisitedKey, MemoEntry)>,
-    fan_outs: Vec<(FanOutKey, MemoEntry)>,
-}
-
 pub(super) struct QueryState {
     visited: VisitedSet,
     /// The cross-file fan-outs on the current path, and the answers of those
@@ -972,6 +972,15 @@ impl QueryState {
         self.fan_out_memo.retain(|_, (_, _, taint)| *taint > at);
         self.memo.extend(aside.memo);
         self.fan_out_memo.extend(aside.fan_outs);
+    }
+
+    /// A pass refused for depth: what the frame answers then depends on the
+    /// passes open around it, so its answer is cut at the outermost of them
+    /// and never remembered as the key's own.
+    fn refuse_pass(&mut self) {
+        if let Some(&outermost) = self.join_seeds.keys().chain(self.frame_seeds.keys()).min() {
+            self.close_cut_at(outermost);
+        }
     }
 
     /// How many passes round a loop are open on the path.
@@ -1743,6 +1752,7 @@ impl ReducerRegistry {
         }
         if state.passes_open() >= MAX_PASS_NESTING {
             crate::util::ghost_stats::count("frame.recurrence_too_deep");
+            state.refuse_pass();
             return no_answer(q);
         }
         let ReducedValue::Type(mut seed) = first else { return first };
@@ -1792,12 +1802,15 @@ impl ReducerRegistry {
         let v = self.reduce_materialized(&materialized, q);
         // An `Undef` that flowed in says only that the value may be absent:
         // beside a flow that came back untyped it is no answer to what the
-        // value is. One stated here (a guard's) stands, and a declared bound
-        // still caps what is left.
+        // value is. One stated here (a guard's) stands where the read sees
+        // it, and a declared bound still caps what is left.
         let v = match v {
             ReducedValue::Type(InferredType::Undef)
                 if materialized.iter().any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == super::tags::FACT_UNTYPED_ARM))
-                    && !bag.iter_attachment(q.attachment).any(|w| matches!(&w.payload, WitnessPayload::InferredType(InferredType::Undef))) =>
+                    && !bag.iter_attachment(q.attachment).any(|w| {
+                        matches!(&w.payload, WitnessPayload::InferredType(InferredType::Undef))
+                            && q.point.filter(|_| q.attachment.is_temporal()).is_none_or(|p| p.reaches(w.span.start))
+                    }) =>
             {
                 ReducedValue::None
             }
@@ -1848,12 +1861,10 @@ impl ReducerRegistry {
         }
         // A member this file defines answers how it ends from its own
         // definition: a child's override that states nothing is no evidence
-        // (the top), never its parent's answer. A cut beneath this frame is
-        // the cycle's to fold, so it settles nothing.
+        // (the top), never its parent's answer.
         if let WitnessAttachment::Member { owner, space, name, aspect: MemberAspect::Effects } = q.attachment {
             if v == ReducedValue::None && defines_member_here(bag, owner, *space, name) {
-                let complete = state.low_cut >= pos;
-                return if complete { ReducedValue::Effects(super::types::Ends::all()) } else { v };
+                return ReducedValue::Effects(super::types::Ends::all());
             }
         }
         if let Some(ladder) = &ladder {
@@ -3913,6 +3924,9 @@ impl ReducerRegistry {
                 for &(_, _, cut) in &recurring {
                     state.close_cut_at(cut);
                 }
+                if state.passes_open() >= MAX_PASS_NESTING {
+                    state.refuse_pass();
+                }
                 recurring.iter().map(|_| None).collect()
             }
             Some((join, mut seed)) => {
@@ -4484,8 +4498,11 @@ impl ReducerRegistry {
                     ctx.app_surface_consumers,
                 );
                 // The first parent in MRO order that defines it is the one
-                // Perl runs; one that states nothing is no evidence.
-                parents.into_iter().find_map(|p| ask(state, WitnessAttachment::effects_of(p, name.clone())))
+                // Perl runs. Only a parent this file shows lacks it is passed
+                // over: any other may define it, and then its answer, even
+                // none, is the call's.
+                let p = parents.into_iter().find(|p| !file_shows_absent(bag, ctx, p, name))?;
+                ask(state, WitnessAttachment::effects_of(p, name.clone()))
             }
             // A receiver may be any subclass of its class, so the call runs
             // that class's resolution or any descendant's override: all of
@@ -4758,6 +4775,38 @@ fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
         }
     }
     stated.is_some_and(|e| !e.completes())
+}
+
+/// Whether this file shows that neither `class` nor any ancestor of it
+/// defines callable `name`: each is a package the file declares, and none
+/// states anything of the member.
+fn file_shows_absent(bag: &WitnessBag, ctx: &BagContext, class: &str, name: &str) -> bool {
+    use crate::model::file_analysis::SymKind;
+    let declared = |c: &str| {
+        ctx.symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+    };
+    let defines = |c: &str| {
+        defines_member_here(bag, c, crate::model::file_analysis::NamespaceId::CALLABLES, name)
+            || bag.iter_attachment(&WitnessAttachment::effects_of(c, name)).next().is_some()
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut todo = vec![class.to_string()];
+    while let Some(c) = todo.pop() {
+        if seen.contains(&c) {
+            continue;
+        }
+        if !declared(&c) || defines(&c) || seen.len() >= 20 {
+            return false;
+        }
+        todo.extend(crate::model::file_analysis::parents_of(
+            &c,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        ));
+        seen.push(c);
+    }
+    true
 }
 
 /// Where an edge with no read position asks a binding from: the end of the
