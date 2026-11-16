@@ -507,6 +507,20 @@ fn local_jumps_state_that_evaluation_ends_there() {
     assert_eq!(fa.sub_return_type_at_arity("f", None), Some(InferredType::Numeric));
 }
 
+/// `exec` replaces the process, or returns false where the command could
+/// not start: it may exit and may come back.
+#[test]
+fn exec_may_come_back() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let fa = build_with("exec 'ls';\n", registry_with_fail_unwinding());
+    let ctx = fa.bag_context(None);
+    let span = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 0, column: 0 },
+        end: tree_sitter::Point { row: 0, column: 9 },
+    };
+    assert_eq!(query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx)), Ends::EXITS | Ends::COMPLETES);
+}
+
 /// How a call ends is read through the call: a builtin states it on
 /// itself, a call the file can pin to its definition reads that
 /// definition's answer, and a call it cannot pin is the top.
