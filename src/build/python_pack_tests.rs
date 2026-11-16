@@ -2107,10 +2107,6 @@ fn a_for_target_is_bound_each_pass() {
     let src = "def f(pairs, c):\n    for k, vs in pairs:\n        print(vs)\n        if c:\n            vs = [vs]\n";
     let fa = py_in(src, None);
     let t = fa.inferred_type_via_bag("vs", Point::new(2, 14));
-    let fb = py_in("def f(pairs, c):\n    for vs in pairs:\n        print(vs)\n        if c:\n            vs = [vs]\n", None);
-    eprintln!("SINGLE {:?}", fb.inferred_type_via_bag("vs", Point::new(2, 14)));
-    for sy in fa.symbols().iter() { eprintln!("SYM {:?} {} {:?}", sy.id, sy.name, sy.span); }
-    for w in fa.witnesses.all() { eprintln!("DBG {:?} {:?} {:?}", w.attachment, w.payload, w.span); }
     assert!(!matches!(t, Some(InferredType::ArrayRef)), "last pass's write is gone: {t:?}");
 }
 
