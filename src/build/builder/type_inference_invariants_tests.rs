@@ -507,6 +507,20 @@ fn local_jumps_state_that_evaluation_ends_there() {
     assert_eq!(fa.sub_return_type_at_arity("f", None), Some(InferredType::Numeric));
 }
 
+/// `exec` replaces the process, or returns false where the command could
+/// not start: it may exit and may come back.
+#[test]
+fn exec_may_come_back() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let fa = build_with("exec 'ls';\n", registry_with_fail_unwinding());
+    let ctx = fa.bag_context(None);
+    let span = crate::model::file_analysis::Span {
+        start: tree_sitter::Point { row: 0, column: 0 },
+        end: tree_sitter::Point { row: 0, column: 9 },
+    };
+    assert_eq!(query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx)), Ends::EXITS | Ends::COMPLETES);
+}
+
 /// How a call ends is read through the call: a builtin states it on
 /// itself, a call the file can pin to its definition reads that
 /// definition's answer, and a call it cannot pin is the top.
@@ -568,4 +582,29 @@ fn an_arm_that_never_comes_back_drops_out_of_the_value() {
     assert_eq!(type_of(9, "$s"), Some(InferredType::String), "a fallback that leaves leaves the left");
     assert_eq!(fa.sub_return_type_at_arity("dies", None), None, "no arm comes back");
     assert_eq!(fa.sub_return_type_at_arity("maybe", None), Some(InferredType::Numeric));
+}
+
+/// `SUPER::` runs the first parent in MRO order that defines the method.
+/// A parent this file does not declare may define it, so a later parent's
+/// answer is not the one that runs: the call is the top. A parent the file
+/// declares whole, and which defines nothing, is passed over.
+#[test]
+fn super_passes_only_a_parent_the_file_can_vouch_for() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let ends_of_super = |first_parent_here: bool| -> Ends {
+        let decl = if first_parent_here { "package Remote;\nsub other { 1 }\n" } else { "" };
+        let source = format!(
+            "{decl}package Foo;\nsub fail {{ return 1 }}\npackage Bar;\nuse parent -norequire, 'Remote', 'Foo';\nsub fail {{ my $self = shift;\n$self->SUPER::fail;\n}}\n"
+        );
+        let fa = build_with(&source, registry_with_fail_unwinding());
+        let ctx = fa.bag_context(None);
+        let row = source.lines().position(|l| l.starts_with("$self->SUPER")).unwrap();
+        let span = crate::model::file_analysis::Span {
+            start: tree_sitter::Point { row, column: 0 },
+            end: tree_sitter::Point { row, column: "$self->SUPER::fail".len() },
+        };
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx))
+    };
+    assert_eq!(ends_of_super(false), Ends::all(), "an undeclared parent may define it");
+    assert_eq!(ends_of_super(true), Ends::UNWINDS, "a declared parent that lacks it is passed over");
 }
