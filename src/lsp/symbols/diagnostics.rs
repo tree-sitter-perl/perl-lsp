@@ -183,6 +183,20 @@ pub fn collect_diagnostics(
     module_index: &ModuleIndex,
     options: DiagnosticOptions,
 ) -> Vec<Diagnostic> {
+    let diagnostics = collect_diagnostics_once(analysis, module_index, options);
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        crate::model::witnesses::check_pass_equiv("diagnostics", &diagnostics, || {
+            collect_diagnostics_once(analysis, module_index, options)
+        });
+    }
+    diagnostics
+}
+
+fn collect_diagnostics_once(
+    analysis: &FileAnalysis,
+    module_index: &ModuleIndex,
+    options: DiagnosticOptions,
+) -> Vec<Diagnostic> {
     crate::util::ghost_stats::count("collect_diagnostics");
     // Two lints read every member access's receiver; one resolution serves
     // both. Rides the caller's session when it opened one.

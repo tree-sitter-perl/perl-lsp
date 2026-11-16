@@ -254,6 +254,9 @@ spelled! {
         /// The node an `Unbind` name stays bound through (an `except`
         /// clause, for its `as` name).
         Lasts = "lasts",
+        /// A statement whose statements run in sequence where it stands (a
+        /// bare block): it leaves where one of them does.
+        Block = "block",
     }
 }
 
@@ -352,9 +355,9 @@ spelled! {
         Then = "then",
         /// What runs where the condition fails.
         Else = "else",
-        /// A construct that tests its condition again after each run of
-        /// its arm: a `break` in the arm lands after it too, so its arms
-        /// decide nothing about what follows.
+        /// A position match's construct that tests its condition again
+        /// after each run of its arm (a loop): a `@ctl.leave.break` or
+        /// `@ctl.leave.continue` in the arm goes to the loop, so the arm leaves only where none is in it.
         Loop = "loop",
         /// A loop whose body runs once before its first test (`do … while`).
         LoopOnce = "loop.once",
@@ -388,6 +391,11 @@ spelled! {
         Label = "label",
         /// How many enclosing constructs a jump leaves (php's `break 2`).
         Levels = "levels",
+        /// The statement a position's chain is, where that is not the node
+        /// holding the condition and its arms (the expression statement
+        /// around `G || throw …`): the rest of its block runs where the arm
+        /// that falls through does.
+        Stmt = "stmt",
         /// A statement that leaves its block unconditionally, by what it
         /// leaves to: nothing after it in the block runs. Which arms of a
         /// condition fall through follows by containment.
@@ -821,7 +829,10 @@ pub enum Capture {
     /// A written type (a declared return, a parameter's or property's
     /// declared type) that names a class by where it is written.
     TypeRelative(RelativeClass),
-    TypeAnnot,
+    /// A declared type, bounding its target's value for as long as the
+    /// extent says: `@type.annot` for the binding's life, `@type.annot.entry`
+    /// on entry only (a parameter a write may retype).
+    TypeAnnot(crate::model::witnesses::Extent),
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
     /// The primary a class specialization specializes.
@@ -927,7 +938,8 @@ impl Capture {
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
             ["ends", "never"] => C::EndsNever,
-            ["type", "annot"] => C::TypeAnnot,
+            ["type", "annot"] => C::TypeAnnot(crate::model::witnesses::Extent::Lifetime),
+            ["type", "annot", "entry"] => C::TypeAnnot(crate::model::witnesses::Extent::Entry),
             ["type", k] => C::TypeRelative(RelativeClass::parse(k)?),
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
@@ -1007,7 +1019,10 @@ impl fmt::Display for Capture {
             C::RetType => f.write_str("rettype"),
             C::EndsNever => f.write_str("ends.never"),
             C::TypeRelative(k) => write!(f, "type.{k}"),
-            C::TypeAnnot => f.write_str("type.annot"),
+            C::TypeAnnot(crate::model::witnesses::Extent::Lifetime | crate::model::witnesses::Extent::Slot) => {
+                f.write_str("type.annot")
+            }
+            C::TypeAnnot(crate::model::witnesses::Extent::Entry) => f.write_str("type.annot.entry"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),

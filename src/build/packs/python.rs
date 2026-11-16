@@ -44,6 +44,7 @@ pub fn python_pack() -> LangPack {
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: annotation_type,
+        annot_enforcement: crate::model::witnesses::Enforcement::Advisory,
         doc_text: |_| None,
         module_paths: |m| {
             let base = m.replace('.', "/");
