@@ -3520,8 +3520,9 @@ impl ReducerRegistry {
                         // An arm of a value that every arm makes up is
                         // still a way in: untyped, it makes the whole
                         // untyped, rather than leaving the others to speak
-                        // for it.
-                        None if q.attachment.folds_every_arm() => out.push(Witness {
+                        // for it. A lone arm is the whole: what it lacks,
+                        // the value lacks.
+                        None if q.attachment.folds_every_arm() && !sole_witness => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(InferredType::Unknown),

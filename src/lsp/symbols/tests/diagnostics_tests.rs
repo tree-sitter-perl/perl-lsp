@@ -406,8 +406,6 @@ sub f {
     assert!(diags.is_empty(), "{:?}", diags.iter().map(|d| &d.message).collect::<Vec<_>>());
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn d1_a_postfix_condition_reads_none_of_its_statements_writes() {
     // `$c->ping` runs before the statement writes `$c`: its receiver is the

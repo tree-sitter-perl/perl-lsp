@@ -3476,8 +3476,6 @@ fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
 /// leaves is left only where its first test fails, unless a `break` or
 /// `continue` in the body goes to the loop.
 #[cfg(feature = "php")]
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
     let foo = Some(InferredType::ClassName("Lib\\Foo".into()));
@@ -3513,8 +3511,6 @@ fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
 /// where that side never ran. One whose right side may fall through, or
 /// whose left proves nothing on its own, narrows nothing after.
 #[cfg(feature = "php")]
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_statement_short_circuit_that_leaves_narrows_the_rest_of_the_block() {
     let foo = Some(InferredType::ClassName("Lib\\Foo".into()));

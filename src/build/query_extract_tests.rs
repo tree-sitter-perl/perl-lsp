@@ -2216,8 +2216,6 @@ x.tail()
     assert_ne!(at(9, 0), class("Foo"), "nothing after");
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_negated_pack_guard_narrows_where_it_fails() {
     // A failed negation is the atom holding: an `else`, the right of `or` /
@@ -2273,8 +2271,6 @@ void f(Base* b, std::optional<Widget> o) {
     assert_eq!(at("o", 8, 19), class("Widget"), "the right of `||` after a negation");
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_pack_exit_anywhere_in_the_body_leaves_it() {
     // An `if` body with a statement leaving the block never falls through,
@@ -2400,8 +2396,6 @@ fn a_pack_test_narrows_past_its_construct_through_each_join() {
     }
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
     // After a chain whose one arm falls through, the rest of the block runs
@@ -2491,8 +2485,6 @@ fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
     }
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
     // A `while` body that always leaves never comes back to the test, so

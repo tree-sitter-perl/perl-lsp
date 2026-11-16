@@ -134,8 +134,6 @@ fn narrow_after_a_chain_follows_the_one_arm_that_falls_through() {
     }
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn narrow_looks_through_a_bare_block() {
     // A bare block runs where it stands, so it leaves where its statements
@@ -167,8 +165,6 @@ fn narrow_looks_through_a_bare_block() {
     assert_eq!(fa_type_at(src, "$x", Point::new(5, 8)), widget, "the rest of the bare block");
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn narrow_after_a_loop_whose_body_always_leaves() {
     // A body that always leaves never comes back to the test, so the loop
@@ -201,8 +197,6 @@ fn narrow_after_a_loop_whose_body_always_leaves() {
     }
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn narrow_at_file_top_level() {
     // A script's top level is a block for the rest-of-block rule.
@@ -473,8 +467,6 @@ fn a_postfix_condition_key_is_owned_by_the_value_it_reads() {
     assert_eq!(owner, Some(HashKeyOwner::Class("Foo".into())));
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn a_callable_in_a_postfix_condition_runs_when_called() {
     // The sub body runs when it is called, not before the statement, so its
@@ -1615,8 +1607,6 @@ fn house_library_index() -> crate::index::module_index::ModuleIndex {
     idx
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn check_function_reads_the_constraint_its_library_declares() {
     let idx = house_library_index();
@@ -1669,8 +1659,6 @@ fn bool_check_leaves_undef_possible() {
     assert!(t.as_ref().is_some_and(|t| t.may_be_undef()), "{t:?}");
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn assert_function_narrows_the_rest_of_the_block() {
     let fa = build_fa(
@@ -1756,8 +1744,6 @@ fn check_on_a_value_that_may_be_no_constraint_proves_nothing() {
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 16)), None);
 }
 
-// xfail until the CFG stack ports this narrowing onto joins.
-#[should_panic]
 #[test]
 fn assert_valid_narrows_the_rest_of_the_block() {
     let fa = build_fa(

@@ -1249,14 +1249,18 @@ pub fn guard_region_witnesses(
     use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource, JOIN_SOURCE};
     let BranchJoin { role, of, lands, arms } = join;
     let attachment = WitnessAttachment::Join { place: Box::new(place.clone()), of, role };
+    // Every path out carries a proof, so the region is one too: under a
+    // declared bound it reads by the guard rule, not as a write.
     let mut out: Vec<Witness> = lands
         .into_iter()
         .filter_map(|at| cut(Span { start: at, end }))
-        .map(|region| Witness {
-            attachment: WitnessAttachment::Place(Box::new(place.clone())),
-            source: WitnessSource::Builder(JOIN_SOURCE.into()),
-            payload: WitnessPayload::Edge(attachment.clone()),
-            span: region,
+        .flat_map(|region| {
+            [WitnessPayload::Edge(attachment.clone()), WitnessPayload::Proof].map(|payload| Witness {
+                attachment: WitnessAttachment::Place(Box::new(place.clone())),
+                source: WitnessSource::Builder(JOIN_SOURCE.into()),
+                payload,
+                span: region,
+            })
         })
         .collect();
     if !out.is_empty() {

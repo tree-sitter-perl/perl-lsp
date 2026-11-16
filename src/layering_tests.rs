@@ -1878,8 +1878,6 @@ fn positional_reads_skip_grammar_extras() {
 /// `binary_search` — is a second copy of that structure, and every one of
 /// them was justified by a guess about real code ("files without the shape
 /// pay nothing") that corpora have a way of proving wrong. Shrink-only.
-// xfail until the CFG stack settles its join sites at its top layer.
-#[should_panic]
 #[test]
 fn build_facts_are_not_keyed_by_position() {
     let files = layer_files(&[Layer::Build]);
@@ -1891,16 +1889,18 @@ fn build_facts_are_not_keyed_by_position() {
         }
     }
     let allow: &[(&str, usize, &str)] = &[
-        ("build/builder/fold.rs", 2, "the hash-key fixup's per-pass snapshots of typed variables and write refs, by position"),
-        ("build/builder/mod.rs", 5, "slot-write RHS and anonymous-sub symbols by span; use, dispatch and method-call emissions deduplicated by span"),
+        ("build/builder/fold.rs", 1, "the hash-key fixup's per-pass snapshot of typed variables, by position"),
+        ("build/builder/joins.rs", 2, "a join minted once per place, construct and role: the construct's span is the `Join` attachment's own key; span-keyed joins move onto the tree together"),
+        ("build/builder/mod.rs", 6, "slot-write RHS and anonymous-sub symbols by span; use, dispatch and method-call emissions deduplicated by span; the arms a test narrows a place over, by the arm's span (a join's key: span-keyed joins move onto the tree together)"),
         ("build/builder/pattern_dispatch.rs", 3, "plugin matches deduplicated by span (walk and fold); a pattern's owner by pattern index, not a position"),
         ("build/cpp_reparse/defs.rs", 1, "a sorted keyword table, not a position"),
         ("build/cpp_reparse/mod.rs", 1, "the splice map: a transformed byte offset to the source's, a map between two texts"),
         ("build/language_driver.rs", 3, "the line index (a byte to its row, text not tree); macro expansion sites by span"),
         ("build/query_extract/extract/defs.rs", 2, "duplicate defs settled by their name's start"),
         ("build/query_extract/extract/flow.rs", 4, "reassigned names, declaration sites and constants by start point; member reads by span"),
+        ("build/query_extract/extract/narrowing.rs", 1, "how far past each construct a test's join holds, by the construct's span (a join's key: span-keyed joins move onto the tree together)"),
         ("build/query_extract/places.rs", 4, "the place a name or member read denotes, by the read's span"),
-        ("build/query_extract/skeleton.rs", 12, "the skeleton joins capture facts by span: callable owners, receiver classes, call arguments, read places, written and initialised sites, declaration names, claimed refs, settled writes"),
+        ("build/query_extract/skeleton.rs", 16, "the skeleton joins capture facts by span: callable owners, receiver classes, call arguments, read places, written and initialised sites, declaration names, claimed refs, settled writes, a readonly member's stored values and read tokens; how far past each construct a test's join holds (a join's key: span-keyed joins move onto the tree together)"),
     ];
     let drift = allowlist_drift("position-keyed side indexes", &seen, allow);
     assert!(
