@@ -31,6 +31,7 @@ fn is_callable(kind: &str) -> bool {
 /// climb counts it as one.
 // TODO(xor-arm): `cst::conditional_arm` treats `xor`'s right operand as
 // conditionally run; fix it with a census, since it bounds observations.
+// Owner: the 0.11 CFG follow-up.
 fn walker_counts_xor(arm: tree_sitter::Node, source: &str) -> bool {
     arm.parent().is_some_and(|p| {
         p.kind() == "lowprec_logical_expression" && (0..p.child_count()).filter_map(|i| p.child(i)).any(|c| !c.is_named() && c.utf8_text(source.as_bytes()) == Ok("xor"))
