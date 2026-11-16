@@ -132,10 +132,36 @@ hand-curating the names "unlikely to collide" is a partial enumeration
 that is always incomplete (rule #10). Requiring the import costs
 nothing: a Type::Tiny constant must be imported to compile.
 
+## A check is a guard on what the constraint constrains
+
+`is_X($v)` / `assert_X($v)` and `$t->check($v)` / `$t->assert_valid($v)`
+narrow `$v` like `ref $v eq 'ARRAY'` does (`docs/adr/flow-narrowing.md`);
+an asserting spelling also narrows the rest of the block. The plugin
+declares the spellings (`type_check_functions`: a prefix and whether it
+dies, `type_check_methods`), never a list of names.
+
+What a passing check proves is X's inner, read from the library the call
+names. A library the vocabulary speaks for (`constraint_libraries`)
+folds X through `type_constraint_inner`: Types::Standard declares most of
+its types through `$meta->$add_core_type` and parents held in lexicals,
+which no pattern can read, so its source would answer few of them. Any other
+library answers from its own source: the plugin's `add_type(name => X,
+parent => P)` / `declare X, as P` patterns mint the sub `X` in the
+library's package with a return EDGE to `P`'s value, and the consumer's
+guard holds `Projected { Member{library, X}, ConstrainedInner }` —
+answered cross-file when asked, so the consumer's build needs no index.
+X's own `where` refines past anything an `InferredType` can say, so X
+proves what its parent does. A library that declares no X answers
+nothing, and the guard proves nothing. A consumer's build sees only the
+spelling, so every imported one-operand `is_*` / `assert_*` call is a
+guard (Ref::Util's `is_hashref($x)` included); for a library that is not
+a type library the guard costs one cross-file lookup when a read in its
+region asks, and answers nothing.
+
 ## What's deferred
 
-- **Method dispatch on a constraint value** (`$t->assert_valid`,
-  `->check`, `->coerce`) → `Type::Tiny`. No-op until `Type::Tiny` is
+- **Method dispatch on a constraint value** beyond the checks
+  (`->coerce`, `->name`) → `Type::Tiny`. No-op until `Type::Tiny` is
   indexed from CPAN; the projection design above is chosen partly so
   this composes — `$t` keeps its `TypeConstraintOf` type for dispatch
   while the accessor projects the inner.
