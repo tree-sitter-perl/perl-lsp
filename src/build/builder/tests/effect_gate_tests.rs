@@ -165,7 +165,7 @@ fn a_sub_another_file_defines_ends_as_that_file_says() {
     let optional = Some(InferredType::Optional(Box::new(foo.clone())));
     let idx = ModuleIndex::new_for_test();
     let path = std::path::PathBuf::from("/tmp/Util.pm");
-    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", Point::new(6, 0), Some(idx));
+    let at = |idx: &ModuleIndex| fa.inferred_type_via_bag_ctx("$x", crate::model::witnesses::ReadPoint::position(Point::new(6, 0)), Some(idx));
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(6, 0)), optional, "with no index the call may come back");
     idx.register_workspace_module(path.clone(), Arc::new(build_fa(&provider("die @_"))));
     assert_eq!(at(&idx), Some(foo), "the provider's `fatal` dies");

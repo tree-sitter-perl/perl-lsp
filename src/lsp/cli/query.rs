@@ -151,7 +151,7 @@ pub(crate) fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
     // Check refs for inferred type — route through the witness bag
     // so framework / branch / arity rules refine the answer.
     if let Some(r) = analysis.ref_at(point) {
-        if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
+        if let Some(ty) = analysis.inferred_type_via_bag_ctx(&r.target_name, r.read_point(), None) {
             println!("{}", file_analysis::format_inferred_type(&ty));
             return;
         }
@@ -629,7 +629,7 @@ fn run_one(
             let (_s, _t, analysis) = parse_file(file)?;
             resolve_imports_blocking(idx, &analysis);
             if let Some(r) = analysis.ref_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
+                if let Some(ty) = analysis.inferred_type_via_bag_ctx(&r.target_name, r.read_point(), None) {
                     return Ok(file_analysis::format_inferred_type(&ty));
                 }
             }
@@ -1539,7 +1539,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
             .iter()
             .map(|p| {
                 let inferred = analysis
-                    .inferred_type_via_bag_ctx(&p.name, probe, Some(&module_index))
+                    .inferred_type_via_bag_ctx(&p.name, crate::model::witnesses::ReadPoint::position(probe), Some(&module_index))
                     .as_ref()
                     .map(file_analysis::format_inferred_type);
                 serde_json::json!({
@@ -1634,7 +1634,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
                 ) {
                     continue;
                 }
-                let Some(t) = analysis.inferred_type_via_bag_ctx(name, w.span.start, Some(&module_index)) else { continue };
+                let Some(t) = analysis.inferred_type_via_bag_ctx(name, crate::model::witnesses::ReadPoint::position(w.span.start), Some(&module_index)) else { continue };
                 vars_in_scope.push(serde_json::json!({
                     "var": name,
                     "type": file_analysis::format_inferred_type(&t),
