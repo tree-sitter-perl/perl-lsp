@@ -5363,3 +5363,25 @@ function f() {
     assert_eq!(at("y", 10, 9), Some(T::ClassName("C".into())), "a `finally` runs on every path");
 }
 
+
+/// A `null` literal holds no value: joined with a typed path it makes the
+/// place optional, and on its own it is `null`.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_null_literal_is_no_value() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+function f($c) {
+    $x = null;
+    if ($c) { $x = new A(); }
+    $y = $x;
+    $z = null;
+    $w = $z;
+}
+";
+    let fa = php(src);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column: 9 });
+    assert_eq!(at("x", 5), Some(T::Optional(Box::new(T::ClassName("A".into())))));
+    assert_eq!(at("z", 7), Some(T::Undef));
+}

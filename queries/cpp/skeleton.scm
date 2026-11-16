@@ -906,6 +906,7 @@
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool
 (false) @expr.lit.bool
+(null) @expr.lit.null
 ; A comparison / logical operator yields `bool` in C++ (unlike Perl's
 ; value-preserving `&&`/`||`, C++'s ARE boolean). Gate on the operator so
 ; an arithmetic `a + b` (same node kind) stays untyped and defers to the

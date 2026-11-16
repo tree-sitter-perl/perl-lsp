@@ -266,6 +266,9 @@ spelled! {
         Bool = "bool",
         ArrayRef = "arrayref",
         HashRef = "hashref",
+        /// The value that means "nothing here" (`null`, `None`, `nullptr`,
+        /// `NULL`): a read of it holds no value, as Perl's `undef`.
+        Null = "null",
     }
 }
 
@@ -1162,6 +1165,7 @@ impl LitKind {
             LitKind::Bool => InferredType::Bool,
             LitKind::ArrayRef => InferredType::ArrayRef,
             LitKind::HashRef => InferredType::HashRef,
+            LitKind::Null => InferredType::Undef,
         }
     }
 }

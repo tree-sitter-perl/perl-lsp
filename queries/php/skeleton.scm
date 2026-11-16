@@ -376,6 +376,10 @@
  (#has-parent? @expr.lit.bool assignment_expression augmented_assignment_expression
    return_statement argument const_element property_element
    static_variable_declaration binary_expression unary_op_expression))
+((null) @expr.lit.null
+ (#has-parent? @expr.lit.null assignment_expression augmented_assignment_expression
+   return_statement argument const_element property_element
+   static_variable_declaration binary_expression unary_op_expression))
 
 ; Parentheses hold the value they wrap.
 ((parenthesized_expression (_) @expr.wrapper.inner) @expr.wrapper

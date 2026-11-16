@@ -283,6 +283,7 @@
 (float) @expr.lit.number
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
+(none) @expr.lit.null
 
 ; Guard narrowing. An atom states what a test proves of its subject, a
 ; name or a member (`self.x`): `isinstance(x, Foo)` that it is the class

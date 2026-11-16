@@ -2213,3 +2213,23 @@ def f():
     assert_eq!(fa.inferred_type_via_bag("e", Point::new(9, 12)), Some(InferredType::ClassName("E".into())));
     assert_eq!(fa.inferred_type_via_bag("e", Point::new(10, 8)), Some(InferredType::ClassName("A".into())));
 }
+
+/// `None` holds no value: joined with a typed path it makes the name
+/// optional.
+#[test]
+fn a_none_literal_is_no_value() {
+    let src = "\
+class A:
+    pass
+def f(c):
+    x = None
+    if c:
+        x = A()
+    y = x
+";
+    let fa = py_in(src, None);
+    assert_eq!(
+        fa.inferred_type_via_bag("x", Point::new(6, 8)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("A".into()))))
+    );
+}
