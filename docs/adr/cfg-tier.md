@@ -200,6 +200,22 @@ but it swallows what its body throws (`@ctl.try.quiet`).
 - `cst::conditional_arm` counts the tried body and every handler as arms,
   so an observation inside them is bounded to them.
 
+## Unbinding
+
+A write can leave a name bound to nothing: Python's `del x`, and the `as`
+name of an `except` once its handler ends. The document says so with
+`@flow.unbind` on the name, landing at its token or at the end of the
+match's `@flow.lasts` node. The write mints its `Reset` and then an
+`Unbind` marker at the same site. A read whose latest write is one raises,
+so the registry answers `Never` for it, and every join it reaches drops
+that path: past `if c: del x` the read holds what the other paths leave.
+A read straight after `del x` answers `Never` too.
+
+An `except` clause is its handler arm whole, so the name it binds
+(an instance of what it catches) is a write inside the arm. A tuple of
+classes (`except (E, F) as e`) binds nothing typed yet
+(`TODO(except-tuple-binds)`).
+
 ## Control structure is declared by each language's query document
 
 One `@ctl.*` vocabulary (branch / cond / then / else, loop and its body,
@@ -291,7 +307,8 @@ and for a call whose callee cannot come back, and nothing stores it
 (`layering_tests::never_is_made_only_by_the_registry`; the bag refuses it
 in debug builds). Only an evaluation answers it: a callable whose every
 arm leaves, or a slot written only by expressions that leave, answers
-nothing. Being the identity of `join`, it drops a non-completing arm from
+nothing. The one slot read that answers it is a read of a name a write
+left unbound (§Unbinding): that read itself raises. Being the identity of `join`, it drops a non-completing arm from
 every value fold (`//`, ternaries, `or return`, return arms) without any
 fold asking the effect lane. A short-circuit whose fallback can only
 leave (`$x // die`, `shift or croak`) peels to its left side the same way.
@@ -312,7 +329,6 @@ its document spells them.
 A loop condition's
 polarity (`TODO(cfg-loop-polarity)`: an `until` body runs where its test
 fails), R's `<<-` (`TODO(write-capture-declarations)`: a write capture
-nothing states yet, so the write binds a local), a comprehension's `:=`,
-Python's `except … as` and `del` unbinding a name, effects through a wrapper in
+nothing states yet, so the write binds a local), a comprehension's `:=`, effects through a wrapper in
 another file (waits on the whole-program engine's `EffectsOf` key), and the
 epic's original diagnostics (must/may use-after-move, the cpp D-codes, D9).

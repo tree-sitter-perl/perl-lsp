@@ -524,7 +524,7 @@
 ; A try runs its body; where the body unwinds, a catch; past both, its
 ; finally.
 (try_statement body: (_) @ctl.try.body) @ctl.try
-(try_statement (catch_clause body: (_) @ctl.try.catch)) @ctl.try
+(try_statement (catch_clause) @ctl.try.catch) @ctl.try
 (try_statement (finally_clause body: (_) @ctl.try.finally)) @ctl.try
 
 ; A statement that leaves its block: nothing after it there runs, and

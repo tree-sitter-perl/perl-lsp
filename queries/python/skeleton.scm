@@ -112,13 +112,23 @@
 (augmented_assignment left: (_) @flow.place)
 
 ; An augmented assignment and a `del` leave what they name without the
-; value a guard proved, whatever it is: a name rebinds (to the operator's
-; result, or to nothing), a member or element is written.
+; value a guard proved, whatever it is: a name rebinds to the operator's
+; result, or a `del` unbinds it; a member or element is written.
 (augmented_assignment
   left: [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
-(delete_statement [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place])
+(delete_statement [(identifier) @flow.unbind (attribute) @flow.place (subscript) @flow.place])
 (delete_statement
-  (expression_list [(identifier) @flow.rebind (attribute) @flow.place (subscript) @flow.place]))
+  (expression_list [(identifier) @flow.unbind (attribute) @flow.place (subscript) @flow.place]))
+
+; `except E as e` binds an instance of what it catches, and unbinds the
+; name once its handler ends.
+; TODO(except-tuple-binds): `except (E, F) as e` binds an `E | F`; today
+; the name is bound to nothing typed. Owner: Python pack follow-up.
+(except_clause
+  value: (as_pattern . [(identifier) (attribute)] @type.annot
+    alias: (as_pattern_target (identifier) @flow.target)))
+(except_clause
+  value: (as_pattern alias: (as_pattern_target (identifier) @flow.unbind))) @flow.lasts
 
 (parameters
   (identifier) @def.var.name @def.var)
@@ -328,7 +338,7 @@
 ; A try runs its body; where the body unwinds, an except; where it
 ; completes, its else; past them all, its finally.
 (try_statement body: (_) @ctl.try.body) @ctl.try
-(try_statement (except_clause (block) @ctl.try.catch)) @ctl.try
+(try_statement (except_clause) @ctl.try.catch) @ctl.try
 (try_statement (else_clause body: (_) @ctl.try.else)) @ctl.try
 (try_statement (finally_clause (block) @ctl.try.finally)) @ctl.try
 

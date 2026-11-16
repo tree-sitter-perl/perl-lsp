@@ -421,6 +421,7 @@ impl WitnessPayload {
         match self {
             WitnessPayload::Edge(_)
             | WitnessPayload::Reset
+            | WitnessPayload::Unbind
             | WitnessPayload::InferredType(_)
             | WitnessPayload::Observation(_) => true,
             WitnessPayload::ReturnExpr(_)
@@ -477,6 +478,7 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
+            | WitnessPayload::Unbind
             | WitnessPayload::BrandOverlay { .. }
             | WitnessPayload::FreeValue { .. }
             | WitnessPayload::Effect(_) => {}
@@ -680,6 +682,13 @@ pub enum WitnessPayload {
     /// (`docs/adr/cfg-tier.md` §Later-running bodies). Kept at the END for
     /// bincode variant-index stability.
     MayBe(WitnessAttachment),
+    /// A WRITE that leaves the attachment's variable bound to nothing
+    /// (Python's `del x`, the `as` name of an `except` past its handler):
+    /// a read of it with this the latest write before it raises, so the
+    /// read answers `Never` and every join it reaches drops that path
+    /// (`docs/adr/cfg-tier.md` §Unbinding). Kept at the END for bincode
+    /// variant-index stability.
+    Unbind,
 }
 
 /// What one write adds to the shape it lands in.

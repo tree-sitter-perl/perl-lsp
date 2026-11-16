@@ -153,6 +153,18 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             let target = Target { name, scopes: target_scopes, at, resets, token: e.span(), relative, space, constant };
             f.flow_targets.insert(e.match_id, target);
         }
+        Capture::Flow(FlowCap::Unbind) => {
+            let name = (pack.shape_name)(&e.text);
+            let at = ad.in_match(e.match_id, Capture::Flow(FlowCap::Lasts)).map_or(e.end, |n| n.end);
+            reset(&mut out.witnesses, name.clone(), cur_scope, at);
+            out.witnesses.push(Witness {
+                attachment: WitnessAttachment::Variable { name: name.clone(), scope: cur_scope },
+                source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
+                payload: WitnessPayload::Unbind,
+                span: Span { start: at, end: at },
+            });
+            f.flow_rebinds.push((name, cur_scope, at, e.span()));
+        }
         Capture::Flow(FlowCap::Rebind) => {
             let (at, resets) = written_at(ad, e);
             if resets {

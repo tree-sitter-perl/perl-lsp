@@ -2156,3 +2156,60 @@ def f():
     assert_eq!(at("z", 21), two("A", "B"), "the `else` runs when the body ends, the handler leaves the entry");
     assert_eq!(at("s", 27), Some(InferredType::ClassName("C".into())), "a `finally` runs on every path");
 }
+
+/// A `del` unbinds a name: a read past it raises, so a path through it
+/// reaches no join, and a read straight after it has no value.
+#[test]
+fn a_del_unbinds_the_name() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+def f(c):
+    x = A()
+    if c:
+        del x
+    y = x
+    z = A()
+    del z
+    w = z
+    v = A()
+    if c:
+        del v
+        v = B()
+    u = v
+";
+    let fa = py_in(src, None);
+    let at = |n: &str, row| fa.inferred_type_via_bag(n, Point::new(row, 8));
+    assert_eq!(at("x", 8), Some(InferredType::ClassName("A".into())), "the path through `del` raises at the read");
+    assert_eq!(at("z", 11), Some(InferredType::Never), "a read with nothing bound raises");
+    let both = crate::model::file_analysis::join_all(
+        &[InferredType::ClassName("A".into()), InferredType::ClassName("B".into())],
+        &crate::model::file_analysis::Unordered,
+    );
+    assert_eq!(at("v", 16), both, "a write after `del` binds it again");
+}
+
+/// `except E as e` binds an instance of `E` in its handler and unbinds the
+/// name when the handler ends, so past the `try` only the paths that never
+/// ran the handler hold what it held before.
+#[test]
+fn an_except_name_is_bound_only_in_its_handler() {
+    let src = "\
+class A:
+    pass
+class E(Exception):
+    pass
+def f():
+    e = A()
+    try:
+        g()
+    except E as e:
+        h = e
+    y = e
+";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("e", Point::new(9, 12)), Some(InferredType::ClassName("E".into())));
+    assert_eq!(fa.inferred_type_via_bag("e", Point::new(10, 8)), Some(InferredType::ClassName("A".into())));
+}

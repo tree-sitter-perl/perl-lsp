@@ -1499,6 +1499,11 @@ impl ReducerRegistry {
         if matches!(q.attachment, WitnessAttachment::Expr(_)) && stated_never_completes(bag, q.attachment) {
             return ReducedValue::Type(InferredType::Never);
         }
+        // A read whose latest write unbound the name raises: the path it is
+        // on never comes back, so it has a slot's one `Never`.
+        if unbound_at(bag, q) {
+            return ReducedValue::Type(InferredType::Never);
+        }
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
         // `Never` types an evaluation, never a slot: a callable whose every
@@ -4095,6 +4100,26 @@ fn defines_member_here(bag: &WitnessBag, owner: &str, space: crate::model::file_
 }
 
 /// Whether `att` states of itself an effect that never completes.
+/// Whether the latest write before `q`'s point left its place bound to
+/// nothing (`WitnessPayload::Unbind`, pushed after its write's `Reset`).
+fn unbound_at(bag: &WitnessBag, q: &ReducerQuery) -> bool {
+    let Some(point) = q.point.filter(|_| q.attachment.is_temporal()) else { return false };
+    let mut latest: Option<(Point, bool)> = None;
+    for w in bag.iter_attachment(q.attachment).filter(|w| w.span.start <= point) {
+        let unbinds = match w.payload {
+            WitnessPayload::Unbind => true,
+            WitnessPayload::Reset => false,
+            _ => continue,
+        };
+        // Writes at one site stand in bag order: a join landing where an
+        // arm ends is pushed after the arm's own writes.
+        if latest.is_none_or(|(at, _)| at <= w.span.start) {
+            latest = Some((w.span.start, unbinds));
+        }
+    }
+    latest.is_some_and(|(_, u)| u)
+}
+
 fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
     let mut stated: Option<super::types::Ends> = None;
     for w in bag.iter_attachment(att) {

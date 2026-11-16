@@ -247,6 +247,13 @@ spelled! {
         /// the write initialises it, never overwrites it. The place's own
         /// `Place` capture makes it a write.
         Init = "init",
+        /// A name a write leaves bound to nothing (Python's `del x`): a
+        /// read past it raises. It unbinds at its own token, or at the end
+        /// of its match's `Lasts` node.
+        Unbind = "unbind",
+        /// The node an `Unbind` name stays bound through (an `except`
+        /// clause, for its `as` name).
+        Lasts = "lasts",
     }
 }
 
