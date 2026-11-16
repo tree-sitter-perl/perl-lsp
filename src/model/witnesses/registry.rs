@@ -788,6 +788,23 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
     build()
 }
 
+/// A frame's computed subtree (`QueryState::frame`).
+struct Framed<T> {
+    value: T,
+    effect: std::sync::Arc<ChaseTrace>,
+    /// The taint the answer carries (`QueryState::leave_frame`).
+    taint: u32,
+    /// The outermost frame a cut beneath it closed at.
+    cut: u32,
+}
+
+/// Remembered answers a recurring arm's pass sets aside
+/// (`QueryState::set_aside_answers_through`).
+struct PathAnswers {
+    memo: Vec<(VisitedKey, MemoEntry)>,
+    fan_outs: Vec<(FanOutKey, MemoEntry)>,
+}
+
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
 /// (two paths reaching one shared sub-attachment) re-chases the shared
@@ -803,23 +820,6 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
 /// what any other off-path reentry would compute. The memo is dropped
 /// when the top-level query returns, so it never leaks state across
 /// queries whose context (scopes / module_index / framework) differs.
-/// Remembered answers a recurring arm's pass sets aside
-/// (`QueryState::set_aside_answers_through`).
-/// A frame's computed subtree (`QueryState::frame`).
-struct Framed<T> {
-    value: T,
-    effect: std::sync::Arc<ChaseTrace>,
-    /// The taint the answer carries (`QueryState::leave_frame`).
-    taint: u32,
-    /// The outermost frame a cut beneath it closed at.
-    cut: u32,
-}
-
-struct PathAnswers {
-    memo: Vec<(VisitedKey, MemoEntry)>,
-    fan_outs: Vec<(FanOutKey, MemoEntry)>,
-}
-
 pub(super) struct QueryState {
     visited: VisitedSet,
     /// The cross-file fan-outs on the current path, and the answers of those
