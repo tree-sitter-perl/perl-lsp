@@ -49,10 +49,12 @@ const NU: Option<TypeObservation> = Some(TypeObservation::NumericUse);
 const SU: Option<TypeObservation> = Some(TypeObservation::StringUse);
 const XU: Option<TypeObservation> = None;
 // How a call to it ends, where the language fixes it; `None` is no
-// evidence, the top. `exec` replaces the process and `dump` aborts it, so
-// neither comes back to anything a handler could catch.
+// evidence, the top. `dump` aborts the process, so it comes back to
+// nothing a handler could catch; `exec` replaces it, or returns false
+// where the command could not start.
 const UW: Option<Ends> = Some(Ends::UNWINDS);
 const EX: Option<Ends> = Some(Ends::EXITS);
+const EC: Option<Ends> = Some(Ends::EXITS.union(Ends::COMPLETES));
 const XE: Option<Ends> = None;
 
 /// `(name, kind, return_type, first_arg_use, ends)` — sorted by name (ASCII:
@@ -115,7 +117,7 @@ static BUILTINS: &[(&str, BuiltinKind, Option<InferredType>, Option<TypeObservat
     ("eq", K::Keyword, X, XU, XE),
     ("eval", K::Function, X, XU, XE),
     ("evalbytes", K::Function, X, XU, XE),
-    ("exec", K::Function, X, XU, EX),
+    ("exec", K::Function, X, XU, EC),
     ("exists", K::Function, B, XU, XE),
     ("exit", K::Function, X, XU, EX),
     ("exp", K::Function, X, NU, XE),
