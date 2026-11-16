@@ -179,7 +179,7 @@ stays silent when it was not.
 
 One `@ctl.*` vocabulary (branch / cond / then / else, loop and its body,
 step, else and once, try / body / handler / finally, and `leave.*` for
-return, throw, break, continue and jump) replaces `@narrow.cond/then/else/exit`,
+return, throw, break, continue and jump) replaces `@ctl.cond/then/else/exit`,
 `@arm` and the branch and loop kinds of `@guard.region`. Perl declares its
 own in `queries/perl/ctl.scm` on the combined walk, so Perl's exit keywords
 stop being a Rust table. The narrowing atoms (`@narrow.is/set/unset/...`)

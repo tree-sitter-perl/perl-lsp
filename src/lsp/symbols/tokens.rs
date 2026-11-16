@@ -44,6 +44,9 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
     let start = position_to_point(range.start);
     let end = position_to_point(range.end);
     let mut hints = Vec::new();
+    // One type query per declaration in range: a pass, so answers the
+    // declarations share (an inherited slot's writes) are derived once.
+    let _pass = analysis.query_pass(None);
 
     for sym in analysis.symbols() {
         let decl_point = sym.selection_span.end;
@@ -60,10 +63,10 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 }
                 // Skip variables whose type is written EXPLICITLY (`int c`,
                 // `Box b`) — the hint just echoes the source. Languages with
-                // explicit types mark the declaration with a `skeleton-annot`
-                // witness; inferred ones (`auto`, Perl) have none, so they
-                // still get the hint.
-                if analysis.witnesses.has_annotation(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
+                // explicit types bound the declaration
+                // (`WitnessPayload::Bound`); inferred ones (`auto`, Perl)
+                // have none, so they still get the hint.
+                if analysis.witnesses.has_declared_bound(&crate::model::witnesses::WitnessAttachment::Place(Box::new(
                     analysis.declared_place(sym.id),
                 ))) {
                     continue;
