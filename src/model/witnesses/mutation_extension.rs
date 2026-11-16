@@ -163,12 +163,12 @@ impl SlotRoutes {
                 WitnessPayload::Observation(_) => w.payload.binds_value(),
                 _ => true,
             }));
-            let standing = Standing::of(query_variable_place(bag, ctx, place, at));
+            let standing = Standing::of(query_variable_place(bag, ctx, place, ReadPoint::position(at)));
             self.current = Some(RouteSegment { place: place.clone(), others, at, standing });
         }
         let seg = self.current.as_mut().expect("set above");
         if same_place && seg.others.boundary(seg.at, at) {
-            seg.standing = Standing::of(query_variable_place(bag, ctx, place, at));
+            seg.standing = Standing::of(query_variable_place(bag, ctx, place, ReadPoint::position(at)));
         }
         seg.at = at;
         seg.standing.clone()
