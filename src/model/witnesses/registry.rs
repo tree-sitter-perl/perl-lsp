@@ -1506,6 +1506,15 @@ impl ReducerRegistry {
         }
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+        // An `Undef` that flowed in says only that the value may be absent:
+        // beside a flow that came back untyped it is no answer to what the
+        // value is. One stated here (a guard's, a declaration's) stands.
+        if matches!(&v, ReducedValue::Type(InferredType::Undef))
+            && materialized.iter().any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == super::tags::FACT_UNTYPED_ARM))
+            && !bag.iter_attachment(q.attachment).any(|w| matches!(&w.payload, WitnessPayload::InferredType(InferredType::Undef)))
+        {
+            return ReducedValue::None;
+        }
         // `Never` types an evaluation, never a slot: a callable whose every
         // arm leaves yields no value (its effect says why), and a place or a
         // member written only by expressions that leave holds none. So it

@@ -5406,3 +5406,21 @@ class R {
     let fa = php(src);
     assert_eq!(fa.inferred_type_via_bag("p", tree_sitter::Point { row: 8, column: 13 }), None);
 }
+
+#[cfg(feature = "php")]
+#[test]
+fn php_a_nullable_field_initialised_to_null_keeps_its_class() {
+    let src = "<?php
+class E {}
+class C {
+    private E|null $type = null;
+    public function getType(): E|null { return $this->type; }
+    public function setType(E $type): static { $this->type = $type; return $this; }
+}
+";
+    let fa = php(src);
+    assert_eq!(
+        fa.sub_return_type_at_arity("getType", None),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("E".into()))))
+    );
+}

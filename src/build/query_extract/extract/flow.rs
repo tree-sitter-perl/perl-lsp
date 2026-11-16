@@ -508,9 +508,18 @@ pub(super) fn finish(st: &mut ExtractState) {
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }
+            let is_field = field_scope_span.contains_key(&(name.clone(), *scope));
             let payload = match annot_type {
                 Some(InferredType::ClassName(cn)) => Some(WitnessPayload::Edge(WitnessAttachment::TypeName(cn))),
                 Some(t) => Some(WitnessPayload::InferredType(t)),
+                // A data member declared with a type the pack cannot read
+                // holds values of that type class-wide: an arm come back
+                // untyped, so a lone null write elsewhere is no answer.
+                None if is_field => Some(WitnessPayload::Fact {
+                    family: crate::model::witnesses::tags::FACT_UNTYPED_ARM.into(),
+                    key: String::new(),
+                    value: crate::model::witnesses::FactValue::Bool(true),
+                }),
                 None => None,
             };
             if let Some(payload) = payload {

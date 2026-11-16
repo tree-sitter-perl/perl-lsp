@@ -2233,3 +2233,19 @@ def f(c):
         Some(InferredType::Optional(Box::new(InferredType::ClassName("A".into()))))
     );
 }
+
+#[test]
+fn a_field_of_an_unread_declared_type_written_none_is_not_none() {
+    let src = "\
+import _t
+class S:
+    auth: _t.AuthType
+    def __init__(self):
+        self.auth = None
+    def g(self):
+        a = self.auth
+        return a
+";
+    let fa = py_in(src, None);
+    assert_ne!(fa.inferred_type_via_bag("a", Point::new(7, 15)), Some(InferredType::Undef));
+}
