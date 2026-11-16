@@ -59,6 +59,10 @@ fn every_call_on_a_long_chain_keeps_its_receiver_under_an_index() {
 /// would be four times.
 #[test]
 fn a_restamp_reduces_each_link_once() {
+    // The equivalence net re-runs every pass with no memo; a cost pin counts both.
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        return;
+    }
     let idx = ModuleIndex::new_for_test();
     let cost = |links| {
         let mut fa = perl_chain(links);
@@ -77,6 +81,10 @@ fn a_restamp_reduces_each_link_once() {
 #[cfg(feature = "cpp")]
 #[test]
 fn a_cpp_reassignment_chain_types_every_call_at_linear_cost() {
+    // The equivalence net re-runs every pass with no memo; a cost pin counts both.
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        return;
+    }
     // Built and stamped, with the attachments that cost.
     let build = |src: &str| {
         let mut parser = tree_sitter::Parser::new();
@@ -120,6 +128,10 @@ fn a_cpp_reassignment_chain_types_every_call_at_linear_cost() {
 #[cfg(feature = "cpp")]
 #[test]
 fn a_cpp_chain_past_the_depth_cap_types_every_call_at_linear_cost() {
+    // The equivalence net re-runs every pass with no memo; a cost pin counts both.
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        return;
+    }
     let chain = |links| {
         let mut src = String::from("struct A { A add(); };\nvoid f() {\n  A x;\n");
         for _ in 0..links {

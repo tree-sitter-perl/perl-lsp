@@ -315,6 +315,8 @@
 (if_statement
   alternative: (elif_clause condition: (_) @ctl.cond) @ctl.branch
   alternative: [(elif_clause) @ctl.else (else_clause body: (_) @ctl.else)])
+; TODO(walrus-evaluation-order): `c` runs before `a` in `a if c else b`;
+; once `:=` is a write, a read in `c` must skip `a` (`EvaluatedBefore`).
 (conditional_expression
   (_) @ctl.then
   .
@@ -341,6 +343,8 @@
 (try_statement (except_clause) @ctl.try.catch) @ctl.try
 (try_statement (else_clause body: (_) @ctl.try.else)) @ctl.try
 (try_statement (finally_clause (block) @ctl.try.finally)) @ctl.try
+; TODO(python-assert-narrowing): `assert G` leaves where G fails, but no node
+; of it leaves; it needs a position whose failing arm is implicit.
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
