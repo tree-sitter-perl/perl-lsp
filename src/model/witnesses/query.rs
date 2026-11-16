@@ -83,6 +83,33 @@ pub fn query_sub_return_type(
     reg.free_name_cross_file(ctx, &[sub_name], &ask, arity_hint, receiver, &[], &mut QueryState::new())
 }
 
+/// The type the declaration bounding `att` states, its alias edge chased:
+/// what the binding is declared to take, whatever it holds later. `None`
+/// when no declaration bounds it.
+pub fn query_declared_bound(bag: &WitnessBag, ctx: &BagContext, att: &WitnessAttachment) -> Option<InferredType> {
+    let ty = bag.bounds_of(att).find_map(|w| match &w.payload {
+        WitnessPayload::Bound { ty, evidence: Evidence::Declared(_), .. } => Some(ty),
+        _ => None,
+    })?;
+    let edge = match ty {
+        BoundType::Type(t) => return Some(t.clone()),
+        BoundType::Edge(edge) => edge,
+    };
+    let q = ReducerQuery {
+        attachment: edge,
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        args: Vec::new(),
+        context: Some(ctx),
+    };
+    match ReducerRegistry::with_defaults().query(bag, &q) {
+        ReducedValue::Type(t) => Some(t),
+        ReducedValue::FactMap(_) | ReducedValue::None => None,
+    }
+}
+
 /// What `place` holds at `point`. The place names its storage, so there
 /// is no chain to walk; `scope` (where the question is asked) supplies only
 /// the framework the fold reads under.
@@ -91,7 +118,7 @@ pub fn query_place_type(
     ctx: &BagContext,
     place: &crate::model::file_analysis::Place,
     scope: ScopeId,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<InferredType> {
     if place.path.is_empty() {
         return query_variable_place(bag, ctx, place, point);
@@ -122,7 +149,7 @@ pub fn query_variable_place(
     bag: &WitnessBag,
     ctx: &BagContext,
     place: &crate::model::file_analysis::Place,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();
@@ -142,7 +169,7 @@ pub fn query_variable_type(
     ctx: &BagContext,
     var: &str,
     scope: ScopeId,
-    point: Point,
+    point: ReadPoint,
 ) -> Option<InferredType> {
     let reg = ReducerRegistry::with_defaults();
     let mut state = QueryState::new();

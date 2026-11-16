@@ -204,8 +204,8 @@ impl<'a> Builder<'a> {
                     }
                 }
                 "string_literal" | "interpolated_string_literal" => {
-                    if let Some(text) = self.extract_string_content(key) {
-                        names.push((text, self.string_content_span(key)));
+                    if let Some(value) = crate::cst::string_value(key, self.source) {
+                        names.push(value);
                     }
                 }
                 _ => {}
@@ -912,10 +912,7 @@ impl<'a> Builder<'a> {
     /// Returns multiple values if a variable resolves to multiple strings (loop var).
     pub(super) fn try_fold_interpolated_string(&self, node: Node<'a>) -> Vec<String> {
         // Find the string_content child
-        let content = match node.named_child(0) {
-            Some(c) if c.kind() == "string_content" => c,
-            _ => return vec![],
-        };
+        let Some(content) = crate::cst::string_content(node) else { return vec![] };
 
         // Walk the string_content: split into literal text and interpolated variables.
         // Named children are the scalars; text between/around them is literal.
@@ -1373,7 +1370,7 @@ impl<'a> Builder<'a> {
                 let right = node.child_by_field_name("right")?;
                 let tails = match right.kind() {
                     "interpolated_string_literal" => self.try_fold_interpolated_string(right),
-                    "string_literal" => self.extract_string_content(right).into_iter().collect(),
+                    "string_literal" => crate::cst::string_content_text(right, self.source).into_iter().collect(),
                     _ => Vec::new(),
                 };
                 if tails.is_empty() {
@@ -1407,8 +1404,8 @@ impl<'a> Builder<'a> {
             Some(right) if right.kind() == "interpolated_string_literal" => {
                 ConstFold::Values(Some(self.try_fold_interpolated_string(right)))
             }
-            Some(right) if right.kind() == "string_literal" => match self.extract_string_content(right) {
-                Some(text) => ConstFold::Literal(text, self.string_content_span(right)),
+            Some(right) if right.kind() == "string_literal" => match crate::cst::string_value(right, self.source) {
+                Some((text, span)) => ConstFold::Literal(text, span),
                 None => ConstFold::Values(None),
             },
             _ => ConstFold::Values(None),
@@ -1584,8 +1581,29 @@ impl<'a> Builder<'a> {
         let stored = if op == Some(crate::cst::AssignOp::Plain) { right } else { node };
         if left.kind() == "hash_element_expression" {
             if let Some(key_node) = left.child_by_field_name("key") {
-                self.slot_write_rhs_span
-                    .insert(node_to_span(key_node), node_to_span(stored));
+                // The object written through, as the edge a positionless
+                // read of it takes: a variable's value where its binding's
+                // scope ends (a hash written and then blessed is the object
+                // it becomes), anything else the value of the expression.
+                let receiver = crate::cst::element_deref_base(left).map(|base| {
+                    let plain = crate::cst::is_plain_scalar(base).then(|| base.utf8_text(self.source).ok()).flatten();
+                    match plain.map(|name| self.binding_key_here(name, base.start_position())) {
+                        Some(root @ crate::model::file_analysis::Binding::Lexical(_)) => {
+                            crate::model::witnesses::WitnessAttachment::Place(Box::new(
+                                crate::model::file_analysis::Place { root, path: Vec::new() },
+                            ))
+                        }
+                        _ => {
+                            let att = crate::model::witnesses::WitnessAttachment::Expr(node_to_span(base));
+                            if self.bag.for_attachment(&att).is_empty() {
+                                self.emit_expr_witness(base);
+                            }
+                            att
+                        }
+                    }
+                });
+                let site = super::SlotWriteSite { rhs: node_to_span(stored), receiver };
+                self.slot_write_rhs_span.insert(node_to_span(key_node), site);
             }
         }
         if matches!(

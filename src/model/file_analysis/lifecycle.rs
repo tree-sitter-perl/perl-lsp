@@ -438,6 +438,46 @@ impl FileAnalysis {
         } else {
             "stamp.pass_build"
         });
+        let stamped = self.stamp_targets(module_index);
+        if crate::model::witnesses::fold_memo_equiv_enabled() {
+            crate::model::witnesses::check_pass_equiv("receiver stamp", &stamped, || self.stamp_targets(module_index));
+        }
+        for (i, target) in stamped {
+            // Monotone: a re-stamp that can't re-derive the invocant class must
+            // not ERASE an authoritative freeze. Witnesses only accrue (finalize
+            // → enrichment adds the index), so a class never legitimately
+            // retracts; the only answer→empty here is a synthesized member ref
+            // whose class was frozen from the field decl (a macro-body
+            // `->field` whose receiver is an untypeable macro parameter). Keep it.
+            let keeps_old = target.targets().is_empty()
+                && self.refs[i].frozen_receiver().is_some_and(|old| !old.targets().is_empty());
+            // With the index, only the single-class dispatch edge goes on the
+            // ref (see `FrozenReceiver`); a union or empty answer is the
+            // session memo's.
+            let edge_only = module_index.is_some() && target.single().is_none();
+            if !keeps_old && !edge_only {
+                // A construction's token names the class it constructs, so
+                // the site is retrieved under the class its receiver's value
+                // settles to (`new $cls` as much as `new Foo`), decided here
+                // where that value is settled. A receiver of several classes
+                // keeps the token's spelling.
+                // TODO(construction-union-retrieval): one key cannot carry a
+                // union, so such a site is retrieved by no constructor.
+                let class = match self.refs[i].constructs() {
+                    true => target.single().map(|t| t.invocant_class().to_string()),
+                    false => None,
+                };
+                self.refs[i].bind_receiver(target);
+                if let Some(class) = class {
+                    self.refs.rekey(i, class, &self.pack.names);
+                }
+            }
+        }
+    }
+
+    /// What the receiver stamp would freeze on each member access, in the
+    /// pass's own memo scope; `stamp_method_call_targets` applies it.
+    fn stamp_targets(&self, module_index: Option<&dyn CrossFileLookup>) -> Vec<(usize, FrozenReceiver)> {
         let mut local_memo: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
         // Without an index every resolution below reads only `self`, which
@@ -756,39 +796,7 @@ impl FileAnalysis {
             }
             stamped.push((i, target));
         }
-        drop(_answers);
-        drop(_pass);
-        for (i, target) in stamped {
-            // Monotone: a re-stamp that can't re-derive the invocant class must
-            // not ERASE an authoritative freeze. Witnesses only accrue (finalize
-            // → enrichment adds the index), so a class never legitimately
-            // retracts; the only answer→empty here is a synthesized member ref
-            // whose class was frozen from the field decl (a macro-body
-            // `->field` whose receiver is an untypeable macro parameter). Keep it.
-            let keeps_old = target.targets().is_empty()
-                && self.refs[i].frozen_receiver().is_some_and(|old| !old.targets().is_empty());
-            // With the index, only the single-class dispatch edge goes on the
-            // ref (see `FrozenReceiver`); a union or empty answer is the
-            // session memo's.
-            let edge_only = module_index.is_some() && target.single().is_none();
-            if !keeps_old && !edge_only {
-                // A construction's token names the class it constructs, so
-                // the site is retrieved under the class its receiver's value
-                // settles to (`new $cls` as much as `new Foo`), decided here
-                // where that value is settled. A receiver of several classes
-                // keeps the token's spelling.
-                // TODO(construction-union-retrieval): one key cannot carry a
-                // union, so such a site is retrieved by no constructor.
-                let class = match self.refs[i].constructs() {
-                    true => target.single().map(|t| t.invocant_class().to_string()),
-                    false => None,
-                };
-                self.refs[i].bind_receiver(target);
-                if let Some(class) = class {
-                    self.refs.rekey(i, class, &self.pack.names);
-                }
-            }
-        }
+        stamped
     }
 
     /// Set the owner binding on owner-less `HashKeyAccess` refs

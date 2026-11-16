@@ -269,7 +269,9 @@
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
 ; where the left holds, of `or` where it fails. An `else` arm is its body;
-; the `else` of a loop or a `try` is no arm of a condition.
+; the `else` of a loop or a `try` is no arm of a condition. A `while` body
+; runs where its condition holds, and the loop tests it again after each
+; run, so a `break` or `continue` in it goes to the loop.
 (if_statement condition: (_) @narrow.cond consequence: (_) @narrow.then)
 (if_statement
   condition: (_) @narrow.cond
@@ -278,6 +280,8 @@
 (if_statement
   alternative: (elif_clause condition: (_) @narrow.cond)
   alternative: [(elif_clause) @narrow.else (else_clause body: (_) @narrow.else)])
+; TODO(walrus-evaluation-order): `c` runs before `a` in `a if c else b`;
+; once `:=` is a write, a read in `c` must skip `a` (`EvaluatedBefore`).
 (conditional_expression
   (_) @narrow.then
   .
@@ -290,6 +294,11 @@
   (_) @narrow.else)
 (boolean_operator left: (_) @narrow.cond operator: "and" right: (_) @narrow.then)
 (boolean_operator left: (_) @narrow.cond operator: "or" right: (_) @narrow.else)
+; TODO(cfg-exit-join): `@narrow.loop` and `@flow.to_loop` stand in for
+; reachability until the CFG's loop edges answer it.
+(while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
+; TODO(python-assert-narrowing): `assert G` leaves where G fails, but no node
+; of it leaves; it needs a position whose failing arm is implicit.
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -297,6 +306,7 @@
 ; TODO(noreturn-callee): `sys.exit()` leaves too. A callee that never
 ; returns is an effect on the callee; mark it once effects and the CFG exist.
 [(return_statement) (raise_statement) (continue_statement) (break_statement)] @flow.leaves
+[(continue_statement) (break_statement)] @flow.to_loop
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.

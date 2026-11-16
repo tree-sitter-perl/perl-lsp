@@ -227,6 +227,12 @@ fn encode_whole(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
     // describe one state by construction rather than by three callers
     // agreeing.
     let projected = crate::model::surface::Surface::project(fa);
+    // The persist path shares one answer memo between the bake and the
+    // projections (`index_perl`); under the equivalence net both are asked
+    // again with a memo open and with none, and must not tell them apart.
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        check_shared_memo_equiv(fa, &bag, &projected);
+    }
     let source_fingerprint = crate::model::surface::surface_fingerprint(&projected);
     let surface = encode_surface(&projected).unwrap_or_default();
     Some(EncodedAnalysis {
@@ -238,6 +244,32 @@ fn encode_whole(fa: &FileAnalysis) -> Option<EncodedAnalysis> {
     })
 }
 
+
+fn check_shared_memo_equiv(
+    fa: &FileAnalysis,
+    bag: &crate::model::witnesses::WitnessBag,
+    persisted: &crate::model::surface::Surface,
+) {
+    let ask = || (bake_conclusion_map(fa, bag), crate::model::surface::Surface::project(fa));
+    let shared = {
+        let _memo = crate::model::witnesses::FoldMemoScope::enter();
+        ask()
+    };
+    let control = crate::model::witnesses::without_fold_memo(ask);
+    let verdicts = [
+        ("bake", shared.0 == control.0),
+        ("surface", shared.1 == control.1),
+        ("persisted_surface", *persisted == control.1),
+    ];
+    for (what, agree) in verdicts {
+        crate::util::ghost_stats::count(if agree { "fold_memo.equiv.agree" } else { "fold_memo.equiv.differ" });
+        if !agree {
+            log::error!("fold-memo equivalence: {what} differs with the shared memo");
+            #[cfg(test)]
+            panic!("fold-memo: the shared memo changed the {what}");
+        }
+    }
+}
 
 /// Bake one analysis's conclusions and encode them for the store.
 ///

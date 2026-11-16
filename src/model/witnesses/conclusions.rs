@@ -918,8 +918,8 @@ fn bake_one(
     // Constant probe. Two queries differing only in their binders must agree
     // before a `Value` is licensed: an answer that moves with the receiver is
     // exactly what `Value` may not represent.
-    let probe = |receiver: Option<InferredType>, arity: Option<u32>| -> ReducedValue {
-        registry.query(
+    let probe = |receiver: Option<InferredType>, arity: Option<u32>| {
+        registry.query_with_residuals(
             bag,
             &ReducerQuery {
                 attachment: att,
@@ -936,7 +936,7 @@ fn bake_one(
         )
     };
 
-    let bare = probe(None, None);
+    let (bare, bare_residuals) = probe(None, None);
     crate::util::ghost_stats::count("bake.attempted");
     let ReducedValue::Type(t) = bare else {
         crate::util::ghost_stats::count("bake.no_bare_answer");
@@ -962,7 +962,7 @@ fn bake_one(
         // key being baked as its own first rung, which is true of the ladder
         // and useless as a `Link`: the consult reached this map by doing
         // exactly that, so a walk back to it is a walk to where we already are.
-        let residual = registry.residuals_of_last_query().map(|targets| {
+        let residual = bare_residuals.map(|targets| {
             let self_key = ConclusionKey::from_attachment(att);
             targets
                 .into_iter()
@@ -1023,7 +1023,7 @@ fn bake_one(
 
     // A receiver the file cannot have produced. If the answer moves, the
     // conclusion is binder-dependent and must not be a constant.
-    let probed = probe(
+    let (probed, _) = probe(
         Some(InferredType::ClassName(
             "Perl::LSP::ConclusionProbe".to_string(),
         )),

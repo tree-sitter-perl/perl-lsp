@@ -102,10 +102,13 @@
 ; A parameter is a local of its callable, named like every variable by
 ; the token after its `$`: a read of `$x` references `x` and leaves the
 ; `$` alone. The `$x` it is written as is the spelling it is listed by.
-; Its declared type is its value from the binding site on. A variadic's
+; Its declared type bounds it on entry: PHP checks it when the call binds
+; the argument, and a later write may retype the local. A variadic's
 ; declared type is its elements', so the local stays untyped.
+; TODO(php-implicit-nullable): `string $m = null` declares `?string`; the
+; bound is `string`, so a `null === $m` guard reads as both.
 (simple_parameter
-  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
+  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
   name: (variable_name (name) @def.local.name @flow.target) @def.local.spelled) @def.local
 (variadic_parameter
   name: (variable_name (name) @def.local.name) @def.local.spelled) @def.local
@@ -158,11 +161,12 @@
 ; body, not to the constructor whose parameter list declares it.
 ; The same token is the constructor's local too, so the match declares
 ; the two as one (`@def.pair`): a rename of either rewrites both, and the
-; declared type is the value of each. (A node holds at most three
+; declared type bounds each: the local on entry, as any parameter, and the
+; property for its life, as any member. (A node holds at most three
 ; captures; tree-sitter drops the rest silently.)
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
-  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot
+  type: [(named_type) (primitive_type) (optional_type) (union_type)]? @type.annot.entry
   name: [
     (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled @def.local.spelled
     (by_ref
@@ -405,10 +409,11 @@
     (by_ref (variable_name (name) @def.assigned.name @flow.rebind) @def.assigned @def.assigned.spelled)
   ] .)
 ])
-; A caught exception is an instance of the class the clause names; a
-; clause naming several (`A | B`) names no single type.
+; A caught exception is an instance of the class the clause names, on
+; entry to the clause: a write in it may retype the variable. A clause
+; naming several (`A | B`) names no single type.
 (catch_clause
-  type: (type_list . (named_type) @type.annot .)
+  type: (type_list . (named_type) @type.annot.entry .)
   name: (variable_name (name) @def.assigned.name @flow.target) @def.assigned @def.assigned.spelled)
 (global_declaration (variable_name (name) @def.assigned.name) @def.assigned @def.assigned.spelled)
 (static_variable_declaration
@@ -488,8 +493,11 @@
 ; loop body run where it holds, every later clause of the chain where it
 ; fails; a ternary yields its body or its alternative; the right of `&&`
 ; runs where the left holds, of `||` where it fails. An `else` arm is its
-; body. A loop tests its condition again after each run of its body, so
-; what follows it is no arm of that test.
+; body. A loop tests its condition again after each run of its body, so a
+; `break` or `continue` in it goes to the loop, and the loop is left where
+; a test fails. A short-circuit written as a statement (`G || throw …`,
+; `G or die`) is a chain of its own, so the rest of the block runs where
+; its right side does not leave.
 (if_statement condition: (_) @narrow.cond body: (_) @narrow.then)
 (if_statement
   condition: (_) @narrow.cond
@@ -498,14 +506,15 @@
 (if_statement
   alternative: (else_if_clause condition: (_) @narrow.cond)
   alternative: [(else_if_clause) @narrow.else (else_clause body: (_) @narrow.else)])
-; TODO(cfg-exit-join): `@narrow.loop` and the fall-through it guards stand
-; in for reachability; the CFG retires both, since a `break` is an edge to
-; the loop's exit there.
+; TODO(cfg-exit-join): `@narrow.loop`, `@flow.to_loop` and the
+; fall-through they guard stand in for reachability; the CFG retires them,
+; since a `break` is an edge to the loop's exit there.
 (while_statement condition: (_) @narrow.cond body: (_) @narrow.then) @narrow.loop
 (conditional_expression condition: (_) @narrow.cond body: (_) @narrow.then)
 (conditional_expression condition: (_) @narrow.cond alternative: (_) @narrow.else)
 (binary_expression left: (_) @narrow.cond operator: ["&&" "and"] right: (_) @narrow.then)
 (binary_expression left: (_) @narrow.cond operator: ["||" "or"] right: (_) @narrow.else)
+(expression_statement (binary_expression left: (_) @narrow.cond operator: ["&&" "and" "||" "or"])) @narrow.stmt
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements
@@ -523,6 +532,16 @@
 ((expression_statement
    [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit]) @flow.leaves
  (#any-of? @_exit "die" "exit"))
+; The right side of a short-circuit leaves the same way (`G || throw …`).
+(binary_expression operator: ["&&" "and" "||" "or"] right: (throw_expression) @flow.leaves)
+((binary_expression
+   operator: ["&&" "and" "||" "or"]
+   right: [(function_call_expression function: [(name) @_exit (qualified_name . (name) @_exit)]) (name) @_exit] @flow.leaves)
+ (#any-of? @_exit "die" "exit"))
+; A `break` or `continue` leaves to the loop around it, and a bare block's
+; statements run where it stands.
+[(break_statement) (continue_statement)] @flow.to_loop
+(compound_statement) @flow.block
 
 ; ---- calls ----
 ; A call's value is an Invoke of its callee on its arguments, and the
