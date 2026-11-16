@@ -27,6 +27,16 @@ two types; `join_all` answers `None` only for no arms. `Never` is not
 holds nothing, and `join_return_arms` answers `None` when the only arms
 that come back are undef (`docs/adr/cfg-tier.md` §Effects).
 
+Every language's null literal (PHP and C++ `null`/`nullptr`, Python
+`None`, R `NULL`, Perl `undef`) types as `Undef`, and each pack spells it
+back in its own word (`X|None`, `X|null`). An `Undef` arm says only that
+the value may be absent, so beside an arm that came back untyped
+(`tags::FACT_UNTYPED_ARM`: a flow the registry could not type, or a data
+member declared with a type the pack cannot read) an all-`Undef` answer is
+no answer; an `Undef` stated on the attachment itself (a guard, a
+declaration) still stands. A member's class-wide writes are arms of one
+value and join, as do any regions that tie on priority and extent.
+
 `TypeOrder` is the only inheritance the join sees: `isa` for
 subsumption, `common_class` for widening. In-file folds without a bag
 context use `Unordered` (a class is an instance only of itself); a
