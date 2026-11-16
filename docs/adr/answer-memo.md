@@ -112,7 +112,8 @@ real run the encode-time check counts `fold_memo.equiv.agree` /
 
 ## Cost
 
-Measured 2026-11-14 (`--check`, cold, three runs each side): a file of 1000
-classes inheriting one base's slot writes went from 25.6 s to 12.7 s wall
-(bake 12.0 s → 0.23 s, encode 14.2 s → 0.36 s); FHEM flat; the CPAN
-substrate +2.3%, the bookkeeping on files that share nothing.
+Measured 2026-11-16 (`--check`, cold, three runs each side): a file of 1000
+classes inheriting one base's slot writes goes from 28.7 s with no memo to
+22.4 s, the per-receiver entries being the remainder; FHEM flat (49.4 s →
+48.6 s). On 2026-11-14 the CPAN substrate cost +2.3%, the bookkeeping on
+files that share nothing.
