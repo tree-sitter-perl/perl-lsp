@@ -789,15 +789,11 @@ fn returns_under(fa: &FileAnalysis, class: &str, name: &str, receiver: &str) -> 
     )
 }
 
-/// An answer that never read its receiver is filed for every receiver; one
-/// that did stays that receiver's. Asked in both orders, so whichever
+/// The memo files an answer under the receiver it was asked with, so one
+/// receiver's answer never serves another. Asked in both orders, so whichever
 /// receiver computes first, the other gets its own answer.
-///
-/// Base-verify by dropping the `note_receiver_read()` in `eval_return_expr`'s
-/// `Receiver` arm: the inherited constructor answers the first receiver's
-/// class for every later one.
 #[test]
-fn a_memo_answer_is_shared_across_receivers_only_when_it_never_read_one() {
+fn a_memo_answer_stays_its_own_receivers() {
     let fa = analyze(
         "package Base;\nsub new { my $class = shift; return bless {}, $class }\nsub conn { return My::Conn->new }\n\
          package P1;\nour @ISA = ('Base');\npackage P2;\nour @ISA = ('Base');\n1;\n",

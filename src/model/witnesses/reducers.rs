@@ -486,7 +486,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // chase through `$o->m`) it answers that receiver, so `return $self`
         // on a subclass instance types the subclass.
         if let Some(package) = first_param_class {
-            super::registry::note_receiver_read();
             return ReducedValue::Type(
                 super::registry::fresh_dispatch_receiver(&q.receiver, &package, q.context)
                     .unwrap_or(InferredType::ClassName(package)),
@@ -1148,17 +1147,11 @@ impl WitnessReducer for ReturnExprReducer {
 pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<InferredType> {
     match re {
         ReturnExpr::Concrete(t) => Some(t.clone()),
-        ReturnExpr::Receiver => {
-            super::registry::note_receiver_read();
-            q.receiver.clone()
-        }
+        ReturnExpr::Receiver => q.receiver.clone(),
         ReturnExpr::Arg(i) => q.args.get(*i as usize).cloned(),
         // The registry resolves `Of` before reducing; one left here had no answer.
         ReturnExpr::Of(_) => None,
-        ReturnExpr::ReceiverOr(fallback) => {
-            super::registry::note_receiver_read();
-            Some(q.receiver.clone().unwrap_or_else(|| fallback.clone()))
-        }
+        ReturnExpr::ReceiverOr(fallback) => Some(q.receiver.clone().unwrap_or_else(|| fallback.clone())),
         ReturnExpr::Operator(op) => match op {
             ParametricOp::RowOf(inner) => {
                 // Project eagerly: `RowOf` only has meaning over a

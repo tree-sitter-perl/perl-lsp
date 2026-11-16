@@ -239,12 +239,6 @@ type MemoEntry = (std::sync::Arc<ReducedValue>, std::sync::Arc<Effect>, u32);
 pub(super) struct Effect {
     rungs: Vec<super::ConclusionKey>,
     poison: bool,
-    /// The subtree read the receiver it was asked under, so its answer is
-    /// that receiver's alone; without a read it answers for every receiver.
-    reads_receiver: bool,
-    /// A cycle closed inside the subtree. Where it closed depends on the
-    /// receivers along the path, so the answer stays its own receiver's.
-    cuts: bool,
 }
 
 impl Effect {
@@ -258,19 +252,14 @@ struct EffectFrame {
     /// `QueryState::opaque_frames` when the frame entered. A rung recorded
     /// deeper sits under a combining frame between it and this one.
     depth: u32,
-    /// Which receiver the frame was asked under (`receiver_hash`): a read
-    /// beneath is a read of this frame's receiver only when the two agree.
-    receiver: u64,
-    /// `RECEIVER_READ` as the frame found it, restored when it closes.
-    outer_read: bool,
     effect: Effect,
     /// Membership for `effect.rungs` once it outgrows a scan.
     seen: Option<std::collections::HashSet<super::ConclusionKey>>,
 }
 
 impl EffectFrame {
-    fn new(depth: u32, receiver: u64) -> Self {
-        EffectFrame { depth, receiver, outer_read: false, effect: Effect::default(), seen: None }
+    fn new(depth: u32) -> Self {
+        EffectFrame { depth, effect: Effect::default(), seen: None }
     }
 
     fn add_rung(&mut self, k: &super::ConclusionKey) {
@@ -293,9 +282,7 @@ impl EffectFrame {
     /// Fold in an effect recorded at opaque depth `at` (a closed child frame,
     /// or a memo hit's replay). Below a combining frame a rung is poison, as a
     /// rung recorded there directly is.
-    fn absorb(&mut self, at: u32, e: &Effect, receiver: u64) {
-        self.effect.reads_receiver |= e.reads_receiver && receiver == self.receiver;
-        self.effect.cuts |= e.cuts;
+    fn absorb(&mut self, at: u32, e: &Effect) {
         if at > self.depth {
             if !e.is_empty() {
                 crate::util::ghost_stats::count("residual.under_opaque");
@@ -598,21 +585,12 @@ fn fold_memo_probe(
     let mut bagless = key.clone();
     bagless.0 = 0;
     let fk = fold_memo_key(bagless, q);
-    let hit = with_current_memo(&stamp, |memo| {
-        if let Some(hit) = memo.answers.get(&fk) {
-            return Some(hit.clone());
-        }
-        // An answer that never read its receiver is filed without one.
-        let mut any = fk.clone();
-        any.0.2 = None;
-        memo.answers.get(&any).filter(|(_, effect)| !effect.reads_receiver && !effect.cuts).cloned()
-    })
-    .flatten();
+    let hit = with_current_memo(&stamp, |memo| memo.answers.get(&fk).cloned()).flatten();
     let Some((MemoAnswer::Reduced(cached), effect)) = hit else {
         return Err(Some(Box::new((stamp, fk))));
     };
     crate::util::ghost_stats::count("fold_memo.hit");
-    state.replay_hit(&effect, Taint::CLEAN, Some(receiver_hash(&key.2)));
+    state.replay_hit(&effect, Taint::CLEAN);
     state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), effect, Taint::CLEAN));
     Ok(cached)
 }
@@ -698,10 +676,7 @@ fn fold_memo_store(
         crate::util::ghost_stats::count("fold_memo.long_ladder");
         return;
     }
-    let (stamp, mut fk) = *fk;
-    if !effect.reads_receiver && !effect.cuts {
-        fk.0.2 = None;
-    }
+    let (stamp, fk) = *fk;
     fold_memo_insert(&stamp, fk, MemoAnswer::Reduced(std::sync::Arc::clone(result)), effect);
 }
 
@@ -884,10 +859,10 @@ impl QueryState {
     ) -> Option<ReducedValue> {
         if let Some((v, effect, taint)) = self.fan_out_memo.get(&key) {
             let (v, effect, taint) = (std::sync::Arc::clone(v), std::sync::Arc::clone(effect), *taint);
-            self.replay_hit(&effect, taint, None);
+            self.replay_hit(&effect, taint);
             return (*v != ReducedValue::None).then(|| (*v).clone());
         }
-        let (v, effect, taint) = self.frame(|s| &mut s.fan_outs, &key, None, |s, _| walk(s))?;
+        let (v, effect, taint) = self.frame(|s| &mut s.fan_outs, &key, |s, _| walk(s))?;
         self.fan_out_memo
             .insert(key, (std::sync::Arc::new(v.clone().unwrap_or(ReducedValue::None)), effect, taint));
         v
@@ -895,13 +870,11 @@ impl QueryState {
 
     /// Compute the subtree of the frame `key` names, or close a cut at it when
     /// it is already on the path (`None`). `path` is the frame family's
-    /// on-path table; `receiver` is the frame's own (`push_effect`). Returns
-    /// the answer, the subtree's effect and the taint the answer carries.
+    /// on-path table. Returns the answer, the subtree's effect and the taint the answer carries.
     fn frame<K: std::hash::Hash + Eq + Clone, T>(
         &mut self,
         path: fn(&mut Self) -> &mut std::collections::HashMap<K, u32>,
         key: &K,
-        receiver: Option<u64>,
         body: impl FnOnce(&mut Self, u32) -> T,
     ) -> Option<(T, std::sync::Arc<Effect>, u32)> {
         if let Some(&at) = path(self).get(key) {
@@ -911,7 +884,7 @@ impl QueryState {
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let (pos, outer_low) = self.enter_frame();
         path(self).insert(key.clone(), pos);
-        self.push_effect(receiver);
+        self.push_effect();
         let v = body(self, pos);
         let effect = self.pop_effect();
         path(self).remove(key);
@@ -923,15 +896,14 @@ impl QueryState {
     /// its effect is recorded at the depth it is re-reached from — under a
     /// combining frame its rungs poison, however transparent the first reach
     /// was.
-    fn replay_hit(&mut self, effect: &Effect, taint: u32, receiver: Option<u64>) {
+    fn replay_hit(&mut self, effect: &Effect, taint: u32) {
         self.low_cut = self.low_cut.min(taint);
-        self.replay(effect, receiver);
+        self.replay(effect);
     }
 
     /// A cycle guard returned for the frame at path position `at`.
     fn close_cut_at(&mut self, at: u32) {
         self.low_cut = self.low_cut.min(at);
-        self.open_effect().effect.cuts = true;
     }
 
     /// Push a frame: its position, and the mark its subtree restarts from.
@@ -969,7 +941,7 @@ impl QueryState {
             memo: std::collections::HashMap::new(),
             path_len: 1,
             low_cut: Taint::CLEAN,
-            effects: vec![EffectFrame::new(0, ROOT_RECEIVER)],
+            effects: vec![EffectFrame::new(0)],
             opaque_frames: 0,
         }
     }
@@ -990,9 +962,7 @@ impl QueryState {
             // chase does not.
             Some(k) => {
                 let at = self.opaque_frames;
-                let open = self.open_effect();
-                let receiver = open.receiver;
-                open.absorb(at, &Effect { rungs: vec![k], ..Effect::default() }, receiver);
+                self.open_effect().absorb(at, &Effect { rungs: vec![k], ..Effect::default() });
             }
             None => self.poison(),
         }
@@ -1009,30 +979,21 @@ impl QueryState {
     }
 
     /// Open the effect of a frame about to compute its subtree.
-    /// `receiver` is the frame's own (`receiver_hash`); `None` is a sub-walk
-    /// of the open frame under its receiver.
-    fn push_effect(&mut self, receiver: Option<u64>) {
-        let receiver = receiver.unwrap_or_else(|| self.open_effect().receiver);
-        let mut frame = EffectFrame::new(self.opaque_frames, receiver);
-        frame.outer_read = RECEIVER_READ.with(|r| r.replace(false));
-        self.effects.push(frame);
+    fn push_effect(&mut self) {
+        self.effects.push(EffectFrame::new(self.opaque_frames));
     }
 
     /// Close the innermost frame's effect and fold it into its parent.
     fn pop_effect(&mut self) -> std::sync::Arc<Effect> {
-        let mut frame = self.effects.pop().expect("push_effect pairs with pop_effect");
-        frame.effect.reads_receiver |= RECEIVER_READ.with(|r| r.replace(frame.outer_read));
-        self.open_effect().absorb(frame.depth, &frame.effect, frame.receiver);
+        let frame = self.effects.pop().expect("push_effect pairs with pop_effect");
+        self.open_effect().absorb(frame.depth, &frame.effect);
         std::sync::Arc::new(frame.effect)
     }
 
-    /// Record what a memoized subtree recorded when it was computed, reached
-    /// under `receiver` (`None`: the open frame's).
-    fn replay(&mut self, effect: &Effect, receiver: Option<u64>) {
+    /// Record what a memoized subtree recorded when it was computed.
+    fn replay(&mut self, effect: &Effect) {
         let at = self.opaque_frames;
-        let open = self.open_effect();
-        let receiver = receiver.unwrap_or(open.receiver);
-        open.absorb(at, effect, receiver);
+        self.open_effect().absorb(at, effect);
     }
 
     /// The whole query's effect: its own frame, with every closed frame folded in.
@@ -1147,33 +1108,6 @@ fn apply_brand_overlays(bag: &WitnessBag, q: &ReducerQuery, v: ReducedValue) -> 
 
 fn receiver_key(r: &Option<InferredType>) -> Option<String> {
     r.as_ref().map(|t| format!("{t:?}"))
-}
-
-/// A receiver's identity on an effect frame: the hash of its `receiver_key`.
-/// Two receivers that collide read as one, which only ever keeps a read.
-fn receiver_hash(key: &Option<String>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut h);
-    h.finish()
-}
-
-/// The root frame's receiver: no query is asked under it, so nothing beneath
-/// claims to read it.
-const ROOT_RECEIVER: u64 = u64::MAX;
-
-thread_local! {
-    /// Set when the open frame's own body reads its receiver. A reducer has
-    /// no `QueryState`, so the read is noted here and the frame collects it
-    /// when it closes (`pop_effect`).
-    static RECEIVER_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Note that the answer being computed reads `q.receiver`'s value — the
-/// substitution of a `Receiver`, or a receiver derived from it. Forwarding
-/// the receiver into a sub-query is not a read: the sub-query notes its own.
-pub(super) fn note_receiver_read() {
-    RECEIVER_READ.with(|r| r.set(true));
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
@@ -1601,7 +1535,7 @@ impl ReducerRegistry {
         // isn't on the current path (cycle guard handles on-path keys).
         if let Some((cached, effect, taint)) = state.memo.get(&key) {
             let (cached, effect, taint) = (std::sync::Arc::clone(cached), std::sync::Arc::clone(effect), *taint);
-            state.replay_hit(&effect, taint, Some(receiver_hash(&key.2)));
+            state.replay_hit(&effect, taint);
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return cached;
         }
@@ -1613,7 +1547,7 @@ impl ReducerRegistry {
             Err(fold_key) => fold_key,
         };
         let Some((result, effect, taint)) =
-            state.frame(|s| &mut s.visited, &key, Some(receiver_hash(&key.2)), |state, pos| {
+            state.frame(|s| &mut s.visited, &key, |state, pos| {
                 #[cfg(test)]
                 QUERY_REC_BODIES.with(|c| c.set(c.get() + 1));
                 std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, pos, state)))
@@ -2114,10 +2048,6 @@ impl ReducerRegistry {
             if let Some(hit) =
                 super::session::candidate_answer(idx, &cached.path, &memo_q)
             {
-                // Both memo tiers key a verdict by the receiver it was
-                // derived under and keep no record of whether it read it, so
-                // a hit is that receiver's answer.
-                note_receiver_read();
                 if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
                     return Some(v);
                 }
@@ -2126,7 +2056,6 @@ impl ReducerRegistry {
             // The sweep tier, behind the (cheaper) session memo: a verdict
             // another file's build already derived this sweep.
             if let Some(hit) = idx.sweep_consult_answer(&cached.path, &verdict_key) {
-                note_receiver_read();
                 super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit);
                 if let Some(v) = rungs.offer(ladder, (*hit).clone()) {
                     return Some(v);
@@ -2201,7 +2130,6 @@ impl ReducerRegistry {
                 super::ConclusionKey::from_attachment(q.attachment)
             {
                 if let Some(map) = idx.conclusions_for(&cached.path) {
-                    note_receiver_read();
                     match map.evaluate(
                         &key,
                         q.receiver.as_ref(),
@@ -2807,7 +2735,7 @@ impl ReducerRegistry {
         };
         // What the objects' chase recorded was reached through a combining
         // frame, as it was when each read chased them itself.
-        state.in_opaque_frame(|state| state.replay(&effect, Some(receiver_hash(&None))));
+        state.in_opaque_frame(|state| state.replay(&effect));
         owners
             .by_class
             .get(owner.as_str())
@@ -3188,7 +3116,6 @@ impl ReducerRegistry {
                                 WitnessAttachment::Member { owner: package, aspect: crate::model::witnesses::MemberAspect::Returns, .. }
                                     if redispatched =>
                                 {
-                                    note_receiver_read();
                                     fresh_dispatch_receiver(&q.receiver, package, q.context)
                                 }
                                 _ => q.receiver.clone(),

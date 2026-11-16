@@ -38,13 +38,9 @@ stored, and the memo empties past 32 MiB per thread.
 
 ## What an entry carries
 
-An answer is not only its value. A chase also records, for the bake:
-
-- the ladder rungs it reached at its own opaque depth (`note_exit`), and
-  whether anything beneath it poisoned the chase;
-- whether it read the receiver it was asked under.
-
-These are the frame's `Effect`, built per frame and folded into the parent
+An answer is not only its value. A chase also records, for the bake, the
+ladder rungs it reached at its own opaque depth (`note_exit`) and whether
+anything beneath it poisoned the chase. These are the frame's `Effect`, built per frame and folded into the parent
 as frames close. Every memo entry (this memo, the per-query memo, the
 fan-out memo) carries its subtree's effect, and a hit replays it at the
 depth it is re-reached from: transparently it records the rungs a fresh
@@ -52,23 +48,26 @@ chase would; under a combining frame (`in_opaque_frame`) any recorded rung
 poisons, as it would fresh. The bake reads the top-level effect from
 `query_with_residuals`.
 
-**Receiver reads.** `note_receiver_read` marks the open frame wherever the
-receiver's value is consumed: a `Receiver` / `ReceiverOr` substitution, a
-fresh dispatch derived from it, the first-parameter-is-the-receiver fold,
-a baked conclusion evaluated against it, and a hit in the session or sweep
-candidate memo (both keyed by the receiver, neither records a read). Forwarding the receiver to a
-sub-query is not a read; the sub-query's read is its parent's only when
-both were asked under the same receiver. An answer with no read and no cycle
-closed in its subtree is filed without its receiver and serves every
-receiver; one with either stays that receiver's. A cut counts because where a
-cycle closes depends on the receivers along the path, read or not. Without this, N classes reading one inherited slot each chase
-that slot's writes under their own receiver, and the memo fills with N
-copies of one answer.
+**Every answer is its receiver's.** The receiver is part of the key, so N
+classes reading one inherited slot hold N entries, one per receiver, even
+where all N answers agree. Measured on real code that costs nothing (Cost).
 
-A read site that forgets to mark is a wrong answer served to another
-receiver, so the equivalence net below runs with the memo on and off, and
-`a_memo_answer_is_shared_across_receivers_only_when_it_never_read_one`
-fails without the marks.
+**The shape for a receiver-free answer, if one is wanted.** An answer that
+never consumes its receiver's value is the same for every receiver, so it
+could be filed once with the receiver blanked (a memo whose key depends on
+which inputs the answer read). The `Effect` is where that goes: a
+`reads_receiver` bit set wherever the receiver's value is consumed (a
+`Receiver` / `ReceiverOr` substitution, a fresh dispatch derived from it,
+the first-parameter-is-the-receiver fold, a baked conclusion evaluated
+against it, a session or sweep candidate-memo hit, since those are keyed
+by the receiver and record no read), carried on each `EffectFrame` with the
+frame's receiver so a sub-query's read counts for its parent only under the
+same receiver, plus a `cuts` bit, since where a cycle closes depends on the
+receivers along the path. The probe then tries the blanked key after the
+exact one. A read site that forgets its mark serves one receiver's answer
+to another, so the equivalence net must run against it. Built and measured
+once: 1000 classes sharing one base went from 23.5 s to 15.1 s, and no real
+corpus moved, so it was taken out.
 
 ## Slot owners
 
