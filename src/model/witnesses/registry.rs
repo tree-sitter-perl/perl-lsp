@@ -788,6 +788,23 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
     build()
 }
 
+/// A frame's computed subtree (`QueryState::frame`).
+struct Framed<T> {
+    value: T,
+    effect: std::sync::Arc<ChaseTrace>,
+    /// The taint the answer carries (`QueryState::leave_frame`).
+    taint: u32,
+    /// The outermost frame a cut beneath it closed at.
+    cut: u32,
+}
+
+/// Remembered answers a recurring arm's pass sets aside
+/// (`QueryState::set_aside_answers_through`).
+struct PathAnswers {
+    memo: Vec<(VisitedKey, MemoEntry)>,
+    fan_outs: Vec<(FanOutKey, MemoEntry)>,
+}
+
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
 /// (two paths reaching one shared sub-attachment) re-chases the shared
@@ -803,23 +820,6 @@ fn slot_owners_building<T>(fk: &FoldMemoKey, build: impl FnOnce() -> T) -> T {
 /// what any other off-path reentry would compute. The memo is dropped
 /// when the top-level query returns, so it never leaks state across
 /// queries whose context (scopes / module_index / framework) differs.
-/// Remembered answers a recurring arm's pass sets aside
-/// (`QueryState::set_aside_answers_through`).
-/// A frame's computed subtree (`QueryState::frame`).
-struct Framed<T> {
-    value: T,
-    effect: std::sync::Arc<ChaseTrace>,
-    /// The taint the answer carries (`QueryState::leave_frame`).
-    taint: u32,
-    /// The outermost frame a cut beneath it closed at.
-    cut: u32,
-}
-
-struct PathAnswers {
-    memo: Vec<(VisitedKey, MemoEntry)>,
-    fan_outs: Vec<(FanOutKey, MemoEntry)>,
-}
-
 pub(super) struct QueryState {
     visited: VisitedSet,
     /// The cross-file fan-outs on the current path, and the answers of those
@@ -1767,12 +1767,10 @@ impl ReducerRegistry {
         }
         // A member this file defines answers how it ends from its own
         // definition: a child's override that states nothing is no evidence
-        // (the top), never its parent's answer. A cut beneath this frame is
-        // the cycle's to fold, so it settles nothing.
+        // (the top), never its parent's answer.
         if let WitnessAttachment::Member { owner, space, name, aspect: MemberAspect::Effects } = q.attachment {
             if v == ReducedValue::None && defines_member_here(bag, owner, *space, name) {
-                let complete = state.low_cut >= pos;
-                return if complete { ReducedValue::Effects(super::types::Ends::all()) } else { v };
+                return ReducedValue::Effects(super::types::Ends::all());
             }
         }
         if let Some(ladder) = &ladder {
@@ -4381,8 +4379,18 @@ impl ReducerRegistry {
                     ctx.app_surface_consumers,
                 );
                 // The first parent in MRO order that defines it is the one
-                // Perl runs; one that states nothing is no evidence.
-                parents.into_iter().find_map(|p| ask(state, WitnessAttachment::effects_of(p, name.clone())))
+                // Perl runs. A silent parent whose whole ancestry this file
+                // declares does not define it; any other silent parent may,
+                // and then nothing later in the order is the one that runs.
+                for p in parents {
+                    if let Some(e) = ask(state, WitnessAttachment::effects_of(p.clone(), name.clone())) {
+                        return Some(e);
+                    }
+                    if !file_declares_ancestry(ctx, &p) {
+                        return None;
+                    }
+                }
+                None
             }
             // TODO(effect-descendants): a receiver may be any subclass of its
             // class, so the call runs every indexed override; until that
@@ -4495,6 +4503,33 @@ fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
         }
     }
     stated.is_some_and(|e| !e.completes())
+}
+
+/// Whether `class` and every ancestor of it are packages this file
+/// declares, so an in-file walk that finds no member has seen them all.
+fn file_declares_ancestry(ctx: &BagContext, class: &str) -> bool {
+    use crate::model::file_analysis::SymKind;
+    let declared = |c: &str| {
+        ctx.symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut todo = vec![class.to_string()];
+    while let Some(c) = todo.pop() {
+        if seen.contains(&c) {
+            continue;
+        }
+        if !declared(&c) || seen.len() >= 20 {
+            return false;
+        }
+        todo.extend(crate::model::file_analysis::parents_of(
+            &c,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        ));
+        seen.push(c);
+    }
+    true
 }
 
 /// Where an edge with no read position asks a binding from: the end of the
