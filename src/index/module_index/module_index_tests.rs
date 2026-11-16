@@ -2830,3 +2830,21 @@ fn a_stripped_gated_copy_rehydrates_into_its_applied_view() {
         Some(MethodResolution::CrossFile { .. })
     ));
 }
+
+#[test]
+fn a_module_name_s_ends_row_speaks_for_every_file_under_it() {
+    // Two files under one package name, one whose `bail` never comes back
+    // and one whose `bail` does: a call may reach either, so the name ends
+    // both ways, whichever file feeds first.
+    use crate::index::module_index::ModuleEdgeIndexes;
+    use crate::model::witnesses::Ends;
+    let dies = build_fa("package Pkg;\nsub bail { die 'x' }\n1;\n");
+    let returns = build_fa("package Pkg;\nsub bail { return 1 }\n1;\n");
+    for (first, second) in [(&dies, &returns), (&returns, &dies)] {
+        let edges = ModuleEdgeIndexes::new();
+        edges.feed("Pkg", &PathBuf::from("/fake/a.pm"), first);
+        edges.feed("Pkg", &PathBuf::from("/fake/b.pm"), second);
+        let ends = edges.callable_ends("bail").expect("a never-returning declarer is recorded");
+        assert!(ends.contains(Ends::COMPLETES), "the returning declaration was dropped: {ends:?}");
+    }
+}
