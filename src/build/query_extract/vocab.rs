@@ -248,6 +248,13 @@ spelled! {
         /// throw, a `break`): nothing after it in the block runs. Which
         /// arms of a condition fall through follows by containment.
         Leaves = "leaves",
+        /// A statement that leaves to the loop around it (`break`,
+        /// `continue`): in a loop's arm it reaches the loop's test or exit,
+        /// not past the loop.
+        ToLoop = "to_loop",
+        /// A statement whose statements run in sequence where it stands (a
+        /// bare block): it leaves where one of them does.
+        Block = "block",
     }
 }
 
@@ -335,9 +342,14 @@ spelled! {
         /// What runs where the condition fails.
         Else = "else",
         /// A position match's construct that tests its condition again
-        /// after each run of its arm (a loop): a `break` in the arm lands
-        /// after it too, so its arms decide nothing about what follows.
+        /// after each run of its arm (a loop): a `@flow.to_loop` in the arm
+        /// goes to the loop, so the arm leaves only where none is in it.
         Loop = "loop",
+        /// The statement a position's chain is, where that is not the node
+        /// holding the condition and its arms (the expression statement
+        /// around `G || throw …`): the rest of its block runs where the arm
+        /// that falls through does.
+        Stmt = "stmt",
     }
 }
 
@@ -718,7 +730,10 @@ pub enum Capture {
     /// A written type (a declared return, a parameter's or property's
     /// declared type) that names a class by where it is written.
     TypeRelative(RelativeClass),
-    TypeAnnot,
+    /// A declared type, bounding its target's value for as long as the
+    /// extent says: `@type.annot` for the binding's life, `@type.annot.entry`
+    /// on entry only (a parameter a write may retype).
+    TypeAnnot(crate::model::witnesses::Extent),
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
     /// The primary a class specialization specializes.
@@ -822,7 +837,8 @@ impl Capture {
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
-            ["type", "annot"] => C::TypeAnnot,
+            ["type", "annot"] => C::TypeAnnot(crate::model::witnesses::Extent::Lifetime),
+            ["type", "annot", "entry"] => C::TypeAnnot(crate::model::witnesses::Extent::Entry),
             ["type", k] => C::TypeRelative(RelativeClass::parse(k)?),
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
@@ -900,7 +916,10 @@ impl fmt::Display for Capture {
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
             C::TypeRelative(k) => write!(f, "type.{k}"),
-            C::TypeAnnot => f.write_str("type.annot"),
+            C::TypeAnnot(crate::model::witnesses::Extent::Lifetime | crate::model::witnesses::Extent::Slot) => {
+                f.write_str("type.annot")
+            }
+            C::TypeAnnot(crate::model::witnesses::Extent::Entry) => f.write_str("type.annot.entry"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),

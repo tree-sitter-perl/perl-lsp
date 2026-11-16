@@ -52,7 +52,7 @@ struct CandidateKey {
     attachment: WitnessAttachment,
     receiver: Option<String>,
     arity: Option<u32>,
-    point: Option<Point>,
+    point: Option<ReadPoint>,
     framework: FrameworkFact,
 }
 
@@ -184,6 +184,20 @@ fn default_budget_ms() -> u64 {
 /// than resetting the memo mid-walk.
 pub struct ResolutionSession {
     owns: bool,
+}
+
+/// Run `f` with no session open, the enclosing one set aside and restored
+/// on drop: the fold memo's control arm, whose answers must not come back out
+/// of a session the shared arm filled.
+pub(crate) fn without_session<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<SessionState>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SESSION.with(|s| *s.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(SESSION.with(|s| s.borrow_mut().take()));
+    f()
 }
 
 impl ResolutionSession {
