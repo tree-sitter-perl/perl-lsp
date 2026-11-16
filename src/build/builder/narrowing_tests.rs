@@ -167,9 +167,9 @@ fn narrow_looks_through_a_bare_block() {
 
 #[test]
 fn narrow_after_a_loop_whose_body_always_leaves() {
-    // A body that always leaves never comes back to the test, so the loop
-    // is left only where its first test fails. A `last`, `next` or `redo`
-    // in it, or a body that falls through, says nothing after the loop.
+    // A loop is left where its test fails, and where a `last` aimed at it
+    // runs. With no such `last`, every way out is a failed test, whatever
+    // the body does: falls through, `next`s, or leaves.
     let widget = Some(InferredType::ClassName("Widget".into()));
     let src_of = |chain: &str| format!("package P;\nsub f {{\n    my ($x, $y) = @_;\n    {chain}\n    $x->layout;\n}}");
     let narrows = [
@@ -177,6 +177,10 @@ fn narrow_after_a_loop_whose_body_always_leaves() {
         ("until ($x->isa('Widget')) { warn 'x'; die 'n'; }", "until"),
         ("while (!$x->isa('Widget')) { if ($y) { return; } else { die 'y'; } }", "a chain whose every arm leaves"),
         ("for (; !$x->isa('Widget'); ) { return; }", "a C-style for"),
+        ("while (!$x->isa('Widget')) { warn 'x'; }", "a body that falls through"),
+        ("while (!$x->isa('Widget')) { next if $y; return; }", "a `next` goes back to the test"),
+        ("while (!$x->isa('Widget')) { for my $z (@$y) { last; } return; }", "a `last` an inner loop owns"),
+        ("L: while (!$x->isa('Widget')) { return; }", "a labelled loop"),
     ];
     for (chain, why) in narrows {
         let src = src_of(chain);
@@ -184,11 +188,8 @@ fn narrow_after_a_loop_whose_body_always_leaves() {
         assert_eq!(fa_type_at(&src, "$x", Point::new(row, 4)), widget, "{why}");
     }
     let nothing = [
-        ("while (!$x->isa('Widget')) { warn 'x'; }", "a body that falls through"),
         ("while (!$x->isa('Widget')) { last if $y; return; }", "a `last` before the exit"),
-        ("while (!$x->isa('Widget')) { next if $y; return; }", "a `next` before the exit"),
-        ("while (!$x->isa('Widget')) { for my $z (@$y) { last; } return; }", "a `last` an inner loop owns"),
-        ("L: while (!$x->isa('Widget')) { return; }", "a labelled loop"),
+        ("L: while (!$x->isa('Widget')) { for my $z (@$y) { last L; } }", "a `last` naming the loop"),
     ];
     for (chain, why) in nothing {
         let src = src_of(chain);
@@ -469,12 +470,18 @@ fn a_postfix_condition_key_is_owned_by_the_value_it_reads() {
 
 #[test]
 fn a_callable_in_a_postfix_condition_runs_when_called() {
-    // The sub body runs when it is called, not before the statement, so its
-    // read is not skipped past the statement's write.
+    // The sub is made before the statement runs and its body runs when it
+    // is called: before the statement's write (`first` calls it at once) or
+    // after it (a callback kept for later).
     let fa = build_fa(
         "package P;\nsub u {\n    my $o = Foo->new;\n    $o = Bar->new if first(sub { $o->alive });\n}",
     );
-    assert_eq!(invocant_class_of(&fa, "alive").as_deref(), Some("Bar"));
+    let read = fa.inferred_type_via_bag("$o", Point::new(3, 33));
+    let names = |arms: &[InferredType]| arms.iter().filter_map(|a| a.class_name().map(str::to_string)).collect::<Vec<_>>();
+    assert!(
+        matches!(&read, Some(InferredType::Union(arms)) if names(arms) == ["Bar", "Foo"]),
+        "got {read:?}"
+    );
 }
 
 #[test]

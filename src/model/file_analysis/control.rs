@@ -123,6 +123,10 @@ pub struct CallableBody {
     /// Whether the callable exists from before its text runs (a Perl named
     /// sub), so it can be called anywhere its variables are bound.
     pub hoisted: bool,
+    /// Where the callable is made, when that runs before code written ahead
+    /// of it: one made in a statement modifier's condition is made before
+    /// the statement runs.
+    pub made_before: Option<Point>,
 }
 
 impl ControlView {
@@ -195,6 +199,7 @@ fn aims(view: &ControlView) -> Vec<Aim> {
         };
         aims[i] = match (found, l.target) {
             (Some(&k), _) if matches!(view.constructs[k].kind, ControlKind::Loop { .. }) => Aim::Loop(k),
+            (Some(&k), _) if matches!(view.constructs[k].kind, ControlKind::Block { .. }) => Aim::Block(k),
             (Some(_), _) | (None, LeaveTarget::Label(_) | LeaveTarget::Levels(_)) => Aim::Through,
             (None, LeaveTarget::Nearest) => Aim::Out,
         };
@@ -299,9 +304,12 @@ enum Aim {
     Out,
     /// Out of loop `k`'s body: past it (`break`) or to its next test.
     Loop(usize),
-    /// Past a construct the view does not join (a `switch`, a bare block,
-    /// a name or a count that names no construct around it): modelled as
-    /// falling through, so no arm around it is said to leave.
+    /// Past block `k` (a bare block, a `switch`), which the view does not
+    /// join: what follows it runs, so nothing inside `k` leaves the arm
+    /// around it.
+    Block(usize),
+    /// Past a name or a count that names no construct around it: modelled
+    /// as falling through, so no arm around it is said to leave.
     Through,
 }
 
@@ -358,11 +366,11 @@ impl<'v> JoinPlan<'v> {
     fn mark_leaving(&mut self) {
         let view = self.view;
         for (i, l) in view.leaves.iter().enumerate() {
-            if self.aims[i] == Aim::Through {
+            if matches!(self.aims[i], Aim::Through | Aim::Block(_)) {
                 continue;
             }
             let held = self.holding_ix(l.span.start).find(|&i| contains(self.arm_span(i), l.span));
-            if let Some(i) = held {
+            if let Some(i) = held.filter(|&i| !self.jumped_past(i, l.span)) {
                 self.mark_left(i);
             }
         }
@@ -388,10 +396,30 @@ impl<'v> JoinPlan<'v> {
                 continue;
             }
             let holder = self.holding_ix(c.span.start).find(|&i| self.arms[i].0 != k && contains(self.arm_span(i), c.span));
-            if let Some(i) = holder {
+            if let Some(i) = holder.filter(|&i| !self.jumped_past(i, c.span)) {
                 self.mark_left(i);
             }
         }
+    }
+
+    /// Whether code at `at` in arm `i` sits in a block inside the arm that a
+    /// jump leaves, so control may come out past the block and on through
+    /// the arm.
+    // TODO(block-jump-order): any jump aimed at the block counts, even one
+    // that only runs after `at` has left. Owner: the 0.11 CFG follow-up.
+    fn jumped_past(&self, i: usize, at: Span) -> bool {
+        self.jumped_past_in(self.arm_span(i), at)
+    }
+
+    /// As [`Self::jumped_past`], for a block inside `region`.
+    fn jumped_past_in(&self, region: Span, at: Span) -> bool {
+        self.aims.iter().any(|aim| match *aim {
+            Aim::Block(k) => {
+                let b = self.view.constructs[k].span;
+                contains(region, b) && contains(b, at)
+            }
+            _ => false,
+        })
     }
 
     /// Marks arm `i` left, and every arm on the same code: an `else` two
@@ -471,7 +499,9 @@ impl<'v> JoinPlan<'v> {
             self.view.bodies.iter().map(|b| b.span).filter(|&b| b != body && contains(body, b)).collect();
         let own = |s: Span| contains(body, s) && !nested.iter().any(|&b| contains(b, s));
         let direct = |s: Span| {
-            own(s) && !self.holding_ix(s.start).any(|i| contains(self.arm_span(i), s) && contains(body, self.arm_span(i)))
+            own(s)
+                && !self.jumped_past_in(body, s)
+                && !self.holding_ix(s.start).any(|i| contains(self.arm_span(i), s) && contains(body, self.arm_span(i)))
         };
         let mut out = Vec::new();
         let mut cut = false;
@@ -728,10 +758,13 @@ impl<'v> JoinPlan<'v> {
             // right side), and here it failed. A step written right after
             // the test (`$i<$n;$i++`) starts there and lands its own join,
             // which the failed test never reaches, so the read stays short.
+            // The test failing is no arm of the loop: what it proves there
+            // is the loop's untaken path, as for an `if` with no `else`.
             (None, Some(cond)) => {
                 let at = past(cond);
                 let stepped = step.is_some_and(|s| c.arms[s].span.start <= at);
-                out.push(read(if stepped { cond.end } else { at }));
+                let at = if stepped { cond.end } else { at };
+                out.push(JoinArm { untaken: Some(Untaken { of: c.span, tested: cond.end }), ..read(at) });
             }
             (None, None) => out.push(read(heads[0])),
         }
@@ -750,7 +783,10 @@ impl<'v> JoinPlan<'v> {
         use crate::model::witnesses::JoinRole;
         let mut arms = Vec::new();
         let mut reached = vec![c];
-        self.arm_points(c, &mut arms, &mut reached, writes);
+        match c.kind {
+            ControlKind::Loop { .. } => arms = self.exit_points(c, writes),
+            _ => self.arm_points(c, &mut arms, &mut reached, writes),
+        }
         arms.retain(|a| bound_from.is_none_or(|b| b <= a.at));
         arms.sort_by_key(|a| (a.at, a.arm.map(|s| (s.start, s.end)), a.untaken.map(|u| (u.tested, u.of.start, u.of.end))));
         arms.dedup();
@@ -769,32 +805,49 @@ impl<'v> JoinPlan<'v> {
     pub fn guard_joins(
         &self,
         of: Span,
+        asserts: bool,
         within: Span,
         bound_from: Option<Point>,
         untaken_proved: impl Fn(Span) -> bool,
         narrowed: impl Fn(Span) -> bool,
-    ) -> Vec<(&'v Construct, BranchJoin)> {
-        let Some(found) = self.construct_at(of, ControlKind::Branch) else { return Vec::new() };
-        let c = self.lifted_into(found);
-        if !self.drops_a_path(c) || !contains(within, c.span) {
+    ) -> Vec<BranchJoin> {
+        use crate::model::witnesses::JoinRole;
+        // A statement that asserts leaves where its test fails and comes out
+        // of itself only where it held: one way on, which no arm runs.
+        let (start, first, own, left) = if asserts {
+            if !untaken_proved(of) {
+                return Vec::new();
+            }
+            let on = JoinArm { untaken: Some(Untaken { of, tested: of.end }), ..read(of.start) };
+            (of, Some(BranchJoin { role: JoinRole::After, of, lands: vec![past(of)], arms: vec![on] }), None, true)
+        } else {
+            // A loop's test holding never leads out of it: only failing does.
+            let looped = self.construct_at(of, ControlKind::Loop { once: false });
+            let Some(found) = self.construct_at(of, ControlKind::Branch).or(looped) else { return Vec::new() };
+            let c = self.lifted_into(found);
+            if !(looped.is_some() || self.drops_a_path(c)) {
+                return Vec::new();
+            }
+            (c.span, None, Some(c), looped.is_some() || self.drops_by(c, false))
+        };
+        if !contains(within, start) {
             return Vec::new();
         }
         let outer = self
-            .arms_holding(c.span.start)
-            .filter(|(k, _)| !std::ptr::eq(*k, c) && contains(k.span, c.span) && k.span != c.span)
+            .arms_holding(start.start)
+            .filter(|(k, _)| contains(k.span, start) && k.span != start)
             .take_while(|(_, a)| contains(within, a.span))
             // Past a loop the place holds what its exit joins, which no
             // test inside it decides.
             .take_while(|(k, _)| k.kind == ControlKind::Branch)
-            .filter(|(k, _)| k.kind == ControlKind::Branch && !self.is_lifted(k) && contains(within, k.span))
+            .filter(|(k, _)| !self.is_lifted(k) && contains(within, k.span))
             .map(|(k, _)| k);
-        let left = self.drops_by(c, false);
-        let mut out: Vec<(&'v Construct, BranchJoin)> = Vec::new();
-        for k in std::iter::once(c).chain(outer) {
+        let mut out: Vec<BranchJoin> = first.into_iter().collect();
+        for k in own.into_iter().chain(outer) {
             let (mut after, _) = self.after_join(k, bound_from, &[]);
             let proved = |a: &JoinArm| match (a.untaken, a.arm) {
                 (Some(u), _) => untaken_proved(u.of) || narrowed(u.of),
-                (None, Some(arm)) => narrowed(arm) || out.iter().any(|(inner, _)| contains(arm, inner.span)),
+                (None, Some(arm)) => narrowed(arm) || out.iter().any(|inner| contains(arm, inner.of)),
                 (None, None) => false,
             };
             // A path past a gate may still not come back. Where it does, it
@@ -807,7 +860,7 @@ impl<'v> JoinPlan<'v> {
             if after.arms.is_empty() || !after.arms.iter().all(|a| a.mute || proved(a)) {
                 break;
             }
-            out.push((k, after));
+            out.push(after);
         }
         out
     }
@@ -1121,15 +1174,16 @@ pub fn body_joins(
             if body.span.start <= made.start || !seen.insert((sid, s)) {
                 continue;
             }
-            let reaches = |w: &&&BoundWrite| body.hoisted || w.at >= made.start;
-            if !ws.iter().filter(reaches).any(|w| w.reassigns || w.at >= made.start) {
+            let from = body.made_before.unwrap_or(made.start);
+            let reaches = |w: &&&BoundWrite| body.hoisted || w.at >= from;
+            if !ws.iter().filter(reaches).any(|w| w.reassigns || w.at >= from) {
                 continue;
             }
             let join = WitnessAttachment::Join { place: Box::new(Place::variable(Binding::Lexical(sid))), of: body.span, role: JoinRole::Entry };
             for payload in [WitnessPayload::Reset, WitnessPayload::Edge(join.clone())] {
                 out.push(Witness { attachment: read_of(sid), source: source(), payload, span: Span { start: body.span.start, end: made.end } });
             }
-            out.push(arm(&join, sid, made.start, None));
+            out.push(arm(&join, sid, from, None));
             out.extend(ws.iter().filter(reaches).map(|w| arm(&join, sid, w.at, w.value)));
         }
     }
@@ -1455,17 +1509,18 @@ impl super::FileAnalysis {
             let reach = Reach::of(&self.scopes, *scope, home);
             let found = plan.guard_joins(
                 *of,
+                false,
                 reach.within,
                 bound_from,
                 |of| proofs.get(&of).is_some_and(|ps| ps.iter().any(|(p, _)| *p == place)),
                 |arm| guards.narrowed.iter().any(|(p, over)| p == place && contains(*over, arm)),
             );
-            for (k, after) in found {
+            for after in found {
                 if !minted.insert((place.clone(), after.of, after.role)) {
                     continue;
                 }
-                let held = self.scopes[reach.holding_scope(&self.scopes, k.span).0 as usize].span.end;
-                let end = guards.bounds.get(&k.span).map_or(held, |&b| b.min(held));
+                let held = self.scopes[reach.holding_scope(&self.scopes, after.of).0 as usize].span.end;
+                let end = guards.bounds.get(&after.of).map_or(held, |&b| b.min(held));
                 regions.extend(guard_region_witnesses(place, after, end, &proofs, |region| {
                     let cut = match place.is_variable() {
                         true => rebinds.earliest_in(place, region),

@@ -2487,11 +2487,11 @@ fn a_pack_chain_narrows_the_rest_of_the_block_to_its_one_falling_arm() {
 
 #[test]
 fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
-    // A `while` body that always leaves never comes back to the test, so
-    // the loop is left only where its first test fails: the rest of the
-    // block narrows as after an `if` with no `else`. A `break` or
-    // `continue` in the body, or a body that falls through, says nothing
-    // after the loop. A bare block (C++) leaves where its statements do.
+    // A `while` loop is left where a test fails, so the rest of the block
+    // narrows as after an `if` with no `else`, whether the body leaves,
+    // falls through or continues: each comes back to the test. A `break`
+    // aimed at the loop leaves it with the test unsettled. A bare block
+    // (C++) leaves where its statements do.
     use crate::model::file_analysis::InferredType;
     let class = |c: &str| Some(InferredType::ClassName(c.into()));
     let python = |chain: &str| {
@@ -2509,14 +2509,14 @@ fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
             "    while not isinstance(x, Foo):\n        if z:\n            return\n        else:\n            raise ValueError()",
             "a body chain whose every arm leaves",
         ),
+        ("    while not isinstance(x, Foo):\n        log()", "a body that falls through"),
+        ("    while not isinstance(x, Foo):\n        if z:\n            continue\n        return", "a continue before the exit"),
     ];
     for (chain, why) in narrows {
         assert_eq!(python(chain), class("Foo"), "python: {why}");
     }
     let nothing = [
-        ("    while not isinstance(x, Foo):\n        log()", "a body that falls through"),
         ("    while not isinstance(x, Foo):\n        if z:\n            break\n        return", "a break before the exit"),
-        ("    while not isinstance(x, Foo):\n        if z:\n            continue\n        return", "a continue before the exit"),
     ];
     for (chain, why) in nothing {
         assert_ne!(python(chain), class("Foo"), "python: {why}");
@@ -2534,14 +2534,14 @@ fn a_pack_loop_whose_body_always_leaves_narrows_after_the_loop() {
         ("    while (!o) { log(); { return; } }", "a bare block in the body"),
         ("    if (!o) { log(); { return; } }", "a bare block in an if"),
         ("    if (o) { log(); } else { { { throw 1; } } }", "nested bare blocks in an else"),
+        ("    while (!o) { log(); }", "a body that falls through"),
+        ("    while (!o) { if (z) continue; return; }", "a continue before the exit"),
     ];
     for (chain, why) in narrows {
         assert_eq!(cpp(chain), class("Widget"), "cpp: {why}");
     }
     let nothing = [
-        ("    while (!o) { log(); }", "a body that falls through"),
         ("    while (!o) { if (z) break; return; }", "a break before the exit"),
-        ("    while (!o) { if (z) continue; return; }", "a continue before the exit"),
         ("    if (!o) { { log(); } }", "a bare block that falls through"),
     ];
     for (chain, why) in nothing {

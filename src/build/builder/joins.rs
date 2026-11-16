@@ -62,7 +62,8 @@ impl<'a> Builder<'a> {
             // A named sub exists before its text runs; an anonymous one
             // where its expression does.
             let hoisted = self.syntax.parent(body).is_some_and(|d| d.child_by_field_name("name").is_some());
-            walk.body(node_to_span(body), !body.has_error(), hoisted);
+            let made_before = self.syntax.parent(body).and_then(|made| self.syntax.parent(made)).and_then(|around| self.runs_before(around)).map(|s| s.start);
+            walk.body(node_to_span(body), !body.has_error(), hoisted, made_before);
             gates.extend(walk.walk(super::control::statements_of(body), source, &gate));
         }
         let mut view = walk.finish();
@@ -194,16 +195,17 @@ impl<'a> Builder<'a> {
                 };
                 let joins = plan.guard_joins(
                     node_to_span(seed.construct),
+                    seed.asserts,
                     reach.within,
                     bound_from,
                     |of| proofs.get(&of).is_some_and(|ps| ps.iter().any(|(p, _)| *p == place)),
                     |arm| narrowed.iter().any(|(p, over)| p == place && contains(*over, arm)),
                 );
-                for (k, after) in joins {
+                for after in joins {
                     if !minted.insert((place.clone(), after.of, after.role)) {
                         continue;
                     }
-                    let scope = self.holding_scope(&reach, k.span);
+                    let scope = self.holding_scope(&reach, after.of);
                     witnesses.extend(self.guard_region(place, key_vars, scope, after, &proofs));
                 }
             }

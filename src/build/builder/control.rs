@@ -71,7 +71,7 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
             });
             for &(cap, _, span, _, _) in &m {
                 match cap {
-                    CtlCap::Body => view.bodies.push(CallableBody { span, readable: true, hoisted: false }),
+                    CtlCap::Body => view.bodies.push(CallableBody { span, readable: true, hoisted: false, made_before: None }),
                     CtlCap::Gate => view.gates.push(span),
                     _ => {
                         if let Some(kind) = leave_kind(cap) {
@@ -195,6 +195,12 @@ impl<'s> ViewWalk<'s> {
             let mut it = cursor.matches(query, node, source);
             while let Some(m) = it.next() {
                 for c in m.captures.iter() {
+                    // A bare block runs its statements where it stands, with
+                    // no arm between them and the code around it.
+                    if matches!(caps[c.index as usize], CtlCap::Block | CtlCap::BlockNext) {
+                        work.extend(statements_of(c.node));
+                        continue;
+                    }
                     if !caps[c.index as usize].is_arm() {
                         continue;
                     }
@@ -211,8 +217,8 @@ impl<'s> ViewWalk<'s> {
     }
 
     /// Records a callable's body the walk follows into.
-    pub(super) fn body(&mut self, span: Span, readable: bool, hoisted: bool) {
-        self.bodies.push(CallableBody { span, readable, hoisted });
+    pub(super) fn body(&mut self, span: Span, readable: bool, hoisted: bool, made_before: Option<Point>) {
+        self.bodies.push(CallableBody { span, readable, hoisted, made_before });
     }
 
     pub(super) fn finish(self) -> ControlView {

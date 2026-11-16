@@ -1800,6 +1800,7 @@ impl ReducerRegistry {
         }
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
+
         // An `Undef` that flowed in says only that the value may be absent:
         // beside a flow that came back untyped it is no answer to what the
         // value is. One stated here (a guard's) stands where the read sees
@@ -3455,6 +3456,7 @@ impl ReducerRegistry {
             _ => None,
         };
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
+        let mut silent_joins: Vec<Point> = Vec::new();
         let mut recurring: Vec<(&Witness, &WitnessAttachment, u32)> = Vec::new();
         for &w in raw.iter() {
             if window.edge_is_dead(&raw, w) {
@@ -3539,6 +3541,10 @@ impl ReducerRegistry {
                             payload: WitnessPayload::InferredType(InferredType::Unknown),
                             span: w.span,
                         }),
+                        // A join no path into carries a value replaces
+                        // nothing: the value coming in stands, as for a
+                        // region that answers nothing.
+                        None if target.folds_every_arm() => silent_joins.push(w.span.start),
                         None if q.attachment.counts_untyped_arms() => out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
@@ -3878,6 +3884,9 @@ impl ReducerRegistry {
         }
         if !recurring.is_empty() {
             self.rechase_recurring(bag, q, state, recurring, read, sole_witness, &mut out);
+        }
+        if !silent_joins.is_empty() {
+            out.retain(|w| !(matches!(w.payload, WitnessPayload::Reset) && silent_joins.contains(&w.span.start)));
         }
         out
     }

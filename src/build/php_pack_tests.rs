@@ -3472,9 +3472,8 @@ fn the_one_arm_a_chain_falls_through_narrows_the_rest_of_the_block() {
     }
 }
 
-/// A bare block leaves where its statements do; a loop whose body always
-/// leaves is left only where its first test fails, unless a `break` or
-/// `continue` in the body goes to the loop.
+/// A bare block leaves where its statements do; a loop is left where a
+/// test fails, and where a `break` aimed at it leaves it.
 #[cfg(feature = "php")]
 #[test]
 fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
@@ -3488,6 +3487,9 @@ fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
         ("while (!$y instanceof Foo) { return; }", "a loop whose body returns"),
         ("while (!$y instanceof Foo) { log_it(); throw new \\Exception(); }", "a loop whose body throws"),
         ("while (!$y instanceof Foo) { if ($z) { return; } else { exit; } }", "a loop body chain whose every arm leaves"),
+        ("while (!$y instanceof Foo) { log_it(); }", "a loop body that falls through tests again"),
+        ("while (!$y instanceof Foo) { if ($z) { continue; } return; }", "a continue goes back to the test"),
+        ("while (!$y instanceof Foo) { foreach ($z as $w) { break; } return; }", "a break an inner loop owns"),
     ];
     for (chain, why) in narrows {
         let src = src_of(chain);
@@ -3495,10 +3497,7 @@ fn a_bare_block_and_a_loop_that_always_leaves_narrow_the_rest_of_the_block() {
     }
     let nothing = [
         ("if (!$y instanceof Foo) { { log_it(); } }", "a bare block that falls through"),
-        ("while (!$y instanceof Foo) { log_it(); }", "a loop body that falls through"),
         ("while (!$y instanceof Foo) { if ($z) { break; } return; }", "a break before the exit"),
-        ("while (!$y instanceof Foo) { if ($z) { continue; } return; }", "a continue before the exit"),
-        ("while (!$y instanceof Foo) { foreach ($z as $w) { break; } return; }", "a break an inner loop owns"),
     ];
     for (chain, why) in nothing {
         let src = src_of(chain);

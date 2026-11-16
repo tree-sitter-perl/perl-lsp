@@ -231,6 +231,8 @@ pub(super) struct UntakenProof {
 /// leaves, the places join past it.
 pub(super) struct GuardSeed<'a> {
     pub(super) construct: Node<'a>,
+    /// The construct is a statement that dies unless its test holds.
+    pub(super) asserts: bool,
     pub(super) places: Vec<(Place, Vec<String>)>,
     pub(super) scope: ScopeId,
 }
@@ -672,6 +674,10 @@ impl<'a> Builder<'a> {
     /// A construct whose test proves something of `subjects` joins them
     /// where an arm of it leaves (`assemble_joins`).
     fn seed_guard_joins(&mut self, construct: Node<'a>, subjects: Vec<NarrowSubject>) {
+        self.seed_joins(construct, false, subjects);
+    }
+
+    fn seed_joins(&mut self, construct: Node<'a>, asserts: bool, subjects: Vec<NarrowSubject>) {
         let mut places: Vec<(Place, Vec<String>)> = Vec::new();
         for s in subjects {
             if let NarrowSubject::Place { place, key_vars, .. } = s {
@@ -681,7 +687,7 @@ impl<'a> Builder<'a> {
             }
         }
         if !places.is_empty() {
-            self.guard_seeds.push(GuardSeed { construct, places, scope: self.current_scope() });
+            self.guard_seeds.push(GuardSeed { construct, asserts, places, scope: self.current_scope() });
         }
     }
 
@@ -756,8 +762,9 @@ impl<'a> Builder<'a> {
 
     /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
     /// run of the body, so the body narrows by G (`until` by its negation),
-    /// and the rebind cutoff ends it at a write. Nothing narrows after the
-    /// loop: `last` leaves with G unchanged.
+    /// and the rebind cutoff ends it at a write. Past the loop, the paths
+    /// where G failed carry its negation; a `last` leaves with G unknown, so
+    /// where one can reach past the loop nothing narrows there.
     pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
         let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
         else {
@@ -772,7 +779,13 @@ impl<'a> Builder<'a> {
             _ => condition,
         };
         let enter = stmt.child(0).is_none_or(|k| k.kind() != "until");
-        self.narrow_arm(condition, body, enter);
+        let mut subjects = self.narrow_arm(condition, body, enter);
+        let of = node_to_span(stmt);
+        for (subject, op, read) in facts_for_region(self, condition, !enter) {
+            subjects.push(subject.clone());
+            self.prove_untaken(subject, op, read, of);
+        }
+        self.seed_guard_joins(stmt, subjects);
     }
 
     /// `G ? A : B` — A runs where G holds, B where it fails.
@@ -851,7 +864,7 @@ impl<'a> Builder<'a> {
             subjects.push(subject.clone());
             self.prove_untaken(subject, op, read, of);
         }
-        self.seed_guard_joins(call, subjects);
+        self.seed_joins(call, true, subjects);
         self.record_guard_sites(call, None);
     }
 

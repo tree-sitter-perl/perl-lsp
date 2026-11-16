@@ -174,7 +174,16 @@ fn decisions(ad: &Adorned<'_, '_>, atom: &Event) -> Vec<Decision> {
             path.push(c);
         }
         for cond in tags().filter(|t| t.cap == Capture::Ctl(CtlCap::Cond)) {
-            let Some(of) = ad.in_match(cond.match_id, Capture::Ctl(CtlCap::Branch)).map(Event::span) else { continue };
+            // A loop that tests before its first pass is left where a test
+            // fails; one that runs once first is left past a pass, which
+            // its test decides nothing about on entry.
+            let Some(of) = [CtlCap::Branch, CtlCap::Loop]
+                .into_iter()
+                .find_map(|k| ad.in_match(cond.match_id, Capture::Ctl(k)))
+                .map(Event::span)
+            else {
+                continue;
+            };
             out.push(Decision { mid: cond.match_id, of, path: path.clone() });
         }
     }
@@ -185,10 +194,20 @@ fn decisions(ad: &Adorned<'_, '_>, atom: &Event) -> Vec<Decision> {
 /// branch, a test's join holds no further, since past that end control
 /// may come from where the test never ran.
 fn control_bounds(ad: &Adorned<'_, '_>) -> HashMap<Span, Point> {
+    // A branch that is a statement's whole chain (`@ctl.stmt`, `G || throw
+    // …`) runs among that statement's neighbours.
+    let tagged = |site: crate::cst::NodeId, cap| ad.tags.on(site).any(|ix| ad.events()[ix].cap == cap);
     ad.events()
         .iter()
-        .filter(|e| e.cap == Capture::Ctl(CtlCap::Branch))
-        .filter_map(|e| Some((e.span(), ad.tree.node(e.site).enclosing_sites().next()?.ts().end_position())))
+        .filter(|e| matches!(e.cap, Capture::Ctl(CtlCap::Branch | CtlCap::Loop)))
+        .filter_map(|e| {
+            let mut up = ad.tree.node(e.site).enclosing_sites();
+            let mut around = up.next()?;
+            if tagged(around.id(), Capture::Ctl(CtlCap::Stmt)) {
+                around = up.next()?;
+            }
+            Some((e.span(), around.ts().end_position()))
+        })
         .collect()
 }
 
@@ -212,13 +231,28 @@ fn control_view(ad: &Adorned<'_, '_>) -> crate::model::file_analysis::ControlVie
         .filter(|e| matches!(e.cap, Capture::Ctl(c) if c.is_arm() || c == CtlCap::Body))
         .map(|e| e.site)
         .collect();
+    // A bare block's statements run where it stands, so one is in sequence
+    // where the block is.
+    let blocks: std::collections::HashSet<crate::cst::NodeId> =
+        ad.events().iter().filter(|e| e.cap == Capture::Flow(FlowCap::Block)).map(|e| e.site).collect();
     let in_sequence = |site: crate::cst::NodeId| {
-        let node = ad.tree.node(site);
-        arm_sites.contains(&site)
-            || node
-                .enclosing_sites()
-                .next()
-                .is_some_and(|arm| arm_sites.contains(&arm.id()) && statements(ad.tree, arm).any(|s| s.id() == site))
+        let mut site = site;
+        loop {
+            if arm_sites.contains(&site) {
+                return true;
+            }
+            let Some(up) = ad.tree.node(site).enclosing_sites().next() else { return false };
+            if !statements(ad.tree, up).any(|s| s.id() == site) {
+                return false;
+            }
+            if arm_sites.contains(&up.id()) {
+                return true;
+            }
+            if !blocks.contains(&up.id()) {
+                return false;
+            }
+            site = up.id();
+        }
     };
     let mut returns = Vec::new();
     let mut unread = Vec::new();
@@ -372,9 +406,16 @@ pub(super) fn finish(st: &mut ExtractState) {
             // A construct with no arm where its condition goes one way runs
             // none there: that path carries what the test proves.
             let tested = ad.in_match(cond, Capture::Ctl(CtlCap::Cond)).map_or(of.end, |c| c.span().end);
-            let construct = out.control.constructs.iter().find(|c| c.span == of && c.kind == crate::model::file_analysis::ControlKind::Branch);
+            // A loop's body runs where its test holds.
+            use crate::model::file_analysis::{ArmRole, ControlKind};
+            let construct = out
+                .control
+                .constructs
+                .iter()
+                .find(|c| c.span == of && matches!(c.kind, ControlKind::Branch | ControlKind::Loop { once: false }));
             for holds in [true, false] {
-                if construct.is_some_and(|c| c.arms.iter().any(|a| a.role == crate::model::file_analysis::ArmRole::When(holds))) {
+                let runs = |r: ArmRole| r == ArmRole::When(holds) || (holds && r == ArmRole::Body);
+                if construct.is_some_and(|c| c.arms.iter().any(|a| runs(a.role))) {
                     continue;
                 }
                 if let Some(payload) = proof(holds, tested, &path) {
