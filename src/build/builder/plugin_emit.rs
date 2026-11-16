@@ -354,6 +354,7 @@ impl<'a> Builder<'a> {
                     }),
                     folded_from: None,
                     arg_count: None,
+                    evaluated_before: self.evaluated_before_span(span),
                 });
             }
             plugin::EmitAction::Handler {
@@ -446,6 +447,7 @@ impl<'a> Builder<'a> {
                     binding: None,
                     folded_from: None,
                     arg_count: None,
+                    evaluated_before: self.evaluated_before_span(span),
                 });
                 if let Some(c) = invocant_class {
                     self.method_call_invocant.insert(ref_idx, c);
@@ -476,6 +478,7 @@ impl<'a> Builder<'a> {
                         }),
                         folded_from: None,
                         arg_count: None,
+                        evaluated_before: self.evaluated_before_span(span),
                     });
                 }
             }
@@ -678,21 +681,12 @@ impl<'a> Builder<'a> {
         let mut content_span: Option<Span> = None;
         let string_value = match arg.kind() {
             "string_literal" | "interpolated_string_literal" => {
-                // Read the string_content child — quote-flavor-agnostic
-                // (handles q{}, qq!!, heredocs, etc.). An empty literal
-                // has no content child, so default to "".
-                // Also capture the content span so plugins can address
-                // positions inside the string without hardcoding
-                // quote-length offsets into the outer node's span.
-                for i in 0..arg.named_child_count() {
-                    if let Some(c) = arg.named_child(i) {
-                        if c.kind() == "string_content" {
-                            content_span = Some(node_to_span(c));
-                            break;
-                        }
-                    }
-                }
-                Some(self.extract_string_content(arg).unwrap_or_default())
+                // The content span lets plugins address positions inside the
+                // string without hardcoding quote-length offsets. An empty
+                // literal has no content: its value is "" and it has no span.
+                let value = crate::cst::string_value(arg, self.source);
+                content_span = value.as_ref().map(|(_, span)| *span);
+                Some(value.map(|(text, _)| text).unwrap_or_default())
             }
             // `autoquoted_bareword` is a fat-comma key (`key => value`)
             // — its text IS the value, never const-folded (a key that

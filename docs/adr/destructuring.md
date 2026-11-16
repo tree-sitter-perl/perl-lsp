@@ -54,9 +54,9 @@ supplies its sources.
    `HashWithKeys` — the structural-shape lane, not a tuple. Both refine a
    bare declared container the same way `doc_admits` lets `array<X>`
    refine `array $p`: a `@return array{…}` over `: array` wins, and an
-   undeclared return with a tuple literal gets its return-arm chain at
-   annotation priority so the tuple beats the bare `array` annot (latest
-   wins at equal priority; `HashRef` never subsumes `Sequence`).
+   undeclared return with a tuple literal gets its return-arm chain. A
+   declared container is a bound, not a competing value, so a refinement
+   never needs a priority to beat it (`docs/adr/declared-bounds.md`).
 
 5. **The safe subset, and what is deliberately outside it.** IN: scalar
    slots at fixed positions; a slurpy tail (element lattice); nested
