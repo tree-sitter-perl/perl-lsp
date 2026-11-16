@@ -276,7 +276,9 @@
 ; holds, every later clause of the chain where it fails; a conditional
 ; expression yields its first value or its last; the right of `and` runs
 ; where the left holds, of `or` where it fails. An `else` arm is its body;
-; the `else` of a loop or a `try` is no arm of a condition.
+; the `else` of a loop or a `try` is no arm of a condition. A `while` body
+; runs where its condition holds, and the loop tests it again after each
+; run, so a `break` or `continue` in it goes to the loop.
 (if_statement condition: (_) @ctl.cond consequence: (_) @ctl.then) @ctl.branch
 (if_statement
   condition: (_) @ctl.cond
@@ -285,6 +287,8 @@
 (if_statement
   alternative: (elif_clause condition: (_) @ctl.cond) @ctl.branch
   alternative: [(elif_clause) @ctl.else (else_clause body: (_) @ctl.else)])
+; TODO(walrus-evaluation-order): `c` runs before `a` in `a if c else b`;
+; once `:=` is a write, a read in `c` must skip `a` (`EvaluatedBefore`).
 (conditional_expression
   (_) @ctl.then
   .
@@ -297,6 +301,11 @@
   (_) @ctl.else) @ctl.branch
 (boolean_operator left: (_) @ctl.cond operator: "and" right: (_) @ctl.then) @ctl.branch
 (boolean_operator left: (_) @ctl.cond operator: "or" right: (_) @ctl.else) @ctl.branch
+; TODO(cfg-exit-join): `@ctl.loop` stands in for
+; reachability until the CFG's loop edges answer it.
+(while_statement condition: (_) @ctl.cond body: (_) @ctl.then) @ctl.loop
+; TODO(python-assert-narrowing): `assert G` leaves where G fails, but no node
+; of it leaves; it needs a position whose failing arm is implicit.
 
 ; A statement that leaves its block: nothing after it there runs, and
 ; whether a chain of arms falls through follows from its arms' statements

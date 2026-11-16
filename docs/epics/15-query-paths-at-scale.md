@@ -103,8 +103,9 @@ FHEM shape, with the arithmetic:
 1. The relation is **semantically correct** — 534 files genuinely
    providing `package main` is what FHEM is — so narrowing it would be
    wrong. The fix is at the sweep level, not the relation level.
-2. **This interlocks hard with Epic 1**, which converts ~75 consumers
-   from the single winner to the candidate set. If Epic 1 lands first,
+2. **This interlocks hard with Epic 1**, which converts the remaining
+   consumers (30 non-test `get_cached` sites on 2026-11-12) from the
+   single winner to the candidate set. If Epic 1 lands first,
    this phase's arithmetic gets worse before it gets better and its
    value goes up correspondingly. Coordinate: Epic 1's PR reports the
    FHEM numbers this phase then has to fix.
@@ -174,7 +175,6 @@ Each of these is OPEN and small; take them or decline them with a
 reason, but do not leave them unlabelled:
 
 - `query_rec` 512-depth cap — seen again during the Phase-A probe.
-- `cursor_slot.rs` deferred reducible case.
 - Merge the two index families (Tier 3, structural — likely its own
   arc, and Epic 11's ADR is asked to note the same debt from the
   closure side).
