@@ -40,7 +40,7 @@
 
 ; ---- loops ----
 ; TODO(cfg-loop-polarity): an `until` body runs where its condition fails;
-; nothing reads a loop condition's polarity yet.
+; nothing reads a loop condition's polarity yet. Owner: the 0.11 CFG follow-up.
 (loop_statement condition: (_) @ctl.cond block: (_) @ctl.loop.body) @ctl.loop
 (loop_statement continue: (_) @ctl.loop.step) @ctl.loop
 (cstyle_for_statement block: (_) @ctl.loop.body) @ctl.loop
