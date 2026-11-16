@@ -12,7 +12,7 @@
 //! decrease along it — that is what makes [`Structure::id_of`] a binary
 //! search instead of a map.
 
-use tree_sitter::Node;
+use tree_sitter::{Node, Point};
 
 /// A node's position in its [`SyntaxForest`]: the preorder index in its
 /// parse, offset by every parse registered before it, so one id names a node
@@ -51,6 +51,9 @@ pub(crate) struct Structure<'t> {
     /// The nodes another parse replaces, by local index, ascending: each
     /// with the forest index of the parse that holds its code.
     injections: Vec<(u32, usize)>,
+    /// For an injected parse, the host node it stands in for: the host's
+    /// forest index and the node's local index there.
+    stands_for: Option<(usize, u32)>,
 }
 
 impl<'t> Structure<'t> {
@@ -82,7 +85,7 @@ impl<'t> Structure<'t> {
                     break;
                 }
                 if !cursor.goto_parent() {
-                    return Structure { base, entries, kinds, injections: Vec::new() };
+                    return Structure { base, entries, kinds, injections: Vec::new(), stands_for: None };
                 }
                 if let Some(closed) = open.pop() {
                     entries[closed as usize].end = entries.len() as u32;
@@ -134,6 +137,23 @@ impl<'t> Structure<'t> {
             .map(|i| (first + i) as u32)
     }
 
+    /// The smallest node whose range holds `start..end`: the last node to
+    /// start at or before `start` (start points never decrease along the
+    /// preorder), climbed until it reaches `end`.
+    fn local_covering(&self, start: Point, end: Point) -> Option<u32> {
+        let mut at = self.entries.partition_point(|e| e.ts.start_position() <= start).checked_sub(1)? as u32;
+        loop {
+            let e = &self.entries[at as usize];
+            if e.ts.end_position() >= end {
+                return Some(at);
+            }
+            if e.parent == NO_PARENT {
+                return None;
+            }
+            at = e.parent;
+        }
+    }
+
     /// The injection on the subtree holding local index `local`, if any.
     fn injection_over(&self, local: u32) -> Option<(u32, usize)> {
         let i = self.injections.partition_point(|(at, _)| *at <= local);
@@ -181,7 +201,9 @@ impl<'t> SyntaxForest<'t> {
                 let pos = host.injections.partition_point(|(a, _)| *a < at);
                 host.injections.insert(pos, (at, index));
             }
-            trees.push(Structure::build(inj.root, base));
+            let mut tree = Structure::build(inj.root, base);
+            tree.stands_for = at.map(|at| (inj.host, at));
+            trees.push(tree);
         }
         SyntaxForest { trees }
     }
@@ -248,6 +270,37 @@ impl<'t> SyntaxForest<'t> {
         let found = self.trees.iter().find_map(|t| t.lift(node));
         debug_assert!(found.is_some(), "node {node:?} is from a parse outside this build");
         found
+    }
+
+    /// The smallest node holding the source range `start..end`, read as one
+    /// tree: inside a replaced node, the injected parse's node. For a reader
+    /// that holds only a span; one holding the node lifts it instead.
+    pub(crate) fn covering(&self, start: Point, end: Point) -> Option<SyntaxNode<'_, 't>> {
+        let mut found = None;
+        let mut tree = 0;
+        while let Some(local) = self.trees[tree].local_covering(start, end) {
+            let t = &self.trees[tree];
+            found = Some(SyntaxNode { tree: t, local });
+            match t.injection_over(local) {
+                Some((_, inner)) => tree = inner,
+                None => break,
+            }
+        }
+        found
+    }
+
+    /// `node`, then its ancestors nearest first, read as one tree: an
+    /// injected parse's root climbs on to the host node it stands in for.
+    pub(crate) fn climb_in_file<'a>(
+        &'a self,
+        node: SyntaxNode<'a, 't>,
+    ) -> impl Iterator<Item = SyntaxNode<'a, 't>> + 'a {
+        std::iter::successors(Some(node), move |n| {
+            n.parent().or_else(|| {
+                let (host, local) = n.tree.stands_for?;
+                Some(SyntaxNode { tree: &self.trees[host], local })
+            })
+        })
     }
 
     /// The file's own parse, the first registered.
