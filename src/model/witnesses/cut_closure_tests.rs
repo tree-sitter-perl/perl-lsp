@@ -36,9 +36,13 @@ fn self_cycling_chain(links: usize) -> WitnessBag {
 /// Ask every read in order under one memo scope, as the stamp does; the
 /// answers and the attachments reduced.
 fn ask_every_read(bag: &WitnessBag, links: usize) -> (Vec<ReducedValue>, u64) {
+    let _scope = FoldMemoScope::enter();
+    ask_every_read_in_open_scope(bag, links)
+}
+
+fn ask_every_read_in_open_scope(bag: &WitnessBag, links: usize) -> (Vec<ReducedValue>, u64) {
     let reg = ReducerRegistry::with_defaults();
     let before = query_rec_bodies();
-    let _scope = FoldMemoScope::enter();
     let answers = (0..=links)
         .map(|i| {
             let att = expr(i, 0);
@@ -67,6 +71,18 @@ fn a_self_closed_answer_is_shared_and_agrees_with_no_memo() {
     assert_eq!(answers, control);
     let a = ReducedValue::Type(InferredType::ClassName("A".into()));
     assert!(answers.iter().all(|v| *v == a), "{answers:?}");
+}
+
+/// The control arm of the equivalence net runs inside the persist path's open
+/// scope; reading that scope's answers would compare the memo with itself.
+#[test]
+fn the_no_memo_control_sets_an_enclosing_scope_aside() {
+    let bag = self_cycling_chain(40);
+    let (_, fresh) = without_fold_memo(|| ask_every_read_in_open_scope(&bag, 40));
+    let _outer = FoldMemoScope::enter();
+    ask_every_read_in_open_scope(&bag, 40);
+    let (_, control) = without_fold_memo(|| ask_every_read_in_open_scope(&bag, 40));
+    assert_eq!(control, fresh, "the control reused the enclosing scope's answers");
 }
 
 /// Deterministic cost pin: an unshared self-closed answer makes every read
