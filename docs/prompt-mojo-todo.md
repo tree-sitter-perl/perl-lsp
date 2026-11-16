@@ -14,6 +14,7 @@
 | Feature | Plugin |
 |---|---|
 | Route → Controller#Action goto-def | `mojo-routes.rhai` |
+| Route names: `->name('x')` → `url_for`/`redirect_to` goto-def, references, completion | `mojo-routes.rhai` |
 | Helper completion + goto-def | `mojo-helpers.rhai` |
 | Minion task registration + enqueue sig help | `minion.rhai` |
 | EventEmitter `on`/`emit`/`once` | `mojo-events.rhai` |
@@ -25,20 +26,12 @@
 
 ## What's missing
 
-### Route naming + `url_for`
+### Route naming: Lite auto-names
 
-```perl
-$r->get('/users/:id')->to('users#show')->name('show_user');
-$c->url_for('show_user', id => 42);
-```
-
-Need: a `MojoRouteName` registry (accumulate from `->name('…')` and Lite
-auto-naming). Completion inside `url_for('…')` / `redirect_to('…')` offers
-known route names. Goto-def from name → route definition.
-
-Implementation: extend `mojo-routes.rhai` to emit a Handler keyed by route
-name at `->name(…)` chain links, plus `MethodCallRef`s at `url_for` /
-`redirect_to` argument spans.
+Explicit `->name('…')` landed (above). What is left is Mojolicious::Lite's
+default name for a route that never calls `->name`: `mojo-lite.rhai` keys
+its route Handlers by PATH, so `url_for('<auto-name>')` finds nothing.
+Implement only Mojo's documented default rule.
 
 ### Stash intelligence
 

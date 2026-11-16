@@ -211,11 +211,12 @@ token is written, not read.
 `@ctl.leave.<kind>` is a statement that leaves its block unconditionally,
 by what it leaves to: `return`, `throw` (to the nearest handler), `exit`
 (out of the process), `break` (past the loop) or `continue` (to the
-loop's next test). Nothing after it in the block runs. It is the
-document's one statement about control leaving; which arms of a
-condition fall through, and what the rest of a block after them is known
-under, the narrowing family derives by containment over the `@ctl.*`
-positions (`flow-narrowing.md`, `cfg-tier.md`).
+loop's next test). Nothing after it in the block runs. `@flow.block`
+marks a statement whose statements run in sequence where it stands (a
+bare block). Those are the document's statements about control leaving;
+which arms of a condition fall through, and what the rest of a block
+after them is known under, the narrowing family derives by containment
+over the `@ctl.*` positions (`flow-narrowing.md`, `cfg-tier.md`).
 
 ## Decision: a member operator states what it reaches
 

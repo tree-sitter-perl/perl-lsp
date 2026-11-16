@@ -948,7 +948,7 @@ sub register {
     let mut fa = parse(consumer_src);
     fa.enrich_imported_types_with_keys(Some(&idx));
     let pt = point_at(consumer_src, "$after");
-    let minion_t = fa.inferred_type_via_bag_ctx("$minion", pt, Some(&idx));
+    let minion_t = fa.inferred_type_via_bag_ctx("$minion", crate::model::witnesses::ReadPoint::position(pt), Some(&idx));
     assert_eq!(
         minion_t,
         Some(InferredType::ClassName("GenericCo::Minion".to_string())),

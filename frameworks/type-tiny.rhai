@@ -14,8 +14,7 @@
 // itself a constructor. That unlocks `$self->attr->method` chains where attr
 // is `isa => InstanceOf['X']` or `isa => Maybe[InstanceOf['X']]`.
 //
-// Import scoping (docs/prompt-type-constraint-types.md §"Future: registration
-// moves to the injection level"): when a package does `use Types::Standard
+// Import scoping (docs/adr/type-constraints.md): when a package does `use Types::Standard
 // qw/Str Int/`, those names become known via an Import action — suppressing
 // unresolved-function diagnostics for explicitly imported type constants.
 // `-all` / `:all` / bare use → full vocab emitted.  `GenericCo::Types` and
@@ -26,8 +25,124 @@ fn id() { "type-tiny" }
 
 fn api() { 1 }
 
-// Manifest hooks are global (consulted by name), so triggers are irrelevant.
-fn triggers() { [] }
+// Manifest hooks are global (consulted by name); the triggers gate only the
+// patterns, which read a type library's own declarations.
+fn triggers() {
+    [ #{ UsesModule: "Type::Library" }, #{ UsesModule: "Type::Utils" } ]
+}
+
+// A type library's declarations, so a consumer's `is_X($v)` reads the X the
+// library declares. Type::Library's `add_type(name => X, parent => P, …)` (on
+// any receiver: `$meta`, `__PACKAGE__`, `__PACKAGE__->meta` — the
+// `UsesModule` trigger is the gate) and Type::Utils' `declare X, as P, …`.
+// X constrains no more than P does as far as a type can say: a constraint's
+// own `where` refines a value no `InferredType` can follow, so X answers P's
+// constraint value.
+fn patterns() {
+    [
+        #{
+            name: "add_type",
+            query: `
+(method_call_expression
+  method: (_) @verb
+  arguments: [
+    (list_expression) @args
+    (anonymous_hash_expression (list_expression) @args)
+  ]
+  (#eq? @verb "add_type"))
+`,
+            projections: #{ args: ["args"] },
+            expect: [
+                #{ src: "__PACKAGE__->add_type(name => Foo, parent => Str);", matches: 1 },
+                #{ src: "$meta->add_type({ name => 'Foo', parent => Int });", matches: 1 },
+                #{ src: "$meta->add_type;", matches: 0 },
+            ],
+        },
+        #{
+            name: "declare",
+            // `as P, where {…}` passes its args as a list; `as InstanceOf[…]`
+            // passes the one call bare. `parent` flattens either, so its
+            // first arg is P.
+            query: `
+([
+  (ambiguous_function_call_expression
+    function: (_) @verb
+    arguments: (list_expression . (_) @name . [
+      (ambiguous_function_call_expression function: (_) @as arguments: (_) @parent)
+      (function_call_expression function: (_) @as arguments: (_) @parent)
+    ]))
+  (function_call_expression
+    function: (_) @verb
+    arguments: (list_expression . (_) @name . [
+      (ambiguous_function_call_expression function: (_) @as arguments: (_) @parent)
+      (function_call_expression function: (_) @as arguments: (_) @parent)
+    ]))
+]
+(#eq? @verb "declare")
+(#eq? @as "as"))
+`,
+            projections: #{ name: ["str"], parent: ["args"] },
+            expect: [
+                #{ src: "declare Foo, as Str, where { 1 };", matches: 1 },
+                #{ src: "declare 'Foo', as InstanceOf['X'];", matches: 1 },
+                #{ src: "declare(\"Foo\", as(Str));", matches: 1 },
+                #{ src: "declare Foo;", matches: 0 },
+                #{ src: "declare Foo, where { 1 };", matches: 0 },
+            ],
+        },
+    ]
+}
+
+fn on_match(pattern, m) {
+    let pkg = m["package"];
+    if pkg == () { return []; }
+    if pattern == "add_type" {
+        let args = m.captures.args;
+        if args == () || args.args == () { return []; }
+        let name = ();
+        let name_span = ();
+        let parent = ();
+        for pair in classified_pairs(args.args, 0) {
+            if pair.key == "name" && pair.value.Str != () {
+                name = pair.value.Str;
+                name_span = pair.value_span;
+            }
+            if pair.key == "parent" { parent = pair.value_span; }
+        }
+        return declared_constraint(pkg, name, name_span, parent);
+    }
+    if pattern == "declare" {
+        let parent = m.captures.parent;
+        if parent == () || parent.args == () || parent.args.is_empty() { return []; }
+        let name = m.captures.name;
+        return declared_constraint(pkg, name.str, name.span, parent.args[0].span);
+    }
+    []
+}
+
+// The constant sub a declaration installs: calling `X` yields its parent's
+// constraint value.
+fn declared_constraint(pkg, name, span, parent) {
+    if name == () || span == () || parent == () || !is_callable_sub_name(name) { return []; }
+    [#{
+        Method: #{
+            name: name,
+            span: span,
+            selection_span: span,
+            params: [],
+            is_method: false,
+            return_type: (),
+            doc: (),
+            on_class: pkg,
+            display: (),
+            hide_in_outline: false,
+            opaque_return: false,
+            outline_label: (),
+            return_via_edge: #{ Expr: parent },
+            attr: (),
+        }
+    }]
+}
 
 // Which call names are constraint constructors. The 0-arity base constants
 // are constraint VALUES too — `isa => Int` is a Type::Tiny object exactly
@@ -56,7 +171,8 @@ fn base_constant_type(name) {
     if name == "CodeRef" { return type_coderef(); }
     if name == "RegexpRef" { return type_regexp(); }
     if name == "Undef" { return type_undef(); }
-    if name == "Bool" { return type_bool(); }
+    // Type::Tiny's Bool admits undef alongside 1, 0 and "".
+    if name == "Bool" { return type_optional(type_bool()); }
     ()
 }
 
@@ -117,9 +233,10 @@ fn type_constraint_inner(name, params) {
 // to all of them for -all / bare use). New type constants added to a
 // future Types::Standard release land here, nowhere else.
 
-fn types_standard_exports() {
-    // Base type constants, each shipping is_X / assert_X / to_X companions.
-    let base = [
+// Types::Standard's base type constants. Each ships is_X / assert_X / to_X
+// companions; the export list and the check guards both project from here.
+fn types_standard_bases() {
+    [
         "Any", "Item",
         "Bool",
         "Undef", "Defined", "Value",
@@ -132,11 +249,14 @@ fn types_standard_exports() {
         "Maybe", "Overload", "StrMatch", "OptList", "Tied",
         "Enum",
         "InstanceOf", "ConsumerOf", "HasMethods",
-    ];
+    ]
+}
+
+fn types_standard_exports() {
     // Coercion / validation helpers: exported as plain functions, no companions.
     let standalone = ["slurpy", "MkOpt", "Join", "Split"];
     let out = [];
-    for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
+    for t in types_standard_bases() { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
     for t in standalone { out += t; }
     out
 }
@@ -167,6 +287,37 @@ fn types_common_numeric_exports() {
     let out = [];
     for t in base { out += t; out += "is_" + t; out += "assert_" + t; out += "to_" + t; }
     out
+}
+
+// Type::Library gives every constraint X it declares the companions
+// `is_X($v)` (checks `$v` against X) and `assert_X($v)` (dies unless it
+// passes). Both guard `$v` as X's inner type, read from whichever library the
+// call names: one listed in `constraint_libraries` folds X through
+// `type_constraint_inner` (and `is_Object` guards nothing), any other answers
+// from the X that library's own source declares.
+fn type_check_functions() {
+    [
+        #{ prefix: "is_", asserts: false },
+        #{ prefix: "assert_", asserts: true },
+    ]
+}
+
+// Libraries this vocabulary speaks for. Types::Standard declares most of its
+// types through `$meta->$add_core_type` and parents held in lexicals, which no
+// pattern reads; Types::Common re-exports Types::Standard's.
+fn constraint_libraries() {
+    ["Types::Standard", "Types::Common"]
+}
+
+// `$type->check($v)` / `$type->assert_valid($v)` on a constraint VALUE
+// (`Int`, `InstanceOf['Foo']`, a `$type` holding one): core narrows `$v` to
+// whatever the receiver constrains, so a `check` on any other object proves
+// nothing.
+fn type_check_methods() {
+    [
+        #{ name: "check", asserts: false },
+        #{ name: "assert_valid", asserts: true },
+    ]
 }
 
 // `use Types::Standard qw/Str Int .../` → emit Import so the named constants
