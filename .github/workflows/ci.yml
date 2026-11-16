@@ -70,6 +70,13 @@ jobs:
       - name: Test
         run: cargo test --features cpp,php,python
 
+      # A plain `cargo test` is what everyone runs locally. A test that reaches
+      # a pack language through the driver needs that language's feature, so
+      # one left ungated passes the step above and fails here, on the PR that
+      # adds it. Gate it with `#[cfg(feature = "<lang>")]`.
+      - name: Test without language features
+        run: cargo test
+
   e2e-tests:
     name: E2E tests (headless nvim)
     if: github.event.action != 'edited' || github.event.changes.base   # see `on:`
