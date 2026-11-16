@@ -3928,6 +3928,7 @@ fn python_call_arg_count_skips_comments() {
 /// An assignment writes the member its left side reads, through any
 /// receiver and with any assignment operator: the member token is a write,
 /// and highlight tells it from a read.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_a_member_an_assignment_writes_is_a_write() {
     use crate::build::language_driver::LanguageRegistry;
@@ -3976,6 +3977,7 @@ struct H {
 /// A reset call gives its member receiver a value again (`o.v.clear()`), the
 /// same place write that ends a move of `o.v`: its member token is a write
 /// too.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_a_reset_call_writes_its_member_receiver() {
     use crate::build::language_driver::LanguageRegistry;
@@ -4002,6 +4004,7 @@ void f(H& o) {
 /// A member write gives the member its value: one this file declares keeps
 /// its declared type over what is written, and one it does not declare
 /// (its class is only forward-declared here) takes the written value.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_a_member_write_is_an_assignment_to_the_member() {
     use crate::build::language_driver::LanguageRegistry;
@@ -4064,6 +4067,7 @@ fn member_write_owners(path: &str, src: &str, row: usize) -> Vec<String> {
 /// round's facts with the next would drop that write every other round and
 /// end, at its bound, without it; the rounds accumulate, so the write keeps
 /// the owner it was given.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_a_write_that_retypes_its_own_receiver_keeps_its_owner() {
     let src = "\
@@ -4083,6 +4087,7 @@ void f(Node* a) {
 /// field of the struct that member is. A declared member's place is its
 /// binding, never its name, so writing a `zset` into the field leaves the
 /// union's member, the receiver, as declared: the write has one owner.
+#[cfg(feature = "cpp")]
 #[test]
 fn cpp_a_member_named_like_its_receiver_is_its_own_place() {
     let src = "\

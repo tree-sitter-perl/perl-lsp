@@ -6,7 +6,7 @@ A Perl LSP server built on ts-parser-perl (crates.io) and tower-lsp.
 
 ```
 cargo build --release
-cargo test                              # unit tests
+cargo test                              # unit tests; CI runs them --features cpp,php,python
 ./e2e/run.sh                            # e2e tests (needs nvim + release build)
 gold-corpus/run.pl                      # gold harness (needs release build + installed substrate)
                                         # BUILD IT `--features cpp`: a plain release build
@@ -16,6 +16,14 @@ gold-corpus/run.pl                      # gold harness (needs release build + in
 perl-lsp --dump-package <root> <pkg>    # debug type inference for a package
 scripts/equiv/run.sh [<base>]           # whole-analysis equivalence vs base (refactor PRs)
 ```
+
+A test that runs a pack-language file through the driver
+(`LanguageRegistry`) only works when that language's feature is compiled
+in, so it carries `#[cfg(feature = "<lang>")]`. CI runs only the featured build,
+so it cannot catch a missing gate. **If a test you run fails because it lacks
+a feature gate, add the gate in the PR you are working on, even when that test
+is outside its scope.** (Tests that build a grammar's parser directly need no
+gate: the grammars are dev-dependencies.)
 
 The gold harness (`gold-corpus/README.md`) is an exact-assertion regression
 net over real CPAN modules from a snapshot-pinned substrate
