@@ -1767,12 +1767,10 @@ impl ReducerRegistry {
         }
         // A member this file defines answers how it ends from its own
         // definition: a child's override that states nothing is no evidence
-        // (the top), never its parent's answer. A cut beneath this frame is
-        // the cycle's to fold, so it settles nothing.
+        // (the top), never its parent's answer.
         if let WitnessAttachment::Member { owner, space, name, aspect: MemberAspect::Effects } = q.attachment {
             if v == ReducedValue::None && defines_member_here(bag, owner, *space, name) {
-                let complete = state.low_cut >= pos;
-                return if complete { ReducedValue::Effects(super::types::Ends::all()) } else { v };
+                return ReducedValue::Effects(super::types::Ends::all());
             }
         }
         if let Some(ladder) = &ladder {
