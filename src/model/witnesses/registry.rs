@@ -4390,18 +4390,11 @@ impl ReducerRegistry {
                     ctx.app_surface_consumers,
                 );
                 // The first parent in MRO order that defines it is the one
-                // Perl runs. A silent parent whose whole ancestry this file
-                // declares does not define it; any other silent parent may,
-                // and then nothing later in the order is the one that runs.
-                for p in parents {
-                    if let Some(e) = ask(state, WitnessAttachment::effects_of(p.clone(), name.clone())) {
-                        return Some(e);
-                    }
-                    if !file_declares_ancestry(ctx, &p) {
-                        return None;
-                    }
-                }
-                None
+                // Perl runs. Only a parent this file shows lacks it is passed
+                // over: any other may define it, and then its answer, even
+                // none, is the call's.
+                let p = parents.into_iter().find(|p| !file_shows_absent(bag, ctx, p, name))?;
+                ask(state, WitnessAttachment::effects_of(p, name.clone()))
             }
             // TODO(effect-descendants): a receiver may be any subclass of its
             // class, so the call runs every indexed override; until that
@@ -4516,12 +4509,17 @@ fn stated_never_completes(bag: &WitnessBag, att: &WitnessAttachment) -> bool {
     stated.is_some_and(|e| !e.completes())
 }
 
-/// Whether `class` and every ancestor of it are packages this file
-/// declares, so an in-file walk that finds no member has seen them all.
-fn file_declares_ancestry(ctx: &BagContext, class: &str) -> bool {
+/// Whether this file shows that neither `class` nor any ancestor of it
+/// defines callable `name`: each is a package the file declares, and none
+/// states anything of the member.
+fn file_shows_absent(bag: &WitnessBag, ctx: &BagContext, class: &str, name: &str) -> bool {
     use crate::model::file_analysis::SymKind;
     let declared = |c: &str| {
         ctx.symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+    };
+    let defines = |c: &str| {
+        defines_member_here(bag, c, crate::model::file_analysis::NamespaceId::CALLABLES, name)
+            || bag.iter_attachment(&WitnessAttachment::effects_of(c, name)).next().is_some()
     };
     let mut seen: Vec<String> = Vec::new();
     let mut todo = vec![class.to_string()];
@@ -4529,7 +4527,7 @@ fn file_declares_ancestry(ctx: &BagContext, class: &str) -> bool {
         if seen.contains(&c) {
             continue;
         }
-        if !declared(&c) || seen.len() >= 20 {
+        if !declared(&c) || defines(&c) || seen.len() >= 20 {
             return false;
         }
         todo.extend(crate::model::file_analysis::parents_of(
