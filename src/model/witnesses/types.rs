@@ -653,11 +653,6 @@ pub enum WitnessPayload {
     /// `Edge` to that declaration's place instead. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     FreeValue { table: crate::model::file_analysis::NameTable, name: String, fallback: Option<String> },
-    /// An effect of evaluating the thing at my attachment: a leaving
-    /// expression's own (`Expr(span)`), or one arm of how a callable ends
-    /// (`SymbolEffects`, `Member{.., Effects}`). `EffectFold` joins them.
-    /// Kept at the END for bincode variant-index stability.
-    Effect(Effect),
     /// The expression at this attachment is evaluated before the statement
     /// at `Span`, which comes first in the source: a statement modifier's
     /// condition (`STMT if G`) or loop list (`STMT for LIST`) runs before
@@ -687,6 +682,11 @@ pub enum WitnessPayload {
     /// `Member` read that adopts it chases `value`. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     SlotWrite { receiver: WitnessAttachment, value: WitnessAttachment },
+    /// An effect of evaluating the thing at my attachment: a leaving
+    /// expression's own (`Expr(span)`), or one arm of how a callable ends
+    /// (`SymbolEffects`, `Member{.., Effects}`). `EffectFold` joins them.
+    /// Kept at the END for bincode variant-index stability.
+    Effect(Effect),
 }
 
 /// The type a bound states: a type, or an edge into the alias graph
