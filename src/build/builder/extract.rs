@@ -403,10 +403,7 @@ impl<'a> Builder<'a> {
 
     pub(super) fn extract_constructor_class(&self, node: Node<'a>) -> Option<String> {
         let inv = crate::cst::constructor_invocant(node, self.source)?;
-        if crate::model::conventions::is_current_package_token(inv) {
-            return self.current_package.clone();
-        }
-        Some(inv.to_string())
+        self.token_class(inv).or_else(|| inv.utf8_text(self.source).ok().map(str::to_string))
     }
 
     /// The scalar variable names in a paren-list LHS (`my ($a, $b)` /
@@ -570,18 +567,10 @@ impl<'a> Builder<'a> {
                 key_node.utf8_text(self.source).ok().map(|s| (s.to_string(), false))
             }
             "string_literal" | "interpolated_string_literal" => {
-                // Simple string: 'key' or "key"
-                let text = key_node.utf8_text(self.source).ok()?;
-                // Strip quotes
-                if text.len() >= 2 {
-                    let inner = &text[1..text.len()-1];
-                    // Dynamic if interpolated and contains $/@
-                    let is_dynamic = key_node.kind() == "interpolated_string_literal"
-                        && (inner.contains('$') || inner.contains('@'));
-                    Some((inner.to_string(), is_dynamic))
-                } else {
-                    None
-                }
+                let inner = crate::cst::string_content_text(key_node, self.source).unwrap_or_default();
+                let is_dynamic = key_node.kind() == "interpolated_string_literal"
+                    && (inner.contains('$') || inner.contains('@'));
+                Some((inner, is_dynamic))
             }
             _ => {
                 // Dynamic key (variable, expression)
@@ -672,7 +661,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let span = if matches!(key_node.kind(), "string_literal" | "interpolated_string_literal") {
-                self.string_content_span(key_node)
+                crate::cst::string_content_span(key_node)
             } else {
                 node_to_span(key_node)
             };
@@ -685,6 +674,7 @@ impl<'a> Builder<'a> {
                 binding: None,
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before(key_node),
             });
         }
     }
@@ -796,7 +786,7 @@ impl<'a> Builder<'a> {
                 child.kind(),
                 "string_literal" | "interpolated_string_literal"
             ) {
-                self.string_content_span(child)
+                crate::cst::string_content_span(child)
             } else {
                 node_to_span(child)
             };
@@ -813,6 +803,7 @@ impl<'a> Builder<'a> {
                     .map(|owner| crate::model::file_analysis::RefBinding::HashKey { owner, sym: None }),
                 folded_from: None,
                 arg_count: None,
+                evaluated_before: self.evaluated_before(child),
             });
         }
     }

@@ -18,6 +18,7 @@ pub fn r_pack() -> LangPack {
         shape_name: |raw| raw.to_string(),
         default_name: |_, _| None,
         annot_type: |_| None,
+        annot_enforcement: crate::model::witnesses::Enforcement::Advisory,
         doc_text: |_| None,
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.

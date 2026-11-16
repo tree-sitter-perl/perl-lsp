@@ -673,6 +673,23 @@ fn quoted_call_arg_key_span_is_content_not_quotes() {
     );
 }
 
+/// A key in any quote flavour reads as its content: `q{name}` is the key
+/// `name`, not `{name` from stripping one byte off each end.
+#[test]
+fn q_quoted_call_arg_key_is_its_content() {
+    let src = "package R;\n\
+        use base 'DBIx::Class::Core';\n\
+        __PACKAGE__->add_columns(qw/name/);\n\
+        sub b { my $s = shift; $s->search({ q{name}, 2 }); }\n1;\n";
+    let fa = build_fa(src);
+    let r = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.span.start.row == 3)
+        .expect("quoted key emits a HashKeyAccess on row 3");
+    assert_eq!(r.target_name, "name", "{r:?}");
+}
+
 /// `class Foo { field $x :param }` `find_param_field`
 /// fallback. e2e `rename: 'name' constructor arg` was the
 /// surfacing failure.

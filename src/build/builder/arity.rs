@@ -71,8 +71,7 @@ pub(super) fn classify_arity_condition(
 ) -> Option<ArityBranch> {
     // Shape 1: bare `@_`.
     if cond.kind() == "array" {
-        let text = cond.utf8_text(source).ok()?.trim();
-        if text == "@_" {
+        if crate::cst::names_arg_array(cond, source) {
             return match keyword {
                 "unless" => Some(ArityBranch::Zero),
                 _ => Some(ArityBranch::AtLeast(1)),
@@ -86,8 +85,7 @@ pub(super) fn classify_arity_condition(
         if op_text == "!" {
             if let Some(operand) = cond.child_by_field_name("operand") {
                 if operand.kind() == "array" {
-                    let text = operand.utf8_text(source).ok()?.trim();
-                    if text == "@_" {
+                    if crate::cst::names_arg_array(operand, source) {
                         return match keyword {
                             "if" => Some(ArityBranch::Zero),
                             _ => Some(ArityBranch::AtLeast(1)),
@@ -219,7 +217,7 @@ pub(super) fn arms_genuinely_agree(
 /// itself (scalar context in an equality) or `scalar(@_)`.
 pub(super) fn node_is_arity_magnitude(node: tree_sitter::Node, source: &[u8]) -> bool {
     if node.kind() == "array" {
-        return node.utf8_text(source).map(|s| s.trim() == "@_").unwrap_or(false);
+        return crate::cst::names_arg_array(node, source);
     }
     if node.kind() == "func1op_call_expression" {
         let Some(kw) = node.child(0) else { return false };
@@ -230,7 +228,7 @@ pub(super) fn node_is_arity_magnitude(node: tree_sitter::Node, source: &[u8]) ->
         for i in 0..node.named_child_count() {
             if let Some(c) = node.named_child(i) {
                 if c.kind() == "array" {
-                    return c.utf8_text(source).map(|s| s.trim() == "@_").unwrap_or(false);
+                    return crate::cst::names_arg_array(c, source);
                 }
             }
         }
