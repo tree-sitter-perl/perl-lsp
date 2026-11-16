@@ -73,9 +73,10 @@ assignment node's end, with its marker there, so `$node = $node->parent`
 reads the old `$node` on the right. An annotated write (`x: int = 5`) is
 anchored too, so its declared type lands at the write it is declared with.
 A target with no anchor binds at its token and mints no marker: a
-declaration (`T x = …`), whose RHS cannot name it. A later write's marker
-retires a declared type like any other value; what a declaration should
-still hold past it is the bounds design's, not a per-language rule.
+declaration (`T x = …`), whose RHS cannot name it. A declared type is no
+value the marker retires: it is a bound the registry caps the variable's
+value by, and its own extent says whether a write ends it
+(`docs/adr/declared-bounds.md`).
 `FrameworkAwareTypeFold` reads it three ways:
 
 - **It is a cutoff.** At the query point, every witness strictly before
@@ -91,8 +92,7 @@ still hold past it is the bounds design's, not a per-language rule.
   when nothing typed stands at or after its site; a typed RHS at the site
   and any later write displace it, and rep or scalar-context evidence
   landing after it revives the variable through those axes
-  (`$r = f(); $r->{k}` reads the hash). An annotation-priority `Unknown`
-  (`@var A|B`) is a claim about the value and keeps its place.
+  (`$r = f(); $r->{k}` reads the hash).
 - **A first binding resets nothing.** A marker with no value-binding
   witness before it (`WitnessPayload::binds_value`) is not a value: the
   write is the declaration — `my $x = f()`, or a pack's first `$x = f()`
@@ -303,8 +303,13 @@ by G TRUE and B by G FALSE, `G && R` / `G and R` narrow R by G TRUE, and
 A loop tests its condition before every run of its body, so the body is
 an arm too: `while (G)`, `STMT while G` and a C-style `for (…; G; …)`
 narrow by G TRUE, `until` by G FALSE. `do BLOCK while G` is the one
-exception — perlsyn runs the block once before the first test. Nothing
-narrows after a loop, since `last` leaves with G unchanged. When STMT is an exit, the
+exception — perlsyn runs the block once before the first test. A loop
+whose block always leaves never comes back to its test, so it is left only
+where its first test fails, and the rest of the enclosing block narrows as
+after an `if` with no `else` (`while (!$x->isa('Foo')) { return }`). Any
+other loop narrows nothing after it: a `last` leaves with G unchanged, and
+a body that falls through leaves G as its last test found it, which is the
+CFG's loop join (`TODO(cfg-exit-join)`). When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once.
@@ -312,9 +317,15 @@ diagnostics see each statement-level guard once.
 "Falls through" is a fact about statements. A block leaves when any of
 its statements leaves, wherever that statement sits, and what follows it
 there is dead: a statement leaves when it is an exit, or when it is an
-`if`/`unless` chain with an `else` whose every arm leaves
-(`block_leaves`). A chain with no `else` has an implicit one, which falls
-through. After a chain whose arms all leave but one, the rest of the
+`if`/`unless` chain with an `else` whose every arm leaves, or a bare
+block that leaves (`block_leaves`). A bare block is a loop that runs once
+(perlsyn), so it leaves only where no `last`/`next`/`redo` in it can reach
+it, the same test a loop's block takes (`loop_block_leaves`, conservative:
+loop control anywhere inside counts, even one an inner loop owns). A chain
+with no `else` has an implicit one, which falls through. The block a
+statement-level guard narrows the rest of is the statement's own: a sub's
+or a construct's block, a bare block, or the file's top level, so a
+script's `die unless $cfg;` narrows the rest of the script. After a chain whose arms all leave but one, the rest of the
 enclosing block runs where that arm does, through the same
 `narrow_block_remainder`, narrowed as that arm's block is: the first
 arm where its block is entered, an `elsif` where its own guard holds and
@@ -346,14 +357,26 @@ what it decides: `@narrow.then` runs where it holds, `@narrow.else` where
 it fails. An `else` arm is the statement it holds, so a later clause of
 the chain (`elseif`, `elif`, C++'s `else if`) is the else arm of the
 condition before it. `@narrow.loop` marks a position's construct that
-tests its condition again after each run of its arm (PHP's `while`): a
-`break` in the arm lands after the loop too, so its arms decide nothing
-about what follows. The fall-through derivation and `@narrow.loop` are a
-single-block stand-in for CFG reachability and retire with it
-(`TODO(cfg-exit-join)`). Apart from guards, each document marks every
+tests its condition again after each run of its arm (the `while` of PHP,
+Python and C++): its implicit `else` is where a test fails, and its arm
+leaves only where it leaves and no `@flow.to_loop` statement in it
+(`break`, `continue`) can go to the loop. That is checked conservatively,
+by containment alone, so one an inner loop or a C++ `switch` owns counts
+too. So a loop whose body always leaves narrows the rest of the block by
+its condition failing, and any other narrows nothing after it. A
+`@flow.block` statement (PHP's and C++'s bare `{ … }`) runs its
+statements in sequence where it stands, so an arm looks through it for
+one that leaves. A short-circuit written as a statement (PHP's `G ||
+throw …`, `G or die`) decides only the arm on its right; a match naming
+the expression statement around it `@narrow.stmt` makes that statement
+the chain's, and a condition with no `then` arm has an implicit one where
+it holds, as one with no `else` has one where it fails. The fall-through
+derivation, `@narrow.loop` and `@flow.to_loop` are a single-block
+stand-in for CFG reachability and retire with it (`TODO(cfg-exit-join)`). Apart from guards, each document marks every
 statement that leaves its block unconditionally `@flow.leaves` (return,
 throw or raise, `break`, `continue`, C++'s `co_return`, PHP's `die` and
-`exit`, which the language reserves, so their spelling names them), and
+`exit`, which the language reserves, so their spelling names them, and
+PHP's leaving right side of a short-circuit), and
 the extractor derives the rest by containment, the Perl rule above: a
 condition's statement is the node holding it and its then arm; a chain
 is that statement with every condition whose statement is an else arm of
@@ -469,11 +492,78 @@ holds. A conjunction that proves a type for a subject drops its `defined`
 of that subject (`conjoin`): the type is already defined, and two regions
 on one span would otherwise tie.
 
-A postfix guard is read where it is written, after the statement it
-decides, so a write in that statement reaches the guard's read
-(`$x = f($x) if defined $x`). The strip then sees the write's value, not
-the value the guard tested; it answers only if that value may be undef
-(`TODO(postfix-guard-read-order)`).
+## Evaluation order: a modifier runs before its statement
+
+A read asks at its own site, so it sees every fact made before it in the
+source. A statement modifier inverts that: `STMT if G` (`unless`, `while`,
+`until`) evaluates `G` before `STMT`, and `STMT for LIST` evaluates `LIST`
+before it, though both are written after it.
+
+The order is read off the core syntax tree (`docs/adr/core-syntax-tree.md`),
+never a table beside it: a read climbs its node's ancestors
+(`SyntaxForest::climb_in_file`, which runs on from `s///e` code through the
+node it replaces). The first callable it meets (`cst::is_callable_boundary`)
+runs the read when called, so it is evaluated before nothing; the first
+node that is a modifier's head (`cst::modifier_runs_head_first` on its
+parent) names the statement it runs before. A site that holds only a span
+(a plugin's emission, a word of a string list) climbs from the smallest node
+holding it (`SyntaxForest::covering`). Every builder reader asks the same
+climb (`Builder::runs_before`), so a read is ordered the same whichever
+pass reads it — the walk at the node, the narrowing at the modifier, the
+constant fold, a post-walk pass over the refs. The fact lands in two homes,
+one per role (rule #14):
+
+- **On the bag**, for what it types: a variable read inside a head carries
+  `EvaluatedBefore(stmt)` on its `Expr` beside its value edge, so the
+  registry's own chase through that `Expr` reads in order.
+- **On the ref**, for what it resolves: every ref and deref site minted
+  inside a head carries `evaluated_before`, and `Ref::read_point()` is the
+  read point a consumer asks. The query entries that type a value at a
+  point (`inferred_type_via_bag_ctx`, `place_type_at`, `subject_type_at`)
+  take a `ReadPoint`, never a bare `Point`: a consumer with a ref passes
+  its read point, and one with only a position (a cursor, a scope's end, a
+  declaration) says so with `ReadPoint::position`. So the undef/Optional
+  deref diagnostics, the closed-shape key lint, the invocant ladder, hover,
+  the hash-key owner pass, the type hierarchy and `--type-at` all read in
+  order without knowing the fact exists.
+
+A `ReadPoint { at, skips }` admits every fact at or before `at` except
+those made inside `skips`. So in `$x = f($x) if defined $x` the strip reads
+the value `defined` tested, not the one the assignment leaves, and `$o =
+Bar->new if $o->alive` calls `alive` on the old `$o`. This holds for every
+read in the head, `defined` or not. The skip is a span, not an earlier
+point: a condition's own writes and narrowings still reach the reads after
+them (`last unless defined($n = $n->{parent}) and ref $n`; `... if defined
+$x && $x->ok`). A binding is lexical, not flow (a `my` is in view from its
+statement's end), so the binding a read names is still asked at `at`.
+
+`do BLOCK while G` runs its block first, so its `G` reads where it is
+written and carries no order fact. A `while`/`until` modifier's condition
+skips the statement as a prefix loop's condition skips its body: no loop
+join yet (`docs/prompt-cfg-tier.md`).
+
+What the shape cannot say:
+
+- **Nested heads.** A read in a head nested in another's head (`$o =
+  Bar->new if do { 1 if $o->alive }`) runs before both statements; a
+  `ReadPoint` skips one, the innermost (`TODO(nested-modifier-skips)`).
+- **A narrowing cut at the statement's write.** A guard region is cut at
+  the first write to its subject in the source, so `return if defined $c;
+  $c = connect() unless $c->ping` ends the exit's `Undef` region at the
+  write, ahead of the head that reads it (`TODO(narrowing-cutoff-read-order)`).
+- **Later writes.** A skip can only remove facts that precede the read.
+  The statement's reads of a write its condition makes (`push @out, $l
+  while defined($l = <$fh>)`), a C-style `for`'s step reading its body's
+  writes, and a Python comprehension's element (`f(x)` in `[f(x) for x in
+  xs]` reads the binding its `for` clause makes after it) need a fact made
+  after the read to reach it. That is a program-order position, which
+  replaces `EvaluatedBefore(Span)` and `ReadPoint::skips` rather than
+  extending them (`TODO(evaluation-order-later-writes)`). In the pack tier
+  no expression that precedes a condition in the source writes today:
+  Python's `a if c else b` would need the fact once `:=` is a write
+  (`TODO(walrus-evaluation-order)`).
+
+Cursor-time completion on text with no recorded read asks at the cursor.
 
 ## Reaching writes
 
