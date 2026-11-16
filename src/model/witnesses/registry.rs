@@ -4081,8 +4081,18 @@ impl ReducerRegistry {
                     ctx.app_surface_consumers,
                 );
                 // The first parent in MRO order that defines it is the one
-                // Perl runs; one that states nothing is no evidence.
-                parents.into_iter().find_map(|p| ask(state, WitnessAttachment::effects_of(p, name.clone())))
+                // Perl runs. A silent parent whose whole ancestry this file
+                // declares does not define it; any other silent parent may,
+                // and then nothing later in the order is the one that runs.
+                for p in parents {
+                    if let Some(e) = ask(state, WitnessAttachment::effects_of(p.clone(), name.clone())) {
+                        return Some(e);
+                    }
+                    if !file_declares_ancestry(ctx, &p) {
+                        return None;
+                    }
+                }
+                None
             }
             // TODO(effect-descendants): a receiver may be any subclass of its
             // class, so the call runs every indexed override; until that
@@ -4187,6 +4197,33 @@ fn defines_member_here(bag: &WitnessBag, owner: &str, space: crate::model::file_
     bag.iter_attachment(&returns).any(|w| {
         !matches!(&w.payload, WitnessPayload::Edge(WitnessAttachment::Member { name: n, .. }) if n == name)
     })
+}
+
+/// Whether `class` and every ancestor of it are packages this file
+/// declares, so an in-file walk that finds no member has seen them all.
+fn file_declares_ancestry(ctx: &BagContext, class: &str) -> bool {
+    use crate::model::file_analysis::SymKind;
+    let declared = |c: &str| {
+        ctx.symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == c)
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut todo = vec![class.to_string()];
+    while let Some(c) = todo.pop() {
+        if seen.contains(&c) {
+            continue;
+        }
+        if !declared(&c) || seen.len() >= 20 {
+            return false;
+        }
+        todo.extend(crate::model::file_analysis::parents_of(
+            &c,
+            ctx.package_parents,
+            ctx.module_index,
+            ctx.app_surface_consumers,
+        ));
+        seen.push(c);
+    }
+    true
 }
 
 fn binding_scope_end(ctx: &BagContext, binding: &crate::model::file_analysis::Binding) -> Option<Point> {

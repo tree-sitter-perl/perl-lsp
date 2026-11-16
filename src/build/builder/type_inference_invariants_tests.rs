@@ -559,3 +559,28 @@ fn a_call_ends_the_way_the_definitions_it_runs_end() {
     assert_eq!(fa.symbol_ends(fail.id), Ends::UNWINDS);
     assert_eq!(fa.symbol_ends(plain.id), Ends::all(), "a definition that states nothing");
 }
+
+/// `SUPER::` runs the first parent in MRO order that defines the method.
+/// A parent this file does not declare may define it, so a later parent's
+/// answer is not the one that runs: the call is the top. A parent the file
+/// declares whole, and which defines nothing, is passed over.
+#[test]
+fn super_passes_only_a_parent_the_file_can_vouch_for() {
+    use crate::model::witnesses::{query_expr_ends, Ends, WitnessAttachment};
+    let ends_of_super = |first_parent_here: bool| -> Ends {
+        let decl = if first_parent_here { "package Remote;\nsub other { 1 }\n" } else { "" };
+        let source = format!(
+            "{decl}package Foo;\nsub fail {{ return 1 }}\npackage Bar;\nuse parent -norequire, 'Remote', 'Foo';\nsub fail {{ my $self = shift;\n$self->SUPER::fail;\n}}\n"
+        );
+        let fa = build_with(&source, registry_with_fail_unwinding());
+        let ctx = fa.bag_context(None);
+        let row = source.lines().position(|l| l.starts_with("$self->SUPER")).unwrap();
+        let span = crate::model::file_analysis::Span {
+            start: tree_sitter::Point { row, column: 0 },
+            end: tree_sitter::Point { row, column: "$self->SUPER::fail".len() },
+        };
+        query_expr_ends(&fa.witnesses, &WitnessAttachment::Expr(span), Some(&ctx))
+    };
+    assert_eq!(ends_of_super(false), Ends::all(), "an undeclared parent may define it");
+    assert_eq!(ends_of_super(true), Ends::UNWINDS, "a declared parent that lacks it is passed over");
+}
