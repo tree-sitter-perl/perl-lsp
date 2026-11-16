@@ -19,8 +19,8 @@ scripts/equiv/run.sh [<base>]           # whole-analysis equivalence vs base (re
 
 A test that runs a pack-language file through the driver
 (`LanguageRegistry`) only works when that language's feature is compiled
-in, so it carries `#[cfg(feature = "<lang>")]`. CI runs the unit tests with
-the features and without them, so an ungated one fails its own PR. (Tests
+in, so it carries `#[cfg(feature = "<lang>")]`. PRs run the unit tests with
+the features; main also runs them without, so an ungated one breaks main. (Tests
 that build a grammar's parser directly need no gate: the grammars are
 dev-dependencies.)
 

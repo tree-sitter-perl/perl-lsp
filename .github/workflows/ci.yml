@@ -72,9 +72,11 @@ jobs:
 
       # A plain `cargo test` is what everyone runs locally. A test that reaches
       # a pack language through the driver needs that language's feature, so
-      # one left ungated passes the step above and fails here, on the PR that
-      # adds it. Gate it with `#[cfg(feature = "<lang>")]`.
+      # one left ungated passes the step above and fails here. Gate it with
+      # `#[cfg(feature = "<lang>")]`. Main only: a second full test build on
+      # every PR push costs more than catching the miss one merge late.
       - name: Test without language features
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo test
 
   e2e-tests:
