@@ -1,7 +1,7 @@
 //! The constant-fold table, keyed by what a name resolves to rather than
 //! how it is spelled: `my $m` in two subs, `our @ISA` in two packages, and
 //! `use constant M` in two packages are distinct entries. Reads are
-//! positional (the latest write at or before the read), so a post-walk
+//! positional (the latest write reaching the read), so a post-walk
 //! reader sees the value its own site saw, not the walk's last write.
 //!
 //! Interim: the value lane (`docs/prompt-cfg-tier.md`, `Place` +
@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::model::file_analysis::Binding;
+use crate::model::witnesses::ReadPoint;
 use crate::model::conventions::{name_match_key, split_qualified, split_qualified_var, PERL_SPELLINGS};
 
 struct Write {
@@ -32,13 +33,13 @@ pub(super) struct ConstTable {
 }
 
 impl ConstTable {
-    /// The write a read at `at` sees: the latest at or before it, ties to
-    /// the later write.
-    fn visible(&self, key: &Binding, at: Point) -> Option<&Write> {
+    /// The write a read at `at` sees: the latest reaching it, ties to the
+    /// later write.
+    fn visible(&self, key: &Binding, at: ReadPoint) -> Option<&Write> {
         self.writes
             .get(key)?
             .iter()
-            .filter(|w| w.at <= at)
+            .filter(|w| at.reaches(w.at))
             .fold(None, |best: Option<&Write>, w| match best {
                 Some(b) if b.at > w.at => Some(b),
                 _ => Some(w),
@@ -118,21 +119,24 @@ impl<'a> Builder<'a> {
         None
     }
 
-    fn visible_constant(&self, name: &str, at: Point) -> Option<&Write> {
+    /// The write `read` sees: one reaching its site, which skips the
+    /// statement a modifier's condition is evaluated before.
+    fn visible_constant(&self, name: &str, read: Node<'a>) -> Option<&Write> {
         if !self.consts.written.contains(&name_match_key(name, &PERL_SPELLINGS)) {
             return None;
         }
-        self.consts.visible(&self.const_key(name, at), at)
+        let at = self.read_point_of(read);
+        self.consts.visible(&self.const_key(name, at.at), at)
     }
 
     /// The constant string values `name` holds where `read` is.
-    pub(super) fn resolve_constant_strings(&self, name: &str, read: Node<'_>) -> Option<Vec<String>> {
-        self.visible_constant(name, read.start_position())?.values.clone()
+    pub(super) fn resolve_constant_strings(&self, name: &str, read: Node<'a>) -> Option<Vec<String>> {
+        self.visible_constant(name, read)?.values.clone()
     }
 
     /// The source literal of a single-literal fold of `name` where `read` is.
-    pub(super) fn constant_string_source(&self, name: &str, read: Node<'_>) -> Option<Span> {
-        self.visible_constant(name, read.start_position())?.source
+    pub(super) fn constant_string_source(&self, name: &str, read: Node<'a>) -> Option<Span> {
+        self.visible_constant(name, read)?.source
     }
 
     /// The one write: after `write` (the node the write belongs to), `name`
@@ -150,7 +154,7 @@ impl<'a> Builder<'a> {
 
     /// Bind the topic `$_` to `values` for the extent of `node`; the outer
     /// topic resumes at its end.
-    pub(super) fn with_topic(&mut self, node: Node<'_>, values: Vec<String>) {
+    pub(super) fn with_topic(&mut self, node: Node<'a>, values: Vec<String>) {
         let outer = self.resolve_constant_strings("$_", node);
         self.push_constant("$_", node.start_position(), Some(values), None);
         self.push_constant("$_", node.end_position(), outer, None);
