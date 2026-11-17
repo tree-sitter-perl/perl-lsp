@@ -908,7 +908,7 @@ impl<'a> Builder<'a> {
                     }
                 }
                 "conditional_statement" => {
-                    let chain = crate::cst::conditional_arms(stmt);
+                    let chain = super::control::branch_chain(self.source, stmt);
                     let Some(last_arm) = chain.last().copied() else {
                         arms.push(TailArm::Value(node_to_span(stmt)));
                         continue;

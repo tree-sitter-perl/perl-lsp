@@ -158,8 +158,9 @@ what the subject holds on the paths that reach it. Every use reaches the
 bag through one producer, `Builder::observe`, as a `TypeObservation` —
 evidence, which a value and a class identity outrank, never a proof. Its
 region is the narrowing rule's: from the use to the end of the
-conditionally-run arm around it (`cst::conditional_arm`: the statement a
-postfix modifier guards, a ternary branch, a short-circuit RHS), else to
+conditionally-run arm around it (`control::arm_around`, the arms
+`queries/perl/ctl.scm` declares: the statement a postfix modifier guards,
+a ternary branch, a short-circuit RHS), else to
 the end of its block, cut at the subject's next rebind
 (`RegionFact::Observe`, sharing `PendingNarrow`'s cutoffs, place subjects
 included). Past an arm an observation says nothing: unlike a write, it

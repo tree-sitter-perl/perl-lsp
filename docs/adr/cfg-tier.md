@@ -197,8 +197,8 @@ but it swallows what its body throws (`@ctl.try.quiet`).
 - A `try` with no path out leaves the arm holding it.
 - A throw in the tried body of a `try` that catches is no leave of the
   callable; a throw in a handler or a `finally` leaves as anywhere else.
-- `cst::conditional_arm` counts the tried body and every handler as arms,
-  so an observation inside them is bounded to them.
+- The tried body and every handler are arms, so an observation inside
+  them is bounded to them.
 
 ## Unbinding
 
@@ -222,10 +222,16 @@ One `@ctl.*` vocabulary (branch / cond / then / else, loop and its body,
 step, else and once, try / body / handler / finally, and `leave.*` for
 return, throw, break, continue and jump) replaces `@ctl.cond/then/else/exit`,
 `@arm` and the branch and loop kinds of `@guard.region`. Perl declares its
-own in `queries/perl/ctl.scm` on the combined walk, so Perl's exit keywords
-stop being a Rust table. The narrowing atoms (`@narrow.is/set/unset/...`)
-describe conditions and stay. The constructs are read once, by the join
-builder, through a tree-free `ControlView`; nothing about them persists.
+own in `queries/perl/ctl.scm`, so Perl's exit keywords stop being a Rust
+table. The narrowing atoms (`@narrow.is/set/unset/...`) describe
+conditions and stay. The join builder reads the constructs through a
+tree-free `ControlView`; nothing about them persists. The walk asks the
+same document what runs conditionally: `control::arm_around` climbs from a
+node and tries each ancestor as a match's root (an observation's extent, a
+shift or a key write that may not run), and `control::branch_chain` reads
+an `if` chain's arms in order. Rooting each match at one node keeps the
+cost the climb's: the document read over a whole file costs what the walk's
+own patterns do.
 A body that runs later is already a callable scope (`ScopeKind::is_callable`).
 
 ## Effects: how a call ends

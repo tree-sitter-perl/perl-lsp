@@ -1,6 +1,5 @@
 use super::*;
-use crate::cst::{conditional_arm, node_to_span, ArmBound, SyntaxForest};
-use crate::model::file_analysis::Span;
+use crate::cst::{node_to_span, SyntaxForest};
 
 fn parse(source: &str) -> tree_sitter::Tree {
     let mut parser = tree_sitter::Parser::new();
@@ -27,68 +26,32 @@ fn is_callable(kind: &str) -> bool {
     )
 }
 
-/// `xor` evaluates both operands, so its right one is no arm; the walker's
-/// climb counts it as one.
-// TODO(xor-arm): `cst::conditional_arm` treats `xor`'s right operand as
-// conditionally run; fix it with a census, since it bounds observations.
-// Owner: the 0.11 CFG follow-up.
-fn walker_counts_xor(arm: tree_sitter::Node, source: &str) -> bool {
-    arm.parent().is_some_and(|p| {
-        p.kind() == "lowprec_logical_expression" && (0..p.child_count()).filter_map(|i| p.child(i)).any(|c| !c.is_named() && c.utf8_text(source.as_bytes()) == Ok("xor"))
-    })
-}
-
-/// Every named node's innermost arm, as the view reads it from the document
-/// and as `cst::conditional_arm` climbs to it, inside the node's callable.
-/// An `else` arm is its block in the document and the `else` node in the
-/// walker; both hold the same statements. The walker stops at an `elsif`
-/// (its whole chain is one arm of the `if`), where the document goes on to
-/// the `elsif`'s own arms, so the document's answer is lifted out of every
-/// `elsif` before the two are compared.
+/// Every named node's innermost arm, as the climb from the node reads it
+/// ([`arm_around`], what the walk asks) and as the view of the whole file
+/// holds it, inside the node's callable.
 fn disagreements(source: &str) -> Vec<String> {
     let tree = parse(source);
     let view = view_of(&tree, source);
     let syn = SyntaxForest::new(tree.root_node());
-    let mut elsifs = std::collections::HashSet::new();
-    let mut stack = vec![tree.root_node()];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "elsif" {
-            elsifs.insert(node_to_span(n));
-        }
-        stack.extend((0..n.named_child_count()).filter_map(|i| n.named_child(i)));
-    }
-    let owner = |arm: &Arm| view.constructs.iter().find(|c| c.arms.contains(arm)).map(|c| c.span);
     let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(n) = stack.pop() {
         for i in (0..n.named_child_count()).rev() {
             stack.push(n.named_child(i).unwrap());
         }
-        // An `else` node is its keyword plus its block; the block is the arm.
-        if matches!(n.kind(), "label" | "source_file" | "else") {
+        if matches!(n.kind(), "label" | "source_file") {
             continue;
         }
         let Some(within) = syn.ancestors(n).find(|a| is_callable(a.kind())) else { continue };
-        let walker = conditional_arm(&syn, n, ArmBound::Sub);
-        if walker.is_some_and(|a| walker_counts_xor(a, source)) {
-            continue;
-        }
-        let walker: Option<Span> = walker.map(|a| match a.kind() {
-            "else" => node_to_span(a.child_by_field_name("block").unwrap_or(a)),
-            _ => node_to_span(a),
-        });
-        let within = node_to_span(within);
-        let mut doc = view.arm_around(node_to_span(n), within);
-        while let Some(elsif) = doc.and_then(owner).filter(|c| elsifs.contains(c)) {
-            doc = view.arm_around(elsif, within);
-        }
+        let climb = arm_around(&syn, source.as_bytes(), n, ArmBound::Sub).map(node_to_span);
+        let doc = view.arm_around(node_to_span(n), node_to_span(within));
         let doc = doc.map(|a| a.span);
-        if walker != doc {
+        if climb != doc {
             out.push(format!(
-                "{} at {:?}: walker {:?}, document {:?}",
+                "{} at {:?}: climb {:?}, document {:?}",
                 n.kind(),
                 n.start_position(),
-                walker.map(|s| (s.start, s.end)),
+                climb.map(|s| (s.start, s.end)),
                 doc.map(|s| (s.start, s.end))
             ));
         }
@@ -123,12 +86,12 @@ sub f {
 "#;
 
 #[test]
-fn the_document_finds_the_arms_the_walker_climbs_to() {
+fn the_climb_finds_the_arms_the_whole_view_holds() {
     assert_eq!(disagreements(SHAPES), Vec::<String>::new());
 }
 
 #[test]
-fn the_document_and_the_walker_agree_on_the_repository_perl() {
+fn the_climb_and_the_whole_view_agree_on_the_repository_perl() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     let mut dirs = vec![root.join("test_files"), root.join("gold-corpus")];

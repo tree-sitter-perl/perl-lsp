@@ -221,7 +221,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             // Usage-site evidence: a mono-typed operator observes
             // its operand. Same Observation payloads the Perl
             // walker emits; the fold is the production one. It holds from
-            // the site to the end of the innermost `@arm` around it inside
+            // the site to the end of the innermost `@ctl` arm around it inside
             // its scope, else to the end of the scope, cut at the next
             // rebind like a guard's narrowing.
             let site = e.span();
@@ -233,7 +233,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             let end = ad
                 .around(e)
                 .map(|a| &ad.events()[a])
-                .filter(|a| a.cap == Capture::Arm)
+                .filter(|a| matches!(a.cap, Capture::Ctl(c) if c.is_arm()))
                 .min_by_key(|a| ad.width(a))
                 .filter(|a| !before(a.start, scope.start))
                 .map_or(scope.end, |a| a.end);

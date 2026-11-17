@@ -286,7 +286,7 @@ impl<'a> Builder<'a> {
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
-            conditional: crate::cst::conditional_arm(self.syntax, left, crate::cst::ArmBound::Sub).is_some(),
+            conditional: super::control::arm_around(self.syntax, self.source, left, super::control::ArmBound::Sub).is_some(),
         });
     }
 

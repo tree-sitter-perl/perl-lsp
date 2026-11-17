@@ -243,6 +243,106 @@ pub(super) fn statements_of(block: Node<'_>) -> Vec<Node<'_>> {
     out
 }
 
+/// How far [`arm_around`] climbs: to the enclosing sub (or file), or only
+/// to the enclosing block. A fact that lands on the block's own scope asks
+/// `Block`: inside the block, the block has, by construction, run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArmBound {
+    Sub,
+    Block,
+}
+
+/// The arm the document declares, between `node` and `bound`, that holds
+/// `node`: the innermost construct around it whose `@ctl` arm captures
+/// lie on the climb. `None` = `node` runs whenever its bound does. Each
+/// ancestor is tried as a match's root only, so the cost is the climb's,
+/// not the file's. Scope-crossing conditionality (a write inside a closure
+/// relative to an outer variable's scope) is the caller's check.
+pub(super) fn arm_around<'t>(syn: &crate::cst::SyntaxForest<'t>, source: &[u8], node: Node<'t>, bound: ArmBound) -> Option<Node<'t>> {
+    use tree_sitter::StreamingIterator;
+    let (query, caps) = ctl_query();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    cursor.set_max_start_depth(Some(0));
+    let mut path = vec![node.id()];
+    for p in syn.ancestors(node) {
+        let kind = p.kind();
+        if crate::cst::is_callable_boundary(kind) || kind == "source_file" || (bound == ArmBound::Block && kind == "block") {
+            return None;
+        }
+        let mut it = cursor.matches(query, p, source);
+        while let Some(m) = it.next() {
+            if let Some(c) = m.captures.iter().find(|c| caps[c.index as usize].is_arm() && path.contains(&c.node.id())) {
+                return Some(c.node);
+            }
+        }
+        path.push(p.id());
+    }
+    None
+}
+
+/// One arm of an `if`/`unless` chain.
+#[derive(Clone, Copy)]
+pub(super) struct CondArm<'a> {
+    /// `None` for the trailing `else`.
+    pub cond: Option<Node<'a>>,
+    pub block: Node<'a>,
+    /// The truth value `cond` must take for `block` to run: `false` only
+    /// for the leading arm of an `unless`. An `else` arm carries `true`.
+    pub enter: bool,
+}
+
+/// A branch statement's arms in order, as the document declares them: the
+/// leading arm, each later branch's (an `elsif`), then the trailing `else`.
+/// A branch's own arm comes first in source; the arm after it is either the
+/// next branch of the chain or the `else`.
+pub(super) fn branch_chain<'t>(source: &[u8], stmt: Node<'t>) -> Vec<CondArm<'t>> {
+    let mut out = Vec::new();
+    let mut at = stmt;
+    while let Some((cond, arms)) = branch_at(source, at) {
+        let Some(&(enter, block)) = arms.first() else { break };
+        out.push(CondArm { cond, block, enter });
+        let Some(&(_, next)) = arms.get(1) else { break };
+        if branch_at(source, next).is_none() {
+            out.push(CondArm { cond: None, block: next, enter: true });
+            break;
+        }
+        at = next;
+    }
+    out
+}
+
+/// The branch rooted at `node`: its condition, and each arm with whether
+/// the condition holds there, in source order.
+fn branch_at<'t>(source: &[u8], node: Node<'t>) -> Option<(Option<Node<'t>>, Vec<(bool, Node<'t>)>)> {
+    use tree_sitter::StreamingIterator;
+    let (query, caps) = ctl_query();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    cursor.set_max_start_depth(Some(0));
+    let mut it = cursor.matches(query, node, source);
+    let mut found = None;
+    while let Some(m) = it.next() {
+        if !m.captures.iter().any(|c| caps[c.index as usize] == CtlCap::Branch && c.node == node) {
+            continue;
+        }
+        let (cond, arms) = found.get_or_insert_with(|| (None, Vec::new()));
+        for c in m.captures {
+            match caps[c.index as usize] {
+                CtlCap::Cond => *cond = cond.or(Some(c.node)),
+                CtlCap::Then | CtlCap::Else => {
+                    let holds = caps[c.index as usize] == CtlCap::Then;
+                    if !arms.iter().any(|&(_, n): &(bool, Node<'t>)| n == c.node) {
+                        arms.push((holds, c.node));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (cond, mut arms) = found?;
+    arms.sort_by_key(|&(_, n)| n.start_byte());
+    Some((cond, arms))
+}
+
 fn leave_kind(c: CtlCap) -> Option<LeaveKind> {
     Some(match c {
         CtlCap::LeaveReturn => LeaveKind::Return,

@@ -291,7 +291,6 @@ fn family(cap: Capture) -> Family {
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)
-        | C::Arm
         | C::Domain(_)
         | C::Shape(_)
         | C::TypeAnnot(_)

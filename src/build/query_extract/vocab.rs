@@ -790,9 +790,6 @@ pub enum Capture {
     Flow(FlowCap),
     Expr(ExprCap),
     Obs(ObsKind),
-    /// A conditionally-run arm (`@arm`): an observation made inside holds
-    /// only within it.
-    Arm,
     Narrow(NarrowCap),
     Ctl(CtlCap),
     Move(MoveCap),
@@ -917,7 +914,6 @@ impl Capture {
             ["expr", "wrapper"] => C::Expr(ExprCap::Wrapper),
             ["expr", "wrapper", "inner"] => C::Expr(ExprCap::WrapperInner),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
-            ["arm"] => C::Arm,
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["ctl", rest @ ..] => C::Ctl(CtlCap::parse(&rest.join("."))?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
@@ -998,7 +994,6 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Wrapper) => f.write_str("expr.wrapper"),
             C::Expr(ExprCap::WrapperInner) => f.write_str("expr.wrapper.inner"),
             C::Obs(k) => write!(f, "obs.{k}"),
-            C::Arm => f.write_str("arm"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Ctl(k) => write!(f, "ctl.{k}"),
             C::Move(k) => write!(f, "move.{k}"),

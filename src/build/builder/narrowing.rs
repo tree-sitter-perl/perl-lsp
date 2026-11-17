@@ -595,7 +595,7 @@ impl<'a> Builder<'a> {
     /// join (`assemble_joins`), which is also what carries a narrowing past
     /// an arm that leaves.
     pub(super) fn narrow_block_guard(&mut self, cond_stmt: Node<'a>) {
-        let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = crate::cst::conditional_arms(cond_stmt)
+        let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = super::control::branch_chain(self.source, cond_stmt)
             .into_iter()
             .map(|arm| (arm.cond, arm.block, arm.enter))
             .collect();
@@ -890,7 +890,7 @@ impl<'a> Builder<'a> {
     /// Record what `operand`'s use at `context` reveals about it. A use
     /// says what the operand holds on the paths that reach it and no others:
     /// it holds from `context` to the end of the conditionally-run arm
-    /// around it (`cst::conditional_arm`), or else to the end of the block
+    /// around it (`control::arm_around`), or else to the end of the block
     /// it sits in, and like any narrowing it ends at the subject's next
     /// rebind. Past an arm the value is a join of the arm and its bypass,
     /// which `JoinFold` will answer; until then the arm says nothing
@@ -906,7 +906,7 @@ impl<'a> Builder<'a> {
             return;
         }
         let Some(subject) = self.narrow_subject_of(operand) else { return };
-        let extent = crate::cst::conditional_arm(self.syntax, context, crate::cst::ArmBound::Block)
+        let extent = super::control::arm_around(self.syntax, self.source, context, super::control::ArmBound::Block)
             .or_else(|| crate::cst::enclosing_block(self.syntax, context));
         let Some(extent) = extent else { return };
         let region = Span { start: context.start_position(), end: extent.end_position() };
