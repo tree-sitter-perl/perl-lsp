@@ -3177,10 +3177,12 @@ impl ReducerRegistry {
                 continue;
             };
             let changed = if temporal {
-                super::extend_in_place(base, &x.hops, x.value.as_ref(), x.widen)
+                super::extend_in_place(base, &x.hops, x.value.as_ref(), x.replaces, x.widen)
             } else {
                 let mut next = base.clone();
-                super::extend_in_place(&mut next, &x.hops, x.value.as_ref(), x.widen) && {
+                // A slot's writes are arms of one value: an arm no type names says
+                // nothing about the others.
+                super::extend_in_place(&mut next, &x.hops, x.value.as_ref(), false, x.widen) && {
                     *base = crate::model::file_analysis::join(base, &next, class_order(q));
                     true
                 }

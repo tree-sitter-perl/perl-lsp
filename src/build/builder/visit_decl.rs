@@ -140,11 +140,7 @@ impl<'a> Builder<'a> {
             // Dereference expressions → rep observations on the operand
             "array_element_expression" => {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
-                if self.element_written_in_place(node) {
-                    self.record_in_place_write(node);
-                } else if self.element_escaped(node) {
-                    self.record_place_escape(node);
-                }
+                self.record_positional_element_write(node);
                 // The direct `$arr[i]` indexes the named array; only a
                 // subscript through a reference has a receiver.
                 if let Some(base) = crate::cst::element_deref_base(node) {

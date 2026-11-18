@@ -86,7 +86,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
         bag.push(Witness {
             attachment,
             source: WitnessSource::Builder("mutation_extension".into()),
-            payload: WitnessPayload::Extend(KeyExtension { hops, value, widen }),
+            payload: WitnessPayload::Extend(KeyExtension { hops, value, replaces: w.replaces, widen }),
             span: Span { start: w.span.start, end: w.span.start },
         });
     }
@@ -222,6 +222,7 @@ pub(super) fn extend_in_place(
     shape: &mut InferredType,
     hops: &[WriteKey],
     vtype: Option<&InferredType>,
+    replaces: bool,
     widen: bool,
 ) -> bool {
     let Some((first, rest)) = hops.split_first() else { return false };
@@ -241,7 +242,7 @@ pub(super) fn extend_in_place(
                 if widen {
                     return open_shape(open);
                 }
-                if vtype.is_none() || keys[i].1.as_deref() == vtype {
+                if (vtype.is_none() && !replaces) || keys[i].1.as_deref() == vtype {
                     return false;
                 }
                 keys.to_mut()[i].1 = vtype.cloned().map(Box::new);
@@ -253,7 +254,7 @@ pub(super) fn extend_in_place(
             // Grown where it stands: a chain of writes under one key copies
             // the inner list once, not once per write.
             let inner = keys.to_mut()[i].1.as_deref_mut().expect("checked above");
-            extend_in_place(inner, rest, vtype, widen)
+            extend_in_place(inner, rest, vtype, replaces, widen)
         }
         // A tuple slot: only the sound moves, retyping an in-bounds slot or
         // appending at exactly `len`. A write past `len` leaves holes, so the
@@ -274,10 +275,14 @@ pub(super) fn extend_in_place(
                     elems.push(vivify(rest, vtype, false).unwrap_or(InferredType::Unknown));
                     return true;
                 }
-                return extend_in_place(&mut elems[i], rest, vtype, widen);
+                return extend_in_place(&mut elems[i], rest, vtype, replaces, widen);
             }
             match (i.cmp(&elems.len()), vtype) {
-                (std::cmp::Ordering::Less, None) => false,
+                (std::cmp::Ordering::Less, None) if !replaces || elems[i] == InferredType::Unknown => false,
+                (std::cmp::Ordering::Less, None) => {
+                    elems[i] = InferredType::Unknown;
+                    true
+                }
                 (std::cmp::Ordering::Less, Some(vt)) if elems[i] == *vt => false,
                 (std::cmp::Ordering::Less, Some(vt)) => {
                     elems[i] = vt.clone();

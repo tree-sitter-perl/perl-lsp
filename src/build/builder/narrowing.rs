@@ -1163,9 +1163,7 @@ impl<'a> Builder<'a> {
                 let Some(read) = crate::cst::read_place(self.syntax, node, self.source, &mut binder) else { return };
                 let access = match kind {
                     "hash_element_expression" | "array_element_expression" => {
-                        let written = self.element_write_kind(node).is_some()
-                            || crate::cst::is_value_reset_target(self.syntax, node, self.source);
-                        if written { Access::Write } else { Access::Opaque }
+                        if self.element_write_kind(node).is_some() { Access::Write } else { Access::Opaque }
                     }
                     // A slice can write every slot it names, read or not.
                     "slice_expression" | "keyval_expression" => Access::Write,
@@ -1194,7 +1192,7 @@ impl<'a> Builder<'a> {
             None => self.collect_flow_matches(),
         };
         for caps in pending {
-            // Bind shapes: no inflowing value. A bare `my`/`local` CLEARS to
+            // Bind shapes: no inflowing value. A bare `my`, `local` or `undef` CLEARS to
             // undef (`Cleared`); a `foreach` var rebinds per element (`Rebind`,
             // type TBD). Both record the rebind for the narrowing cutoff.
             if let Some(bare) = caps.clear {
@@ -1271,12 +1269,12 @@ impl<'a> Builder<'a> {
                                 let scope = self.scope_at_point(elem.start_position());
                                 match (n.filter(|_| plain), &elem_nodes) {
                                     (Some(n), Some(nodes)) => {
-                                        self.record_key_write(elem, nodes.get(n).copied(), None, scope)
+                                        self.record_key_write(elem, nodes.get(n).copied(), None, true, scope)
                                     }
                                     (Some(n), None) => {
-                                        self.record_key_write(elem, Some(src), Some(n as i32), scope)
+                                        self.record_key_write(elem, Some(src), Some(n as i32), true, scope)
                                     }
-                                    (None, _) => self.record_key_write(elem, None, None, scope),
+                                    (None, _) => self.record_key_write(elem, None, None, false, scope),
                                 }
                                 continue;
                             }
@@ -1319,7 +1317,7 @@ impl<'a> Builder<'a> {
 
     /// The variable name(s) a clear (`@flow.clear`) targets — a
     /// `variable_declaration` (single or paren list) or a `localization`
-    /// scalar.
+    /// name.
     pub(super) fn bare_bind_names(&self, bare: Node<'a>) -> Vec<String> {
         if bare.kind() == "variable_declaration" {
             if let Some(targets) = self.lhs_list_targets(bare) {

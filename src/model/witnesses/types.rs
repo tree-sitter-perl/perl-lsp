@@ -896,6 +896,10 @@ pub struct KeyExtension {
     /// (`$s->{self} = $s`) sees the shape without this key. A list
     /// assignment's slot is already taken.
     pub value: Option<InferredType>,
+    /// The write stores `value` whatever it is (`KeyWrite::replaces`): an
+    /// unknown one leaves the key untyped rather than as it was.
+    #[serde(default)]
+    pub replaces: bool,
     /// The write may not have run (conditional, or reached across a scope
     /// boundary): it opens the shape instead of growing it.
     pub widen: bool,

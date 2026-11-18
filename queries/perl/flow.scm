@@ -7,7 +7,8 @@
 ;                  `our` declaration (single OR list), or a bare `($x, $y)`
 ;                  group — the minter iterates a list's slots positionally
 ;   @flow.source   the value expression the LHS receives
-;   @flow.clear    a declaration with no value: the name resets to undef
+;   @flow.clear    a bind with no value (`my $x;`, `local $x`, `undef $x`):
+;                  the name resets to undef
 ;   @flow.rebind   a loop variable, rebound to each element of its source
 ;
 ; Names are the shared capture vocabulary (`query_extract::vocab::FlowCap`),
@@ -43,8 +44,20 @@
 ; and so won't match here). Clears to undef.
 (expression_statement (variable_declaration) @flow.clear)
 
-; bare `local $x;` — clears the scalar to undef for the dynamic scope.
-(localization_expression (scalar) @flow.clear)
+; `local $x` / `local @a` / `local ($x, %h)` — each name clears for the
+; dynamic scope.
+(localization_expression [(scalar) (array) (hash)] @flow.clear)
+(localization_expression
+  (parenthesized_expression [(scalar) (array) (hash)] @flow.clear))
+(localization_expression
+  (parenthesized_expression
+    (list_expression [(scalar) (array) (hash)] @flow.clear)))
+
+; `undef $x` / `undef(@a)` — the name is left without a value, the write
+; `$x = undef` makes.
+(undef_expression [(scalar) (array) (hash)] @flow.clear)
+(undef_expression
+  (parenthesized_expression [(scalar) (array) (hash)] @flow.clear))
 
 ; `foreach my $x (LIST)` — the loop var rebinds per element (element type TBD).
 (for_statement

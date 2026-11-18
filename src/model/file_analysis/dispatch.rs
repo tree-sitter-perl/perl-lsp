@@ -715,6 +715,12 @@ pub struct KeyWrite {
     /// N of the RHS, not the RHS itself.
     #[serde(default)]
     pub rhs_slot: Option<i32>,
+    /// The write leaves the key holding the value it stores, so a value no
+    /// type names leaves the key untyped instead of keeping what it held:
+    /// an assignment, or `delete`/`undef`/`local`, which store none. False
+    /// for a write that changes the value it finds (`$h{k}++`, `\$h{k}`).
+    #[serde(default)]
+    pub replaces: bool,
     /// Syntactically conditional within its sub (if/postfix/ternary/
     /// loop/short-circuit). Scope-crossing writes (nested block or
     /// closure relative to the decl scope) are detected in the pass.
