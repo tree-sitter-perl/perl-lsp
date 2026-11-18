@@ -411,20 +411,20 @@ impl<'v> JoinPlan<'v> {
     }
 
     /// Whether code at `at` in arm `i` sits in a block inside the arm that a
-    /// jump leaves, so control may come out past the block and on through
-    /// the arm.
-    // TODO(block-jump-order): any jump aimed at the block counts, even one
-    // that only runs after `at` has left. Owner: the 0.11 CFG follow-up.
+    /// jump leaves before control reaches `at`, so control may come out past
+    /// the block and on through the arm.
     fn jumped_past(&self, i: usize, at: Span) -> bool {
         self.jumped_past_in(self.arm_span(i), at)
     }
 
-    /// As [`Self::jumped_past`], for a block inside `region`.
+    /// As [`Self::jumped_past`], for a block inside `region`. A jump at or
+    /// past `at` runs only once control is there, so where `at` leaves, the
+    /// jump never runs.
     fn jumped_past_in(&self, region: Span, at: Span) -> bool {
-        self.aims.iter().any(|aim| match *aim {
+        self.view.leaves.iter().zip(&self.aims).any(|(l, aim)| match *aim {
             Aim::Block(k) => {
                 let b = self.view.constructs[k].span;
-                contains(region, b) && contains(b, at)
+                contains(region, b) && contains(b, at) && l.span.start < at.start
             }
             _ => false,
         })

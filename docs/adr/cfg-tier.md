@@ -150,7 +150,10 @@ carrying its name (`last OUTER`), or the n-th (`break 2`). A `switch` takes
 a `break` (`@ctl.block`), and Perl's bare block and php's `switch` take a
 `continue` too (`@ctl.block.next`); a jump that leaves one of those, or names
 nothing around it, is modelled as falling through, since no join is minted
-past them. A narrowing never joins out past a loop: what the place holds
+past them. A leave inside such a block still leaves the arm around it
+unless a jump out of the block comes before it: a jump at or past the leave
+runs only once control is there, and the leave takes it elsewhere first. A
+narrowing never joins out past a loop: what the place holds
 there is the loop's exit, which no test inside decides.
 
 A loop's recurrence shows up at query time as a cycle through a join, and

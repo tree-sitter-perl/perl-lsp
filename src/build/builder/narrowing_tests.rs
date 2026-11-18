@@ -144,6 +144,7 @@ fn narrow_looks_through_a_bare_block() {
     let narrows = [
         ("unless ($x->isa('Widget')) { warn 'x'; { return; } }", "a bare block that returns"),
         ("if ($x->isa('Widget')) { warn 'w'; } else { { { die 'n'; } } }", "nested bare blocks in an else"),
+        ("unless ($x->isa('Widget')) { { return; last; } }", "a `last` only reached past the leave"),
     ];
     for (chain, why) in narrows {
         let src = src_of(chain);
