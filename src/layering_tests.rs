@@ -1749,6 +1749,39 @@ fn query_paths_never_canonicalize() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A held file's role (workspace / dependency) is a fact on its record,
+/// minted where the file lands and read through `FileRecords::role_of` — never
+/// inferred from which table a path is missing from, the absence test that
+/// made any file outside the front doors a dependency by default. Pinned in
+/// three halves: the sites that read a role, no membership test on the path
+/// home, and the two sweeps over it (the workspace sweep filters by role in
+/// its one iterator, so a file of another role in the home is left out in
+/// one place).
+#[test]
+fn file_roles_are_read_from_the_record() {
+    let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| l.contains("role_of(") || l.contains(".file_role("));
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_index/file_records.rs", 1, "the accessor"),
+        ("index/module_index/lookup.rs", 1, "`CrossFileLookup::file_role` for the index"),
+        ("model/file_analysis/cross_file.rs", 1, "`ScopedLookup` delegates to the index it scopes"),
+        ("index/module_index/registration.rs", 2, "the name-slot winner prefers a workspace candidate; \
+          `for_each_registered_file` is the workspace sweep"),
+        ("index/resolve/refs.rs", 1, "`index_role`: the role as a `RoleMask`, the one projection resolve's \
+          consumers read"),
+    ];
+    let mut drift = allowlist_drift("file role read", &seen, allow);
+    let seen = count_lines(&files, &|l| l.contains("all_files.contains_key("));
+    drift.extend(allowlist_drift("path-home membership as a role", &seen, &[]));
+    let seen = count_lines(&files, &|l| l.contains("all_files.iter()"));
+    let allow: &[(&str, usize, &str)] = &[
+        ("index/module_index/registration.rs", 1, "`for_each_registered_file`, the role-filtered workspace sweep"),
+        ("index/module_index/lookup.rs", 1, "`for_each_cached_file`: every held file, every role"),
+    ];
+    drift.extend(allowlist_drift("sweep over the path home", &seen, allow));
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,

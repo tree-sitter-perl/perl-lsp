@@ -5,6 +5,17 @@ use super::*;
 
 // ---- Cross-file lookup capability ----
 
+/// The tier a file the index holds belongs to. A fact on the file's record,
+/// minted where the file lands: a front door registers the project's own
+/// files, the dependency tier lands the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileRole {
+    Workspace,
+    /// Read-only: visible to references, never rewritten by rename, never
+    /// swept for the project's diagnostics.
+    Dependency,
+}
+
 /// A module in the cache — its filesystem path plus the full FileAnalysis of
 /// its source. Shared by reference-count so async handlers don't deep-copy.
 #[derive(Debug)]
@@ -876,13 +887,10 @@ pub trait CrossFileLookup {
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
-    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
-    /// attribution for the masked backward walk: a dependency site is
-    /// visible to references but never rewritten by rename; every other
-    /// file the lookup holds is WORKSPACE. The default (no front door, so
-    /// everything held came from elsewhere) is the conservative answer.
-    fn is_dependency_path(&self, _path: &crate::util::canonical_path::CanonicalPath) -> bool {
-        true
+    /// The role recorded for the file at `path`; `None` when this lookup
+    /// holds no file there (the default: a lookup without a path home).
+    fn file_role(&self, _path: &crate::util::canonical_path::CanonicalPath) -> Option<FileRole> {
+        None
     }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
@@ -939,8 +947,7 @@ pub trait CrossFileLookup {
             }
         });
     }
-    /// The WORKSPACE-tier subset of `for_each_cached_file`: exactly the
-    /// files `is_dependency_path` answers false for. Default: none.
+    /// The WORKSPACE-role subset of `for_each_cached_file`. Default: none.
     fn for_each_workspace_file(&self, _f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {}
     fn for_each_reexport_module(
         &self,
@@ -1392,8 +1399,8 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn member_ends(&self, class: &str, name: &str) -> MemberEnds {
         self.inner.member_ends(class, name)
     }
-    fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
-        self.inner.is_dependency_path(path)
+    fn file_role(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<FileRole> {
+        self.inner.file_role(path)
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means

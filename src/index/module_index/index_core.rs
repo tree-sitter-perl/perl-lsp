@@ -69,6 +69,10 @@ pub(crate) struct IndexCore {
     /// bare-name lookup and compete for the name-slot winner, so the leaf
     /// answers only where nothing indexed declares the identity.
     pub(crate) leaf_defs: DashMap<String, DefCandidates>,
+    /// Every held file's record: its names and its role. Shared because
+    /// both sides land files — the front doors the project's, the resolver
+    /// thread the `@INC` tier's.
+    pub(crate) records: FileRecords,
     /// The `@INC` roots this process resolves from, canonical, most-
     /// preferred first. Recorded ONCE by the resolver thread (discovery
     /// shells out to `perl`, so no query path may re-derive it) and read by
@@ -152,6 +156,7 @@ impl IndexCore {
             available_modules: DashMap::new(),
             all_defs: DashMap::new(),
             leaf_defs: DashMap::new(),
+            records: FileRecords::default(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
@@ -312,6 +317,7 @@ impl IndexCore {
                     bc.invalidate(&m.path);
                 }
                 self.mint_registration_gen(&m.path);
+                self.records.land_dependency(&m.path, package_names(&m.analysis));
                 self.edges.feed(module_name, &m.path, &m.analysis);
                 self.push_loader_shapes(module_name, &m.analysis);
             }

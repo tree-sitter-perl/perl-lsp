@@ -12,7 +12,6 @@ impl ModuleIndex {
             open_doc_paths: Arc::new(DashMap::new()),
             closedness: Arc::new(Default::default()),
             all_files: Arc::new(DashMap::new()),
-            registered_names: Arc::new(DashMap::new()),
             freshness: Arc::new(crate::model::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             enriched_order: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -552,6 +551,11 @@ impl ModuleIndex {
     /// fills it alongside `cache_raw` so a warm start keeps every provider.
     pub fn all_defs_raw(&self) -> &DashMap<String, DefCandidates> {
         &self.core.all_defs
+    }
+
+    /// The per-file records the warm lane lands its providers' roles in.
+    pub(crate) fn file_records(&self) -> &FileRecords {
+        &self.core.records
     }
 
 }

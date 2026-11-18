@@ -179,9 +179,9 @@ The spike's axes live in CandidateSet construction:
   identity and completion), and `rename_edits` → `Result` REFUSES on
   alias-spelled sites (full-or-refuse) instead of silently skipping.
 - **file roles** — one rule for every language: an open document is OPEN,
-  a front-door index registration
-  (`CrossFileLookup::is_dependency_path` false) is WORKSPACE, the rest
-  (@INC) is DEPENDENCY. Each index-held file is admitted by its own tier,
+  an index-held file carries the role its landing recorded
+  (`CrossFileLookup::file_role`): a front-door registration is WORKSPACE,
+  an @INC landing DEPENDENCY. Each index-held file is admitted by its own tier,
   so EDITABLE rename and VISIBLE references mean the same thing for a pack
   workspace as for a Perl one.
 - **delegation / `Specializes` / domain edges** — consumers declare

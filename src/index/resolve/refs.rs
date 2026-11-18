@@ -1,6 +1,7 @@
 //! The reference walks: `refs_to`, `group_refs` + group rename edits,
 //! `implementations_of`, and specialization families.
 use crate::util::canonical_path::CanonicalPath;
+use crate::model::file_analysis::FileRole;
 use super::*;
 
 /// Group construction shared by the local arm (cursor in the class
@@ -808,13 +809,12 @@ fn walk_refs(
     sorted_deduped(out)
 }
 
-/// The tier an index-held file rides: WORKSPACE for a front-door
-/// registration, DEPENDENCY otherwise.
+/// The tier an index-held file rides, from the role on its record. A path
+/// the index holds no file at is nothing the project can edit.
 pub(super) fn index_role(idx: &dyn CrossFileLookup, path: &CanonicalPath) -> RoleMask {
-    if idx.is_dependency_path(path) {
-        RoleMask::DEPENDENCY
-    } else {
-        RoleMask::WORKSPACE
+    match idx.file_role(path) {
+        Some(FileRole::Workspace) => RoleMask::WORKSPACE,
+        Some(FileRole::Dependency) | None => RoleMask::DEPENDENCY,
     }
 }
 

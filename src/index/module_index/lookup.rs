@@ -584,10 +584,8 @@ impl CrossFileLookup for ModuleIndex {
         .unwrap_or_default()
     }
 
-    fn is_dependency_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> bool {
-        // `all_files` holds exactly what a workspace/pack front door
-        // registered; the @INC tier writes only the name-keyed cache.
-        !self.all_files.contains_key(path)
+    fn file_role(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<crate::model::file_analysis::FileRole> {
+        self.core.records.role_of(path)
     }
 
     fn cached_by_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<Arc<CachedModule>> {

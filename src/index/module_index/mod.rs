@@ -182,6 +182,8 @@ pub(crate) use index_core::IndexCore;
 #[cfg(test)]
 pub(crate) use index_core::strip_import_copy_one;
 
+mod file_records;
+pub(crate) use file_records::FileRecords;
 mod gated_views;
 mod lookup;
 mod queries;
@@ -265,13 +267,6 @@ pub struct ModuleIndex {
     /// (epoch, key) pairs overwrite in place, never accumulate — so the
     /// ceiling is the registered-file count × ~100 bytes.
     enrichment_key_memo: Arc<DashMap<crate::util::canonical_path::CanonicalPath, (u64, u64)>>,
-    /// The linkage-visible (name, declares-a-Class) pairs each file
-    /// registered — the exact inverse list `unregister_file` walks AND the
-    /// class-rank source for the cache-slot tie-break. Recorded at
-    /// registration (pre-strip) because the resident copy's `symbols` may be
-    /// evicted, and rehydration after an edit persists would fetch the NEW
-    /// generation's names.
-    registered_names: Arc<DashMap<crate::util::canonical_path::CanonicalPath, Vec<(String, bool)>>>,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
     /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`
@@ -298,7 +293,7 @@ pub struct ModuleIndex {
 /// package with the same name as `module_name` and falling back to the
 /// single-package case if only one package exists in the file.
 /// Every `package X;` / `class X` a FileAnalysis declares, in declaration
-/// order, deduped — `(name, is-class)` in the `registered_names` record
+/// order, deduped — `(name, is-class)` in the `FileRecord` names
 /// shape. Workspace registration keys the candidate tables on ALL of them:
 /// a multi-package `.pm` is ordinary Perl, and keying on the first name
 /// alone leaves every later package unreachable by name. Empty for scripts

@@ -360,6 +360,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
                 conn,
                 module_index.cache_raw(),
                 module_index.all_defs_raw(),
+                module_index.file_records(),
                 module_index.is_long_lived() && module_resolver::eviction_enabled(),
             )
         });

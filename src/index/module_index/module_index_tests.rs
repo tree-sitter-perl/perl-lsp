@@ -2871,3 +2871,38 @@ fn def_candidates_hold_path_order_under_any_insert_order() {
     bucket.remove_path(&a.path);
     assert_eq!(paths(&bucket), vec![b.path.clone(), c.path.clone()]);
 }
+
+/// A held file's role is on its record: a landing from the `@INC` tier is a
+/// dependency, a front-door registration of the same path makes it the
+/// project's and keeps it so against a later landing, and unregistering the
+/// project's file takes its workspace role away — while the workspace sweep
+/// sees exactly the workspace-role files.
+#[test]
+fn a_held_file_reads_its_role_from_its_record() {
+    use crate::model::file_analysis::FileRole;
+    let idx = ModuleIndex::new_for_test();
+    let dep = parse_source_to_cached("package Ext::Lib;\nsub f { 1 }\n1;", "Ext::Lib");
+    let mine = parse_source_to_cached("package My::App;\nsub g { 1 }\n1;", "My::App");
+    let swept = |idx: &ModuleIndex| {
+        let mut v = Vec::new();
+        idx.for_each_registered_file(&mut |cm| v.push(cm.path.clone()));
+        v
+    };
+
+    idx.insert_cache("Ext::Lib", Some(Arc::clone(&dep)));
+    assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency));
+    assert_eq!(idx.file_role(&mine.path), None, "nothing held there yet");
+
+    idx.register_workspace_module(mine.path.to_path_buf(), Arc::clone(&mine.analysis));
+    assert_eq!(idx.file_role(&mine.path), Some(FileRole::Workspace));
+    assert_eq!(swept(&idx), vec![mine.path.clone()], "the sweep sees the project's file only");
+
+    // The tier finding the project's own file does not demote it.
+    idx.insert_cache("My::App", Some(Arc::clone(&mine)));
+    assert_eq!(idx.file_role(&mine.path), Some(FileRole::Workspace));
+
+    idx.unregister_workspace_path(&mine.path);
+    assert_ne!(idx.file_role(&mine.path), Some(FileRole::Workspace));
+    assert!(swept(&idx).is_empty());
+    assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency), "the tier's record stays");
+}

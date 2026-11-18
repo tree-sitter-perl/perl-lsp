@@ -430,16 +430,19 @@ impl ModuleIndex {
         self.bump_registration_gen(&path);
         let sd = self.record_and_dirty(&path, &analysis, SurfaceWrite::Background);
         let cached = Arc::new(CachedModule::new(path, analysis.clone()));
-        // Path-keyed registry first: the relational retrieval resolves
+        let names = package_names(&analysis);
+        // The record (and its role) before the path home publishes the
+        // copy, so a concurrent sweep never sees it roleless.
+        let prev = self.core.records.register_workspace(&cached.path, names.clone());
+        // Path-keyed registry next: the relational retrieval resolves
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
         self.all_files.insert(cached.path.clone(), cached.clone());
-        let names = package_names(&analysis);
         if !names.is_empty() {
             // Whole copy: the feed inside the rebuild records the name list.
             self.core.edges.record_names(&cached.path, &analysis);
         }
-        self.adopt_workspace_candidate(cached, names);
+        self.adopt_workspace_candidate(cached, names, prev);
         sd
     }
 
@@ -447,7 +450,8 @@ impl ModuleIndex {
     /// declares (`names`, extracted from the WHOLE analysis pre-strip), then
     /// rebuild the name-keyed registrations for every affected name — the
     /// declared set plus any a previous registration of the same path
-    /// declared and this one dropped. Perl's package relation is
+    /// declared and this one dropped (`prev`, what recording `names`
+    /// replaced). Perl's package relation is
     /// name → MANY files (a package reopens anywhere), so the candidate
     /// table (`all_defs`) is the truth and the name-keyed cache slot is a
     /// derived winner — recomputed from the SET, never from arrival order.
@@ -455,10 +459,8 @@ impl ModuleIndex {
         &self,
         cached: Arc<CachedModule>,
         names: Vec<(String, bool)>,
+        prev: Option<Vec<(String, bool)>>,
     ) {
-        let prev = self
-            .registered_names
-            .insert(cached.path.clone(), names.clone());
         let mut affected: Vec<String> = names.iter().map(|(n, _)| n.clone()).collect();
         for (n, _) in prev.into_iter().flatten() {
             if !affected.contains(&n) {
@@ -513,12 +515,10 @@ impl ModuleIndex {
         // The relation is shared with the @INC tier, but the winner is not:
         // project code shadows an installed copy of the same name, and
         // `best_candidate`'s path tie-break has no opinion about which tier
-        // a file came from. `registered_names` holds exactly the paths a
-        // workspace/pack front door registered, so it IS the tier test —
-        // no second marker to keep in sync.
+        // a file came from; the role on each candidate's record does.
         let refs: Vec<&Arc<CachedModule>> = cands
             .iter()
-            .filter(|c| self.registered_names.contains_key(&c.path))
+            .filter(|c| self.core.records.role_of(&c.path) == Some(crate::model::file_analysis::FileRole::Workspace))
             .collect();
         if refs.is_empty() {
             // Only @INC providers left: leave their slot alone.
@@ -1001,13 +1001,16 @@ impl ModuleIndex {
         // bare `package Foo;` mints no PackageFacts entry, so the facts
         // table under-enumerates), falling back to the Package/Class
         // symbols for unregistered copies.
-        let mut own: Vec<String> = match self.registered_names.get(&cached.path) {
-            Some(names) => names.iter().map(|(n, _)| n.clone()).collect(),
-            None => crate::index::module_index::package_names(&cached.analysis)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
-        };
+        let mut own: Vec<String> = self
+            .core
+            .records
+            .with_names(&cached.path, |names| names.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_else(|| {
+                crate::index::module_index::package_names(&cached.analysis)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect()
+            });
         own.sort_unstable();
         own.dedup();
         for pkg in &own {
@@ -1136,8 +1139,9 @@ impl ModuleIndex {
         let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, arc));
+        let prev = self.core.records.register_workspace(&cached.path, names.clone());
         self.all_files.insert(cached.path.clone(), cached.clone());
-        self.adopt_workspace_candidate(cached, names);
+        self.adopt_workspace_candidate(cached, names, prev);
     }
 
     /// Registration-owned strip: feed the name/edge registrations from the
@@ -1195,7 +1199,7 @@ impl ModuleIndex {
         // one module, so dropping on one file's deletion would wrongly
         // un-suppress the entrypoint lint. Its reader is biased honest-quiet,
         // so never-remove is the safe direction there.
-        if let Some((_, names)) = self.registered_names.remove(&canon) {
+        if let Some(names) = self.core.records.forget_workspace(&canon) {
             for (name, _) in &names {
                 if let Some(mut v) = self.core.all_defs.get_mut(name) {
                     v.remove_path(&canon);
@@ -1562,8 +1566,12 @@ impl ModuleIndex {
     /// evicted — and falls back to the symbol scan for copies registered
     /// whole (recovery paths, tests).
     pub(super) fn module_defines_class(&self, m: &CachedModule, name: &str) -> bool {
-        if let Some(rec) = self.registered_names.get(&m.path) {
-            return rec.iter().any(|(n, is_class)| n == name && *is_class);
+        if let Some(declares) = self
+            .core
+            .records
+            .with_names(&m.path, |names| names.iter().any(|(n, is_class)| n == name && *is_class))
+        {
+            return declares;
         }
         m.analysis
             .symbols()
@@ -1716,7 +1724,7 @@ impl ModuleIndex {
         // registration's tie-break consults the record via
         // `module_defines_class`, and the fallback symbol scan on a
         // stripped copy misjudges every Class as a value.
-        self.registered_names.insert(cached.path.clone(), feed.to_vec());
+        self.core.records.register_workspace(&cached.path, feed.to_vec());
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
         self.all_files.insert(cached.path.clone(), cached.clone());
@@ -1817,11 +1825,7 @@ impl ModuleIndex {
         // would fetch the WRONG generation after an edit persists — so the
         // inverse runs on the name list registration recorded, not on
         // `old.analysis.symbols`.
-        let names = self
-            .registered_names
-            .remove(&canon)
-            .map(|(_, v)| v)
-            .unwrap_or_default();
+        let names = self.core.records.forget_workspace(&canon).unwrap_or_default();
         for leaf in super::widening_leaves(old.analysis.names(), &names) {
             if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
                 v.remove_path(&canon);
@@ -1882,16 +1886,22 @@ impl ModuleIndex {
         n
     }
 
-    /// Every front-door registration — the project's own files, the one
-    /// home they have.
+    /// Every WORKSPACE-role registration — the project's own files. The one
+    /// iterator the project-wide sweeps (diagnostics, heatmap, symbol rows,
+    /// the include-closure consumer scan) share, so a file of another role
+    /// in the path home is left out in one place.
     pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
         for entry in self.all_files.iter() {
-            f(entry.value());
+            if self.core.records.role_of(entry.key()) == Some(crate::model::file_analysis::FileRole::Workspace) {
+                f(entry.value());
+            }
         }
     }
 
     pub fn registered_file_count(&self) -> usize {
-        self.all_files.len()
+        let mut n = 0usize;
+        self.for_each_registered_file(&mut |_| n += 1);
+        n
     }
 
     /// Rebuild the reverse index (`func → modules`) from the current cache.
