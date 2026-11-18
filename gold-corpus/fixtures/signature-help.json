@@ -91,7 +91,7 @@
       "expect": {
         "all": [
           "new($uri",
-          "active param: 1 ($scheme)"
+          "active param: 1 ($scheme: String|…)"
         ],
         "none": []
       },
