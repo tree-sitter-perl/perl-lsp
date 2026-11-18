@@ -32,6 +32,11 @@ pub(super) fn ctl_query() -> (&'static Query, &'static [CtlCap]) {
     (query, caps)
 }
 
+/// Force the control document to compile now, off the parallel per-file path.
+pub(crate) fn warm_ctl_query() {
+    let _ = ctl_query();
+}
+
 /// The view over one file's matches of a control document, each match its
 /// captures as `(capture, node id, span, text)`; only a name or a count
 /// needs its text. Arms group by the construct their pattern captures, so

@@ -70,8 +70,9 @@ fn build_default_registry() -> PluginRegistry {
 
 /// Compile every pattern query now, once — before the parallel workspace
 /// index charges `Query::new` to per-file build. See
-/// `pattern_dispatch::warm_pattern_queries`. The flow query is independent
-/// of the pattern set, so it compiles alongside rather than after.
+/// `pattern_dispatch::warm_pattern_queries`. The flow and control documents
+/// are independent of the pattern set, so they compile alongside rather
+/// than after.
 fn warm_registry_queries(reg: &PluginRegistry) {
     crate::util::timings::phase("registry::queries", || {
         rayon::join(
@@ -80,7 +81,7 @@ fn warm_registry_queries(reg: &PluginRegistry) {
                     reg.plugins.iter().flat_map(|p| p.patterns().iter()),
                 )
             },
-            crate::build::builder::warm_flow_query,
+            || rayon::join(crate::build::builder::warm_flow_query, crate::build::builder::control::warm_ctl_query),
         )
     });
 }
