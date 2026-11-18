@@ -1740,7 +1740,6 @@ fn query_paths_never_canonicalize() {
     let files = layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp]);
     let seen = count_lines(&files, &|l| l.contains("CanonicalPath::from_stored("));
     let allow: &[(&str, usize, &str)] = &[
-        ("index/module_cache/warm.rs", 1, "the warm scan re-adopts the spelling its own writer persisted"),
         ("index/module_index/lookup.rs", 3, "ref-row retrieval hands back the paths registration shredded the rows under; \
           the included-by edge holds registered paths"),
         ("index/resolve/definitions.rs", 1, "an include target is the canonical spelling the build minted"),
@@ -1765,8 +1764,10 @@ fn file_roles_are_read_from_the_record() {
         ("index/module_index/file_records.rs", 1, "the accessor"),
         ("index/module_index/lookup.rs", 1, "`CrossFileLookup::file_role` for the index"),
         ("model/file_analysis/cross_file.rs", 1, "`ScopedLookup` delegates to the index it scopes"),
-        ("index/module_index/registration.rs", 2, "the name-slot winner prefers a workspace candidate; \
-          `for_each_registered_file` is the workspace sweep"),
+        ("index/module_index/index_core.rs", 3, "the name slot ranks a workspace candidate first (`derive_slot`, \
+          a landing's shadow check) and the tier never lands a file the project registered (`tier_providers`)"),
+        ("index/module_index/registration.rs", 2, "`for_each_registered_file` is the workspace sweep; \
+          `mark_doc_closed` re-records only the front door's copy"),
         ("index/resolve/refs.rs", 1, "`index_role`: the role as a `RoleMask`, the one projection resolve's \
           consumers read"),
     ];

@@ -465,10 +465,10 @@ pub fn load_one_diag(
     path: &str,
     want_bag: bool,
 ) -> Result<FileAnalysis, RehydrateMiss> {
-    // A dual-homed project-lib file has TWO rows for one path (name-keyed
-    // import + path-keyed workspace). Prefer a row whose stamp matches the
-    // disk (one tier's persist may have failed or lagged, leaving a stale
-    // generation); workspace-first is only the tiebreak, applied in Rust
+    // Every tier keys its row by path, so a path has one row unless a writer
+    // keyed it otherwise. When it has several, prefer a row whose stamp
+    // matches the disk (one persist may have failed or lagged, leaving a
+    // stale generation); workspace-first is only the tiebreak, applied in Rust
     // because an ORDER BY would run a sorter on every rehydrate. Single-row
     // paths deliberately skip stamp validation — the registered generation
     // may legitimately predate an unsaved edit, and the caller invalidates
@@ -699,8 +699,7 @@ pub(super) fn rehydrate_from_opens(
 /// through `save_generation`, so "blob + rows describe one generation" has
 /// one speller.
 pub struct PersistedGeneration<'a> {
-    /// The `modules` key: the path for path-keyed sources, the module name
-    /// for the @INC tier.
+    /// The `modules` key: the file's path, for every tier.
     pub module_name: &'a str,
     pub path: &'a std::path::Path,
     pub include_closure: &'a crate::model::file_analysis::path_intern::ClosureList,
@@ -860,10 +859,9 @@ pub fn refresh_deps_stamp(
     let _ = conn.execute(sql::MODULE_DEPS_STAMP_UPDATE.registered(), params![deps, path]);
 }
 
-/// Persist one module result: a parsed file as a whole generation
-/// (`save_generation`), or `None` as the @INC tier's negative sentinel.
+/// Persist one parsed file as a whole generation (`save_generation`).
 /// Returns the strip licence: whether a generation that can rehydrate this
-/// copy is on disk.
+/// copy is on disk. `None` writes nothing: a miss is never remembered.
 pub fn save_to_db(
     conn: &Connection,
     module_name: &str,
@@ -871,7 +869,7 @@ pub fn save_to_db(
     source: &str,
 ) -> bool {
     let Some(cached) = result else {
-        return save_negative(conn, module_name, source);
+        return false;
     };
     // A bag-evicted copy IS the already-persisted generation — re-encoding
     // it would overwrite the good blob with a bagless one.
@@ -896,32 +894,6 @@ pub fn save_to_db(
             stub: None,
         },
     )
-}
-
-/// A name the @INC tier looked for and found nowhere: a row with no path and
-/// no blob, so the next session doesn't search again.
-fn save_negative(conn: &Connection, module_name: &str, source: &str) -> bool {
-    let r = conn.execute(
-        sql::MODULE_SAVE.registered(),
-        params![
-            module_name,
-            "",
-            0i64,
-            0i64,
-            source,
-            None::<Vec<u8>>,
-            None::<Vec<u8>>,
-            EXTRACT_VERSION,
-            0i64
-        ],
-    );
-    match r {
-        Ok(_) => true,
-        Err(e) => {
-            log::error!("Failed to save module cache for '{}': {}", module_name, e);
-            false
-        }
-    }
 }
 
 #[cfg(test)]

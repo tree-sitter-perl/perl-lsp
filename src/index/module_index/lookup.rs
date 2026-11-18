@@ -589,19 +589,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn cached_by_path(&self, path: &crate::util::canonical_path::CanonicalPath) -> Option<Arc<CachedModule>> {
-        // Registered files: the per-path registry is O(1). The @INC cache is
-        // name-keyed with unique paths — linear fallback (its candidate sets
-        // are @INC-sized, not tree-sized).
-        if let Some(cm) = self.all_files.get(path) {
-            return Some(cm.value().clone());
-        }
-        self.core.cache.iter().find_map(|entry| {
-            entry
-                .value()
-                .as_ref()
-                .filter(|cm| &cm.path == path)
-                .cloned()
-        })
+        self.core.all_files.get(path).map(|cm| cm.value().clone())
     }
 
     fn enriched_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -798,24 +786,11 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
-        // `all_files` is the complete per-path registry (pack indexes, fed by
-        // `register_symbols`) — the name-keyed views can't see a file that
-        // lost all its name ties OR declares nothing registrable. The Perl
-        // hub's cache is written directly (module-name keys, unique per
-        // file), so union it in for both worlds.
-        let mut seen: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
-        for entry in self.all_files.iter() {
-            if seen.insert(entry.key().to_path_buf()) {
-                f(entry.value());
-            }
-        }
-        for entry in self.core.cache.iter() {
-            if let Some(ref cached) = *entry.value() {
-                if seen.insert(cached.path.to_path_buf()) {
-                    f(cached);
-                }
-            }
+        // The path home holds every file once, whatever its role — a file
+        // that lost every name tie or declares nothing registrable included,
+        // which the name-keyed views cannot reach.
+        for entry in self.core.all_files.iter() {
+            f(entry.value());
         }
     }
 

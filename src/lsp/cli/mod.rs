@@ -340,8 +340,9 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     let mut inc_paths = timings::phase("cli::discover_inc", module_resolver::discover_inc_paths);
     module_resolver::add_project_lib_paths(&mut inc_paths, &root_path);
 
+    // The store's gates run before any landing reads a row; there is no
+    // warm lane (`module_resolver::land_module`).
     let db = module_cache::open_cache_db(Some(&root_uri), "perl");
-    let mut stale_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref conn) = db {
         let _ = module_cache::validate_inc_paths(conn, &inc_paths);
         let _ = module_cache::validate_plugin_fingerprint(
@@ -355,23 +356,6 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
             conn,
             module_cache::conclusion_fingerprint(),
         );
-        let (warmed, stale) = timings::phase("cli::warm_inc_cache", || {
-            module_cache::warm_cache(
-                conn,
-                module_index.cache_raw(),
-                module_index.all_defs_raw(),
-                module_index.file_records(),
-                module_index.is_long_lived() && module_resolver::eviction_enabled(),
-            )
-        });
-        // Stamp generations for the warm-loaded @INC providers (the warm
-        // scan bypasses the registration front doors) so `enrichment_key`
-        // reads a real token for every provider.
-        module_index.stamp_import_generations();
-        if warmed > 0 {
-            eprintln!("Cache: {} modules loaded from disk", warmed);
-        }
-        stale_set = stale.into_iter().collect();
     }
 
     let mut needed = std::collections::HashSet::new();
@@ -399,9 +383,7 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     let mut queued: std::collections::HashSet<String> = needed.clone();
     let _resolve_phase = timings::PhaseGuard::start("cli::resolve_imports");
     while let Some(name) = queue.pop_front() {
-        let cached_arc = if module_index.cache_raw().contains_key(name.as_str())
-            && !stale_set.contains(&name)
-        {
+        let cached_arc = if module_index.cache_raw().contains_key(name.as_str()) {
             already_cached += 1;
             timings::record_cached(&name);
             // The relation, not the winner — the descent below must see
@@ -412,26 +394,18 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
             };
             (!cands.is_empty()).then_some(cands)
         } else {
-            if stale_set.contains(&name) {
-                parse_memo.remove(&name);
+            // One-shot copies stay whole: rehydration never amortizes here.
+            let (_, stored) = module_index.land_module(
+                db.as_ref(),
+                &inc_paths,
+                &name,
+                &mut parser,
+                &mut parse_memo,
+            );
+            if stored.is_some() {
+                resolved += 1;
             }
-            module_resolver::resolve_and_parse_with_memo(&inc_paths, &name, &mut parser, &mut parse_memo)
-                .map(|providers| {
-                    if let Some(ref conn) = db {
-                        // One row per provider — the name maps to a set.
-                        for m in &providers {
-                            module_cache::save_to_db(
-                                conn,
-                                &name,
-                                &Some(std::sync::Arc::clone(m)),
-                                module_cache::NAME_KEYED_SOURCE,
-                            );
-                        }
-                    }
-                    module_index.insert_cache_providers(&name, Some(providers.clone()));
-                    resolved += 1;
-                    providers
-                })
+            stored
         };
         if let Some(providers) = cached_arc {
             // Every provider's re-export edges: a shadowed twin can name a
@@ -447,14 +421,6 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
     }
     drop(_resolve_phase);
     eprintln!("Modules: {} cached, {} resolved, {} total", already_cached, resolved, queued.len());
-
-    // `warm_cache` populated `cache_raw()` directly, bypassing the reverse
-    // index, and `insert_cache` only indexes export/export_ok. Rebuild the
-    // full `func → modules` index from the cache so `find_exporters` answers
-    // identically on cold and warm runs (B6 export-attribution regression).
-    timings::phase("cli::rebuild_reverse_index", || {
-        module_index.rebuild_reverse_index_from_cache()
-    });
 
     (ws, module_index)
 }

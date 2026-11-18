@@ -47,74 +47,70 @@ fn load_one_rehydrates_full_bag() {
     let _ = std::fs::remove_file(&pm);
 }
 
+/// A dependency file on disk, parsed — the fixture the tier's row tests
+/// persist and read back by path.
+fn dep_fixture(stem: &str, source: &str) -> Arc<CachedModule> {
+    let pm = std::env::temp_dir().join(format!("{stem}_{}.pm", std::process::id()));
+    std::fs::write(&pm, source).unwrap();
+    parse_source_to_cached(source, &pm)
+}
+
+fn save_dep(conn: &Connection, cached: &Arc<CachedModule>) -> bool {
+    save_to_db(conn, &cached.path.to_string_lossy(), &Some(Arc::clone(cached)), DEPENDENCY_SOURCE)
+}
+
 #[test]
 fn test_db_save_and_load_roundtrip() {
     let conn = test_db();
-    let dir = std::env::temp_dir();
-    let pm = dir.join("TestModule_roundtrip.pm");
-    std::fs::write(&pm, "package TestModule;\nour @EXPORT = qw(foo bar);\nour @EXPORT_OK = qw(baz);\nsub foo { 1 }\nsub bar { 2 }\nsub baz { 3 }\n1;\n").unwrap();
+    let cached = dep_fixture(
+        "TestModule_roundtrip",
+        "package TestModule;\nour @EXPORT = qw(foo bar);\nour @EXPORT_OK = qw(baz);\nsub foo { 1 }\nsub bar { 2 }\nsub baz { 3 }\n1;\n",
+    );
+    assert!(save_dep(&conn, &cached));
 
-    let source = std::fs::read_to_string(&pm).unwrap();
-    let cached = Some(parse_source_to_cached(&source, &pm));
-    save_to_db(&conn, "TestModule", &cached, "import");
+    let loaded = load_dependency_row(&conn, &cached.path).expect("a current row lands");
+    assert_eq!(loaded.export, vec!["foo", "bar"]);
+    assert_eq!(loaded.export_ok, vec!["baz"]);
+    assert!(!loaded.bag_is_evicted(), "a landing reads the row whole");
+    assert_eq!(loaded.witnesses.len(), cached.analysis.witnesses.len());
 
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, stale) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1);
-    assert!(stale.is_empty());
-
-    let loaded = cache.get("TestModule").unwrap();
-    let loaded = loaded.as_ref().unwrap();
-    assert_eq!(loaded.analysis.export, vec!["foo", "bar"]);
-    assert_eq!(loaded.analysis.export_ok, vec!["baz"]);
-
-    let _ = std::fs::remove_file(&pm);
+    let _ = std::fs::remove_file(&cached.path);
 }
 
-/// The @INC pool is keyed by scheme, not by writer. Every name-keyed
-/// producer (resolver thread, one-shot CLI) tags rows `NAME_KEYED_SOURCE`
-/// and `warm_cache` reads exactly that tag; a writer-specific tag stranded
-/// CLI-resolved rows unread, so each CLI verb re-resolved the whole tier.
-/// Path-keyed `workspace` rows must stay out — they stream separately.
+/// The dependency tier's rows are path-keyed: one row per file, keyed like
+/// the workspace's, and a landing reads only its own tier's row for a path.
 #[test]
-fn warm_cache_shares_the_name_keyed_pool_and_excludes_path_keyed_rows() {
+fn dependency_rows_are_path_keyed_and_tier_scoped() {
     let conn = test_db();
-    let dir = std::env::temp_dir();
+    let dep = dep_fixture("DepRowsByPath", "package DepRowsByPath;\nsub f { 1 }\n1;\n");
+    assert!(save_dep(&conn, &dep));
+    let key: String = conn
+        .query_row(
+            "SELECT module_name FROM modules WHERE source = ?1",
+            [DEPENDENCY_SOURCE],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(key, dep.path.to_string_lossy(), "the row's key is the file's path");
 
-    let inc = dir.join("WarmPoolInc.pm");
-    std::fs::write(&inc, "package WarmPoolInc;\nsub f { 1 }\n1;\n").unwrap();
-    let inc_cached = Some(parse_source_to_cached(
-        &std::fs::read_to_string(&inc).unwrap(),
-        &inc,
-    ));
-    save_to_db(&conn, "WarmPoolInc", &inc_cached, NAME_KEYED_SOURCE);
-
-    // Path-keyed: same table, different keying scheme.
-    let ws = dir.join("WarmPoolWorkspace.pm");
-    std::fs::write(&ws, "package WarmPoolWorkspace;\nsub g { 2 }\n1;\n").unwrap();
-    let ws_cached = Some(parse_source_to_cached(
-        &std::fs::read_to_string(&ws).unwrap(),
-        &ws,
-    ));
-    save_to_db(&conn, &ws.to_string_lossy(), &ws_cached, "workspace");
-
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _stale) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-
-    assert_eq!(n, 1, "exactly the name-keyed row warms");
+    let ws = dep_fixture("WsRowsByPath", "package WsRowsByPath;\nsub g { 2 }\n1;\n");
+    save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace");
     assert!(
-        cache.contains_key("WarmPoolInc"),
-        "a name-keyed row must warm back regardless of which writer resolved it"
-    );
-    assert!(
-        !cache.contains_key(&*ws.to_string_lossy()),
-        "path-keyed rows must not pollute the name-keyed cache"
+        load_dependency_row(&conn, &ws.path).is_none(),
+        "a workspace row is the walk's, never a dependency landing's"
     );
 
-    let _ = std::fs::remove_file(&inc);
-    let _ = std::fs::remove_file(&ws);
+    let _ = std::fs::remove_file(&dep.path);
+    let _ = std::fs::remove_file(&ws.path);
+}
+
+/// A miss is never remembered: there is no row for a name nothing provides.
+#[test]
+fn a_miss_writes_no_row() {
+    let conn = test_db();
+    assert!(!save_to_db(&conn, "Nonexistent::Module", &None, DEPENDENCY_SOURCE));
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
 }
 
 /// Pin-the-fix: `plugin_namespaces` survives the bincode +
@@ -126,39 +122,25 @@ fn warm_cache_shares_the_name_keyed_pool_and_excludes_path_keyed_rows() {
 #[test]
 fn test_db_plugin_namespaces_roundtrip() {
     let conn = test_db();
-    let dir = std::env::temp_dir();
-    let pm = dir.join("TestMojoApp_namespaces.pm");
     // A Mojolicious::Lite script — mojo-lite + mojo-routes +
     // mojo-helpers should all emit namespaces that round-trip.
-    std::fs::write(
-        &pm,
+    let cached = dep_fixture(
+        "TestMojoApp_namespaces",
         "package TestMojoApp;\n\
              use Mojolicious::Lite;\n\
              app->helper(current_user => sub { my ($c) = @_; });\n\
              get '/users' => sub { my $c = shift; };\n\
              1;\n",
-    )
-    .unwrap();
-
-    let source = std::fs::read_to_string(&pm).unwrap();
-    let cached = Some(parse_source_to_cached(&source, &pm));
-    let original_ns_count = cached.as_ref().unwrap().analysis.plugin.namespaces.len();
+    );
+    let original_ns_count = cached.analysis.plugin.namespaces.len();
     assert!(
         original_ns_count > 0,
         "sanity: fixture must produce at least one PluginNamespace"
     );
 
-    save_to_db(&conn, "TestMojoApp", &cached, "import");
-
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, stale) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1);
-    assert!(stale.is_empty(), "fresh insert should not be stale");
-
-    let loaded = cache.get("TestMojoApp").unwrap();
-    let loaded = loaded.as_ref().unwrap();
-    let loaded_ns = &loaded.analysis.plugin.namespaces;
+    assert!(save_dep(&conn, &cached));
+    let loaded = load_dependency_row(&conn, &cached.path).expect("a current row lands");
+    let loaded_ns = &loaded.plugin.namespaces;
     assert_eq!(
         loaded_ns.len(),
         original_ns_count,
@@ -181,86 +163,60 @@ fn test_db_plugin_namespaces_roundtrip() {
         );
     }
 
-    let _ = std::fs::remove_file(&pm);
-}
-
-#[test]
-fn test_db_negative_result_roundtrip() {
-    let conn = test_db();
-    save_to_db(&conn, "Nonexistent::Module", &None, "import");
-
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1);
-
-    let entry = cache.get("Nonexistent::Module").unwrap();
-    assert!(entry.is_none());
+    let _ = std::fs::remove_file(&cached.path);
 }
 
 #[test]
 fn test_db_stale_entry_skipped() {
     let conn = test_db();
-
-    let dir = std::env::temp_dir();
-    let pm = dir.join("StaleModule_v9.pm");
-    std::fs::write(
-        &pm,
+    let cached = dep_fixture(
+        "StaleModule_v9",
         "package StaleModule;\nour @EXPORT_OK = qw(old);\nsub old {}\n1;\n",
-    )
-    .unwrap();
-
-    let source = std::fs::read_to_string(&pm).unwrap();
-    let cached = Some(parse_source_to_cached(&source, &pm));
-    save_to_db(&conn, "StaleModule", &cached, "import");
+    );
+    assert!(save_dep(&conn, &cached));
 
     std::thread::sleep(std::time::Duration::from_secs(1));
     std::fs::write(
-        &pm,
+        &cached.path,
         "package StaleModule;\nour @EXPORT_OK = qw(v2 with more content);\n1;\n",
     )
     .unwrap();
 
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 0, "stale entry should not be loaded");
-    assert!(!cache.contains_key("StaleModule"));
+    assert!(load_dependency_row(&conn, &cached.path).is_none(), "a stale row must not land");
 
-    let _ = std::fs::remove_file(&pm);
+    let _ = std::fs::remove_file(&cached.path);
 }
 
 #[test]
 fn test_db_plugin_fingerprint_invalidation() {
     let conn = test_db();
+    let foo = dep_fixture("FingerprintFoo", "package Foo;\n1;\n");
+    let bar = dep_fixture("FingerprintBar", "package Bar;\n1;\n");
 
     // First run: claims plugin set fingerprint "hash-A".
     validate_plugin_fingerprint(&conn, "hash-A").unwrap();
-    save_to_db(&conn, "Foo", &None, "import");
+    assert!(save_dep(&conn, &foo));
 
     // Same fingerprint → cache survives.
     validate_plugin_fingerprint(&conn, "hash-A").unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1, "cache should survive identical fingerprint");
+    assert!(load_dependency_row(&conn, &foo.path).is_some(), "cache should survive identical fingerprint");
 
     // Plugin set changed → cache cleared.
     validate_plugin_fingerprint(&conn, "hash-B").unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 0, "cache should be empty after plugin set change");
+    assert!(load_dependency_row(&conn, &foo.path).is_none(), "cache should be empty after plugin set change");
 
     // Stamp persists — second run with hash-B doesn't re-clear.
-    save_to_db(&conn, "Bar", &None, "import");
+    assert!(save_dep(&conn, &bar));
     validate_plugin_fingerprint(&conn, "hash-B").unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1, "stamp should persist between same-fingerprint runs");
+    assert!(load_dependency_row(&conn, &bar.path).is_some(), "stamp should persist between same-fingerprint runs");
+
+    let _ = std::fs::remove_file(&foo.path);
+    let _ = std::fs::remove_file(&bar.path);
 }
 
+/// A dependency's blob still reads the map (an exportless module borrows its
+/// first exporting parent's lists), so a moved `@INC` retires the tier's
+/// rows — and only the tier's.
 #[test]
 fn test_db_inc_hash_invalidation() {
     let conn = test_db();
@@ -269,33 +225,37 @@ fn test_db_inc_hash_invalidation() {
         PathBuf::from("/usr/lib/perl5"),
         PathBuf::from("/home/user/lib"),
     ];
+    let foo = dep_fixture("IncHashFoo", "package Foo;\n1;\n");
+    let ws = dep_fixture("IncHashWs", "package Ws;\n1;\n");
 
     validate_inc_paths(&conn, &paths1).unwrap();
-    save_to_db(&conn, "Foo", &None, "import");
+    assert!(save_dep(&conn, &foo));
+    save_to_db(&conn, &ws.path.to_string_lossy(), &Some(Arc::clone(&ws)), "workspace");
 
     validate_inc_paths(&conn, &paths2).unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 0, "cache should be empty after @INC change");
+    assert!(load_dependency_row(&conn, &foo.path).is_none(), "the tier's rows go when @INC moves");
+    assert!(load_one(&conn, &ws.path.to_string_lossy()).is_some(), "the walk's rows stay");
+
+    let _ = std::fs::remove_file(&foo.path);
+    let _ = std::fs::remove_file(&ws.path);
 }
 
 #[test]
 fn test_db_schema_version_migration() {
     let conn = test_db();
+    let old = dep_fixture("OldModule", "package OldModule;\n1;\n");
 
     conn.execute(
         "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
         [],
     )
     .unwrap();
-    save_to_db(&conn, "OldModule", &None, "import");
+    assert!(save_dep(&conn, &old));
 
     init_schema(&conn).unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 0, "old data should be gone after migration");
+    assert!(load_dependency_row(&conn, &old.path).is_none(), "old data should be gone after migration");
+
+    let _ = std::fs::remove_file(&old.path);
 }
 
 #[test]
@@ -356,22 +316,16 @@ fn test_full_file_analysis_survives_roundtrip() {
     let cached = parse_source_to_cached(&source, &pm);
     let original_refs_count = cached.analysis.refs().len();
     let original_packages = cached.analysis.packages.clone();
-    save_to_db(&conn, "Fidelity", &Some(Arc::clone(&cached)), "import");
+    assert!(save_dep(&conn, &cached));
 
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1);
-
-    let loaded = cache.get("Fidelity").unwrap();
-    let loaded = loaded.as_ref().unwrap();
+    let loaded = load_dependency_row(&conn, &cached.path).expect("a current row lands");
     assert_eq!(
-        loaded.analysis.refs().len(),
+        loaded.refs().len(),
         original_refs_count,
         "refs survive roundtrip"
     );
     assert_eq!(
-        loaded.analysis.packages, original_packages,
+        loaded.packages, original_packages,
         "per-package facts survive"
     );
 
@@ -395,7 +349,7 @@ fn same_second_same_size_rewrite_invalidates_row() {
         let s1 = std::fs::metadata(&pm).unwrap().modified().unwrap();
         let source = std::fs::read_to_string(&pm).unwrap();
         let cached = Some(parse_source_to_cached(&source, &pm));
-        save_to_db(&conn, "SubSecond", &cached, "import");
+        save_to_db(&conn, &pm.to_string_lossy(), &cached, DEPENDENCY_SOURCE);
         // Same byte length, different content.
         std::fs::write(&pm, "package SubSecond;\nsub b { 2 }\n1;\n").unwrap();
         let s2 = std::fs::metadata(&pm).unwrap().modified().unwrap();
@@ -404,10 +358,10 @@ fn same_second_same_size_rewrite_invalidates_row() {
         // identical mtimes — the stamp's residual one-tick blind spot, not
         // the regression under test — so retry those instead of asserting.
         if secs(s1) == secs(s2) && s1 != s2 {
-            let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-            let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-            assert_eq!(n, 0, "same-second same-size rewrite must invalidate the row");
+            assert!(
+                load_dependency_row(&conn, &pm).is_none(),
+                "same-second same-size rewrite must invalidate the row"
+            );
             let _ = std::fs::remove_file(&pm);
             return;
         }
@@ -436,24 +390,17 @@ fn header_change_invalidates_consumer_row_via_deps_stamp() {
     let mut fa = crate::build::builder::build(&tree, source.as_bytes());
     fa.pack.include_closure =
         crate::model::file_analysis::path_intern::ClosureList::from_iter(std::iter::once(hdr_canon.as_str()));
-    let cached = Some(Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(pm.clone()), Arc::new(fa))));
-    // warm_cache serves the 'import' tier ('workspace' rows stream through
-    // warm_cache_streaming); the deps_stamp semantics under test are
-    // source-independent.
-    save_to_db(&conn, "Consumer", &cached, "import");
+    let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::resolve(pm.clone()), Arc::new(fa)));
+    // The deps_stamp semantics under test are source-independent; the
+    // dependency tier's row read is the simplest probe of them.
+    assert!(save_dep(&conn, &cached));
 
-    // Unchanged closure → row warms.
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1, "row valid while the closure is unchanged");
+    // Unchanged closure → row lands.
+    assert!(load_dependency_row(&conn, &cached.path).is_some(), "row valid while the closure is unchanged");
 
     // Header changes; the consumer file itself does not.
     std::fs::write(&hdr, "#define LIMIT 5\n#define LIMIT2 7\n").unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 0, "header edit must invalidate the consumer's row");
+    assert!(load_dependency_row(&conn, &cached.path).is_none(), "header edit must invalidate the consumer's row");
 
     let _ = std::fs::remove_file(&pm);
     let _ = std::fs::remove_file(&hdr);
@@ -491,20 +438,16 @@ fn degraded_analysis_is_not_persisted() {
 #[test]
 fn input_fingerprint_change_clears_table() {
     let conn = test_db();
+    let foo = dep_fixture("InputFingerprintFoo", "package Foo;\n1;\n");
     validate_input_fingerprint(&conn, 0xA).unwrap();
-    save_to_db(&conn, "Foo", &None, "import");
+    assert!(save_dep(&conn, &foo));
 
     validate_input_fingerprint(&conn, 0xA).unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 1, "same inputs: cache survives");
+    assert!(load_dependency_row(&conn, &foo.path).is_some(), "same inputs: cache survives");
 
     validate_input_fingerprint(&conn, 0xB).unwrap();
-    let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
-    let all_defs: DashMap<String, DefCandidates> = DashMap::new();
-    let (n, _) = warm_cache(&conn, &cache, &all_defs, &Default::default(), false);
-    assert_eq!(n, 0, "changed inputs: table cleared");
+    assert!(load_dependency_row(&conn, &foo.path).is_none(), "changed inputs: table cleared");
+    let _ = std::fs::remove_file(&foo.path);
 }
 
 /// Relational ref index: shred → candidate-file retrieval round-trip, the
@@ -1105,11 +1048,11 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
 /// import tier (blobs AND derived rows) while workspace rows — possibly
 /// committed by the concurrent indexer moments earlier — survive.
 #[test]
-fn inc_clear_is_import_tier_scoped() {
+fn inc_clear_is_dependency_tier_scoped() {
     let conn = test_db();
     validate_inc_paths(&conn, &[PathBuf::from("/lib/a")]).unwrap();
     shred_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
-    shred_rows(&conn, "/inc/Dep.pm", "import", &[], &[]).unwrap();
+    shred_rows(&conn, "/inc/Dep.pm", DEPENDENCY_SOURCE, &[], &[]).unwrap();
 
     validate_inc_paths(&conn, &[PathBuf::from("/lib/CHANGED")]).unwrap();
     assert!(
@@ -1118,7 +1061,7 @@ fn inc_clear_is_import_tier_scoped() {
     );
     assert!(
         !has_ref_rows(&conn, "/inc/Dep.pm"),
-        "import rows must clear on an @INC change"
+        "dependency rows must clear on an @INC change"
     );
 }
 
@@ -2599,7 +2542,12 @@ fn an_old_row_format_upgrades_without_recreating_the_file() {
     {
         let c = Connection::open(&db).unwrap();
         init_schema(&c).unwrap();
-        save_to_db(&c, "Keep::Me", &None, NAME_KEYED_SOURCE);
+        c.execute(
+            "INSERT INTO modules (module_name, path, mtime_secs, file_size, source) \
+             VALUES ('Keep::Me', '', 0, 0, 'dependency')",
+            [],
+        )
+        .unwrap();
         // An older `syms`: no `key_id`/`flags`, so none of today's indexes.
         c.execute_batch(
             "DROP TABLE syms;

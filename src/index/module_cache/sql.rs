@@ -266,14 +266,14 @@ registry! {
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM held; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces;";
     MODULES_CLEAR => NoScratch, "DELETE FROM modules";
-    MODULES_CLEAR_IMPORT => NoScratch, "DELETE FROM modules WHERE source = 'import'";
-    REFS_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives idx_refs_file per import file instead of probing `files` once per refs row"),
-        "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
-    SYMS_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives the `file_id` index prefix per import file instead of probing `files` once per syms row"),
-        "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
-    HELD_CLEAR_IMPORT => Scratch("once per @INC change: the IN set drives idx_held_file per import file instead of probing `files` once per held row"),
-        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE source = 'import')";
-    FILES_CLEAR_IMPORT => NoScratch, "DELETE FROM files WHERE source = 'import'";
+    MODULES_CLEAR_DEPENDENCY => NoScratch, "DELETE FROM modules WHERE source = 'dependency'";
+    REFS_CLEAR_DEPENDENCY => Scratch("once per @INC change: the IN set drives idx_refs_file per dependency file instead of probing `files` once per refs row"),
+        "DELETE FROM refs WHERE file_id IN (SELECT file_id FROM files WHERE source = 'dependency')";
+    SYMS_CLEAR_DEPENDENCY => Scratch("once per @INC change: the IN set drives the `file_id` index prefix per dependency file instead of probing `files` once per syms row"),
+        "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE source = 'dependency')";
+    HELD_CLEAR_DEPENDENCY => Scratch("once per @INC change: the IN set drives idx_held_file per dependency file instead of probing `files` once per held row"),
+        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE source = 'dependency')";
+    FILES_CLEAR_DEPENDENCY => NoScratch, "DELETE FROM files WHERE source = 'dependency'";
     CONCLUSIONS_CLEAR => NoScratch, "DELETE FROM conclusions";
     BUILTINS_CLEAR => NoScratch, "DELETE FROM builtins";
     BUILTINS_INSERT => NoScratch, "INSERT INTO builtins (name, doc) VALUES (?1, ?2)";
@@ -300,6 +300,12 @@ registry! {
         "DELETE FROM modules WHERE path = ?1 AND source = ?2";
     MODULES_PATH_EXISTS => NoScratch, "SELECT 1 FROM modules WHERE path = ?1 LIMIT 1";
     MODULES_SOURCE_BYTES => NoScratch, "SELECT COALESCE(SUM(file_size), 0) FROM modules";
+    DEPENDENCY_ROW_LOAD => NoScratch,
+        "SELECT analysis, bag, mtime_secs, file_size, extract_version, deps_stamp \
+         FROM modules WHERE path = ?1 AND source = ?2";
+    DEPENDENCY_ROW_CURRENT => NoScratch,
+        "SELECT 1 FROM modules WHERE path = ?1 AND source = ?2 AND mtime_secs = ?3 \
+         AND file_size = ?4 AND extract_version = ?5 AND analysis IS NOT NULL";
     WARM_MODULES_BY_SOURCE => NoScratch,
         "SELECT module_name, path, mtime_secs, file_size, analysis, extract_version, deps_stamp \
          FROM modules WHERE source = ?1";
@@ -362,7 +368,7 @@ registry! {
 
     // ---- the relational row store ----
     /// Sticky workspace tier: a project lib/ file re-shredded by the @INC
-    /// resolver as 'import' keeps the walk's verdict.
+    /// resolver as 'dependency' keeps the walk's verdict.
     FILES_UPSERT => NoScratch,
         "INSERT INTO files (path, source) VALUES (?1, ?2)
          ON CONFLICT(path) DO UPDATE SET source =

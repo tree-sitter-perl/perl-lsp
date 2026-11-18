@@ -22,7 +22,7 @@ impl ModuleIndex {
     /// The registered copy at `path`.
     pub(crate) fn workspace_file_for_test(&self, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
         let path = crate::util::canonical_path::CanonicalPath::resolve(path);
-        self.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
+        self.core.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
     }
 }
 
@@ -296,29 +296,6 @@ fn test_find_exporters_uses_reverse_index() {
 }
 
 #[test]
-fn test_rebuild_reverse_index_recovers_warm_path_exporters() {
-    // The warm path (`warm_cache`) writes straight into `cache_raw()` and
-    // never touches the reverse index, so `find_exporters` is blind until a
-    // rebuild. The export-only name (`weaken`-style XS export with no Perl
-    // body, hence no `symbols` entry) is the case `indexable_symbol_names`
-    // alone misses — the B6 cold/warm attribution regression.
-    let idx = ModuleIndex::new_for_test();
-    let src = "package Scalar::Util;\nour @EXPORT_OK = qw(weaken blessed);\n1;";
-    let cached = parse_source_to_cached(src, "Scalar::Util");
-
-    // Simulate warm_cache: direct insert, no reverse-index update.
-    idx.cache_raw().insert("Scalar::Util".to_string(), Some(cached));
-    assert!(
-        idx.find_exporters("weaken").is_empty(),
-        "warm insert must not populate the reverse index on its own"
-    );
-
-    idx.rebuild_reverse_index_from_cache();
-    assert_eq!(idx.find_exporters("weaken"), vec!["Scalar::Util"]);
-    assert_eq!(idx.find_exporters("blessed"), vec!["Scalar::Util"]);
-}
-
-#[test]
 fn test_find_exporters_exporter_extensible() {
     // Names declared via `export(...)` and `:Export` attributes are
     // discoverable cross-file — the goto-def proxy for a consumer's import.
@@ -455,18 +432,12 @@ fn test_children_index_direct_and_transitive() {
 }
 
 #[test]
-fn test_children_index_survives_warm_rebuild_and_purge() {
-    // B6: the children edge must be fed by the warm rebuild path, not
-    // just the insert path — and purged on re-registration.
+fn test_children_index_is_purged_when_the_project_claims_a_landed_file() {
+    // The children edge a dependency landing fed must go when a front door
+    // registers the same file as the project's without the parent.
     let idx = ModuleIndex::new_for_test();
     let child = "package Kid;\nuse parent 'Base::Class';\n1;";
-    let cached = parse_source_to_cached(child, "Kid");
-
-    // Simulate warm_cache: direct insert, indexes untouched.
-    idx.cache_raw().insert("Kid".to_string(), Some(cached));
-    assert!(idx.modules_with_parent("Base::Class").is_empty());
-
-    idx.rebuild_reverse_index_from_cache();
+    idx.insert_cache("Kid", Some(parse_source_to_cached(child, "Kid")));
     assert_eq!(idx.modules_with_parent("Base::Class"), vec!["Kid"]);
 
     // Re-registration with the parent edge gone must drop the stale edge.
@@ -478,6 +449,11 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
     assert!(
         idx.modules_with_parent("Base::Class").is_empty(),
         "purge on re-registration must drop the stale parent edge",
+    );
+    assert_eq!(
+        idx.file_role(&crate::util::canonical_path::CanonicalPath::resolve(PathBuf::from("/fake/Kid.pm"))),
+        Some(crate::model::file_analysis::FileRole::Workspace),
+        "the project's registration replaces the landing",
     );
 }
 
@@ -2905,4 +2881,72 @@ fn a_held_file_reads_its_role_from_its_record() {
     assert_ne!(idx.file_role(&mine.path), Some(FileRole::Workspace));
     assert!(swept(&idx).is_empty());
     assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency), "the tier's record stays");
+}
+
+/// A landed dependency is held by path like every other file: its record,
+/// its path home (`cached_by_path` is one lookup) and the all-roles sweep —
+/// never the project's sweep.
+#[test]
+fn a_landed_dependency_has_a_path_home() {
+    use crate::model::file_analysis::{CrossFileLookup, FileRole};
+    let idx = ModuleIndex::new_for_test();
+    let dep = parse_source_to_cached("package Ext::Home;\nsub f { 1 }\n1;", "Ext::Home");
+    idx.insert_cache("Ext::Home", Some(Arc::clone(&dep)));
+
+    assert_eq!(idx.file_role(&dep.path), Some(FileRole::Dependency));
+    let held = idx.cached_by_path(&dep.path).expect("the path home holds the landing");
+    assert!(Arc::ptr_eq(&held, &idx.get_cached("Ext::Home").unwrap()), "one copy serves the slot and the path");
+    let mut all = Vec::new();
+    idx.for_each_cached_file(&mut |cm| all.push(cm.path.clone()));
+    assert_eq!(all, vec![dep.path.clone()]);
+    let mut mine = Vec::new();
+    idx.for_each_registered_file(&mut |cm| mine.push(cm.path.clone()));
+    assert!(mine.is_empty(), "a dependency is not the project's");
+}
+
+/// The map's order picks the slot — what `require` would load — not the
+/// path order the candidate table keeps, and a re-derivation (the winner
+/// leaving) falls back to the map's next file.
+#[test]
+fn a_dependency_slot_follows_the_map_order() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let idx = ModuleIndex::new_for_test();
+    let src = "package Twin::Order;\nsub f { 1 }\n1;";
+    let mk = |dir: &str| {
+        let a = parse_source_to_cached(src, "Twin::Order");
+        Arc::new(CachedModule::new(
+            crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from(format!("/{dir}/Twin/Order.pm"))),
+            Arc::clone(&a.analysis),
+        ))
+    };
+    let (first, second) = (mk("zz"), mk("aa"));
+    idx.insert_cache_providers("Twin::Order", Some(vec![Arc::clone(&first), Arc::clone(&second)]));
+    assert_eq!(idx.get_cached("Twin::Order").unwrap().path, first.path, "the map's first file wins");
+    assert_eq!(idx.def_candidates("Twin::Order").len(), 2);
+
+    // The winner's path turns out to be the project's: it leaves the tier,
+    // and the slot re-derives to the map's next file.
+    let mine = Arc::clone(&first.analysis);
+    idx.register_workspace_module(first.path.to_path_buf(), mine);
+    idx.unregister_workspace_path(&first.path);
+    assert_eq!(idx.get_cached("Twin::Order").unwrap().path, second.path);
+}
+
+/// A dependency record lives exactly as long as its candidacy: the inverse
+/// that removes it from the name's candidates and slot takes its record and
+/// path home with it.
+#[test]
+fn a_dependency_record_does_not_outlive_its_slot() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let idx = ModuleIndex::new_for_test();
+    let dep = parse_source_to_cached("package Ext::Gone;\nsub f { 1 }\n1;", "Ext::Gone");
+    idx.insert_cache("Ext::Gone", Some(Arc::clone(&dep)));
+    assert_eq!(idx.modules_with_symbol("f"), vec!["Ext::Gone"]);
+
+    idx.unregister_workspace_path(&dep.path);
+    assert_eq!(idx.file_role(&dep.path), None, "the record went with the landing");
+    assert!(idx.cached_by_path(&dep.path).is_none(), "and the path home");
+    assert!(idx.get_cached("Ext::Gone").is_none(), "and the slot");
+    assert!(idx.def_candidates("Ext::Gone").is_empty(), "and the candidacy");
+    assert!(idx.modules_with_symbol("f").is_empty(), "and the edge feed");
 }

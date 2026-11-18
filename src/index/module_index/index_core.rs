@@ -42,9 +42,6 @@ pub(crate) struct IndexCore {
     /// A set, not a queue: a stale path rejected ten thousand times in one
     /// sweep is one repair.
     pub(crate) repair_pushed: DashMap<std::path::PathBuf, ()>,
-    /// Modules loaded from cache with an old extract_version.
-    /// Eligible for priority re-resolution when requested.
-    pub(crate) stale_modules: DashMap<String, ()>,
     /// Perl builtins hover docs, name → rendered markdown. Hydrated
     /// from SQLite by the resolver thread at startup (parsed from
     /// `perlfunc.pod` on first cold-cache miss). Empty until the
@@ -73,6 +70,12 @@ pub(crate) struct IndexCore {
     /// both sides land files — the front doors the project's, the resolver
     /// thread the `@INC` tier's.
     pub(crate) records: FileRecords,
+    /// The path home: every held file, keyed by canonical path, whatever its
+    /// role — including files that declare NOTHING registrable (a header-only
+    /// `#include` shim, a packageless entrypoint), which the name-keyed views
+    /// cannot reach. Written beside `records`, record first, so a sweep never
+    /// meets a file without its role.
+    pub(crate) all_files: DashMap<crate::util::canonical_path::CanonicalPath, Arc<CachedModule>>,
     /// The `@INC` roots this process resolves from, canonical, most-
     /// preferred first. Recorded ONCE by the resolver thread (discovery
     /// shells out to `perl`, so no query path may re-derive it) and read by
@@ -151,12 +154,12 @@ impl IndexCore {
             loader_config_shapes: DashMap::new(),
             shapes_by_contributor: DashMap::new(),
             repair_pushed: DashMap::new(),
-            stale_modules: DashMap::new(),
             builtins: DashMap::new(),
             available_modules: DashMap::new(),
             all_defs: DashMap::new(),
             leaf_defs: DashMap::new(),
             records: FileRecords::default(),
+            all_files: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
@@ -207,43 +210,6 @@ impl IndexCore {
         self.registration_gen.insert(path.clone(), g);
     }
 
-    /// Stamp a generation for every name-keyed cache entry that lacks one.
-    /// The @INC warm scan (`warm_cache`) writes blobs straight into the
-    /// cache without a registration front door, so those providers would
-    /// otherwise read gen 0 in `enrichment_key`. `or_insert` so a warm entry
-    /// racing a workspace front-door registration keeps the front-door
-    /// generation.
-    pub(crate) fn stamp_missing_import_gens(&self) {
-        for entry in self.cache.iter() {
-            if let Some(ref cm) = *entry.value() {
-                self.registration_gen.entry(cm.path.clone()).or_insert_with(|| {
-                    crate::util::ghost_stats::count("epoch.gen_stamp_missing");
-                    self.gen_counter
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                });
-            }
-        }
-    }
-
-    /// THE one spelling of "a module resolution landed in the name-keyed
-    /// cache slot" — the resolver thread and the CLI both route here.
-    /// `result` is the WHOLE parsed copy; `persisted` says its blob landed
-    /// (the strip license) and `strip` is the eviction switch. On a resolved
-    /// copy, in order: stale-pin clear BEFORE the copy is reachable (a
-    /// re-resolve replaced the blob; a query racing this insert must not
-    /// rehydrate the prior generation), a fresh registration generation
-    /// (moves every consumer's enrichment key), then the projections — edge
-    /// feeds and loader-config shapes — on the WHOLE analysis (the shape
-    /// projection resolves config literals through the witness bag the strip
-    /// drops: reads-whole-before-evict), then the registration-owned strip,
-    /// then the store. Returns the stored copy (the caller's memo value).
-    ///
-    /// A `None` miss never clobbers an already-indexed copy: on-demand @INC
-    /// resolution can miss a module the workspace indexer already built (a
-    /// project module under a relative `use lib` the resolver's @INC doesn't
-    /// cover), and clobbering would leave the reverse index pointing at a
-    /// module the cache no longer holds (the orphan that broke cross-file
-    /// Handler / dispatch lookup).
     /// A shape mutation landed — invalidate every memo keyed on the
     /// enrichment epoch. Over-invalidation is the safe direction.
     pub(crate) fn note_shape_change(&self) {
@@ -298,7 +264,25 @@ impl IndexCore {
         }
     }
 
-    pub(crate) fn insert_resolved(
+    /// THE one spelling of "the `@INC` tier landed `module_name`" — the
+    /// resolver thread and the CLI both route here. `result` is the WHOLE
+    /// copy of every file the map located for the name, in the map's order
+    /// (a landing adds to the name's candidates, as every front door does);
+    /// `persisted` says their rows landed (the strip licence) and `strip` is
+    /// the eviction switch. Each file is landed by path: a fresh registration
+    /// generation (moves every consumer's enrichment key), the projections —
+    /// edge feeds and loader-config shapes — on the WHOLE analysis (the shape
+    /// projection reads the witness bag the strip drops), the strip, then the
+    /// record and the path home. The candidate relation and the name slot are
+    /// derived from the records. Returns the stored copies (the caller's
+    /// memo value).
+    ///
+    /// A `None` miss never clobbers an already-indexed copy: on-demand @INC
+    /// resolution can miss a module the workspace indexer already built (a
+    /// project module under a relative `use lib` the resolver's @INC doesn't
+    /// cover), and clobbering would leave the reverse index pointing at a
+    /// module the cache no longer holds.
+    pub(crate) fn land_providers(
         &self,
         module_name: &str,
         result: Option<Providers>,
@@ -307,49 +291,157 @@ impl IndexCore {
     ) -> Option<Providers> {
         crate::util::ghost_stats::count("epoch.shape.insert_resolved");
         self.note_shape_change();
-        if let Some(ref providers) = result {
-            // One purge, then one push per provider: `record_loader_shapes`
-            // clears the contributor's entries before pushing, so calling it
-            // per provider would leave only the last one's shapes.
-            self.purge_loader_shapes(module_name);
-            for m in providers {
-                if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
-                    bc.invalidate(&m.path);
-                }
-                self.mint_registration_gen(&m.path);
-                self.records.land_dependency(&m.path, package_names(&m.analysis));
-                self.edges.feed(module_name, &m.path, &m.analysis);
-                self.push_loader_shapes(module_name, &m.analysis);
+        let Some(providers) = self.tier_providers(result) else {
+            if !matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
+                self.set_slot(module_name, None);
             }
-        } else if matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
             return None;
+        };
+        // One purge, then one push per provider: `record_loader_shapes`
+        // clears the contributor's entries before pushing, so calling it
+        // per provider would leave only the last one's shapes.
+        self.purge_loader_shapes(module_name);
+        for m in &providers {
+            if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
+                bc.invalidate(&m.path);
+            }
+            self.mint_registration_gen(&m.path);
+            self.edges.feed(module_name, &m.path, &m.analysis);
+            self.push_loader_shapes(module_name, &m.analysis);
         }
-        let stored: Option<Providers> = result.as_ref().map(|providers| {
-            providers
-                .iter()
-                .map(|m| strip_import_copy_one(m, persisted, strip))
-                .collect()
-        });
-        // The relation holds every provider; the name-keyed slot holds the
-        // @INC-order winner (what `require` would load) — derived from the
-        // set, never the only thing kept.
-        if let Some(ref providers) = stored {
-            self.adopt_inc_providers(module_name, providers);
+        let stored: Providers = providers
+            .iter()
+            .map(|m| strip_import_copy_one(m, persisted, strip))
+            .collect();
+        for (precedence, (whole, m)) in providers.iter().zip(&stored).enumerate() {
+            self.records.land_dependency(
+                &m.path,
+                package_names(&whole.analysis),
+                (module_name.to_string(), precedence),
+            );
+            self.all_files.insert(m.path.clone(), m.clone());
+            self.all_defs.entry(module_name.to_string()).or_default().upsert(m.clone());
         }
-        let primary = stored.as_ref().and_then(|p| p.first().cloned());
-        self.set_slot(module_name, primary);
-        stored
+        // The map's first file takes the slot — what `require` would load —
+        // unless a workspace file holds it: project code shadows an
+        // installed copy (`derive_slot`'s rank).
+        let shadowed = matches!(
+            self.cache.get(module_name).as_deref(),
+            Some(Some(c)) if self.records.role_of(&c.path) == Some(crate::model::file_analysis::FileRole::Workspace)
+        );
+        if !shadowed {
+            self.set_slot(module_name, stored.first().cloned());
+        }
+        Some(stored)
     }
 
-    /// Adopt `providers` as `@INC` candidates for `module_name`, keyed by
-    /// path so a re-resolve REPLACES its own entry instead of stacking, and
-    /// a workspace candidate for the same name is left untouched (the tiers
-    /// share the relation; precedence stays with the cache slot).
-    pub(crate) fn adopt_inc_providers(&self, module_name: &str, providers: &[Arc<CachedModule>]) {
-        let mut v = self.all_defs.entry(module_name.to_string()).or_default();
-        for cand in providers {
-            v.upsert(cand.clone());
+    /// The files of a landing the tier may hold: a path a front door
+    /// registered is the walk's (project `lib/` is on `@INC` too), and the
+    /// tier never lands a second copy of it. `None` when nothing is left.
+    pub(crate) fn tier_providers(&self, result: Option<Providers>) -> Option<Providers> {
+        let mut providers = result?;
+        providers.retain(|m| {
+            let owned = self.records.role_of(&m.path) == Some(crate::model::file_analysis::FileRole::Workspace);
+            if owned {
+                crate::util::ghost_stats::count("dependency.workspace_path_skipped");
+            }
+            !owned
+        });
+        (!providers.is_empty()).then_some(providers)
+    }
+
+    /// Re-derive `name`'s slot from its candidates, ranked by role then the
+    /// map: a workspace file shadows an installed one, and among workspace
+    /// files the class-rank/path tie-break decides; among dependencies the
+    /// map's precedence does (what `require` would load). No candidate
+    /// leaves the slot alone — a remembered miss, or a name nothing landed.
+    pub(crate) fn derive_slot(&self, name: &str) {
+        use crate::model::file_analysis::FileRole;
+        let Some(cands) = self.all_defs.get(name).map(|v| v.to_vec()) else {
+            return;
+        };
+        let (workspace, deps): (Vec<&Arc<CachedModule>>, Vec<&Arc<CachedModule>>) = cands
+            .iter()
+            .partition(|c| self.records.role_of(&c.path) == Some(FileRole::Workspace));
+        let winner = if !workspace.is_empty() {
+            best_candidate(&workspace, name, &|m, n| self.defines_class(m, n))
+        } else {
+            deps.into_iter()
+                .min_by_key(|c| (self.records.precedence(&c.path, name).unwrap_or(usize::MAX), c.path.clone()))
+                .cloned()
+        };
+        if let Some(w) = winner {
+            let held = matches!(self.cache.get(name).as_deref(), Some(Some(c)) if Arc::ptr_eq(c, &w));
+            if !held {
+                self.set_slot(name, Some(w));
+            }
         }
+    }
+
+    /// Undo a dependency landing of `path`: its record and path home, its
+    /// candidacy under every name the map placed it, those names' edge feeds
+    /// (re-fed from the survivors) and slots (re-derived). A workspace file
+    /// at `path` is the front door's and is left alone.
+    pub(crate) fn retire_dependency(&self, path: &crate::util::canonical_path::CanonicalPath) {
+        let Some(record) = self.records.forget_dependency(path) else {
+            return;
+        };
+        crate::util::ghost_stats::count("dependency.retired");
+        self.note_shape_change();
+        self.all_files.remove(path);
+        for (name, _) in &record.loads_as {
+            if let Some(mut v) = self.all_defs.get_mut(name) {
+                v.remove_path(path);
+            }
+            self.all_defs.remove_if(name, |_, v| v.is_empty());
+            self.edges.purge_module(name);
+            let survivors: Vec<Arc<CachedModule>> =
+                self.all_defs.get(name).map(|v| v.to_vec()).unwrap_or_default();
+            for c in &survivors {
+                self.edges.feed(name, &c.path, &c.analysis);
+            }
+            if survivors.is_empty() {
+                self.purge_loader_shapes(name);
+                if matches!(self.cache.get(name).as_deref(), Some(Some(c)) if c.path == *path) {
+                    self.clear_slot(name);
+                }
+            } else {
+                self.derive_slot(name);
+            }
+        }
+        self.edges.remove_path_record(path);
+        if let Some(bc) = self.bag_cache.read().ok().and_then(|g| g.clone()) {
+            bc.invalidate(path);
+        }
+    }
+
+    /// A front door is about to register `path` as the project's: a
+    /// dependency landing at the same path (the resolver got there first)
+    /// retires, so its names re-derive and the project copy replaces it.
+    pub(crate) fn claim_for_workspace(
+        &self,
+        path: &crate::util::canonical_path::CanonicalPath,
+        names: Vec<(String, bool)>,
+    ) -> Option<Vec<(String, bool)>> {
+        self.retire_dependency(path);
+        self.records.register_workspace(path, names)
+    }
+
+    /// Does `m` declare a `Class`/type named `name`? Rank source for the
+    /// slot tie-break. Reads the record first — the resident copy's
+    /// `symbols` may be evicted — and falls back to the symbol scan for
+    /// copies registered whole (recovery paths, tests).
+    pub(crate) fn defines_class(&self, m: &CachedModule, name: &str) -> bool {
+        if let Some(declares) = self
+            .records
+            .with_names(&m.path, |names| names.iter().any(|(n, is_class)| n == name && *is_class))
+        {
+            return declares;
+        }
+        m.analysis
+            .symbols()
+            .iter()
+            .any(|s| matches!(s.kind, crate::model::file_analysis::SymKind::Class) && s.name == name)
     }
 
     /// Drop `contributor`'s loader-shape entries. Split from the push so a
@@ -406,20 +498,6 @@ impl IndexCore {
                     .entry(contributor.to_string())
                     .or_default()
                     .push(f.name.clone());
-            }
-        }
-    }
-
-    /// Rebuild the edge indexes (`func → modules`, bridges, children, specs)
-    /// from the current cache. The warm path writes blobs straight into the
-    /// cache without touching the indexes, so a warm start that skips this
-    /// leaves every reverse lookup blind (cold/warm attribution, the B6
-    /// class).
-    pub(crate) fn rebuild_reverse_index(&self) {
-        self.edges.clear();
-        for entry in self.cache.iter() {
-            if let Some(ref cached) = *entry.value() {
-                self.edges.feed(entry.key(), &cached.path, &cached.analysis);
             }
         }
     }

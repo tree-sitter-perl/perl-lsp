@@ -48,28 +48,21 @@ pub(super) fn residency_tripwire(tier: &str, whole: usize, expected: usize) {
     }
 }
 
-/// Persist EVERY provider of `module_name` — one row per file, because the
-/// name maps to a set. `true` only when all of them landed: a partial write
-/// must not license the resident strip, or the un-persisted provider loses
-/// the axes it can no longer rehydrate.
-pub(super) fn save_module_generation(
-    conn: &rusqlite::Connection,
-    module_name: &str,
-    result: &Option<Providers>,
-) -> bool {
-    let Some(providers) = result else {
-        return module_cache::save_to_db(conn, module_name, &None, module_cache::NAME_KEYED_SOURCE);
-    };
-    let mut all = true;
-    for m in providers {
-        all &= module_cache::save_to_db(
-            conn,
-            module_name,
-            &Some(m.clone()),
-            module_cache::NAME_KEYED_SOURCE,
-        );
+/// Persist one dependency file, path-keyed. `true` when a row that can
+/// rehydrate it is on disk — already current (the landing took it from that
+/// row) or written now. That verdict is the strip licence.
+pub(super) fn persist_dependency(conn: &rusqlite::Connection, m: &Arc<CachedModule>) -> bool {
+    if let Some(stamp) = module_cache::file_stamp(&m.path) {
+        if module_cache::dependency_row_is_current(conn, &m.path, stamp) {
+            return true;
+        }
     }
-    all
+    module_cache::save_to_db(
+        conn,
+        &m.path.to_string_lossy(),
+        &Some(Arc::clone(m)),
+        module_cache::DEPENDENCY_SOURCE,
+    )
 }
 
 /// Stamp-before-read + re-stat-after-parse: capture the disk stamp, run the

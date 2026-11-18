@@ -64,10 +64,9 @@ impl std::ops::Deref for DefCandidates {
 ///   "who subclasses this class" in O(1).
 ///
 /// The bundle exists because the feeds must never diverge across the
-/// resolve insert path, the SQLite warm rebuild, and workspace
-/// registration — a map fed on insert but not on rebuild serves cold
-/// sessions and starves warm ones (the twice-paid B6 lesson). One
-/// `feed()` per site makes a missed map unrepresentable.
+/// dependency landing and workspace registration — a map fed on one path
+/// but not the other serves one tier and starves the other (the twice-paid
+/// B6 lesson). One `feed()` per site makes a missed map unrepresentable.
 /// One reverse-index bucket: the module list readers iterate, plus the
 /// membership test that keeps insertion O(1).
 ///
@@ -75,7 +74,7 @@ impl std::ops::Deref for DefCandidates {
 /// scan per insert makes a bulk feed quadratic in bucket size, and the
 /// worst case is also the common one: `new` is declared by every module in
 /// the workspace, so its bucket IS the workspace. Measured at 8k synthetic
-/// modules, the scan cost `rebuild_reverse_index` 4,108 ms of a 15 s CLI
+/// modules, the scan cost a whole-index re-feed 4,108 ms of a 15 s CLI
 /// startup and grew as ~n^2.5; without it, 137 ms and linear.
 ///
 /// The set materializes only once a bucket is big enough for the scan to
@@ -166,20 +165,19 @@ pub struct ModuleEdgeIndexes {
     /// (inverse `IncludeDirective::target`): "who includes this header"
     /// without a sweep. Keyed and membered by canonical PATH — an include
     /// names a file, not a module — so it sits outside the module-keyed
-    /// purge record AND outside `clear()`: the rebuild re-feeds from the
-    /// name-keyed winners, and an include-only file wins no name. A stale
+    /// purge record: an include-only file wins no name to purge. A stale
     /// member (an edit dropped the directive, the file went) is rechecked
     /// against the includer's current analysis at read.
     pub(super) includers: DashMap<String, ModuleBucket>,
     /// The indexable-name list each FILE last fed — the symbols-derived
     /// half of `feed`, recorded from the WHOLE analysis so a re-feed over
-    /// symbol-EVICTED cache copies (`rebuild_reverse_index*` after the
+    /// symbol-EVICTED cache copies (a deferred registration after the
     /// workspace indexer strips, sibling replay after a same-name purge)
     /// replays the names instead of reading empty vecs and silently
     /// blinding `modules_with_symbol`/`find_exporters`. Keyed by PATH, not
     /// module name: several files can feed under one package name (Perl
     /// reopens packages anywhere), and a name-keyed record would replay one
-    /// file's names for its siblings. `clear()` and `purge_module` keep it
+    /// file's names for its siblings. `purge_module` keeps it
     /// (re-feeds are exactly when it's needed); `remove_path_record` drops
     /// it when the file itself goes.
     name_records: DashMap<std::path::PathBuf, FedNames>,
@@ -270,13 +268,13 @@ impl ModuleEdgeIndexes {
     }
 
     /// Register every edge `analysis` contributes under `module_name`.
-    /// The ONLY write path besides `purge_module`/`clear` — new edge
+    /// The ONLY write path besides `purge_module` — new edge
     /// maps get their extraction added here and nowhere else. Eviction-
     /// aware: a symbol-stripped copy replays `path`'s recorded name list;
     /// a whole copy recomputes and re-records it. Idempotent per
     /// (bucket, module_name): re-feeding never grows a bucket, so the
-    /// candidate-set rebuilds (purge + one feed per candidate) and the
-    /// warm rebuild can overlap without accumulation.
+    /// candidate-set rebuilds (purge + one feed per candidate) can overlap
+    /// without accumulation.
     pub fn feed(&self, module_name: &str, path: &std::path::Path, analysis: &FileAnalysis) {
         let FedNames { names, providers, bridges, ends } = if analysis.symbols_are_evicted() {
             match self.name_records.get(path) {
@@ -544,22 +542,6 @@ impl ModuleEdgeIndexes {
     /// Drop `path`'s recorded name list (the file itself is gone).
     pub fn remove_path_record(&self, path: &std::path::Path) {
         self.name_records.remove(path);
-    }
-
-    /// Wipe the edge maps for a rebuild. Deliberately KEEPS `name_records`
-    /// — the rebuild re-feeds from cache copies that may be symbol-evicted,
-    /// and the records are their only complete name source.
-    pub fn clear(&self) {
-        self.names.clear();
-        self.bridges.clear();
-        self.children.clear();
-        self.specs.clear();
-        self.providers.clear();
-        self.ends.clear();
-        // The marks describe the maps just emptied; keeping them would let
-        // a later purge take the sweep for a module with no edges left,
-        // and — worse — a re-feed would find its mark already set.
-        self.fed_modules.clear();
     }
 
     /// The symbol-derived feed parts — the

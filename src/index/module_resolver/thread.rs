@@ -28,7 +28,9 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
     scan_inc_module_names(&inc_paths, &core.available_modules);
     log::info!("@INC scan: {} modules available", core.available_modules.len());
 
-    // Warm the in-memory cache from SQLite.
+    // The store's gates run before any landing reads a row. There is no
+    // warm lane: a landing takes each located file from its row in place of
+    // parsing it, so a warm start lands what a cold one would.
     let db = module_cache::open_cache_db(ws_root.as_deref(), "perl");
     if let Some(ref conn) = db {
         let _ = module_cache::validate_inc_paths(conn, &inc_paths);
@@ -57,31 +59,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 Err(e) => log::warn!("Builtins hydrate failed: {}", e),
             }
         }
-        // Warm-copy strip is a long-lived-server behavior; one-shot CLI
-        // keeps warm copies whole for wall (rehydration never amortizes).
-        let strip_warm = server.is_some()
-            && core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
-            && eviction_enabled();
-        let (n, stale_names) = module_cache::warm_cache(conn, &core.cache, &core.all_defs, &core.records, strip_warm);
-        log::info!("Warmed module cache: {} entries loaded from disk, {} stale", n, stale_names.len());
-        // Stamp generations for the warm-loaded @INC providers (they
-        // landed in the cache without a registration front door).
-        core.stamp_missing_import_gens();
-        for name in &stale_names {
-            core.stale_modules.insert(name.clone(), ());
-        }
-        // Server sessions re-resolve stale modules eagerly; headless ones
-        // re-resolve on demand (`request_resolve` queues stale names with
-        // priority).
-        if server.is_some() && !stale_names.is_empty() {
-            {
-                let mut pq = core.queue.priority.lock().unwrap();
-                pq.extend(stale_names);
-            }
-            core.queue.notify_new_work();
-        }
-        // Build reverse index from warmed cache.
-        core.rebuild_reverse_index();
     }
 
     // Each module resolves at most once per process.
@@ -195,18 +172,18 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 continue;
             }
 
-            let is_re_resolve = core.stale_modules.contains_key(&module_name);
-            if is_re_resolve {
-                log::info!("Re-resolving stale module '{}'", module_name);
-                // Stale entry must not be served from the run-local memo.
-                parse_memo.remove(&module_name);
-            } else {
-                log::info!("Resolving module '{}'", module_name);
-            }
-
+            log::info!("Resolving module '{}'", module_name);
             crate::util::ghost_stats::count("resolver.module_resolved");
-            let result = parse_module(&inc_paths, &module_name, &mut parser, &mut parse_memo);
-            match &result {
+            let (result, stored) = land_module(
+                &core,
+                db.as_ref(),
+                &inc_paths,
+                &module_name,
+                &mut parser,
+                &mut parse_memo,
+                eviction_enabled(),
+            );
+            match &stored {
                 Some(providers) => log::info!(
                     "Resolved '{}': {} provider(s), {} export, {} export_ok",
                     module_name,
@@ -216,22 +193,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                 ),
                 None => log::info!("No exports found for '{}'", module_name),
             }
-            // Persistence is per FILE: each provider gets its own row, so a
-            // shadowed twin survives the warm start too.
-            let persisted = db
-                .as_ref()
-                .map(|conn| save_module_generation(conn, &module_name, &result))
-                .unwrap_or(false);
-            // The one spelling of "a resolution landed": stale-pin clear +
-            // generation mint + whole-analysis projections + registration-
-            // owned strip + the None-never-clobbers guard, all inside
-            // `insert_resolved`.
-            let stored = core.insert_resolved(
-                &module_name,
-                result.clone(),
-                persisted,
-                eviction_enabled(),
-            );
             // The memo would otherwise pin the WHOLE closure for the
             // thread's lifetime — a second copy of the tier. Failed
             // resolves are NOT memoized (pre-existing semantics: the
@@ -322,9 +283,6 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     }
                 }
             }
-
-            // Remove from stale set after re-resolution (no-op otherwise).
-            core.stale_modules.remove(&module_name);
 
             // Report cpanfile progress.
             if let Some(srv) = &server {

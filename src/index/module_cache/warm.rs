@@ -1,5 +1,6 @@
-//! Warm scans: row-generation classification and the three warm lanes
-//! (name-keyed @INC, streaming workspace, stub-first pack).
+//! Warm scans: row-generation classification, the two warm lanes
+//! (streaming workspace, stub-first pack), and the dependency tier's
+//! per-path row read.
 
 use super::*;
 
@@ -276,171 +277,41 @@ pub fn warm_pack_stream_with_stubs(
     count
 }
 
-/// None-over-Some, atomically: the workspace registrar may register this
-/// name concurrently, and a sentinel clobber answers "no such module" all
-/// session. The entry API holds the shard lock across check+insert.
-fn insert_sentinel_guarded(
-    cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    module_name: String,
-) {
-    match cache.entry(module_name) {
-        dashmap::mapref::entry::Entry::Occupied(mut o) => {
-            if o.get().is_none() {
-                o.insert(None);
-            }
-        }
-        dashmap::mapref::entry::Entry::Vacant(v) => {
-            v.insert(None);
-        }
+/// The persisted analysis of the dependency at `path`, WHOLE (its bag
+/// included), when the row is current: same file stamp, this binary's
+/// extract version, the same closure stamp. The tier has no warm lane of its
+/// own — a landing reads the row of each file the map located, in place of
+/// parsing it, so a warm start lands exactly what a cold one would. A miss
+/// (no row, a stale one, a decode break) parses.
+pub fn load_dependency_row(conn: &Connection, path: &std::path::Path) -> Option<FileAnalysis> {
+    let path_str = path.to_string_lossy();
+    let (blob, bag, mtime, size, version, deps): (Option<Vec<u8>>, Option<Vec<u8>>, i64, i64, i64, i64) = conn
+        .query_row(
+            sql::DEPENDENCY_ROW_LOAD.registered(),
+            params![path_str, DEPENDENCY_SOURCE],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .ok()?;
+    if !matches!(classify_row_generation(&path_str, mtime, size, version), RowGeneration::Current(_)) {
+        return None;
     }
+    let blob = blob.filter(|b| !b.is_empty())?;
+    let fa = decode_analysis_parts(&blob, bag.as_deref(), true)?;
+    if closure_stamp(&fa.pack.include_closure, &mut std::collections::HashMap::new()) != deps {
+        return None;
+    }
+    crate::util::ghost_stats::count("dependency.row_landed");
+    Some(fa)
 }
 
-/// The name-keyed (@INC) warm lane. `cache` takes the name-slot winner,
-/// `all_defs` the whole provider relation and `records` each provider's
-/// dependency record — the table holds one row per
-/// FILE, so a name with two providers warms as two rows and the winner is
-/// DERIVED (@INC order is unavailable here, so it is the smallest path —
-/// the same order-independent tie-break the workspace tier uses; the
-/// resolver's own insert corrects it to true @INC order once it runs).
-pub fn warm_cache(
-    conn: &Connection,
-    cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    all_defs: &DashMap<String, DefCandidates>,
-    records: &crate::index::module_index::FileRecords,
-    strip: bool,
-) -> (usize, Vec<String>) {
-    // Name-keyed warm serves the @INC tier only; 'workspace' rows are
-    // path-keyed and stream through `warm_cache_streaming` — loading them
-    // here would pollute the module cache with path-string keys. The tag is
-    // the keying scheme, never the writer: every name-keyed producer shares
-    // `NAME_KEYED_SOURCE` so a new writer cannot strand its rows unread.
-    let mut stmt = match conn.prepare(sql::WARM_MODULES_BY_SOURCE.registered()) {
-        Ok(s) => s,
-        Err(_) => return (0, Vec::new()),
-    };
-
-    let rows = match stmt.query_map(params![NAME_KEYED_SOURCE], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<Vec<u8>>>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(_) => return (0, Vec::new()),
-    };
-
-    let mut count = 0usize;
-    let mut stale_names = Vec::new();
-    // Closure members overlap heavily across rows; stat each once per warm.
-    let mut stat_memo: std::collections::HashMap<String, (i64, i64)> =
-        std::collections::HashMap::new();
-    for row in rows.map(|r| {
-        if let Err(ref e) = r {
-            log::warn!("cache warm scan error (row skipped / scan may truncate): {}", e);
-        }
-        r
-    }).flatten() {
-        let (module_name, path_str, cached_mtime, cached_size, analysis_blob, row_extract_version, row_deps_stamp) = row;
-
-        let path = match classify_row_generation(
-            &path_str,
-            cached_mtime,
-            cached_size,
-            row_extract_version,
-        ) {
-            // Negative sentinel: empty path + NULL blob — a remembered miss.
-            // Never over a Some: the workspace indexer may have registered
-            // this name concurrently (the insert_into_cache guard's warm
-            // twin — a clobber here answers "no such module" all session).
-            RowGeneration::Sentinel => {
-                insert_sentinel_guarded(cache, module_name);
-                count += 1;
-                continue;
-            }
-            RowGeneration::StampStale => continue,
-            // The provider file is gone. Its rows can only be seen here, so
-            // drop the generation rather than carry it forever.
-            RowGeneration::Missing => {
-                let _ = crate::index::module_cache::invalidate_generation(conn, &path_str);
-                continue;
-            }
-            // @INC tier policy: stale entries still load, queued for
-            // priority re-resolve.
-            RowGeneration::VersionStale => {
-                stale_names.push(module_name.clone());
-                PathBuf::from(&path_str)
-            }
-            RowGeneration::Current(p) => p,
-        };
-
-        match analysis_blob {
-            Some(blob) if !blob.is_empty() => {
-                match decode_analysis_parts(&blob, None, false) {
-                    Some(mut fa) => {
-                        // A pack file's analysis bakes its headers (splices,
-                        // witnesses, closure): the row is valid only while the
-                        // whole closure is unchanged, not just the file itself.
-                        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
-                            continue;
-                        }
-                        // Strip AT INSERT (long-lived processes): the blob
-                        // just decoded IS the recoverable generation, and
-                        // stripping here (not a post-hoc sweep) can never
-                        // touch a copy some OTHER path registered
-                        // whole-for-a-reason (writer fallback, watcher).
-                        let path = crate::util::canonical_path::CanonicalPath::from_stored(path);
-                        records.land_dependency(&path, crate::index::module_index::package_names(&fa));
-                        if strip && !fa.degraded {
-                            fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
-                        }
-                        let cand = Arc::new(CachedModule::new(path, Arc::new(fa)));
-                        adopt_warm_provider(cache, all_defs, &module_name, cand);
-                        count += 1;
-                    }
-                    None => {
-                        log::warn!("Failed to decode cached analysis for '{}', skipping", module_name);
-                    }
-                }
-            }
-            _ => {
-                // Blob missing / empty on a NON-sentinel row (a legacy
-                // NULL-blob write): re-resolve rather than remember a miss —
-                // a sentinel here would be a terminal cross-session false
-                // negative for a real module.
-                if path_str.is_empty() {
-                    insert_sentinel_guarded(cache, module_name);
-                } else {
-                    stale_names.push(module_name);
-                }
-                count += 1;
-            }
-        }
-    }
-
-    (count, stale_names)
-}
-
-/// Adopt one warmed row as a provider of `module_name`: replace-by-path in
-/// the relation (a re-warm must not stack), then re-derive the name-slot
-/// winner from the SET. Row order out of SQLite is not @INC order and is
-/// not stable, so the winner cannot be "whichever row arrived last" —
-/// smallest path makes repeat warms byte-identical.
-fn adopt_warm_provider(
-    cache: &DashMap<String, Option<Arc<CachedModule>>>,
-    all_defs: &DashMap<String, DefCandidates>,
-    module_name: &str,
-    cand: Arc<CachedModule>,
-) {
-    let mut v = all_defs.entry(module_name.to_string()).or_default();
-    v.upsert(cand.clone());
-    let winner = v.first().cloned();
-    drop(v);
-    if let Some(w) = winner {
-        cache.insert(module_name.to_string(), Some(w));
-    }
+/// Whether the dependency at `path` already has a current row for the
+/// `stamp` it was read at — a landing taken from that row has nothing new
+/// to write.
+pub fn dependency_row_is_current(conn: &Connection, path: &std::path::Path, stamp: (i64, i64)) -> bool {
+    conn.query_row(
+        sql::DEPENDENCY_ROW_CURRENT.registered(),
+        params![path.to_string_lossy(), DEPENDENCY_SOURCE, stamp.0, stamp.1, EXTRACT_VERSION],
+        |_| Ok(()),
+    )
+    .is_ok()
 }

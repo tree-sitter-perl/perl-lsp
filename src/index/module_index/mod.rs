@@ -232,11 +232,6 @@ pub struct ModuleIndex {
     /// every hit is validated against the live index before it is trusted, so
     /// a stale entry costs a failed validation and a decode.
     closedness: Arc<crate::index::closedness_store::ClosednessStore>,
-    /// Every pack file registered, keyed by canonical path — including files
-    /// that declare NOTHING registrable (a header-only `#include` shim). The
-    /// name-keyed views can't reach those, but whole-project sweeps
-    /// (`for_each_cached_file`) must.
-    all_files: Arc<DashMap<crate::util::canonical_path::CanonicalPath, Arc<CachedModule>>>,
     /// The freshness engine (`docs/adr/storage-engine.md`):
     /// per-file span-free surface records + the reverse-dependency index.
     /// Fed at registration (whole copy, pre-strip) and on open-doc

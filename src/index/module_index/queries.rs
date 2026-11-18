@@ -11,7 +11,6 @@ impl ModuleIndex {
             loaded_modules: Arc::new(DashMap::new()),
             open_doc_paths: Arc::new(DashMap::new()),
             closedness: Arc::new(Default::default()),
-            all_files: Arc::new(DashMap::new()),
             freshness: Arc::new(crate::model::surface::FreshnessIndex::default()),
             enriched: Arc::new(DashMap::new()),
             enriched_order: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -157,24 +156,11 @@ impl ModuleIndex {
     }
 
     /// Request background resolution for a module. Non-blocking.
-    /// Stale modules (old extract version) are queued with priority.
     pub fn request_resolve(&self, module_name: &str) {
-        let is_stale = self.core.stale_modules.contains_key(module_name);
-        if self.core.cache.contains_key(module_name) && !is_stale {
-            return; // fresh and cached
+        if self.core.cache.contains_key(module_name) {
+            return;
         }
-        if is_stale {
-            let mut priority = self.core.queue.priority.lock().unwrap();
-            if !priority.contains(&module_name.to_string()) {
-                priority.push(module_name.to_string());
-            }
-        } else {
-            let mut pending = self.core.queue.pending.lock().unwrap();
-            pending.push(module_name.to_string());
-        }
-        // Both guards are out of scope here — `notify_new_work` takes
-        // `pending`, and the drain's lock order forbids holding `priority`
-        // across it.
+        self.core.queue.pending.lock().unwrap().push(module_name.to_string());
         self.core.queue.notify_new_work();
     }
 

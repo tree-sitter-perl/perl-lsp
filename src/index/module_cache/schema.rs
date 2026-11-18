@@ -308,16 +308,18 @@ fn validate_inc_paths_inner(conn: &Connection, inc_paths: &[PathBuf]) -> rusqlit
             stored,
             current_hash
         );
-        // Import-tier only: workspace blobs bake plugin emissions and their
-        // own source, not @INC paths — and the workspace indexer may have
+        // Dependency tier only: a dependency's blob still reads the map (a
+        // module that exports nothing borrows its first exporting parent's
+        // lists, located through @INC), where workspace blobs bake plugin
+        // emissions and their own source — and the workspace indexer may have
         // written its rows BEFORE this validation runs (two writers, one
         // DB), so anything broader would delete rows mid-write and leave
         // already-evicted resident copies with no retrieval source.
-        conn.execute(sql::MODULES_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::REFS_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::SYMS_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::HELD_CLEAR_IMPORT.registered(), [])?;
-        conn.execute(sql::FILES_CLEAR_IMPORT.registered(), [])?;
+        conn.execute(sql::MODULES_CLEAR_DEPENDENCY.registered(), [])?;
+        conn.execute(sql::REFS_CLEAR_DEPENDENCY.registered(), [])?;
+        conn.execute(sql::SYMS_CLEAR_DEPENDENCY.registered(), [])?;
+        conn.execute(sql::HELD_CLEAR_DEPENDENCY.registered(), [])?;
+        conn.execute(sql::FILES_CLEAR_DEPENDENCY.registered(), [])?;
         conn.execute(sql::META_SET.registered(), params!["inc_hash", current_hash])?;
     }
     Ok(())

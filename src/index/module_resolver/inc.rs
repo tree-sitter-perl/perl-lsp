@@ -12,15 +12,29 @@ use crate::util::canonical_path::CanonicalPath;
 /// parent exactly once.
 pub type ParseMemo = HashMap<String, Option<Providers>>;
 
-/// Parse a module file directly in-process.
-/// tree-sitter-perl is stable — no subprocess isolation needed.
-pub(super) fn parse_module(
+/// THE landing of one `@INC` module name, shared by the resolver thread and
+/// the one-shot CLI: locate every file the map places under the name, take
+/// each from its current row (`rows`) or parse it, keep what the tier may
+/// hold (`IndexCore::tier_providers`), persist those path-keyed, and land
+/// them (`IndexCore::land_providers`). `strip` is the eviction switch; a copy
+/// strips only once its row is on disk. Returns the whole copies (what a
+/// descent reads — the strip drops the bag) and the stored ones.
+pub(crate) fn land_module(
+    core: &IndexCore,
+    rows: Option<&rusqlite::Connection>,
     inc_paths: &[PathBuf],
     module_name: &str,
     parser: &mut Parser,
     memo: &mut ParseMemo,
-) -> Option<Providers> {
-    resolve_and_parse_with_memo(inc_paths, module_name, parser, memo)
+    strip: bool,
+) -> (Option<Providers>, Option<Providers>) {
+    let whole = core.tier_providers(resolve_providers(inc_paths, module_name, parser, memo, rows));
+    let persisted = match (rows, &whole) {
+        (Some(conn), Some(providers)) => providers.iter().all(|m| persist_dependency(conn, m)),
+        _ => false,
+    };
+    let stored = core.land_providers(module_name, whole.clone(), persisted, strip);
+    (whole, stored)
 }
 
 // ---- Resolution ----
@@ -91,8 +105,20 @@ pub fn resolve_and_parse_with_memo(
     parser: &mut Parser,
     memo: &mut ParseMemo,
 ) -> Option<Providers> {
+    resolve_providers(inc_paths, module_name, parser, memo, None)
+}
+
+/// `resolve_and_parse_with_memo`, taking each file from its current row in
+/// `rows` when there is one.
+fn resolve_providers(
+    inc_paths: &[PathBuf],
+    module_name: &str,
+    parser: &mut Parser,
+    memo: &mut ParseMemo,
+    rows: Option<&rusqlite::Connection>,
+) -> Option<Providers> {
     let mut visiting: std::collections::HashSet<String> = std::collections::HashSet::new();
-    resolve_and_parse_inner(inc_paths, module_name, parser, &mut visiting, memo)
+    resolve_and_parse_inner(inc_paths, module_name, parser, &mut visiting, memo, rows)
 }
 
 fn resolve_and_parse_inner(
@@ -101,6 +127,7 @@ fn resolve_and_parse_inner(
     parser: &mut Parser,
     visiting: &mut std::collections::HashSet<String>,
     memo: &mut ParseMemo,
+    rows: Option<&rusqlite::Connection>,
 ) -> Option<Providers> {
     if let Some(cached) = memo.get(module_name) {
         return cached.clone();
@@ -116,7 +143,7 @@ fn resolve_and_parse_inner(
     let mut providers: Providers = Vec::new();
     for path in resolve_module_paths(inc_paths, module_name) {
         if let Some(cached) =
-            parse_one_provider(inc_paths, module_name, path, parser, visiting, memo)
+            parse_one_provider(inc_paths, module_name, path, parser, visiting, memo, rows)
         {
             providers.push(cached);
         }
@@ -128,8 +155,9 @@ fn resolve_and_parse_inner(
     Some(providers)
 }
 
-/// Read + parse ONE provider file into a `CachedModule`. Every provider runs
-/// this same body — the @INC winner has no privileged path (rule #10).
+/// Read + parse ONE provider file into a `CachedModule`, or take it from its
+/// current row. Every provider runs this same body — the @INC winner has no
+/// privileged path (rule #10).
 fn parse_one_provider(
     inc_paths: &[PathBuf],
     module_name: &str,
@@ -137,7 +165,11 @@ fn parse_one_provider(
     parser: &mut Parser,
     visiting: &mut std::collections::HashSet<String>,
     memo: &mut ParseMemo,
+    rows: Option<&rusqlite::Connection>,
 ) -> Option<Arc<CachedModule>> {
+    if let Some(fa) = rows.and_then(|conn| module_cache::load_dependency_row(conn, &path)) {
+        return Some(Arc::new(CachedModule::new(path, Arc::new(fa))));
+    }
     let bench = std::env::var_os("PERL_LSP_BENCH").is_some();
     let bench_start = if bench { Some(std::time::Instant::now()) } else { None };
 
@@ -168,7 +200,7 @@ fn parse_one_provider(
         let parents = crate::index::module_index::primary_package_parents(&analysis, module_name);
         for parent in &parents {
             let parent_primary =
-                resolve_and_parse_inner(inc_paths, parent, parser, visiting, memo)
+                resolve_and_parse_inner(inc_paths, parent, parser, visiting, memo, rows)
                     .and_then(|p| p.into_iter().next());
             if let Some(parent_cached) = parent_primary {
                 if !parent_cached.analysis.export.is_empty()

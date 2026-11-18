@@ -80,11 +80,11 @@ sub new {
     let cached = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/x/Demo/Has/Event.pm")), analysis));
 
     // Workspace-index style insert: a resolved module.
-    core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
+    core.land_providers("Demo::Has::Event", Some(vec![cached]), false, false);
     assert!(core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some());
 
     // On-demand resolver miss: `None`. Must NOT clobber the indexed copy.
-    core.insert_resolved("Demo::Has::Event", None, false, false);
+    core.land_providers("Demo::Has::Event", None, false, false);
     assert!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().is_some(),
         "a None on-demand miss clobbered an already-indexed module",
@@ -95,7 +95,7 @@ sub new {
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
     let cached2 = Arc::new(CachedModule::new(crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")), analysis2));
-    core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
+    core.land_providers("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
         crate::util::canonical_path::CanonicalPath::fixture(PathBuf::from("/y/Demo/Has/Event.pm")),
@@ -719,4 +719,65 @@ fn a_workspace_file_whose_save_failed_in_a_committed_chunk_stays_whole() {
     });
     assert_eq!(seen, 3, "every file must stay registered");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The tier's rows are path-keyed and are the landing's parse cache: a
+/// first landing writes one `dependency` row keyed by the file's path; a
+/// second landing in a fresh index takes the file from that row instead of
+/// parsing it; a miss writes nothing.
+#[test]
+fn a_landing_reads_the_files_row_in_place_of_parsing_it() {
+    let root = std::env::temp_dir().join(format!("d3_land_rows_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Row")).unwrap();
+    let pm = root.join("Row/Cached.pm");
+    std::fs::write(&pm, "package Row::Cached;\nsub aa { 1 }\n1;\n").unwrap();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    module_cache::init_schema(&conn).unwrap();
+    let inc = vec![root.clone()];
+    let mut parser = create_parser();
+
+    let core = IndexCore::new();
+    let (_, stored) = land_module(&core, Some(&conn), &inc, "Row::Cached", &mut parser, &mut HashMap::new(), false);
+    assert!(stored.is_some());
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(pm.clone());
+    let (key, source): (String, String) = conn
+        .query_row("SELECT module_name, source FROM modules", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    assert_eq!((key.as_str(), source.as_str()), (&*canon.to_string_lossy(), module_cache::DEPENDENCY_SOURCE));
+
+    // Same size, same mtime, different body: only a row read can still
+    // answer `aa`.
+    let mtime = std::fs::metadata(&pm).unwrap().modified().unwrap();
+    std::fs::write(&pm, "package Row::Cached;\nsub bb { 1 }\n1;\n").unwrap();
+    std::fs::File::options().write(true).open(&pm).unwrap().set_modified(mtime).unwrap();
+    let core = IndexCore::new();
+    let (whole, _) = land_module(&core, Some(&conn), &inc, "Row::Cached", &mut parser, &mut HashMap::new(), false);
+    let names: Vec<String> = whole.unwrap()[0].analysis.symbols().iter().map(|s| s.name.clone()).collect();
+    assert!(names.iter().any(|n| n == "aa") && !names.iter().any(|n| n == "bb"), "{names:?}");
+
+    let (_, missed) = land_module(&core, Some(&conn), &inc, "Row::Absent", &mut parser, &mut HashMap::new(), false);
+    assert!(missed.is_none());
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM modules", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1, "a miss is never remembered");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A located file the project registered is the walk's: the tier does not
+/// land a second copy of it, and the project's record stays.
+#[test]
+fn the_tier_does_not_land_a_project_file() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let source = "package Mine::Here;\nsub f { 1 }\n1;\n";
+    let mut parser = create_parser();
+    let tree = parser.parse(source, None).unwrap();
+    let analysis = Arc::new(crate::build::builder::build(&tree, source.as_bytes()));
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let path = PathBuf::from("/proj/lib/Mine/Here.pm");
+    idx.register_workspace_module(path.clone(), Arc::clone(&analysis));
+    let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
+    let copy = Arc::new(CachedModule::new(canon.clone(), analysis));
+    idx.insert_cache("Mine::Alias", Some(copy));
+    assert!(idx.get_cached("Mine::Alias").is_none(), "the walk's file is not landed again");
+    assert_eq!(idx.file_role(&canon), Some(crate::model::file_analysis::FileRole::Workspace));
 }

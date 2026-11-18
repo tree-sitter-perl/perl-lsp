@@ -284,13 +284,13 @@ fn forget_orphaned_derivations(conn: &Connection, path: &str) {
 }
 
 /// Tier-scoped eraser: drops the generation ONLY when its rows carry
-/// `source` — the walk's dead-row GC must not take a dual-homed file's
-/// import-tier generation (project-lib files leave the walk when
-/// gitignored but stay valid @INC modules).
+/// `source` — the walk's dead-row GC must not take a file the dependency
+/// tier persisted (project-lib files leave the walk when gitignored but
+/// stay valid @INC modules).
 pub fn invalidate_generation_tier(conn: &Connection, path: &str, source: &str) {
     let _ = conn.execute(sql::MODULES_DELETE_PATH_TIER.registered(), params![path, source]);
-    // Stubs are workspace-tier only — an import-tier invalidation must not
-    // orphan a dual-homed file's still-valid workspace stub.
+    // Stubs are workspace-tier only — a dependency-tier invalidation must
+    // not orphan a workspace stub.
     if source == "workspace" {
         delete_stub(conn, path);
     }

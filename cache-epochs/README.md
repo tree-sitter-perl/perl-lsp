@@ -11,11 +11,11 @@ every reader compares the version for equality.
 
 | Directory         | Invalidates                                   | On mismatch                              |
 |-------------------|-----------------------------------------------|------------------------------------------|
-| `extract`         | analysis blobs (`modules.extract_version`)    | rows re-analyze; @INC rows load stale and re-resolve |
+| `extract`         | analysis blobs (`modules.extract_version`)    | rows re-analyze                          |
 | `stub`            | warm-scan stubs                               | `stubs` wiped, backfilled from blobs     |
 | `ref-rows`        | relational ref/sym row format                 | row tables rebuilt, re-shredded          |
 | `conclusion-rows` | `conclusions` row shape                       | table rebuilt, re-baked                  |
-| `schema`          | `modules` table DDL                           | `modules` dropped                        |
+| `schema`          | `modules` table DDL and keying                | `modules` dropped                        |
 | `macro-cache`     | persisted C/C++ macro tables                  | tables re-gathered                       |
 
 Add a file when your change alters what a cache STORES (its shape or its

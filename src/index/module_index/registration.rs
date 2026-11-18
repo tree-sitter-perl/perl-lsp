@@ -379,8 +379,8 @@ impl Drop for SweepMemoGuard {
 }
 
 impl ModuleIndex {
-    /// Insert a resolved module into the name-keyed cache slot — a thin
-    /// front over `IndexCore::insert_resolved`, the one spelling shared
+    /// Land a resolved module as a dependency — a thin front over
+    /// `IndexCore::land_providers`, the one spelling shared
     /// with the resolver thread. CLI/test copies stay whole (`persisted:
     /// false` — nothing was written here, so the strip has no license).
     pub fn insert_cache(&self, module_name: &str, cached: Option<Arc<CachedModule>>) {
@@ -391,7 +391,21 @@ impl ModuleIndex {
     /// single-copy front door above is this one with a one-element set —
     /// there is no separate one-provider path.
     pub fn insert_cache_providers(&self, module_name: &str, providers: Option<Providers>) {
-        self.core.insert_resolved(module_name, providers, false, false);
+        self.core.land_providers(module_name, providers, false, false);
+    }
+
+    /// The one-shot CLI's landing of `module_name`: the resolver thread's
+    /// own (`module_resolver::land_module`), keeping copies whole — a
+    /// one-shot run never amortizes a rehydration.
+    pub fn land_module(
+        &self,
+        rows: Option<&rusqlite::Connection>,
+        inc_paths: &[std::path::PathBuf],
+        module_name: &str,
+        parser: &mut tree_sitter::Parser,
+        memo: &mut module_resolver::ParseMemo,
+    ) -> (Option<Providers>, Option<Providers>) {
+        module_resolver::land_module(&self.core, rows, inc_paths, module_name, parser, memo, false)
     }
 
     /// The workspace-registration reads that need the FULL analysis:
@@ -433,11 +447,11 @@ impl ModuleIndex {
         let names = package_names(&analysis);
         // The record (and its role) before the path home publishes the
         // copy, so a concurrent sweep never sees it roleless.
-        let prev = self.core.records.register_workspace(&cached.path, names.clone());
+        let prev = self.core.claim_for_workspace(&cached.path, names.clone());
         // Path-keyed registry next: the relational retrieval resolves
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        self.core.all_files.insert(cached.path.clone(), cached.clone());
         if !names.is_empty() {
             // Whole copy: the feed inside the rebuild records the name list.
             self.core.edges.record_names(&cached.path, &analysis);
@@ -512,23 +526,9 @@ impl ModuleIndex {
             return;
         }
         self.workspace_modules.insert(name.to_string(), ());
-        // The relation is shared with the @INC tier, but the winner is not:
-        // project code shadows an installed copy of the same name, and
-        // `best_candidate`'s path tie-break has no opinion about which tier
-        // a file came from; the role on each candidate's record does.
-        let refs: Vec<&Arc<CachedModule>> = cands
-            .iter()
-            .filter(|c| self.core.records.role_of(&c.path) == Some(crate::model::file_analysis::FileRole::Workspace))
-            .collect();
-        if refs.is_empty() {
-            // Only @INC providers left: leave their slot alone.
-            return;
-        }
-        if let Some(best) =
-            best_candidate(&refs, name, &|m, n| self.module_defines_class(m, n))
-        {
-            self.core.set_slot(name, Some(best));
-        }
+        // The relation is shared with the @INC tier; the winner is ranked by
+        // each candidate's role, then by the map.
+        self.core.derive_slot(name);
     }
 
     /// The freshness gate, single-sourced: record `fa`'s span-free surface
@@ -660,7 +660,12 @@ impl ModuleIndex {
     pub fn mark_doc_closed(&self, path: &std::path::Path) -> Option<SurfaceDirty> {
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.open_doc_paths.remove(canon.as_path());
-        let cm = self.all_files.get(&canon).map(|e| e.value().clone())?;
+        // The front door's copy: a closed dependency's record was never the
+        // open-doc lane's to hand back.
+        if self.core.records.role_of(&canon) != Some(crate::model::file_analysis::FileRole::Workspace) {
+            return None;
+        }
+        let cm = self.core.all_files.get(&canon).map(|e| e.value().clone())?;
         let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, &cm);
         Some(self.record_and_dirty(&canon, &whole, SurfaceWrite::Background))
     }
@@ -671,13 +676,6 @@ impl ModuleIndex {
     /// where a surface fingerprint deliberately stands still).
     pub(crate) fn bump_registration_gen(&self, path: &crate::util::canonical_path::CanonicalPath) {
         self.core.mint_registration_gen(path);
-    }
-
-    /// Stamp a generation for every name-keyed cache entry that lacks one —
-    /// the warm scan loads @INC blobs straight into the cache without a
-    /// registration front door. See `IndexCore::stamp_missing_import_gens`.
-    pub(crate) fn stamp_import_generations(&self) {
-        self.core.stamp_missing_import_gens();
     }
 
     pub(super) fn registration_gen_of(&self, path: &crate::util::canonical_path::CanonicalPath) -> u64 {
@@ -1139,8 +1137,8 @@ impl ModuleIndex {
         let path = crate::util::canonical_path::CanonicalPath::resolve(path);
         self.bump_registration_gen(&path);
         let cached = Arc::new(CachedModule::new(path, arc));
-        let prev = self.core.records.register_workspace(&cached.path, names.clone());
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        let prev = self.core.claim_for_workspace(&cached.path, names.clone());
+        self.core.all_files.insert(cached.path.clone(), cached.clone());
         self.adopt_workspace_candidate(cached, names, prev);
     }
 
@@ -1187,7 +1185,10 @@ impl ModuleIndex {
         self.core.note_shape_change();
         self.remove_surface(path);
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
-        self.all_files.remove(&canon);
+        // A dependency at this path (a vendored tree under the root) leaves
+        // through the tier's inverse, which owns its names.
+        self.core.retire_dependency(&canon);
+        self.core.all_files.remove(&canon);
         self.core.edges.remove_path_record(canon.as_path());
         // The inverse of `record_workspace_projections`' shape half. Its own
         // retraction only fires when the SAME file re-registers, so a deleted
@@ -1199,31 +1200,17 @@ impl ModuleIndex {
         // one module, so dropping on one file's deletion would wrongly
         // un-suppress the entrypoint lint. Its reader is biased honest-quiet,
         // so never-remove is the safe direction there.
-        if let Some(names) = self.core.records.forget_workspace(&canon) {
-            for (name, _) in &names {
-                if let Some(mut v) = self.core.all_defs.get_mut(name) {
-                    v.remove_path(&canon);
-                }
-                self.core.all_defs.remove_if(name, |_, v| v.is_empty());
-                // Survivors keep their edges and re-pick the winner; the
-                // last candidate's departure empties the slot.
-                self.rebuild_name_registration(name);
-            }
+        let Some(names) = self.core.records.forget_workspace(&canon) else {
             return;
-        }
-        // No record (registered through a legacy/test door): fall back to
-        // the cache scan.
-        let name = self.core.cache.iter().find_map(|entry| {
-            entry
-                .value()
-                .as_ref()
-                .filter(|cm| cm.path == canon)
-                .map(|_| entry.key().clone())
-        });
-        if let Some(name) = name {
-            self.core.edges.purge_module(&name);
-            self.core.clear_slot(&name);
-            self.workspace_modules.remove(&name);
+        };
+        for (name, _) in &names {
+            if let Some(mut v) = self.core.all_defs.get_mut(name) {
+                v.remove_path(&canon);
+            }
+            self.core.all_defs.remove_if(name, |_, v| v.is_empty());
+            // Survivors keep their edges and re-pick the winner; the
+            // last candidate's departure empties the slot.
+            self.rebuild_name_registration(name);
         }
     }
 
@@ -1566,17 +1553,7 @@ impl ModuleIndex {
     /// evicted — and falls back to the symbol scan for copies registered
     /// whole (recovery paths, tests).
     pub(super) fn module_defines_class(&self, m: &CachedModule, name: &str) -> bool {
-        if let Some(declares) = self
-            .core
-            .records
-            .with_names(&m.path, |names| names.iter().any(|(n, is_class)| n == name && *is_class))
-        {
-            return declares;
-        }
-        m.analysis
-            .symbols()
-            .iter()
-            .any(|s| matches!(s.kind, SymKind::Class) && s.name == name)
+        self.core.defines_class(m, name)
     }
 
     /// Run `f` against this index's retained read connection to the
@@ -1724,10 +1701,10 @@ impl ModuleIndex {
         // registration's tie-break consults the record via
         // `module_defines_class`, and the fallback symbol scan on a
         // stripped copy misjudges every Class as a value.
-        self.core.records.register_workspace(&cached.path, feed.to_vec());
+        self.core.claim_for_workspace(&cached.path, feed.to_vec());
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
-        self.all_files.insert(cached.path.clone(), cached.clone());
+        self.core.all_files.insert(cached.path.clone(), cached.clone());
         for (name, is_class) in feed {
             let sym_name = name;
             let incoming_is_class = *is_class;
@@ -1818,7 +1795,7 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("epoch.shape.unregister_file");
         self.core.note_shape_change();
         let canon = crate::util::canonical_path::CanonicalPath::resolve(path);
-        let Some((_, old)) = self.all_files.remove(&canon) else {
+        let Some((_, old)) = self.core.all_files.remove(&canon) else {
             return;
         };
         // Symbols may be evicted on the resident copy, and rehydration
@@ -1891,7 +1868,7 @@ impl ModuleIndex {
     /// the include-closure consumer scan) share, so a file of another role
     /// in the path home is left out in one place.
     pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
-        for entry in self.all_files.iter() {
+        for entry in self.core.all_files.iter() {
             if self.core.records.role_of(entry.key()) == Some(crate::model::file_analysis::FileRole::Workspace) {
                 f(entry.value());
             }
@@ -1902,26 +1879,6 @@ impl ModuleIndex {
         let mut n = 0usize;
         self.for_each_registered_file(&mut |_| n += 1);
         n
-    }
-
-    /// Rebuild the reverse index (`func → modules`) from the current cache.
-    /// `warm_cache` writes straight into `cache_raw()` and never touches the
-    /// reverse index, so a CLI/full-startup warm path that skips this leaves
-    /// `find_exporters` blind to cached modules — the warm run then degrades
-    /// "exported by X (not yet imported)" hints to a bare "not defined"
-    /// (the B6 cold/warm attribution regression). The resolver thread already
-    /// calls the equivalent rebuild after its own warm.
-    pub fn rebuild_reverse_index_from_cache(&self) {
-        self.core.rebuild_reverse_index();
-        // The cache holds one WINNER per name; a same-name sibling file's
-        // edges live only through the candidate table — re-feed every
-        // candidate (idempotent) so a rebuild never blinds
-        // `modules_with_symbol` to a reopened package's other files.
-        for entry in self.core.all_defs.iter() {
-            for c in entry.value().iter() {
-                self.core.edges.feed(entry.key(), &c.path, &c.analysis);
-            }
-        }
     }
 }
 
