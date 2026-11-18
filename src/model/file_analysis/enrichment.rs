@@ -59,7 +59,7 @@ impl FileAnalysis {
             // Every caller's shape, joined: keyed hashes keep every key any
             // caller passes. Callers that pass no one shape type nothing.
             let agreed = match crate::model::file_analysis::join_all(&shapes, &self.type_order(module_index)) {
-                Some(InferredType::Union(_) | InferredType::Unknown) | None => continue,
+                Some(InferredType::Union(_) | InferredType::Open(_) | InferredType::Unknown) | None => continue,
                 Some(t) => t,
             };
             // Anchored at the parameter's binding token (a write marker at

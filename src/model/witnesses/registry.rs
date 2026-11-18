@@ -203,9 +203,11 @@ impl<'a> ClassLadder<'a> {
     }
 
     /// Does a rung's answer end the walk? Any answer does, except an
-    /// untyped one where the ladder walks on past it (`untyped_settles`).
+    /// untyped or open one (`X | …` leaves part of the value to name) where
+    /// the ladder walks on past it (`untyped_settles`).
     fn settles(&self, v: &ReducedValue) -> bool {
-        self.untyped_settles || !matches!(v, ReducedValue::Type(InferredType::Unknown))
+        self.untyped_settles
+            || !matches!(v, ReducedValue::Type(InferredType::Unknown | InferredType::Open(_)))
     }
 }
 
@@ -1884,7 +1886,9 @@ impl ReducerRegistry {
             // that cycle, which the frame it started from folds.
             if !ladder.untyped_settles && !bag.for_attachment(q.attachment).is_empty() {
                 let complete = state.low_cut >= pos;
-                return if complete { ReducedValue::Type(InferredType::Unknown) } else { v };
+                // What the local fold knew of it stands (`X | …`).
+                let open = matches!(v, ReducedValue::Type(InferredType::Open(_)));
+                return if complete && !open { ReducedValue::Type(InferredType::Unknown) } else { v };
             }
         }
 

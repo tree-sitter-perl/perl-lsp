@@ -514,6 +514,7 @@ impl FileAnalysis {
             // shared resolve leaves it in the session's receiver memo for the
             // readers after this stamp; what goes on the ref is below.
             let (classes, source) = self.resolve_receiver_shared(r, module_index);
+            let open = classes.is_open();
             let arms = classes
                 .into_iter()
                 .map(|cn| {
@@ -538,7 +539,7 @@ impl FileAnalysis {
                     }
                 })
                 .collect();
-            let target = FrozenReceiver::from_arms(arms, source, ReceiverView::of(module_index));
+            let target = FrozenReceiver::from_receiver_arms(arms, open, source, ReceiverView::of(module_index));
             if crate::util::ghost_stats::enabled() {
                 let ns = _t0.elapsed().as_nanos();
                 crate::util::ghost_stats::add_ns(

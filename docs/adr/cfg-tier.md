@@ -72,7 +72,7 @@ can run anywhere its variables are bound.
   body's writes stores (the variable after the write, for one that stores
   no whole value). A `MayBe` is not windowed: every read past its site, outside the
   body, joins the value standing there with it, so a later write never
-  retires it, and an untyped write leaves the read untyped. That is the
+  retires it, and an untyped write leaves the read open (`X|…`). That is the
   sound reading without knowing which calls run the body
   (`TODO(closure-call-writes)`: the write reaches the variable only where
   the body is called, owned by the whole-program epic).
@@ -142,8 +142,8 @@ variable held (`@flow.assign` on the target), so nothing a pass wrote
 reaches the next. A variable bound at or past the head and ahead of the
 body (`while (my $x = ...)`, `for my $x`) is bound afresh each pass, and
 the loop joins none for it (`JoinPlan::binds_each_pass`). A use where the
-head lands (the test's first read) reads the joined value: an untyped join,
-like an untyped write, yields to a use at or after it.
+head lands (the test's first read) reads the joined value: an untyped or
+open join, like an untyped write, yields to a use at or after it.
 
 A `break` or `continue` leaves the innermost construct it can leave, the one
 carrying its name (`last OUTER`), or the n-th (`break 2`). A `switch` takes
@@ -163,7 +163,8 @@ iterates). An arm whose chase closes at its own join and comes back untyped
 is chased again with the join answering what its other arms hold, then with
 what that pass joined, until a pass adds nothing (`rechase_recurring`): `$n
 = $n->next` round three classes holds all three. One still untyped after a
-pass (`$p = $p->{up}`) makes the join untyped, as any untyped arm does. A
+pass (`$p = $p->{up}`) leaves the join open (`X|…`,
+`docs/adr/union-types.md` §Open unions), as any untyped arm does. A
 read inside the loop asked first closes the cycle at its own frame instead:
 the arm drops out of that pass, and the frame is asked again seeded with its
 last answer until it stops moving (`pass_round_loop`). The lattice is finite

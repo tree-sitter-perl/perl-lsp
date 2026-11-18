@@ -276,6 +276,15 @@ pub enum InferredType {
     /// a callable whose every arm is `Never` yields no value and answers
     /// nothing. Distinct from `None`, which is no evidence.
     Never,
+    /// `X | …`: a value that is at least one of the inner's arms on some
+    /// path, and on another path something nothing could name. Built only by
+    /// [`join`] where an `Unknown` arm meets a typed one, so the inner is
+    /// never `Open`, `Unknown` or `Never`. A known arm is a real possibility
+    /// (completion, navigation and a per-arm diagnostic may read it); the
+    /// `…` forbids every claim about the WHOLE value — not a class, not
+    /// provably undef, never a decided misfit (`docs/adr/union-types.md`
+    /// §Open unions). Kept at the END for bincode variant-index stability.
+    Open(Box<InferredType>),
 }
 
 /// Which builtin minted a [`InferredType::RefTagOf`] — what its string can
@@ -858,6 +867,7 @@ impl InferredType {
                 HashWithKeys { keys, open }
             }
             Optional(b) => Optional(Box::new(b.map_class_names(f))),
+            Open(b) => Open(Box::new(b.map_class_names(f))),
             Union(arms) => arms.map(|a| a.clone().map_class_names(f)),
             other => other,
         }
@@ -882,6 +892,7 @@ impl InferredType {
             Sequence(v) => Sequence(v.into_iter().map(InferredType::joined_with_unseen).collect()),
             Branded { base, marks } => Branded { base: Box::new(base.joined_with_unseen()), marks },
             Optional(b) => Optional(Box::new(b.joined_with_unseen())),
+            Open(b) => Open(Box::new(b.joined_with_unseen())),
             Union(arms) => arms.map(|a| a.clone().joined_with_unseen()),
             other => other,
         }
@@ -908,6 +919,7 @@ impl InferredType {
     /// and an `Optional` of one distribute the same way everywhere.
     pub fn receiver_arms(&self) -> &[InferredType] {
         match self.defined_part() {
+            Some(InferredType::Open(known)) => known.receiver_arms(),
             Some(InferredType::Union(arms)) => arms,
             Some(t) => std::slice::from_ref(t),
             None => &[],
@@ -933,9 +945,17 @@ impl InferredType {
     }
 
     /// Whether the value is known to be possibly undef: an `Optional` or
-    /// `Undef` itself. `Unknown` says nothing either way.
+    /// `Undef` itself. `Unknown` says nothing either way, and neither does an
+    /// open union: an undef arm beside one nothing names says only that the
+    /// value may be absent, never what it is.
     pub fn may_be_undef(&self) -> bool {
         matches!(self, InferredType::Optional(_) | InferredType::Undef)
+    }
+
+    /// Whether some path holds a value nothing could name (`X | …`): the
+    /// known arms are possibilities, never the whole story.
+    pub fn is_open(&self) -> bool {
+        matches!(self, InferredType::Open(_))
     }
 
     /// `f` over each value a receiver may be (`receiver_arms`), joined
@@ -1157,7 +1177,9 @@ impl InferredType {
                     t.for_each_attachment_mut(f);
                 }
             }
-            InferredType::TypeConstraintOf(Some(t)) | InferredType::Optional(t) => t.for_each_attachment_mut(f),
+            InferredType::TypeConstraintOf(Some(t)) | InferredType::Optional(t) | InferredType::Open(t) => {
+                t.for_each_attachment_mut(f)
+            }
             InferredType::Branded { base, .. } => base.for_each_attachment_mut(f),
             InferredType::Union(arms) => {
                 for t in arms.arms_mut() {
@@ -1494,7 +1516,7 @@ pub enum Fit {
     No,
     /// The order cannot place it: the value's ancestry runs past what the
     /// order sees, so an edge it does not hold could put it under the
-    /// bound. An `Unknown` value is undecided too.
+    /// bound. An `Unknown` value is undecided too, and so is an open one.
     Undecided,
 }
 
@@ -1506,7 +1528,8 @@ pub enum Fit {
 /// one arm decidedly outside puts it outside, and it is undecided only
 /// when every arm outside is a class the order cannot place.
 pub fn fit(value: &InferredType, bound: &InferredType, order: &dyn TypeOrder) -> Fit {
-    if !value.is_known() {
+    // An open union's `…` may sit anywhere, so nothing it holds decides.
+    if !value.is_known() || value.is_open() {
         return Fit::Undecided;
     }
     let top = join(bound, bound, order);
@@ -1563,36 +1586,42 @@ pub fn join_traced(
     }
     let mut arms = Vec::new();
     let mut maybe_undef = false;
+    let mut open = false;
     for t in [a, b] {
-        if !t.collect_arms(&mut arms, &mut maybe_undef) {
-            return InferredType::Unknown;
-        }
+        t.collect_arms(&mut arms, &mut maybe_undef, &mut open);
     }
-    from_arms(arms, maybe_undef, order, trace)
+    if !open {
+        return from_arms(arms, maybe_undef, order, trace);
+    }
+    // An arm nothing names leaves the known arms standing as possibilities
+    // (`X | …`). With no value arm known there is nothing to keep: an undef
+    // arm beside it says the value may be absent, never what it is.
+    if arms.is_empty() {
+        return InferredType::Unknown;
+    }
+    match from_arms(arms, maybe_undef, order, trace) {
+        InferredType::Unknown => InferredType::Unknown,
+        known => InferredType::Open(Box::new(known)),
+    }
 }
 
 impl InferredType {
-    /// Split `self` into union arms and its undef half. `false`: `self` is
-    /// `Unknown`, which absorbs the whole join.
-    fn collect_arms(&self, arms: &mut Vec<InferredType>, maybe_undef: &mut bool) -> bool {
+    /// Split `self` into union arms and its undef half; `open` when some
+    /// part is a value nothing names (`Unknown`, or an open union's `…`).
+    fn collect_arms(&self, arms: &mut Vec<InferredType>, maybe_undef: &mut bool, open: &mut bool) {
         match self {
-            InferredType::Unknown => false,
-            InferredType::Undef => {
-                *maybe_undef = true;
-                true
+            InferredType::Unknown => *open = true,
+            InferredType::Open(known) => {
+                *open = true;
+                known.collect_arms(arms, maybe_undef, open);
             }
+            InferredType::Undef => *maybe_undef = true,
             InferredType::Optional(inner) => {
                 *maybe_undef = true;
-                inner.collect_arms(arms, maybe_undef)
+                inner.collect_arms(arms, maybe_undef, open);
             }
-            InferredType::Union(us) => {
-                arms.extend(us.iter().cloned());
-                true
-            }
-            t => {
-                arms.push(t.clone());
-                true
-            }
+            InferredType::Union(us) => arms.extend(us.iter().cloned()),
+            t => arms.push(t.clone()),
         }
     }
 }

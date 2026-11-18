@@ -501,12 +501,13 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             }
         }
         // An `Unknown` on the plain axis (a reset the RHS never typed, a
-        // join approximation) yields to rep and scalar-context evidence that
+        // join approximation), or an open one whose `…` it could name, yields
+        // to rep and scalar-context evidence that
         // lands at or after it: `$r = f(); $r->{k}` reads the hash, and a
         // loop's test reads the value its head join lands right where the
         // test starts. A write lands past its RHS, so no use in the RHS ties
         // it.
-        if matches!(plain_type, Some(InferredType::Unknown))
+        if matches!(plain_type, Some(InferredType::Unknown | InferredType::Open(_)))
             && last_observation_at.is_some()
             && last_observation_at >= plain_type_at
         {

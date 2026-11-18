@@ -101,9 +101,11 @@ fn reads_before_the_join_see_their_own_path() {
 }
 
 #[test]
-fn an_arm_nothing_types_leaves_the_join_untyped() {
+fn an_arm_nothing_types_leaves_the_typed_arm_open() {
+    // The bypass still holds `Foo`; the taken arm holds what nothing names.
     let bag = bag_with_join(None);
-    assert_eq!(read(&bag, at(5, 0)), ReducedValue::Type(InferredType::Unknown));
+    let foo = InferredType::ClassName("Foo".into());
+    assert_eq!(read(&bag, at(5, 0)), ReducedValue::Type(InferredType::Open(Box::new(foo))));
 }
 
 #[test]

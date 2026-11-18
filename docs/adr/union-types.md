@@ -11,7 +11,8 @@ whole-program engine) needs that join on a finite-height lattice.
 `types.rs::join(a, b, order)` is the one least upper bound; every fold
 reads it, through `join_all` / `join_return_arms`. It is total:
 
-- equal → that type; `Unknown` absorbs (it is the lattice's top)
+- equal → that type; `Unknown` beside a typed arm leaves the typed arms
+  open (`X|…`, §Open unions), and alone it stays the lattice's top
 - `Never` is the identity: an arm that does not complete drops out
   (`join(Never, T) = T`)
 - an `Undef` or `Optional` arm makes the result `Optional<the rest>`
@@ -43,6 +44,30 @@ subsumption, `common_class` for widening. In-file folds without a bag
 context use `Unordered` (a class is an instance only of itself); a
 `BagContext` answers through the local + cross-file isa seam
 (`class_isa`, `least_common_class`).
+
+## Open unions
+
+`InferredType::Open(known)` is `X|…`: on some path the value is one of
+`known`'s arms, and on another it is something nothing could name. `join`
+builds it, and only `join`, wherever an `Unknown` arm meets a typed one, so
+every fold that reads the join (control-flow joins, return and ternary arms,
+slot writes) answers the same shape:
+
+- `join(X, Unknown) = Open(X)`; `join(Open(X), Y) = Open(join(X, Y))`
+- nothing known is not open: with no value arm the join is `Unknown`, and an
+  `Undef` arm beside one nothing names says nothing of what the value is
+- past the width cap the known arms widen as a closed union's do, to
+  `Unknown` when no common class holds them
+
+A known arm is a real possibility, so what reads ONE possibility reads it:
+completion, navigation, the per-arm unresolved-method hint ("which `$x` may
+be"). Nothing claims the WHOLE value from it: `class_name()` is `None`, it
+is never provably undef (`may_be_undef` is false), a bound `fit` is
+`Undecided`, and an open receiver has no single dispatch edge
+(`ReceiverClasses::single`, `ReceiverArms::Open`). A class ladder walks on
+past an open rung as past an untyped one, and an open plain-axis answer
+yields to later rep evidence as an untyped one does. Display spells it
+`X|…` in every language.
 
 ## Per-language subsumption
 

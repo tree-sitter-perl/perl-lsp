@@ -2362,9 +2362,19 @@ pub fn sym_kind_code(k: &SymKind) -> u8 {
 /// receiver may be, deduplicated in arm order. A union receiver has
 /// several; nothing pins an empty one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReceiverClasses(Vec<String>);
+pub struct ReceiverClasses(Vec<String>, bool);
 
 impl ReceiverClasses {
+    /// Some path holds a value nothing names (an `X | …` receiver): the
+    /// classes are possibilities, so none of them is THE class.
+    pub fn is_open(&self) -> bool {
+        self.1
+    }
+
+    pub fn mark_open(&mut self) {
+        self.1 = true;
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
     }
@@ -2382,7 +2392,7 @@ impl ReceiverClasses {
     /// why at its call. A union has none.
     pub fn single(&self) -> Option<&str> {
         match self.0.as_slice() {
-            [one] => Some(one),
+            [one] if !self.1 => Some(one),
             _ => None,
         }
     }
@@ -2474,6 +2484,9 @@ pub enum ReceiverArms {
     One(MethodTarget),
     /// Two or more arms.
     Union(Vec<MethodTarget>),
+    /// The arms of an open receiver (`X | …`): possibilities, never the
+    /// one dispatch edge. Kept at the END for bincode variant stability.
+    Open(Vec<MethodTarget>),
 }
 
 /// A member access's receiver as the stamp (`stamp_method_call_targets`)
@@ -2494,9 +2507,15 @@ pub struct FrozenReceiver {
 
 impl FrozenReceiver {
     pub fn from_arms(arms: Vec<MethodTarget>, source: ReceiverSource, view: ReceiverView) -> Self {
+        Self::from_receiver_arms(arms, false, source, view)
+    }
+
+    /// [`Self::from_arms`] for a receiver that may be `open` (`X | …`).
+    pub fn from_receiver_arms(arms: Vec<MethodTarget>, open: bool, source: ReceiverSource, view: ReceiverView) -> Self {
         let mut arms = arms;
         let arms = match arms.len() {
             0 => ReceiverArms::None,
+            _ if open => ReceiverArms::Open(arms),
             1 => ReceiverArms::One(arms.pop().expect("one arm")),
             _ => ReceiverArms::Union(arms),
         };
@@ -2507,15 +2526,20 @@ impl FrozenReceiver {
     pub fn single(&self) -> Option<&MethodTarget> {
         match &self.arms {
             ReceiverArms::One(t) => Some(t),
-            ReceiverArms::None | ReceiverArms::Union(_) => None,
+            ReceiverArms::None | ReceiverArms::Union(_) | ReceiverArms::Open(_) => None,
         }
+    }
+
+    /// Whether the receiver may also be a value nothing names.
+    pub fn is_open(&self) -> bool {
+        matches!(self.arms, ReceiverArms::Open(_))
     }
 
     pub fn targets(&self) -> &[MethodTarget] {
         match &self.arms {
             ReceiverArms::None => &[],
             ReceiverArms::One(t) => std::slice::from_ref(t),
-            ReceiverArms::Union(ts) => ts,
+            ReceiverArms::Union(ts) | ReceiverArms::Open(ts) => ts,
         }
     }
 

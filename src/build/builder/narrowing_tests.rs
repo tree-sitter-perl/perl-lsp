@@ -1759,3 +1759,12 @@ fn assert_valid_narrows_the_rest_of_the_block() {
     );
     assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 13)), Some(InferredType::String));
 }
+
+/// A join where one path holds a value nothing names keeps what the other
+/// path holds as a possibility (`String|…`), never the whole answer and
+/// never nothing at all.
+#[test]
+fn a_join_with_an_untyped_path_keeps_the_typed_one_open() {
+    let src = "package P;\nsub f {\n    my ($s) = @_;\n    my $x = 'a';\n    if ($s) {\n        $x = $s->read;\n    }\n    $x;\n}";
+    assert_eq!(fa_type_at(src, "$x", Point::new(7, 4)), Some(InferredType::Open(Box::new(InferredType::String))));
+}
