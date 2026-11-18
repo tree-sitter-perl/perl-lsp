@@ -134,27 +134,12 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
 }
 
 /// Every place `node` may die at, at any depth, as [`control_view`] reads
-/// a capture.
+/// a capture. It runs the whole document and keeps the raises: a second,
+/// raise-only compile of the document costs every process about as much
+/// as the first, and a deep search runs only inside a `try` arm.
 fn raises_in<'s>(node: Node<'_>, source: &'s [u8]) -> Vec<Vec<(CtlCap, usize, Span, &'s str, Point)>> {
-    use std::sync::OnceLock;
     use tree_sitter::StreamingIterator;
-    // The document with every pattern but its raises disabled: a deep
-    // search runs only those.
-    static RAISES: OnceLock<Query> = OnceLock::new();
-    let (_, caps) = ctl_query();
-    let query = RAISES.get_or_init(|| {
-        let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
-        let mut query = Query::new(&lang, CTL_SCM).expect("queries/perl/ctl.scm compiles");
-        for p in 0..query.pattern_count() {
-            let raises = query.capture_quantifiers(p).iter().enumerate().any(|(i, q)| {
-                *q != tree_sitter::CaptureQuantifier::Zero && caps[i] == CtlCap::Raise
-            });
-            if !raises {
-                query.disable_pattern(p);
-            }
-        }
-        query
-    });
+    let (query, caps) = ctl_query();
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut out = Vec::new();
     let mut it = cursor.matches(query, node, source);
