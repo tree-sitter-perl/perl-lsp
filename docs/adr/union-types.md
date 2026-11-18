@@ -34,8 +34,15 @@ back in its own word (`X|None`, `X|null`). An `Undef` arm says only that
 the value may be absent, so beside an arm that came back untyped
 (`tags::FACT_UNTYPED_ARM`: a flow the registry could not type, or a data
 member declared with a type the pack cannot read) an all-`Undef` answer is
-no answer; an `Undef` stated on the attachment itself (a guard) still
-stands, and a declared bound still caps what is left
+no answer, and a typed answer stays open beside it (`X|…`, §Open unions):
+a return arm or a member write that came back untyped is an arm like any
+other. An arm a cycle guard cut came back through the fold itself
+(`return __SUB__->($n - 1)`) and is not counted. A place's writes are not
+counted this way: which write a read sees is the window's to say, and the
+flow joins keep what an untyped path leaves open. The `||`/`//` fallback
+with no left in sight stays closed: writing the fallback says the author
+expects it to run. An `Undef` stated on the attachment itself (a guard)
+still stands, and a declared bound still caps what is left
 (`docs/adr/declared-bounds.md`). A member's class-wide writes are arms of
 one value and join, as do any regions that tie on extent.
 
