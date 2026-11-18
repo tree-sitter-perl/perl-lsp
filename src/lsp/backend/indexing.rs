@@ -113,6 +113,11 @@ impl Backend {
                         // its persisted generation was just invalidated, so
                         // the resident copy is the only source until the
                         // next bulk index re-persists.
+                        // TODO(perl-watcher-cap): read through
+                        // `source_files::analyze_file` under the driver's cap and
+                        // take the DELETED arm when it refuses, as the pack
+                        // invalidator does; a file saved past 1 MB keeps
+                        // registering here although the walk would skip it.
                         if let Ok(source) = crate::util::text::read_source(&path) {
                             let mut parser = crate::index::module_resolver::create_parser();
                             if let Some(tree) = parser.parse(&source, None) {
