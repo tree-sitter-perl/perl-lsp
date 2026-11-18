@@ -1803,19 +1803,27 @@ impl ReducerRegistry {
         let materialized = self.materialize(bag, q, state);
         let v = self.reduce_materialized(&materialized, q);
 
-        // An `Undef` that flowed in says only that the value may be absent:
-        // beside a flow that came back untyped it is no answer to what the
+        // An arm that came back untyped is an arm of the value like any
+        // other: what the typed arms fold to stays open beside it (`X|…`,
+        // the join with `Unknown`). An `Undef` that flowed in says only that
+        // the value may be absent, so beside it it is no answer to what the
         // value is. One stated here (a guard's) stands where the read sees
         // it, and a declared bound still caps what is left.
+        let untyped_arm = materialized
+            .iter()
+            .any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == super::tags::FACT_UNTYPED_ARM));
         let v = match v {
             ReducedValue::Type(InferredType::Undef)
-                if materialized.iter().any(|w| matches!(&w.payload, WitnessPayload::Fact { family, .. } if family == super::tags::FACT_UNTYPED_ARM))
+                if untyped_arm
                     && !bag.iter_attachment(q.attachment).any(|w| {
                         matches!(&w.payload, WitnessPayload::InferredType(InferredType::Undef))
                             && q.point.filter(|_| q.attachment.is_temporal()).is_none_or(|p| p.reaches(w.span.start))
                     }) =>
             {
                 ReducedValue::None
+            }
+            ReducedValue::Type(t) if untyped_arm && !t.is_never() => {
+                ReducedValue::Type(crate::model::file_analysis::join(&t, &InferredType::Unknown, class_order(q)))
             }
             v => v,
         };
