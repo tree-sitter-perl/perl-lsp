@@ -464,7 +464,7 @@ impl ModuleIndex {
             if !affected.contains(&n) {
                 // Declared before, dropped now: the rebuild below sheds it.
                 if let Some(mut v) = self.core.all_defs.get_mut(&n) {
-                    v.retain(|c| c.path != cached.path);
+                    v.remove_path(&cached.path);
                 }
                 self.core.all_defs.remove_if(&n, |_, v| v.is_empty());
                 affected.push(n);
@@ -472,10 +472,7 @@ impl ModuleIndex {
         }
         for (name, _) in &names {
             let mut v = self.core.all_defs.entry(name.clone()).or_default();
-            match v.iter().position(|c| c.path == cached.path) {
-                Some(i) => v[i] = cached.clone(),
-                None => v.push(cached.clone()),
-            }
+            v.upsert(cached.clone());
         }
         for name in &affected {
             self.rebuild_name_registration(name);
@@ -498,7 +495,7 @@ impl ModuleIndex {
             .core
             .all_defs
             .get(name)
-            .map(|v| v.clone())
+            .map(|v| v.to_vec())
             .unwrap_or_default();
         self.core.edges.purge_module(name);
         for c in &cands {
@@ -1201,7 +1198,7 @@ impl ModuleIndex {
         if let Some((_, names)) = self.registered_names.remove(&canon) {
             for (name, _) in &names {
                 if let Some(mut v) = self.core.all_defs.get_mut(name) {
-                    v.retain(|c| c.path != canon);
+                    v.remove_path(&canon);
                 }
                 self.core.all_defs.remove_if(name, |_, v| v.is_empty());
                 // Survivors keep their edges and re-pick the winner; the
@@ -1734,10 +1731,7 @@ impl ModuleIndex {
             // stale analysis, and duplicate paths never stack.
             {
                 let mut v = self.core.all_defs.entry(sym_name.clone()).or_default();
-                match v.iter().position(|c| c.path == cached.path) {
-                    Some(i) => v[i] = cached.clone(),
-                    None => v.push(cached.clone()),
-                }
+                v.upsert(cached.clone());
             }
             // A TYPE wins the cache slot over a callable/value of the same
             // name. C reuses names freely — a `#define OP(x)` macro in one
@@ -1767,10 +1761,7 @@ impl ModuleIndex {
         // competes with a declaration of the identity.
         for leaf in super::widening_leaves(analysis.names(), feed) {
             let mut v = self.core.leaf_defs.entry(leaf).or_default();
-            match v.iter().position(|c| c.path == cached.path) {
-                Some(i) => v[i] = cached.clone(),
-                None => v.push(cached.clone()),
-            }
+            v.upsert(cached.clone());
         }
         // Specialization family edges: primary → spec NAMES. A spec's Class
         // symbol registered above makes `get_cached(spec_name)` resolve, so
@@ -1833,13 +1824,13 @@ impl ModuleIndex {
             .unwrap_or_default();
         for leaf in super::widening_leaves(old.analysis.names(), &names) {
             if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
-                v.retain(|c| c.path != canon);
+                v.remove_path(&canon);
             }
             self.core.leaf_defs.remove_if(&leaf, |_, v| v.is_empty());
         }
         for (name, _) in &names {
             if let Some(mut v) = self.core.all_defs.get_mut(name) {
-                v.retain(|c| c.path != canon);
+                v.remove_path(&canon);
             }
             self.core.all_defs.remove_if(name, |_, v| v.is_empty());
             let survivor = self

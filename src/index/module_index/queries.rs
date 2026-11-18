@@ -550,7 +550,7 @@ impl ModuleIndex {
 
     /// The candidate relation behind the name-slot winner — the warm lane
     /// fills it alongside `cache_raw` so a warm start keeps every provider.
-    pub fn all_defs_raw(&self) -> &DashMap<String, Vec<Arc<CachedModule>>> {
+    pub fn all_defs_raw(&self) -> &DashMap<String, DefCandidates> {
         &self.core.all_defs
     }
 

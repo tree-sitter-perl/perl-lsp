@@ -62,13 +62,13 @@ pub(crate) struct IndexCore {
     /// per-origin visibility rule (`ScopedLookup`) picks among them.
     /// Shared: the resolver thread adopts @INC providers here, the async
     /// side adopts workspace candidates.
-    pub(crate) all_defs: DashMap<String, Vec<Arc<CachedModule>>>,
+    pub(crate) all_defs: DashMap<String, DefCandidates>,
     /// The files declaring a use-map class, keyed by the class's LEAF —
     /// the widening relation (`CrossFileLookup::leaf_def_candidates`). Its
     /// own table, never `all_defs`: a leaf key there would join every
     /// bare-name lookup and compete for the name-slot winner, so the leaf
     /// answers only where nothing indexed declares the identity.
-    pub(crate) leaf_defs: DashMap<String, Vec<Arc<CachedModule>>>,
+    pub(crate) leaf_defs: DashMap<String, DefCandidates>,
     /// The `@INC` roots this process resolves from, canonical, most-
     /// preferred first. Recorded ONCE by the resolver thread (discovery
     /// shells out to `perl`, so no query path may re-derive it) and read by
@@ -342,10 +342,7 @@ impl IndexCore {
     pub(crate) fn adopt_inc_providers(&self, module_name: &str, providers: &[Arc<CachedModule>]) {
         let mut v = self.all_defs.entry(module_name.to_string()).or_default();
         for cand in providers {
-            match v.iter().position(|c| c.path == cand.path) {
-                Some(i) => v[i] = cand.clone(),
-                None => v.push(cand.clone()),
-            }
+            v.upsert(cand.clone());
         }
     }
 

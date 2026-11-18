@@ -3,6 +3,42 @@
 
 use super::*;
 
+/// The files declaring one name, held in path order.
+///
+/// Path order is the candidate order every consumer scan, union and
+/// tie-break leans on. It is kept at the write so a read is a plain copy:
+/// sorting per lookup made a bucket shared by hundreds of files (a script
+/// tree whose files all declare into `main`) the hottest thing in a run.
+/// One entry per path — a re-registered file replaces its own candidate.
+#[derive(Default, Clone)]
+pub struct DefCandidates(Vec<Arc<CachedModule>>);
+
+impl DefCandidates {
+    pub fn upsert(&mut self, cand: Arc<CachedModule>) {
+        match self.0.binary_search_by(|c| c.path.cmp(&cand.path)) {
+            Ok(i) => self.0[i] = cand,
+            Err(i) => self.0.insert(i, cand),
+        }
+    }
+
+    pub fn remove_path(&mut self, path: &std::path::Path) {
+        if let Ok(i) = self.0.binary_search_by(|c| c.path.as_path().cmp(path)) {
+            self.0.remove(i);
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<Arc<CachedModule>> {
+        self.0.clone()
+    }
+}
+
+impl std::ops::Deref for DefCandidates {
+    type Target = [Arc<CachedModule>];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// Concurrent module cache with background resolution.
 ///
 /// The reverse-edge maps over the module cache, bundled so every feed
