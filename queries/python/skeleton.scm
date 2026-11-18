@@ -344,6 +344,11 @@
 (try_statement (except_clause) @ctl.try.catch) @ctl.try
 (try_statement (else_clause body: (_) @ctl.try.else)) @ctl.try
 (try_statement (finally_clause (block) @ctl.try.finally)) @ctl.try
+; Where a tried body may unwind: almost any operation raises in Python, so
+; each statement may, and so may a call inside one. A write nothing here
+; follows in the body reaches no handler.
+(block (_) @ctl.raise)
+(call) @ctl.raise
 ; TODO(python-assert-narrowing): `assert G` leaves where G fails, but no node
 ; of it leaves; it needs a position whose failing arm is implicit.
 

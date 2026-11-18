@@ -2353,3 +2353,41 @@ fn a_nested_write_reads_as_its_flat_twin() {
     assert_eq!(flat.inferred_type_via_bag("x", Point::new(2, 0)), Some(InferredType::String));
     assert_eq!(nested.inferred_type_via_bag("x", Point::new(3, 4)), Some(InferredType::String));
 }
+
+/// A body stops only where something in it may raise, so a handler starts
+/// from the writes a later statement or call follows; only the paths that
+/// complete go on past a `finally`.
+#[test]
+fn a_try_unwinds_only_where_it_may_raise() {
+    let src = "\
+class A:
+    pass
+class B:
+    pass
+class C:
+    pass
+def f(c):
+    x = A()
+    try:
+        x = B()
+    except E:
+        u = x
+    y = A()
+    try:
+        y = B()
+        g()
+    finally:
+        if c:
+            y = C()
+    w = y
+";
+    let fa = py_in(src, None);
+    let two = |a: &str, b: &str| {
+        crate::model::file_analysis::join_all(
+            &[InferredType::ClassName(a.into()), InferredType::ClassName(b.into())],
+            &crate::model::file_analysis::Unordered,
+        )
+    };
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(11, 12)), Some(InferredType::ClassName("A".into())), "nothing raises past the write");
+    assert_eq!(fa.inferred_type_via_bag("y", Point::new(19, 8)), two("B", "C"), "the entry value only unwinds through the finally");
+}

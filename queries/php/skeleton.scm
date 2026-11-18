@@ -537,6 +537,14 @@
 (try_statement body: (_) @ctl.try.body) @ctl.try
 (try_statement (catch_clause) @ctl.try.catch) @ctl.try
 (try_statement (finally_clause body: (_) @ctl.try.finally)) @ctl.try
+; Where a tried body may unwind: a call or a construction, an include, a
+; throw, or a division, which throws on a zero divisor. A write nothing here
+; follows in the body reaches no catch.
+[(function_call_expression) (member_call_expression) (nullsafe_member_call_expression)
+ (scoped_call_expression) (object_creation_expression) (include_expression)
+ (include_once_expression) (require_expression) (require_once_expression)
+ (throw_expression)] @ctl.raise
+(binary_expression operator: ["/" "%"]) @ctl.raise
 (expression_statement (binary_expression left: (_) @ctl.cond operator: ["&&" "and" "||" "or"])) @ctl.stmt
 
 ; A statement that leaves its block: nothing after it there runs, and

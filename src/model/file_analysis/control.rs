@@ -112,6 +112,10 @@ pub struct ControlView {
     /// Every statement that returns, wherever it sits: one the view cannot
     /// place still says its callable may come back.
     pub returns: Vec<Span>,
+    /// Where a tried arm may unwind (`@ctl.raise`): a write none of these
+    /// follows inside the arm reaches no handler. Sorted by start; only
+    /// those inside a try's arms are kept.
+    pub raises: Vec<Span>,
 }
 
 /// A callable's body as the view holds it.
@@ -216,6 +220,10 @@ fn before(p: Point) -> Point {
 }
 
 /// The place as it stands at `at`, on a path no test decides.
+fn at_point(at: Point) -> Span {
+    Span { start: at, end: at }
+}
+
 fn read(at: Point) -> JoinArm {
     JoinArm { at, arm: None, untaken: None, gates: Vec::new(), mute: false }
 }
@@ -911,18 +919,69 @@ impl<'v> JoinPlan<'v> {
     /// Where each path through try `c` comes out of it: past its `finally`
     /// where it has one, else the end of its body (or of what runs where
     /// the body completes) and of each handler, and for a quiet try,
-    /// wherever its body may unwind ([`Self::unwound`]).
+    /// wherever its body may unwind ([`Self::unwound`]). Only the paths
+    /// that complete go on past a `finally`: one that unwinds runs it and
+    /// goes on unwinding.
     fn try_points(&self, c: &'v Construct, out: &mut Vec<JoinArm>, reached: &mut Vec<&'v Construct>, writes: &[Point]) {
+        let mut completions = Vec::new();
+        self.try_completions(c, &mut completions, reached, writes);
         match c.arms.iter().position(|a| a.role == ArmRole::Finally) {
-            // A `finally` that writes nothing hands each path on as it came
-            // in; only the paths that complete go on past the `try`.
-            // TODO(try-finally-paths): one that writes on some of its paths
-            // carries the unwinding paths' values past it too. Owner: CFG
-            // follow-up (a `finally` run once per kind of entry).
-            Some(f) if writes.iter().any(|&w| contains(c.arms[f].span, Span { start: w, end: w })) => {
-                self.arm_end(c, f, out, reached, writes)
+            Some(f) if writes.iter().any(|&w| contains(c.arms[f].span, at_point(w))) => {
+                let fin = c.arms[f].span;
+                let mut through = Vec::new();
+                self.arm_end(c, f, &mut through, reached, writes);
+                for p in through {
+                    self.through_finally(fin, p, &completions, writes, out, 0);
+                }
             }
-            _ => self.try_completions(c, out, reached, writes),
+            // One that writes nothing hands each path on as it came in.
+            _ => out.extend(completions),
+        }
+    }
+
+    /// The paths that complete, as they stand at `p`, a point a path
+    /// through `finally` arm `fin` reaches: `p` itself where a write of
+    /// the `finally` stands on every path to it, the completing paths
+    /// where none does on any, and otherwise the paths out of the latest
+    /// construct before `p` that writes, each taken the same way. Reading
+    /// `p` itself would join the paths that unwind into the `finally` too.
+    fn through_finally(&self, fin: Span, p: JoinArm, completions: &[JoinArm], writes: &[Point], out: &mut Vec<JoinArm>, depth: usize) {
+        let gated = |a: &JoinArm| JoinArm { gates: a.gates.iter().chain(&p.gates).copied().collect(), ..a.clone() };
+        // The innermost arm inside the `finally` around `p`: what runs
+        // before `p` on its path is in it, or before its construct.
+        let around = self.arms_holding(p.at).filter(|(_, a)| contains(fin, a.span) && a.span != fin).last();
+        let region = around.map_or(fin, |(_, a)| a.span);
+        let prior: Vec<Point> = writes.iter().copied().filter(|&w| contains(region, at_point(w)) && w <= p.at).collect();
+        let level = |w: Point| self.arms_holding(w).filter(|(_, a)| contains(region, a.span) && a.span != region).next().is_none();
+        if depth > 32 || prior.iter().any(|&w| level(w)) {
+            return out.push(p);
+        }
+        let latest = self
+            .view
+            .constructs
+            .iter()
+            .filter(|k| contains(region, k.span) && k.span != region && k.span.end <= p.at)
+            .filter(|k| prior.iter().any(|&w| contains(k.span, at_point(w))))
+            .max_by_key(|k| (k.span.end, std::cmp::Reverse(k.span.start)));
+        match (latest, around) {
+            (Some(k), _) => {
+                let (after, _) = self.after_join(k, None, writes);
+                for a in after.arms {
+                    self.through_finally(fin, gated(&a), completions, writes, out, depth + 1);
+                }
+            }
+            // Nothing before `p` writes: it stands as the `finally` began.
+            (None, None) if prior.is_empty() => out.extend(completions.iter().map(gated)),
+            // … or as the branch around it began.
+            (None, Some((k, _))) if prior.is_empty() && k.kind == ControlKind::Branch => {
+                self.through_finally(fin, JoinArm { at: entry_point(k), ..p.clone() }, completions, writes, out, depth + 1)
+            }
+            // A loop's arm is entered from its own end as well.
+            // TODO(finally-loop-paths): read here, the point joins the
+            // unwinding entries too; exact is the loop's entry taken back the
+            // same way, joined with its body's writes. Owner: 0.11 CFG
+            // follow-up.
+            _ => out.push(p),
         }
     }
 
@@ -948,15 +1007,33 @@ impl<'v> JoinPlan<'v> {
     }
 
     /// The place as it may stand where try `c` unwinds out of its arms of
-    /// `roles`: as it entered, or past any write in them.
-    // TODO(try-unwind-points): a path unwinds only at a call or a throw, so
-    // a write that no call or throw follows inside the body reaches no
-    // handler. Owner: CFG follow-up (calls as program points).
+    /// `roles`: as it entered, or past a write in them that a raise
+    /// follows ([`ControlView::raises`]).
     fn unwound(&self, c: &'v Construct, roles: &[ArmRole], writes: &[Point]) -> Vec<JoinArm> {
         let spans: Vec<Span> = c.arms.iter().filter(|a| roles.contains(&a.role)).map(|a| a.span).collect();
         std::iter::once(read(entry_point(c)))
-            .chain(writes.iter().filter(|&&w| spans.iter().any(|&s| contains(s, Span { start: w, end: w }))).map(|&w| read(w)))
+            .chain(
+                writes
+                    .iter()
+                    .filter(|&&w| spans.iter().any(|&s| contains(s, at_point(w)) && self.raised_after(s, w)))
+                    .map(|&w| read(w)),
+            )
             .collect()
+    }
+
+    /// Whether arm `arm` may unwind after its write at `w`: a raise in it
+    /// ends past `w`, or sits in a loop around `w` inside it, which runs
+    /// again. A raise inside the write's own right side ends before it.
+    fn raised_after(&self, arm: Span, w: Point) -> bool {
+        let rerun = self
+            .view
+            .constructs
+            .iter()
+            .filter(|k| matches!(k.kind, ControlKind::Loop { .. }) && contains(arm, k.span) && contains(k.span, at_point(w)))
+            .map(|k| k.span.start)
+            .min();
+        let from = rerun.unwrap_or(w);
+        self.view.raises.iter().any(|&r| contains(arm, r) && r.end > from)
     }
 
     /// Whether try `c` catches what its body throws.

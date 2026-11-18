@@ -33,6 +33,7 @@ fn an_arm_holding_a_leave_is_no_arm_of_the_join() {
         gates: Vec::new(),
         bodies: Vec::new(),
         returns: Vec::new(),
+        raises: Vec::new(),
     };
     let plan = JoinPlan::new(&view);
     assert!(plan.drops_a_path(&view.constructs[0]));
@@ -56,6 +57,7 @@ fn a_nested_branch_leaves_its_arm_only_when_every_way_leaves() {
         gates: Vec::new(),
         bodies: Vec::new(),
         returns: Vec::new(),
+        raises: Vec::new(),
     };
     let one = mk(vec![Leave { span: sp((0, 22), (0, 28)), kind: LeaveKind::Return, target: LeaveTarget::Nearest }]);
     let plan = JoinPlan::new(&one);
@@ -95,6 +97,7 @@ fn a_jump_leaves_the_construct_it_can_leave() {
         gates: Vec::new(),
         bodies: Vec::new(),
         returns: Vec::new(),
+        raises: Vec::new(),
     };
     let plan = JoinPlan::new(&view);
     let c = &view.constructs[0];
@@ -116,6 +119,7 @@ fn a_named_or_counted_jump_leaves_the_loop_it_names() {
         gates: Vec::new(),
         bodies: Vec::new(),
         returns: Vec::new(),
+        raises: Vec::new(),
     };
     let plan = JoinPlan::new(&view);
     let exits = joined(&plan, &view.constructs[0], JoinRole::Exit);

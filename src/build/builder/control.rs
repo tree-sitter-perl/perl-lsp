@@ -73,6 +73,7 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
                 match cap {
                     CtlCap::Body => view.bodies.push(CallableBody { span, readable: true, hoisted: false, made_before: None }),
                     CtlCap::Gate => view.gates.push(span),
+                    CtlCap::Raise => view.raises.push(span),
                     _ => {
                         if let Some(kind) = leave_kind(cap) {
                             view.leaves.push(Leave { span, kind, target: target.unwrap_or_default() });
@@ -119,7 +120,50 @@ pub(crate) fn control_view<'s>(matches: impl IntoIterator<Item = Vec<(CtlCap, us
         }
     }
     view.constructs.sort_by_key(|c| (c.span.start.row, c.span.start.column, std::cmp::Reverse((c.span.end.row, c.span.end.column))));
+    // Only a try's arms unwind to a handler.
+    let tried: Vec<Span> = view
+        .constructs
+        .iter()
+        .filter(|c| matches!(c.kind, ControlKind::Try { .. }))
+        .flat_map(|c| c.arms.iter().map(|a| a.span))
+        .collect();
+    view.raises.retain(|r| tried.iter().any(|t| t.start <= r.start && r.end <= t.end));
+    view.raises.sort_by_key(|r| (r.start, r.end));
+    view.raises.dedup();
     view
+}
+
+/// Every place `node` may die at, at any depth, as [`control_view`] reads
+/// a capture.
+fn raises_in<'s>(node: Node<'_>, source: &'s [u8]) -> Vec<Vec<(CtlCap, usize, Span, &'s str, Point)>> {
+    use std::sync::OnceLock;
+    use tree_sitter::StreamingIterator;
+    // The document with every pattern but its raises disabled: a deep
+    // search runs only those.
+    static RAISES: OnceLock<Query> = OnceLock::new();
+    let (_, caps) = ctl_query();
+    let query = RAISES.get_or_init(|| {
+        let lang: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+        let mut query = Query::new(&lang, CTL_SCM).expect("queries/perl/ctl.scm compiles");
+        for p in 0..query.pattern_count() {
+            let raises = query.capture_quantifiers(p).iter().enumerate().any(|(i, q)| {
+                *q != tree_sitter::CaptureQuantifier::Zero && caps[i] == CtlCap::Raise
+            });
+            if !raises {
+                query.disable_pattern(p);
+            }
+        }
+        query
+    });
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut out = Vec::new();
+    let mut it = cursor.matches(query, node, source);
+    while let Some(m) = it.next() {
+        for c in m.captures.iter().filter(|c| caps[c.index as usize] == CtlCap::Raise) {
+            out.push(captured([(CtlCap::Raise, c.node)], source));
+        }
+    }
+    out
 }
 
 /// One match's captures as [`control_view`] reads them.
@@ -203,6 +247,11 @@ impl<'s> ViewWalk<'s> {
                     }
                     if !caps[c.index as usize].is_arm() {
                         continue;
+                    }
+                    // A tried arm may die anywhere inside it, not only at a
+                    // statement the walk roots a match at.
+                    if matches!(caps[c.index as usize], CtlCap::TryBody | CtlCap::TryCatch | CtlCap::TryElse | CtlCap::TryFinally) {
+                        self.out.extend(raises_in(c.node, source));
                     }
                     if c.node.kind() == "block" {
                         work.extend(statements_of(c.node));

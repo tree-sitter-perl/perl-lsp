@@ -11,6 +11,7 @@
 ;   @ctl.block.next           a block `last` and `next` leave, testing nothing
 ;   @ctl.try / @ctl.try.quiet a body and what runs where it dies
 ;   @ctl.try.body / .catch / .finally   its arms
+;   @ctl.raise    where a tried body may die
 ;   @ctl.label                the name a construct carries, or a jump aims at
 ;   @ctl.leave.<kind>         a statement that leaves its block
 ;
@@ -68,6 +69,14 @@
 (try_statement catch_block: (_) @ctl.try.catch) @ctl.try
 (try_statement finally_block: (_) @ctl.try.finally) @ctl.try
 (eval_expression (block) @ctl.try.body) @ctl.try.quiet
+
+; Where a tried block may die: a call of any kind (`die` among them), a
+; `require`, or a division, which dies on a zero divisor. A write nothing
+; here follows in the block reaches no `catch`.
+[(function_call_expression) (ambiguous_function_call_expression) (method_call_expression)
+ (func0op_call_expression) (func1op_call_expression) (coderef_call_expression)
+ (require_expression)] @ctl.raise
+(binary_expression ["/" "%"]) @ctl.raise
 (statement_label label: (_) @ctl.label statement: (block_statement) @ctl.block.next)
 
 ; ---- leaving ----

@@ -70,3 +70,44 @@ fn a_handler_throw_leaves_the_sub() {
     let fa = build_fa("use feature 'try';\nsub f { try { 1 } catch ($e) { die $e } finally { } die 'y' }\n");
     assert!(!completes(&fa, "f"));
 }
+
+/// A body stops only where something in it may die: a write nothing that
+/// may die follows reaches no handler, and in a loop, what runs again
+/// follows it.
+#[test]
+fn a_handler_starts_only_from_writes_a_raise_follows() {
+    let at_handler = |body: &str| {
+        let fa = build_fa(&format!(
+            "use feature 'try';\nsub f {{\nmy $x = Foo->new;\ntry {{ {body} }} catch ($e) {{\nmy $y = $x;\n}}\n}}\n"
+        ));
+        fa.inferred_type_via_bag("$x", Point::new(4, 0))
+    };
+    assert_eq!(at_handler("$x = Bar->new;"), Some(class("Foo")), "the call is the write's own right side");
+    assert_eq!(at_handler("$x = Bar->new; my $n = 1 / $_[0];"), either("Foo", "Bar"), "a division may die");
+    assert_eq!(at_handler("g(); $x = Bar->new;"), Some(class("Foo")));
+    assert_eq!(at_handler("my $b = Bar->new; for (1..2) { $x = $b; } my $n = 1;"), Some(class("Foo")));
+    assert_eq!(at_handler("for (1..2) { $x = Bar->new; }"), either("Foo", "Bar"), "the next pass constructs again");
+    assert_eq!(at_handler("for (1..2) { g(); $x = Bar->new; }"), either("Foo", "Bar"), "the next pass calls again");
+    assert_eq!(at_handler("$x = Bar->new; if ($_[0]) { die 'x' }"), either("Foo", "Bar"));
+    // An `eval` lands past itself where the body completes or stops.
+    let fa = build_fa("sub f {\nmy $x = Foo->new;\neval { $x = Bar->new; 1 };\nreturn $x;\n}\n");
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(3, 0)), either("Foo", "Bar"));
+}
+
+/// Only the paths that complete go on past a `finally`; one that unwinds
+/// runs it and keeps unwinding, so a handler's value never comes past it
+/// unless the handler completes.
+#[test]
+fn only_completing_paths_go_on_past_a_finally() {
+    let past = |body: &str, fin: &str| {
+        let fa = build_fa(&format!(
+            "use feature 'try';\nsub f {{\nmy $x = Foo->new;\ntry {{ {body} }} finally {{ {fin} }}\nreturn $x;\n}}\n"
+        ));
+        fa.inferred_type_via_bag("$x", Point::new(4, 0))
+    };
+    let body = "$x = Bar->new; g();";
+    assert_eq!(past(body, "if ($_[0]) { $x = Baz->new }"), either("Bar", "Baz"), "the entry value unwinds");
+    assert_eq!(past(body, "if ($_[0]) { $x = Baz->new } log_it();"), either("Bar", "Baz"));
+    assert_eq!(past(body, "log_it();"), Some(class("Bar")));
+    assert_eq!(past(body, "$x = Baz->new;"), Some(class("Baz")));
+}

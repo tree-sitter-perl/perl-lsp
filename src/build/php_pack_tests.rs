@@ -5604,3 +5604,29 @@ function f(?Shape $c) {
     let t = fa.inferred_type_via_bag("c", at(src, "$c->side", 0)).expect("a type inside the guard");
     assert_eq!(t, crate::model::file_analysis::InferredType::ClassName("Square".into()));
 }
+
+/// A body stops only where something in it may throw, so a catch starts
+/// from the writes something that may throw follows; only the paths that
+/// complete go on past a `finally`.
+#[cfg(feature = "php")]
+#[test]
+fn php_a_try_unwinds_only_where_it_may_throw() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+class A {}
+class B {}
+class C {}
+function f($c) {
+    $x = new A();
+    try { $x = new B(); } catch (Exception $e) { $u = $x; }
+    $y = new A();
+    try { $y = new B(); g(); } finally { if ($c) { $y = new C(); } }
+    $w = $y;
+}
+";
+    let fa = php(src);
+    let two = |a: &str, b: &str| crate::model::file_analysis::join_all(&[T::ClassName(a.into()), T::ClassName(b.into())], &crate::model::file_analysis::Unordered);
+    let at = |n: &str, row, column| fa.inferred_type_via_bag(n, tree_sitter::Point { row, column });
+    assert_eq!(at("x", 6, 54), Some(T::ClassName("A".into())), "the construction is the write's own right side");
+    assert_eq!(at("y", 9, 9), two("B", "C"), "the entry value only unwinds through the finally");
+}

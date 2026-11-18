@@ -183,17 +183,27 @@ A `try` is a construct of four arm roles: the tried body, its handlers
 but it swallows what its body throws (`@ctl.try.quiet`).
 
 - **A handler starts** from any point the tried body could have stopped
-  at: the value entering the `try`, or past any write in the body
-  (`TODO(try-unwind-points)`: only a call or a throw stops a body, so a
-  write nothing can throw after reaches no handler; exact once calls are
-  program points).
+  at: the value entering the `try`, or past a write in the body that a
+  *raise* follows. Each language's control document names its raises
+  (`@ctl.raise`, any depth): Perl and PHP a call, a construction, a
+  `require`/include, a throw and a division (both die on a zero divisor);
+  Python, where almost every operation raises, each statement and each
+  call. A raise follows a write when it ends past the write's site (a
+  call in the write's own right side ends before it) or sits in a loop
+  around the write inside the arm, which runs again. A runtime error the
+  document does not name (Perl's strict-refs deref of a string, PHP's
+  `TypeError` from an operator) is outside the rule.
 - **Past the `try`** comes the tried body's end (or its `else` end), each
   handler's end, and for a quiet `try` the points its body could have
   stopped at. A `finally` runs on every one of those paths and on the
   unwinding ones, and starts from all of them; only the completing ones go
-  on past it. A `finally` that writes nothing hands those on unchanged; one
-  that writes is read at its end (`TODO(try-finally-paths)`: on a path
-  where it does not write, that end still carries an unwinding value).
+  on past it. Each path out of the `finally` is read where a `finally`
+  write stands on every way to it; where none stands on any, it carries
+  the completing paths; between the two, it is taken back through the
+  latest construct before it that writes, each of whose paths is read the
+  same way. A path inside a loop of the `finally` with no write of its own
+  level before it is read where it stands, which joins the unwinding entries
+  too (`TODO(finally-loop-paths)`).
 - A `try` with no path out leaves the arm holding it.
 - A throw in the tried body of a `try` that catches is no leave of the
   callable; a throw in a handler or a `finally` leaves as anywhere else.

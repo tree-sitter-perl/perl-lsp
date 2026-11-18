@@ -416,6 +416,11 @@ spelled! {
         /// A call that is a whole statement: control reaches what follows
         /// it only if the call comes back.
         Gate = "gate",
+        /// Where code may unwind to a handler, at any depth: a call, or an
+        /// operation the language's runtime raises from. A tried body stops
+        /// only at one of these, so a write no raise follows reaches no
+        /// handler.
+        Raise = "raise",
     }
 }
 
